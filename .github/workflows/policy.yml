@@ -165,7 +165,7 @@ on:
         type: string
         default: ""
       output-repo:
-        description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a patch, a fork of `repo` has its base branch brought up to date first; comments need no checkout
+        description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a new pull request, the patch's base commit must already be in the output repository; comments need no checkout
         type: string
         default: ""
       apply-environment:
