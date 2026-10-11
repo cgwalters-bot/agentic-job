@@ -46,6 +46,7 @@ jobs:
     with:
       id: pull-${{ github.event.pull_request.number }}
       event: true
+      notify: comment
       # Comment-only: policy refuses pull request outputs and no patch is handed back.
       kind: analysis
       task: >-

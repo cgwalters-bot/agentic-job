@@ -50,6 +50,7 @@ jobs:
     with:
       id: item-${{ github.event.issue.number }}
       event: true
+      notify: comment
       task: >-
         You answer /agent requests on this repository's issues and pull requests. Do what the
         request below asks, within what the bounds allow, and answer with one comment. Propose a

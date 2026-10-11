@@ -208,13 +208,13 @@ on:
         default: false
       notify:
         description: >-
-          How whoever started an event-triggered run is told it started and how it ended, by jobs
+          How a run with an item or numeric comment-target reports its state, by jobs
           that run nothing from the agent's machine: `comment` (an eyes reaction on what started it,
           and a comment edited when the run ends), `reaction` (eyes, then rocket or confused), or
           `none`. These write with the call's own token, which then needs `issues: write` or
           `pull-requests: write`
         type: string
-        default: comment
+        default: none
       title-prefix:
         description: Put before the title of a pull request or an issue the run opens
         type: string
@@ -317,7 +317,10 @@ on:
         value: ${{ jobs.notify.outputs.id }}
       notify-item:
         description: The issue or pull request the notify job comments on, and conclude reports to
-        value: ${{ jobs.notify.outputs.item || jobs.policy.outputs.item }}
+        value: ${{ jobs.notify.outputs.item || jobs.policy.outputs.item || jobs.policy.outputs.comment-target }}
+      notify-repo:
+        description: The caller repository for event items, otherwise the fixed output repository
+        value: ${{ jobs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}
       notify-comment-id:
         description: The status comment the notify job posted, which apply.yml's conclude job edits
         value: ${{ jobs.notify.outputs.comment-id }}
@@ -741,7 +744,11 @@ jobs:
   # how the run ended on the policy's item if this found none.
   notify:
     needs: [policy, activate]
-    if: ${{ inputs.event && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && needs.policy.outputs.item != '' }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && (needs.activate.result == 'success' || (inputs.proposals-artifact != '' && needs.activate.result == 'skipped')) && inputs.notify != 'none' && (needs.policy.outputs.item != '' || inputs.output-repo == '' || inputs.output-repo == github.repository) && needs.policy.outputs.admitted == 'true' && (needs.policy.outputs.item != '' || (needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
+    # Serialize lookup/create with conclude so simultaneous runs cannot create duplicates.
+    concurrency:
+      group: agentic-job-status-${{ needs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}-${{ needs.policy.outputs.item || needs.policy.outputs.comment-target }}
+      cancel-in-progress: false
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
     continue-on-error: true
@@ -755,13 +762,26 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       WORKFLOW: ${{ github.workflow }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agentic-job-source
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.policy.outputs.policy-artifact-id }}
           path: .agentic-job
       - name: What to react to, and where to comment
         id: target
+        env:
+          TARGET: ${{ needs.policy.outputs.comment-target }}
         run: |
+          if [ ! -f "$JOB_DIR/event.json" ] || [ "$(jq -r '.item.number // empty' "$JOB_DIR/event.json")" = '' ]; then
+            [[ "$TARGET" =~ ^[1-9][0-9]*$ ]] || exit 1
+            printf '%s\n' "item=$TARGET" "what=item" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           kind=$(jq -r '.react_to.kind' "$JOB_DIR/event.json") id=$(jq -r '.react_to.id // .react_to.number' "$JOB_DIR/event.json")
           item=$(jq -r '.item.number' "$JOB_DIR/event.json") what=$(jq -r '.item.kind' "$JOB_DIR/event.json")
           [[ "$kind" =~ ^(issue|comment|review_comment)$ && "$id" =~ ^[0-9]+$ && "$item" =~ ^[0-9]+$ && "$what" =~ ^(issue|pull_request)$ ]] ||
@@ -771,6 +791,7 @@ jobs:
       # otherwise stop it before the agent with nothing said, as conclude
       # would not run. conclude posts a status comment when this left none.
       - name: An eyes reaction on what started the run
+        if: ${{ steps.target.outputs.id != '' }}
         continue-on-error: true
         env:
           KIND: ${{ steps.target.outputs.kind }}
@@ -789,6 +810,7 @@ jobs:
         env:
           ITEM: ${{ steps.target.outputs.item }}
           WHAT: ${{ steps.target.outputs.what }}
+          TEXT: ⏳ [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) is running.
+          REPO: ${{ needs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}
         run: |
-          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments" \
-            -f body="⏳ [$WORKFLOW]($RUN_URL) started a run for this $WHAT." --jq '"id=\(.id)"' | tee -a "$GITHUB_OUTPUT"
+          node "$SOURCE_DIR/workflow/status.cjs" | tee -a "$GITHUB_OUTPUT"

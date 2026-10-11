@@ -190,6 +190,6 @@ jobs:
       issue: ${{ inputs.item }}
       apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}
       apply-partial: false
-      notify: none
+      notify: ${{ inputs.kind == 'review' && 'none' || 'comment' }}
       artifact-prefix: dispatch-${{ inputs.kind }}-
       branch-prefix: dispatch/${{ inputs.kind }}/

@@ -73,15 +73,15 @@ Every run's result can be found from the issue it was dispatched for. A draft
 PR ends its body with `Refs OWNER/REPO#N`, which apply writes from the `repo`
 and `item` inputs, not from agent text; `Refs` closes nothing on merge. Its
 title is the first line of the agent's summary, cut between words to 100
-characters. Unless the result is a comment on the issue itself (triage,
-research and review), apply leaves one short comment there linking the run and
-its result, once even when the job is re-run. The result's URL is the
+characters. For non-review runs in the calling repository, notify and conclude
+upsert one status comment there, linking the current run and its result across
+runs and retries. Cross-repository targets receive no job-token notification.
+The result's URL is the
 `result-url` output of `dispatch.yml` (and of `agentic-job.yml` and
 `apply.yml`) and is in the run summary. A run that hands back only `noop`,
-`missing_tool` or `missing_data` has no result: apply says so on the item,
-once, and the run stays green. The agent's sanitized reason is quoted there
-only for a profile whose outputs include `add_comment`; otherwise it is in the
-run summary.
+`missing_tool` or `missing_data` has no result: conclude says so in the status
+comment, and the run stays green. The agent's sanitized reason stays in the
+run summary. Reviews have no status comment.
 
 All targets must use `main` and fit the committed bounds. Do not use globs.
 Protected documentation is refused by default; to deliberately permit a file,

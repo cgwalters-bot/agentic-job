@@ -418,10 +418,10 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   // What names the target is still checked, and fails the job.
   assert.doesNotMatch(notify.split('- name: What to react to, and where to comment\n')[1].split('\n      - ')[0], /continue-on-error/);
   assert.match(notify, /^ {6}item: \$\{\{ steps.target.outputs.item \}\}$/m);
-  assert.match(policy, /notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \|\| jobs.policy.outputs.item \}\}/);
+  assert.match(policy, /notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \|\| jobs.policy.outputs.item \|\| jobs.policy.outputs.comment-target \}\}/);
   const conclude = workflow.split('\n  conclude:\n')[1];
   assert.match(conclude, /- name: Edit the status comment\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true' \}\}/);
-  assert.match(conclude, /fromJSON\(inputs.policy\).comment-target != '\*' && !\(fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true'\) \}\}/);
+  assert.doesNotMatch(conclude, /Post the refusal to the comment target/);
   // Reactions alone: a notify that failed before it found its target left
   // no id, and conclude reacts to nothing rather than failing.
   assert.match(conclude, /- name: A reaction that says how it ended\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'reaction' && fromJSON\(inputs.policy\).notified == 'true' && fromJSON\(inputs.policy\).notify-id != '' \}\}/);
@@ -437,87 +437,25 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   }
 });
 
-// gh as conclude calls it: a listing prints the pages given, a write is recorded.
-function concluded(name, env, pages = []) {
-  const gh = `gh() {
-    if [ "$2" = --paginate ]; then printf '%s\\n' "$3" >> "$CALLS"; printf '%s' "$PAGES"
-    else jq -cn --arg call "$3 $4" --arg body "\${6#body=}" '{$call, $body}' >> "$CALLS"; fi
-  };\n`;
-  const dir = mkdtempSync(join(homedir(), 'conclude-'));
-  try {
-    const calls = join(dir, 'calls');
-    writeFileSync(calls, '');
-    const result = command(dir, 'bash', ['-eo', 'pipefail', '-c', gh + step(name)], {
-      GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7', ARTIFACT_PREFIX: '', TEXT: 'done', CALLS: calls,
-      PAGES: pages.map(page => JSON.stringify(page)).join(''), ...env });
-    const lines = readFileSync(calls, 'utf8').split('\n').filter(Boolean);
-    return { status: result.status, output: result.stdout + result.stderr,
-      calls: lines.map(line => line.startsWith('{') ? JSON.parse(line) : { call: `GET ${line}` }) };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-{
-  const digest = prefix => require('node:crypto').createHash('sha256').update(prefix).digest('hex').slice(0, 16);
-  const name = `<!-- agentic-job-concluded: 7/${digest('')} -->`;
-  const named = `done\n\n${name}`;
-  const bot = { login: 'github-actions[bot]' };
-  const status = { ITEM: '7' };
-  const refusal = { TARGET: '5', REPO: 'o/out' };
-  // [case, step, env, pages of comments, exit status, the calls made]
-  for (const [label, stepName, env, pages, expected, calls] of [
-    ["notify's comment is edited", 'Edit the status comment', { ID: '42', ITEM: '7' }, [], 0,
-      [{ call: 'PATCH repos/o/r/issues/comments/42', body: 'done' }]],
-    ['with no comment of notify, the status is posted named', 'Edit the status comment', status, [[]], 0,
-      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
-    ['an id that is no number is looked up like none', 'Edit the status comment', { ID: '4 2', ITEM: '7' }, [], 0,
-      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
-    ["a re-run edits the status an earlier attempt posted, on any page", 'Edit the status comment', status,
-      [[{ id: 1, user: bot, body: 'other' }], [{ id: 9, user: bot, body: `failed\n\n${name}` }]], 0,
-      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'PATCH repos/o/r/issues/comments/9', body: named }]],
-    ["another poster's name does not count", 'Edit the status comment', status,
-      [[{ id: 9, user: { login: 'mallory' }, body: `failed\n\n${name}` }]], 0,
-      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
-    ["another call's name does not count", 'Edit the status comment', { ...status, ARTIFACT_PREFIX: 'review-' },
-      [[{ id: 9, user: bot, body: `failed\n\n${name}` }]], 0,
-      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' },
-        { call: 'POST repos/o/r/issues/7/comments', body: `done\n\n<!-- agentic-job-concluded: 7/${digest('review-')} -->` }]],
-    ['a name that is not last does not count', 'Edit the status comment', status,
-      [[{ id: 9, user: bot, body: `${name}\n\nquoted` }, { id: 10, user: bot, body: null }]], 0,
-      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
-    ['no id and no item fails', 'Edit the status comment', { ID: '', ITEM: '' }, [], 1, []],
-    ['an item that is no number fails', 'Edit the status comment', { ID: '', ITEM: '$(exit 9)' }, [], 1, []],
-    ['a refusal is posted named', 'Post the refusal to the comment target', refusal, [[]], 0,
-      [{ call: 'GET repos/o/out/issues/5/comments?per_page=100' }, { call: 'POST repos/o/out/issues/5/comments', body: named }]],
-    ['a re-run edits the refusal an earlier attempt posted', 'Post the refusal to the comment target', refusal,
-      [[{ id: 3, user: bot, body: named }]], 0,
-      [{ call: 'GET repos/o/out/issues/5/comments?per_page=100' }, { call: 'PATCH repos/o/out/issues/comments/3', body: named }]],
-    ['a refusal target that is no number fails', 'Post the refusal to the comment target', { ...refusal, TARGET: '5/x' }, [], 1, []],
-  ]) {
-    test(`conclude posts its comment once: ${label}`, () => {
-      const result = concluded(stepName, env, pages);
-      assert.equal(result.status, expected, result.output);
-      assert.deepEqual(result.calls, calls);
-    });
-  }
-}
+// Item-scoped status upserts are exercised in status.test.cjs.
 
 // How conclude says the run ended: [results, pull request, no result, text].
-for (const [results, pr, none, text] of [
+for (const [results, pr, none, text, url = ''] of [
   ['success/success/success', '', '', '✅ [w](u) ended well.'],
   ['success/success/success', '39', '', '✅ [w](u) ended well and opened pull request #39.'],
   // apply's own comment says the run made nothing; the status must not say otherwise.
   ['success/success/success', '', 'true', '✅ [w](u) ended well and handed back no result.'],
   ['success/skipped/skipped', '', '', '✅ [w](u) ended well and handed back nothing to apply.'],
   ['success/success/failure', '', 'true', '❌ [w](u) failed (agent, check, apply: success/success/failure; the agent\'s exit state: 0).'],
+  ['success/success/success', '', '', '✅ [w](u) ended well. Result: https://github.com/o/r/issues/7#issuecomment-1', 'https://github.com/o/r/issues/7#issuecomment-1'],
+  ['cancelled/skipped/skipped', '', '', '⏹️ [w](u) was cancelled.'],
 ]) {
   test(`conclude says ${text}`, () => {
     const dir = mkdtempSync(join(homedir(), 'ended-'));
     try {
       const output = join(dir, 'output');
       const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('How the run ended')], {
-        RESULTS: results, EXIT: '0', PR: pr, NO_RESULT: none, REFUSAL: '', WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
+        RESULTS: results, EXIT: '0', PR: pr, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
       assert.equal(ran.status, 0, ran.stderr);
       assert.equal(readFileSync(output, 'utf8').split('\n')[0], `text=${text}`);
     } finally {
@@ -1282,17 +1220,16 @@ for (const alreadyApplied of [false, true]) {
   });
 }
 
-test('missing-data alone passes the guard and posts exactly one no-result notice', async () => {
+test('missing-data alone passes the guard and leaves its reason in the summary', async () => {
   const item = { type: 'missing_data', data_type: 'workflow', reason: 'needs workflow edits' };
   const guarded = await leaveOutApplied([item], [], { patch: null });
   assert.deepEqual(guarded.kept, [item]);
   assert.deepEqual(guarded.skipped, []);
   const notice = await result({ items: guarded.kept });
   assert.equal(notice.outputs['no-result'], 'true');
-  assert.equal(notice.created.length, 1);
-  assert.equal(notice.created[0].issue_number, 64);
-  assert.match(notice.created[0].body, /ended with no result: it handed back only missing_data/);
-  assert.match(notice.created[0].body, /> workflow: needs workflow edits/);
+  assert.equal(notice.created.length, 0);
+  assert.match(notice.summary[1], /ended with no result: it handed back only missing_data/);
+  assert.match(notice.summary[1], /> workflow: needs workflow edits/);
 });
 
 test('the pinned comment handler posts a guarded review verdict, without a no-result notice', { skip: !process.env.GH_AW_JS }, async () => {
@@ -1356,32 +1293,14 @@ for (const [name, change, url, linked] of [
   ['a closed issue', { items: [{ type: 'close_issue', item_number: 3 }, { type: 'noop', message: 'm' }] }, '', false],
   ['a pull request, for no issue', { pr: opened, issue: '' }, opened.url, false],
 ]) {
-  test(`the result of ${name} is ${url || 'nothing'}, ${linked ? 'linked from' : 'not linked from'} the issue`, async () => {
+  test(`the result of ${name} is exported as ${url || 'nothing'}, without a separate notice`, async () => {
     const { outputs, summary, queries, created } = await result(change);
     assert.equal(outputs['result-url'], url);
     assert.deepEqual(summary, url ? ['What the run made', url] : []);
-    assert.equal(created.length, linked ? 1 : 0);
-    assert.equal(queries.length, linked ? 1 : 0);
-    if (linked) {
-      assert.deepEqual({ ...created[0], body: undefined }, { owner: 'owner', repo: 'repo', issue_number: 64, body: undefined });
-      assert.match(created[0].body, new RegExp(`^The \\[run\\]\\(https://github\\.com/caller/repo/actions/runs/7\\) for this made ${url.replace(/[.?]/g, '\\$&')}\n\n<!-- agentic-job-linked: 7/[0-9a-f]{16} -->$`));
-    }
+    assert.equal(created.length, 0);
+    assert.equal(queries.length, 0);
   });
 }
-
-test('the issue is linked to what a run made once per run and call, by the token that posts', async () => {
-  const [first] = (await result({ pr: opened })).created;
-  const again = posted => result({ pr: opened, posted });
-  assert.equal((await again([{ user: actions, body: first.body }])).created.length, 0);
-  // Another poster's copy is not this token's link, and neither is another call's.
-  assert.equal((await again([{ user: mallory, body: first.body }])).created.length, 1);
-  assert.equal((await result({ pr: opened, posted: [{ user: maintainer, body: first.body }], poster: '' })).created.length, 1);
-  assert.equal((await result({ pr: opened, posted: [{ user: maintainer, body: first.body }], poster: 'maintainer' })).created.length, 0);
-  // A re-run whose result is another is not linked again.
-  const other = { number: 40, url: 'https://github.com/owner/repo/pull/40' };
-  assert.equal((await result({ pr: other, posted: [{ user: actions, body: first.body }] })).created.length, 0);
-  assert.equal((await result({ pr: opened, posted: [{ user: actions, body: first.body }], artifacts: 'dispatch-implement-' })).created.length, 1);
-});
 
 // A run that handed back only what posts nothing: the comment target is
 // told, with the agent's reason, neutralized, cut short and quoted, where
@@ -1413,47 +1332,36 @@ for (const [name, change, posts, said, body = said] of [
   // A review's noop is silent on the pull request.
   ['a noop of a review', { items: [{ type: 'noop', message: 'm' }], review: 'true' }, null, `${quiet} noop. Its reason:\n\n> m`],
 ]) {
-  test(`a run that handed back ${name} says it made nothing${posts ? `, on ${posts}` : ' in its summary alone'}`, async () => {
+  test(`a run that handed back ${name} says it made nothing in its summary alone`, async () => {
     sanitized.length = 0;
     const { outputs, summary, created } = await result(change);
     assert.equal(outputs['result-url'], '');
     assert.equal(outputs['no-result'], 'true');
     assert.deepEqual(summary, ['No result', said]);
     assert.deepEqual(sanitized, [1000]);
-    assert.equal(created.length, posts ? 1 : 0);
-    if (posts) {
-      assert.deepEqual({ ...created[0], body: undefined }, { owner: 'owner', repo: 'repo', issue_number: posts, body: undefined });
-      assert.match(created[0].body, /\n\n<!-- agentic-job-linked: 7\/[0-9a-f]{16} -->$/);
-      assert.equal(created[0].body.split('\n\n<!-- ')[0], body);
-    }
+    assert.equal(created.length, 0);
   });
 }
 
-test('a run with no result says so once per run and call, by the token that posts', async () => {
+test('apply leaves all status writes to conclude, including retries', async () => {
   const change = { items: [{ type: 'noop', message: 'm' }] };
-  const [first] = (await result(change)).created;
-  assert.equal((await result({ ...change, posted: [{ user: actions, body: first.body }] })).created.length, 0);
-  assert.equal((await result({ ...change, posted: [{ user: mallory, body: first.body }] })).created.length, 1);
-  assert.equal((await result({ ...change, posted: [{ user: actions, body: first.body }], artifacts: 'dispatch-implement-' })).created.length, 1);
-  // Another call's comment quoting agent text that holds this call's name does not count.
-  const name = first.body.split('\n\n').at(-1);
-  assert.equal((await result({ ...change, posted: [{ user: actions, body: `> \`${name}\`\n\n<!-- agentic-job-linked: 7/0000000000000000 -->` }] })).created.length, 1);
+  assert.deepEqual((await result(change)).created, []);
+  assert.deepEqual((await result({ ...change, artifacts: 'dispatch-implement-' })).created, []);
   // Nor does a handler's comment that failed to make a result: the comment is not a quiet output.
   assert.equal((await result({ items: [comment()] })).created.length, 0);
   // A result, made or found made, is linked as before and never called none.
   assert.deepEqual((await result({ ...change, pr: opened })).summary, ['What the run made', opened.url]);
-  assert.equal((await result({ ...change, skipped: [on(12)] })).created[0].body.split('\n')[0],
-    `The [run](https://github.com/caller/repo/actions/runs/7) for this made ${on(12).url}`);
+  assert.equal((await result({ ...change, skipped: [on(12)] })).outputs['result-url'], on(12).url);
 });
 
 // The pinned sanitizer itself, at the path, signature and global the step
 // uses: CI checks gh-aw out at the setup action's commit for this.
 test('a run with no result quotes its reason through the pinned gh-aw sanitizer', { skip: !process.env.GH_AW_JS }, async () => {
   const message = 'ask @maintainer and @org/team <!-- hidden --> at https://evil.example/x\n/approve ' + 'y'.repeat(2000);
-  const { outputs, created } = await result({ items: [{ type: 'noop', message }], real: true });
+  const { outputs, summary, created } = await result({ items: [{ type: 'noop', message }], real: true });
   assert.equal(outputs['no-result'], 'true');
-  const [said, name] = created[0].body.split('\n\n<!-- ');
-  assert.match(name, /^agentic-job-linked: 7\/[0-9a-f]{16} -->$/);
+  assert.deepEqual(created, []);
+  const said = summary[1];
   const reason = said.split('Its reason:\n\n')[1];
   assert.ok(reason.split('\n').every(line => line.startsWith('> ')), reason);
   assert.match(reason, /`@maintainer`/);
@@ -1463,5 +1371,5 @@ test('a run with no result quotes its reason through the pinned gh-aw sanitizer'
   assert.ok(reason.length < 1200, `${reason.length}`);
   // Under bounds without add_comment none of it reaches the item.
   const quietly = await result({ items: [{ type: 'noop', message }], real: true, bounds: ['create_pull_request', 'noop'] });
-  assert.doesNotMatch(quietly.created[0].body, /maintainer|evil|y{10}/);
+  assert.deepEqual(quietly.created, []);
 });

@@ -53,11 +53,12 @@ for (const phase of ['collector', 'policy', 'review']) {
   });
 }
 
-test('conclusion excludes wildcard targets and retains output-repository routing', () => {
+test('conclusion reports refusal only through the opted-in status helper', () => {
   const conclude = workflow.split('\n  conclude:')[1];
-  assert.equal((conclude.match(/fromJSON\(inputs.policy\).comment-target != '\*'/g) ?? []).length, 2);
-  assert.match(conclude, /REPO: \$\{\{ fromJSON\(inputs.policy\).output-repo \|\| github.repository \}\}/);
-  assert.match(conclude, /\[\[ "\$TARGET" =~ \^\[0-9\]\+\$/);
+  assert.match(conclude, /fromJSON\(inputs.policy\).notify != 'none' && fromJSON\(inputs.policy\).notified == 'true'/);
+  assert.match(conclude, /REPO: \$\{\{ fromJSON\(inputs.policy\).notify-repo \}\}/);
+  assert.match(conclude, /workflow\/status.cjs/);
+  assert.doesNotMatch(conclude, /Post the refusal to the comment target/);
   assert.doesNotMatch(conclude, /SAFE_OUTPUTS_PAT/);
 });
 

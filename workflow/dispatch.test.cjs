@@ -88,7 +88,7 @@ test('caller fixes capabilities and token boundary', () => {
   }
   for (const line of ['allow: .github/agentic-job/dispatch.toml',
     'comment-target: ${{ inputs.item }}', 'issue: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}',
-    'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', 'notify: none',
+    'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', "notify: ${{ inputs.kind == 'review' && 'none' || 'comment' }}",
     'model: ${{ needs.target.outputs.agent != \'fake\' && vars.AGENT_MODEL || \'\' }}', 'inference-url: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_URL || \'\' }}',
     'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
     assert.ok(workflow.includes(line), line);

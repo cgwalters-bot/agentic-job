@@ -33,6 +33,27 @@ separate jobs on separate machines. The apply job's additional checks are
 `activate`, `notify` and `conclude` also inherit the caller's permissions
 and can remove labels, post reactions and create or edit status comments.
 None of these write-capable jobs executes code produced by the agent.
+Notifications are off by default (`notify: none`). With `notify: comment`,
+event items and numeric `comment-target` values (including dispatch, schedule
+and proposals-only runs) have one bot status comment, found by a hidden marker
+and edited at start and finish across runs. It links the Actions run and the
+result, or names the failed jobs/check refusal. No-result reasons remain in
+the run summary; apply no longer posts a separate no-result or result-link notice.
+The shipped dispatch caller opts in except for reviews, which remain silent.
+The comment uses the caller's job token, never the apply PAT; the built-in
+job token cannot write to cross-repository targets, so notify skips those
+destinations. No new permission is granted. Status API failures do not fail apply.
+
+The lookup accepts only this token's `github-actions[bot]` marker, so a user's
+copied marker cannot redirect an edit. It stops after 20 pages of 100 comments,
+failing rather than creating a possible duplicate. Notify and conclude serialize
+their lookup/write on the repository/item to avoid simultaneous creates.
+A stored Actions run ID prevents a slower older run from overwriting newer status.
+GitHub may replace a pending job in that concurrency group; notifications are
+best-effort, not a run gate. Existing unmarked comments are not deleted or migrated.
+Only the workflow's pinned source is checked out in these write-capable jobs,
+with persisted credentials disabled; no agent-produced code is executed.
+
 `policy` and `check` have `contents: read`; `agent` has `contents`,
 `issues`, `pull-requests` and `actions` read and `id-token: write`, not
 repository write permissions, and hands its token to the agent for
@@ -811,7 +832,7 @@ What changes with `event: true`. `base` gives way to the pull request's
 base branch where the event names one, and the bounds have to cover it.
 `comment-target` defaults to the triggering item. The `notify` and
 `conclude` jobs put an eyes reaction on what started the run and a
-status comment on the item, edited when the run ends (`notify: reaction`
+status comment on the item when opted in, edited when the run ends (`notify: reaction`
 for reactions only, `none` for neither); they write with the call's own
 token, so the call grants `issues: write` or `pull-requests: write` for
 them; naming no permissions, they hold the whole of what the call was
@@ -1195,20 +1216,16 @@ The workflow's outputs are `exit` (the exit state of `run`),
 `pull-request`, `applied-artifact-id` and `result-url`: the URL of the pull
 request, or else of the first comment or issue apply made or found made, also
 in the run summary. With `issue` set to a number of the output repository, a
-pull request ends its body with `Refs OWNER/NAME#N`, and apply comments once
-on that issue with a link to the run and its result, unless the result is a
-comment there already. A link that cannot be posted fails no run.
+pull request ends its body with `Refs OWNER/NAME#N`. When notifications are
+enabled, conclude puts the result link in the item's single status comment.
+A link that cannot be posted fails no run.
 A run whose checked outputs are only `noop`, `missing_tool` or
 `missing_data` makes nothing anyone would see: its run summary says "No
 result" with the agent's reason, passed through gh-aw's sanitizer as the
 handlers run it (mentions, HTML comments and URLs off its allowlist
-neutralized, cut at 1000 characters) and quoted line by line. Apply comments
-once, whatever `notify` says, on a numeric `comment-target` with a link to the
-run, except for a review, whose `noop` stays silent. The comment quotes the
-reason only when the caller's `outputs` include `add_comment`: listing `noop`
-alone lets the agent put no text on the item, so the comment is then the
-workflow's own notice that the reason is in the run summary. With
-`notify: comment`, the status comment says the run handed back no result.
+neutralized, cut at 1000 characters) and quoted line by line. With
+`notify: comment`, the status comment says the run handed back no result;
+the agent's reason stays in the linked run's summary. Reviews stay silent.
 The job stays green: every piece worked, and an
 agent that declines has answered; failing it would invite re-runs that change
 nothing, and a job has no neutral conclusion. An agent's `stopped_early` is
@@ -1269,11 +1286,9 @@ refuses any request holding the name, so the agent cannot make one
 request look applied by posting another. Closing an issue, adding
 labels and setting a project field are left to be done again: done
 twice they leave the forge as once, unless someone undid them in
-between. A re-run of apply runs `conclude` again too; the status or
-refusal comment it posts itself (not `notify`'s, which it edits) is
-named `agentic-job-concluded: RUNID/DIGEST` by the run and the prefix,
-and a re-run edits the one of `github-actions[bot]` that ends with it
-rather than post another. "Re-run all jobs" keeps the run's ID, but runs
+between. A re-run of apply runs `conclude` again too; it edits the same
+item-scoped `agentic-job-status` comment as notify, rather than posting another.
+"Re-run all jobs" keeps the run's ID, but runs
 the agent again: what it hands back the same is left out, and what
 differs is applied as new. A pull request with a different
 patch is new even with the same title, body and branch; its handler

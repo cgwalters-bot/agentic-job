@@ -105,6 +105,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: node --test workflow/activation.test.cjs
+      - run: node --test workflow/status.test.cjs
       - run: node --test workflow/setup-timing.test.mjs
       - run: node --test workflow/job-timing.test.cjs
       # The same digest-checked analyzers as workflow-ingress.yml, so a PR
@@ -583,6 +584,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-event-${{ github.run_id }}
+      notify: comment
       event: true
       # A base the bounds would refuse, so that e2e-verify's check of the
       # run's base proves the event's pull request chose it. On a push the

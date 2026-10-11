@@ -5,7 +5,7 @@
 #
 #   apply     gh-aw's pinned handlers on check.yml's accepted outputs;
 #             the only job given SAFE_OUTPUTS_PAT
-#   conclude  edits the status comment notify posted, or posts check's
+#   conclude  edits the opted-in status comment, including check's
 #             refusal to the policy's comment target
 #
 # Its inputs are the caller's `needs` of the other pieces, as JSON: the
@@ -687,36 +687,15 @@ jobs:
           path: ${{ env.GH_AW_TMP }}/applied.json
           retention-days: 90
           if-no-files-found: error
-      # Where to find what the run made: the pull request, or else the
-      # first comment or issue, an earlier attempt's before this one's. The
-      # issue the run was made for is told where it is, unless it is a
-      # comment there already; once, by the guard's rule: a comment of this
-      # token's poster named by this run and this call. The link is not
-      # what the run was for, so failing to post it fails no run.
-      #
-      # A run that handed back only noop, missing_tool or missing_data made
-      # nothing anyone would see: its numeric comment target is told so,
-      # once by the same rule, whatever `notify` says, unless it is a review,
-      # whose noop is silent. The workflow writes that comment; the agent's
-      # reason is quoted in it only where the caller's bounds allow
-      # add_comment, so a run's agent puts no text on an item its caller did
-      # not let it comment on. Otherwise the reason is in the run summary
-      # alone. The reason is agent text: gh-aw's sanitizer, with the URL
-      # policy the handlers run it with, neutralizes its mentions, HTML
-      # comments and URLs and cuts it short, and it is quoted line by line.
-      # The job stays green: the pieces worked, and an agent that declines
-      # has answered; failing it would invite re-runs that change nothing,
-      # and GitHub has no neutral job conclusion.
+      # Export the result for conclude's single status comment. No-result
+      # reasons are agent text: sanitize and quote them in the summary only.
+      # A decline stays green: the pieces worked, and rerunning changes nothing.
       - name: Say where what the run made is
         id: result
         if: ${{ !cancelled() && steps.apply.outcome != 'skipped' }}
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
-          COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
-          REVIEW: ${{ fromJSON(inputs.policy).review }}
-          POSTER: ${{ steps.applied.outputs.poster }}
           # As the handlers sanitize text: the collector's policy, in check.yml.
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -724,23 +703,12 @@ jobs:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           script: |
             const fs = require('node:fs');
-            const { createHash } = require('node:crypto');
             const applied = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/applied.json`, 'utf8'));
             // A push's URL is the pull request it pushed to.
             const posted = [...applied.already_applied, ...applied.made]
               .filter(item => ['add_comment', 'create_issue', 'push_to_pull_request_branch'].includes(item.type) && item.url).map(item => item.url);
             const url = applied.pull_request?.url ?? posted[0] ?? '';
             core.setOutput('result-url', url);
-            const { ISSUE: issue, OUTPUT_REPO: where, POSTER: me, COMMENT_TARGET: target } = process.env;
-            const [owner, repo] = where.split('/');
-            const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '');
-            const name = `agentic-job-linked: ${process.env.GITHUB_RUN_ID}/${hash.digest('hex').slice(0, 16)}`;
-            const once = async (number, text) => {
-              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: Number(number), per_page: 100 });
-              // Ends with: a comment of this poster can quote agent text holding another call's name.
-              if (comments.some(found => me && found.user?.login === me && String(found.body).endsWith(`\n\n<!-- ${name} -->`))) return;
-              await github.rest.issues.createComment({ owner, repo, issue_number: Number(number), body: `${text}\n\n<!-- ${name} -->` });
-            };
             if (!url) {
               const quiet = ['noop', 'missing_tool', 'missing_data'];
               const { items } = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
@@ -756,16 +724,11 @@ jobs:
               const ended = `The [run](${process.env.RUN_URL}) for this ended with no result: it handed back only ${types}.`;
               const text = `${ended} Its reason:\n\n${reason}`;
               await core.summary.addHeading('No result', 3).addRaw(text).write();
-              if (process.env.REVIEW === 'true' || !/^[1-9][0-9]*$/.test(target ?? '')) return;
-              // The caller's bounds, as check applied them: without add_comment, no agent text goes on the item.
-              const bounds = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8'));
-              await once(target, bounds.add_comment ? text : `${ended} Its reason is in the run's summary.`);
+              // Conclude edits the single status comment; agent reasons stay in the summary.
               return;
             }
             await core.summary.addHeading('What the run made', 3).addLink(url, url).write();
-            const on = new RegExp(`^https://[^/]+/${where.replace(/[.]/g, '\\.')}/(issues|pull)/${issue}(#|$)`, 'i');
-            if (!issue || on.test(url)) return;
-            await once(issue, `The [run](${process.env.RUN_URL}) for this made ${url}`);
+            // Result links are reported by conclude, not a separate status comment.
       # A run that asked for a pull request and has none did not do what
       # it was for, and neither did one of whose outputs a handler failed.
       - name: Every output was applied
@@ -792,14 +755,17 @@ jobs:
           [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; } ||
             { echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1; }
 
-  # How an event-triggered run ended, for whoever started it: the status
+  # How an opted-in run ended, for whoever started it: the status
   # comment `notify` posted is edited to say so, or a reaction says it
   # where the caller asked for reactions alone. The results of the jobs
   # are this workflow's own; the exit state and the pull request's
   # number are numbers.
   conclude:
     needs: apply
-    if: ${{ always() && ((fromJSON(inputs.policy).event == 'true' && fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true') || (fromJSON(inputs.check).outputs.refusal != '' && fromJSON(inputs.policy).comment-target != '' && fromJSON(inputs.policy).comment-target != '*')) }}
+    if: ${{ always() && fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true' }}
+    concurrency:
+      group: agentic-job-status-${{ fromJSON(inputs.policy).notify-repo }}-${{ fromJSON(inputs.policy).notify-item }}
+      cancel-in-progress: false
     runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
     timeout-minutes: 5
     env:
@@ -822,11 +788,12 @@ jobs:
       - name: How the run ended
         id: ended
         env:
-          RESULTS: ${{ fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
+          RESULTS: ${{ fromJSON(inputs.policy).proposals-artifact != '' && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
           EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
           PR: ${{ needs.apply.outputs.pull-request }}
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
+          RESULT_URL: ${{ needs.apply.outputs.result-url }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ ]]
           case "$RESULTS" in
@@ -837,53 +804,26 @@ jobs:
             *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
           esac
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
+          [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
           printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
-      # Notify's comment is edited; if posting it failed (which does not
-      # stop the run), the status goes in a new comment on the same item.
-      # Re-running apply re-runs this job: a comment it posts is named by
-      # run and call, as apply names the link to its result, and a re-run
-      # edits the one this job token's github-actions[bot] posted before.
+      # The same bounded lookup at start and finish, including retries.
+      # Checkout only this workflow's pinned source, never the producer's tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agentic-job-source
+          persist-credentials: false
       - name: Edit the status comment
         if: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true' }}
+        continue-on-error: true
         env:
-          ID: ${{ fromJSON(inputs.policy).notify-comment-id }}
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}
+          REPO: ${{ fromJSON(inputs.policy).notify-repo }}
           TEXT: ${{ steps.ended.outputs.text }}
-          ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
         run: |
-          if [[ "$ID" =~ ^[0-9]+$ ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$TEXT" --jq .html_url
-          else
-            [[ "$ITEM" =~ ^[0-9]+$ ]] || { echo "::error::notify left no comment id and no item"; exit 1; }
-            name="<!-- agentic-job-concluded: $GITHUB_RUN_ID/$(printf %s "$ARTIFACT_PREFIX" | sha256sum | cut -c1-16) -->"
-            ID=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments?per_page=100" | jq -rs --arg name "$name" \
-              'map(.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | endswith("\n\n" + $name)))) | first | .id // empty')
-            if [[ "$ID" =~ ^[0-9]+$ ]]; then
-              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
-            else
-              gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
-            fi
-          fi
-      # Only a policy-admitted numeric target, never an agent-selected endpoint.
-      # Named and edited on a re-run, as the status comment above.
-      - name: Post the refusal to the comment target
-        if: ${{ fromJSON(inputs.check).outputs.refusal != '' && fromJSON(inputs.policy).comment-target != '' && fromJSON(inputs.policy).comment-target != '*' && !(fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') }}
-        env:
-          TARGET: ${{ fromJSON(inputs.policy).comment-target }}
-          REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
-          TEXT: ${{ steps.ended.outputs.text }}
-          ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
-        run: |
-          [[ "$TARGET" =~ ^[0-9]+$ && "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
-          name="<!-- agentic-job-concluded: $GITHUB_RUN_ID/$(printf %s "$ARTIFACT_PREFIX" | sha256sum | cut -c1-16) -->"
-          ID=$(gh api --paginate "repos/$REPO/issues/$TARGET/comments?per_page=100" | jq -rs --arg name "$name" \
-            'map(.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | endswith("\n\n" + $name)))) | first | .id // empty')
-          if [[ "$ID" =~ ^[0-9]+$ ]]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$ID" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
-          else
-            gh api -X POST "repos/$REPO/issues/$TARGET/comments" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
-          fi
+          node "$GITHUB_WORKSPACE/.agentic-job-source/workflow/status.cjs"
       # A notify that failed before it found what to react to leaves no
       # id: nothing is reacted to then, and notify's failure says why.
       - name: A reaction that says how it ended

@@ -32,6 +32,7 @@ jobs:
     with:
       id: schedule-${{ github.run_id }}
       event: true
+      notify: comment
       task: >-
         Read docs/ for a statement that is no longer true of the code, and propose one pull
         request that fixes one, or say in a comment that you found none.
