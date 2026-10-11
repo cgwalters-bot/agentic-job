@@ -11,7 +11,7 @@ const { admit, taskFile, checkRequest, checkOutputs, resolveDispatch } = require
 const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
   item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
 
-test('dispatch resolves an open same-repository head and refuses hostile routing', async () => {
+test('dispatch resolves same-repository and fork heads and refuses hostile routing', async () => {
   const env = { REVIEW: 'true', EVENT: 'false', KIND: 'analysis', OUTPUTS: 'add_comment,noop',
     MAX_OUTPUTS: '1', NOTIFY: 'none', APPLY_PARTIAL: 'false', ITEM: '147', TARGET: '147',
     REPO: 'o/r', BASE: 'main' };
@@ -21,18 +21,27 @@ test('dispatch resolves an open same-repository head and refuses hostile routing
     assert.deepEqual(args, { owner: 'o', repo: 'r', pull_number: 147 });
     return { data: value };
   } } } });
-  assert.equal(await resolveDispatch(env, api(data)), data.head.sha);
+  for (const repo of [{ full_name: 'o/r' }, { full_name: 'fork/r', fork: true }, null]) {
+    const head = { ...data.head, repo, ref: '--upload-pack=evil' };
+    assert.equal(await resolveDispatch(env, api({ ...data, head })), data.head.sha);
+  }
   for (const change of [{ TARGET: '*' }, { ITEM: '01' }, { KIND: 'branch' },
     { OUTPUTS: 'all' }, { MAX_OUTPUTS: '3' }, { EVENT: 'true' }, { REVIEW: 'false' },
-    { OUTPUT_REPO: 'other/repo' }]) {
+    { OUTPUT_REPO: 'other/repo' }, { NOTIFY: 'comment' }, { APPLY_PARTIAL: 'true' },
+    { ITEM: '9007199254740992', TARGET: '9007199254740992' }, { REPO: 'o/r/evil' }]) {
     await assert.rejects(resolveDispatch({ ...env, ...change }, api(data)));
   }
   for (const change of [{ state: 'closed' }, { number: 148 },
     { head: { sha: '--evil', repo: { full_name: 'o/r' } } },
-    { head: { ...data.head, repo: { full_name: 'fork/r' } } },
-    { base: { ...data.base, ref: 'other' } }]) {
-    await assert.rejects(resolveDispatch(env, api({ ...data, ...change })));
+    { head: null }, { head: { sha: 'A'.repeat(40) } }, { head: { sha: 'a'.repeat(39) } },
+    { base: null }, { base: { ...data.base, ref: 'other' } },
+    { base: { ...data.base, repo: { full_name: 'other/r' } } }]) {
+    await assert.rejects(resolveDispatch(env, api({ ...data, ...change })),
+      /open PR on the configured base with an exact head SHA/);
   }
+  await assert.rejects(resolveDispatch(env, { rest: { pulls: { get: async () => {
+    throw new Error('PR unavailable');
+  } } } }), /PR unavailable/);
 });
 
 test('review admission narrows, never overrides, event authorization', () => {

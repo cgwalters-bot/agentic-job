@@ -72,10 +72,13 @@ async function resolveDispatch(env, github) {
   }
   const [owner, repo] = env.REPO.split('/');
   const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(env.ITEM) });
+  // Bind the review to the target PR and exact commit, not its source repository
+  // or author-controlled branch. The sandbox fetches this SHA from the target
+  // without forge credentials; accepting a fork adds no write authority.
   if (data.number !== Number(env.ITEM) || data.state !== 'open' ||
       data.base?.ref !== env.BASE || data.base?.repo?.full_name !== env.REPO ||
-      data.head?.repo?.full_name !== env.REPO || !/^[0-9a-f]{40}$/.test(data.head?.sha ?? '')) {
-    throw new Error('Dispatch review requires an open same-repository PR on the configured base');
+      !/^[0-9a-f]{40}$/.test(data.head?.sha ?? '')) {
+    throw new Error('Dispatch review requires an open PR on the configured base with an exact head SHA');
   }
   return data.head.sha;
 }

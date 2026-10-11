@@ -33,11 +33,20 @@ gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 \
 
 `triage` and `research` post a canned comment on that issue and leave the tree
 clean. `implement` writes `DISPATCH-TRIAL.md` and proposes one draft PR from
-the applying account's fork. `review` takes an **open,
-same-repository pull request number targeting main**, not an issue number. It
+the applying account's fork. `review` takes an **open pull request number
+targeting the configured base (main by default)**, not an issue number. Both
+same-repository and fork pull requests are accepted. It
 posts a clearly scripted verdict naming the pinned head. This is not an
 approval or permission to merge. Delete trial comments, and branches in the
 applying account's fork, when finished.
+
+Dispatch review remains opt-in (`kind=review`), analysis-only and bounded to
+one verdict comment or noop on the selected PR. The resolver reads the PR from
+the configured target repository and pins its head SHA. The sandbox fetches
+that SHA from the target repository without forge credentials, never from an
+author-supplied fork URL or branch name. The base supplies trusted instructions;
+the head remains untrusted data. No job permissions or token access change.
+This does not enable fork end-to-end CI or make a verdict merge authorization.
 
 `fix` takes the number of an open pull request that implement opened, from
 the applying account's fork. Its run starts from that pull request's branch
