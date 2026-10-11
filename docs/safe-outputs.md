@@ -238,7 +238,7 @@ bounds file (not to the caller workflow):
 [unprotected_files]
 repos = ["OWNER/REPO"]
 files = ["README.md"]
-dot_folders = [".github"] # optional, and only ".github"; see the prerequisites below
+dot_folders = [".github"] # optional, and only ".github"; see the protections below
 ```
 
 This does not relax the fixed patch refusals below. New executable files
@@ -253,27 +253,29 @@ only: a push is refused anything under `.github/`, since gh-aw's push
 handler refuses workflow files without `allow_workflows`, which apply never
 sets. Workflow changes are pushed only to
 apply's fork, which has Actions turned off, and reach the repository as a
-fork pull request. The output check is not the gate against a malicious
-workflow edit, and this project provides no other: the target's
-`pull_request` CI runs the pull request's edited workflows, choosing their
-runners (`runs-on`), matrices and job counts, before anyone reviews them,
-and the forge stops asking for approval once the apply account has
-contributed. Before exempting `.github`, an operator must:
+fork pull request. Its `pull_request` CI gets no secrets and a read-only
+token, not the target repository's write credentials. Nothing merges without
+review and required checks. The trusted
+[workflow ingress check](workflow-ingress.md) flags known-bad workflow patterns
+and new analyzer ignores; it does not prove a workflow safe or replace review.
+Reviewers must treat changes to the caller's bounds (`.github/agentic-job/`)
+or to the workflow that calls agentic-job as policy changes: the exemption lets
+an agent propose widening its own bounds, which takes effect once merged.
 
-- set the repository's approval policy for fork pull request workflows to
-  require approval for all external contributors, or stricter;
-- make sure the apply account (the user of `SAFE_OUTPUTS_PAT`) is neither a
-  member nor a collaborator of the repository or its organization: the forge
-  runs a member's or collaborator's fork pull request workflows without
-  approval, whatever the external-contributor setting says;
-- make sure no self-hosted runner is reachable by a workflow run from a fork
-  pull request;
-- have reviewers treat a change to the caller's bounds
-  (`.github/agentic-job/`) or to the workflow that calls agentic-job as a
-  policy change: the exemption lets an agent propose widening its own
-  bounds, which takes effect once merged;
-- provide any workflow check at PR ingress they want, and review before
-  merge.
+The output check is not the gate against a malicious workflow edit. Before
+review, the target's `pull_request` CI can run the edited workflows, choosing
+their runners (`runs-on`), matrices and job counts. Fork token restrictions do
+not protect a self-hosted runner from that code; do not make self-hosted runners
+reachable by fork pull request workflows. Two additional measures are optional
+hardening, not prerequisites for the exemption:
+
+- Requiring workflow approval for all external contributors stops an edited
+  workflow from spending CI resources or choosing runners before a human looks,
+  which matters especially with self-hosted runners.
+- Keeping the apply account (the user of `SAFE_OUTPUTS_PAT`) outside the
+  repository's and organization's membership and collaborator roles makes that
+  external-contributor approval policy apply to its fork pull requests, since
+  members and collaborators bypass it.
 
 The apply credential needs classic PAT `repo` and `workflow` scopes (or a
 fine-grained token with Contents and Workflows write permissions on the fork)
