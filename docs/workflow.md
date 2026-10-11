@@ -1133,6 +1133,22 @@ in the run summary. With `issue` set to a number of the output repository, a
 pull request ends its body with `Refs OWNER/NAME#N`, and apply comments once
 on that issue with a link to the run and its result, unless the result is a
 comment there already. A link that cannot be posted fails no run.
+A run whose checked outputs are only `noop`, `missing_tool` or
+`missing_data` makes nothing anyone would see: its run summary says "No
+result" with the agent's reason, passed through gh-aw's sanitizer as the
+handlers run it (mentions, HTML comments and URLs off its allowlist
+neutralized, cut at 1000 characters) and quoted line by line. Apply comments
+once, whatever `notify` says, on a numeric `comment-target` with a link to the
+run, except for a review, whose `noop` stays silent. The comment quotes the
+reason only when the caller's `outputs` include `add_comment`: listing `noop`
+alone lets the agent put no text on the item, so the comment is then the
+workflow's own notice that the reason is in the run summary. With
+`notify: comment`, the status comment says the run handed back no result.
+The job stays green: every piece worked, and an
+agent that declines has answered; failing it would invite re-runs that change
+nothing, and a job has no neutral conclusion. An agent's `stopped_early` is
+not seen here: a run that hands back nothing at all has no checked outputs,
+and check and apply are skipped.
 
 ### Running apply again
 

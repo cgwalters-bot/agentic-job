@@ -262,12 +262,26 @@ result is a comment on the issue, it MUST leave the issue one comment linking
 the run and the result, named by run and call and looked for as RC-013 looks
 for a comment, so that a re-run does not post it again. Failing to post the link
 MUST NOT fail the run. A pull request title made from the agent's summary
-MUST be cut at a word boundary within its limit.
+MUST be cut at a word boundary within its limit. When there is no such URL and
+every checked output is `noop`, `missing_tool` or `missing_data`, apply MUST
+say "No result" in the run summary with the agent's reason, passed through
+gh-aw's sanitizer with the handlers' URL policy, cut at 1000 characters and
+quoted line by line, and, whatever `notify` says, unless the run is a review,
+leave a numeric `comment-target` one comment linking the run, named as the
+link above and found only where a comment of its poster ends with that name.
+That comment MUST quote the reason only when the caller's bounds allow
+`add_comment`, and otherwise hold only the workflow's own text. Apply MUST
+post nothing for a run with any other output, and conclude's status MUST say
+such a run handed back no result.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request
 refers to the issue the caller named, and closes nothing`, `a pull request's
 handler pushes only to the fork, and there is none without one`, the `the result of
-...` cases and `the issue is linked to what a run made once, by the token that
-posts`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
+...` cases, `the issue is linked to what a run made once, by the token that
+posts`, the `a run that handed back ...` cases, `a run with no result says
+so once per run and call, by the token that posts`, `a run with no result
+quotes its reason through the pinned gh-aw sanitizer`, `the reason of a run
+with no result is sanitized as the handlers sanitize a comment` and the
+`conclude says ...` cases; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary` and `the URL of what apply made is an output
 of dispatch, by way of the wrapper`; [proposals.test.cjs](../workflow/proposals.test.cjs),
 the issue cases of `the policy command is told when apply holds only the job
@@ -487,6 +501,10 @@ These limitations are not additional guarantees:
   fails): there is no result URL. Its link comment has RC-013's
   limits for a comment, and a re-run that makes another result is not linked
   again.
+- RC-019's "no result" comment needs checked outputs: a run that hands back
+  nothing at all, or one stopped at a limit without `apply-partial`, skips
+  apply and is told only through `notify`, and an agent's `stopped_early`
+  reason, in its outcome rather than its outputs, never reaches apply.
 - RC-020 does not hold the branch at `head` before the push: gh-aw's handler
   re-anchors on the patch's base commit and pushes without force, so a
    unrelated commit added on top of `head` makes the

@@ -90,7 +90,6 @@ jobs:
       - run: node --test workflow/job-timing.test.cjs
       # Loopback-only TCP preflight tests; no OIDC credential or external proxy.
       - run: python3 -m unittest discover -s workflow -p 'test_*.py' -v
-      - run: node --test workflow/apply.test.cjs
       - run: node --test workflow/refusal.test.cjs
       - run: node --test workflow/review.test.cjs
       - run: node --test workflow/push.test.cjs
@@ -101,6 +100,7 @@ jobs:
       - run: node --test workflow/ci.test.cjs
       # Credentialless cross-repository fix: the pinned real handler writes
       # only local git fixtures, with mock forge reads. No new permissions.
+      # apply's tests run gh-aw's pinned sanitizer from the same checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
@@ -108,7 +108,7 @@ jobs:
           path: gh-aw
           sparse-checkout: actions/setup/js
           persist-credentials: false
-      - run: node --test workflow/fix-handler.test.cjs
+      - run: node --test workflow/fix-handler.test.cjs workflow/apply.test.cjs
         env:
           GH_AW_JS: ${{ github.workspace }}/gh-aw/actions/setup/js
 

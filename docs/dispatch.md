@@ -68,7 +68,11 @@ characters. Unless the result is a comment on the issue itself (triage,
 research and review), apply leaves one short comment there linking the run and
 its result, once even when the job is re-run. The result's URL is the
 `result-url` output of `dispatch.yml` (and of `agentic-job.yml` and
-`apply.yml`) and is in the run summary.
+`apply.yml`) and is in the run summary. A run that hands back only `noop`,
+`missing_tool` or `missing_data` has no result: apply says so on the item,
+once, and the run stays green. The agent's sanitized reason is quoted there
+only for a profile whose outputs include `add_comment`; otherwise it is in the
+run summary.
 
 All targets must use `main` and fit the committed bounds. Do not use globs.
 Protected documentation is refused by default; to deliberately permit a file,
