@@ -6,7 +6,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 
 use anyhow::Result;
 
-use super::{CONTAINER_UID, Checker, Want};
+use super::{Attempt, CONTAINER_UID, Checker, Want};
 use crate::sandbox::enter::Output;
 use crate::sandbox::{egress, host, network};
 
@@ -280,14 +280,15 @@ impl Checker<'_> {
             got,
         );
 
+        // The refusals, made together: each waits mostly on its own way
+        // into the sandbox, and one that is not refused fails the check
+        // as it would alone.
         let around = direct(&[&url]);
-        let got = self.sandbox_succeeds(&around)?;
-        self.report.expect(
-            Want::Fail,
+        let mut attempts = vec![Attempt::refused(
             "egress-direct",
             format!("{user} can't reach {url} around the proxy"),
-            got,
-        );
+            &around,
+        )];
         // The address, looked up here: the sandbox user cannot.
         let address = (host_name.as_str(), HTTPS_PORT)
             .to_socket_addrs()
@@ -298,20 +299,20 @@ impl Checker<'_> {
             Some(address) => {
                 let probe = tcp_probe(&address, HTTPS_PORT);
                 let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
-                self.control_or_note(
-                    "egress-tcp-control",
-                    &format!("{address}:{HTTPS_PORT}"),
-                    &probe,
-                );
-                let got = self.sandbox_succeeds(&probe)?;
-                self.report.expect(
-                    Want::Fail,
-                    "egress-tcp",
-                    format!(
-                        "{user} can't open a TCP connection to {address}:{HTTPS_PORT} around the proxy"
+                attempts.extend([
+                    Attempt::control(
+                        "egress-tcp-control",
+                        format!("{address}:{HTTPS_PORT}"),
+                        &probe,
                     ),
-                    got,
-                );
+                    Attempt::refused(
+                        "egress-tcp",
+                        format!(
+                            "{user} can't open a TCP connection to {address}:{HTTPS_PORT} around the proxy"
+                        ),
+                        &probe,
+                    ),
+                ]);
             }
             None => self.report.expect(
                 Want::Succeed,
@@ -321,72 +322,79 @@ impl Checker<'_> {
             ),
         }
         let resolve = ["getent", "hosts", host_name.as_str()];
-        self.control_or_note(
-            "egress-resolve-control",
-            &format!("a resolver for {host_name}"),
-            &resolve,
-        );
-        let got = self.sandbox_succeeds(&resolve)?;
-        self.report.expect(
-            Want::Fail,
-            "egress-resolve",
-            format!("{user} can't resolve names (getent hosts)"),
-            got,
-        );
         let dns = tcp_probe(PUBLIC_DNS, DNS_PORT);
         let dns: Vec<&str> = dns.iter().map(String::as_str).collect();
-        self.control_or_note(
-            "egress-dns-control",
-            &format!("{PUBLIC_DNS}:{DNS_PORT}"),
-            &dns,
-        );
-        let got = self.sandbox_succeeds(&dns)?;
-        self.report.expect(
-            Want::Fail,
-            "egress-dns",
-            format!("{user} can't reach a public DNS server ({PUBLIC_DNS}:{DNS_PORT})"),
-            got,
-        );
         let wireserver = direct(&[
             "--connect-timeout",
             WIRESERVER_CONNECT_SECONDS,
             WIRESERVER_URL,
         ]);
-        self.control_or_note("egress-wireserver-control", "the WireServer", &wireserver);
-        let got = self.sandbox_succeeds(&wireserver)?;
-        self.report.expect(
-            Want::Fail,
-            "egress-wireserver",
-            format!("{user} can't reach the WireServer"),
-            got,
-        );
-        let got = self.sandbox_succeeds(&proxied(&["-H", "Metadata:true", METADATA_URL]))?;
-        self.report.expect(
-            Want::Fail,
-            "egress-proxy-metadata",
-            "the proxy doesn't reach the instance metadata service",
-            got,
-        );
-        let got = self.sandbox_succeeds(&proxied(&[WIRESERVER_URL]))?;
-        self.report.expect(
-            Want::Fail,
-            "egress-proxy-wireserver",
-            "the proxy doesn't reach the WireServer",
-            got,
-        );
-        for endpoint in self.config.egress.direct.clone() {
-            let got =
-                self.sandbox_succeeds(&proxied(&["--proxy", &proxy, "--noproxy", "", &endpoint]))?;
-            self.report.expect(
-                Want::Fail,
+        attempts.extend([
+            Attempt::control(
+                "egress-resolve-control",
+                format!("a resolver for {host_name}"),
+                &resolve,
+            ),
+            Attempt::refused(
+                "egress-resolve",
+                format!("{user} can't resolve names (getent hosts)"),
+                &resolve,
+            ),
+            Attempt::control(
+                "egress-dns-control",
+                format!("{PUBLIC_DNS}:{DNS_PORT}"),
+                &dns,
+            ),
+            Attempt::refused(
+                "egress-dns",
+                format!("{user} can't reach a public DNS server ({PUBLIC_DNS}:{DNS_PORT})"),
+                &dns,
+            ),
+            Attempt::control("egress-wireserver-control", "the WireServer", &wireserver),
+            Attempt::refused(
+                "egress-wireserver",
+                format!("{user} can't reach the WireServer"),
+                &wireserver,
+            ),
+            Attempt::refused(
+                "egress-proxy-metadata",
+                "the proxy doesn't reach the instance metadata service",
+                &proxied(&["-H", "Metadata:true", METADATA_URL]),
+            ),
+            Attempt::refused(
+                "egress-proxy-wireserver",
+                "the proxy doesn't reach the WireServer",
+                &proxied(&[WIRESERVER_URL]),
+            ),
+        ]);
+        for endpoint in &self.config.egress.direct {
+            attempts.push(Attempt::refused(
                 "egress-proxy-direct",
                 format!("the proxy doesn't reach {endpoint} on the tailnet"),
-                got,
-            );
+                &proxied(&["--proxy", &proxy, "--noproxy", "", endpoint]),
+            ));
         }
+        let image = self.config.sandbox.check.container_image.clone();
+        if self.has_podman() {
+            let own_network = [&["podman", "run", "--rm", image.as_str()][..], &around].concat();
+            attempts.extend([
+                Attempt::refused_in_container(
+                    "egress-container-direct",
+                    format!(
+                        "a container as subordinate uid {CONTAINER_UID} can't reach {url} around the proxy"
+                    ),
+                    &self.container(&around),
+                ),
+                Attempt::refused_in_container(
+                    "egress-container-own-network",
+                    format!("a container on its own network can't reach {url}"),
+                    &own_network,
+                ),
+            ]);
+        }
+        self.attempts(&attempts)?;
 
         if self.has_podman() {
-            let image = self.config.sandbox.check.container_image.clone();
             let post = head(&[
                 "--cacert",
                 CONTAINER_CA,
@@ -405,27 +413,6 @@ impl Checker<'_> {
                 format!(
                     "a container as subordinate uid {CONTAINER_UID} on the host's network is refused a POST too"
                 ),
-                got,
-            );
-            let got = self.in_container(&around)?;
-            self.report.expect(
-                Want::Fail,
-                "egress-container-direct",
-                format!(
-                    "a container as subordinate uid {CONTAINER_UID} can't reach {url} around the proxy"
-                ),
-                got,
-            );
-            let own_network = [
-                &["podman", "run", "--rm", image.as_str()][..],
-                around.as_slice(),
-            ]
-            .concat();
-            let got = self.sandbox_succeeds(&own_network)?;
-            self.report.expect(
-                Want::Fail,
-                "egress-container-own-network",
-                format!("a container on its own network can't reach {url}"),
                 got,
             );
         }
@@ -500,6 +487,8 @@ impl Checker<'_> {
                     .map(move |&port| ((*addr).to_owned(), port))
             }));
             targets.extend(self_peerapi(&status));
+            // Made together, and reported in this order: see `egress`.
+            let mut attempts = Vec::new();
             for (addr, port) in targets {
                 let target = if addr.contains(':') {
                     format!("[{addr}]:{port}")
@@ -508,35 +497,31 @@ impl Checker<'_> {
                 };
                 let probe = tcp_probe(&addr, port);
                 let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
-                self.control_or_note(&format!("tailnet-control:{target}"), &target, &probe);
-                let got = self.sandbox_succeeds(&probe)?;
-                self.report.expect(
-                    Want::Fail,
-                    &format!("tailnet:{target}"),
-                    format!("{user} can't reach {target}"),
-                    got,
-                );
+                attempts.extend([
+                    Attempt::control(format!("tailnet-control:{target}"), &target, &probe),
+                    Attempt::refused(
+                        format!("tailnet:{target}"),
+                        format!("{user} can't reach {target}"),
+                        &probe,
+                    ),
+                ]);
                 if self.has_podman() {
-                    let got = self.in_container(&probe)?;
-                    self.report.expect(
-                        Want::Fail,
-                        &format!("tailnet-container:{target}"),
+                    attempts.push(Attempt::refused_in_container(
+                        format!("tailnet-container:{target}"),
                         format!(
                             "a container as subordinate uid {CONTAINER_UID} can't reach {target}"
                         ),
-                        got,
-                    );
+                        &self.container(&probe),
+                    ));
                 }
             }
             let port = OTHER_TAILNET_PORT.to_string();
-            let got =
-                self.sandbox_succeeds(&["timeout", "10", "tailscale", "nc", &host_v4, &port])?;
-            self.report.expect(
-                Want::Fail,
+            attempts.push(Attempt::refused(
                 "tailnet-nc",
                 format!("{user} can't dial {host_v4}:{port} through tailscaled (tailscale nc)"),
-                got,
-            );
+                &["timeout", "10", "tailscale", "nc", &host_v4, &port],
+            ));
+            self.attempts(&attempts)?;
         }
         Ok(())
     }

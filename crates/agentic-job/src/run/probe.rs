@@ -5,7 +5,8 @@
 //!
 //! These are the token's part of the old tree's
 //! `agent-isolation-check.mjs`. The probes that need no token are
-//! `sandbox check`'s (step 5), which `run` will call again here too. One
+//! `sandbox check`'s (step 5), which the run action calls again unless
+//! it passed earlier in the same job. One
 //! of the old probes is left to that step, since it needs the container
 //! image `[sandbox.check]` names: that a container's subordinate uid
 //! cannot read the file.

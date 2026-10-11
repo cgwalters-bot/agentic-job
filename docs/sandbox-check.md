@@ -12,6 +12,57 @@ probe which fails because a program is missing does not read as a
 protection that holds. A probe or a control that comes out wrong fails
 the check: exit state 1.
 
+The run action calls it again, as `sandbox check --unless-passed`,
+before the agent starts. Secure-host's check, `sandbox check --record`,
+leaves a record in `RUNNER_TEMP`, `agentic-job-sandbox-checked`, when
+all its probes passed: the job's run ID, attempt and name, the binary's
+version and a fingerprint of its bytes, and the installed configuration
+it probed. A record means exactly that secure-host's check passed and
+nothing has entered the sandbox user since, and it spares at most one
+check: only `--record` writes one, every check removes it before
+anything else, whether it takes it or not, and `sandbox exec` and `run`
+remove it before the sandbox user runs anything. A check with
+`--unless-passed` that finds the same record makes no probe; without it
+(secure-host ran with `check: false`, the configuration or the binary
+changed, a step of the sandbox user's or an agent ran, or the run is in
+another job) it probes as usual, and leaves no record, so a second
+`run` in the job probes again. A step of the sandbox user's (`sandbox
+exec -- make check`) or an agent can leave behind what the probes look
+for, a process or a detached container. The threat is the sandbox user writing a record of a
+check that never passed: `RUNNER_TEMP` is closed to it, which the
+check that wrote the record proved ([The job's work
+directories](#the-jobs-work-directories)). A record is taken only from a
+file of the runner's user in a directory of its own that no one else can
+write in, which is where those probes look, and a link in its place is
+not followed.
+
+What the record does not stop is the runner's user itself. Steps of
+that user between secure-host and `run` run unprobed, and any of them
+can write a record `run` takes, since everything in it is
+known to that user, or loosen what the probes proved (the home or
+workspace modes, a loopback listener) without `run` noticing. Before the
+record, `run` caught such a step; now it is the caller's to avoid. Such a
+step already holds the job's credentials, so this loses a second look,
+not a privilege. In the reusable workflow nothing runs in between. A
+caller job that runs repository code as the runner's user before `run`
+(as in the [secure-host example](secure-host.md), `make check`) should
+give secure-host `check: false`, so that `run` probes after that code.
+
+The refusals of the network probes and their controls are made eight
+at a time: each costs about a second of entering the sandbox, and they
+wait on rules that reject rather than on each other. Those from a
+rootless container come after the others, one at a time, since a
+container that failed to start beside another would read as a refusal
+that holds. A refusal that succeeds fails the check as it did when they
+ran one by one. Each of these refusals first prints a line to its
+standard error from inside the sandbox user's session, and one without
+that line is an error that fails the check: a session that sudo, the
+helper, run0 or PAM did not start, alone or beside seven others, would
+otherwise read as a refusal that holds too. That line proves the
+session only: a refusal from a container that exits 125, 126 or 127,
+podman's own statuses for a container or command it did not start, is an
+error for the same reason.
+
 The host probes come first below, then those of the runner's own user,
 which setup has taken root from ([After setup, nothing has
 root](#after-setup-nothing-has-root)), then the network's: the rules
@@ -258,7 +309,8 @@ and those named by `RUNNER_TEMP`, `RUNNER_WORKSPACE` and
 `GITHUB_WORKSPACE`, when they are the runner's own and outside what
 setup closed. A caller with such a layout lists them in
 `sandbox.private-dirs`. These three names are, with the identity-token
-request variables, all the binary knows of a CI system.
+request variables and the run, attempt and job names of the record
+above, all the binary knows of a CI system.
 
 ## Local sockets
 

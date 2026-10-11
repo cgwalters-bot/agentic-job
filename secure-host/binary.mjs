@@ -7,7 +7,12 @@
 // one that does not match stops the job, and nothing is built in
 // its place. A build is not kept in a cache: a cache is the calling
 // repository's, where any workflow on its default branch or on the run's
-// own ref can leave an entry for a commit nobody has built yet.
+// own ref can leave an entry for a commit nobody has built yet. A push
+// to main that changes the source publishes its release a few minutes
+// after the push (pin.yml, which skips a push a newer one overtook): a
+// job of a commit off main, of a skipped one, or one that starts in
+// those minutes builds, and the build's minutes are the price of taking
+// nothing on trust but this repository's attestation.
 //
 //   binary.mjs get --out DIR [--build]   the binaries, into DIR
 //   binary.mjs digest [--root DIR]       the digest of the source at DIR
@@ -161,7 +166,10 @@ async function get({ out, build: asked }) {
   mkdirSync(out, { recursive: true });
   const fetched = !asked && await fetchRelease(source, out);
   if (!fetched) {
-    console.log(`::notice::${asked ? "A build was requested" : `No release exists for source ${source}`}; building from this source, about two minutes`);
+    const why = asked
+      ? "A build was requested"
+      : `No release exists for source ${source} (pin.yml publishes one for each push to main, a few minutes after it; a commit off main has none)`;
+    console.log(`::notice::${why}; building from this source, about two minutes`);
     build(out);
   }
   console.log(fetched ? `fetched build-${source} by its attested checksums` : "built from this source");

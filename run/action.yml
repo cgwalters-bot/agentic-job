@@ -24,11 +24,22 @@ runs:
     # Do not let a caller accidentally turn this into an unsandboxed runner.
     # Unlocked configurations skip runner privilege probes, so reject them
     # explicitly before checking the root-owned installed configuration.
+    # The probes are not made twice in a row: secure-host's check, when
+    # all passed, left a record in $RUNNER_TEMP naming this job and the
+    # installed configuration, and that directory is closed to the sandbox
+    # user, which those probes proved. Only that check writes one; the next
+    # check in the job consumes it, and `sandbox exec` and `run` remove it,
+    # so a second run in the job, or one after a step of the sandbox
+    # user's, probes again; so does one without it (secure-host ran with
+    # `check: false`, or in another job). Steps of
+    # the runner's user between secure-host and this one run unprobed and
+    # can write that record themselves: a caller that runs repository code
+    # there gives secure-host `check: false`.
     - name: Prove the host is secured
       shell: bash
       run: |
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
-        agentic-job sandbox check
+        agentic-job sandbox check --unless-passed
     # The policy job's commit must be this action's: a caller that names
     # another commit for an action would run one version's binary and
     # settings with another's steps. Pinned remotely, the ref is the

@@ -400,7 +400,8 @@ jobs:
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml
-      # It repeats the sandbox checks and uploads before reporting a limit.
+      # It takes secure-host's passing sandbox checks from the record they
+      # left in this job, and uploads before reporting a limit.
       - id: run
         timeout-minutes: 340
         uses: ./.agentic-job-source/run

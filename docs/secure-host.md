@@ -67,14 +67,21 @@ sandbox user, with a positive control for every probe
 ([sandbox-check.md](sandbox-check.md)), and the step fails if one does
 not hold.
 
-Setup logs monotonic wall times for service shutdown, package and npm
-installation, proxy startup, the privileged-binary allowlist, the filesystem
-view (with `sandbox.world-write-walk = false`), world-write and setuid traversal and
-package ownership (the default), and the optional sandbox script. Each
+Setup logs monotonic wall times for every stage, in order: the preflight
+(the configuration, the users and the refusals of a machine that is not
+fresh), creating the sandbox user, the filesystem view (with
+`sandbox.world-write-walk = false`), the environment and private
+directories, service shutdown, installing itself, package installation,
+the privileged-binary allowlist, npm installation, denying privileges, proxy
+startup, the network rules, the view probe directory, world-write and
+setuid traversal and package ownership (the default), ssh and ptrace, the
+optional sandbox script, the configuration and locking the runner. Each
 `Sandbox setup stage NAME: SECONDSs (ok|failed)` line measures only that
 stage, including its subprocesses; a failed stage still reports its time
-and returns its original error. These are not timings for the whole
-`secure-host` step: binary acquisition and the final probes are separate.
+and returns its original error. `Sandbox setup total: SECONDSs (ok|failed)`
+follows, from the start of setup, so that what the stages leave out is
+the difference. These are not timings for the whole `secure-host` step:
+binary acquisition and the final probes are separate.
 Use fresh hosted runners when comparing traversal changes; a second walk
 on the same machine benefits from the filesystem cache and is not a
 representative setup measurement.
@@ -255,7 +262,7 @@ file says, and the file's own default where it says nothing.
 | `sandbox-user` | The second user's name. Default `runner-sandbox` |
 | `runner-user` | The user the job's steps run as. Default: the one that runs the step |
 | `script` | A file: a script setup runs as the sandbox user at its end |
-| `check` | `false` skips `sandbox check`. Default `true` |
+| `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
 | `binary` | An `agentic-job` already on the machine, in place of fetching or building one |
 | `build` | `true` builds the binary even where a release fits |
 

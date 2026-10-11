@@ -50,6 +50,9 @@ pub fn run(args: &Args) -> Result<Exit> {
     let config = Config::load(Path::new(config::ROOT_COPY))
         .context("`agentic-job sandbox setup` writes this file")?;
     let entry = Entry::new(&config)?;
+    // What the sandbox user does next is for the next check to probe:
+    // a passing one earlier in the job no longer vouches for the host.
+    super::check::forget_passed()?;
     // Opened here, as the caller: the sandbox user gets its bytes and
     // not its path.
     let input: Box<dyn Read + Send> = match &args.stdin {

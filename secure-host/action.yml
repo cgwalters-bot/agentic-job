@@ -59,7 +59,11 @@ inputs:
     description: A file, a script that setup runs as the sandbox user at its end, for a toolchain in that user's home
     default: ""
   check:
-    description: Prove the result with `agentic-job sandbox check` before the step returns; `false` leaves that to the job
+    description: >-
+      Prove the result with `agentic-job sandbox check` before the step returns; `false` leaves that to the job.
+      A passing check lets the next check in this job, the run action's, skip its probes, unless something
+      entered the sandbox user or checked in between; give `false` when steps of the runner's user
+      (repository code) run between this step and run
     default: "true"
   binary:
     description: >-
@@ -151,15 +155,17 @@ runs:
     - name: Secure the host
       shell: bash
       run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
-    - name: Prove it
-      if: ${{ inputs.check != 'false' }}
-      shell: bash
-      run: agentic-job sandbox check
     # Asked of the sandbox user itself, which also shows that the way in
-    # to it works for the steps after this one.
+    # to it works for the steps after this one. Before the probes: every
+    # `sandbox exec` removes the record that `--record` leaves of a passing
+    # check, which the run action takes in place of probing again.
     - name: The sandbox user
       id: user
       shell: bash
       run: |
         name=$(agentic-job sandbox exec -- id -un)
         printf '%s\n' "name=$name" "home=$(getent passwd "$name" | cut -d: -f6)" | tee -a "$GITHUB_OUTPUT"
+    - name: Prove it
+      if: ${{ inputs.check != 'false' }}
+      shell: bash
+      run: agentic-job sandbox check --record

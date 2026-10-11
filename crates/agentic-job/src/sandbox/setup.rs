@@ -16,6 +16,7 @@
 
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,7 +27,8 @@ use rustix::fs::Mode;
 
 use super::enter::{Entry, RUN0};
 use super::host::{self, User};
-use super::{egress, helper, network};
+use super::network::{self, Direct};
+use super::{egress, helper};
 use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
@@ -255,71 +257,122 @@ const INSTALL_ATTEMPTS: u32 = 4;
 const INSTALL_PAUSE: Duration = Duration::from_secs(20);
 
 pub fn run(args: &Args) -> Result<Exit> {
-    let text = fs::read_to_string(&args.config)
-        .with_context(|| format!("reading {}", args.config.display()))?;
-    let config = Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
-    let direct = config.check_host()?.direct;
-    ensure!(host::is_root(), "`sandbox setup` must run as root");
-    ensure!(
-        host::has_program(RUN0),
-        "{RUN0} not found: the sandbox is entered with it, and it needs systemd 257 or later"
+    let started = Instant::now();
+    // Every stage is timed, so that the log accounts for all of setup's
+    // time and not only for the stages that were thought slow.
+    let result = setup(args);
+    println!(
+        "Sandbox setup total: {:.3}s ({})",
+        started.elapsed().as_secs_f64(),
+        if result.is_ok() { "ok" } else { "failed" }
     );
-    // Root's umask is the caller's, and some images build with 000.
-    rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
-    // Before anything else is decided: a machine that was set up before
-    // is refused whoever asks, and however.
-    ensure!(
-        !Path::new(CONFIG_DIR).exists(),
-        "{CONFIG_DIR} already exists: `sandbox setup` ran on this machine before, and the sandbox needs a fresh one for every job"
-    );
-    let runner = runner_user(&config)?;
-    // Every refusal comes before the first change.
-    let existing = preflight(&config, &runner)?;
-    let mut resolvers = Vec::new();
-    if config.egress.proxy {
-        let resolv_conf = match fs::read_to_string(RESOLV_CONF) {
-            Ok(text) => text,
-            Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
-            Err(err) => return Err(err).with_context(|| format!("reading {RESOLV_CONF}")),
-        };
-        let on_tailnet = network::tailnet_resolvers(&resolv_conf);
-        resolvers = network::resolvers(&resolv_conf)
-            .with_context(|| format!("reading resolvers from {RESOLV_CONF}"))?;
-        ensure!(
-            on_tailnet.is_empty(),
-            "{RESOLV_CONF} names {} on the tailnet, which the egress proxy may not reach: join the tailnet without its DNS (tailscale up --accept-dns=false)",
-            on_tailnet.join(", ")
-        );
-    }
-    fs::create_dir(CONFIG_DIR).with_context(|| format!("creating {CONFIG_DIR}"))?;
-    fs::set_permissions(CONFIG_DIR, fs::Permissions::from_mode(MODE_PROGRAM))
-        .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
+    result
+}
 
-    let sandbox = create_user(&config, &runner, existing)?;
+/// What the preflight read and decided, before setup changes anything.
+struct Preflight {
+    /// The configuration as written, which setup installs.
+    text: String,
+    config: Config,
+    direct: Vec<Direct>,
+    runner: User,
+    /// The sandbox user, where the image ships it and that is allowed.
+    existing: Option<User>,
+    /// The resolvers the egress proxy may use: none without it.
+    resolvers: Vec<IpAddr>,
+}
+
+fn setup(args: &Args) -> Result<Exit> {
+    let Preflight {
+        text,
+        config,
+        direct,
+        runner,
+        existing,
+        resolvers,
+    } = timed_setup("preflight", || {
+        let text = fs::read_to_string(&args.config)
+            .with_context(|| format!("reading {}", args.config.display()))?;
+        let config =
+            Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
+        let direct = config.check_host()?.direct;
+        ensure!(host::is_root(), "`sandbox setup` must run as root");
+        ensure!(
+            host::has_program(RUN0),
+            "{RUN0} not found: the sandbox is entered with it, and it needs systemd 257 or later"
+        );
+        // Root's umask is the caller's, and some images build with 000.
+        rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
+        // Before anything else is decided: a machine that was set up before
+        // is refused whoever asks, and however.
+        ensure!(
+            !Path::new(CONFIG_DIR).exists(),
+            "{CONFIG_DIR} already exists: `sandbox setup` ran on this machine before, and the sandbox needs a fresh one for every job"
+        );
+        let runner = runner_user(&config)?;
+        // Every refusal comes before the first change.
+        let existing = preflight(&config, &runner)?;
+        let mut resolvers = Vec::new();
+        if config.egress.proxy {
+            let resolv_conf = match fs::read_to_string(RESOLV_CONF) {
+                Ok(text) => text,
+                Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+                Err(err) => return Err(err).with_context(|| format!("reading {RESOLV_CONF}")),
+            };
+            let on_tailnet = network::tailnet_resolvers(&resolv_conf);
+            resolvers = network::resolvers(&resolv_conf)
+                .with_context(|| format!("reading resolvers from {RESOLV_CONF}"))?;
+            ensure!(
+                on_tailnet.is_empty(),
+                "{RESOLV_CONF} names {} on the tailnet, which the egress proxy may not reach: join the tailnet without its DNS (tailscale up --accept-dns=false)",
+                on_tailnet.join(", ")
+            );
+        }
+        Ok(Preflight {
+            text,
+            config,
+            direct,
+            runner,
+            existing,
+            resolvers,
+        })
+    })?;
+    let sandbox = timed_setup("create-user", || {
+        fs::create_dir(CONFIG_DIR).with_context(|| format!("creating {CONFIG_DIR}"))?;
+        fs::set_permissions(CONFIG_DIR, fs::Permissions::from_mode(MODE_PROGRAM))
+            .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
+        create_user(&config, &runner, existing)
+    })?;
     if !config.sandbox.world_write_walk {
         timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
     }
-    let subuids = subuid_ranges(
-        &sandbox,
-        &fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?,
-    )?;
-    drop_image_environment()?;
-    close_private_dirs(&config, &runner)?;
+    let subuids = timed_setup("environment-and-private-dirs", || {
+        let subuids = subuid_ranges(
+            &sandbox,
+            &fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?,
+        )?;
+        drop_image_environment()?;
+        close_private_dirs(&config, &runner)?;
+        Ok(subuids)
+    })?;
     timed_setup("stop-services", || {
         stop_services(&config.sandbox.stop_services)
     })?;
-    install_self()?;
-    // The helper's copy, the configuration it reads and the programs it
-    // runs are what the runner's one sudo rule gives root to: their
-    // directories are made root's alone first, or setup refuses.
-    for path in std::iter::once(SELF_COPY)
-        .chain(std::iter::once(CONFIG_DIR))
-        .chain(host::PATH_DIRS.iter().copied())
-        .chain(host::SBIN_DIRS.iter().copied())
-        .filter(|path| Path::new(path).exists())
-    {
-        make_roots_alone(Path::new(path))?;
-    }
+    timed_setup("install-self", || {
+        install_self()?;
+        // The helper's copy, the configuration it reads and the programs it
+        // runs are what the runner's one sudo rule gives root to: their
+        // directories are made root's alone first, or setup refuses.
+        for path in std::iter::once(SELF_COPY)
+            .chain(std::iter::once(CONFIG_DIR))
+            .chain(host::PATH_DIRS.iter().copied())
+            .chain(host::SBIN_DIRS.iter().copied())
+            .filter(|path| Path::new(path).exists())
+        {
+            make_roots_alone(Path::new(path))?;
+        }
+        Ok(())
+    })?;
     timed_setup("packages", || install_packages(&config.setup.packages))?;
     timed_setup("privileged-binary-allowlist", privileged_binaries::check)?;
     timed_setup("npm", || install_npm(&config.setup.npm))?;
@@ -327,10 +380,12 @@ pub fn run(args: &Args) -> Result<Exit> {
     // at), and a rule is written only for what is there. The runner's
     // rules take effect now too, which nothing running needs: the job's
     // step is waiting on this process, root already.
-    deny_privileges(
-        &sandbox.name,
-        config.sandbox.lock_runner.then_some(runner.name.as_str()),
-    )?;
+    timed_setup("deny-privileges", || {
+        deny_privileges(
+            &sandbox.name,
+            config.sandbox.lock_runner.then_some(runner.name.as_str()),
+        )
+    })?;
     // The proxy first, since the rules name its uid; and both after the
     // installs, which root does on the open network.
     let proxy_uid = config
@@ -338,12 +393,14 @@ pub fn run(args: &Args) -> Result<Exit> {
         .proxy
         .then(|| timed_setup("egress-proxy", || egress::start(&config.egress)))
         .transpose()?;
-    let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())
-        .chain(subuids.iter().cloned())
-        .collect();
-    network::apply(&network::rules_with_resolvers(
-        &uids, &direct, proxy_uid, &resolvers,
-    ))?;
+    timed_setup("network-rules", || {
+        let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())
+            .chain(subuids.iter().cloned())
+            .collect();
+        network::apply(&network::rules_with_resolvers(
+            &uids, &direct, proxy_uid, &resolvers,
+        ))
+    })?;
     match proxy_uid {
         Some(_) => println!(
             "{} reaches the network only through the egress proxy, {}",
@@ -355,16 +412,21 @@ pub fn run(args: &Args) -> Result<Exit> {
             sandbox.name
         ),
     }
-    // In view mode this stays writable by DAC, so probes prove mount confinement.
-    // Walk mode removes world write access, including for the runner.
-    fs::create_dir(VIEW_PROBE_DIR).context("creating filesystem-view probe directory")?;
-    host::run(Command::new("chown").args([&format!("root:{}", sandbox.gid), VIEW_PROBE_DIR]))?;
-    fs::set_permissions(VIEW_PROBE_DIR, fs::Permissions::from_mode(0o777))?;
+    timed_setup("view-probe-dir", || {
+        // In view mode this stays writable by DAC, so probes prove mount confinement.
+        // Walk mode removes world write access, including for the runner.
+        fs::create_dir(VIEW_PROBE_DIR).context("creating filesystem-view probe directory")?;
+        host::run(Command::new("chown").args([&format!("root:{}", sandbox.gid), VIEW_PROBE_DIR]))?;
+        fs::set_permissions(VIEW_PROBE_DIR, fs::Permissions::from_mode(0o777))?;
+        Ok(())
+    })?;
     optional_hardening_walk(config.sandbox.world_write_walk, |stage, operation| {
         timed_setup(stage, operation)
     })?;
-    fix_ssh_crypto_policy()?;
-    restrict_ptrace()?;
+    timed_setup("ssh-and-ptrace", || {
+        fix_ssh_crypto_policy()?;
+        restrict_ptrace()
+    })?;
     println!(
         "Sandbox user {} (uid {}, subordinate uids {}), in addition to {} whose home {} is closed to it",
         sandbox.name,
@@ -376,18 +438,20 @@ pub fn run(args: &Args) -> Result<Exit> {
     if let Some(script) = &config.setup.script {
         timed_setup("sandbox-script", || run_setup_script(&config, script))?;
     }
-    write_managed_settings(&config)?;
-    // Late, so a setup that failed leaves nothing `sandbox check` and
-    // `run` would take for a finished one; before the lock, whose proof
-    // runs the helper, which reads it.
-    install_file(
-        Path::new(config::ROOT_COPY),
-        text.as_bytes(),
-        MODE_FILE,
-        None,
-    )?;
+    timed_setup("configuration", || {
+        write_managed_settings(&config)?;
+        // Late, so a setup that failed leaves nothing `sandbox check` and
+        // `run` would take for a finished one; before the lock, whose proof
+        // runs the helper, which reads it.
+        install_file(
+            Path::new(config::ROOT_COPY),
+            text.as_bytes(),
+            MODE_FILE,
+            None,
+        )
+    })?;
     if config.sandbox.lock_runner {
-        lock_runner(&runner)?;
+        timed_setup("lock-runner", || lock_runner(&runner))?;
     } else {
         println!(
             "sandbox.lock-runner = false: {} keeps its sudo, and every step after this one has root",
