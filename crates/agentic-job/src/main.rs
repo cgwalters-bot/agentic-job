@@ -13,7 +13,10 @@ fn main() -> ExitCode {
     match cli.command.run() {
         Ok(code) => code.into(),
         Err(err) => {
-            eprintln!("error: {err:#}");
+            eprintln!(
+                "error: {}",
+                agentic_job::run::enter::one_line(&format!("{err:#}"))
+            );
             ExitCode::from(exit::ERROR)
         }
     }

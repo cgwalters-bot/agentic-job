@@ -402,8 +402,12 @@ jobs:
         run: |
           sudo -n true
           test "$SANDBOX_USER" = builder
-          test "$(agentic-job sandbox exec -- pwd)" = "$SANDBOX_HOME"
-          test "$(agentic-job sandbox exec -- sh -c 'echo "${HTTPS_PROXY:-none}"')" = none
+          agentic-job sandbox exec -- pwd > "$RUNNER_TEMP/sandbox-pwd.txt"
+          read -r actual < "$RUNNER_TEMP/sandbox-pwd.txt"
+          test "$actual" = "$SANDBOX_HOME"
+          agentic-job sandbox exec -- sh -c 'echo "${HTTPS_PROXY:-none}"' > "$RUNNER_TEMP/sandbox-proxy.txt"
+          read -r actual < "$RUNNER_TEMP/sandbox-proxy.txt"
+          test "$actual" = none
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
 
   # The action as another repository names it, which a pull request

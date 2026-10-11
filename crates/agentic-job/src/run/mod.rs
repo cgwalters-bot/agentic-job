@@ -783,7 +783,7 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
         Ok(Ended::Ended(record)) => (true, record),
         Ok(Ended::NoRunApi) => (false, None),
         Err(err) => {
-            eprintln!("error: {err:#}");
+            eprintln!("error: {}", enter::one_line(&format!("{err:#}")));
             (false, None)
         }
     };
@@ -938,7 +938,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     .into_iter()
     .flatten()
     {
-        eprintln!("error: {err:#}");
+        eprintln!("error: {}", enter::one_line(&format!("{err:#}")));
         unclean = true;
     }
     if matches!(&settled, Some(Ok(settled)) if !settled.dead) {
@@ -949,7 +949,10 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     }
     let exit = match stage {
         Stage::NotStarted(err) => {
-            eprintln!("error: the run did not start: {err:#}");
+            eprintln!(
+                "error: the run did not start: {}",
+                enter::one_line(&format!("{err:#}"))
+            );
             Exit::NotStarted
         }
         Stage::Interrupted(name) => {

@@ -185,7 +185,7 @@ pub fn require(
 pub fn report(probes: &[Probe]) -> bool {
     for probe in probes {
         let mark = if probe.passed { "ok  " } else { "FAIL" };
-        eprintln!("{mark} {}", probe.what);
+        eprintln!("{mark} {}", super::enter::one_line(&probe.what));
     }
     probes.iter().all(|probe| probe.passed)
 }

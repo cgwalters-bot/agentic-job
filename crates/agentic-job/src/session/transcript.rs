@@ -77,7 +77,7 @@ impl Inner {
     fn log(&mut self, lines: &[String]) {
         // The job log is best effort; the transcript has everything.
         for line in lines {
-            let _ = writeln!(self.log, "{line}");
+            let _ = writeln!(self.log, "{}", crate::workflow_commands::escaped(line));
         }
         let _ = self.log.flush();
     }
@@ -203,4 +203,39 @@ pub(super) struct Finished {
     pub agent_error: bool,
     /// The transcript could not be written.
     pub write_error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_logs_are_escaped_but_transcripts_keep_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job.log");
+        let (stop, _) = watch::channel(None);
+        let tap = Tap::create(
+            dir.path(),
+            Box::new(File::create(&path).unwrap()),
+            Limits::default(),
+            stop,
+            Clients::none(),
+        )
+        .unwrap();
+        let lines = [
+            "prefix ::set-output name=a::b",
+            "::::add-mask::hidden\r\n##[error]forged",
+        ]
+        .map(str::to_owned);
+        tap.log(&lines);
+        for line in &lines {
+            tap.stderr(line);
+        }
+        let shown = std::fs::read_to_string(path).unwrap();
+        assert!(!shown.contains("::") && !shown.contains("##["), "{shown}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(STDERR_LOG)).unwrap(),
+            format!("{}\n", lines.join("\n")),
+        );
+    }
 }

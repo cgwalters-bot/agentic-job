@@ -63,21 +63,17 @@ impl Output {
     }
 }
 
-/// What starts a command to GitHub's runner anywhere in a line of a
-/// job's log, and what it is printed as.
-const LOG_COMMAND: &str = "##[";
-const LOG_COMMAND_SHOWN: &str = "## [";
-
 /// TEXT on one line and without control characters: what a repository or
 /// the agent wrote must not act as a command to the CI system's log.
-/// GitHub's runner takes `::name::` for one only at the start of a line,
-/// where nothing printed here puts such text, and `##[name]` anywhere in
-/// a line, so that is broken up.
+/// Both of the runner's command syntaxes are broken up: the runner only
+/// reads them at the start of a line, but mid-line too, as defense in depth.
 pub fn one_line(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect::<String>()
-        .replace(LOG_COMMAND, LOG_COMMAND_SHOWN)
+    crate::workflow_commands::escaped(
+        &text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>(),
+    )
 }
 
 /// Runs one command at a time and gives back what it wrote: the way
@@ -322,7 +318,7 @@ mod tests {
 
     #[test]
     fn log_lines_stay_one_line() {
-        assert_eq!(one_line("a\nb\r::error::c\x1b[0m"), "a b ::error::c [0m");
+        assert_eq!(one_line("a\nb\r::error::c\x1b[0m"), "a b : :error: :c [0m");
         // The form the runner acts on in the middle of a line.
         assert_eq!(
             one_line("x ##[error]y ##[group]"),

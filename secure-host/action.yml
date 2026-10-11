@@ -163,7 +163,9 @@ runs:
       id: user
       shell: bash
       run: |
-        name=$(agentic-job sandbox exec -- id -un)
+        # Regular-file capture is exact; piped output has `::` broken up.
+        agentic-job sandbox exec -- id -un > "$RUNNER_TEMP/secure-host/user.txt"
+        read -r name < "$RUNNER_TEMP/secure-host/user.txt"
         printf '%s\n' "name=$name" "home=$(getent passwd "$name" | cut -d: -f6)" | tee -a "$GITHUB_OUTPUT"
     - name: Prove it
       if: ${{ inputs.check != 'false' }}

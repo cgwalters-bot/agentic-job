@@ -15,17 +15,21 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::Shutdown;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
+use rustix::fs::FileType;
+use rustix::process::{Pid, Signal, kill_process};
 
 use super::host::{self, User};
 use super::network;
 use super::root::Root;
 use crate::config::{Config, Sandbox};
+use crate::workflow_commands;
 
 /// `run0` came with systemd 256, and its `--pipe` with 257.
 pub const RUN0: &str = "run0";
@@ -235,36 +239,14 @@ impl Entry {
         &self,
         argv: &[String],
         cwd: Option<&Path>,
-        mut input: impl Read + Send + 'static,
+        input: impl Read + Send + 'static,
     ) -> Result<ExitStatus> {
-        let (mut stdin, child_stdin) = UnixStream::pair().context("socketpair")?;
-        let (mut stdout, child_stdout) = UnixStream::pair().context("socketpair")?;
-        let (mut stderr, child_stderr) = UnixStream::pair().context("socketpair")?;
-        let mut child = {
-            let mut command = self.command(argv, cwd)?;
-            command
-                .stdin(Stdio::from(OwnedFd::from(child_stdin)))
-                .stdout(Stdio::from(OwnedFd::from(child_stdout)))
-                .stderr(Stdio::from(OwnedFd::from(child_stderr)))
-                .spawn()
-                .with_context(|| format!("starting {RUN0} for {}", argv.join(" ")))?
-        };
-        // Never joined: a command that ends before its input does leaves
-        // this reading an input nobody is waiting for, and the process
-        // ends with the command.
-        std::thread::spawn(move || {
-            let _ = std::io::copy(&mut input, &mut stdin);
-            let _ = stdin.shutdown(Shutdown::Write);
-        });
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let _ = std::io::copy(&mut stderr, &mut std::io::stderr().lock());
-            });
-            let mut out = std::io::stdout().lock();
-            let _ = std::io::copy(&mut stdout, &mut out);
-            let _ = out.flush();
-        });
-        child.wait().context("waiting for run0")
+        let command = self.command(argv, cwd)?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("creating the sandbox stream runtime")?
+            .block_on(stream_command(command, input))
     }
 
     /// Whether `argv` ran and succeeded as the sandbox user.
@@ -273,9 +255,306 @@ impl Entry {
     }
 }
 
+/// How long a signalled command has to exit before its immediate child
+/// (sudo, which cannot relay SIGKILL) is killed. The runner's own cancel
+/// sends SIGINT, then SIGTERM 7.5 seconds later.
+const SIGNAL_GRACE: Duration = Duration::from_secs(5);
+
+/// How the sandbox's output reaches one of this process's streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relay {
+    /// As written: a regular file is data, not a runner log.
+    Exact,
+    /// With both command syntaxes broken.
+    Escaped,
+}
+
+impl Relay {
+    /// Anything but a regular file may reach the runner's log, through any
+    /// pipeline (`| tail`, `| sort`, `| tee`) and alongside other writers:
+    /// output with no `::` or `##[` left in it cannot form a command
+    /// however it is filtered, reordered or interleaved by line.
+    fn to(fd: BorrowedFd<'_>) -> Result<Self> {
+        let stat = rustix::fs::fstat(fd).context("identifying a sandbox output destination")?;
+        Ok(
+            if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile {
+                Self::Exact
+            } else {
+                Self::Escaped
+            },
+        )
+    }
+
+    fn writer<'a>(self, writer: impl Write + 'a) -> Box<dyn Write + 'a> {
+        match self {
+            Self::Exact => Box::new(writer),
+            Self::Escaped => Box::new(workflow_commands::Escaping::new(writer)),
+        }
+    }
+}
+
+/// Regular files get the exact bytes; everything else is escaped. Written
+/// to the descriptors themselves, not through `Stdout`'s line buffer, so
+/// that each escaped write is one write to the pipe.
+async fn stream_command(command: Command, input: impl Read + Send + 'static) -> Result<ExitStatus> {
+    let [out, err] = [std::io::stdout().as_fd(), std::io::stderr().as_fd()].map(|fd| {
+        let relay = Relay::to(fd)?;
+        let fd = fd
+            .try_clone_to_owned()
+            .context("duplicating a sandbox output destination")?;
+        Ok::<_, anyhow::Error>(relay.writer(std::fs::File::from(fd)))
+    });
+    stream_command_to(command, input, out?, err?).await
+}
+
+async fn stream_command_to(
+    mut command: Command,
+    mut input: impl Read + Send + 'static,
+    mut log: Box<dyn Write + '_>,
+    mut errors: Box<dyn Write + '_>,
+) -> Result<ExitStatus> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupt = signal(SignalKind::interrupt()).context("watching SIGINT")?;
+    let mut terminate = signal(SignalKind::terminate()).context("watching SIGTERM")?;
+    let mut hangup = signal(SignalKind::hangup()).context("watching SIGHUP")?;
+    let (mut stdin, child_stdin) = UnixStream::pair().context("socketpair")?;
+    let (stdout, child_stdout) = UnixStream::pair().context("socketpair")?;
+    let (stderr, child_stderr) = UnixStream::pair().context("socketpair")?;
+    let mut stdout = async_stream(stdout)?;
+    let mut stderr = async_stream(stderr)?;
+    command
+        .stdin(Stdio::from(OwnedFd::from(child_stdin)))
+        .stdout(Stdio::from(OwnedFd::from(child_stdout)))
+        .stderr(Stdio::from(OwnedFd::from(child_stderr)));
+    let mut child = tokio::process::Command::from(command)
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting the sandbox stream command")?;
+    // Do not keep the child's socket ends open in the command object.
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut input, &mut stdin);
+        let _ = stdin.shutdown(Shutdown::Write);
+    });
+    let outcome = tokio::select! {
+        result = async {
+            tokio::try_join!(relay(&mut stdout, &mut log), relay(&mut stderr, &mut errors), child.wait())
+        } => Ok(result),
+        _ = interrupt.recv() => Err((Signal::INT, "SIGINT")),
+        _ = terminate.recv() => Err((Signal::TERM, "SIGTERM")),
+        _ = hangup.recv() => Err((Signal::HUP, "SIGHUP")),
+    };
+    match outcome {
+        Ok(Ok((_, _, status))) => Ok(status),
+        Ok(Err(e)) => {
+            stop(&mut child, Signal::TERM).await;
+            Err(e).context("relaying sandbox output")
+        }
+        Err((signal, name)) => {
+            stop(&mut child, signal).await;
+            Err(anyhow!("sandbox stream interrupted by {name}"))
+        }
+    }
+}
+
+fn async_stream(stream: UnixStream) -> Result<tokio::net::UnixStream> {
+    stream
+        .set_nonblocking(true)
+        .context("making a sandbox output socket nonblocking")?;
+    tokio::net::UnixStream::from_std(stream).context("registering a sandbox output socket")
+}
+
+async fn relay(from: &mut tokio::net::UnixStream, to: &mut dyn Write) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = [0; 8192];
+    loop {
+        let count = from.read(&mut bytes).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        to.write_all(&bytes[..count])?;
+        to.flush()?;
+    }
+}
+
+/// Passes `signal` on rather than SIGKILL at once: sudo relays SIGINT,
+/// SIGTERM and SIGHUP towards the command, while killing sudo would orphan
+/// the command. Kills it if it has not exited within [`SIGNAL_GRACE`].
+async fn stop(child: &mut tokio::process::Child, signal: Signal) {
+    let pid = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(Pid::from_raw);
+    if let Some(pid) = pid {
+        let _ = kill_process(pid, signal);
+        if tokio::time::timeout(SIGNAL_GRACE, child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs this test binary again, with `env`, as only `test`.
+    fn rerun(test: &str, env: (&str, &str)) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &format!("sandbox::enter::tests::{test}")])
+            .env(env.0, env.1);
+        command
+    }
+
+    fn shell(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    /// Whether `log` could still hold a command, however it is filtered.
+    fn has_command_syntax(log: &[u8]) -> bool {
+        log.windows(2).any(|w| w == b"::") || log.windows(3).any(|w| w == b"##[")
+    }
+
+    /// Both streams, as a log, whatever the command does or how it ends.
+    #[tokio::test]
+    async fn streamed_commands_are_escaped() {
+        for script in [
+            "printf '::set-output name=a::b\\npartial\\r'; printf '::add-mask::x\\n##[error]x' >&2",
+            "printf ':'; printf ':stop-commands::x\\n#'; printf '#[group]' >&2; exit 7",
+            "printf '  ::error::x'; kill -TERM $$",
+        ] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let _status = stream_command_to(
+                shell(script),
+                std::io::empty(),
+                Relay::Escaped.writer(&mut out),
+                Relay::Escaped.writer(&mut err),
+            )
+            .await
+            .unwrap();
+            assert!(!out.is_empty(), "{script}");
+            for log in [&out, &err] {
+                assert!(!has_command_syntax(log), "{}", String::from_utf8_lossy(log));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_spawn_fails_and_file_transfers_are_exact() {
+        assert!(
+            stream_command_to(
+                Command::new("/no/such/agentic-job-command"),
+                std::io::empty(),
+                Relay::Escaped.writer(Vec::new()),
+                Relay::Escaped.writer(Vec::new()),
+            )
+            .await
+            .is_err()
+        );
+        let script = "printf '\\000::set-output name=a::b\\r'; printf 'x::y\\n' >&2";
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert!(
+            stream_command_to(
+                shell(script),
+                std::io::empty(),
+                Relay::Exact.writer(&mut out),
+                Relay::Exact.writer(&mut err),
+            )
+            .await
+            .unwrap()
+            .success()
+        );
+        assert_eq!(out, b"\0::set-output name=a::b\r");
+        assert_eq!(err, b"x::y\n");
+    }
+
+    /// Regular files get exact bytes; anything else may be a log, through
+    /// a pipeline or not. Closed stdout is /dev/null under Rust.
+    #[test]
+    fn relays_follow_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join("out")).unwrap();
+        let null = std::fs::File::options()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let (_reader, pipe) = std::io::pipe().unwrap();
+        for (fd, relay) in [
+            (file.as_fd(), Relay::Exact),
+            (null.as_fd(), Relay::Escaped),
+            (pipe.as_fd(), Relay::Escaped),
+        ] {
+            assert_eq!(Relay::to(fd).unwrap(), relay);
+        }
+    }
+
+    /// The signal is passed on, and a command that ignores it is killed
+    /// after the grace period.
+    #[test]
+    fn supervisor_signals_reach_the_command() {
+        const SCRIPT: &str = "AGENTIC_JOB_STREAM_TEST_SCRIPT";
+        if let Ok(script) = std::env::var(SCRIPT) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(stream_command_to(
+                shell(&script),
+                std::io::empty(),
+                Relay::Escaped.writer(Vec::new()),
+                Relay::Escaped.writer(Vec::new()),
+            ));
+            assert!(result.is_err());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().display();
+        // Signals are process-wide: isolate each case from parallel tests.
+        for (name, ignore) in [
+            ("INT", false),
+            ("TERM", false),
+            ("HUP", false),
+            ("TERM", true),
+        ] {
+            let script = if ignore {
+                format!(
+                    "trap '' {name}; echo $$ > {dir}/pid; printf partial; kill -{name} $PPID; exec sleep 600"
+                )
+            } else {
+                format!(
+                    "echo $$ > {dir}/pid; trap 'echo {name} > {dir}/got; kill $!; exit 0' {name}; \
+                     printf partial; sleep 600 & kill -{name} $PPID; wait"
+                )
+            };
+            let _ = std::fs::remove_file(format!("{dir}/got"));
+            let output = rerun("supervisor_signals_reach_the_command", (SCRIPT, &script))
+                .arg("--nocapture")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let got = std::fs::read_to_string(format!("{dir}/got")).ok();
+            assert_eq!(
+                got.as_deref(),
+                (!ignore).then(|| format!("{name}\n")).as_deref()
+            );
+            let pid = std::fs::read_to_string(format!("{dir}/pid")).unwrap();
+            assert!(
+                !Path::new(&format!("/proc/{}", pid.trim())).exists(),
+                "{name}"
+            );
+        }
+    }
 
     fn entry(env: &[(&str, &str)]) -> Entry {
         let sandbox = Sandbox {

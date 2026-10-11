@@ -121,7 +121,13 @@ impl Report {
     /// the line at once: some probes take a while.
     fn expect(&mut self, want: Want, id: &str, what: impl Into<String>, succeeded: bool) {
         let (what, passed) = (what.into(), succeeded == (want == Want::Succeed));
-        println!("{}: [{id}] {what}", if passed { "ok" } else { "FAIL" });
+        println!(
+            "{}",
+            crate::workflow_commands::escaped(&format!(
+                "{}: [{id}] {what}",
+                if passed { "ok" } else { "FAIL" }
+            ))
+        );
         self.outcomes.push(Outcome {
             id: id.to_owned(),
             what,
@@ -130,7 +136,7 @@ impl Report {
     }
 
     fn note(&self, text: &str) {
-        println!("note: {text}");
+        println!("note: {}", crate::workflow_commands::escaped(text));
     }
 
     /// A control of `runner`'s: see [`Checker::control_or_note`].
@@ -626,7 +632,12 @@ fn bounded_stderr(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(&stderr[..stderr.len().min(DIAGNOSTIC_BYTES)]);
     // Escape terminal/control characters, including newlines, so a subprocess
     // cannot forge another probe result or a workflow command in the log.
-    let mut shown: String = text.chars().flat_map(char::escape_default).collect();
+    let mut shown = crate::workflow_commands::escaped(
+        &text
+            .chars()
+            .flat_map(char::escape_default)
+            .collect::<String>(),
+    );
     if stderr.len() > DIAGNOSTIC_BYTES {
         shown.push_str(" [truncated]");
     }
@@ -643,6 +654,10 @@ mod diagnostic_tests {
             (b"".as_slice(), ""),
             (b"denied\n\x1b".as_slice(), "denied\\n\\u{1b}"),
             (b"\xff".as_slice(), "\\u{fffd}"),
+            (
+                b"::add-mask::x ##[error]y".as_slice(),
+                ": :add-mask: :x ## [error]y",
+            ),
         ] {
             assert_eq!(bounded_stderr(input), expected);
         }

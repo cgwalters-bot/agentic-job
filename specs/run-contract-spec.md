@@ -353,6 +353,39 @@ human edits to the proposed workflow still require review.
 
 ### 3.4 The caller's own agent job
 
+**RC-022 — Untrusted logs.** Sandbox stdout and stderr, including setup
+scripts and agent messages under `run`, MUST NOT set runner outputs, install
+masks or create workflow annotations. Whatever of them may reach a runner
+log MUST have both runner command syntaxes (`::` and `##[`) broken up
+wherever they occur, not only at the start of a line, so that filtering,
+reordering or interleaving whole lines downstream cannot form a command.
+Protection MUST NOT depend on runner state such as `stop-commands`: a
+supervisor killed with SIGKILL would leave it set for the rest of the job.
+Writers sharing one pipe MUST NOT be able to join their bytes into either
+syntax: each write is escaped as if it followed an unknown writer's bytes,
+and is no larger than one atomic pipe write. A handled signal MUST be
+passed on to the command, which is killed only after a bounded grace period.
+Output directed to a regular file is data, not a runner log, and keeps its
+exact bytes.
+Enforcement: [workflow_commands.rs](../crates/agentic-job/src/workflow_commands.rs),
+`escaping_breaks_both_syntaxes` and `writes_cannot_join_into_a_command`;
+[enter.rs](../crates/agentic-job/src/sandbox/enter.rs),
+`streamed_commands_are_escaped`,
+`failed_spawn_fails_and_file_transfers_are_exact`,
+`relays_follow_the_destination` and
+`supervisor_signals_reach_the_command`;
+[transcript.rs](../crates/agentic-job/src/session/transcript.rs),
+`agent_logs_are_escaped_but_transcripts_keep_original_bytes`;
+[check/mod.rs](../crates/agentic-job/src/sandbox/check/mod.rs),
+`stderr_is_bounded_and_escaped` (probe diagnostics also contain sandbox text);
+[example-secure-host.yml](../.github/workflows/example-secure-host.yml),
+`Sandbox output cannot command the runner`,
+`Filtered and overlapping sandbox output cannot command the runner`,
+`Trusted output can command the runner` (a positive control),
+`Trusted outputs are unchanged` and `Sandbox did not install a mask`. The
+final job checks that the runner exports a trusted sentinel rather than
+refusing it as masked, and that it does refuse one a trusted step masked.
+
 A caller MAY write the agent job itself, between the policy, check and apply
 pieces, as [the pieces](../docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)
 describes. The pieces keep the boundaries of 3.1 to 3.3; this section is what

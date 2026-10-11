@@ -222,7 +222,22 @@ command `< /dev/null`. None of the step's `env:` reaches it. Variables
 for the sandbox user are the configuration's (`[sandbox] env`), and the
 egress proxy's are set for it.
 
-**Files go in and out as bytes on a pipe**, since neither user reads the
+Sandbox logs cannot issue workflow commands. Unless it is redirected to a
+regular file, the sandbox's stdout and stderr have both command syntaxes
+broken up wherever they occur (`::` becomes `: :`, `##[` becomes `## [`),
+as do setup/probe diagnostics and `run`'s agent-derived log text. With
+neither left in the output, a filter between `sandbox exec` and the log
+(`| tail`, `| grep`, `| sort`, `| tee`), or another `sandbox exec` writing
+to the same log, cannot turn it back into a command, and nothing is left
+for the runner to undo if the supervisor is killed. Stdout or stderr
+redirected to a regular file gets the exact bytes.
+
+This changes piped output: `$(agentic-job sandbox exec …)` and
+`agentic-job sandbox exec … | tar -x` see `: :` for every `::` (and
+`## [` for `##[`) the command wrote, so `std::io` arrives as `std: :io`.
+Redirect to a file in `$RUNNER_TEMP` and read that for exact bytes.
+
+**Files go in and out through the supervisor**, since neither user reads the
 other's files:
 
 ```yaml

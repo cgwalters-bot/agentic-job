@@ -1082,8 +1082,9 @@ fn agent_text_is_no_command_to_the_job_log() {
     job.repository(&user);
     let got = job.run(&config(&user, &plain(&proxy)));
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
-    // The agent's words are shown, so this test has something to find.
-    for want in ["add-mask", "stop-commands", "::error::a name"] {
+    // The agent's words are shown, so this test has something to find,
+    // with the command syntax broken up wherever it is.
+    for want in ["add-mask", "stop-commands", ": :error: :a name"] {
         assert!(got.stdout.contains(want), "{want}: {}", got.all());
     }
     for line in got.stdout.lines().chain(got.stderr.lines()) {

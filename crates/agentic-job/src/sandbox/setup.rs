@@ -1509,8 +1509,14 @@ fn run_setup_script(config: &Config, script: &Path) -> Result<()> {
     install_file(Path::new(SCRIPT_COPY), &bytes, MODE_PROGRAM, None)?;
     let entry = Entry::new(config)?;
     let output = entry.run(&[SCRIPT_COPY], b"")?;
-    std::io::stdout().write_all(&output.stdout)?;
-    std::io::stderr().write_all(&output.stderr)?;
+    // Captured setup output is only a log, so complete escaping avoids a
+    // suspension window (and cross-stream ordering or signal cleanup).
+    std::io::stdout().write_all(
+        crate::workflow_commands::escaped(&String::from_utf8_lossy(&output.stdout)).as_bytes(),
+    )?;
+    std::io::stderr().write_all(
+        crate::workflow_commands::escaped(&String::from_utf8_lossy(&output.stderr)).as_bytes(),
+    )?;
     ensure!(
         output.success(),
         "setup.script failed as {} ({})",

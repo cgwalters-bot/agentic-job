@@ -6,9 +6,9 @@
 //! this process holds (the agent can read its run token) and everything
 //! shaped like a credential ([`crate::redact`]). And the line is made
 //! unable to act as a command to the CI system that shows the log:
-//! GitHub's runner reads `::name::` at the start of a line and `##[name]`
-//! anywhere in one as a command (`add-mask`, `stop-commands`, `error`),
-//! whoever printed it.
+//! GitHub's runner reads a line starting with `::name::` or `##[name]`,
+//! after leading whitespace, as a command (`add-mask`, `stop-commands`,
+//! `error`), whoever printed it; both are broken up mid-line too.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -16,11 +16,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::enter::one_line;
 use crate::redact::Redactor;
-
-/// What starts a command to GitHub's runner at the start of a line.
-const LINE_COMMAND: &str = "::";
-/// Put before a line that would start with one.
-const LINE_COMMAND_GUARD: &str = "| ";
 
 /// The redactor of a run, shared by its log and by whatever redacts its
 /// files afterwards, so that there is one count of what was replaced.
@@ -44,12 +39,7 @@ impl Shared {
 /// LINE as it may be shown in a job's log: redacted, on one line, and no
 /// command to the runner.
 pub fn shown(redactor: &Shared, line: &str) -> String {
-    let clean = one_line(&redactor.with(|redactor| redactor.redact(line).into_owned()));
-    if clean.trim_start().starts_with(LINE_COMMAND) {
-        format!("{LINE_COMMAND_GUARD}{clean}")
-    } else {
-        clean
-    }
+    one_line(&redactor.with(|redactor| redactor.redact(line).into_owned()))
 }
 
 /// A writer that passes on whole lines, each as [`shown`], to the job's
@@ -171,21 +161,22 @@ mod tests {
         // (the line, as shown)
         let cases = [
             ("» plain words", "» plain words"),
-            ("::add-mask::x", "| ::add-mask::x"),
-            ("  \t::stop-commands::t", "|    ::stop-commands::t"),
-            ("\u{a0}::error::x", "| \u{a0}::error::x"),
+            ("::add-mask::x", ": :add-mask: :x"),
+            ("  \t::stop-commands::t", "   : :stop-commands: :t"),
+            ("\u{a0}::error::x", "\u{a0}: :error: :x"),
             ("» ##[error]x ##[add-mask]y", "» ## [error]x ## [add-mask]y"),
             (
                 "» a\r::warning::b\n::error::c",
-                "» a ::warning::b ::error::c",
+                "» a : :warning: :b : :error: :c",
             ),
-            ("» a\u{1b}[2K\u{8}::notice::b", "» a [2K ::notice::b"),
-            ("» mid ::error:: line", "» mid ::error:: line"),
+            ("» a\u{1b}[2K\u{8}::notice::b", "» a [2K : :notice: :b"),
+            ("» mid ::error:: line", "» mid : :error: : line"),
+            ("» ::::add-mask::x", "» : : : :add-mask: :x"),
         ];
         for (line, want) in cases {
             let got = shown(&redactor, line);
             assert_eq!(got, want, "{line:?}");
-            assert!(!got.trim_start().starts_with("::"), "{got:?}");
+            assert!(!got.contains("::"), "{got:?}");
             assert!(!got.contains("##["), "{got:?}");
             assert!(!got.contains(['\n', '\r']), "{got:?}");
         }
