@@ -1,0 +1,17 @@
+# The same bounds, admitting anyone's pull request, from a fork too, as a
+# review on every pull request does. Comments still need a command.
+hosts = ["github.com"]
+repos = ["octo/repo"]
+bases = ["main"]
+max_outputs = 5
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+add_comment = { max = 1 }
+
+[trigger]
+events = ["pull_request", "issue_comment"]
+roles = ["all"]
+forks = true
+commands = ["/review"]

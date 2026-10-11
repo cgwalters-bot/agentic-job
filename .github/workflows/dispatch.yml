@@ -126,7 +126,7 @@ jobs:
               throw new Error(onPull ? `${profile} requires a pull request` : 'This profile requires an issue, not a pull request');
             }
             const instructions = profile === 'review'
-              ? 'Review the pinned head supplied by the runner. Return one add_comment with VERDICT: APPROVE, CHANGES or REJECT on its first line and REASON: on its second line (at most 200 characters), or noop. A verdict is not merge authority.'
+              ? 'Review the pinned head supplied by the runner. Return one add_comment whose first line starts with VERDICT: APPROVE or VERDICT: CHANGES, or noop. A verdict is not merge authority.'
               : profile === 'fix'
               ? "Fix works in a checkout of the pull request's branch at its pinned head; the change is pushed to that branch as one commit. Use noop, missing_tool or missing_data when needed."
               : 'Implement proposes one draft pull request. Triage and research leave the tree clean and return one add_comment. Use noop, missing_tool or missing_data when needed.';

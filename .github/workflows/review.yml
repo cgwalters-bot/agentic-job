@@ -1,33 +1,50 @@
-# Uses base-branch workflow, task, bounds and setup, never the PR's versions.
-# Copy the files named below; pin the reusable workflow to a reviewed commit
-# when calling from another repository. Real inference is deliberately off.
+# A review of every pull request, by a real agent, and its verdict as the
+# commit status `review` on the reviewed head (docs/review.md).
+#
+# pull_request_target runs this file, its bounds, task and actions from
+# the base branch, never the pull request's: the agent reads the head as
+# data, fetched by commit inside the sandbox, with no credential. That is
+# what makes forks safe to admit; each review spends bounded inference
+# (max-requests, budget and timeout below), so only some authors start one
+# automatically (the policy job's `if:`).
+#
+# The agent job is this file's, as in tracker's caller, for its one
+# privileged step: joining the inference proxy's tailnet. So its identity
+# token's `job_workflow_ref` names this file, and the broker and the
+# tailnet's federated identity have to admit it (docs/inference.md).
+#
+# Another repository calls this file at a pinned commit from the same
+# events, with its own copies of the bounds, the task and hosted.toml.
 name: review
 on:
   pull_request_target:
-    types: [opened, synchronize, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
+  workflow_call:
+    # Forward only this declared credential, never inherit.
+    secrets:
+      SAFE_OUTPUTS_PAT:
+        required: false
 permissions: {}
 jobs:
-  review:
-    # Optimization only: the event policy checks actor permissions and forks.
+  policy:
+    # The event policy checks actors, commands and the pull request.
+    # Drafts wait for ready_for_review. Automatic reviews are only for
+    # the owner, organization members and collaborators: anyone else,
+    # someone with a merged commit included, could open pull requests, or
+    # close and reopen one, to drain the broker's shared cap and stall
+    # every other run. GitHub sets author_association; the author cannot.
+    # Their pull requests are reviewed on a `/review` from someone with
+    # write access (docs/review.md).
     if: >-
-      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
-    concurrency:
-      group: review-pull-${{ github.event.pull_request.number || github.event.issue.number }}
-      # Only automatic PR events supersede a review; arbitrary comments must
-      # not be able to cancel it before event authorization runs.
-      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
-    uses: ./.github/workflows/agentic-job.yml
-    secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+    uses: ./.github/workflows/policy.yml
+    # The policy job reads; activate and notify have nothing to do.
     permissions:
       contents: read
-      issues: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write
-      pull-requests: write
     with:
       id: review-${{ github.event.pull_request.number || github.event.issue.number }}
       repo: ${{ github.repository }}
@@ -39,10 +56,171 @@ jobs:
       outputs: add_comment,noop
       max-outputs: '1'
       notify: none
-      allow: workflow/review.toml
-      config: .github/agentic-job/hosted.toml
-      agent: fake
-      setup: .github/agentic-job/e2e/review.sh
-      timeout: '10'
-      max-requests: '0'
-      budget: '100'
+      # Any role, forks included, for the automatic events (the `if:` above
+      # narrows them to owner, members and collaborators); `/review` from
+      # someone who can write.
+      allow: ${{ github.event_name == 'issue_comment' && 'workflow/review-command.toml' || 'workflow/review.toml' }}
+      # The runner's configuration, as dispatch.yml picks it.
+      config: ${{ vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
+      # No fallback: without the variables the run fails in policy, where
+      # a scripted agent would post a verdict nobody made.
+      agent: ${{ vars.AGENT }}
+      model: ${{ vars.AGENT_MODEL }}
+      # Only opencode reads an instructions repository, as in dispatch.yml:
+      # passed to Claude, it would demand Claude's file there.
+      agent-config-repo: ${{ vars.AGENT == 'opencode' && vars.AGENT_CONFIG_REPO || '' }}
+      agent-config-path: ${{ vars.AGENT == 'opencode' && vars.AGENT_CONFIG_PATH || '' }}
+      inference-url: ${{ vars.INFERENCE_URL }}
+      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      # What one review may spend, stated here rather than inherited: model
+      # requests, AIC (hundredths of a dollar; under the broker's `plain`
+      # registration only a convention) and the agent's minutes. Nothing
+      # caps it per author or across pull requests; a push supersedes the
+      # last review of that pull request, which has spent what it spent.
+      max-requests: '150'
+      budget: '500'
+      timeout: '75'
+
+  # agentic-job.yml's agent job, with the tailnet join between prepare and
+  # secure-host.
+  agent:
+    needs: policy
+    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    # Only admitted runs enter the group. Only automatic PR events
+    # supersede a review; a comment must not cancel one.
+    concurrency:
+      group: review-pull-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ${{ fromJSON(vars.AGENT_RUNNER || '"ubuntu-26.04"') }}
+    timeout-minutes: 360
+    # Read only: the agent gets this job's token for GitHub reads. The
+    # identity token is for the tailnet join and the proxy's registration;
+    # `sandbox setup` keeps it from the agent's user.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    outputs:
+      exit: ${{ steps.run.outputs.exit }}
+      safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+    steps:
+      # The base commit the policy job decided, never the head.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.policy.outputs.ref }}
+          persist-credentials: false
+      - name: The policy call's source repository and commit
+        env:
+          SOURCE_REPOSITORY: ${{ needs.policy.outputs.source-repository }}
+          SOURCE_SHA: ${{ needs.policy.outputs.source-sha }}
+        run: |
+          echo "$SOURCE_REPOSITORY at $SOURCE_SHA"
+          [[ "$SOURCE_REPOSITORY" == */* && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          persist-credentials: false
+      - uses: ./.agentic-job-source/prepare
+        with:
+          binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
+          policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
+      # The one privileged step, before anything of the agent's is on the
+      # machine, as tracker's caller has it: the action picks the client
+      # id and tags by organization, joins with --accept-dns=false and
+      # makes tailscaled's socket root's only.
+      - name: Join the tailnet
+        uses: cgwalters-forge/actions/tailscale@d7bfa158217182d8c0b0b775189dcf91a6afcdde
+        with:
+          hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: ./.agentic-job-source/secure-host
+        with:
+          binary: /usr/local/bin/agentic-job
+          config: .agentic-job/config.toml
+      - id: run
+        timeout-minutes: 340
+        uses: ./.agentic-job-source/run
+        with:
+          github-token: ${{ github.token }}
+
+  check:
+    needs: [policy, agent]
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+
+  # The one comment on the pull request: the only job given a secret, the
+  # optional SAFE_OUTPUTS_PAT, else the job token. `actions: read` lets it
+  # confirm the checked outputs are check's.
+  apply:
+    needs: [policy, agent, check]
+    if: ${{ always() && needs.policy.result == 'success' }}
+    uses: ./.github/workflows/apply.yml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
+      actions: read
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      agent: ${{ toJSON(needs.agent) }}
+      check: ${{ toJSON(needs.check) }}
+
+  # The verdict as a commit status on the pull request's head: success only
+  # for a checked APPROVE whose comment was posted, failure for CHANGES,
+  # a noop or a run that did not get that far. It reads no agent text:
+  # reviewStatus in workflow/review.cjs, from the policy call's pinned
+  # source, takes the verdict check.yml set (one of two words) and the
+  # head policy admitted. A run that was cancelled, or superseded in the
+  # agent job, leaves the status as it was; on a head no run finished, a
+  # required `review` stays expected. A merge group's commit never gets
+  # one, so `review` cannot be required while a merge queue is on
+  # (docs/review.md).
+  #
+  # A status belongs to the commit, not the pull request, and the pull
+  # request's title and body reach the agent. So anyone could open a
+  # second pull request with someone else's head and talk its review into
+  # APPROVE. The status is set only when the triggering pull request is the
+  # one open pull request at that head.
+  status:
+    needs: [policy, agent, check, apply]
+    if: ${{ !cancelled() && needs.policy.outputs.review-head != '' && needs.agent.result != 'cancelled' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    # `contents: read` only to check out the pinned source.
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          sparse-checkout: workflow/review.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Report the verdict as the status `review`
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PULL: ${{ github.event.pull_request.number || github.event.issue.number }}
+          HEAD_SHA: ${{ needs.policy.outputs.review-head }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          VERDICT: ${{ needs.check.outputs.verdict }}
+          APPLY_RESULT: ${{ needs.apply.result }}
+          RESULT_URL: ${{ needs.apply.outputs.result-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const { reportStatus } = require(`${process.env.GITHUB_WORKSPACE}/.agentic-job-source/workflow/review.cjs`);
+            await reportStatus(process.env, github, core);

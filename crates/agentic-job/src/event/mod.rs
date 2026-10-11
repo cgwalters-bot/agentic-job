@@ -66,6 +66,10 @@ const PULL_REQUEST_EVENTS: &[&str] = &["pull_request", "pull_request_target"];
 /// `write` and `admin` is not either.
 pub const DEFAULT_ROLES: &[&str] = &["admin", "maintain", "write"];
 
+/// gh-aw's `roles: all`: any person, whatever their role, and without a
+/// permission to fetch. Bots are still admitted only by name.
+pub const ALL_ROLES: &str = "all";
+
 /// The most an event payload, a permission response and a caller's task
 /// may be, in bytes.
 const MAX_EVENT_BYTES: u64 = 4 * 1024 * 1024;
@@ -141,9 +145,6 @@ pub struct Args {
     /// only where forks are
     #[arg(long, value_name = "FILE")]
     pub pull_request: Option<PathBuf>,
-    /// Complete, workflow-scoped run history for the configured guard windows
-    #[arg(long, value_name = "FILE")]
-    pub run_history: Option<PathBuf>,
     /// The caller's own task text, put before the event's
     #[arg(long, value_name = "FILE")]
     pub task: Option<PathBuf>,
@@ -158,7 +159,8 @@ pub struct Args {
 pub struct Trigger {
     /// The events that may start a run, from [`EVENTS`].
     pub events: Vec<String>,
-    /// The roles an actor may have, exactly; [`DEFAULT_ROLES`] by default.
+    /// The roles an actor may have, exactly; [`DEFAULT_ROLES`] by default,
+    /// or [`ALL_ROLES`] alone for anyone.
     #[serde(default = "default_roles")]
     pub roles: Vec<String>,
     /// Bot logins admitted without a role (`dependabot[bot]`).
@@ -175,12 +177,6 @@ pub struct Trigger {
     /// RFC 3339 deadline, inclusive: no run starts at or after it.
     #[serde(default, rename = "stop-after")]
     pub stop_after: Option<String>,
-    /// Minimum seconds between workflow runs.
-    #[serde(default)]
-    pub cooldown: Option<u32>,
-    /// Maximum workflow runs per actor in a rolling 24-hour window.
-    #[serde(default, rename = "max-runs-per-user")]
-    pub max_runs_per_user: Option<u32>,
     /// Label commands, matched exactly on the label added by the event.
     /// When nonempty, item events must be `labeled` with a listed label.
     #[serde(default)]
@@ -235,6 +231,9 @@ impl Trigger {
         if self.roles.is_empty() && self.bots.is_empty() {
             bail!("[trigger] roles and bots are both empty: nobody may start a run");
         }
+        if self.roles.len() > 1 && self.roles.iter().any(|role| role == ALL_ROLES) {
+            bail!("[trigger] roles: {ALL_ROLES:?} admits anyone and must stand alone");
+        }
         Ok(())
     }
 }
@@ -282,11 +281,12 @@ pub struct Item {
     pub url: Option<String>,
 }
 
-/// A pull request's head, when it is in the repository itself.
+/// A pull request's head: its commit, and its branch only when it is in
+/// the repository itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
-    #[serde(rename = "ref")]
-    pub git_ref: String,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
     pub sha: String,
 }
 
@@ -317,7 +317,7 @@ pub struct Decision {
     pub command: Option<String>,
     /// For a pull request, its base branch; the run should start there.
     pub base: Option<String>,
-    /// For a pull request in the repository, its head.
+    /// For a pull request, its head.
     pub head: Option<Head>,
     /// A key for the caller's `concurrency.group`, one run per item.
     pub concurrency: String,
@@ -405,7 +405,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         pull_request: pull_request.as_ref(),
     });
     if outcome.decision.admitted
-        && let Some(reason) = guards::check(trigger, args.run_history.as_deref(), &args.actor)?
+        && let Some(reason) = guards::check(trigger)?
     {
         outcome.decision.admitted = false;
         outcome.decision.reason = reason;
@@ -552,6 +552,9 @@ fn check_actor(input: &Input<'_>) -> std::result::Result<Option<String>, String>
             Err(format!("{actor} is a bot the bounds do not list"))
         };
     }
+    if input.trigger.roles.iter().any(|role| role == ALL_ROLES) {
+        return Ok(None);
+    }
     let Some(permission) = input.permission else {
         return Err(format!(
             "no permission of {actor} was given, and one is needed"
@@ -681,7 +684,7 @@ fn read_comment(
                     item.number
                 ));
             }
-            (base_of(pull)?, check_head(input, pull)?)
+            (base_of(pull)?, Some(check_head(input, pull)?))
         }
         (ItemKind::PullRequest, None) if input.trigger.forks => (None, None),
         (ItemKind::PullRequest, None) => {
@@ -732,7 +735,7 @@ fn read_pull_request(
         .get("pull_request")
         .ok_or("no pull request in the event")?;
     let item = item_of(input, pull, ItemKind::PullRequest)?;
-    let head = check_head(input, pull)?;
+    let head = Some(check_head(input, pull)?);
     outcome.text = Text {
         author: str_at(pull, &["user", "login"])
             .unwrap_or_default()
@@ -771,7 +774,7 @@ fn read_review_comment(
         .ok_or("no pull request in the event")?;
     check_author(input, comment)?;
     let item = item_of(input, pull, ItemKind::PullRequest)?;
-    let head = check_head(input, pull)?;
+    let head = Some(check_head(input, pull)?);
     let body = str_at(comment, &["body"]).unwrap_or_default();
     let (command, request) = match_command(input.trigger, body)?;
     let id = u64_at(comment, &["id"]).ok_or("the comment has no id")?;
@@ -829,30 +832,36 @@ fn check_author(input: &Input<'_>, comment: &Value) -> std::result::Result<(), S
 }
 
 /// A pull request's head is in the repository, or the bounds allow forks.
-/// The head is reported only when it is the repository's own: a fork's
-/// branch is never something a run starts from by name.
-fn check_head(input: &Input<'_>, pull: &Value) -> std::result::Result<Option<Head>, String> {
+/// Its commit is reported either way, as the one name for it that holds no
+/// author's text; its branch only when it is the repository's own: a
+/// fork's branch is never something a run starts from by name.
+fn check_head(input: &Input<'_>, pull: &Value) -> std::result::Result<Head, String> {
     let repo_id = u64_at(input.payload, &["repository", "id"]).ok_or("the repository has no id")?;
-    let head_id = u64_at(pull, &["head", "repo", "id"]);
-    if head_id == Some(repo_id) {
-        let git_ref = str_at(pull, &["head", "ref"]).ok_or("the head has no ref")?;
-        let sha = str_at(pull, &["head", "sha"]).ok_or("the head has no sha")?;
-        if !SHA_RE.is_match(sha) {
-            return Err("the head's sha is not a commit id".to_string());
-        }
-        return Ok(Some(Head {
-            git_ref: git_ref.to_string(),
-            sha: sha.to_string(),
-        }));
+    let own = u64_at(pull, &["head", "repo", "id"]) == Some(repo_id);
+    if !own && !input.trigger.forks {
+        return Err(format!(
+            "the pull request's head is in {}, not in {}, and the bounds do not allow forks",
+            str_at(pull, &["head", "repo", "full_name"]).unwrap_or("another repository"),
+            input.repository
+        ));
     }
-    if input.trigger.forks {
-        return Ok(None);
+    let sha = str_at(pull, &["head", "sha"]).ok_or("the head has no sha")?;
+    if !SHA_RE.is_match(sha) {
+        return Err("the head's sha is not a commit id".to_string());
     }
-    Err(format!(
-        "the pull request's head is in {}, not in {}, and the bounds do not allow forks",
-        str_at(pull, &["head", "repo", "full_name"]).unwrap_or("another repository"),
-        input.repository
-    ))
+    let git_ref = if own {
+        Some(
+            str_at(pull, &["head", "ref"])
+                .ok_or("the head has no ref")?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    Ok(Head {
+        git_ref,
+        sha: sha.to_string(),
+    })
 }
 
 /// A pull request's base branch, when it is named like one.
@@ -937,8 +946,6 @@ mod tests {
             forks: false,
             commands: commands.iter().map(|c| c.to_string()).collect(),
             stop_after: None,
-            cooldown: None,
-            max_runs_per_user: None,
             labels: vec![],
         }
     }
@@ -1164,5 +1171,10 @@ mod tests {
         assert!(t.validate().is_err());
         t.events = vec!["issues".into()];
         t.validate().unwrap();
+        // "all" admits anyone, so beside a role it would hide that.
+        t.roles = vec![ALL_ROLES.into()];
+        t.validate().unwrap();
+        t.roles = vec![ALL_ROLES.into(), "write".into()];
+        assert!(t.validate().is_err());
     }
 }

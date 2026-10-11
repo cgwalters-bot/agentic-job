@@ -17,10 +17,12 @@ State the exact admitted head SHA in the findings so a stale review cannot be
 mistaken for a review of a newer push.
 
 Return exactly one safe output: add_comment on the triggering pull request,
-or noop if no useful review can be made. The comment must begin with exactly
-one of VERDICT: APPROVE, VERDICT: CHANGES, or VERDICT: REJECT, followed immediately
-by REASON: and a concise reason (the entire line, including the prefix, at most
-200 characters), then findings and
-what you verified or could not verify. APPROVE means no blocking findings;
-CHANGES means actionable defects; REJECT means unsafe or fundamentally wrong.
-This verdict is only text, never a GitHub approval or merge authorization.
+or noop if no useful review can be made. The comment's first line starts with
+VERDICT: APPROVE when nothing blocks merging, or VERDICT: CHANGES when there is
+something actionable to fix, and may go on with a short reason. Keep that
+line to the one verdict: a first line that also names the other verdict (or
+REJECT next to APPROVE) is refused and the comment is lost. Then come the
+findings, most important first, and what you verified or could not verify.
+Skip praise and style nits a linter would catch.
+This verdict is only text, never a GitHub approval or merge authorization; an
+APPROVE sets the commit status `review` to success.

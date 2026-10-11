@@ -10,11 +10,11 @@ function admit(decision, base) {
     Number.isSafeInteger(decision.item.number) && decision.item.number > 0 &&
     decision.base === base && /^[0-9a-f]{40}$/.test(decision.head?.sha ?? '') &&
     ((['pull_request', 'pull_request_target'].includes(decision.event) &&
-      ['opened', 'synchronize', 'ready_for_review'].includes(decision.action)) ||
+      ['opened', 'synchronize', 'reopened', 'ready_for_review'].includes(decision.action)) ||
       (decision.event === 'issue_comment' && decision.action === 'created' &&
         decision.command === 'review'));
   return valid ? decision : { ...decision, admitted: false,
-    reason: 'review requires an admitted same-repository pull request on the configured base' };
+    reason: 'review requires an admitted pull request on the configured base, at an exact commit' };
 }
 
 function taskFile(root, name) {
@@ -39,25 +39,69 @@ function checkRequest(env) {
   }
 }
 
+// The verdict, for the `review` status: APPROVE or CHANGES, or '' for a
+// noop, which approves nothing. REJECT, which briefs written before
+// CHANGES still ask for, is read as CHANGES.
 function checkOutputs(output, number) {
   if (!/^[1-9][0-9]*$/.test(String(number))) throw new Error('Review target must be a pull request number');
   if (!Array.isArray(output.items) || output.items.length !== 1) {
     throw new Error('Review must return exactly one comment or noop');
   }
   const item = output.items[0];
-  if (item.type === 'noop') return;
+  if (item.type === 'noop') return '';
   // gh-aw recognizes aliases and editing/reply routes. The handler's trusted
   // configuration fixes the target: the agent supplies only text.
   if (item.type !== 'add_comment' || typeof item.body !== 'string' ||
       Object.keys(item).some(key => !['type', 'body'].includes(key))) {
     throw new Error('Review output must be a comment on the triggering pull request');
   }
-  const lines = item.body.split('\n');
-  if (!/^VERDICT: (APPROVE|CHANGES|REJECT)$/.test(lines[0]) ||
-      !/^REASON: [^\r\n\x00-\x1f\x7f]+$/u.test(lines[1] ?? '') ||
-      Array.from(lines[1]).length > 200) {
-    throw new Error('Review comment requires VERDICT and a REASON line of at most 200 characters');
+  // One word, then the end of the line, a space or a stop; a first line
+  // naming both is no verdict.
+  const line = item.body.split('\n', 1)[0];
+  const verdict = /^VERDICT: (APPROVE|CHANGES|REJECT)(?=$|[\s.,;:])/.exec(line)?.[1];
+  if (!verdict || /APPROVE[\s\S]*(CHANGES|REJECT)|(CHANGES|REJECT)[\s\S]*APPROVE/.test(line)) throw new Error('Review comment must start with VERDICT: APPROVE or VERDICT: CHANGES');
+  return verdict === 'APPROVE' ? verdict : 'CHANGES';
+}
+
+// The commit status `review` for one finished run, from its jobs' results
+// and the open pull requests at the reviewed head, or `skip` with why it
+// sets none. It reads no agent text: the verdict is one of two words
+// check set, and success needs a checked APPROVE whose comment was posted.
+// A status belongs to the commit, so it is set only when the triggering
+// pull request is the one open there (docs/review.md).
+function reviewStatus(run, open) {
+  if (!/^[0-9a-f]{40}$/.test(run.head ?? '') || !/^[1-9][0-9]*$/.test(run.pull ?? '') ||
+      !Number.isSafeInteger(Number(run.pull))) {
+    throw new Error('Review status requires a pull request number and an exact head SHA');
   }
+  if (open.length !== 1 || open[0] !== Number(run.pull)) {
+    return { skip: `No review status on ${run.head}: its open pull requests are ${open.join(', ') || 'none'}, not only #${run.pull}` };
+  }
+  const checked = run.check === 'success';
+  if (checked && run.verdict === 'APPROVE' && run.apply === 'success' && run.url) {
+    return { state: 'success', description: 'The review approved this commit' };
+  }
+  if (checked && run.verdict === 'CHANGES') {
+    return { state: 'failure', description: 'The review asked for changes' };
+  }
+  return { state: 'failure', description: 'The review did not approve this commit' };
+}
+
+async function reportStatus(env, github, core) {
+  const run = { pull: env.PULL, head: env.HEAD_SHA, check: env.CHECK_RESULT,
+    verdict: env.VERDICT, apply: env.APPLY_RESULT, url: env.RESULT_URL };
+  // Validate before the head goes into any request.
+  reviewStatus(run, [Number(run.pull)]);
+  const [owner, repo] = env.GITHUB_REPOSITORY.split('/');
+  const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+  const status = reviewStatus(run, pulls.filter(pull => pull.head?.sha === run.head).map(pull => pull.number));
+  if (status.skip) {
+    core.notice(status.skip);
+    return status;
+  }
+  await github.rest.repos.createCommitStatus({ owner, repo, sha: run.head, context: 'review',
+    state: status.state, description: status.description, target_url: env.RUN_URL });
+  return status;
 }
 
 async function resolveDispatch(env, github) {
@@ -95,4 +139,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { admit, taskFile, checkRequest, checkOutputs, resolveDispatch };
+module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch };

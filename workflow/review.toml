@@ -1,4 +1,8 @@
-# Copy with review.yml and review.md; set repos and bases for the caller.
+# Copy with review.yml, review-command.toml and review.md; set repos and
+# bases for the caller. The automatic events: any role's pull request,
+# forks included; review.yml's `if:` narrows them to the owner, members
+# and collaborators, to protect the shared inference cap.
+# The agent reviews the head as data, without a credential.
 hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
 bases = ["main"]
@@ -11,8 +15,7 @@ add_comment = { max = 1 }
 noop = { max = 1 }
 
 [trigger]
-events = ["pull_request_target", "pull_request", "issue_comment"]
-roles = ["admin", "maintain", "write"]
+events = ["pull_request_target", "pull_request"]
+roles = ["all"]
 bots = []
-forks = false
-commands = ["/review"]
+forks = true

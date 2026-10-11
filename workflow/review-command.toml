@@ -1,0 +1,19 @@
+# review.toml for `/review`: the same bounds, for a comment by someone who
+# can write, on any pull request, forks included.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["main"]
+max_outputs = 1
+max_patch_bytes = 1024
+max_patch_files = 1
+
+[outputs]
+add_comment = { max = 1 }
+noop = { max = 1 }
+
+[trigger]
+events = ["issue_comment"]
+roles = ["admin", "maintain", "write"]
+bots = []
+forks = true
+commands = ["/review"]

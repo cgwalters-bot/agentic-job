@@ -9,87 +9,6 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
-#[test]
-fn run_history_cli() {
-    for (name, history, code) in [
-        ("missing flag", None, 1),
-        ("missing file", Some("missing"), 2),
-        ("malformed", Some("{"), 2),
-        (
-            "unannotated",
-            Some(
-                r#"{"coverage":"admitted_starts","workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":1,"workflow_runs":[{"id":2,"workflow_id":1,"actor":{"login":"alice"}}]}"#,
-            ),
-            2,
-        ),
-        (
-            "empty",
-            Some(
-                r#"{"coverage":"admitted_starts","workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":0,"workflow_runs":[]}"#,
-            ),
-            0,
-        ),
-        (
-            "started",
-            Some(
-                r#"{"coverage":"admitted_starts","workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":1,"workflow_runs":[{"id":2,"workflow_id":1,"actor":{"login":"alice"},"admission":{"status":"started","started_at":"2999-01-01T00:00:00Z"}}]}"#,
-            ),
-            1,
-        ),
-        (
-            "creation-only empty history",
-            Some(
-                r#"{"workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":0,"workflow_runs":[]}"#,
-            ),
-            2,
-        ),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let allow = dir.path().join("allow.toml");
-        std::fs::write(
-            &allow,
-            format!(
-                "{}\ncooldown = 600\n",
-                std::fs::read_to_string(data("allow.toml")).unwrap()
-            ),
-        )
-        .unwrap();
-        let out = dir.path().join("out");
-        let mut command = Command::new(BIN);
-        command
-            .arg("event")
-            .arg("--allow")
-            .arg(&allow)
-            .args([
-                "--event-name",
-                "schedule",
-                "--actor",
-                "alice",
-                "--repository",
-                "octo/repo",
-            ])
-            .arg("--event")
-            .arg(data("schedule.json"))
-            .arg("--out")
-            .arg(&out);
-        if let Some(contents) = history {
-            let path = dir.path().join("history.json");
-            if contents != "missing" {
-                std::fs::write(&path, contents).unwrap();
-            }
-            command.arg("--run-history").arg(path);
-        }
-        let output = command.output().unwrap();
-        assert_eq!(
-            output.status.code(),
-            Some(code),
-            "{name}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(out.join("task.md").exists(), code == 0, "{name}");
-    }
-}
-
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/event")
@@ -418,6 +337,32 @@ const CASES: &[Case] = &[
             concurrency: "pull-16",
             command: None,
         },
+    },
+    Case {
+        name: "a pull request from a fork by anyone, where the bounds allow all roles",
+        allow: "allow-anyone.toml",
+        repository: "octo/repo",
+        event_name: "pull_request",
+        event: "pull_request-fork.json",
+        actor: "mallory",
+        permission: None,
+        pull_request: None,
+        expect: Admitted {
+            item: Some(16),
+            concurrency: "pull-16",
+            command: None,
+        },
+    },
+    Case {
+        name: "a bot the bounds do not list, where the bounds allow all roles",
+        allow: "allow-anyone.toml",
+        repository: "octo/repo",
+        event_name: "issue_comment",
+        event: "issue_comment-bot.json",
+        actor: "dependabot[bot]",
+        permission: None,
+        pull_request: None,
+        expect: Refused("is a bot the bounds do not list"),
     },
     Case {
         name: "a pull request synchronized",
@@ -775,6 +720,237 @@ fn label_caller_bounds_feed_activation() {
     }
 }
 
+/// One event against the review caller's shipped bounds.
+struct ReviewCase {
+    name: &'static str,
+    event_name: &'static str,
+    event: &'static str,
+    /// The actor, also the sender and any comment's author.
+    actor: &'static str,
+    permission: Option<&'static str>,
+    /// For a comment, the pull request as policy.yml fetches it.
+    pull_request: Option<&'static str>,
+    /// None when admitted, else text of the refusal's reason.
+    refused: Option<&'static str>,
+}
+
+/// The review caller's role gate: the automatic pull request events admit
+/// anyone, from a fork too; `/review` needs write. These are the files
+/// review.yml selects, run as its policy job runs them.
+const REVIEW_CASES: &[ReviewCase] = &[
+    ReviewCase {
+        name: "a fork's pull request opened by an outsider, no permission fetched",
+        event_name: "pull_request_target",
+        event: "pull_request-fork.json",
+        actor: "mallory",
+        permission: None,
+        pull_request: None,
+        refused: None,
+    },
+    ReviewCase {
+        name: "a fork's pull request opened by a read-role user",
+        event_name: "pull_request_target",
+        event: "pull_request-fork.json",
+        actor: "alice",
+        permission: Some("permission-read.json"),
+        pull_request: None,
+        refused: None,
+    },
+    ReviewCase {
+        name: "a fork's pull request opened by a user with no role",
+        event_name: "pull_request_target",
+        event: "pull_request-fork.json",
+        actor: "alice",
+        permission: Some("permission-none.json"),
+        pull_request: None,
+        refused: None,
+    },
+    ReviewCase {
+        name: "a fork's pull request as a pull_request event, which review.toml also lists",
+        event_name: "pull_request",
+        event: "pull_request-fork.json",
+        actor: "mallory",
+        permission: None,
+        pull_request: None,
+        refused: None,
+    },
+    ReviewCase {
+        name: "/review by a read-role user on a fork's pull request",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-read.json"),
+        pull_request: Some("pull-13-fork.json"),
+        refused: Some("has the role \"read\""),
+    },
+    ReviewCase {
+        name: "/review by a read-role user on a pull request from the repository",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-read.json"),
+        pull_request: Some("pull-13.json"),
+        refused: Some("has the role \"read\""),
+    },
+    ReviewCase {
+        name: "/review by a user with no role",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-none.json"),
+        pull_request: Some("pull-13-fork.json"),
+        refused: Some("has the role \"none\""),
+    },
+    ReviewCase {
+        name: "/review with no permission fetched",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: None,
+        pull_request: Some("pull-13-fork.json"),
+        refused: Some("one is needed"),
+    },
+    ReviewCase {
+        name: "/review by a write-role user on a fork's pull request",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-write.json"),
+        pull_request: Some("pull-13-fork.json"),
+        refused: None,
+    },
+    ReviewCase {
+        name: "/review by a write-role user on a pull request from the repository",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-write.json"),
+        pull_request: Some("pull-13.json"),
+        refused: None,
+    },
+    ReviewCase {
+        name: "/review by an admin",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-admin.json"),
+        pull_request: Some("pull-13-fork.json"),
+        refused: None,
+    },
+];
+
+/// The bounds review.yml's `allow:` picks for an event: this mirrors the
+/// line `review_caller_selects_its_bounds` pins.
+fn review_bounds(event_name: &str) -> &'static str {
+    if event_name == "issue_comment" {
+        "workflow/review-command.toml"
+    } else {
+        "workflow/review.toml"
+    }
+}
+
+/// A fixture moved to the review caller's repository, as JSON.
+fn review_fixture(name: &str) -> Value {
+    let text = std::fs::read_to_string(data(name))
+        .unwrap_or_else(|err| panic!("{name}: {err}"))
+        .replace("octo/repo", "cgwalters-forge/agentic-job");
+    serde_json::from_str(&text).unwrap_or_else(|err| panic!("{name}: {err}"))
+}
+
+#[test]
+fn review_caller_selects_its_bounds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let caller =
+        std::fs::read_to_string(root.join(".github/workflows/review.yml")).expect("review.yml");
+    let allow: Vec<_> = caller
+        .lines()
+        .filter_map(|line| line.strip_prefix("      allow: "))
+        .collect();
+    assert_eq!(
+        allow,
+        [format!(
+            "${{{{ github.event_name == 'issue_comment' && '{}' || '{}' }}}}",
+            review_bounds("issue_comment"),
+            review_bounds("pull_request_target")
+        )],
+        "review.yml must pick the bounds review_caller_bounds_gate_roles tests"
+    );
+}
+
+#[test]
+fn review_caller_bounds_gate_roles() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Both files refuse the other's events: a comment never gets the
+    // automatic events' open bounds.
+    let crossed = REVIEW_CASES.iter().map(|case| (case, true));
+    let own = REVIEW_CASES.iter().map(|case| (case, false));
+    for (case, cross) in own.chain(crossed) {
+        let bounds = if cross {
+            if case.event_name == "issue_comment" {
+                "workflow/review.toml"
+            } else {
+                "workflow/review-command.toml"
+            }
+        } else {
+            review_bounds(case.event_name)
+        };
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let mut event = review_fixture(case.event);
+        event["sender"]["login"] = case.actor.into();
+        if let Some(comment) = event.get_mut("comment") {
+            comment["body"] = "/review".into();
+            comment["user"]["login"] = case.actor.into();
+        }
+        let event_path = dir.path().join("payload.json");
+        std::fs::write(&event_path, event.to_string()).expect("write event");
+        let mut command = Command::new(BIN);
+        command
+            .arg("event")
+            .arg("--allow")
+            .arg(root.join(bounds))
+            .args(["--event-name", case.event_name, "--actor", case.actor])
+            .args(["--repository", "cgwalters-forge/agentic-job"])
+            .arg("--event")
+            .arg(&event_path)
+            .arg("--out")
+            .arg(dir.path());
+        if let Some(permission) = case.permission {
+            command.arg("--actor-permission").arg(data(permission));
+        }
+        if let Some(pull) = case.pull_request {
+            let pull_path = dir.path().join("pull.json");
+            std::fs::write(&pull_path, review_fixture(pull).to_string()).expect("write pull");
+            command.arg("--pull-request").arg(&pull_path);
+        }
+        let output = command.output().expect("event CLI runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let decision: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("event.json"))
+                .unwrap_or_else(|err| panic!("{}: no event.json: {err}\n{stderr}", case.name)),
+        )
+        .expect("event.json is JSON");
+        let name = format!("{} ({bounds})", case.name);
+        match (cross, case.refused) {
+            (false, None) => {
+                assert_eq!(output.status.code(), Some(0), "{name}: {stderr}");
+                assert_eq!(decision["admitted"], true, "{name}");
+            }
+            (false, Some(reason)) => {
+                assert_eq!(output.status.code(), Some(1), "{name}: {stderr}");
+                assert_eq!(decision["admitted"], false, "{name}");
+                let got = decision["reason"].as_str().unwrap_or("");
+                assert!(got.contains(reason), "{name}: {got:?} lacks {reason:?}");
+            }
+            (true, _) => {
+                assert_eq!(output.status.code(), Some(1), "{name}: {stderr}");
+                assert_eq!(decision["admitted"], false, "{name}");
+                let got = decision["reason"].as_str().unwrap_or("");
+                assert!(got.contains(case.event_name), "{name}: {got:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn decisions() {
     for case in CASES {
@@ -824,8 +1000,8 @@ fn decisions() {
     }
 }
 
-/// A pull request's base and head reach the decision, and a fork's head
-/// does not.
+/// A pull request's base and head reach the decision, and of a fork's
+/// head only its commit: its branch is the fork's to name.
 #[test]
 fn pull_request_targets() {
     let same = CASES
@@ -863,7 +1039,19 @@ fn pull_request_targets() {
         serde_json::from_slice(&std::fs::read(dir.path().join("event.json")).expect("event.json"))
             .expect("JSON");
     assert_eq!(decision["base"], "main");
-    assert!(decision["head"].is_null(), "{decision}");
+    assert_eq!(
+        decision["head"],
+        serde_json::json!({"sha": "3333333333333333333333333333333333333333"}),
+        "{decision}"
+    );
+    let task = std::fs::read_to_string(dir.path().join("task.md")).expect("task.md");
+    assert!(
+        task.contains(
+            "fetched from the repository as refs/pull/16/head, at commit \
+             3333333333333333333333333333333333333333."
+        ),
+        "{task}"
+    );
 }
 
 /// Every fence opened is closed by a line that is exactly it, and no

@@ -117,7 +117,7 @@ pub fn render(task: Option<&str>, outcome: &Outcome) -> String {
         ));
     }
     // The one way to name the head that holds no text of the event: the
-    // number, and the commit id when the head is the repository's own.
+    // number, and its commit id.
     if let Some(item) = decision
         .item
         .as_ref()
@@ -231,7 +231,7 @@ mod tests {
                 command: Some("agent".to_string()),
                 base: None,
                 head: Some(Head {
-                    git_ref: String::new(),
+                    git_ref: None,
                     sha: "f".repeat(40),
                 }),
                 concurrency: String::new(),

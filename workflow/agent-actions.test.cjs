@@ -299,12 +299,39 @@ test('the wrapper forwards every setting to the policy call as it is', () => {
 });
 
 // A network to join is the caller's own step (docs/workflow.md): no
-// workflow or action here joins one or takes its credentials.
+// workflow or action here joins one or takes its credentials, but for
+// review.yml, this repository's own caller, which composes its agent job
+// to join the inference proxy's tailnet as tracker's does.
 test('no workflow or action of this repository joins a network itself', () => {
   const root = join(__dirname, '..');
-  const files = [...readdirSync(join(root, '.github/workflows')).map(file => `.github/workflows/${file}`),
+  const files = [...readdirSync(join(root, '.github/workflows')).filter(file => file !== 'review.yml').map(file => `.github/workflows/${file}`),
     'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml', 'workflow/inference-preflight.py'];
   for (const file of files) {
     assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);
   }
+});
+
+// review.yml's exemption above, bounded: one join, by the pinned action, in
+// the agent job only, after prepare and before secure-host, so it runs
+// before anything of the agent's is on the machine; no other job, and
+// nothing outside the jobs, joins or mentions joining.
+test('review.yml joins the tailnet once, in its agent job, before secure-host', () => {
+  const review = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
+  const [head, body] = review.split(/^jobs:\n/m);
+  const joins = /tailscale|join(?:s|ing)? (?:a|the) tailnet/i;
+  assert.doesNotMatch(head, joins);
+  const jobs = Object.fromEntries(body.split(/^(?=  [-\w]+:\n)/m)
+    .map(text => [text.match(/^  ([-\w]+):\n/)[1], text]));
+  assert.deepEqual(Object.keys(jobs), ['policy', 'agent', 'check', 'apply', 'status']);
+  for (const [name, text] of Object.entries(jobs)) {
+    if (name !== 'agent') assert.doesNotMatch(text, joins, name);
+  }
+  const uses = [...jobs.agent.matchAll(/^ {6}(?:- )? *uses: (\S+)/gm)].map(([, action]) => action);
+  const tailscale = uses.filter(action => /tailscale/i.test(action));
+  assert.equal(tailscale.length, 1, uses.join('\n'));
+  assert.match(tailscale[0], /^cgwalters-forge\/actions\/tailscale@[0-9a-f]{40}$/);
+  assert.equal(jobs.agent.match(/tailscale/gi).length, 2, 'the step and its pin, nothing else');
+  const at = uses.indexOf(tailscale[0]);
+  assert.equal(uses[at - 1], './.agentic-job-source/prepare');
+  assert.equal(uses[at + 1], './.agentic-job-source/secure-host');
 });

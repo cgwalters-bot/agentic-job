@@ -158,9 +158,8 @@ Policy caps output types, counts and patch size before the agent starts.
 Pull requests are drafts; analysis runs cannot request one. Collector and
 policy checks run on a clean VM before apply. Apply credentials are the
 job token or an environment secret, not tokens minted per run.
-Event bounds restrict actors and forks. Deadline guards exist; cooldown
-and user quotas require trusted history that the reusable workflow does
-not yet fetch. See [events.md](events.md#optional-run-guards-for-custom-policy-jobs).
+Event bounds restrict actors and forks, and can end at a deadline. See
+[events.md](events.md#deadline).
 
 ## Evidence and non-goals
 

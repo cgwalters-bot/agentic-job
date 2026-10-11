@@ -49,7 +49,9 @@ so the workflow can end quietly.
 # workflow_dispatch, discussion (label commands only).
 events = ["issue_comment", "pull_request", "schedule"]
 # The roles an actor may hold, exactly: "maintain" is not "write", and
-# "admin" is not either. gh-aw's default.
+# "admin" is not either. gh-aw's default. ["all"], alone, as gh-aw's
+# `roles: all`, admits any person without reading a permission: none is
+# needed, though policy.yml still fetches it.
 roles = ["admin", "maintain", "write"]
 # Bot logins admitted without a role. Never github-actions[bot].
 bots = []
@@ -68,7 +70,8 @@ The checks, in order:
    payload's repository is the one the workflow runs in.
 3. A schedule has no actor and passes. Otherwise the actor is a bot
    (`[bot]`, or `sender.type` is `Bot`) and must be in `bots`, or a
-   person whose role on the repository is in `roles`. The role comes
+   person whose role on the repository is in `roles`, or anyone with
+   `roles = ["all"]`. The role comes
    from the response of
    `GET /repos/OWNER/NAME/collaborators/LOGIN/permission` (`role_name`,
    or `permission` where there is none), which the workflow fetches with
@@ -87,8 +90,8 @@ The checks, in order:
 6. A comment's body starts with one of `commands`, at the very first
    character, as gh-aw matches it. Everything after the command is the
    request.
-7. A pull request's head is in the repository, or `forks = true`. A
-   fork's head is never reported as something to start from. The payload
+7. A pull request's head is in the repository, or `forks = true`. Of a
+   fork's head only its commit is reported, never its branch. The payload
    of a comment on a pull request does not say where the head is, so the
    workflow fetches the pull request (`GET /repos/OWNER/NAME/pulls/N`)
    and passes it in; it has to be the one the comment is on, and then
@@ -99,7 +102,7 @@ What `event.json` carries for the workflow: the item (`issue`,
 `pull_request` or `discussion`, its number, and its URL when it is under the
 repository's; no text of the event is in this file), the default target
 of an `add_comment`; the command; for a pull request its base branch
-and, when the head is the repository's own, the head's ref and sha; a
+and the head's sha, and its ref when the head is the repository's own; a
 `concurrency` key (`issue-N`, `pull-N`, `schedule`, `dispatch`); and
 `react_to`, the comment or item the workflow puts an eyes reaction on so
 the human sees the run started. The `reason` is one line.
@@ -253,65 +256,11 @@ A refused trigger leaves no comment: the policy job holds no token that
 could write one, by design, and a run that was never admitted has
 nothing to say. The job summary and the `trigger` outputs say why.
 
-## Optional run guards for custom policy jobs
+## Deadline
 
-The `[trigger]` table also accepts `stop-after` (an RFC 3339 timestamp),
-`cooldown` (positive integer seconds), and `max-runs-per-user` (a positive
-integer, in a rolling 24-hour window). At or after the deadline the event
-is refused. Cooldown and user counts include only trusted records of
-admitted agent starts; refused events and denied actors do not renew the
-window. The current run ID is excluded. No roles or dispatches are exempt.
-
-History-dependent guards require `event --run-history FILE`. The trusted
-policy job must establish complete coverage of the calling workflow's trusted
-admitted starts since an inclusive lower bound covering the larger of cooldown
-and 24 hours, and supply the following history (timestamps are RFC 3339):
-
-```json
-{
-  "coverage": "admitted_starts",
-  "workflow_id": 123,
-  "current_run_id": 456,
-  "since": "2026-10-06T00:00:00Z",
-  "total_count": 0,
-  "workflow_runs": []
-}
-```
-
-`coverage` is a required trusted attestation: `since` bounds admitted-start
-timestamps, not workflow creation timestamps. Include runs created before
-`since` that started within the window, including queue or approval delays.
-For example, a run created 25 hours ago but admitted one minute ago counts
-against both a 24-hour user quota and a cooldown longer than one minute.
-Fetching every page of a last-24-hours **created-time** query cannot establish
-this coverage, even if GitHub reports `total_count = 0`. The future fetcher must
-obtain complete admitted-start coverage from trusted evidence or fail closed;
-it must not label creation-only coverage as `admitted_starts`.
-
-`workflow_runs` holds objects with `id`, `workflow_id`, `actor.login`, and
-a required `admission` record: `{"status":"started","started_at":"2026-10-07T12:00:00Z"}`
-or `{"status":"not_started"}`. An unannotated GitHub run list is rejected.
-The fetcher must obtain these records from trusted policy/start evidence,
-not from workflow conclusions or agent-written artifacts. Unknown or
-unavailable evidence must fail closed, never become `not_started`.
-The fetcher supplies the trusted workflow
-and current-run IDs; the binary checks the coverage declaration, scope, unique
-IDs, count and window bound, but cannot independently verify the fetcher's
-completeness attestation. `total_count` counts the supplied history records,
-not a creation-filtered API result. Missing history refuses admission; malformed or truncated
-history is an input error. Fetch slightly beyond the window to allow for
-time spent between fetching and evaluation. History is capped at 4 MiB.
-The reusable workflow does **not yet fetch or pass this file**; enabling
-these guards without that integration refuses runs rather than ignoring
-the guard. This does not complete
-[#118](https://github.com/cgwalters-forge/agentic-job/issues/118).
-Workflow history fetching, pagination, current workflow/run ID binding,
-trusted admission evidence and hosted admission/refusal E2E remain required.
-
-These are snapshot guards, not atomic quotas: concurrent policy jobs can
-observe the same history. Use caller concurrency as well. Rerun attempts
-share a GitHub run ID and are not separately counted. Issue-search and
-check-status guards (`skip-if-match`/`skip-if-no-match` and
-`skip-if-check-failing`) and a daily AI-credit guard are not implemented;
-the latter needs a trusted proxy usage API and a decision about dispatch
-exemptions.
+The `[trigger]` table also accepts `stop-after`, an RFC 3339 timestamp:
+at or after it every event is refused. Quotas and cooldowns are not
+implemented; caller concurrency and the request cap bound a run instead.
+The `cooldown` and `max-runs-per-user` keys, and `event --run-history`, were
+removed unwired: a bounds file that still sets either key fails to parse
+(exit 2) where it used to be refused (exit 1).

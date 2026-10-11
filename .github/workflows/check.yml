@@ -27,6 +27,9 @@ on:
       has-patch:
         description: Whether the trusted checker report contains a patch
         value: ${{ jobs.check.outputs.has-patch }}
+      verdict:
+        description: For a review, APPROVE or CHANGES as the checked comment starts, or empty
+        value: ${{ jobs.check.outputs.verdict }}
 
 permissions:
   contents: read
@@ -48,6 +51,7 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       refusal: ${{ steps.refusal.outputs.reason }}
       has-patch: ${{ steps.checked.outputs.has-patch }}
+      verdict: ${{ steps.verdict.outputs.verdict }}
     steps:
       # The pieces must be one commit's: a policy call pinned elsewhere
       # would have this commit's code check (or apply) the settings,
@@ -128,7 +132,10 @@ jobs:
             await require(`${dir}/collect_ndjson_output.cjs`).main();
       - name: The collector refused nothing
         run: jq -e '.errors == []' "$GH_AW_TMP/agent_output.json"
+      # One of two words, never agent text: a caller may report it as a
+      # status, which the comment's posting has still to be checked for.
       - name: Validate the review verdict
+        id: verdict
         if: ${{ fromJSON(inputs.policy).review == 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -138,7 +145,7 @@ jobs:
             const fs = require('node:fs');
             const { checkOutputs } = require(`${process.env.SOURCE_DIR}/workflow/review.cjs`);
             try {
-              checkOutputs(JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')), process.env.TARGET);
+              core.setOutput('verdict', checkOutputs(JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')), process.env.TARGET));
             } catch (error) {
               fs.writeFileSync(`${process.env.GH_AW_TMP}/report.json`, JSON.stringify({ ok: false, errors: [error.message] }));
               core.setFailed(error.message);

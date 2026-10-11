@@ -905,15 +905,14 @@ jobs:
           RESULT: ${{ needs.e2e-review.result }}
           TRIGGER: ${{ needs.e2e-review.outputs.trigger }}
           EXIT: ${{ needs.e2e-review.outputs.exit }}
-          ACTION: ${{ github.event.action }}
         run: |
           if [ "$INSTALLED" != true ]; then test "$RESULT" = skipped; echo 'Review E2E awaits installation of its base-branch files.' >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
           case "$GITHUB_EVENT_NAME" in
-            pull_request) if [ "$ACTION" = reopened ]; then test "$RESULT/$TRIGGER/$EXIT" = success/refused/; else test "$RESULT/$TRIGGER/$EXIT" = success/admitted/0; fi ;;
+            pull_request) test "$RESULT/$TRIGGER/$EXIT" = success/admitted/0 ;;
             push|merge_group) test "$RESULT/$TRIGGER/$EXIT" = success/refused/ ;;
           esac
       - name: Exactly one scripted verdict was posted on the triggering pull request
-        if: ${{ github.event_name == 'pull_request' && github.event.action != 'reopened' && needs.review-base.outputs.installed == 'true' }}
+        if: ${{ github.event_name == 'pull_request' && needs.review-base.outputs.installed == 'true' }}
         env:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

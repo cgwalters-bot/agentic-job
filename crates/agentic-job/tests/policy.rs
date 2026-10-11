@@ -323,34 +323,44 @@ fn dispatch_documented_unprotected_files_hint_is_valid() {
 
 #[test]
 fn review_caller_bounds_allow_only_analysis_outputs() {
-    let allow = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow/review.toml");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-job"))
-        .arg("policy")
-        .arg("--allow")
-        .arg(&allow)
-        .args([
-            "--repo",
-            "cgwalters-forge/agentic-job",
-            "--clone-url",
-            "https://github.com/cgwalters-forge/agentic-job",
-            "--base",
-            "main",
-            "--kind",
-            "analysis",
-            "--outputs",
-            "add_comment,noop",
-            "--max-outputs",
-            "1",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let policy: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(policy["kind"], "analysis");
-    assert_eq!(policy["max_outputs"], 1);
-    assert!(policy["safe_outputs"].get("create_pull_request").is_none());
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow");
+    for bounds in ["review.toml", "review-command.toml"] {
+        let allow = root.join(bounds);
+        let review = |kind: &str, outputs: &str| {
+            Command::new(BIN)
+                .arg("policy")
+                .arg("--allow")
+                .arg(&allow)
+                .args(["--repo", "cgwalters-forge/agentic-job"])
+                .args([
+                    "--clone-url",
+                    "https://github.com/cgwalters-forge/agentic-job",
+                ])
+                .args(["--base", "main", "--kind", kind, "--outputs", outputs])
+                .args(["--max-outputs", "1"])
+                .output()
+                .expect("running agentic-job")
+        };
+        let output = review("analysis", "add_comment,noop");
+        assert!(
+            output.status.success(),
+            "{bounds}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(policy["kind"], "analysis", "{bounds}");
+        assert_eq!(policy["max_outputs"], 1, "{bounds}");
+        assert!(
+            policy["safe_outputs"].get("create_pull_request").is_none(),
+            "{bounds}"
+        );
+        for (kind, outputs) in [
+            ("branch", "create_pull_request,noop"),
+            ("analysis", "add_comment,create_issue"),
+        ] {
+            let output = review(kind, outputs);
+            assert_eq!(output.status.code(), Some(1), "{bounds}: {kind} {outputs}");
+            assert!(output.stdout.is_empty(), "{bounds}: {kind} {outputs}");
+        }
+    }
 }

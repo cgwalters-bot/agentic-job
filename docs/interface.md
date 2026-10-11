@@ -19,7 +19,7 @@ builds that source. `build-binary: true` forces a build.
 | `sandbox exec [--chdir DIR] [--stdin FILE] -- COMMAND...` | the runner's user | Runs a command as the sandbox user, in its home by default, with none of the caller's environment. It first removes the job's record of a passing check, so the next check probes; `run` does the same. |
 | `run --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent in the sandbox and takes what it hands back. |
 | `check --policy FILE --outputs DIR --collected FILE [--report FILE]` | anyone | Checks handed-back outputs and patch against the policy. |
-| `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--run-history`, `--task`. See [events.md](events.md). |
+| `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
 | `audit DIR [--json]` | anyone | Inspects downloaded artifacts offline. Findings do not cause a refusal exit code. See [workflow.md](workflow.md#auditing-downloaded-artifacts). |
 
 Internal commands are hidden: `launch-agent`

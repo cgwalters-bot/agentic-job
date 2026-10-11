@@ -96,9 +96,14 @@ test('event caller copy lists include every referenced companion file', () => {
     const path = `.github/workflows/${workflow}`;
     assert.ok(list.includes(`](../${path})`), `missing caller ${path}`);
     const caller = fs.readFileSync(path, 'utf8');
-    for (const [, companion] of caller.matchAll(/^      (?:allow|config|setup|review-task): (.+)$/gm)) {
-      assert.ok(fs.statSync(companion).isFile(), `missing companion ${companion}`);
-      assert.ok(list.includes(`](../${companion})`), `${workflow} copy list omits ${companion}`);
+    for (const [, value] of caller.matchAll(/^      (?:allow|config|setup|review-task): (.+)$/gm)) {
+      // An expression choosing between files names each of them quoted,
+      // as a path.
+      const companions = value.startsWith('${{') ? [...value.matchAll(/'([^'/]*\/[^']*)'/g)].map(([, file]) => file) : [value];
+      for (const companion of companions) {
+        assert.ok(fs.statSync(companion).isFile(), `missing companion ${companion}`);
+        assert.ok(list.includes(`](../${companion})`), `${workflow} copy list omits ${companion}`);
+      }
     }
   }
 });

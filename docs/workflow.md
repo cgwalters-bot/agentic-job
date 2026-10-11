@@ -412,13 +412,11 @@ The aggregate accepts only those named skips when `changes` explicitly reports
 `false`; detection failures, unexpected skips and cancelled jobs remain red.
 
 CI already cancels superseded PR runs with its workflow/ref concurrency group;
-main pushes are not cancelled. The dedicated review caller now cancels an older
-review when an automatic PR event arrives, using its existing per-PR job group.
-Comment events cannot cancel an active review before actor authorization. A
-non-command comment never enters the group. GitHub still replaces a pending
-job in the same group even with cancellation off, so an unauthorized `/review`
-can displace a pending review (an existing denial-of-service limit, not write
-authority). Cancellation is best-effort: an
+main pushes are not cancelled. The dedicated review caller cancels an older
+review when an automatic PR event arrives, using a per-PR group on its agent
+job, which only admitted runs reach: a comment cannot cancel a review, and
+only an admitted `/review` can replace a pending one. Cancellation is
+best-effort: an
 already-posted verdict still names its old SHA, and cancelling CI can leave
 scratch branches/comments if its cleanup does not finish. No cancellation is
 merge authorization or rollback.
@@ -731,11 +729,12 @@ Both are merged there and off.
 
 The dedicated [review caller](review.md) sets `review: true` and
 `review-task: workflow/review.md` to take a fixed task from the base checkout,
-review an admitted same-repository head SHA with an analysis-only policy, and
-post one validated verdict comment or noop. It requires notifications and
-partial application off, and supports fake, opencode and Claude agents. Real
-reviewers start in the trusted base checkout with the exact head beside it;
-see [real reviewer setup](review.md#enabling-a-real-reviewer). The
+review an admitted head SHA, from a fork too, with an analysis-only policy,
+post one validated verdict comment or noop, and report the verdict as the
+commit status `review`. It requires notifications and partial application
+off, and supports fake, opencode and Claude agents. Real reviewers start in
+the trusted base checkout with the exact head beside it; see the
+[review guide](review.md). The
 [dispatch caller](dispatch.md) also supports operator-selected reviews of open
 same-repository or fork PRs on the configured base, pinned to their exact head SHA.
 
@@ -783,13 +782,16 @@ your repository:
   uses the scripted agent's built-in file-changing session, not a setup script.
 - **Dedicated review:** [`.github/workflows/review.yml`](../.github/workflows/review.yml),
   [`workflow/review.toml`](../workflow/review.toml),
-  [`workflow/review.md`](../workflow/review.md),
-  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml) and
-  [`.github/agentic-job/e2e/review.sh`](../.github/agentic-job/e2e/review.sh).
-  This runs on pull request events or `/review`, not a label; see the
-  [review guide](review.md).
+  [`workflow/review-command.toml`](../workflow/review-command.toml),
+  [`workflow/review.md`](../workflow/review.md) and
+  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml).
+  This runs on pull request events or `/review`, not a label, with a real
+  agent. Unlike the others, `review.yml` composes `policy.yml`, `check.yml`
+  and `apply.yml` itself and is meant to be called, not copied: copy only
+  the bounds, the task and `hosted.toml`, and call it as in
+  [another repository](review.md#another-repository).
 
-In each caller, replace `uses: ./.github/workflows/agentic-job.yml` with
+In each other caller, replace `uses: ./.github/workflows/agentic-job.yml` with
 `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
 using a reviewed commit. In its bounds file, set `repos` to your public
 repository and `bases` to the base branches you allow. Keep the caller's

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { admit, taskFile, checkRequest, checkOutputs, resolveDispatch } = require('./review.cjs');
+const { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch } = require('./review.cjs');
 
 const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
   item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
@@ -46,7 +46,7 @@ test('dispatch resolves same-repository and fork heads and refuses hostile routi
 
 test('review admission narrows, never overrides, event authorization', () => {
   for (const event of ['pull_request', 'pull_request_target']) {
-    for (const action of ['opened', 'synchronize', 'ready_for_review']) {
+    for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review']) {
       assert.equal(admit({ ...decision, event, action }, 'main').admitted, true);
     }
   }
@@ -55,7 +55,7 @@ test('review admission narrows, never overrides, event authorization', () => {
     { admitted: false }, { item: { kind: 'issue', number: 147 } },
     { item: { kind: 'pull_request', number: '147' } }, { head: null },
     { head: { sha: '--upload-pack=evil' } }, { base: 'other' },
-    { event: 'push' }, { action: 'reopened' }, { action: 'labeled' },
+    { event: 'push' }, { action: 'closed' }, { action: 'labeled' },
     { event: 'issue_comment', action: 'created', command: 'agent' },
   ]) {
     assert.equal(admit({ ...decision, ...change }, 'main').admitted, false, JSON.stringify(change));
@@ -83,27 +83,98 @@ test('review request has no branch, alternate target/token or notification autho
 
 test('only a single verdict comment on this PR or noop passes', () => {
   const check = item => checkOutputs({ items: [item] }, 147);
-  for (const verdict of ['APPROVE', 'CHANGES', 'REJECT']) {
-    check({ type: 'add_comment', body: `VERDICT: ${verdict}\nREASON: ${'é'.repeat(192)}\nFindings` });
+  for (const [body, verdict] of [
+    ['VERDICT: APPROVE', 'APPROVE'],
+    ['VERDICT: APPROVE\nLooks right.', 'APPROVE'],
+    ['VERDICT: APPROVE. Looks right.', 'APPROVE'],
+    ['VERDICT: CHANGES\n\n1. Fix the test.', 'CHANGES'],
+    ['VERDICT: CHANGES — one finding', 'CHANGES'],
+    // Briefs written before CHANGES ask for REJECT and a REASON line.
+    ['VERDICT: REJECT\nREASON: Breaks the build.', 'CHANGES'],
+    ['VERDICT: REJECT', 'CHANGES'],
+  ]) {
+    assert.equal(check({ type: 'add_comment', body }), verdict, body);
   }
-  check({ type: 'noop', message: 'No review possible.' });
+  assert.equal(check({ type: 'noop', message: 'No review possible.' }), '');
   for (const item of [
     { type: 'create_pull_request' }, { type: 'add_comment', body: 'APPROVE' },
-    { type: 'add_comment', body: 'VERDICT: approve\nREASON: no' },
-    { type: 'add_comment', body: `VERDICT: APPROVE\nREASON: ${'x'.repeat(193)}` },
-    { type: 'add_comment', body: 'VERDICT: APPROVE\nREASON: ' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE\nREASON: no\rhidden' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE\nREASON: no', issue_number: 148 },
-    { type: 'add_comment', body: 'VERDICT: APPROVE\nREASON: no', pull_request_number: 148 },
+    { type: 'add_comment', body: 'VERDICT: approve' },
+    { type: 'add_comment', body: 'VERDICT: REJECTED' },
+    { type: 'add_comment', body: 'VERDICT: REJECT, or APPROVE' },
+    { type: 'add_comment', body: 'VERDICT: APPROVE unless REJECT' },
+    { type: 'add_comment', body: 'VERDICT: APPROVED' },
+    { type: 'add_comment', body: 'VERDICT: APPROVE-ish' },
+    { type: 'add_comment', body: 'VERDICT: APPROVE?' },
+    { type: 'add_comment', body: 'VERDICT: APPROVE|CHANGES' },
+    { type: 'add_comment', body: 'VERDICT: APPROVE / CHANGES' },
+    { type: 'add_comment', body: 'VERDICT: CHANGES, or APPROVE if you like' },
+    { type: 'add_comment', body: ' VERDICT: APPROVE' },
+    { type: 'add_comment', body: 'Summary\nVERDICT: APPROVE' },
+    { type: 'add_comment', body: 'VERDICT: APPROVE', issue_number: 148 },
+    { type: 'add_comment', body: 'VERDICT: APPROVE', pull_request_number: 148 },
   ]) assert.throws(() => check(item), undefined, JSON.stringify(item));
   for (const key of ['item_number', 'pr', 'pr_number', 'repo', 'comment_id',
     'reply_to_id', 'target', 'temporary_id']) {
     assert.throws(() => check({ type: 'add_comment',
-      body: 'VERDICT: APPROVE\nREASON: no', [key]: '147' }), undefined, key);
+      body: 'VERDICT: APPROVE', [key]: '147' }), undefined, key);
   }
   for (const items of [[], [{ type: 'noop' }, { type: 'noop' }]]) {
     assert.throws(() => checkOutputs({ items }, 147), /exactly one/);
   }
+});
+
+test('the review status maps each run to one state, only for the one open pull request', () => {
+  const head = 'a'.repeat(40);
+  const approved = { pull: '147', head, check: 'success', verdict: 'APPROVE', apply: 'success',
+    url: 'https://github.com/o/r/pull/147#issuecomment-1' };
+  const did = { state: 'failure', description: 'The review did not approve this commit' };
+  for (const [name, change, open, expected] of [
+    ['approved', {}, [147], { state: 'success', description: 'The review approved this commit' }],
+    ['changes', { verdict: 'CHANGES', url: '' }, [147], { state: 'failure', description: 'The review asked for changes' }],
+    ['noop', { verdict: '' }, [147], did],
+    ['check failed', { check: 'failure', verdict: '' }, [147], did],
+    ['check failed after the verdict', { check: 'failure' }, [147], did],
+    ['changes, check failed', { check: 'failure', verdict: 'CHANGES' }, [147], did],
+    ['check skipped', { check: 'skipped', verdict: '' }, [147], did],
+    ['apply failed', { apply: 'failure' }, [147], did],
+    ['apply skipped', { apply: 'skipped', url: '' }, [147], did],
+    ['no comment posted', { url: '' }, [147], did],
+    ['no open pull request', {}, [], { skip: `No review status on ${head}: its open pull requests are none, not only #147` }],
+    ['two open pull requests', {}, [147, 148], { skip: `No review status on ${head}: its open pull requests are 147, 148, not only #147` }],
+    ['another pull request', {}, [148], { skip: `No review status on ${head}: its open pull requests are 148, not only #147` }],
+  ]) assert.deepEqual(reviewStatus({ ...approved, ...change }, open), expected, name);
+  for (const change of [{ head: 'A'.repeat(40) }, { head: `${head}\n` }, { head: undefined },
+    { pull: '0' }, { pull: '01' }, { pull: '147;' }, { pull: '9007199254740992' }]) {
+    assert.throws(() => reviewStatus({ ...approved, ...change }, [147]), /exact head SHA/, JSON.stringify(change));
+  }
+});
+
+test('the review status is posted only after the open pull requests are listed', async () => {
+  const head = 'a'.repeat(40);
+  const env = { GITHUB_REPOSITORY: 'o/r', PULL: '147', HEAD_SHA: head, CHECK_RESULT: 'success',
+    VERDICT: 'APPROVE', APPLY_RESULT: 'success', RESULT_URL: 'https://x/1', RUN_URL: 'https://x/run' };
+  const fake = pulls => {
+    const calls = { posted: [], notices: [] };
+    const github = { rest: { pulls: { list: 'list' }, repos: {
+      createCommitStatus: async args => { calls.posted.push(args); } } },
+    paginate: async (route, args) => {
+      assert.equal(route, 'list');
+      assert.deepEqual(args, { owner: 'o', repo: 'r', state: 'open', per_page: 100 });
+      return pulls;
+    } };
+    return { calls, github, core: { notice: message => calls.notices.push(message) } };
+  };
+  let { calls, github, core } = fake([{ number: 147, head: { sha: head } }, { number: 150, head: { sha: 'b'.repeat(40) } }]);
+  assert.equal((await reportStatus(env, github, core)).state, 'success');
+  assert.deepEqual(calls.posted, [{ owner: 'o', repo: 'r', sha: head, context: 'review',
+    state: 'success', description: 'The review approved this commit', target_url: 'https://x/run' }]);
+  ({ calls, github, core } = fake([{ number: 147, head: { sha: head } }, { number: 148, head: { sha: head } }]));
+  assert.ok((await reportStatus(env, github, core)).skip);
+  assert.deepEqual(calls.posted, []);
+  assert.equal(calls.notices.length, 1);
+  ({ calls, github, core } = fake([]));
+  await assert.rejects(reportStatus({ ...env, HEAD_SHA: 'main' }, github, core), /exact head SHA/);
+  assert.deepEqual(calls.posted, []);
 });
 
 test('task comes from a bounded regular base file, not a symlink or escape', () => {
@@ -145,10 +216,37 @@ test('caller and write job retain the trusted-source boundary', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
   const checker = fs.readFileSync(path.join(__dirname, '../.github/workflows/check.yml'), 'utf8');
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
-  assert.match(caller, /pull_request_target:\s+types: \[opened, synchronize, ready_for_review\]/);
+  assert.match(caller, /pull_request_target:\s+types: \[opened, synchronize, reopened, ready_for_review\]/);
   assert.match(caller, /kind: analysis/);
   assert.match(caller, /notify: none/);
-  assert.doesNotMatch(caller, /contents: write|secrets: inherit/);
+  assert.doesNotMatch(caller, /contents: write|secrets: inherit|pull_request.head|refs\/pull/);
+  // Which job holds which token: writes only in apply (the comment) and
+  // status (the status), the identity token only in the agent job.
+  const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
+    .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
+  assert.deepEqual(Object.keys(jobs), ['policy', 'agent', 'check', 'apply', 'status']);
+  for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: [],
+    apply: ['pull-requests'], status: ['statuses'] })) {
+    const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
+    assert.deepEqual(granted, writes, name);
+    if (name !== 'apply') assert.doesNotMatch(jobs[name], /secrets/, name);
+  }
+  assert.match(jobs.agent, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
+  for (const [, action] of caller.matchAll(/^ +(?:- )?uses: ([^.\s]\S*)/gm)) assert.match(action, /@[0-9a-f]{40}$/, action);
+  // The status takes the verdict check.yml set and the head policy
+  // admitted, nothing the agent wrote.
+  // reviewStatus maps them; the only code it runs is the policy call's
+  // pinned source, never the head.
+  assert.doesNotMatch(jobs.status, /needs\.agent\.outputs|artifact|pull_request\.head|needs\.policy\.outputs\.ref\b/);
+  assert.match(jobs.status, /repository: \$\{\{ needs.policy.outputs.source-repository \}\}\s+ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  assert.match(jobs.status, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
+  assert.match(jobs.status, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
+  assert.match(jobs.status, /await reportStatus\(process.env, github, core\)/);
+  assert.match(jobs.status, /runs-on: ubuntu-26.04/);
+  // Automatic reviews only for the owner, members and collaborators;
+  // anyone else, a past contributor included, waits for a `/review`.
+  assert.match(jobs.policy, /github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&\s+contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github.event.pull_request.author_association\)\) \|\|/);
+  assert.match(checker, /core.setOutput\('verdict', checkOutputs\(/);
   const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   assert.match(policy, /inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
   assert.match(workflow, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
