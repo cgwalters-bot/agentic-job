@@ -121,7 +121,9 @@ the mount namespace. It runs systemd/PAM code, not agent-supplied code. The
 probes require that another process of the sandbox uid cannot attach with
 ptrace, write its memory, open its memory file or use its `/proc/PID/root`.
 They test both run0 and manager handlers, with positive memory-write and
-ptrace controls and the separate host `ptrace_scope` check. A hosted test
+ptrace controls and the separate host `ptrace_scope` check. `hidepid` hides
+these nondumpable handlers from their own uid, so the probe finds them in
+the control groups of the manager and of the run0 command. A hosted test
 kills a sacrificial run0 handler and verifies that its surviving command
 still cannot write outside the view. Killing the handler does not necessarily
 end its parent session in systemd 257; it offers no new execution path.

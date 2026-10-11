@@ -67,6 +67,17 @@ Enforcement: [run_token.rs](../crates/agentic-job/src/sandbox/check/run_token.rs
 runtime checks `token-runner-file`, `token-config-mode`, `token-config-dir-mode`,
 `token-files` and `token-processes`.
 
+**RC-022 — Process visibility.** After `secure-host`, the sandbox user MUST NOT
+be able to enumerate or list another user's process in `/proc`, or read its
+`/proc/PID/cmdline`, even with the PID known. Setup MUST enable
+`hidepid=invisible` by default for every sandbox entry path.
+Enforcement: [on_host.rs](../crates/agentic-job/src/sandbox/check/on_host.rs),
+runtime test `proc-other-users` via a session, user-manager service and Podman
+user namespace, with `proc-control-runner` and `proc-control-sandbox-*`;
+[sandbox_host.rs](../crates/agentic-job/tests/sandbox_host.rs)
+removes the protection with `hidepid=0` and `hidepid=1` in CI's hosted Ubuntu
+26.04 `sandbox` job. Containers' own proc mounts expose only their PID namespace.
+
 **RC-014 — Forge read credential.** A sandboxed producer MAY hold one GitHub
 token, as `GH_TOKEN`, and it MUST NOT be able to write: the producer can leak
 it. The reusable workflow's agent job MUST request only `contents`, `issues`,

@@ -3,7 +3,7 @@
 //! thrown away after the job.
 //!
 //! The boundary is the separate uid: it cannot read another uid's
-//! `/proc/PID/environ` or memory, and has no sudo. The rest closes what
+//! processes through `/proc` or memory, and has no sudo. The rest closes what
 //! runner images leave open to every local user, which starts to matter
 //! once something runs as a user other than the runner's.
 //!
@@ -343,6 +343,8 @@ fn setup(args: &Args) -> Result<Exit> {
             .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
         create_user(&config, &runner, existing)
     })?;
+    // Before any sandbox mount view or user manager inherits /proc.
+    timed_setup("proc-hidepid", hide_other_processes)?;
     if !config.sandbox.world_write_walk {
         timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
     }
@@ -1333,6 +1335,14 @@ fn restrict_ptrace() -> Result<()> {
     if scope.trim() == "0" {
         fs::write(PTRACE_SCOPE, "1\n").with_context(|| format!("writing {PTRACE_SCOPE}"))?;
     }
+    Ok(())
+}
+
+/// Apply to the host, not just one entry path. Reset any image-provided
+/// exemption to root's group, which the sandbox user cannot belong to.
+fn hide_other_processes() -> Result<()> {
+    host::run(Command::new("mount").args(["-o", "remount,hidepid=invisible,gid=0", "/proc"]))
+        .context("hiding other users' processes on the host /proc")?;
     Ok(())
 }
 

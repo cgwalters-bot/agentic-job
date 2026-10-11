@@ -780,6 +780,19 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             },
         ));
     }
+    for (name, hidepid) in [("proc hidepid=0", "0"), ("proc hidepid=1", "1")] {
+        cases.push(Case::new(name, &["proc-other-users"], move || {
+            Removed::by(
+                &[&[
+                    "mount",
+                    "-o",
+                    &format!("remount,hidepid={hidepid},gid=0"),
+                    "/proc",
+                ]],
+                &[&["mount", "-o", "remount,hidepid=invisible,gid=0", "/proc"]],
+            )
+        }));
+    }
     cases.push(Case::new(
         "ptrace of any process of one's uid",
         &["ptrace-scope"],
@@ -1182,21 +1195,17 @@ fn each_probe_fails_when_its_protection_is_removed() {
     if !config.sandbox.world_write_walk {
         let killed = entry.run(&["python3", "-I", "-c", r#"
 import os, pathlib, subprocess, time
-helpers = []
-for directory in pathlib.Path('/proc').iterdir():
-    if not directory.name.isdecimal():
-        continue
-    try:
-        comm = (directory / 'comm').read_text().strip()
-        status = dict(line.split(':', 1) for line in (directory / 'status').read_text().splitlines() if ':' in line)
-        if comm == '(sd-pam)' and int(status['PPid']) == os.getpid():
-            helpers.append(int(directory.name))
-    except FileNotFoundError:
-        pass
+# The handler is this command's child, which hidepid hides from /proc even
+# as a zombie: found as a child and waited for instead.
+helpers = [int(child) for task in pathlib.Path('/proc/self/task').iterdir() for child in (task / 'children').read_text().split()]
 assert len(helpers) == 1, helpers
 subprocess.run(['kill', '-TERM', str(helpers[0])], check=True)
-time.sleep(0.2)
-assert not pathlib.Path('/proc', str(helpers[0])).exists() or (pathlib.Path('/proc') / str(helpers[0]) / 'stat').read_text().split(') ')[1].startswith('Z')
+for _ in range(50):
+    if os.waitpid(helpers[0], os.WNOHANG)[0]:
+        break
+    time.sleep(0.1)
+else:
+    raise AssertionError('PAM handler survived SIGTERM')
 try:
     fd = os.open('/etc/agentic-job/write-probe/after-pam-kill', os.O_WRONLY | os.O_CREAT, 0o600)
 except PermissionError:

@@ -42,21 +42,54 @@ finally:
     os.kill(child, signal.SIGKILL)
     os.waitpid(child, 0)
 
-handlers = []
-for name in os.listdir("/proc"):
-    if not name.isdecimal():
-        continue
-    try:
-        with open(f"/proc/{name}/comm") as stream:
-            comm = stream.read().strip()
-        with open(f"/proc/{name}/status") as stream:
-            fields = dict(line.split(":", 1) for line in stream if ":" in line)
-        if comm == "(sd-pam)" and int(fields["Uid"].split()[0]) == os.getuid():
-            handlers.append(int(name))
-    except FileNotFoundError:
-        continue
 
-assert len(handlers) >= 2, "expected both user-manager and run0 PAM handlers"
+def cgroup_processes(root):
+    found = set()
+    for directory, _, files in os.walk(root):
+        if "cgroup.procs" in files:
+            try:
+                with open(os.path.join(directory, "cgroup.procs")) as stream:
+                    found.update(int(pid) for pid in stream.read().split())
+            except OSError:
+                pass
+    return found
+
+
+def hidden(pid):
+    return not os.path.exists(f"/proc/{pid}")
+
+
+def is_handler(pid):
+    try:
+        with open(f"/proc/{pid}/comm") as stream:
+            comm = stream.read().strip()
+        with open(f"/proc/{pid}/status") as stream:
+            fields = dict(line.split(":", 1) for line in stream if ":" in line)
+    except (FileNotFoundError, PermissionError):
+        # hidepid keeps a nondumpable process even from its own uid, while
+        # permission to signal it is by uid alone.
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+    return comm == "(sd-pam)" and int(fields["Uid"].split()[0]) == os.getuid()
+
+
+# hidepid takes the handlers out of /proc, but each stays in the control group
+# of the unit it serves: this command's and, under the user's slice, the
+# manager's.
+with open("/proc/self/cgroup") as stream:
+    own = stream.read().strip().rpartition("::")[2]
+candidates = cgroup_processes(f"/sys/fs/cgroup{own}") | cgroup_processes(
+    f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice"
+)
+handlers = sorted(pid for pid in candidates if is_handler(pid))
+
+assert len(handlers) >= 2, (
+    f"expected both user-manager and run0 PAM handlers, found {handlers}"
+    f" among {sorted(candidates)} in {own}"
+)
 for pid in handlers:
     assert lib.ptrace(16, pid, None, None) == -1, f"traceable PAM handler {pid}"
     assert ctypes.get_errno() == errno.EPERM, "ptrace failed for an unrelated reason"
@@ -67,6 +100,8 @@ for pid in handlers:
             fd = os.open(path, os.O_WRONLY | (os.O_CREAT if path.endswith("/pam") else 0), 0o600)
         except PermissionError:
             pass
+        except FileNotFoundError:
+            assert hidden(pid), f"PAM handler escape failed for an unrelated reason: {path}"
         else:
             os.close(fd)
             raise AssertionError(f"accessible PAM handler escape: {path}")

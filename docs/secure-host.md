@@ -47,6 +47,10 @@ machine that is thrown away after the job:
   every local user: world-writable system paths, the image's
   environment file, the hosted compute agent's directory, tailscaled's
   socket;
+- remounts the host's `/proc` with `hidepid=invisible` before starting sandbox
+  sessions: other users' processes cannot be listed or read, including command
+  lines, with no runner-specific exemption or opt-out. Secrets must still never be
+  passed as command-line arguments;
 - takes away that user's sudo, polkit actions, cron, at and lingering,
   and stops the daemons that listen for every local user
   (`stop-services`), the container daemon first of all;
@@ -204,6 +208,17 @@ Host networking does not grant root or bypass the sandbox uid's network
 rules; it exposes the same host services the sandbox user can already
 reach. The mount contains public certificates, not the proxy's private
 key. Do not work around TLS failures by disabling certificate checks.
+
+The host proc restriction applies to `sandbox exec`, the agent under `run`,
+and rootless Podman's host processes, regardless of their entry path. A
+container's own `/proc` shows the processes in its PID namespace, not the
+host's processes. Rootless user namespaces do not grant permission to remount
+the initial PID namespace's proc filesystem without the restriction. The
+runner user also loses visibility of other users' processes unless it already
+belongs to the exempt root group (`gid=0`), but still sees its own worker and
+step processes. The sandbox user is forbidden from belonging to that group.
+Hosted Ubuntu 26.04 CI exercises setup, probes, rootless containers and later
+runner steps; RHEL 10 compatibility for this restriction remains unverified.
 
 **Running as the sandbox user.** `agentic-job sandbox exec -- COMMAND`
 runs a command as the sandbox user, in its home, and ends with the
