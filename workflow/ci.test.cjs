@@ -10,6 +10,15 @@ const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 
 const script = ci.split('        run: |\n')[1].split('\n  docs:')[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
 
+test('PR CI tests the ingress checker with the same verified analyzers', () => {
+  const ingress = fs.readFileSync(path.join(__dirname, '../.github/workflows/workflow-ingress.yml'), 'utf8');
+  const install = source => source.split('      - name: Install verified static analyzers\n')[1].split(/\n {6}(?! )/)[0];
+  assert.match(install(ingress), /sha256sum -c -/);
+  assert.equal(install(ci), install(ingress));
+  assert.ok(fs.existsSync(path.join(__dirname, 'test_ingress.py')));
+  assert.match(ci, /python3 -m unittest discover -s workflow -p 'test_\*\.py' -v\n {8}env:\n {10}ZIZMOR: /);
+});
+
 test('privileged jobs and required check remain gated for forks', () => {
   assert.match(ci, /\non:\n  pull_request:\n  push:\n    branches: \[main\]\n\n/);
   assert.doesNotMatch(ci, /pull_request_target|workflow_run|secrets\./);

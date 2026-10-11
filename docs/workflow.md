@@ -327,6 +327,11 @@ Read this before relying on it.
 
 ## CI runner use
 
+Workflow and action edits are also vetted by the independent base-defined
+[workflow ingress check](workflow-ingress.md), including fork pull requests.
+It gates a merge only once an administrator requires it in a ruleset; that
+static regression gate is separate from the privileged end-to-end tests below.
+
 The run action reports setup seconds from GitHub's job start to the first ACP
 `session/prompt` dispatch, including checkout, hardening, clone and registration.
 If the agent never receives a task it reports that timing is unavailable.

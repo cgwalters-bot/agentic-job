@@ -27,7 +27,8 @@ jobs:
     # token and no OIDC token: the end-to-end jobs, which write here, cannot
     # run for it. Path classification lives here, not in PR-owned scripts.
     # Agent patches cannot edit workflows; human workflow edits still need
-    # review because pull_request runs the proposed workflow. `e2e` says
+    # review, and the workflow-ingress check once an administrator requires
+    # it in a ruleset, because pull_request runs the proposed workflow. `e2e` says
     # whether the jobs run; `fork-e2e` that the paths need them (or do not
     # say) and they cannot, which fails the required ci check.
     outputs:
@@ -88,8 +89,22 @@ jobs:
       - run: node --test workflow/activation.test.cjs
       - run: node --test workflow/setup-timing.test.mjs
       - run: node --test workflow/job-timing.test.cjs
+      # The same digest-checked analyzers as workflow-ingress.yml, so a PR
+      # that changes the checker is tested before merge. Read-only token.
+      - name: Install verified static analyzers
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fL --retry 3 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o actionlint.tar.gz
+          curl -fL --retry 3 https://github.com/zizmorcore/zizmor/releases/download/v1.30.1/zizmor-x86_64-unknown-linux-gnu.tar.gz -o zizmor.tar.gz
+          printf '%s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' 'e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a  zizmor.tar.gz' | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          tar -xzf zizmor.tar.gz zizmor
       # Loopback-only TCP preflight tests; no OIDC credential or external proxy.
+      # Ingress fixtures are local Git repositories, inspected but never run.
       - run: python3 -m unittest discover -s workflow -p 'test_*.py' -v
+        env:
+          ZIZMOR: ${{ runner.temp }}/zizmor
+          ACTIONLINT: ${{ runner.temp }}/actionlint
       - run: node --test workflow/refusal.test.cjs
       - run: node --test workflow/review.test.cjs
       - run: node --test workflow/push.test.cjs
@@ -257,7 +272,7 @@ jobs:
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
   static:
-    uses: ./.github/workflows/build.yml
+    uses: ./.github/workflows/build.yml # zizmor: ignore[self-repository] Test this revision's reusable workflow, not a remote revision.
 
   # validation.json is generated from gh-aw's compiled workflows, so a
   # change of the pin has to regenerate it. The commit is the one
@@ -377,7 +392,7 @@ jobs:
   # example a caller copies, which builds and tests after the lock, as
   # the runner's user and as the sandbox user, and proves both.
   secure-host:
-    uses: ./.github/workflows/example-secure-host.yml
+    uses: ./.github/workflows/example-secure-host.yml # zizmor: ignore[self-repository] Test this revision's reusable workflow, not a remote revision.
 
   # The same step with its switches the other way: root kept, no egress
   # proxy, another name for the sandbox user. What the lock takes is
@@ -390,7 +405,7 @@ jobs:
         with:
           persist-credentials: false
       - id: host
-        uses: ./secure-host
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action under test.
         with:
           lock: false
           egress: false
@@ -423,7 +438,7 @@ jobs:
         with:
           persist-credentials: false
       - id: host
-        uses: cgwalters-forge/agentic-job/secure-host@main
+        uses: cgwalters-forge/agentic-job/secure-host@main # zizmor: ignore[unpinned-uses] Deliberately test the public main-branch action in this fresh-runner integration job.
       - name: A pinned release of this source was fetched, and nothing was built
         env:
           FETCHED: ${{ steps.host.outputs.fetched }}
@@ -476,7 +491,7 @@ jobs:
       pull-requests: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # GitHub validates the skipped agent job's permission too
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: board
       repo: ${{ github.repository }}
@@ -495,7 +510,7 @@ jobs:
       pull-requests: write # the status comment and reaction on the pull request e2e-event is for
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # the agent job asks for it, for a proxy this run has none of
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-full-${{ github.run_id }}
       task: Comment on the issue.
@@ -518,7 +533,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions: *e2e-permissions
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-limit-${{ github.run_id }}
       task: Start a comment and then too many subagent tasks.
@@ -550,7 +565,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions: *e2e-permissions
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-event-${{ github.run_id }}
       event: true
@@ -581,7 +596,7 @@ jobs:
       pull-requests: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-analysis-${{ github.run_id }}
       repo: ${{ github.repository }}
@@ -612,7 +627,7 @@ jobs:
       pull-requests: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-analysis-refused-${{ github.run_id }}
       expect-check-refusal: true
@@ -669,7 +684,7 @@ jobs:
       pull-requests: write
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
-    uses: ./.github/workflows/dispatch.yml
+    uses: ./.github/workflows/dispatch.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       task: Exercise the shipped scripted dispatch caller; no model is needed.
       scripted: true
@@ -689,7 +704,7 @@ jobs:
       pull-requests: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
-    uses: ./.github/workflows/example-compose.yml
+    uses: ./.github/workflows/example-compose.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       task: Exercise the composed example caller; no model is needed.
       item: '64'
@@ -703,7 +718,7 @@ jobs:
       issues: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-review-${{ github.run_id }}
       repo: ${{ github.repository }}

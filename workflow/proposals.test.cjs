@@ -50,7 +50,7 @@ test('every checked-in caller passes the mode gate', () => {
     const source = readFileSync(join(directory, file), 'utf8');
     // Local reusable-workflow calls are job-level, with inputs indented six spaces.
     for (const block of source.split(/^  [\w-]+:\s*$/m).slice(1)) {
-      if (!/^    uses: \.\/\.github\/workflows\/agentic-job\.yml\s*$/m.test(block)) continue;
+      if (!/^    uses: \.\/\.github\/workflows\/agentic-job\.yml( +#.*)?$/m.test(block)) continue;
       const change = {};
       for (const [input, variable] of Object.entries(inputs)) {
         const match = block.match(new RegExp(`^      ${input}: *(.*)$`, 'm'));
