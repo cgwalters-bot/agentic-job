@@ -129,8 +129,18 @@ must preserve the workflow's handling of new inputs.
 Check and apply use fresh VMs and treat artifacts as data. The reusable
 workflow uses no build cache. Apply trials the patch on a fetched base
 ancestor and compares changed paths, with rename detection disabled.
-Protected dot-folders and git configuration cannot be unprotected by
-caller bounds.
+Top-level dot-folders are protected by default. Caller bounds may exempt
+`.github`, and only it, for pull requests to repositories they name exactly
+(a push never has it, since gh-aw's push handler refuses workflow files); git configuration
+and the other fixed patch refusals remain protected. Apply never executes the
+workflows it pushes, but the target's own `pull_request` CI runs a fork pull
+request's edited workflows before anyone reviews them. So the output check
+is not the gate against bad workflow edits, and this project provides none:
+an operator who exempts `.github` must first require approval of workflow
+runs for all external contributors, keep the apply account neither a member
+nor a collaborator of the target, keep self-hosted runners unreachable
+from fork pull requests, and supply any workflow check at PR ingress, with
+review before merge.
 
 ### R14. Generated files are checked by code a pull request cannot change
 

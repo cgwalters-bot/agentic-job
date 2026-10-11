@@ -10,14 +10,18 @@ use std::path::Path;
 use super::handback::{
     AGENT_OUTCOME, AGENT_OUTPUTS, MAX_LINES, MAX_OUTCOME_BYTES, MAX_OUTPUTS_BYTES,
 };
-use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy};
+use crate::policy::{
+    CREATE_PULL_REQUEST, EXEMPTABLE_DOT_FOLDER, Kind, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules,
+    Policy,
+};
 
 const KIB: usize = 1 << 10;
 
 /// What `check` refuses by path whatever the policy says
 /// (`check::patch`), in words: an agent is not shown the pattern.
 const ALWAYS_PROTECTED: &str = "any file or directory whose name starts with `.git`, in any \
-                                directory (`.gitignore`, `.gitattributes`, `.gitkeep`), \
+                                directory (`.gitignore`, `.gitattributes`, `.gitkeep`, \
+                                and the top-level `.github/` unless exempted above), \
                                 `CODEOWNERS`, and the configuration of hooks, shells, editors \
                                 and CI systems (`.husky/`, `lefthook.yml`, `.envrc`, \
                                 `.vscode/`, `.pre-commit-config.yaml`, `.travis.yml`)";
@@ -53,6 +57,19 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
         text.push_str(
             "anything under a top-level directory whose name starts with a dot (`.github/`); ",
         );
+        // Validation admits no other exemption.
+        if rules
+            .unprotected_dot_folders
+            .iter()
+            .any(|name| name == EXEMPTABLE_DOT_FOLDER)
+        {
+            let _ = write!(
+                text,
+                "except `{EXEMPTABLE_DOT_FOLDER}/`, which the caller exempts for this repository \
+                 (a change there, a workflow included, is merged only after a human reviews \
+                 the pull request); "
+            );
+        }
     }
     let _ = write!(
         text,
@@ -367,5 +384,23 @@ mod tests {
         // A run that proposes no change has no such rules to be told.
         let analysis = text(&policy(Kind::Analysis, rules(&["README.md"], true)));
         assert!(!analysis.contains("refused whole"), "{analysis}");
+    }
+
+    #[test]
+    fn brief_names_only_effective_folder_exemptions() {
+        for folders in [Vec::<String>::new(), vec![".github".into()]] {
+            let mut policy = crate::policy::tests::policy();
+            policy
+                .safe_outputs
+                .create_pull_request
+                .as_mut()
+                .unwrap()
+                .unprotected_dot_folders = folders.clone();
+            let brief = text(&policy);
+            assert_eq!(
+                brief.contains("except `.github/`, which the caller exempts"),
+                !folders.is_empty()
+            );
+        }
     }
 }

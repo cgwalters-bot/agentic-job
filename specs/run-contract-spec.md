@@ -158,7 +158,14 @@ relative paths, binary changes, symlinks, submodules, new executables, mode
 changes, renames and file-count excess. It MUST also refuse extra mail,
 unsupported mail headers, patch content hidden in the commit message and file
 headers without a mode. Exact-repository policy exceptions MAY relax protected
-names, but not top-level dot-folders or the fixed patch restrictions.
+names and, off by default and for a pull request only, the top-level
+`.github` folder, but not the fixed patch restrictions; without that exception
+`.github/` is among them, and a push never has it. Apply
+MUST NOT execute the edited workflows. This project provides no gate against
+a malicious workflow edit: exempting `.github` presumes the operator requires
+approval of fork pull request workflow runs, keeps the apply account neither
+a member nor a collaborator of the target, keeps self-hosted runners
+unreachable from them and reviews before merge.
 Enforcement: [check/patch.rs](../crates/agentic-job/src/check/patch.rs), tests
 `what_is_refused` and `unprotected_names_and_folders_follow_the_policy`;
 [patch_git.rs](../crates/agentic-job/tests/patch_git.rs),
@@ -311,11 +318,13 @@ the policy's, before it fetches or pushes anything for it, and one from a
 repository its identity does not own before it forks; it MUST give gh-aw's handler that
 fork as the only head repository it may push to. It MUST NOT push a partial
 run's change. It MUST push without force, with no fallback to a new pull
-request and without `allow_workflows`, and fail unless the branch then holds
+request and without `allow_workflows`, so that gh-aw's handler too refuses
+a change under `.github/workflows/`, and fail unless the branch then holds
 the checked tree as one commit on that head.
 Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
 `push_requests_against_the_bounds`, `a_push_policy_names_its_pull_request_and_always_a_max`,
-`push_bounds_must_name_branches_and_one_push`, `push_bounds_intersect` and
+`push_bounds_must_name_branches_and_one_push`, `push_bounds_intersect`,
+`a_push_never_carries_a_folder_exemption` and
 `what_the_job_token_cannot_apply_is_refused`;
 [push.test.cjs](../workflow/push.test.cjs), `a push resolves an open pull
 request from a fork's branch and refuses hostile routing`;

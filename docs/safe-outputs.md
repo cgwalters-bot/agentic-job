@@ -176,14 +176,17 @@ forge serves a fork pull request's head from the target too) and starts there:
 - the run refuses to start when the checkout is not at `head`;
 - check refuses a hand-back whose base is not `head`, a push line naming any
   branch but the pull request's, and the same patch rules as a pull request
-  (protected files, every top-level dot-folder, size and file count);
+  (protected files, every top-level dot-folder, size and file count): a push
+  is never given the `.github` exemption a pull request may have;
 - apply makes or finds its fork as for a pull request, and refuses unless the
   pull request is open and its head is that fork and the policy's branch; a
   pull request from someone else's repository is refused before anything is
   forked, fetched or pushed; gh-aw's handler is given the fork as the only head
   repository it may push to, and refuses a pull request from any other;
 - the handler applies the patch on `head` and pushes one commit without force,
-  with no fallback to a new pull request and never with `allow_workflows`. A
+   with no fallback to a new pull request and never with `allow_workflows`,
+   so the handler refuses a change under `.github/workflows/` as well as
+   check does. A
    branch that moved since `head` was read makes the push not a fast-forward,
    which the forge refuses: the pull request has to be run again. Before the
    handler runs, apply leaves out a push if the fetched fork branch already
@@ -223,15 +226,19 @@ machine starts.
 Some things no bounds file can change. A run hands back one patch, so at
 most one pull request. A pull request is a draft. An `analysis` run may
 not ask for one. gh-aw's default list of protected file names and every
-top-level dot-folder stay protected; a bounds file can take names off
-that list for repositories it names exactly, and cannot add to it.
-For example, to allow README edits in one repository, add this to the
+top-level dot-folder are protected by default; a bounds file can take names off
+that list and exempt the `.github` folder for repositories it names exactly
+(case-insensitive OWNER/REPO, no globs), and cannot add to the list. No
+other dot-folder can be exempted: check refuses `.husky/`, `.vscode/`,
+`.circleci/` and `.tekton/` whatever the policy says.
+For example, to allow README and workflow edits in one repository, add this to the
 bounds file (not to the caller workflow):
 
 ```toml
 [unprotected_files]
 repos = ["OWNER/REPO"]
 files = ["README.md"]
+dot_folders = [".github"] # optional, and only ".github"; see the prerequisites below
 ```
 
 This does not relax the fixed patch refusals below. New executable files
@@ -239,8 +246,47 @@ remain refused: add a script without its executable bit and run it with
 its interpreter. Check refusals appear as run annotations and, when a
 comment target is available, in the run's conclusion comment.
 
+The exemption does not reach protected file names or git's own files
+inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`). Organization and
+caller bounds must both permit it, and it applies to `create_pull_request`
+only: a push is refused anything under `.github/`, since gh-aw's push
+handler refuses workflow files without `allow_workflows`, which apply never
+sets. Workflow changes are pushed only to
+apply's fork, which has Actions turned off, and reach the repository as a
+fork pull request. The output check is not the gate against a malicious
+workflow edit, and this project provides no other: the target's
+`pull_request` CI runs the pull request's edited workflows, choosing their
+runners (`runs-on`), matrices and job counts, before anyone reviews them,
+and the forge stops asking for approval once the apply account has
+contributed. Before exempting `.github`, an operator must:
+
+- set the repository's approval policy for fork pull request workflows to
+  require approval for all external contributors, or stricter;
+- make sure the apply account (the user of `SAFE_OUTPUTS_PAT`) is neither a
+  member nor a collaborator of the repository or its organization: the forge
+  runs a member's or collaborator's fork pull request workflows without
+  approval, whatever the external-contributor setting says;
+- make sure no self-hosted runner is reachable by a workflow run from a fork
+  pull request;
+- have reviewers treat a change to the caller's bounds
+  (`.github/agentic-job/`) or to the workflow that calls agentic-job as a
+  policy change: the exemption lets an agent propose widening its own
+  bounds, which takes effect once merged;
+- provide any workflow check at PR ingress they want, and review before
+  merge.
+
+The apply credential needs classic PAT `repo` and `workflow` scopes (or a
+fine-grained token with Contents and Workflows write permissions on the fork)
+to push workflow files. No agent or check job gains a write credential.
+
 `policy.json` holds, as `safe_outputs`, gh-aw's own configuration format:
-the collector reads that part as it is.
+the collector reads that part as it is. The additional `unprotected_dot_folders`
+list, on `create_pull_request` only, is enforced by check. Apply passes it to
+gh-aw's handler as `protected_dot_folder_excludes`, keeping only `.github`
+whatever the list says, and keeps `protect_top_level_dot_folders`
+on, so the handler still refuses every other dot-folder before and after it
+applies the patch. `protected_files_policy` stays `blocked`, so protected
+basenames remain refused.
 
 ## What the agent does
 

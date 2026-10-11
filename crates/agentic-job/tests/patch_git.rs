@@ -619,6 +619,7 @@ fn rules() -> PullRequest {
             .map(|&name| name.to_owned())
             .collect(),
         protect_top_level_dot_folders: true,
+        unprotected_dot_folders: Vec::new(),
         protected_files_policy: ProtectedFilesPolicy::Blocked,
         draft: true,
         max_patch_size: 1024,

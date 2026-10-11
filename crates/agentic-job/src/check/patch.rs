@@ -27,7 +27,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::policy::PatchRules;
+use crate::policy::{EXEMPTABLE_DOT_FOLDER, PatchRules};
 
 /// The header `run` adds, naming the commit the patch is against (gh-aw's
 /// name for it).
@@ -124,12 +124,18 @@ fn quoted(line: &str) -> String {
     format!("{:?}", line.chars().take(QUOTED_CHARS).collect::<String>())
 }
 
-/// Why a path may not be in a change, if it may not.
-fn path_problem(path: &str) -> Option<&'static str> {
+/// Why a path may not be in a change, if it may not. `PROTECTED_PATH_RE`
+/// takes `.github/` for git's own; only where the policy exempts that
+/// folder is it left out, and every component inside it is still matched.
+fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
     let dotted = path.split('/').any(|part| part == "." || part == "..");
+    let inside = match path.strip_prefix(".github/") {
+        Some(inside) if github_exempt => inside,
+        _ => path,
+    };
     if !PLAIN_PATH_RE.is_match(path) || dotted {
         Some("not a plain relative path")
-    } else if PROTECTED_PATH_RE.is_match(path) {
+    } else if PROTECTED_PATH_RE.is_match(inside) {
         Some("protected path")
     } else {
         None
@@ -191,6 +197,8 @@ struct Reader {
     problems: Vec<String>,
     files: BTreeSet<String>,
     base_commit: Option<String>,
+    /// Whether the policy exempts the top-level `.github/` folder.
+    github_exempt: bool,
     /// What the header of the file being read said it does to the file,
     /// once it has stated a mode.
     change: Option<Change>,
@@ -258,7 +266,7 @@ impl Reader {
             return State::Lost;
         };
         for path in [old, new] {
-            if let Some(why) = path_problem(path) {
+            if let Some(why) = path_problem(path, self.github_exempt) {
                 self.problem(format!("{path:?}: {why}"));
             }
             self.files.insert(path.to_owned());
@@ -498,9 +506,11 @@ fn protected<'p>(paths: &'p BTreeSet<String>, rules: &PatchRules<'_>) -> Vec<&'p
     };
     let dot_folder = |path: &str| {
         rules.protect_top_level_dot_folders
-            && path
-                .split_once('/')
-                .is_some_and(|(top, _)| top.len() > 1 && top.starts_with('.'))
+            && path.split_once('/').is_some_and(|(top, _)| {
+                top.len() > 1
+                    && top.starts_with('.')
+                    && !rules.unprotected_dot_folders.iter().any(|name| name == top)
+            })
     };
     paths
         .iter()
@@ -520,7 +530,13 @@ pub struct PatchReading {
 
 /// Reads a patch against `base_commit` under `rules`.
 pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> PatchReading {
-    let mut reader = Reader::default();
+    let mut reader = Reader {
+        github_exempt: rules
+            .unprotected_dot_folders
+            .iter()
+            .any(|name| name == EXEMPTABLE_DOT_FOLDER),
+        ..Reader::default()
+    };
     let mut lines = patch.strip_suffix('\n').unwrap_or(patch).split('\n');
 
     // Git ends a line at a newline only. A reader that also ends one at a
@@ -642,6 +658,32 @@ mod tests {
     fn problems(patch: &str) -> Vec<String> {
         let rules = policy().safe_outputs.create_pull_request.unwrap();
         patch_problems(patch, &rules, BASE)
+    }
+
+    #[test]
+    fn exact_dot_folder_exemption_preserves_fixed_refusals() {
+        for enabled in [false, true] {
+            let mut pr = policy().safe_outputs.create_pull_request.unwrap();
+            if enabled {
+                pr.unprotected_dot_folders.push(".github".into());
+            }
+            for (path, allowed) in [
+                (".github/workflows/check.yml", enabled),
+                (".github/actions/build/action.yml", enabled),
+                (".github-other/check.yml", false),
+                (".agents/config.json", false),
+                (".github/CODEOWNERS", false),
+                (".github/.git/config", false),
+                (".github/package.json", false),
+                (".github/.husky/pre-commit", false),
+            ] {
+                assert_eq!(
+                    patch_problems(&(head() + &edit(path)), &pr, BASE).is_empty(),
+                    allowed,
+                    "{enabled}: {path}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -854,7 +896,7 @@ mod tests {
             (
                 "CI",
                 head() + &add(".github/workflows/x.yml", "100644"),
-                ".github/workflows/x.yml",
+                "\".github/workflows/x.yml\": protected path",
             ),
             (
                 "a top-level dot-folder",

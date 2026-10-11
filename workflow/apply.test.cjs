@@ -118,6 +118,42 @@ function stepEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: '(.*)'$`, 'm'))[1];
 }
 
+for (const carrier of ['create_pull_request', 'push_to_pull_request_branch']) {
+  for (const folders of [undefined, [], ['.github'], ['.agents'], ['.agents', '.github']]) {
+    test(`${carrier} exempts at most .github of the policy's dot-folders ${JSON.stringify(folders)}`, () => {
+      const root = mkdtempSync(join(homedir(), 'apply-test-'));
+      try {
+        const original = { max: 1, protected_files: ['CODEOWNERS'], protected_files_policy: 'blocked',
+          protect_top_level_dot_folders: true, unprotected_dot_folders: folders };
+        writeFileSync(join(root, 'config.json'), JSON.stringify({ [carrier]: original }));
+        const name = "Write the handlers' configuration";
+        const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+          GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo',
+          BASE: 'main', BRANCH_PREFIX: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '',
+          PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'), FORK: 'bot/repo',
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'))[carrier];
+        assert.ok(!Object.hasOwn(config, 'unprotected_dot_folders'));
+        // gh-aw's guard stays on for every folder the policy does not exempt.
+        assert.equal(config.protect_top_level_dot_folders, true);
+        // Only a pull request carries an exemption, and only `.github`.
+        const excluded = carrier === 'create_pull_request' ? (folders ?? []).filter(f => f === '.github') : [];
+        assert.deepEqual(config.protected_dot_folder_excludes, excluded.length ? excluded : undefined);
+        assert.ok(!Object.hasOwn(config, 'allow_workflows'));
+        assert.equal(config.protected_files_policy, 'blocked');
+        assert.deepEqual(config.protected_files, ['CODEOWNERS']);
+        assert.equal(config['head-repo'], 'bot/repo');
+        assert.deepEqual(config.allowed_repos, ['bot/repo']);
+        assert.ok(!Object.hasOwn(JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8')),
+          carrier === 'create_pull_request' ? 'push_to_pull_request_branch' : 'create_pull_request'));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 test("a push is applied to the policy pull request from apply's fork, never as a pull request, never with workflows", () => {
   const root = mkdtempSync(join(homedir(), 'apply-test-'));
   try {

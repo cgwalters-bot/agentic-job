@@ -78,6 +78,10 @@ const MAX_OUTPUTS: &str = "max";
 /// gh-aw states a patch's size cap in units of this many bytes.
 const KB: u64 = 1024;
 
+/// The one top-level dot-folder bounds may exempt from protection, for
+/// repositories they name exactly.
+pub const EXEMPTABLE_DOT_FOLDER: &str = ".github";
+
 /// The files a patch may not touch, at any depth: the defaults gh-aw's
 /// compiler writes for `create-pull-request` (v0.90.1). A bounds file can
 /// take names off this list for the repositories it names, and cannot add
@@ -235,8 +239,8 @@ pub struct Bounds {
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
 /// repositories named exactly (no globs), only the names listed. So the
-/// rest of the list, the top-level dot-folders and everything `check`
-/// refuses on its own stay protected everywhere.
+/// rest of the list and everything `check` refuses on its own stay protected.
+/// The top-level `.github` folder, and no other, can also be exempted there.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Unprotected {
@@ -244,6 +248,8 @@ pub struct Unprotected {
     pub repos: Vec<String>,
     #[serde(default)]
     pub files: Vec<String>,
+    #[serde(default)]
+    pub dot_folders: Vec<String>,
 }
 
 /// How many outputs of one type.
@@ -391,6 +397,9 @@ pub struct PullRequest {
     /// Whether everything under a top-level directory whose name starts
     /// with a dot (`.github/`) is protected as well.
     pub protect_top_level_dot_folders: bool,
+    /// Our selective exemptions; apply translates them for gh-aw's handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unprotected_dot_folders: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
     pub draft: bool,
     /// The largest patch, in KB.
@@ -412,6 +421,10 @@ pub struct Push {
     /// on it fails if the branch moved since.
     pub head: String,
     pub protected_files: Vec<String>,
+    /// Always true, with no exemption: gh-aw's push handler refuses a
+    /// change under `.github/workflows/` without `allow_workflows`, which
+    /// apply never sets, so an exempt `.github` would let check pass a
+    /// patch that apply then fails. Only a pull request carries one.
     pub protect_top_level_dot_folders: bool,
     pub protected_files_policy: ProtectedFilesPolicy,
     /// The largest patch, in KB.
@@ -426,6 +439,7 @@ pub struct PatchRules<'a> {
     pub protected_files: &'a [String],
     /// Whether everything under a top-level dot-folder is protected too.
     pub protect_top_level_dot_folders: bool,
+    pub unprotected_dot_folders: &'a [String],
     pub max_patch_files: u32,
 }
 
@@ -434,6 +448,7 @@ impl PullRequest {
         PatchRules {
             protected_files: &self.protected_files,
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
+            unprotected_dot_folders: &self.unprotected_dot_folders,
             max_patch_files: self.max_patch_files,
         }
     }
@@ -444,6 +459,7 @@ impl Push {
         PatchRules {
             protected_files: &self.protected_files,
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
+            unprotected_dot_folders: &[],
             max_patch_files: self.max_patch_files,
         }
     }
@@ -519,6 +535,9 @@ impl Policy {
                     && output != PUSH_TO_PULL_REQUEST_BRANCH,
                 "the output type {output:?} has no configuration here"
             );
+        }
+        if let Some((_, rules)) = self.safe_outputs.patch_carrier() {
+            validate_dot_folders(rules.unprotected_dot_folders)?;
         }
         for (output, limit) in &self.safe_outputs.others {
             limit.validate(output)?;
@@ -635,6 +654,13 @@ impl Bounds {
             );
         }
         ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
+        for repo in &self.unprotected_files.repos {
+            ensure!(
+                REPO_RE.is_match(repo) && !dotted(repo),
+                "unprotected_files.repos requires exact repository names: {repo:?}"
+            );
+        }
+        validate_dot_folders(&self.unprotected_files.dot_folders)?;
         ensure!(
             self.max_patch_files >= 1,
             "`max_patch_files` must be at least 1"
@@ -660,6 +686,19 @@ impl Bounds {
             })
             .map(|name| (*name).to_owned())
             .collect()
+    }
+
+    fn dot_folders(&self, repo: &str) -> Vec<String> {
+        if self
+            .unprotected_files
+            .repos
+            .iter()
+            .any(|own| own.eq_ignore_ascii_case(repo))
+        {
+            self.unprotected_files.dot_folders.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Why `url` may not be cloned as `repo`, if it may not. The URL must
@@ -707,9 +746,6 @@ impl Bounds {
         } = *request;
         let mut errors = Vec::new();
 
-        // A name of dots alone is no directory to clone into, whatever
-        // their number: `run` refuses one (`run::clone::check`).
-        let dotted = |name: &str| name.split('/').any(|part| part.bytes().all(|b| b == b'.'));
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
         if !repo_ok || !glob_matches(&self.repos, repo) {
             errors.push(format!(
@@ -899,6 +935,7 @@ impl Bounds {
                 max: limit(CREATE_PULL_REQUEST).max,
                 protected_files: self.protected_files(repo),
                 protect_top_level_dot_folders: true,
+                unprotected_dot_folders: self.dot_folders(repo),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 draft: true,
                 max_patch_size: self.max_patch_bytes / KB,
@@ -932,6 +969,26 @@ impl Bounds {
             safe_outputs,
         })
     }
+}
+
+/// Whether a component of `name` is dots alone: no directory to clone
+/// into, whatever their number, so `run` refuses one (`run::clone::check`).
+fn dotted(name: &str) -> bool {
+    name.split('/').any(|part| part.bytes().all(|b| b == b'.'))
+}
+
+/// Only `.github` may be exempted: check's fixed refusals take the other
+/// dot-folders it names (`.husky/`, `.vscode/`, `.circleci/`, `.tekton/`)
+/// whatever the policy says, so an exemption for them would grant nothing,
+/// and no other folder has been needed.
+fn validate_dot_folders(names: &[String]) -> Result<()> {
+    for name in names {
+        ensure!(
+            name == EXEMPTABLE_DOT_FOLDER,
+            "unprotected_files.dot_folders may only name {EXEMPTABLE_DOT_FOLDER:?}, not {name:?}"
+        );
+    }
+    Ok(())
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -1014,6 +1071,8 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
         other.safe_outputs.create_pull_request,
     ) {
         (Some(mut pr), Some(bound)) => {
+            pr.unprotected_dot_folders
+                .retain(|name| bound.unprotected_dot_folders.contains(name));
             pr.max_patch_size = pr.max_patch_size.min(bound.max_patch_size);
             pr.max_patch_files = pr.max_patch_files.min(bound.max_patch_files);
             for name in bound.protected_files {
@@ -1105,6 +1164,99 @@ files = ["README.md", "AGENTS.md"]
     /// The policy of the request the tests of `check` use.
     pub(crate) fn policy() -> Policy {
         bounds().compile(&request()).unwrap()
+    }
+
+    #[test]
+    fn dot_folder_bounds_are_exact_and_intersect() {
+        for (repos, admitted) in [
+            (vec![REPO], true),
+            (vec!["BOOTC-DEV/BOOTC"], true),
+            (vec!["bootc-dev/other"], false),
+        ] {
+            let mut bounds = bounds();
+            bounds.unprotected_files.repos = repos.into_iter().map(str::to_owned).collect();
+            bounds.unprotected_files.dot_folders = vec![".github".into()];
+            bounds.validate().unwrap();
+            let policy = bounds.compile(&request()).unwrap();
+            policy.validate().unwrap();
+            let pr = policy.safe_outputs.create_pull_request.as_ref().unwrap();
+            assert_eq!(!pr.unprotected_dot_folders.is_empty(), admitted);
+            assert!(pr.protect_top_level_dot_folders);
+            let loaded: Policy =
+                serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+            assert_eq!(loaded, policy);
+            for (left, right) in [(policy.clone(), self::policy()), (self::policy(), policy)] {
+                assert!(
+                    intersect(left, right)
+                        .unwrap()
+                        .safe_outputs
+                        .create_pull_request
+                        .unwrap()
+                        .unprotected_dot_folders
+                        .is_empty()
+                );
+            }
+        }
+        for name in [
+            "*",
+            ".github/*",
+            ".",
+            "..",
+            ".git",
+            ".gitignore",
+            ".github/",
+            " .github",
+            ".GITHUB",
+            ".agents",
+            ".husky",
+            ".vscode",
+            ".circleci",
+            ".tekton",
+        ] {
+            let mut bounds = bounds();
+            bounds.unprotected_files.dot_folders = vec![name.into()];
+            assert!(bounds.validate().is_err(), "{name}");
+        }
+        let mut bounds = bounds();
+        bounds.unprotected_files.repos = vec!["bootc-dev/*".into()];
+        assert!(bounds.validate().is_err());
+    }
+
+    #[test]
+    fn a_push_never_carries_a_folder_exemption() {
+        let mut bounds = bounds();
+        bounds.outputs.insert(
+            PUSH_TO_PULL_REQUEST_BRANCH.into(),
+            OutputLimit {
+                max: 1,
+                branches: vec!["bot/**".into()],
+                ..OutputLimit::default()
+            },
+        );
+        bounds.unprotected_files.repos = vec![REPO.into()];
+        bounds.unprotected_files.dot_folders = vec![".github".into()];
+        let request = Request {
+            base: "bot/fix",
+            outputs: PUSH_TO_PULL_REQUEST_BRANCH,
+            pull_request: Some(("42", "1111111111111111111111111111111111111111")),
+            output_repo: Some(REPO),
+            ..request()
+        };
+        let policy = bounds.compile(&request).unwrap();
+        let (carrier, rules) = policy.safe_outputs.patch_carrier().unwrap();
+        assert_eq!(carrier, PUSH_TO_PULL_REQUEST_BRANCH);
+        assert!(rules.protect_top_level_dot_folders);
+        assert!(rules.unprotected_dot_folders.is_empty());
+        // One written by hand with an exemption does not load.
+        let mut value = serde_json::to_value(&policy).unwrap();
+        value["safe_outputs"][PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+            serde_json::json!([".github"]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        assert_eq!(Policy::load(&path).unwrap(), policy);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(Policy::load(&path).is_err());
     }
 
     #[test]

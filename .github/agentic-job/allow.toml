@@ -29,8 +29,10 @@ missing_data = { max = 3 }
 # [unprotected_files]
 # repos = ["OWNER/REPO"]
 # files = ["README.md"]
-# This cannot allow dot-folders, git internals, binaries, symlinks, submodules,
-# new executables, renames or mode changes. Add scripts without the executable
+# dot_folders = [".github"] allows workflow edits; read the prerequisites in
+# docs/safe-outputs.md first. This cannot allow other dot-folders, git
+# internals, binaries, symlinks, submodules, new executables, renames or
+# mode changes. Add scripts without the executable
 # bit and invoke them with their interpreter instead.
 
 # Which events may start a run from this repository, and who may start
