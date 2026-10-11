@@ -536,8 +536,11 @@ impl Policy {
                 "the output type {output:?} has no configuration here"
             );
         }
-        if let Some((_, rules)) = self.safe_outputs.patch_carrier() {
-            validate_dot_folders(rules.unprotected_dot_folders)?;
+        if let Some(pr) = &self.safe_outputs.create_pull_request {
+            validate_dot_folders(
+                &pr.unprotected_dot_folders,
+                "create_pull_request.unprotected_dot_folders",
+            )?;
         }
         for (output, limit) in &self.safe_outputs.others {
             limit.validate(output)?;
@@ -660,7 +663,10 @@ impl Bounds {
                 "unprotected_files.repos requires exact repository names: {repo:?}"
             );
         }
-        validate_dot_folders(&self.unprotected_files.dot_folders)?;
+        validate_dot_folders(
+            &self.unprotected_files.dot_folders,
+            "unprotected_files.dot_folders",
+        )?;
         ensure!(
             self.max_patch_files >= 1,
             "`max_patch_files` must be at least 1"
@@ -981,11 +987,11 @@ fn dotted(name: &str) -> bool {
 /// dot-folders it names (`.husky/`, `.vscode/`, `.circleci/`, `.tekton/`)
 /// whatever the policy says, so an exemption for them would grant nothing,
 /// and no other folder has been needed.
-fn validate_dot_folders(names: &[String]) -> Result<()> {
+fn validate_dot_folders(names: &[String], field: &str) -> Result<()> {
     for name in names {
         ensure!(
             name == EXEMPTABLE_DOT_FOLDER,
-            "unprotected_files.dot_folders may only name {EXEMPTABLE_DOT_FOLDER:?}, not {name:?}"
+            "{field} may only name {EXEMPTABLE_DOT_FOLDER:?}, not {name:?}"
         );
     }
     Ok(())
@@ -1185,15 +1191,19 @@ files = ["README.md", "AGENTS.md"]
             let loaded: Policy =
                 serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
             assert_eq!(loaded, policy);
-            for (left, right) in [(policy.clone(), self::policy()), (self::policy(), policy)] {
-                assert!(
+            for (left, right, survives) in [
+                (policy.clone(), self::policy(), false),
+                (self::policy(), policy.clone(), false),
+                (policy.clone(), policy, admitted),
+            ] {
+                assert_eq!(
                     intersect(left, right)
                         .unwrap()
                         .safe_outputs
                         .create_pull_request
                         .unwrap()
-                        .unprotected_dot_folders
-                        .is_empty()
+                        .unprotected_dot_folders,
+                    if survives { vec![".github"] } else { vec![] }
                 );
             }
         }
@@ -1215,7 +1225,27 @@ files = ["README.md", "AGENTS.md"]
         ] {
             let mut bounds = bounds();
             bounds.unprotected_files.dot_folders = vec![name.into()];
-            assert!(bounds.validate().is_err(), "{name}");
+            assert_eq!(
+                bounds.validate().unwrap_err().to_string(),
+                format!("unprotected_files.dot_folders may only name \".github\", not {name:?}")
+            );
+            let mut policy = self::policy();
+            policy
+                .safe_outputs
+                .create_pull_request
+                .as_mut()
+                .unwrap()
+                .unprotected_dot_folders = vec![name.into()];
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("policy.json");
+            std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+            let error = Policy::load(&path).unwrap_err();
+            assert_eq!(
+                error.root_cause().to_string(),
+                format!(
+                    "create_pull_request.unprotected_dot_folders may only name \".github\", not {name:?}"
+                )
+            );
         }
         let mut bounds = bounds();
         bounds.unprotected_files.repos = vec!["bootc-dev/*".into()];
@@ -1256,7 +1286,14 @@ files = ["README.md", "AGENTS.md"]
         std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
         assert_eq!(Policy::load(&path).unwrap(), policy);
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(Policy::load(&path).is_err());
+        let error = Policy::load(&path).unwrap_err();
+        assert!(
+            error
+                .root_cause()
+                .to_string()
+                .contains("unknown field `unprotected_dot_folders`"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1364,7 +1401,13 @@ files = ["README.md", "AGENTS.md"]
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("policy.json");
             std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
-            assert!(Policy::load(&path).is_err(), "{project:?}, {field:?}");
+            let error = Policy::load(&path).unwrap_err();
+            let expected = if project != first {
+                format!("invalid exact project URL {project:?}")
+            } else {
+                format!("invalid project field {field:?}")
+            };
+            assert_eq!(error.root_cause().to_string(), expected);
         }
     }
 
