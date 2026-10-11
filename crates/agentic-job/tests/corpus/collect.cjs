@@ -21,6 +21,8 @@ Object.assign(globalThis, {
 });
 Object.assign(process.env, {
   GH_AW_SAFE_OUTPUTS: outputs, GH_AW_SAFE_OUTPUTS_CONFIG_PATH: config, GH_AW_VALIDATION_CONFIG_PATH: validation,
+  // check.yml's URL policy.
+  GH_AW_SAFE_OUTPUTS_URLS: "allowed-or-code-region",
 });
 // Its own copy of the result goes to /tmp/gh-aw unless told otherwise.
 require(path.join(js, "constants.cjs")).TMP_GH_AW_PATH = path.join(path.dirname(result), "gh-aw");

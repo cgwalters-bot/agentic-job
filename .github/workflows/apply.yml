@@ -516,6 +516,8 @@ jobs:
           GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/agent_output.json
           GH_AW_WORKFLOW_ID: agentic-job
           GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
+          # The handlers sanitize text again: the collector's policy, in check.yml.
+          GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
         with:
           # Use the checkout's credential selection for API writes too.
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}

@@ -114,6 +114,13 @@ jobs:
           GH_AW_SAFE_OUTPUTS: ${{ env.JOB_DIR }}/safe-outputs/outputs.jsonl
           GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ env.GH_AW_TMP }}/config.json
           GH_AW_VALIDATION_CONFIG_PATH: ${{ env.SOURCE_DIR }}/safe-outputs/validation.json
+          # gh-aw's `safe-outputs.urls`. Its default redacts a non-https
+          # `scheme://` up to the next space even in code, which ate Cargo's
+          # `path+file://` package ids (#401). URLs in what gh-aw takes for
+          # code are now kept, and its idea of code is not quite GitHub's:
+          # see docs/safe-outputs.md for why that is acceptable. Secret-shaped
+          # strings are refused by check either way.
+          GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
         with:
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;

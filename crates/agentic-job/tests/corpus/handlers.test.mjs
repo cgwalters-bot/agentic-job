@@ -236,3 +236,77 @@ test('checked issue actions preserve the actual handler payload', async () => {
     }
   }
 });
+
+// gh-aw's `safe-outputs.urls`, as the step NAME of a workflow sets it.
+function urlPolicy(file, name) {
+  const text = readFileSync(join(root, '.github/workflows', file), 'utf8');
+  const section = text.split(`- name: ${name}\n`)[1]?.split('\n      - ')[0];
+  assert.ok(section, `${file}: ${name}`);
+  return section.match(/^ {10}GH_AW_SAFE_OUTPUTS_URLS: (\S+)$/m)?.[1];
+}
+
+test('build output in code survives gh-aw\'s URL filtering, a secret in it does not', () => {
+  const policies = [
+    urlPolicy('check.yml', 'Ingest the outputs with gh-aw\'s collector'),
+    urlPolicy('apply.yml', 'Apply the outputs with gh-aw\'s handlers'),
+  ];
+  assert.deepEqual(policies, ['allowed-or-code-region', 'allowed-or-code-region']);
+  const repo = 'owner/source';
+  // The head of a `cargo metadata` that gh-aw's default policy cut (#401).
+  const cargo = '{"packages":[{"name":"agentic-job","version":"0.0.3","id":"path+file:///home/u/agentic-job#0.0.3","license":"MIT OR Apache-2.0"}]}';
+  // Put together here, so that no file holds a secret-shaped string.
+  const token = ['gh', 's_', 'a1B2'.repeat(10)].join('');
+  // [name, body, accepted, what the comment shows, what it must not]
+  for (const [name, body, ok, shown, hidden] of [
+    ['cargo metadata in a code block', `\`\`\`text\n${cargo}\n\`\`\``, true, cargo, '(redacted)'],
+    ['a package id in inline code', 'id `path+file:///home/u/x#0.1.0` ok', true, 'path+file:///home/u/x#0.1.0', '(redacted)'],
+    ['cargo metadata in prose', cargo, true, '"id":"(redacted) OR Apache-2.0"', 'path+file'],
+    ['a link in prose', 'see ftp://evil.example/x', true, '(evil.example/redacted)', 'ftp://'],
+    ['a job token in a code block', `\`\`\`text\n${cargo} ${token}\n\`\`\``, false],
+    ['a job token in a URL in code', `\`git://x/${token}\``, false],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'url-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.add_comment]\nmax = 1\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'add_comment',
+        '--max-outputs', '1'], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type: 'add_comment', item_number: 7, body }) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      assert.equal(checked.status, ok ? 0 : 1, name);
+      if (!ok) {
+        assert.match(verdict.errors.join('\n'), /secret-shaped/, name);
+        continue;
+      }
+      // The handler sanitizes the body again before posting it, with apply's policy.
+      globalThis.core = { info() {}, warning() {}, debug() {}, error() {} };
+      const { sanitizeContent } = require(join(js, 'sanitize_content.cjs'));
+      const previous = process.env.GH_AW_SAFE_OUTPUTS_URLS;
+      process.env.GH_AW_SAFE_OUTPUTS_URLS = policies[1];
+      let posted;
+      try {
+        posted = sanitizeContent(verdict.items[0].body, {});
+      } finally {
+        if (previous === undefined) delete process.env.GH_AW_SAFE_OUTPUTS_URLS;
+        else process.env.GH_AW_SAFE_OUTPUTS_URLS = previous;
+      }
+      for (const text of [verdict.items[0].body, posted]) {
+        assert.ok(text.includes(shown), `${name}: ${text}`);
+        assert.ok(!text.includes(hidden), `${name}: ${text}`);
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});

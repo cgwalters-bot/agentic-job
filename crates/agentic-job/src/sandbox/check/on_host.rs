@@ -436,8 +436,18 @@ impl Checker<'_> {
             &["unshare", "--user", "--map-root-user", "--mount", "true"],
             b"",
         )?;
+        // The stderr noted above reads like an error, so say what it is (#401).
+        let why = if diagnostic {
+            ""
+        } else {
+            "; information only, not a failure: usually Ubuntu's AppArmor user \
+             namespace restriction, which leaves unprofiled programs such as \
+             util-linux `unshare` without the capability to write uid_map, while \
+             Podman's profiled entry point, which filesystem-view-userns requires, \
+             keeps it"
+        };
         self.report.note(&format!(
-            "util-linux-userns-diagnostic: success={diagnostic}; world_write_walk={}",
+            "util-linux-userns-diagnostic: success={diagnostic}; world_write_walk={}{why}",
             self.config.sandbox.world_write_walk
         ));
         if !self.config.sandbox.world_write_walk {

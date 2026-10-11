@@ -229,6 +229,33 @@ mod tests {
         }
     }
 
+    /// Build output is left as it is, and a secret in it is still replaced
+    /// (#401: the span lost there was gh-aw's URL filtering, not this).
+    #[test]
+    fn build_output() {
+        let job = token("ghs_");
+        let registered = "registered-run-secret";
+        let metadata = r#"{"packages":[{"name":"agentic-job","version":"0.0.3","id":"path+file:///home/u/agentic-job/crates/agentic-job#0.0.3","license":"MIT OR Apache-2.0","license_file":null}]}"#;
+        let cases: &[(&str, String, String)] = &[
+            ("cargo metadata", metadata.to_owned(), metadata.to_owned()),
+            (
+                "the job token in a package id",
+                metadata.replace("/home/u", &format!("/{job}")),
+                metadata.replace("/home/u", &format!("/{REPLACEMENT}")),
+            ),
+            (
+                "a registered secret in a git URL",
+                format!("Updating git repository `https://x:{registered}@example.com/a`"),
+                format!("Updating git repository `https://x:{REPLACEMENT}@example.com/a`"),
+            ),
+        ];
+        let mut redactor = Redactor::new([registered]).unwrap();
+        for (name, text, want) in cases {
+            assert_eq!(redactor.finds(text.as_bytes()), text != want, "{name}");
+            assert_eq!(redactor.redact(text), *want, "{name}");
+        }
+    }
+
     #[test]
     fn github_job_token_is_redacted_from_public_run_files() {
         let dir = tempfile::tempdir().unwrap();

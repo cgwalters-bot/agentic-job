@@ -56,7 +56,10 @@ home, and cannot remount the host view writable to write the planted directory.
 The build probe writes a real Containerfile and builds with networking and pulls
 disabled; the built-image run also forbids pulls and fails distinctly without
 running if its build failed. Both the view and legacy-walk baseline report a
-non-failing util-linux `unshare` diagnostic, including stderr on failure. This
+non-failing util-linux `unshare` diagnostic, including stderr on failure. With
+Ubuntu's AppArmor user namespace restriction on (23.10 and later), that note
+reads `unshare: write failed /proc/self/uid_map: Operation not permitted`:
+expected, and not a failure of the check. This
 distinguishes host policy from view regressions:
 [Ubuntu's AppArmor user namespace restrictions](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces)
 are application-specific, and secure-host does not disable those sysctls.

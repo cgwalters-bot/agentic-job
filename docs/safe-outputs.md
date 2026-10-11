@@ -36,6 +36,24 @@ into this repository, and none of it is reimplemented: it is validated,
 maintained code, and a second implementation would only be a second
 reading of the same rules to keep in step.
 
+Both run with gh-aw's
+[`safe-outputs.urls`](https://github.github.com/gh-aw/reference/glossary/#url-sanitization-policy-safe-outputsurls)
+set to `allowed-or-code-region`. Its default redacts every URL that is
+not `https://` to an allowed domain, in code blocks too, and a
+non-`https` one up to the next space, so build output was lost: Cargo's
+`path+file://` package ids took the JSON after them with them
+([#401](https://github.com/cgwalters-forge/agentic-job/issues/401)).
+Now URLs in inline code and code blocks are kept, and those in prose
+are filtered as before. gh-aw's idea of code is not exactly GitHub's
+(an HTML block around a fence, escaped backticks, a span across a blank
+line), so an agent that means to can still get a link or image to any
+host posted. That adds no channel out: the sandbox's reads are open to
+any host anyway, links to github.com pass the filter too, and GitHub
+fetches images through its own proxy. The filter is not secret
+redaction: check refuses a credential-shaped string anywhere in the
+outputs, code included, and `run` refuses to upload outputs holding one
+or the run's own secrets.
+
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the
 rules of each type. gh-aw's compiler writes those into the workflows it
