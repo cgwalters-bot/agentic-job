@@ -6,6 +6,13 @@ maintain or write permission. Forks and issue comments are refused. The
 workflow, bounds and [standing task](../workflow/review.md) come from the base,
 not the pull request head.
 
+The separate [dispatched review](dispatch.md) also accepts open fork pull
+requests on the configured base. It resolves the exact head SHA through the
+target repository's PR API and fetches that SHA without forge credentials in
+the sandbox. It does not use the fork's URL or branch as a fetch argument,
+broaden job permissions, or change automatic event admission. Fork end-to-end
+CI remains a separate concern.
+
 To try the scripted caller in another repository, follow the
 [complete copy and edit list](workflow.md#event-triggered-callers), including
 the setup script, bounds and standing task. No label is needed for this caller.

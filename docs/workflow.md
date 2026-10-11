@@ -679,7 +679,8 @@ post one validated verdict comment or noop. It requires notifications and
 partial application off, and supports fake, opencode and Claude agents. Real
 reviewers start in the trusted base checkout with the exact head beside it;
 see [real reviewer setup](review.md#enabling-a-real-reviewer). The
-[dispatch caller](dispatch.md) also supports operator-selected PR reviews.
+[dispatch caller](dispatch.md) also supports operator-selected reviews of open
+same-repository or fork PRs on the configured base, pinned to their exact head SHA.
 
 With `event: true` the run is decided from the event that started the
 calling workflow, by `agentic-job event` in the policy job
