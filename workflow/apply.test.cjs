@@ -386,16 +386,6 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   const conclude = workflow.split('\n  conclude:\n')[1];
   assert.match(conclude, /- name: Edit the status comment\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true' \}\}/);
   assert.match(conclude, /fromJSON\(inputs.policy\).comment-target != '\*' && !\(fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true'\) \}\}/);
-  // [comment id, item, status, the API call]
-  for (const [id, item, expected, call] of [
-    ['42', '7', 0, 'PATCH repos/o/r/issues/comments/42'], ['', '7', 0, 'POST repos/o/r/issues/7/comments'],
-    ['', '', 1, ''], ['', '$(exit 9)', 1, ''], ['4 2', '7', 0, 'POST repos/o/r/issues/7/comments'],
-  ]) {
-    const result = command(__dirname, 'bash', ['-eo', 'pipefail', '-c', 'gh() { echo "$3 $4"; };\n' + step('Edit the status comment')],
-      { ID: id, ITEM: item, TEXT: 'done', GITHUB_REPOSITORY: 'o/r' });
-    assert.equal(result.status, expected, result.stdout + result.stderr);
-    if (expected === 0) assert.equal(result.stdout.trim(), call);
-  }
   // Reactions alone: a notify that failed before it found its target left
   // no id, and conclude reacts to nothing rather than failing.
   assert.match(conclude, /- name: A reaction that says how it ended\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'reaction' && fromJSON\(inputs.policy\).notified == 'true' && fromJSON\(inputs.policy\).notify-id != '' \}\}/);
@@ -410,6 +400,72 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
     if (expected === 0) assert.equal(result.stdout.trim(), call);
   }
 });
+
+// gh as conclude calls it: a listing prints the pages given, a write is recorded.
+function concluded(name, env, pages = []) {
+  const gh = `gh() {
+    if [ "$2" = --paginate ]; then printf '%s\\n' "$3" >> "$CALLS"; printf '%s' "$PAGES"
+    else jq -cn --arg call "$3 $4" --arg body "\${6#body=}" '{$call, $body}' >> "$CALLS"; fi
+  };\n`;
+  const dir = mkdtempSync(join(homedir(), 'conclude-'));
+  try {
+    const calls = join(dir, 'calls');
+    writeFileSync(calls, '');
+    const result = command(dir, 'bash', ['-eo', 'pipefail', '-c', gh + step(name)], {
+      GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7', ARTIFACT_PREFIX: '', TEXT: 'done', CALLS: calls,
+      PAGES: pages.map(page => JSON.stringify(page)).join(''), ...env });
+    const lines = readFileSync(calls, 'utf8').split('\n').filter(Boolean);
+    return { status: result.status, output: result.stdout + result.stderr,
+      calls: lines.map(line => line.startsWith('{') ? JSON.parse(line) : { call: `GET ${line}` }) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+{
+  const digest = prefix => require('node:crypto').createHash('sha256').update(prefix).digest('hex').slice(0, 16);
+  const name = `<!-- agentic-job-concluded: 7/${digest('')} -->`;
+  const named = `done\n\n${name}`;
+  const bot = { login: 'github-actions[bot]' };
+  const status = { ITEM: '7' };
+  const refusal = { TARGET: '5', REPO: 'o/out' };
+  // [case, step, env, pages of comments, exit status, the calls made]
+  for (const [label, stepName, env, pages, expected, calls] of [
+    ["notify's comment is edited", 'Edit the status comment', { ID: '42', ITEM: '7' }, [], 0,
+      [{ call: 'PATCH repos/o/r/issues/comments/42', body: 'done' }]],
+    ['with no comment of notify, the status is posted named', 'Edit the status comment', status, [[]], 0,
+      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
+    ['an id that is no number is looked up like none', 'Edit the status comment', { ID: '4 2', ITEM: '7' }, [], 0,
+      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
+    ["a re-run edits the status an earlier attempt posted, on any page", 'Edit the status comment', status,
+      [[{ id: 1, user: bot, body: 'other' }], [{ id: 9, user: bot, body: `failed\n\n${name}` }]], 0,
+      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'PATCH repos/o/r/issues/comments/9', body: named }]],
+    ["another poster's name does not count", 'Edit the status comment', status,
+      [[{ id: 9, user: { login: 'mallory' }, body: `failed\n\n${name}` }]], 0,
+      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
+    ["another call's name does not count", 'Edit the status comment', { ...status, ARTIFACT_PREFIX: 'review-' },
+      [[{ id: 9, user: bot, body: `failed\n\n${name}` }]], 0,
+      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' },
+        { call: 'POST repos/o/r/issues/7/comments', body: `done\n\n<!-- agentic-job-concluded: 7/${digest('review-')} -->` }]],
+    ['a name that is not last does not count', 'Edit the status comment', status,
+      [[{ id: 9, user: bot, body: `${name}\n\nquoted` }, { id: 10, user: bot, body: null }]], 0,
+      [{ call: 'GET repos/o/r/issues/7/comments?per_page=100' }, { call: 'POST repos/o/r/issues/7/comments', body: named }]],
+    ['no id and no item fails', 'Edit the status comment', { ID: '', ITEM: '' }, [], 1, []],
+    ['an item that is no number fails', 'Edit the status comment', { ID: '', ITEM: '$(exit 9)' }, [], 1, []],
+    ['a refusal is posted named', 'Post the refusal to the comment target', refusal, [[]], 0,
+      [{ call: 'GET repos/o/out/issues/5/comments?per_page=100' }, { call: 'POST repos/o/out/issues/5/comments', body: named }]],
+    ['a re-run edits the refusal an earlier attempt posted', 'Post the refusal to the comment target', refusal,
+      [[{ id: 3, user: bot, body: named }]], 0,
+      [{ call: 'GET repos/o/out/issues/5/comments?per_page=100' }, { call: 'PATCH repos/o/out/issues/comments/3', body: named }]],
+    ['a refusal target that is no number fails', 'Post the refusal to the comment target', { ...refusal, TARGET: '5/x' }, [], 1, []],
+  ]) {
+    test(`conclude posts its comment once: ${label}`, () => {
+      const result = concluded(stepName, env, pages);
+      assert.equal(result.status, expected, result.output);
+      assert.deepEqual(result.calls, calls);
+    });
+  }
+}
 
 test('comment-only apply skips every repository step, including checkout', () => {
   const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];

@@ -784,29 +784,49 @@ jobs:
           printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
       # Notify's comment is edited; if posting it failed (which does not
       # stop the run), the status goes in a new comment on the same item.
+      # Re-running apply re-runs this job: a comment it posts is named by
+      # run and call, as apply names the link to its result, and a re-run
+      # edits the one this job token's github-actions[bot] posted before.
       - name: Edit the status comment
         if: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true' }}
         env:
           ID: ${{ fromJSON(inputs.policy).notify-comment-id }}
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}
           TEXT: ${{ steps.ended.outputs.text }}
+          ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
         run: |
           if [[ "$ID" =~ ^[0-9]+$ ]]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$TEXT" --jq .html_url
           else
             [[ "$ITEM" =~ ^[0-9]+$ ]] || { echo "::error::notify left no comment id and no item"; exit 1; }
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments" -f body="$TEXT" --jq .html_url
+            name="<!-- agentic-job-concluded: $GITHUB_RUN_ID/$(printf %s "$ARTIFACT_PREFIX" | sha256sum | cut -c1-16) -->"
+            ID=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments?per_page=100" | jq -rs --arg name "$name" \
+              'map(.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | endswith("\n\n" + $name)))) | first | .id // empty')
+            if [[ "$ID" =~ ^[0-9]+$ ]]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
+            else
+              gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
+            fi
           fi
       # Only a policy-admitted numeric target, never an agent-selected endpoint.
+      # Named and edited on a re-run, as the status comment above.
       - name: Post the refusal to the comment target
         if: ${{ fromJSON(inputs.check).outputs.refusal != '' && fromJSON(inputs.policy).comment-target != '' && fromJSON(inputs.policy).comment-target != '*' && !(fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') }}
         env:
           TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
           TEXT: ${{ steps.ended.outputs.text }}
+          ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
         run: |
           [[ "$TARGET" =~ ^[0-9]+$ && "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
-          gh api -X POST "repos/$REPO/issues/$TARGET/comments" -f body="$TEXT" --jq .html_url
+          name="<!-- agentic-job-concluded: $GITHUB_RUN_ID/$(printf %s "$ARTIFACT_PREFIX" | sha256sum | cut -c1-16) -->"
+          ID=$(gh api --paginate "repos/$REPO/issues/$TARGET/comments?per_page=100" | jq -rs --arg name "$name" \
+            'map(.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | endswith("\n\n" + $name)))) | first | .id // empty')
+          if [[ "$ID" =~ ^[0-9]+$ ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$ID" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
+          else
+            gh api -X POST "repos/$REPO/issues/$TARGET/comments" -f body="$TEXT"$'\n\n'"$name" --jq .html_url
+          fi
       # A notify that failed before it found what to react to leaves no
       # id: nothing is reacted to then, and notify's failure says why.
       - name: A reaction that says how it ended

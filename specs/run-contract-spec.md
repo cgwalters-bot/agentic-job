@@ -215,7 +215,14 @@ open or merged pull request from the run's branch in the fork RC-021 names,
 or an issue, posted by its
 own token's principal: `github-actions[bot]` for the job token, the user
 `GET /user` names for a PAT, and no one for a PAT it does not name. Check MUST refuse any request holding the name. Closing, labelling and setting a project
-field are left to be repeated: done twice they leave the forge as once.
+field are left to be repeated: done twice they leave the forge as once, as
+the handlers apply them here (closing with no comment, labels only that
+exist, the issue's item found or added and its field set).
+Conclude, which a re-run of apply runs again, MUST post its status or
+refusal comment once per run and call: named `agentic-job-concluded:
+RUNID/DIGEST16` (over the artifact prefix), hidden last in the body, and
+edited, not posted again, when a comment of `github-actions[bot]` ends with
+that name.
 For `push_to_pull_request_branch`, the guard MUST leave out the push when
 the fetched fork branch holds the checked tree as exactly one commit on the
 policy's pinned head. The final check MUST re-fetch and verify that same
@@ -223,7 +230,8 @@ parent and tree even when the guard left it out. This reuses the guard and
 its `already_applied` report, not a second marker scheme.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), tests from
 `a posted body hides the name the guard put last` to `a pull request
-without a checked patch stops the guard`;
+without a checked patch stops the guard`, `closing an issue again posts
+nothing`, and the `conclude posts its comment once` cases;
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), test `what_is_refused`;
 the e2e-dispatch-verify step `The re-run left out what was applied, and the
 comment is there once` in [ci.yml](../.github/workflows/ci.yml), which re-runs
@@ -477,7 +485,15 @@ These limitations are not additional guarantees:
   branch, as before. "Re-run all jobs" keeps the run ID, but the agent hands
   back anew, and what differs is applied as new. The hidden name is checked
   on the forge, not a ledger, so deleting what was posted lets a re-run post
-  it again.
+  it again. Nor is a close, a label or a field value marked: a re-run after
+  someone reopened the issue, removed the label or changed the field does
+  it again. The model's `AtMostOnce` covers proposals, not conclude's
+  status comment. An issue gh-aw's pull request handler opens in a pull
+  request's place is not named, and a run whose `create_issue` max allows
+  one may open it again on a re-run that gets past the run's branch.
+  Conclude's reactions are not removed, so a re-run that ends otherwise
+  leaves both; and "Re-run all jobs" runs `notify` again, which posts a
+  second status comment.
 - Whether a supplied job, App or fine-grained token can write is not
   detectable before the run: GitHub reports scopes only for classic tokens,
   and validates an empty write's body before it authorizes it (422, not

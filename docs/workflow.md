@@ -1160,9 +1160,14 @@ posts count: nothing is left out, and a re-run posts again. `check`
 refuses any request holding the name, so the agent cannot make one
 request look applied by posting another. Closing an issue, adding
 labels and setting a project field are left to be done again: done
-twice they leave the forge as once. "Re-run all jobs" keeps the run's
-ID, but runs the agent again: what it hands back the same is left out,
-and what differs is applied as new. A pull request with a different
+twice they leave the forge as once, unless someone undid them in
+between. A re-run of apply runs `conclude` again too; the status or
+refusal comment it posts itself (not `notify`'s, which it edits) is
+named `agentic-job-concluded: RUNID/DIGEST` by the run and the prefix,
+and a re-run edits the one of `github-actions[bot]` that ends with it
+rather than post another. "Re-run all jobs" keeps the run's ID, but runs
+the agent again: what it hands back the same is left out, and what
+differs is applied as new. A pull request with a different
 patch is new even with the same title, body and branch; its handler
 then stops at the run's branch, which is already there, and apply
 fails rather than report the earlier pull request.
