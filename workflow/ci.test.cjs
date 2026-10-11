@@ -20,7 +20,7 @@ test('PR CI tests the ingress checker with the same verified analyzers', () => {
 });
 
 test('privileged jobs and required check remain gated for forks', () => {
-  assert.match(ci, /\non:\n  pull_request:\n  push:\n    branches: \[main\]\n\n/);
+  assert.match(ci, /\non:\n  pull_request:\n  merge_group:\n  push:\n    branches: \[main\]\n\n/);
   assert.doesNotMatch(ci, /pull_request_target|workflow_run|secrets\./);
   const jobs = ci.split('\njobs:\n')[1].split(/\n(?=  [a-z][a-z0-9-]*:\n)/);
   let privileged = 0;
@@ -30,12 +30,14 @@ test('privileged jobs and required check remain gated for forks', () => {
     assert.match(job, /\n    if: \$\{\{ (always\(\) && )?needs\.changes\.outputs\.e2e == 'true'( && [^|\n]*)? \}\}\n|\n    if: \$\{\{ github\.event_name == 'push' \}\}\n/, job.split('\n')[0]);
   }
   assert.ok(privileged >= 10);
-  const fork = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository";
-  assert.ok(ci.includes(`e2e: \${{ ${fork} && 'false' || steps.paths.outputs.e2e }}`));
-  assert.ok(ci.includes(`fork-e2e: \${{ ${fork} && steps.paths.outputs.e2e != 'false' }}`));
-  const command = ci.slice(ci.indexOf('        run: >-\n', ci.indexOf('\n  ci:')))
+  assert.match(ci, /^      e2e:.*steps\.queue\.outputs\.enabled == 'true' \|\| github\.event\.pull_request\.head\.repo\.full_name != github\.repository.*$/m);
+  assert.match(ci, /^      fork-e2e:.*steps\.queue\.outputs\.enabled != 'true'.*$/m);
+  assert.match(ci, /^            const rules = await github\.paginate\('GET \/repos\/\{owner\}\/\{repo\}\/rules\/branches\/\{branch\}', \{$/m);
+  assert.match(ci, /branch: context.payload.pull_request.base.ref/);
+  assert.match(ci, /\n  ci:\n    if: \$\{\{ always\(\) \}\}\n    needs: required-checks\n/);
+  const command = ci.slice(ci.indexOf('        run: >-\n', ci.indexOf('\n  required-checks:')), ci.indexOf('\n  ci:\n'))
     .replace('        run: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
-  const skipped = ['proposals', 'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'];
+  const skipped = ['proposals', 'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'];
   const normal = ['changes', 'docs', 'rust', 'sandbox'];
   const needs = Object.fromEntries([...normal, ...skipped].map(key => [key, { result: 'success' }]));
   const run = (state, e2e, installed = 'true', forkE2e = 'false') => spawnSync('bash', ['-c', command], {
@@ -56,6 +58,89 @@ test('privileged jobs and required check remain gated for forks', () => {
   for (const key of normal) assert.notEqual(run({ ...docs, [key]: { result: 'skipped' } }, 'false'), 0);
   assert.equal(run({ ...needs, 'e2e-review': { result: 'skipped' } }, 'true', 'false'), 0);
   for (const key of skipped) assert.notEqual(run({ ...needs, [key]: { result: 'skipped' } }, 'true'), 0);
+});
+
+test('queue scheduling runs E2E on groups and on PRs only without a queue', () => {
+  // Approximation for these canonical inputs only: GitHub expressions differ
+  // from JavaScript in truthiness and case-insensitive string comparisons.
+  // The substring assertions above check wiring; this table checks scheduling.
+  const vm = require('node:vm');
+  const expressions = Object.fromEntries(['e2e', 'fork-e2e'].map(key => [key,
+    ci.match(new RegExp(`      ${key}: \\$\\{\\{ (.*) \\}\\}`))[1]]));
+  for (const event of ['pull_request', 'merge_group', 'push']) {
+    for (const queue of ['true', 'false']) {
+      for (const fork of [true, false]) {
+        for (const paths of ['true', 'false']) {
+          const context = {
+            github: { event_name: event, repository: 'owner/repo', event: {
+              pull_request: { head: { repo: { full_name: fork ? 'fork/repo' : 'owner/repo' } } },
+            } },
+            steps: { queue: { outputs: { enabled: queue } }, paths: { outputs: { e2e: paths } } },
+          };
+          const deferred = event === 'pull_request' && queue === 'true';
+          const unavailable = event === 'pull_request' && fork;
+          assert.equal(vm.runInNewContext(expressions.e2e, context), deferred || unavailable ? 'false' : paths);
+          assert.equal(vm.runInNewContext(expressions['fork-e2e'], context), unavailable && !deferred && paths !== 'false');
+        }
+      }
+    }
+  }
+});
+
+test('review bootstrap checks trusted base files, including on merge groups', () => {
+  const block = ci.split('\n  review-base:\n')[1].split('\n  e2e-dispatch:\n')[0];
+  const expression = block.match(/ref: \$\{\{ (.*) \}\}/)[1];
+  const vm = require('node:vm');
+  for (const [pr, group, expected] of [
+    ['pr-base', 'group-base', 'pr-base'],
+    ['', 'group-base', 'group-base'],
+    ['', '', 'push-head'],
+  ]) {
+    assert.equal(vm.runInNewContext(expression, { github: {
+      event: { pull_request: { base: { sha: pr } }, merge_group: { base_sha: group } },
+      sha: 'push-head',
+    } }), expected);
+  }
+  assert.match(ci, /pull_request and merge_group both run the proposed workflow/);
+});
+
+test('merge-group analysis uses a branch name, not a fully qualified ref', () => {
+  const source = ci.split('      - id: merge-base\n')[1].split('      # Effective branch rules')[0]
+    .split('          script: |\n')[1].trim().split('\n').map(line => line.trim()).join('\n');
+  const run = ref => {
+    let branch;
+    new Function('context', 'core', source)(
+      { payload: { merge_group: { head_ref: ref } } },
+      { setOutput: (key, value) => { assert.equal(key, 'branch'); branch = value; } },
+    );
+    return branch;
+  };
+  assert.equal(run('refs/heads/gh-readonly-queue/main/pr-123-abcd'), 'gh-readonly-queue/main/pr-123-abcd');
+  assert.throws(() => run('refs/tags/main'), /not a branch/);
+  assert.equal((ci.match(/base: \$\{\{ github.head_ref \|\| needs.changes.outputs.analysis-base \|\| 'main' \}\}/g) || []).length, 2);
+});
+
+test('queue detection fails closed and sentinel rejects non-success', async () => {
+  const source = ci.split('      - id: queue\n')[1].split('      - uses: actions/checkout@')[0]
+    .split('          script: |\n')[1].trim().split('\n').map(line => line.trim()).join('\n');
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const detect = new AsyncFunction('github', 'context', 'core', source);
+  const context = { repo: { owner: 'owner', repo: 'repo' }, payload: { pull_request: { base: { ref: 'main' } } } };
+  for (const rules of [[], [{ type: 'merge_queue' }], [{ type: 'required_status_checks' }]]) {
+    let enabled;
+    await detect({ paginate: async (route, params) => {
+      assert.equal(params.branch, 'main');
+      return rules;
+    } }, context, { setOutput: (key, value) => { assert.equal(key, 'enabled'); enabled = value; } });
+    assert.equal(enabled, rules.some(rule => rule.type === 'merge_queue'));
+  }
+  await assert.rejects(detect({ paginate: async () => { throw new Error('API unavailable'); } }, context,
+    { setOutput: () => assert.fail('must not publish an output after API failure') }), /API unavailable/);
+  const sentinel = ci.split('\n  ci:\n')[1].split('        run: ')[1].trim();
+  for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
+    assert.equal(spawnSync('bash', ['-c', sentinel], { env: { ...process.env, RESULT: result } }).status,
+      result === 'success' ? 0 : 1);
+  }
 });
 
 test('E2E callers, concurrency and apt safeguards remain wired', () => {
@@ -120,7 +205,7 @@ test('the workflow classifies real Git paths without executing PR scripts', () =
       git('add', name);
       git('commit', '-qm', 'change');
       const head = git('rev-parse', 'HEAD');
-      for (const event of ['pull_request', 'push']) assert.equal(run(head, event), `e2e=${expected}`, name);
+      for (const event of ['pull_request', 'push', 'merge_group']) assert.equal(run(head, event), `e2e=${expected}`, name);
     }
     assert.equal(run(base), 'e2e=true');
     assert.equal(run(base, 'push', '0'.repeat(40)), 'e2e=true');

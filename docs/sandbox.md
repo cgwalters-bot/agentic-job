@@ -17,6 +17,13 @@ design assumes prompt injection succeeds. What then matters is what the
 process can reach: no credential of the job's, no way out of its user,
 and no network path that carries data out in a write.
 
+This protects against the sandboxed process, not an untrusted workflow running
+outside the sandbox. A merge queue executes proposed workflow files and code
+with write and OIDC permissions before landing. The current PR-only
+[ingress checker](workflow-ingress.md#merge-queue-limitation) is not enforced on
+that path; human approval before enqueueing is the trust gate, including for
+workflow steps that build or execute the proposed binary outside the sandbox.
+
 The boundary is a second Unix user on the same machine. It is not a
 kernel boundary: a local privilege escalation in the kernel, systemd or
 sudo defeats it. So the machine must be a VM used for one job, and

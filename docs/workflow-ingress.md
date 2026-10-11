@@ -51,6 +51,30 @@ An administrator must enforce the trusted workflow with a ruleset; a required
 status name alone can be imitated by PR-owned workflows. Installation needs
 maintainer review because the old default branch cannot run a new definition.
 Events produced with `GITHUB_TOKEN` do not trigger workflows; token-created PRs
-need an app/PAT-triggered event. Merge queues and private-repository unauthenticated
-fetches are not supported. Hosted event delivery and ruleset enforcement need
-verification on GitHub, not just local tests.
+need an app/PAT-triggered event. Private-repository unauthenticated fetches are
+not supported. Hosted event delivery and ruleset enforcement need verification
+on GitHub, not just local tests.
+
+## Merge queue limitation
+
+This PR-only workflow cannot enforce ingress on merge groups. Enabling a queue
+with the [current CI rollout](workflow.md#ci-runner-use) requires removing its
+required-workflow rule: **ingress is then no longer enforced**, even though its
+PR runs still provide advisory findings. A required status name cannot replace
+the trusted workflow. Preserving enforcement would instead require a
+ruleset-defined `merge_group` workflow that vets `base_sha..head_sha` using
+trusted checker code; that is not implemented or verified here.
+
+Enqueueing runs the proposed workflows and code with repository write and OIDC
+permissions before landing, even if the group later fails. Therefore the queue
+must require an approving human review of the current head before admission.
+The sandbox does not protect credentials held by workflow steps outside it.
+Future auto-merge must not bypass human approval of the current head for any
+apply-opened PR. Edits to `.github/**` or `action.yml`/`action.yaml` are examples,
+not the entire boundary: binaries and host scripts built from the queued tree
+also execute outside the sandbox. Require at least one approval, approval of
+the most recent push, and dismissal of stale approvals on push. Allow no bypass
+actors unless they run and verify the full E2E suite before merging.
+Do not enable the queue until this approval requirement and broker OIDC trust
+have been verified. Queue setting changes also require rerunning open PRs whose
+green CI skipped E2E, as described in the rollout guide.

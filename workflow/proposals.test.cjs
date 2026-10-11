@@ -151,7 +151,7 @@ test('documented proposals caller matches the CI trial and shipped bounds', () =
   const bounds = readFileSync(join(__dirname, '../.github/agentic-job/allow.toml'), 'utf8');
   for (const type of ['add_comment', 'noop']) assert.match(bounds, new RegExp(`^${type} =`, 'm'));
   assert.ok(Number(bounds.match(/^max_outputs = (\d+)$/m)[1]) >= 2);
-  assert.match(ci.split('\n  ci:\n')[1], /needs: \[.*proposals, e2e-proposals,/);
+  assert.match(ci.split('\n  required-checks:\n')[1], /needs: \[.*proposals, e2e-proposals,/);
 });
 
 // Mirror ActionCommand.TryParseV2/TryParse command recognition: modern syntax

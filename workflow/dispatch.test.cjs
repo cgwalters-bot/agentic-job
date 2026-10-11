@@ -205,7 +205,7 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
     assert.ok(cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() `) ||
       cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() }}`), name);
   }
-  const aggregate = job('ci');
+  const aggregate = job('required-checks');
   assert.match(aggregate, /needs: \[.*e2e-dispatch-verify.*\]/);
   // A fork's pull request is no reason to pass a skipped job: it fails ci.
   assert.doesNotMatch(aggregate, /\$fork\b/);

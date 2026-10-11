@@ -21,6 +21,13 @@ That is a test fixture pin, not a claim that the old deployment is unchanged.
 
 ## Open work
 
+With a merge queue, restore hosted admission coverage for the event caller,
+the review verdict and dispatch's review profile: PRs skip E2E and merge groups
+exercise policy refusal instead. Use a trusted, human-approved execution path
+without granting unreviewed PR code write or OIDC authority. This is follow-up
+to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464),
+not coverage demonstrated by local tests.
+
 [Sandbox gaps (#21)](https://github.com/cgwalters-forge/agentic-job/issues/21)
 include DNS through local services, resolver restrictions and runner
 prerequisite checks. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/issues/20)

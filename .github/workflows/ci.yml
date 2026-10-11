@@ -1,10 +1,11 @@
 # The one job named ci is what the main branch ruleset requires. It only
-# gathers the others, so a new kind of check is a new job listed in its
-# `needs`, with no change to the ruleset.
+# follows the always-running aggregate, so a new check is listed in
+# required-checks.needs, with no change to the ruleset.
 name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -23,26 +24,43 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # A fork's pull request, as apply opens every agent's, gets a read-only
-    # token and no OIDC token: the end-to-end jobs, which write here, cannot
-    # run for it. Path classification lives here, not in PR-owned scripts.
-    # Agent patches cannot edit workflows; human workflow edits still need
-    # review, and the workflow-ingress check once an administrator requires
-    # it in a ruleset, because pull_request runs the proposed workflow. `e2e` says
-    # whether the jobs run; `fork-e2e` that the paths need them (or do not
-    # say) and they cannot, which fails the required ci check.
+    # Queue detection and path classification run inline with read-only access.
+    # With a queue, PRs need no write-capable E2E jobs. Without one, a fork
+    # still cannot run those jobs and must not silently bypass the only gate.
+    # pull_request and merge_group both run the proposed workflow; a merge
+    # group's holds this repository's write-capable job token.
     outputs:
-      e2e: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'false' || steps.paths.outputs.e2e }}
-      fork-e2e: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && steps.paths.outputs.e2e != 'false' }}
+      analysis-base: ${{ steps.merge-base.outputs.branch }}
+      e2e: ${{ github.event_name == 'pull_request' && (steps.queue.outputs.enabled == 'true' || github.event.pull_request.head.repo.full_name != github.repository) && 'false' || steps.paths.outputs.e2e }}
+      fork-e2e: ${{ github.event_name == 'pull_request' && steps.queue.outputs.enabled != 'true' && github.event.pull_request.head.repo.full_name != github.repository && steps.paths.outputs.e2e != 'false' }}
     steps:
+      - id: merge-base
+        if: ${{ github.event_name == 'merge_group' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const ref = context.payload.merge_group.head_ref;
+            if (!ref.startsWith('refs/heads/')) throw new Error('merge group head is not a branch');
+            core.setOutput('branch', ref.slice('refs/heads/'.length));
+      # Effective branch rules include repository and organization rulesets.
+      # API failures fail this job; never guess that the queue will test later.
+      - id: queue
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const rules = await github.paginate('GET /repos/{owner}/{repo}/rules/branches/{branch}', {
+              ...context.repo, branch: context.payload.pull_request.base.ref,
+            });
+            core.setOutput('enabled', rules.some(rule => rule.type === 'merge_queue'));
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - id: paths
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD: ${{ github.event.pull_request.head.sha || github.event.after }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.event.after }}
         shell: bash
         run: |
           e2e=true
@@ -463,9 +481,6 @@ jobs:
   # so its number is written out three times below), and `e2e-verify`
   # deletes them again.
   #
-  # A pull request from a fork skips these (the changes job): its token cannot
-  # write. Unless it changes only documentation, the required ci check then
-  # fails, and a maintainer runs them from a branch of this repository.
   # Never forward a deployment PAT to proposed workflow code. These callers
   # exercise apply's job-token fallback under their declared permissions.
   # Same noop producer/call as docs/workflow.md; no checkout or producer token.
@@ -600,7 +615,7 @@ jobs:
     with:
       id: e2e-analysis-${{ github.run_id }}
       repo: ${{ github.repository }}
-      base: ${{ github.head_ref || 'main' }}
+      base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}
       kind: analysis
       task: Analyze the checked out topic branch and comment on the named scratch issue.
       outputs: add_comment
@@ -632,7 +647,7 @@ jobs:
       id: e2e-analysis-refused-${{ github.run_id }}
       expect-check-refusal: true
       repo: ${{ github.repository }}
-      base: ${{ github.head_ref || 'main' }}
+      base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}
       kind: analysis
       task: Try to comment outside the caller's fixed destination.
       outputs: add_comment
@@ -660,7 +675,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           persist-credentials: false
       - id: files
         run: |
@@ -895,7 +910,7 @@ jobs:
           if [ "$INSTALLED" != true ]; then test "$RESULT" = skipped; echo 'Review E2E awaits installation of its base-branch files.' >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
           case "$GITHUB_EVENT_NAME" in
             pull_request) if [ "$ACTION" = reopened ]; then test "$RESULT/$TRIGGER/$EXIT" = success/refused/; else test "$RESULT/$TRIGGER/$EXIT" = success/admitted/0; fi ;;
-            push) test "$RESULT/$TRIGGER/$EXIT" = success/refused/ ;;
+            push|merge_group) test "$RESULT/$TRIGGER/$EXIT" = success/refused/ ;;
           esac
       - name: Exactly one scripted verdict was posted on the triggering pull request
         if: ${{ github.event_name == 'pull_request' && github.event.action != 'reopened' && needs.review-base.outputs.installed == 'true' }}
@@ -989,16 +1004,16 @@ jobs:
           gh api "repos/$GH_REPO/issues/$PR/reactions" --jq '.[] | select(.content == "eyes" and .user.login == "github-actions[bot]").id' |
             xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/$PR/reactions/{}"
 
-  ci:
+  required-checks:
     if: ${{ always() }}
-    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: A fork's pull request cannot run the end-to-end jobs
         if: ${{ needs.changes.outputs.fork-e2e == 'true' }}
         run: |
-          echo '::error::This pull request is from a fork and changes what the end-to-end jobs test, which cannot run with its read-only token. ci stays red until a maintainer runs them from a branch of this repository.'
+          echo '::error::Without a merge queue this fork pull request cannot run the required write-capable end-to-end jobs. Enable the queue or test from a branch of this repository.'
       - name: Every job succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
@@ -1009,5 +1024,18 @@ jobs:
           jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork_e2e "$FORK_E2E"
           '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or
           (.value.result == "skipped" and $e2e == "false" and
-            (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
            (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"
+
+  # Only this sentinel is required in the ruleset. Always report a failure
+  # if the aggregate did not succeed (a skipped required check can pass).
+  ci:
+    if: ${{ always() }}
+    needs: required-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - env:
+          RESULT: ${{ needs.required-checks.result }}
+        run: test "$RESULT" = success

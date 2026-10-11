@@ -310,16 +310,19 @@ Read this before relying on it.
 - The event path (`event: true`) runs in CI on same-repository pull requests and
   push of this repository (`e2e-event`, [below](#event-triggered-callers)):
   admitted on a pull request, with the comments on the pull request;
-  refused on a push. The slash-command, label and schedule examples are
+  refused on a push. With a merge queue, PRs skip these callers and merge
+  groups exercise refusal only: event admission, the review verdict and
+  dispatch's review profile are not covered there. Restoring that coverage is
+  [follow-up work](plan.md#open-work). The slash-command, label and schedule examples are
   live here with the scripted agent.
-- Fork pull requests, as apply opens every agent's, skip CI's end-to-end
-  jobs, which write here (the `changes` job in `ci.yml`); the other jobs run
-  for them with a read-only token, no secrets and no OIDC token. Unless
-  such a pull request changes only documentation, the required `ci`
-  check fails for it, and a maintainer runs the end-to-end jobs from a
-  branch of this repository before merging it.
+- With a merge queue configured, pull requests (including forks) skip CI's
+  write-capable end-to-end jobs; the queue runs them before landing. Without
+  a queue, non-documentation fork pull requests still fail the gate because
+  their read-only token cannot run those jobs. No PAT is forwarded to them.
 - Not yet verified: `apply-environment` (the live caller passes a variable,
   but its resolved value is not confirmed by the cited evidence).
+- Not yet verified: a `merge_group` run. No merge queue is configured
+  yet, so CI has only run the pull request and push paths.
 - Not tried at all: a network join in the composed caller's own agent job,
   and applying a `create_issue`:
   that type is checked through gh-aw's collector and `check` in CI
@@ -329,8 +332,9 @@ Read this before relying on it.
 
 Workflow and action edits are also vetted by the independent base-defined
 [workflow ingress check](workflow-ingress.md), including fork pull requests.
-It gates a merge only once an administrator requires it in a ruleset; that
-static regression gate is separate from the privileged end-to-end tests below.
+It gates a merge only once an administrator requires it in a ruleset, without
+a merge queue. The queue rollout below gives up that enforcement; it is a
+trust-boundary change, not just a capacity change.
 
 The run action reports setup seconds from GitHub's job start to the first ACP
 `session/prompt` dispatch, including checkout, hardening, clone and registration.
@@ -342,11 +346,64 @@ comes from the harness's outgoing transcript, not an agent-provided timestamp.
 Timing-report failures cannot prevent artifact upload. On a failed-jobs rerun the
 bound checks the latest full agent execution, including one from a prior attempt.
 
-CI always starts and reports the required job named `ci`; it does not use
-workflow-level path exclusions. Its read-only `changes` job checks the complete
-Git diff (PR merge base to head, or push before to after), without an API's
+CI keeps one required sentinel named `ci`, depending on the `always()`
+`required-checks` aggregation job. The aggregate fails on failed, cancelled or
+unexpectedly skipped dependencies; the sentinel only succeeds after it succeeds.
+There are no workflow-level path exclusions. Following
+[bootc's CI](https://github.com/bootc-dev/bootc/blob/main/.github/workflows/ci.yml),
+the read-only `changes` job queries the base branch's effective rules. With a
+`merge_queue` rule, pull requests run the non-writing checks only, and
+`merge_group` runs the end-to-end callers with this repository's job tokens.
+Without a queue, same-repository pull requests also run those callers. A rules
+API failure fails the gate rather than guessing that testing can be deferred.
+Pushes to main retain the existing suite. The
+[ingress workflow](workflow-ingress.md) is PR-only and does not run for a merge
+group. Enabling the queue with this PR-only ingress workflow means **ingress
+is no longer enforced**: the administrator must remove its required-workflow
+rule, not merely stop requiring its status name. `ci` is the required CI name,
+not a replacement for trusted ingress. A merge group runs the queued pull request's
+own workflow files and code with this repository's job token, including the
+write and OIDC permissions of the end-to-end callers, before it lands. Entering
+the queue is what grants them, so whatever admits a pull request to the queue
+is the gate on its workflow changes. Even a group that fails and is ejected may
+already have written to the forge or spent inference budget. The queue must
+require an approving human review of the current head before enqueueing,
+including its workflows, actions and code executed outside the sandbox. Do not
+enable the queue until that approval gate is enforced: configure at least one
+required approval, require approval of the most recent push, and dismiss stale
+approvals on push. Use no bypass actors, or require each bypass actor to run and
+verify the full E2E suite. Future caller-bounded auto-merge must not bypass human
+approval of the current head for any apply-opened PR. Workflow and action edits
+(`.github/**`, `action.yml`/`action.yaml`) are examples, not the whole boundary:
+the queued tree's binary and host scripts also run outside the sandbox with
+write or OIDC authority. This restriction is not implemented here: part 3
+remains follow-up work. Event/review callers report successful policy refusals
+on merge groups, rather than trying to find a triggering pull request; dispatch
+omits its PR-only review profile. Their verifiers handle these events explicitly.
+
+The rules API's acceptance of percent-encoded slashes in base branch names has
+not been verified live; an API rejection fails `changes` and the `ci` gate closed.
+
+Queue detection is a snapshot at the PR run, not a merge-time guarantee. Before
+removing the queue rule or changing it to evaluate-only, block direct merges and
+rerun CI on every open PR head that passed while the queue was active. Those
+green statuses did not include E2E. Actors able to bypass the queue must also
+run and verify the full E2E suite before direct merging; a green PR `ci` is
+insufficient. Changing the rules does not invalidate old green statuses.
+
+Broker acceptance of pre-landing OIDC is **unknown**, not demonstrated here.
+Merge-group jobs request it from
+`refs/heads/gh-readonly-queue/main/pr-N-<sha>`; `secure-host/hosted.toml` configures
+the host, not broker trust. The broker operator must verify the actual claims
+and workflow/ref allowlist described in [inference admission](inference.md)
+before enabling the queue. Acceptance authorizes spend from unmerged code;
+refusal stalls the queue's E2E jobs. Do not broaden the allowlist merely to make
+CI green without reviewing that pre-landing authority.
+
+The path check uses the complete
+Git diff (PR merge base to head, merge-group base to head, or push before to after), without an API's
 changed-file pagination limit. Only `README.md` and Markdown under `docs/`
-skip the six `e2e-*` callers, `review-base` and their write-capable verifier.
+skip the `e2e-*` callers, `review-base` and their write-capable verifier.
 Renames check both names; empty diffs, missing history and unknown events run
 the suite. Other checks, including sandbox probes, still run. In particular,
 `workflow/review.md` is executable reviewer input, not documentation for this
@@ -394,24 +451,24 @@ do not save runner-minutes. Combining the analysis pair or full/limit into a
 new multi-scenario workflow would add machinery and reduce isolation; no callers
 are combined here. The docs-only gate saves the whole caller group instead.
 
-Landing several reviewed commits on one branch with one CI run is an operator
-workflow outside this repository. This public organization repository is
-eligible for GitHub's merge queue; an administrator must confirm/enable it in
-the branch rules. It is **not** single-build batching for free:
+Landing uses required checks, GitHub auto-merge and a merge queue, not a land
+job. An administrator enables the queue rule only after the approval, status
+transition and broker prerequisites above are verified;
+this change does not alter repository settings. It is **not** single-build batching for free:
 [GitHub's queue documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
 explicitly says merge limits do not combine `merge_group` builds. The queue can
 avoid repeated manual rebases and limit build concurrency, but still tests
-cumulative groups. Enabling it also requires CI's required check on
-`merge_group` and updating the event-refusal assertions; neither is enabled
-here. Prefer operator batching for the immediate capacity problem.
+cumulative groups. Required review statuses and caller-bounded auto-merge for
+pull requests opened by apply are separate follow-up work; neither is added here.
 
-The only new checkout uses the existing full action pin, no persisted
-credential, full history and the workflow's existing contents-read permission.
-The new path/test steps execute repository code only in read-only jobs. All
-other CI workflow changes are caller dependencies/conditions and narrowly
-allowlisted aggregate skips; verifier permissions and cleanup steps are
-unchanged. Review changes only its cancellation condition. No action pins,
-token placement, sandbox controls or output guards change.
+Queue detection uses the existing pinned GitHub script action with contents-read
+access; event fields are API parameters, never interpolated shell code. Checkout
+pins and non-persisted credentials are unchanged. The queue's ref belongs to this
+repository, allowing the existing write-capable E2E calls without a deployment
+PAT. Their permission blocks, apply-only token placement and cleanup remain
+unchanged. Analysis callers use the merge-group ref to read the queued tree.
+The aggregate additionally covers both analysis callers. The sentinel has no
+permissions and executes no repository code. No sandbox or output guard changes.
 
 ## Proposals from a non-agent job
 
