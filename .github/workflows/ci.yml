@@ -87,6 +87,7 @@ jobs:
       - run: cargo test --workspace --locked
       - run: node --test workflow/activation.test.cjs
       - run: node --test workflow/setup-timing.test.mjs
+      - run: node --test workflow/job-timing.test.cjs
       # Loopback-only TCP preflight tests; no OIDC credential or external proxy.
       - run: python3 -m unittest discover -s workflow -p 'test_*.py' -v
       - run: node --test workflow/apply.test.cjs
@@ -731,6 +732,7 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
+      actions: read # read hosted job durations; no write or cleanup authority
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -746,6 +748,19 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
         run: node workflow/dispatch-verify.cjs
+      - name: Bound the hosted end-to-end agent job
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { checkJobDuration } = require('./workflow/job-timing.cjs');
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: context.runId, filter: 'all', per_page: 100,
+            });
+            const full = jobs.filter(job => job.name === 'e2e-full / agent')
+              .sort((a, b) => b.run_attempt - a.run_attempt);
+            if (!full.length) throw new Error('missing hosted end-to-end agent job');
+            const seconds = checkJobDuration(full[0], 900);
+            await core.summary.addRaw(`Hosted end-to-end agent job: ${seconds}s (bound 900s).\n`).write();
       # A re-run of the full run's apply job, as far as the forge is
       # concerned: its guard, from the workflow under test, given the
       # outputs check accepted, leaves out the comment the first attempt

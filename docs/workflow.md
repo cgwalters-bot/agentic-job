@@ -327,6 +327,16 @@ Read this before relying on it.
 
 ## CI runner use
 
+The run action reports setup seconds from GitHub's job start to the first ACP
+`session/prompt` dispatch, including checkout, hardening, clone and registration.
+If the agent never receives a task it reports that timing is unavailable.
+CI asserts that the hosted `e2e-full / agent` job completes within 900 seconds;
+this generous regression bound is not the under-one-minute setup goal.
+Job start and completion use read-only Actions metadata; the first task timestamp
+comes from the harness's outgoing transcript, not an agent-provided timestamp.
+Timing-report failures cannot prevent artifact upload. On a failed-jobs rerun the
+bound checks the latest full agent execution, including one from a prior attempt.
+
 CI always starts and reports the required job named `ci`; it does not use
 workflow-level path exclusions. Its read-only `changes` job checks the complete
 Git diff (PR merge base to head, or push before to after), without an API's

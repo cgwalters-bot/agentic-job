@@ -190,7 +190,8 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   const verifier = job('e2e-dispatch-verify');
   const cleanup = job('e2e-verify');
   assert.equal(verifier.match(/    permissions:\n([\s\S]*?)(?=^    \S)/m)?.[1],
-    '      contents: read\n      issues: read\n      pull-requests: read\n');
+    '      contents: read\n      issues: read\n      pull-requests: read\n' +
+    '      actions: read # read hosted job durations; no write or cleanup authority\n');
   assert.match(verifier, /ref: \$\{\{ github.sha \}\}/);
   assert.match(verifier, /persist-credentials: false/);
   assert.match(verifier, /run: node workflow\/dispatch-verify.cjs/);

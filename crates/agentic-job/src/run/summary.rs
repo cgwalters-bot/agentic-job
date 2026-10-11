@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 
 use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
-use crate::session::digest::{Digest, cut};
+use crate::session::digest::{Digest, Dir, cut};
 use crate::session::{Outcome, Record, RunResult};
 
 pub const SCHEMA: &str = "agent-run-summary/v1";
@@ -236,6 +236,18 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert("workflow".into(), json!(measured.workflow));
     s.insert("agent".into(), json!(measured.agent));
     s.insert("started_at".into(), json!(measured.started_at));
+    // The first task dispatched to the agent, after clone and registration.
+    let first_step = inputs.records.iter().find(|record| {
+        matches!(record.dir, Dir::Send)
+            && record
+                .msg
+                .as_ref()
+                .is_some_and(|msg| msg["method"] == "session/prompt")
+    });
+    s.insert(
+        "agent_first_step_at".into(),
+        json!(first_step.map(|record| record.ts)),
+    );
     s.insert("finished_at".into(), json!(measured.finished_at));
     s.insert("duration_s".into(), json!(measured.duration_s));
     // A whole number as one, as the old tree had it.
@@ -896,6 +908,11 @@ Redacted 1 string(s).
                 "protocolVersion": 1, "agentInfo": {"name": "an-agent", "version": "1.2"}}}),
             ),
             rec(
+                0.5,
+                Dir::Recv,
+                json!({"jsonrpc": "2.0", "method": "session/prompt"}),
+            ),
+            rec(
                 1.0,
                 Dir::Send,
                 json!({"jsonrpc": "2.0", "id": 1, "method": "session/prompt",
@@ -939,6 +956,7 @@ Redacted 1 string(s).
             usage: None,
         });
         assert_eq!(s["acp_protocol"], 1, "{s:#}");
+        assert_eq!(s["agent_first_step_at"], 1.0);
         assert_eq!(s["agent_version"], "an-agent 1.2");
         assert_eq!(s["stop_reason"], "end_turn");
         assert_eq!(s["tokens_source"], TOKENS_UNVERIFIED);

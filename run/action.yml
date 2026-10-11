@@ -103,6 +103,32 @@ runs:
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"
         [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
+    # Read-only Actions metadata; never expose this credential to the agent.
+    - name: Report job setup duration
+      continue-on-error: true # telemetry must not prevent artifact hand-back
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        ACTION_PATH: ${{ github.action_path }}
+        RUNNER_NAME: ${{ runner.name }}
+      with:
+        script: |
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { setupSeconds } = require(path.join(process.env.ACTION_PATH, '../workflow/job-timing.cjs'));
+          const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+            ...context.repo, run_id: context.runId, attempt_number: Number(process.env.GITHUB_RUN_ATTEMPT), per_page: 100,
+          });
+          const current = jobs.filter(job => job.runner_name === process.env.RUNNER_NAME && job.status === 'in_progress');
+          if (current.length !== 1) throw new Error('cannot identify current agent job');
+          const file = path.join(process.env.JOB_DIR, 'out/run/summary.json');
+          const summary = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+          if (summary.agent_first_step_at == null) {
+            await core.summary.addRaw('Setup duration unavailable: agent never received its first task.\n').write();
+          } else {
+            const seconds = setupSeconds(current[0], summary.agent_first_step_at);
+            await core.summary.addRaw(`Setup (job start to first agent task): ${seconds.toFixed(3)} seconds.\n`).write();
+          }
     # Re-check visibility before uploading: a repository can become private
     # while the agent works. This credential stays with the runner user.
     - name: Check again that the repositories are public
