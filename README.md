@@ -116,7 +116,8 @@ Then make three edits:
 - in `allow.toml`, set `repos` to your repository.
 
 Create an `agent-apply` environment limited to your default branch, and
-store in it as `SAFE_OUTPUTS_PAT` the classic `repo` PAT of a dedicated bot
+store in it as `SAFE_OUTPUTS_PAT` a classic PAT with `repo` and `workflow`
+scopes of a dedicated bot
 account that does not own the repository and has write access to nothing
 else ([pull requests come from a fork](docs/workflow.md#pull-requests-come-from-a-fork)).
 
@@ -201,10 +202,17 @@ and [#2](https://github.com/cgwalters-bot/agentic-job-trial/pull/2) there
 No caller exists in the operator's runner repository,
 `bootc-dev/cgwalters-devspace-sandbox`, yet.
 
-Not yet: a real agent through the reusable workflow on hosted runners
-(hosted Ubuntu alone cannot reach the existing private inference proxy; see the
-[deployment checklist](docs/workflow.md#what-a-caller-provides)), private
-repositories, and most of gh-aw's catalogue. Pull requests from forks
+Claude Code and opencode have also run through the reusable workflow on
+hosted runners using its old built-in `tailscale-*` inputs to reach the
+private inference proxy ([retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).
+Those inputs have since been removed; see
+[Migrating from the Tailscale inputs](docs/workflow.md#migrating-from-the-tailscale-inputs).
+For a private network join today, use the caller's own step in the
+[composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own).
+No real agent has yet run on hosted runners with that caller-owned join.
+
+Not supported: private target repositories and most of gh-aw's catalogue.
+Pull requests from forks
 do not get the end-to-end jobs that write. The sandbox setup takes two
 to five minutes on a hosted runner. Nobody but its authors has used it.
 

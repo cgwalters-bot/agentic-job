@@ -97,9 +97,19 @@ Preflight names **all** missing model, runner, URL and audience variables at
 once, before policy/build or agent startup. It rejects unknown agents.
 Real agents have a 150-request cap; scripted sessions have no inference and
 `max-requests: 0`. Real agents do not install scripted sessions.
-Hosted Ubuntu alone cannot reach a private broker. Joining its network in a
-step of your own needs an agent job of your own
-([example-compose.yml](../.github/workflows/example-compose.yml)), which
+Hosted Ubuntu alone cannot reach a private broker. The shipped dispatch
+caller calls the complete reusable workflow, which has no network-join
+inputs. To join a private network on a hosted runner, adapt the caller to
+the [composed form](workflow.md#the-pieces-and-an-agent-job-of-your-own):
+call `policy.yml`, write your own agent job, then call `check.yml` and
+`apply.yml`, all from the same reviewed commit. In the agent job, run
+`prepare`, your chosen network-join step, `secure-host`, then `run`, as
+[example-compose.yml](../.github/workflows/example-compose.yml) marks.
+The join action and its credentials are yours, not a built-in vendor
+integration. Pin that action by commit, leave no credential readable by
+the sandbox user, and keep the agent job's repository permissions read
+only. For a tailnet join, disable its DNS: sandbox setup rejects tailnet
+resolvers when the egress proxy is enabled. This composed form
 changes what the broker has to admit
 ([inference admission](inference.md#which-workflows-a-broker-admits)). Or provide disposable runners
 with passwordless sudo initially and systemd 257+, Node and apt-get or dnf;
@@ -118,7 +128,7 @@ restricted to the protected default branch, and store its sole secret
 This is gh-aw's `safe-outputs.github-token` for
 [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
 see [the mapping and job-token limits](workflow.md#the-apply-job-and-its-token).
-Use a classic PAT with `repo` scope of a dedicated bot account that does not
+Use a classic PAT with `repo` and `workflow` scopes of a dedicated bot account that does not
 own the target and has write access to nothing but its own forks: such a PAT
 writes to every repository its account can, and still comments, opens issues
 and forks on any public repository, so the account is what bounds it. Apply

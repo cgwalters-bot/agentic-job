@@ -285,13 +285,23 @@ Read this before relying on it.
   [Issue #59](https://github.com/cgwalters-forge/agentic-job/issues/59)
   records these deployments. No caller exists in the operator's runner
   repository, `bootc-dev/cgwalters-devspace-sandbox`, yet.
-  A real agent through the reusable workflow
-  on GitHub-hosted runners remains untried; the existing broker is private.
+  Claude Code and opencode have also run through the reusable workflow on
+  GitHub-hosted runners using its old built-in `tailscale-*` inputs, including
+  agent configuration and analysis runs (the [retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).
+  Those inputs have since been removed; see
+  [Migrating from the Tailscale inputs](#migrating-from-the-tailscale-inputs).
+  No real agent has yet run on hosted runners with the composed form's
+  caller-owned network join.
 - This repository's CI opens no pull request: apply opens one only from
   a fork, which takes a PAT that CI does not hold. `apply.test.cjs` runs
   the fork step, the handlers' configuration and the guard against a
-  stand-in for the forge; a pull request from a fork has not been opened
-  by a live run, and neither has Actions been turned off on a real fork.
+  stand-in for the forge. Those local tests do not prove live fork
+  creation or Actions disabling; a live run opened a pull request from the
+  fork (apply refuses to push unless Actions read back as off there), as recorded in
+  [#426](https://github.com/cgwalters-forge/agentic-job/issues/426).
+  That [run, 38068331946](https://github.com/cgwalters-forge/tracker/actions/runs/38068331946),
+  called from `cgwalters-forge/tracker`, used an `output-repo` other than the
+  caller: it opened [board-test#45](https://github.com/cgwalters-forge-stage/board-test/pull/45).
 - The example caller has been dispatched on this repository's main
   branch: once to the end, with the scripted agent's built-in session,
   and once naming a private repository, which stopped in the policy
@@ -308,10 +318,10 @@ Read this before relying on it.
   such a pull request changes only documentation, the required `ci`
   check fails for it, and a maintainer runs the end-to-end jobs from a
   branch of this repository before merging it.
-- Not tried at all: `apply-environment`, an `output-repo` other than the
-  calling repository, bringing a fork's base branch up to date, a
-  network join in a caller's own agent job,
-  `agent-config-repo`, `kind: analysis`, and applying a `create_issue`:
+- Not yet verified: `apply-environment` (the live caller passes a variable,
+  but its resolved value is not confirmed by the cited evidence).
+- Not tried at all: a network join in the composed caller's own agent job,
+  and applying a `create_issue`:
   that type is checked through gh-aw's collector and `check` in CI
   (the `corpus` job), and its handler has not run from this workflow.
 
@@ -537,6 +547,29 @@ proxy URL as the runner user, before sandbox setup. This control sends no creden
 and proves only reachability, not broker admission or model availability.
 A failure names the missing network route rather than blaming sandbox rules.
 
+### Agent configuration repositories and model names
+
+`agent-config-repo` selects a public configuration repository;
+`agent-config-ref` selects its ref and `agent-config-path` its directory
+(the root by default). This is agent configuration, not the runner TOML
+passed as `config`. opencode reads `opencode.json`, optional `AGENTS.md`
+and optional `opencode-runner.json`. Its configuration must define exactly
+one provider and enable only it with `enabled_providers`, without
+`disabled_providers`. The runner profile may not override providers.
+The provider's address and key are replaced by the inference proxy URL
+and run token, and sharing is disabled. With this configuration, `model`
+is passed as supplied: use the configured provider/model name, such as
+`praxis/MODEL`. Without it, opencode uses the built-in `inference` provider:
+pass a bare model name (or `inference/MODEL`), not another provider's prefix.
+
+Claude reads `CLAUDE.md` from a configuration repository; it does not use
+opencode's files. Its `model` input is optional in the reusable workflow
+and selects the adapter's model when supplied. The shipped dispatch
+caller's preflight still requires `AGENT_MODEL` and `AGENT_RUNNER` for
+both real agents. Dispatch forwards configuration repository/path only
+for opencode; a direct or composed policy call can also select the ref
+or Claude's configuration repository.
+
 ### What a caller provides
 
 **A bounds file** in its repository (`allow`): which repositories and
@@ -548,22 +581,6 @@ is this repository's. The inputs `repo`, `base`, `kind`, `outputs` and
 request the file does not cover. So a workflow that takes those from
 whoever dispatches it is still bounded by a file that changes only by a
 commit.
-
-For a custom trusted policy job (CLI groundwork only), an organization
-wrapper can pin a reusable workflow under
-`uses: ORG/.github/.github/workflows/agentic-job.yml@COMMIT` and supply a
-second trusted bounds file to `agentic-job policy --org-allow FILE`.
-The command checks the request independently against both files, then
-takes the lower output and patch caps, the common output types, and the
-union of protected file names. Neither file can widen the other. Explicit
-requests outside either file are refused; `all`/`max` takes the intersection.
-This intersects output policies, not `[trigger]` tables: organization
-trigger admission must be checked separately with `event`. The reusable
-workflow does not yet expose or fetch an organization bounds file; the
-existing policy job cannot be extended by a wrapper merely fetching a file.
-A custom policy job must fetch it from a trusted pinned ref before policy
-evaluation. Reusable-workflow input and invocation wiring remain part of #118;
-the built-in reusable workflow does not support organization bounds yet.
 
 **A configuration file** (`config`) for what depends on the runner
 image and not on the run: the services `sandbox setup` stops, the local
@@ -1260,6 +1277,21 @@ The exit state that decides between a whole and a partial run comes from
 the agent's machine. A machine that lied about it could have a partial
 run applied without its marking, or a whole one with it; it could not
 get anything past `check`.
+
+## Organization bounds in a custom policy job
+
+The reusable workflow has no organization-bounds input. For a custom
+trusted policy job, `agentic-job policy --org-allow FILE` checks the
+request independently against the caller's bounds and a second trusted
+bounds file. It takes the lower output and patch caps, the common output
+types, and the union of protected file names. Neither file can widen the
+other. Explicit requests outside either file are refused; `all`/`max`
+takes the intersection. This intersects output policies, not `[trigger]`
+tables: organization trigger admission must be checked separately with
+`event`. Fetch organization bounds from a trusted pinned ref before
+policy evaluation. Merely wrapping `policy.yml` and fetching a file does
+not make it consume that file; reusable-workflow wiring remains part of
+[#118](https://github.com/cgwalters-forge/agentic-job/issues/118).
 
 ## Things a caller should know
 

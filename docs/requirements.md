@@ -150,7 +150,7 @@ policy checks run on a clean VM before apply. Apply credentials are the
 job token or an environment secret, not tokens minted per run.
 Event bounds restrict actors and forks. Deadline guards exist; cooldown
 and user quotas require trusted history that the reusable workflow does
-not yet fetch. See [events.md](events.md#optional-run-guards-cli-groundwork-only).
+not yet fetch. See [events.md](events.md#optional-run-guards-for-custom-policy-jobs).
 
 ## Evidence and non-goals
 
