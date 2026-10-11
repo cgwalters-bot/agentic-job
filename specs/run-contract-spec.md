@@ -216,6 +216,11 @@ or an issue, posted by its
 own token's principal: `github-actions[bot]` for the job token, the user
 `GET /user` names for a PAT, and no one for a PAT it does not name. Check MUST refuse any request holding the name. Closing, labelling and setting a project
 field are left to be repeated: done twice they leave the forge as once.
+For `push_to_pull_request_branch`, the guard MUST leave out the push when
+the fetched fork branch holds the checked tree as exactly one commit on the
+policy's pinned head. The final check MUST re-fetch and verify that same
+parent and tree even when the guard left it out. This reuses the guard and
+its `already_applied` report, not a second marker scheme.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), tests from
 `a posted body hides the name the guard put last` to `a pull request
 without a checked patch stops the guard`;
@@ -432,7 +437,7 @@ These limitations are not additional guarantees:
   again.
 - RC-020 does not hold the branch at `head` before the push: gh-aw's handler
   re-anchors on the patch's base commit and pushes without force, so a
-  commit added on top of `head` (an earlier attempt's push too) makes the
+   unrelated commit added on top of `head` makes the
   forge refuse it as not a fast-forward. A branch force-pushed or rebased so
   that `head` is no longer in it is different: the handler then applies the
   patch on the new tip, that push succeeds, and apply's last step fails only
@@ -440,7 +445,8 @@ These limitations are not additional guarantees:
   of the output repository the pull request lets edit it can move the
   branch. Apply checks that the pull request is open, the handler does not:
   one closed in between is pushed to, on the fork's branch. A re-run of apply
-  after a push fails rather than pushing again. No CI run pushes to a live
+   after a push succeeds without pushing again when the fork holds exactly
+   one commit on `head` with the checked tree (RC-013). No CI run pushes to a live
   pull request: RC-020's evidence is unit tests and apply's steps run
   against a local repository.
 - RC-021 has run against a stand-in for the forge only: no live run has made

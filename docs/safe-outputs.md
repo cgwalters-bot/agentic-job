@@ -166,10 +166,16 @@ forge serves a fork pull request's head from the target too) and starts there:
   repository it may push to, and refuses a pull request from any other;
 - the handler applies the patch on `head` and pushes one commit without force,
   with no fallback to a new pull request and never with `allow_workflows`. A
-  branch that moved since `head` was read, by an earlier attempt's push too,
-  makes the push not a fast-forward, which the forge refuses: the pull request
-  has to be run again. Apply then fetches the branch back from the fork and
-  refuses unless it is that one commit on `head` with the checked tree.
+   branch that moved since `head` was read makes the push not a fast-forward,
+   which the forge refuses: the pull request has to be run again. Before the
+   handler runs, apply leaves out a push if the fetched fork branch already
+   holds exactly one commit on `head` with the checked tree. This succeeds as
+   already applied, without pushing again. Apply then fetches the branch back from the fork and
+   refuses unless it is that one commit on `head` with the checked tree.
+
+The final check also runs for an already-applied push: a branch moved between
+the guard and the final fetch still fails. A merge commit, another tree, or
+the checked tree on another parent does not count as already applied.
 
 A partial run (one stopped at a limit, applied under `apply-partial`) is not
 pushed: nothing on a pushed commit would say the work was cut short, so

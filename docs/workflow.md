@@ -1095,6 +1095,8 @@ the branch was pushed; nothing in `made` stands for it then.
 `already_applied` lists what an earlier attempt of the job had posted
 (`type`, `name`, `url`), which this one left out; see
 [running apply again](#running-apply-again).
+For a push it holds `type` and the pull request's `url`, without a body marker:
+the fork branch's one-parent commit and checked tree are the evidence.
 `handlers` is the configuration the handlers ran with.
 
 The workflow's outputs are `exit` (the exit state of `run`),
@@ -1128,6 +1130,23 @@ posted:
 - an issue, through the forge's search, as gh-aw finds its own issues.
   The search lags seconds behind, so an issue opened just before is not
   found.
+
+A push to a pull request's branch uses the same guard, summary and
+`already_applied` list, but needs no new marker. If the fetched fork branch
+already holds exactly one commit on the policy's pinned head with the tree
+the patch trial checked, the guard leaves out that push and succeeds without
+pushing. Other outputs keep their original positions for their hidden markers.
+The final step fetches and verifies that branch again, including a skipped
+push; unrelated branch advances and merge commits do not count as applied.
+
+CI's credentialless `workflow/fix-handler.test.cjs` runs the pinned gh-aw
+push handler on a scripted patch with a different caller repository and the
+target checkout at the workspace root. Forge reads are mocked, transport is
+redirected to home-directory scratch, and both remotes are local bare git
+repositories. It verifies the fork's parent and tree, an unchanged target,
+the mapping's negative control and the re-run guard with real git. This is
+not a live dispatch or sandbox test: those still need a prepared runner and
+a user's write token to create/manage the applying identity's fork.
 
 The rest are applied, so a re-run completes an attempt that stopped
 part-way, and the job summary lists what was left out. A pull request

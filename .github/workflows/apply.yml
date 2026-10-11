@@ -314,8 +314,9 @@ jobs:
       # The push handler takes the pull request only if its head repository
       # is `head-repo`, applies the patch on the head the run started from
       # (the patch's base, which check held to the policy's), and pushes
-      # without force: a branch that moved on since, by an earlier attempt's
-      # push too, refuses it. One rewritten since the trial above fetched it,
+      # without force: a branch that moved on since refuses it, unless the
+      # guard below finds the exact checked change already applied. One
+      # rewritten since the trial above fetched it,
       # so that the head is no longer in it, the handler applies the patch
       # on instead, as only the fork's owner or a maintainer of the output
       # repository can do; the last step then fails the job.
@@ -413,6 +414,7 @@ jobs:
           FORK: ${{ steps.fork.outputs.repo }}
           # Whether the token below is the PAT; the secret itself stays there.
           TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
+          TREE: ${{ steps.trial.outputs.tree }}
         with:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           script: |
@@ -441,6 +443,20 @@ jobs:
             const skippedFile = `${process.env.GH_AW_TMP}/skipped.json`;
             const kept = [], skipped = [];
             for (const [index, item] of output.items.entries()) {
+              if (item.type === 'push_to_pull_request_branch') {
+                // The fork was checked above and fetched before the trial.
+                // Like the post-push check, require exactly one parent and
+                // the checked tree: an unrelated advance is not applied.
+                const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch;
+                const parents = await exec.getExecOutput('git', ['show', '-s', '--format=%P', 'refs/agentic-job/target-base'], { silent: true });
+                const tree = await exec.getExecOutput('git', ['rev-parse', 'refs/agentic-job/target-base^{tree}'], { silent: true });
+                if (parents.stdout.trim() === config.head && tree.stdout.trim() === process.env.TREE) {
+                  skipped.push({ type: item.type, url: `https://github.com/${owner}/${repo}/pull/${config.target}` });
+                } else {
+                  kept.push(item);
+                }
+                continue;
+              }
               if (!['add_comment', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
               // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
               const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '').update('\0').update(JSON.stringify(item));
@@ -707,10 +723,11 @@ jobs:
           # gh-aw counts a push its handler skipped as no failure: the
           # branch itself, in the fork, has to hold the commit, on the head
           # it was for.
-          if jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null; then
+          if jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+             jq -e 'any(.already_applied[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/applied.json" > /dev/null; then
             head=$(jq -r '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
             git fetch --no-tags "https://github.com/$FORK" "+refs/heads/$BASE:refs/agentic-job/pushed"
-            [ "$(git rev-parse --verify --quiet 'refs/agentic-job/pushed^')" = "$head" ] && [ "$(git rev-parse 'refs/agentic-job/pushed^{tree}')" = "$TREE" ] ||
+            [ "$(git show -s --format=%P refs/agentic-job/pushed)" = "$head" ] && [ "$(git rev-parse 'refs/agentic-job/pushed^{tree}')" = "$TREE" ] ||
               { echo "::error::$BASE of $FORK does not hold the checked change as one commit on $head"; exit 1; }
           fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")

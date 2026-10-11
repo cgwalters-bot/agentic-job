@@ -98,6 +98,18 @@ jobs:
       # Read-only contract tests; no forge token or agent-produced code.
       - run: node --test workflow/dispatch.test.cjs
       - run: node --test workflow/ci.test.cjs
+      # Credentialless cross-repository fix: the pinned real handler writes
+      # only local git fixtures, with mock forge reads. No new permissions.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/gh-aw
+          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          path: gh-aw
+          sparse-checkout: actions/setup/js
+          persist-credentials: false
+      - run: node --test workflow/fix-handler.test.cjs
+        env:
+          GH_AW_JS: ${{ github.workspace }}/gh-aw/actions/setup/js
 
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left

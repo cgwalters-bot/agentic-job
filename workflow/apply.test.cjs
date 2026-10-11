@@ -153,7 +153,7 @@ test("a push is applied to the policy pull request from apply's fork, never as a
 // one commit on the pinned head with the checked tree, whatever gh-aw counted.
 test('a push is verified on the branch it went to: one commit on the pinned head, with the checked tree', () => {
   const name = 'Every output was applied';
-  const run = tip => {
+  const run = (tip, skipped = false) => {
     const root = mkdtempSync(join(homedir(), 'apply-test-'));
     try {
       // The fork on the forge, and the output repository the work tree
@@ -183,14 +183,19 @@ test('a push is verified on the branch it went to: one commit on the pinned head
       const other = commit('other\n');
       // The branch moved: the checked change on top of someone else's.
       const moved = commit('after\n');
-      git(work, 'push', '-q', fork, `${{ pushed, other, moved }[tip]}:refs/heads/agent-run-12`);
+      // A merge with the same tree and first parent is not one commit on head.
+      git(work, 'reset', '-q', '--hard', head);
+      git(work, 'merge', '-q', '--no-ff', pushed, '-m', 'merge');
+      const merged = git(work, 'rev-parse', 'HEAD');
+      git(work, 'push', '-q', fork, `${{ pushed, other, moved, merged }[tip]}:refs/heads/agent-run-12`);
       git(work, 'push', '-q', 'origin', `${pushed}:refs/heads/agent-run-12`);
       git(work, 'reset', '-q', '--hard', head);
       const tmp = join(root, 'tmp');
       mkdirSync(tmp);
       writeFileSync(join(tmp, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head } }));
-      writeFileSync(join(tmp, 'agent_output.json'), JSON.stringify({ items: [{ type: 'push_to_pull_request_branch', branch: 'agent-run-12' }] }));
-      writeFileSync(join(tmp, 'applied.json'), JSON.stringify({ pull_request: null, refused: false }));
+      const push = { type: 'push_to_pull_request_branch', branch: 'agent-run-12' };
+      writeFileSync(join(tmp, 'agent_output.json'), JSON.stringify({ items: skipped ? [] : [push] }));
+      writeFileSync(join(tmp, 'applied.json'), JSON.stringify({ pull_request: null, refused: false, already_applied: skipped ? [push] : [] }));
       const result = command(work, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
         GH_AW_TMP: tmp, BASE: 'agent-run-12', OUTPUT_REPO: 'owner/repo', TREE: tree, FORK: 'bot/repo',
         OUTCOME: 'success', FAILED: '0', PROJECT_REFUSED: 'false',
@@ -202,10 +207,12 @@ test('a push is verified on the branch it went to: one commit on the pinned head
     }
   };
   // [the branch on the forge after the push, status]
-  for (const [tip, expected] of [['pushed', 0], ['other', 1], ['moved', 1]]) {
-    const got = run(tip);
-    assert.equal(got.status, expected, `${tip}: ${got.out}`);
-    if (expected) assert.match(got.out, /agent-run-12 of bot\/repo does not hold the checked change as one commit on/, tip);
+  for (const [tip, expected] of [['pushed', 0], ['other', 1], ['moved', 1], ['merged', 1]]) {
+    for (const skipped of [false, true]) {
+      const got = run(tip, skipped);
+      assert.equal(got.status, expected, `${tip} skipped=${skipped}: ${got.out}`);
+      if (expected) assert.match(got.out, /agent-run-12 of bot\/repo does not hold the checked change as one commit on/, tip);
+    }
   }
 });
 
@@ -571,10 +578,11 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Runs the guard against a forge holding `posted`, by whoever posted it,
 // with the job token or, with `pat`, a PAT that /user names as `me`.
-async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo' } = {}) {
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked' } = {}) {
   const dir = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head: 'head' } }));
     const file = `aw-agent-run-${run}.patch`;
     writeFileSync(join(dir, 'report.json'), JSON.stringify({ patch: patch === null ? null : { file } }));
     if (patch !== null) writeFileSync(join(dir, file), patch);
@@ -594,12 +602,21 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
       },
     };
     const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', GITHUB_RUN_ID: run,
-      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork };
+      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork, TREE: checkedTree };
+    const exec = { getExecOutput: async (program, args) => {
+      assert.equal(program, 'git');
+      if (args[0] === 'show') {
+        assert.deepEqual(args, ['show', '-s', '--format=%P', 'refs/agentic-job/target-base']);
+        return { stdout: `${parents}\n` };
+      }
+      assert.deepEqual(args, ['rev-parse', 'refs/agentic-job/target-base^{tree}']);
+      return { stdout: `${tree}\n` };
+    } };
     // gh-aw's normalize_branch_name.cjs, as far as these prefixes go.
     const normalizeBranchName = name => name.replace(/[^a-zA-Z0-9\-_/.]+/g, '-');
     const fakeRequire = path => path === '/runner/gh-aw/actions/normalize_branch_name.cjs' ? { normalizeBranchName } : require(path);
-    await new AsyncFunction('require', 'process', 'core', 'github', script('Leave out what an earlier attempt applied'))(
-      fakeRequire, { env }, core, github);
+    await new AsyncFunction('require', 'process', 'core', 'github', 'exec', script('Leave out what an earlier attempt applied'))(
+      fakeRequire, { env }, core, github, exec);
     const kept = JSON.parse(readFileSync(join(dir, 'agent_output.json'), 'utf8')).items;
     const skipped = JSON.parse(readFileSync(join(dir, 'skipped.json'), 'utf8'));
     return { kept, skipped, outputs, summary, queries, warnings };
@@ -610,9 +627,9 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
 
 // What the handlers send, after the request hook hides the name.
 function sent(body) {
-  const line = workflow.split('\n').find(text => text.includes('options.body = options.body.replace('));
-  const options = { body };
-  new Function('options', line)(options);
+  const hook = script('Apply the outputs with gh-aw\'s handlers').split('client.hook.before("request", options => {')[1].split('\n  });')[0];
+  const options = { method: 'POST', url: '/repos/{owner}/{repo}/issues/{issue_number}/comments', body };
+  new Function('options', 'creates', 'issues', hook)(options, () => false, 0);
   return options.body;
 }
 
@@ -620,6 +637,28 @@ const comment = (body = 'first') => ({ type: 'add_comment', body });
 // The name the guard put in a body it kept: its last line.
 const nameIn = item => item.body.split('\n').at(-1);
 const pull = { type: 'create_pull_request', title: 't', body: 'change', branch: 'agent-run-7' };
+
+test('a re-run leaves out only a push already holding the checked tree as one commit on the pinned head', async () => {
+  const push = { type: 'push_to_pull_request_branch', branch: 'p/agent-run-7' };
+  for (const [name, options, applied] of [
+    ['already applied', {}, true],
+    ['unchanged head', { parents: 'older', tree: 'before' }, false],
+    ['another change', { tree: 'other' }, false],
+    ['another parent', { parents: 'other' }, false],
+    ['merge commit', { parents: 'head other' }, false],
+    ['no trial tree', { checkedTree: '' }, false],
+  ]) {
+    const { kept, skipped, summary } = await leaveOutApplied([push, comment()], [], options);
+    assert.equal(skipped.length, applied ? 1 : 0, name);
+    assert.equal(kept.some(item => item.type === push.type), !applied, name);
+    // Removing the push does not change the next output's marker position.
+    assert.match(kept.at(-1).body, /agentic-job-applied: 7\/1\/[0-9a-f]{16}$/);
+    if (applied) {
+      assert.deepEqual(skipped, [{ type: push.type, url: 'https://github.com/owner/repo/pull/42' }]);
+      assert.match(summary[0], /Already applied/);
+    }
+  }
+});
 
 test('a posted body hides the name the guard put last, and only that name', () => {
   const name = 'agentic-job-applied: 7/0/0123456789abcdef';
