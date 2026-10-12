@@ -59,8 +59,18 @@ Corpus/parity tests need the pinned external old-tree and gh-aw checkouts;
 validation regeneration needs gh-aw's compiled workflows. Release-pin checks
 download published binaries, proxy hash checks download wheels, and end-to-end
 jobs write to the forge. Leave these to CI when those inputs or permissions
-are absent; do not contact a forge or broaden network access from a sandbox.
+are absent; do not broaden network access from a sandbox.
 Their CI job limits are 5–20 minutes, not measured runtimes.
+
+The forge rule is about writes. Reading public forge data with the token the
+run was given is allowed and expected: the item, its comments and review
+threads, check results, Actions job logs and artifacts. Writing to a forge
+(comments, pushes, API mutations, end-to-end tests that write) goes only
+through [safe outputs](docs/safe-outputs.md). A fix run finds what it must fix
+in the latest review on the pull request and the log of the failing required
+check; read both before changing anything. A task that says "measure from a
+real CI log" means fetch one.
+
 The static build is `cargo build --release --locked --target x86_64-unknown-linux-musl -p agentic-job`
 after installing musl-tools and adding that Rust target; CI allows 30 minutes.
 The target and musl-gcc are prerequisites, not provided by a normal Rust installation.
@@ -91,8 +101,8 @@ Explain security consequences whenever touching workflows, action pins,
 permissions, token placement, caller bounds or check code. Preserve the
 [job/token separation](docs/workflow.md) and [safe-output contract](docs/safe-outputs.md):
 `policy` and `check` have read-only repository access; `agent` has read access
-and OIDC permission, but the sandbox user has neither forge credentials nor
-the OIDC request credential. Only `apply` consumes `SAFE_OUTPUTS_PAT`,
+and OIDC permission, but the sandbox user has at most a read-only forge token
+and never the OIDC request credential. Only `apply` consumes `SAFE_OUTPUTS_PAT`,
 explicitly passed even for an environment secret. If empty it falls back to
 the job token, whether or not an apply environment is configured.
 `activate`, `notify` and `conclude` inherit caller permissions and can write
