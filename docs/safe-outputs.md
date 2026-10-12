@@ -254,8 +254,12 @@ handler refuses workflow files without `allow_workflows`, which apply never
 sets. Workflow changes are pushed only to
 apply's fork, which has Actions turned off, and reach the repository as a
 fork pull request. Its `pull_request` CI gets no secrets and a read-only
-token, not the target repository's write credentials. Nothing merges without
-review and required checks. The trusted
+token, not the target repository's write credentials. Operators must configure
+and enforce pre-merge review and the intended required checks; the exemption
+does not provide these merge protections automatically. If relying on the trusted
+[workflow ingress check](workflow-ingress.md) as a merge gate, an administrator
+must enforce that workflow with a ruleset: a required status name alone can be
+imitated by PR-owned workflows. The trusted
 [workflow ingress check](workflow-ingress.md) flags known-bad workflow patterns
 and new analyzer ignores; it does not prove a workflow safe or replace review.
 Reviewers must treat changes to the caller's bounds (`.github/agentic-job/`)
