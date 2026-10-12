@@ -114,6 +114,32 @@ orders and permissions reset each time. That is not a hosted after measurement
 or proof of under-a-minute setup; collect this change's own CI timings before
 closing the setup-time issue.
 
+After #488, the current-main
+[run 38248520519, e2e-full agent](https://github.com/cgwalters-forge/agentic-job/actions/runs/38248520519/job/114809161130)
+at `4b0b75f1b24b6fead5c1815b15437451239fe386` took 171 seconds from job
+start to the run action (172.376 seconds to its inner Run the agent step).
+Actions reports setup 1 second, target checkout 1, source assertion 0, source
+checkout 1, prepare 2 and secure-host 165; the remaining second is between
+steps. Inside secure-host: apt configuration 0.263 seconds, binary acquisition
+skipped, binary installation 0.016, configuration 0.022, reachability 0.015,
+sandbox setup 139.220, sandbox-user entry 0.081 and final check 24.801.
+Setup's largest stages were traversal 75.974, user creation 33.226, packages
+16.975, proxy startup 8.696 and package ownership 3.602 seconds. The walk is
+still the largest cost. Neither this 171/165-second observation nor the earlier
+227/222-second baseline reproduces the supplied pre-#488 estimate of 83/72
+seconds; different hosted runners vary substantially.
+
+The next traversal optimization prunes symlinks before filesystem-type tests
+force a metadata lookup. GNU find does not follow links here, and neither
+hardening action selects them: regular files and directories retain the same
+selection and traversal, including closed directories and setuid programs in
+temporary trees. No tree exclusion, security control or probe is added or
+removed. A local 30,000-dangling-symlink fixture, in both execution orders,
+measured 0.085771/0.085993 seconds before and 0.070781/0.069982 after.
+This isolates unnecessary link metadata work, not the full hosted walk.
+Hosted after timings remain unmeasured until the proposed change runs in CI;
+this does not establish under-a-minute setup.
+
 Before acquiring the binary or installing setup packages, the action runs
 [`apt.mjs`](../secure-host/apt.mjs) as root. CI's sandbox and static-build jobs
 and the reusable workflow's source-build fallback use the same snippet.

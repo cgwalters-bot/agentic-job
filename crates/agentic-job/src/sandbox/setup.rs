@@ -1053,6 +1053,8 @@ fn find_literal_path(path: &str) -> String {
 /// Closed directories must still be hardened: another setup or job step can
 /// reopen them later. Only pseudo-filesystems and read-only, nosuid mounts
 /// without writable descendants are pruned, independently of directory modes.
+/// Symlinks cannot match either action under find's default no-follow policy.
+/// Test their directory-entry type before -fstype forces a metadata lookup.
 fn hardening_find(root: &str, readonly: &[String]) -> Vec<String> {
     let mut args: Vec<String> = [
         "-O3",
@@ -1060,6 +1062,9 @@ fn hardening_find(root: &str, readonly: &[String]) -> Vec<String> {
         "-xdev",
         "-ignore_readdir_race",
         "(",
+        "-type",
+        "l",
+        "-o",
         "-fstype",
         "proc",
         "-o",
@@ -1952,6 +1957,9 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o666)).unwrap();
         std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&directory, root.join("directory-link")).unwrap();
+        std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
         let args = hardening_find(root.to_str().unwrap(), &[]);
         assert_eq!(run_hardening_find(&args, &inventory).unwrap().0, 4);
         for (name, _, expected) in cases {
@@ -2099,6 +2107,36 @@ mod tests {
             }
             println!(
                 "Local synthetic walk {label}: {:.6}s (30000 files in private tree)",
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "local symlink traversal benchmark; no host hardening"]
+    fn hardening_walk_symlink_benchmark() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        for index in 0..30000 {
+            std::os::unix::fs::symlink("missing", root.join(index.to_string())).unwrap();
+        }
+        let inventory = root.join("inventory");
+        let after = hardening_find(root.to_str().unwrap(), &[]);
+        let mut before = after.clone();
+        // The only difference from current main is the early symlink prune.
+        assert_eq!(&before[5..8], ["-type", "l", "-o"]);
+        before.drain(5..8);
+        for (label, args) in [
+            ("before", &before),
+            ("after", &after),
+            ("after", &after),
+            ("before", &before),
+        ] {
+            let start = Instant::now();
+            assert_eq!(run_hardening_find(args, &inventory).unwrap().0, 0);
+            assert!(fs::read(&inventory).unwrap().is_empty());
+            println!(
+                "Local symlink walk {label}: {:.6}s",
                 start.elapsed().as_secs_f64()
             );
         }
