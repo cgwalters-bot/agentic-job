@@ -367,6 +367,13 @@ hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
+For a `push_to_pull_request_branch` request without `message`, `run` fills
+that field from the outcome summary (or its default run description), the
+same fallback it uses for the patch's commit message. An explicit `message`
+is preserved, including an invalid value for the collector to refuse. This
+does not validate requests while the producer runs or replace the separate
+check job.
+
 ## The check, in two halves
 
 The check job runs on a machine the agent never touched, with read

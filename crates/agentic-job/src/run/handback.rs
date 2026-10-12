@@ -375,6 +375,14 @@ pub fn build_outputs(
             {
                 return line.to_owned();
             }
+            // Keep the request consistent with the fallback commit message.
+            // Explicit invalid values stay for gh-aw's collector to refuse.
+            if push && item.get("message").is_none() {
+                item.set(
+                    "message",
+                    json!(format!("{}\n\n{}", fallback.title, fallback.body)),
+                );
+            }
             let text = |key: &str, default: &str| {
                 item.text(key)
                     .filter(|text| !text.trim().is_empty())
@@ -1149,6 +1157,33 @@ mod tests {
                 ("T", "B\nC"),
             ),
             (
+                "a missing message uses the outcome in both request and commit",
+                "{\"type\":\"push_to_pull_request_branch\"}",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\\n\\nFix the parser.\\nIt dropped the last line.\",\"branch\":\"agent-run-12\"}\n",
+                (
+                    "Fix the parser.",
+                    "Fix the parser.\nIt dropped the last line.",
+                ),
+            ),
+            (
+                "an explicit null stays for the collector to refuse",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":null}",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":null,\"branch\":\"agent-run-12\"}\n",
+                (
+                    "Fix the parser.",
+                    "Fix the parser.\nIt dropped the last line.",
+                ),
+            ),
+            (
+                "an explicit number stays for the collector to refuse",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":7}",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":7,\"branch\":\"agent-run-12\"}\n",
+                (
+                    "Fix the parser.",
+                    "Fix the parser.\nIt dropped the last line.",
+                ),
+            ),
+            (
                 "an empty message is the outcome's",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":\" \"}",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":\" \",\"branch\":\"agent-run-12\"}\n",
@@ -1636,6 +1671,46 @@ mod tests {
                 home.checkout.base_commit
             )
         );
+        let verdict = home.verdict(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
+    }
+
+    #[test]
+    fn a_push_without_a_message_uses_the_patch_message() {
+        let home = Home::new();
+        let mut policy = crate::policy::tests::push_policy();
+        policy.repo = "o/r".into();
+        policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap()
+            .head
+            .clone_from(&home.checkout.base_commit);
+        sh(&home.checkout.dir, "echo two >> a.txt");
+        std::fs::write(
+            home.path(AGENT_OUTPUTS),
+            "{\"type\":\"push_to_pull_request_branch\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.path(AGENT_OUTCOME),
+            "{\"summary\":\"parser: Keep the last line\\nIt was dropped.\"}\n",
+        )
+        .unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert_eq!(change.dropped, None);
+        let outputs = std::fs::read_to_string(home.path("safe-outputs/outputs.jsonl")).unwrap();
+        let item: Value = serde_json::from_str(outputs.trim()).unwrap();
+        assert_eq!(
+            item["message"],
+            "parser: Keep the last line\n\nparser: Keep the last line\nIt was dropped."
+        );
+        let patch =
+            std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-12.patch")).unwrap();
+        assert!(patch.contains("Subject: [PATCH] parser: Keep the last line\n"));
+        assert!(patch.contains("\nIt was dropped.\n"));
         let verdict = home.verdict(&policy);
         assert!(verdict.ok, "{:?}", verdict.errors);
         assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
