@@ -104,8 +104,16 @@ write protection. The host-native test exhausts mode bits, inode types,
 ownership, root/nonroot users and filesystem matches. CI also compiles the
 CO-RE object. Hosted loading, attachment, relocation and denial results must
 be read from this change's CI before claiming they work on Ubuntu; RHEL runtime
-is still unverified. The full directory-entry, sticky-directory, tmpfs and
-Podman-overlay acceptance matrix is left for the next slice, as are default
+is still unverified. The hosted matrix now tests create, unlink and rename
+(each parent separately) in a foreign non-sticky directory, with writable-before
+baselines and sticky-directory, owner and separate-device tmpfs controls.
+Operations run as `nobody` after loading; only fixed fixtures are inspected.
+`security_inode_permission` checks `MAY_WRITE` in the VFS parent permission
+path for these entry operations; no additional hook is introduced. Sticky
+entries belong to the worker so sticky-directory DAC permits their removal.
+Tmpfs is limited to 1 MiB and each command to 120 seconds. These are CI
+assertions, not locally observed kernel denials. Podman-overlay acceptance
+remains unfinished, as do default
 enablement, walk removal and this PR's before/after job-to-agent timings.
 No new setup-time measurements are available.
 
