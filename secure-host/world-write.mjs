@@ -28,9 +28,16 @@ export function attach(object, dev, run) {
     "autoattach", "pinmaps", `${PIN}/maps`]);
   // autoattach can fall back to pinning a program. A program pin is NOT an
   // attachment: require each expected pin to be a tracing link before enabling.
+  // bpftool's single-link show path can return -1 after printing valid JSON:
+  // do_show tests stale errno instead of do_show_link's result (v7.6.0).
+  // Enumeration terminates on ENOENT and -f includes the actual pin paths.
+  const links = JSON.parse(run("bpftool", ["-j", "-f", "link", "show"]));
+  if (!Array.isArray(links)) throw new Error("expected bpftool link array");
   for (const name of PROGRAMS) {
-    const info = JSON.parse(run("bpftool", ["-j", "link", "show", "pinned", `${PIN}/links/${name}`]));
-    if (info.type !== "tracing" || info.attach_type !== "modify_return") {
+    const matches = links.filter(link => Array.isArray(link.pinned) &&
+      link.pinned.includes(`${PIN}/links/${name}`));
+    if (matches.length !== 1 || matches[0].type !== "tracing" ||
+        matches[0].attach_type !== "modify_return") {
       throw new Error(`not a modify-return tracing link: ${name}`);
     }
   }
@@ -38,12 +45,34 @@ export function attach(object, dev, run) {
     "key", "hex", "00", "00", "00", "00", "value", "hex", ...rootConfig(dev)]);
 }
 
+export function runCommand(command, args) {
+  try {
+    return execFileSync(command, args, {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      timeout: 120_000, maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    throw new Error(`${[command, ...args].map(arg => JSON.stringify(arg)).join(" ")}: ` +
+      `exit status ${error.status ?? "unavailable"}, signal ${error.signal ?? "none"}` +
+      `\n${error.message}\nstderr: ${error.stderr?.trim() || "(empty)"}`, { cause: error });
+  }
+}
+
+export function reportRefusal(error, run = runCommand, log = console.error) {
+  log(`world-write setup refused: ${error.message}`);
+  for (const [command, args] of [["bpftool", ["version"]], ["uname", ["-r"]]]) {
+    try {
+      log(`${command} ${args.join(" ")}: ${run(command, args).trim()}`);
+    } catch (diagnosticError) {
+      log(`diagnostic failed: ${diagnosticError.message}`);
+    }
+  }
+}
+
 export function load() {
   requireSupportedHost();
   if (process.getuid() !== 0) throw new Error("world-write loading requires root");
-  const run = (command, args) => execFileSync(command, args, {
-    encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], timeout: 120_000,
-  });
+  const run = runCommand;
   if (Number(statfsSync("/sys/fs/bpf").type) !== 0xcafe4a11) {
     run("mount", ["-t", "bpf", "bpf", "/sys/fs/bpf"]);
   }
@@ -89,7 +118,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     load();
   } catch (error) {
-    console.error(`world-write setup refused: ${error.message}`);
+    reportRefusal(error);
     process.exitCode = 1;
   }
 }

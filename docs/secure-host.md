@@ -51,6 +51,12 @@ must not continue with untrusted code; reuse of that host is unsupported.
 [bpftool v7.6.0's `auto_attach_program`](https://github.com/libbpf/bpftool/blob/v7.6.0/src/prog.c)
 calls `bpf_program__attach` and pins its link, but can fall back to pinning an
 unattached program. That is why the loader checks every link.
+Inspection uses `bpftool -j -f link show` and matches the four exact pin paths:
+v7.6.0's single-link `show pinned` path can print valid JSON yet return failure
+because it tests stale `errno`. Enumeration avoids that exit-status bug without
+ignoring command failures. Command output is capped at 1 MiB. Refusals include
+the command's stderr, exit status and signal, plus `bpftool version` and `uname -r`;
+failed diagnostic commands do not hide the original refusal.
 [libbpf v1.6.0](https://github.com/libbpf/libbpf/blob/v1.6.0/src/libbpf.c)
 routes `fmod_ret` to `attach_trace`, creating a BTF-targeted link with
 `BPF_MODIFY_RETURN`. This is the same mechanism for both supported systems,
@@ -65,6 +71,9 @@ The [hosted Ubuntu job](../.github/workflows/world-write.yml) additionally
 repeats denied/owner-control writes in a separate step after the loader exits,
 proving attachment lifetime. It has read-only repository permission, no secrets
 and a ten-minute bound, and executes proposed code as root only on a fresh VM.
+The same workflow is called by CI and feeds its ruleset-required `ci` sentinel,
+including merge-queue runs. Enforcement failure cannot be treated as a skipped
+optional job; the check runs for all changes, including the world-write paths.
 
 The concrete threat is an unprivileged process modifying another user's
 globally writable host files or non-sticky directories. The candidate uses
