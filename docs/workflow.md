@@ -42,11 +42,20 @@ result, or names the failed jobs/check refusal. For a run that hands back only
 the same sanitizer as other agent text, limited to 1000 characters and quoted.
 The same reason remains in the run summary; apply posts no separate notice.
 The shipped dispatch caller opts in except for reviews, which remain silent.
-The comment uses the caller's job token, never the apply PAT; the built-in
-job token cannot write to cross-repository targets, so notify skips those
-destinations. No new permission is granted. Status API failures do not fail apply.
+Same-repository comments use the caller's job token. Cross-repository comments
+use the explicitly supplied `SAFE_OUTPUTS_PAT`, in notify and conclude only;
+without it the comment is skipped and the job summary explains why. No new
+permission is granted. Status API failures do not fail apply. Composed callers
+must pass that secret to both policy and apply for start and finish updates.
+The supplied token must identify a user through `GET /user`; an unsupported
+identity fails the status step rather than editing another author's comment.
+Notify does not enter the apply environment: an environment-only credential
+is not available there unless the caller supplies it explicitly.
+Status writes with a supplied credential are not gated by apply's environment
+approval; the credential remains confined to the pinned deterministic helper.
 
-The lookup accepts only this token's `github-actions[bot]` marker, so a user's
+The lookup accepts only the job token's `github-actions[bot]` marker, or the
+cross-repository token's authenticated user and marker, so another user's
 copied marker cannot redirect an edit. It stops after 20 pages of 100 comments,
 failing rather than creating a possible duplicate. Notify and conclude serialize
 their lookup/write on the repository/item to avoid simultaneous creates.
@@ -497,9 +506,9 @@ A caller job can upload an artifact containing `outputs.jsonl` in the
 [safe-output format](safe-outputs.md), then call this workflow with
 `proposals-artifact` naming it. The producer needs no write credential.
 Policy still reads the caller's bounds; check still collects and validates
-the requests on a separate read-only machine; only apply receives the write
-token. No agent, sandbox setup or inference runs. Event admission, review and
-partial application are not available in this mode. Use a trusted caller ref
+the requests on a separate read-only machine; apply and opted-in cross-repository
+status jobs receive the write token. No agent, sandbox setup or inference runs.
+Event admission, review and partial application are not available in this mode. Use a trusted caller ref
 for the bounds, just as for agent runs.
 
 ```yaml
@@ -865,7 +874,7 @@ expires when the job ends. The agent can leak it, and that is accepted:
 whoever gets it can read what the agent could, until the job ends, and
 write nothing. The workflow passes no credential that can write to the
 agent job, unless a caller's `GH_READ_TOKEN` (below) can; `SAFE_OUTPUTS_PAT`
-is passed only to apply.
+is passed only to deterministic apply and cross-repository status jobs.
 
 To give the agent another token, store a read-only one as a secret and
 pass it explicitly as `GH_READ_TOKEN: ${{ secrets.NAME }}` under the

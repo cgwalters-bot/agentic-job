@@ -245,7 +245,7 @@ on:
         type: boolean
         default: true
     secrets:
-      # Explicit optional credential, consumed only by apply. Never use inherit.
+      # Explicit optional credential for apply and cross-repository status. Never use inherit.
       # Callers must pass this name even for an environment secret;
       # the environment's same-name value takes precedence (docs/workflow.md).
       SAFE_OUTPUTS_PAT:
@@ -298,6 +298,8 @@ jobs:
   # `job.workflow_*`: the binary and the actions below are that commit's.
   policy:
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository,excessive-permissions] Call this revision; inherit caller permissions for activate/notify while policy.yml narrows its policy job to read-only.
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     with:
       id: ${{ inputs.id }}
       task: ${{ inputs.task }}

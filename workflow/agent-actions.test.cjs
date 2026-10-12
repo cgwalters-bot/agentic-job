@@ -203,7 +203,7 @@ test('the composed example marks where a caller\'s own steps go, and its example
 
 // The agent holds its GitHub token and can leak it: every permission of
 // the job that makes it is a read, but the run's own OIDC token.
-test('the agent job token reads and only apply holds a write credential', () => {
+test('the agent job token reads and write credentials stay in deterministic jobs', () => {
   const jobs = wrapper.split('\njobs:\n')[1];
   const agent = jobs.split('\n  agent:\n')[1].split('\n  check:\n')[0];
   const permissions = agent.split('    permissions:\n')[1].split('    outputs:\n')[0];
@@ -231,7 +231,9 @@ test('the agent job token reads and only apply holds a write credential', () => 
     assert.ok(named.length > 0, file);
     for (const [, name, job] of named) {
       assert.equal(job.includes('secrets.GH_READ_TOKEN'), ['agentic-job.yml', 'example-compose.yml'].includes(file) && name === 'agent', `${file} ${name}`);
-      assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), name === 'apply', `${file} ${name}`);
+      const holdsWrite = name === 'apply' || (file === 'agentic-job.yml' && name === 'policy') ||
+        (file === 'policy.yml' && name === 'notify') || (file === 'apply.yml' && name === 'conclude');
+      assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), holdsWrite, `${file} ${name}`);
     }
   }
   const owned = compose.split('\n  agent:\n')[1].split('\n  check:\n')[0];

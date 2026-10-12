@@ -26,17 +26,17 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-test('apply alone consumes the optional safe outputs PAT with job-token fallback', () => {
+test('apply uses the optional PAT with fallback, status receives it separately', () => {
   const jobs = workflow.split('\njobs:\n')[1];
   const before = jobs.split('\n  apply:\n')[0];
   const [apply, after] = jobs.split('\n  apply:\n')[1].split('\n  conclude:\n');
   assert.ok(workflow.includes('      SAFE_OUTPUTS_PAT:\n'));
   assert.match(workflow.split('    secrets:\n')[1].split('    outputs:\n')[0], /required: false/);
   assert.ok(!before.includes('secrets.SAFE_OUTPUTS_PAT'));
-  assert.ok(!after.includes('secrets.SAFE_OUTPUTS_PAT'));
-  // The wrapper hands the PAT to the apply call, and to nothing else.
+  assert.match(after, /STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}/);
+  // The policy call consumes it only in notify, never in its read-only job.
   const wrapperJobs = wrapper.split('\njobs:\n')[1].split(/\n  (?=[-\w]+:\n)/);
-  assert.deepEqual(wrapperJobs.filter(job => job.includes('secrets.SAFE_OUTPUTS_PAT')).map(job => job.split(':')[0]), ['apply']);
+  assert.deepEqual(wrapperJobs.filter(job => job.includes('secrets.SAFE_OUTPUTS_PAT')).map(job => job.split(':')[0]), ['policy', 'apply']);
   assert.match(wrapperJobs.find(job => job.startsWith('apply:')), /uses: \.\/\.github\/workflows\/apply\.yml *(?:#[^\n]*)?\n/);
   const selection = 'secrets.SAFE_OUTPUTS_PAT';
   for (const key of ['token', 'github-token']) {

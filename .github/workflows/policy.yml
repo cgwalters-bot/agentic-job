@@ -227,6 +227,10 @@ on:
         description: Put before the name of every artifact, for a caller that calls this more than once in a run
         type: string
         default: ""
+    secrets:
+      SAFE_OUTPUTS_PAT:
+        description: Optional apply credential for opted-in cross-repository status comments only
+        required: false
     # The whole set goes to check.yml and apply.yml as `toJSON(needs.policy.outputs)`,
     # so that what they check and apply is what this call decided, and the
     # caller's agent job finds its trusted inputs here by upload ID.
@@ -751,7 +755,7 @@ jobs:
   # how the run ended on the policy's item if this found none.
   notify:
     needs: [policy, activate]
-    if: ${{ !cancelled() && needs.policy.result == 'success' && (needs.activate.result == 'success' || (inputs.proposals-artifact != '' && needs.activate.result == 'skipped')) && inputs.notify != 'none' && (needs.policy.outputs.item != '' || inputs.output-repo == '' || inputs.output-repo == github.repository) && needs.policy.outputs.admitted == 'true' && (needs.policy.outputs.item != '' || (needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && (needs.activate.result == 'success' || (inputs.proposals-artifact != '' && needs.activate.result == 'skipped')) && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && (needs.policy.outputs.item != '' || (needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
     # Serialize lookup/create with conclude so simultaneous runs cannot create duplicates.
     concurrency:
       group: agentic-job-status-${{ needs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}-${{ needs.policy.outputs.item || needs.policy.outputs.comment-target }}
@@ -819,5 +823,6 @@ jobs:
           WHAT: ${{ steps.target.outputs.what }}
           TEXT: ⏳ [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) is running.
           REPO: ${{ needs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}
+          STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
         run: |
           node "$SOURCE_DIR/workflow/status.cjs" | tee -a "$GITHUB_OUTPUT"

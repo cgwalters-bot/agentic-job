@@ -59,7 +59,7 @@ test('conclusion reports refusal only through the opted-in status helper', () =>
   assert.match(conclude, /REPO: \$\{\{ fromJSON\(inputs.policy\).notify-repo \}\}/);
   assert.match(conclude, /workflow\/status.cjs/);
   assert.doesNotMatch(conclude, /Post the refusal to the comment target/);
-  assert.doesNotMatch(conclude, /SAFE_OUTPUTS_PAT/);
+  assert.match(conclude, /STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}/);
 });
 
 test('expected policy refusal succeeds only with a refusal report and a working summary writer', () => {

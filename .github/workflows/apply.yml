@@ -4,7 +4,7 @@
 # machine but the checked outputs.
 #
 #   apply     gh-aw's pinned handlers on check.yml's accepted outputs;
-#             the only job given SAFE_OUTPUTS_PAT
+#             uses SAFE_OUTPUTS_PAT; conclude uses it only for cross-repository status
 #   conclude  edits the opted-in status comment, including check's
 #             refusal to the policy's comment target
 #
@@ -858,6 +858,7 @@ jobs:
         env:
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}
           REPO: ${{ fromJSON(inputs.policy).notify-repo }}
+          STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
           TEXT: ${{ steps.ended.outputs.text }}
           NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason }}
         run: |

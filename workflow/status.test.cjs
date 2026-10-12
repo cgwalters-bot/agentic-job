@@ -82,13 +82,91 @@ test('dispatch and event status use the same trusted helper, opt-in only', () =>
   assert.match(policy, /needs.policy.outputs.comment-target != '\*'/);
   assert.match(policy, /!cancelled\(\) && needs.policy.result == 'success'/);
   assert.match(policy, /inputs.proposals-artifact != '' && needs.activate.result == 'skipped'/);
-  assert.match(policy, /inputs.output-repo == '' \|\| inputs.output-repo == github.repository/);
+  assert.doesNotMatch(policy.split('\n  notify:\n')[1].split('runs-on:')[0], /inputs.output-repo == github.repository/);
   assert.match(policy, /notify-repo:\n[^\n]*\n        value: \$\{\{ jobs.policy.outputs.item != '' && github.repository \|\| inputs.output-repo \|\| github.repository \}\}/);
   assert.doesNotMatch(policy.split('\n  notify:\n')[1].split('runs-on:')[0], /inputs.event/);
   for (const source of [policy, read('apply')]) assert.match(source, /workflow\/status.cjs/);
   assert.match(read('dispatch'), /notify: \$\{\{ inputs.kind == 'review' && 'none' \|\| 'comment' \}\}/);
   assert.doesNotMatch(read('apply'), /await once\(/);
   assert.match(read('apply'), /Edit the status comment\n[^\n]*\n        continue-on-error: true/);
+});
+
+test('cross-repository status uses the authenticated author and keeps one comment', () => {
+  const cross = { ...env, GITHUB_REPOSITORY: 'caller/repo', STATUS_TOKEN: 'supplied' };
+  const comments = [named('mallory'), named('github-actions[bot]')];
+  const writes = [];
+  const api = (method, path, body) => {
+    if (path === 'user') return { login: 'status-bot' };
+    if (method === 'GET') return comments;
+    writes.push(method);
+    if (method === 'POST') comments.push({ id: 99, user: { login: 'status-bot' }, body });
+    else comments.at(-1).body = body;
+    return comments.at(-1);
+  };
+  for (const text of ['running', 'finished', 'rerun']) {
+    upsert({ ...cross, TEXT: text, NO_RESULT_REASON: JSON.stringify('> no data') }, api);
+  }
+  assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
+  assert.match(comments.at(-1).body, /Its reason:\n\n> no data/);
+  assert.equal(upsert({ ...cross, GITHUB_RUN_ID: '99' }, api).id, 99);
+  assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
+  assert.throws(() => upsert(cross, () => ({})), /authenticated user/);
+  let pages = 0;
+  assert.throws(() => upsert(cross, (method, path) => {
+    if (path === 'user') return { login: 'status-bot' };
+    assert.equal(method, 'GET');
+    pages++;
+    return Array(100).fill(named('mallory'));
+  }), /exceeded/);
+  assert.equal(pages, MAX_PAGES);
+});
+
+test('cross-repository status without a supplied token skips without any API call', () => {
+  const messages = [];
+  assert.equal(upsert({ ...env, GITHUB_REPOSITORY: 'caller/repo' }, () => assert.fail(),
+    message => messages.push(message)), null);
+  assert.deepEqual(messages, ['Status comment skipped: cross-repository target requires the caller-supplied SAFE_OUTPUTS_PAT.']);
+  upsert({ ...env, GITHUB_REPOSITORY: 'O/R', STATUS_TOKEN: 'unused' }, (method, path) => {
+    assert.notEqual(path, 'user');
+    return method === 'GET' ? [] : { id: 1 };
+  });
+});
+
+test('status CLI selects the credential only for cross-repository comments and reports skips', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'status-cli-'));
+  try {
+    const preload = join(dir, 'mock.cjs');
+    const log = join(dir, 'calls');
+    const summary = join(dir, 'summary');
+    writeFileSync(preload, `require('node:child_process').execFileSync = (program, args, options) => {
+      require('node:fs').appendFileSync(process.env.CALL_LOG, JSON.stringify({ args, token: options.env.GH_TOKEN }) + '\\n');
+      return JSON.stringify(args[3] === 'user' ? { login: 'status-bot' } : args[2] === 'GET' ? [] : { id: 42 });
+    };`);
+    for (const [caller, token, selected] of [
+      ['caller/repo', 'supplied', 'supplied'], ['o/r', 'supplied', 'job-token'], ['caller/repo', '', null],
+    ]) {
+      writeFileSync(log, '');
+      writeFileSync(summary, '');
+      const result = spawnSync(process.execPath, ['--require', preload, join(__dirname, 'status.cjs')], {
+        env: { ...process.env, ...env, GITHUB_REPOSITORY: caller, GH_TOKEN: 'job-token',
+          STATUS_TOKEN: token, CALL_LOG: log, GITHUB_STEP_SUMMARY: summary }, encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const calls = readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+      if (selected) {
+        assert.ok(calls.length >= 2);
+        assert.ok(calls.every(call => call.token === selected));
+        assert.equal(result.stdout, 'id=42\n');
+        assert.equal(readFileSync(summary, 'utf8'), '');
+      } else {
+        assert.deepEqual(calls, []);
+        assert.equal(result.stdout, '');
+        assert.match(readFileSync(summary, 'utf8'), /Status comment skipped:.*SAFE_OUTPUTS_PAT/);
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('conclude carries the encoded reason only for a successful no-result run', () => {

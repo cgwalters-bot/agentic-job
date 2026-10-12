@@ -92,8 +92,8 @@ Organization project writes require the caller's apply environment token; see
 [token setup](workflow.md#the-apply-job-and-its-token). The repository job token
 cannot write organization projects, so a call without `apply-environment` is
 refused `update_project` at admission, before an agent runs, and `outputs: all`
-leaves it out. The token stays only in apply, never in the proposals producer
-or check.
+leaves it out. The token stays in deterministic apply and, when explicitly
+supplied, cross-repository status jobs, never in the proposals producer or check.
 
 Apply also guards the handler's GraphQL client: it refuses implicit field
 creation and field IDs not read back with an exact allowlisted name. This stops
