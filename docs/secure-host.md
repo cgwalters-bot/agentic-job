@@ -10,6 +10,16 @@ before untrusted steps, whether or not an agent runs afterwards: the action in
 [`secure-host/`](../secure-host/action.yml). The reusable workflow's
 agent job uses the same action and does not own it.
 
+The action supports exactly **Ubuntu 26.04** and **RHEL 10** (including
+RHEL 10 minor releases). Its first step reads `/etc/os-release` and refuses
+any other host, or a missing/unreadable release file, with one diagnostic
+before fetching binaries, changing apt settings or invoking setup. It checks
+`ID` and `VERSION_ID`, not `ID_LIKE`: Fedora, CentOS Stream and other
+derivatives are not supported hosts. This admission check does not prove
+kernel features or runtime enforcement; the setup checks and probes still
+have to pass. It applies to the composite action, not direct CLI invocation.
+Container image distributions are independent of the supported host systems.
+
 ```yaml
 jobs:
   build:

@@ -272,7 +272,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
-      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs
+      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs
       # The pin's digest is of Cargo.lock, Cargo.toml, crates and egress:
       # a file the build includes from anywhere else would not be in it.
       - name: Nothing is built in from outside what the pin's digest covers

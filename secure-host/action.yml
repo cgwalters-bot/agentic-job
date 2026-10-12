@@ -90,6 +90,11 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Check supported host
+      shell: bash
+      env:
+        ACTION: ${{ github.action_path }}
+      run: node "$ACTION/platform.mjs"
     - name: Bound apt network waits and avoid the Azure mirror
       shell: bash
       env:
