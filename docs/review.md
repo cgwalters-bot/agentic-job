@@ -17,7 +17,16 @@ none is listed today, and this repository has no Dependabot or Renovate
 configuration. A repository that adds one must list the bot in `bots` or not
 require `review`, or its pull requests wait on an expected status forever. The
 workflow, the bounds and the
-[standing task](../workflow/review.md) come from the base, never the head.
+[standing task](../workflow/review.md) come from the running caller workflow's
+revision (`github.workflow_sha`) on `pull_request_target`, never the head or
+a stale pull request base. The code under review still starts at its separate
+trusted base commit. A policy-refused automatic review updates the single bot
+status comment with one line saying `Review refused:` and why. Its lookup is
+bounded to 20 pages, and diagnostics are bounded to 1000 characters and escaped.
+The writer uses the job token and only pinned source code, never the apply PAT
+or the PR head. Refused `/review` comments remain silent: allowing arbitrary
+commenters to trigger refusal notices would enable comment spam. Notifications
+for admitted reviews remain off; their only comment is the checked verdict.
 
 The agent starts in the base checkout with the exact admitted head SHA fetched
 beside it, inside the sandbox and with no credential: the head is data, and

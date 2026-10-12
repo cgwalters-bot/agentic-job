@@ -751,13 +751,16 @@ Both are merged there and off.
 ### Event-triggered callers
 
 The dedicated [review caller](review.md) sets `review: true` and
-`review-task: workflow/review.md` to take a fixed task from the base checkout,
+`review-task: workflow/review.md` to take a fixed task from the trusted caller checkout,
 review an admitted head SHA, from a fork too, with an analysis-only policy,
 post one validated verdict comment or noop, and report the verdict as the
 commit status `review`. It requires notifications and partial application
 off, and supports fake, opencode and Claude agents. Real reviewers start in
 the trusted base checkout with the exact head beside it; see the
-[review guide](review.md). The
+[review guide](review.md). On `pull_request_target`, caller bounds and the task
+are read at `github.workflow_sha`, independently of the reviewed code's base.
+Refused automatic reviews use the single status comment to say why; admitted
+reviews still keep general notifications off. The
 [dispatch caller](dispatch.md) also supports operator-selected reviews of open
 same-repository or fork PRs on the configured base, pinned to their exact head SHA.
 

@@ -365,7 +365,7 @@ jobs:
       review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
       source-repository: ${{ job.workflow_repository }}
       source-sha: ${{ job.workflow_sha }}
-      # Event review policy/task come from the base, never the PR head.
+      # Reviewed code still starts at the trusted PR base, not the policy revision.
       # Dispatch uses the operator's trusted caller commit, not target code.
       ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
       # The caller's settings for check and apply, as given to this call.
@@ -397,14 +397,13 @@ jobs:
             [ -n "$TASK" ] || { echo '::error::an agent run needs a task'; exit 1; }
           fi
       # The calling repository, for its bounds file.
-      # The agent job checks out the same commit (the `ref` output), for
-      # the setup script the configuration names.
+      # On pull_request_target use the running caller workflow's policy,
+      # even when the PR base predates it. Never read policy from the head.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Event review policy/task come from the base, never the PR head.
-          # Dispatch uses the operator's trusted caller commit, not target code.
-          ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
+          # Other event reviews use the base; dispatch uses the trusted caller.
+          ref: ${{ github.event_name == 'pull_request_target' && github.workflow_sha || (inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha) }}
       # Logs, transcripts and patches are published, so nothing is run for
       # a repository that cannot be shown to be public. An answer that is
       # an error counts as not public.

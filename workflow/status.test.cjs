@@ -6,10 +6,43 @@ const { readFileSync, mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { upsert, MARKER, MAX_PAGES } = require('./status.cjs');
+const { upsert, reviewRefusal, MARKER, MAX_PAGES } = require('./status.cjs');
 
 const env = { REPO: 'o/r', ITEM: '7', TEXT: 'running', GITHUB_RUN_ID: '100' };
 const named = (login = 'github-actions[bot]', body = `old\n\n${MARKER}`) => ({ id: 42, user: { login }, body });
+
+test('refused automatic review states why in one line and reuses the single status comment', () => {
+  const comments = [];
+  const writes = [];
+  const api = (method, path, body) => {
+    if (method === 'GET') return comments;
+    writes.push(method);
+    if (method === 'POST') comments.push(named());
+    comments[0].body = body;
+    return comments[0];
+  };
+  for (const reason of ['the bounds do not allow forks', 'the actor is a bot not listed in the bounds']) {
+    upsert({ ...env, TEXT: reviewRefusal(reason) }, api);
+    assert.equal(comments[0].body.split('\n')[0], `Review refused: ${reason}`);
+  }
+  assert.deepEqual(writes, ['POST', 'PATCH']);
+  assert.equal(comments.length, 1);
+  const hostile = reviewRefusal('line one\n@all <img> `code` <!-- marker -->');
+  assert.doesNotMatch(hostile, /[\n@<>`]/);
+  assert.equal(reviewRefusal('x'.repeat(2000)).length, 'Review refused: '.length + 1000);
+});
+
+test('refusal writer is limited to policy-refused automatic reviews and trusted source', () => {
+  const workflow = readFileSync('.github/workflows/review.yml', 'utf8');
+  const refusal = workflow.split('\n  refusal:\n')[1].split('\n  agent:\n')[0];
+  assert.match(refusal, /github.event_name == 'pull_request_target'/);
+  assert.match(refusal, /needs.policy.result == 'success' && needs.policy.outputs.admitted == 'false'/);
+  assert.match(refusal, /ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  assert.match(refusal, /persist-credentials: false/);
+  assert.match(refusal, /REASON: \$\{\{ needs.policy.outputs.reason \}\}/);
+  assert.match(refusal, /run: node .agentic-job-source\/workflow\/status.cjs review-refusal/);
+  assert.doesNotMatch(refusal, /SAFE_OUTPUTS_PAT|id-token:|contents: write/);
+});
 
 for (const [label, comments, method] of [
   ['new item', [], 'POST'],

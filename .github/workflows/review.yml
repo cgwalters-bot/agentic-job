@@ -81,6 +81,38 @@ jobs:
       budget: '500'
       timeout: '75'
 
+  # Refusals of automatic reviews should not disappear into Actions logs.
+  # The policy job's trusted-author gate prevents outsider comment spam;
+  # /review refusals remain silent rather than letting any commenter write.
+  refusal:
+    needs: policy
+    if: ${{ !cancelled() && github.event_name == 'pull_request_target' && needs.policy.result == 'success' && needs.policy.outputs.admitted == 'false' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    concurrency:
+      group: agentic-job-status-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          sparse-checkout: workflow/status.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Report the refused review in the single status comment
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ITEM: ${{ github.event.pull_request.number }}
+          REASON: ${{ needs.policy.outputs.reason }}
+        run: node .agentic-job-source/workflow/status.cjs review-refusal
+
   # agentic-job.yml's agent job, with the tailnet join between prepare and
   # secure-host.
   agent:

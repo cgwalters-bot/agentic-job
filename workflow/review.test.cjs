@@ -11,6 +11,24 @@ const { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus,
 const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
   item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
 
+test('target event caller policy follows the running workflow, independently of the reviewed base', () => {
+  const workflow = fs.readFileSync('.github/workflows/policy.yml', 'utf8');
+  const checkout = workflow.split('# The calling repository, for its bounds file.')[1]
+    .split('# Logs, transcripts')[0];
+  assert.match(checkout, /ref: \$\{\{ github.event_name == 'pull_request_target' && github.workflow_sha \|\|/);
+  assert.doesNotMatch(checkout, /job.workflow_sha|pull_request.head/);
+  const outputs = workflow.split('\n  policy:\n')[1].split('    steps:')[0];
+  assert.match(outputs, /ref: \$\{\{ inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\) \|\| github.sha \}\}/);
+  const select = section => new Function('github', 'inputs', `return (${section.match(/ref: \$\{\{ (.+) \}\}/)[1]
+    .replace(/inputs\.([\w-]+)/g, (_, key) => `inputs[${JSON.stringify(key)}]`)});`);
+  const github = { event_name: 'pull_request_target', workflow_sha: 'b'.repeat(40),
+    sha: 'c'.repeat(40), event: { pull_request: { base: { sha: 'a'.repeat(40) } } } };
+  const inputs = { review: true, 'review-item': '', base: 'main' };
+  assert.equal(select(checkout)(github, inputs), github.workflow_sha, 'stale PR base cannot select old bounds');
+  assert.equal(select(outputs)(github, inputs), github.event.pull_request.base.sha, 'reviewed code stays on its base');
+  assert.equal(select(checkout)({ ...github, event_name: 'workflow_dispatch' }, { ...inputs, 'review-item': '147' }), github.sha);
+});
+
 test('dispatch resolves same-repository and fork heads and refuses hostile routing', async () => {
   const env = { REVIEW: 'true', EVENT: 'false', KIND: 'analysis', OUTPUTS: 'add_comment,noop',
     MAX_OUTPUTS: '1', NOTIFY: 'none', APPLY_PARTIAL: 'false', ITEM: '147', TARGET: '147',
@@ -220,12 +238,12 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(caller, /kind: analysis/);
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit|pull_request.head|refs\/pull/);
-  // Which job holds which token: writes only in apply (the comment) and
-  // status (the status), the identity token only in the agent job.
+  // Writes only in refusal (the notice), apply (the verdict) and status
+  // (the commit status), the identity token only in the agent job.
   const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'agent', 'check', 'apply', 'status']);
-  for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: [],
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'apply', 'status']);
+  for (const [name, writes] of Object.entries({ policy: [], refusal: ['pull-requests'], agent: ['id-token'], check: [],
     apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);

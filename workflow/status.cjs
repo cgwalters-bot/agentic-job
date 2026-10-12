@@ -4,6 +4,14 @@ const { execFileSync } = require('node:child_process');
 const MARKER = '<!-- agentic-job-status -->';
 const MAX_PAGES = 20;
 
+function reviewRefusal(reason) {
+  // Policy diagnostics may contain event text. Keep the notice one line,
+  // bounded, and inert as Markdown (including mentions and HTML).
+  const text = String(reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 1000)
+    .replace(/[&<>@`*_\[\]\\]/g, char => `&#${char.charCodeAt(0)};`);
+  return `Review refused: ${text || 'no policy reason was supplied'}`;
+}
+
 function upsert(env, api) {
   const { REPO: repo, ITEM: item, TEXT: text, GITHUB_RUN_ID: run } = env;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo ?? '') || !/^[1-9][0-9]*$/.test(item ?? '')) {
@@ -31,9 +39,11 @@ function upsert(env, api) {
 }
 
 if (require.main === module) {
-  const result = upsert(process.env, (method, path, body) => JSON.parse(execFileSync('gh',
+  const env = process.argv[2] === 'review-refusal'
+    ? { ...process.env, TEXT: reviewRefusal(process.env.REASON) } : process.env;
+  const result = upsert(env, (method, path, body) => JSON.parse(execFileSync('gh',
     ['api', '-X', method, path, ...(body === undefined ? [] : ['-f', `body=${body}`])], { encoding: 'utf8' })));
   console.log(`id=${result.id}`);
 }
 
-module.exports = { upsert, MARKER, MAX_PAGES };
+module.exports = { upsert, reviewRefusal, MARKER, MAX_PAGES };
