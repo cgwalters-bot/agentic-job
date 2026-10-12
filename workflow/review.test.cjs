@@ -224,9 +224,9 @@ test('caller and write job retain the trusted-source boundary', () => {
   // status (the status), the identity token only in the agent job.
   const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'agent', 'check', 'apply', 'status']);
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'apply', 'status']);
   for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: [],
-    apply: ['pull-requests'], status: ['statuses'] })) {
+    refusal: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);
     if (name !== 'apply') assert.doesNotMatch(jobs[name], /secrets/, name);
@@ -265,4 +265,57 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(ci, /HEAD_SHA: \$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(ci, /contains\("Reviewed SHA: " \+ \$sha \+ "\\n"\)/);
   assert.match(ci, /\.key == "e2e-review" and \.value.result == "skipped" and \$installed == "false"/);
+});
+
+test('target events read workflow policy without changing the trusted review base', () => {
+  const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+  const checkout = policy.split('      # The calling repository, for its bounds file.')[1]
+    .split('      # Logs, transcripts')[0].match(/ref: \$\{\{ (.*) \}\}/)[1];
+  const base = policy.match(/^      ref: \$\{\{ (.*) \}\}/m)[1];
+  const inputs = { review: true, 'review-item': '', base: 'main' };
+  const evaluate = expression => Function('github', 'inputs',
+    `return ${expression.replaceAll('inputs.review-item', 'inputs["review-item"]')}`);
+  const github = { event_name: 'pull_request_target', workflow_sha: 'current-policy',
+    sha: 'event-sha', event: { pull_request: { base: { sha: 'stale-base' } } } };
+  assert.equal(evaluate(checkout)(github, inputs), 'current-policy');
+  assert.equal(evaluate(base)(github, inputs), 'stale-base');
+  github.event_name = 'pull_request';
+  assert.equal(evaluate(checkout)(github, inputs), 'stale-base');
+  inputs.review = false;
+  assert.equal(evaluate(checkout)(github, inputs), 'event-sha');
+});
+
+test('refused event reviews update one author-owned bounded status comment', () => {
+  const { refusalText } = require('./review.cjs');
+  const { upsert, MARKER } = require('./status.cjs');
+  const reason = 'the bounds do not allow forks';
+  assert.equal(refusalText(reason), `Review refused by policy: ${reason}`);
+  assert.equal(refusalText('a\n\r@user [link](url)'), 'Review refused by policy: a \\@user \\[link\\]\\(url\\)');
+  assert.ok(refusalText('a'.repeat(2000)).length < 1100);
+  const comments = [{ id: 1, user: { login: 'attacker' }, body: `copied\n\n${MARKER}` }];
+  const calls = [];
+  const api = (method, route, body) => {
+    calls.push([method, route, body]);
+    if (method === 'GET') return comments;
+    if (method === 'POST') {
+      const comment = { id: 2, user: { login: 'github-actions[bot]' }, body };
+      comments.push(comment);
+      return comment;
+    }
+    comments[1].body = body;
+    return comments[1];
+  };
+  const env = { REPO: 'owner/repo', ITEM: '472', GITHUB_RUN_ID: '100', TEXT: refusalText(reason) };
+  upsert(env, api);
+  upsert({ ...env, GITHUB_RUN_ID: '101' }, api);
+  assert.equal(calls.filter(([method]) => method === 'POST').length, 1);
+  assert.equal(calls.filter(([method]) => method === 'PATCH').length, 1);
+  assert.equal(comments[1].body.split('\n')[0], `Review refused by policy: ${reason}`);
+  const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
+  const refusal = caller.split('\n  refusal:\n')[1].split('\n  agent:\n')[0];
+  assert.match(refusal, /needs.policy.outputs.admitted == 'false'/);
+  assert.match(refusal, /ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  assert.match(refusal, /REASON: \$\{\{ needs.policy.outputs.reason \}\}/);
+  assert.match(refusal, /run: node .agentic-job-source\/workflow\/review.cjs refusal/);
+  assert.match(refusal, /group: agentic-job-status-/);
 });

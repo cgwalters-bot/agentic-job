@@ -17,7 +17,18 @@ none is listed today, and this repository has no Dependabot or Renovate
 configuration. A repository that adds one must list the bot in `bots` or not
 require `review`, or its pull requests wait on an expected status forever. The
 workflow, the bounds and the
-[standing task](../workflow/review.md) come from the base, never the head.
+[standing task](../workflow/review.md) come from the trusted caller, never the
+head. On `pull_request_target`, policy and task files are read at
+`github.workflow_sha`, the running caller workflow's revision, not the pull
+request's possibly stale base SHA. The agent's separate trusted base checkout
+is unchanged.
+
+When policy refuses an event review, the existing single bot status comment
+says `Review refused by policy: REASON` on one line. The reason is bounded to
+1000 characters and Markdown-escaped. Only the pinned workflow source runs
+with the comment-writing token; no head code or agent output is executed.
+This does not enable notifications for admitted reviews, change admission,
+or set a review commit status for a refused head.
 
 The agent starts in the base checkout with the exact admitted head SHA fetched
 beside it, inside the sandbox and with no credential: the head is data, and

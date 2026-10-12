@@ -81,6 +81,35 @@ jobs:
       budget: '500'
       timeout: '75'
 
+  # A refusal spends no inference, but must not silently leave the PR waiting.
+  # Reuse the bounded, author-checked status comment, never PR-owned code.
+  refusal:
+    needs: policy
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.policy.outputs.admitted == 'false' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    concurrency:
+      group: agentic-job-status-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          sparse-checkout: workflow
+          persist-credentials: false
+      - name: Report the policy refusal in the single status comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ITEM: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REASON: ${{ needs.policy.outputs.reason }}
+        run: node .agentic-job-source/workflow/review.cjs refusal
+
   # agentic-job.yml's agent job, with the tailnet join between prepare and
   # secure-host.
   agent:

@@ -369,7 +369,7 @@ jobs:
       review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
       source-repository: ${{ job.workflow_repository }}
       source-sha: ${{ job.workflow_sha }}
-      # Event review policy/task come from the base, never the PR head.
+      # Event review agent checkout stays on its trusted base, not the head.
       # Dispatch uses the operator's trusted caller commit, not target code.
       ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
       # The caller's settings for check and apply, as given to this call.
@@ -406,9 +406,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Event review policy/task come from the base, never the PR head.
+          # Read current trusted caller policy, even when the PR base is stale.
+          # The separate `ref` output keeps the agent on its trusted base.
           # Dispatch uses the operator's trusted caller commit, not target code.
-          ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.workflow_sha || (inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha) }}
       # Logs, transcripts and patches are published, so nothing is run for
       # a repository that cannot be shown to be public. An answer that is
       # an error counts as not public.

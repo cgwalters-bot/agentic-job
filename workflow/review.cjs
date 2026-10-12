@@ -2,6 +2,15 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+function refusalText(reason) {
+  // Policy reasons can name event fields. Keep them inert and on one line;
+  // a refusal must not turn a PR-controlled name into Markdown or a mention.
+  const text = String(reason ?? '').replace(/[\x00-\x20\x7f]+/g, ' ').trim().slice(0, 1000)
+    .replace(/[\\`*_{}\[\]()<>!#|~@]/g, '\\$&');
+  return `Review refused by policy: ${text || 'no reason supplied'}`;
+}
 
 // Run only from the reusable workflow's pinned source, never from the review head.
 function admit(decision, base) {
@@ -134,9 +143,13 @@ if (require.main === module) {
     process.stdout.write(taskFile(process.cwd(), file));
   } else if (command === 'check') {
     checkOutputs(JSON.parse(fs.readFileSync(file, 'utf8')), number);
+  } else if (command === 'refusal') {
+    execFileSync(process.execPath, [path.join(__dirname, 'status.cjs')], {
+      env: { ...process.env, TEXT: refusalText(process.env.REASON) }, stdio: 'inherit',
+    });
   } else {
-    throw new Error('Expected task or check');
+    throw new Error('Expected task, check or refusal');
   }
 }
 
-module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch };
+module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch, refusalText };
