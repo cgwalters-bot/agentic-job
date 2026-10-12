@@ -20,6 +20,44 @@ kernel features or runtime enforcement; the setup checks and probes still
 have to pass. It applies to the composite action, not direct CLI invocation.
 Container image distributions are independent of the supported host systems.
 
+## Candidate access-time world-write policy (not enabled)
+
+`crates/agentic-job/bpf/world_write.bpf.c` is a candidate replacement for
+the chmod walk, not an installed control. The existing walk and its setuid
+inventory remain in use until a pinned object, bpftool loader and privileged
+acceptance probes are integrated. Building the candidate is not evidence of
+enforcement; the current final probe still checks the existing hardening.
+
+The concrete threat is an unprivileged process modifying another user's
+globally writable host files or non-sticky directories. The candidate uses
+only modify-return programs on `security_*` wrappers, independently of the
+active LSM list. Its single configuration map is off by default. A loader
+must record the root filesystem's **kernel** device number (major shifted
+left 20 bits, OR minor), not the libc encoding of `stat.st_dev`, before
+enabling it. Other superblocks' devices are outside the policy; bind mounts
+of the root filesystem are still inside it.
+
+The predicate compares inode ownership with the task's kernel `fsuid`
+using CO-RE field reads. It has no group, user-namespace or root exemption.
+Sticky **directories** are allowed; a sticky regular file is not exempt.
+The hooks chosen for the candidate are:
+
+- `security_inode_permission`, for `MAY_WRITE`: file write access and
+  parent-directory write permission for create, link, unlink, rename
+  (both parents), mkdir, rmdir, symlink and mknod;
+- `security_file_open`, for `FMODE_WRITE`: opening a file for writing;
+- `security_file_permission`, for `MAY_WRITE`: writes through descriptors
+  opened before activation, or before ownership/mode changes;
+- `security_inode_setattr`, for `ATTR_SIZE`: truncate and ftruncate.
+
+These hooks do **not** revoke existing writable mappings or mediate all
+memory-mapped writes. Mapping coverage and kernel caller-path verification
+remain integration work; this candidate must not be represented as complete
+write protection. The host-native test exhausts mode bits, inode types,
+ownership, root/nonroot users and filesystem matches. CI also compiles the
+CO-RE object, but has not yet proved loading, attachment, kernel relocation
+or denial on Ubuntu or RHEL. No new setup-time measurements are available.
+
 ```yaml
 jobs:
   build:
