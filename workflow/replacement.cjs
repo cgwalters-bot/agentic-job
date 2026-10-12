@@ -14,17 +14,18 @@ function git(args, cwd) {
   }).trim();
 }
 
-function trial(env) {
+function trial(env, repo = process.cwd(), remote = `https://github.com/${env.REPO}`) {
   const report = JSON.parse(fs.readFileSync(env.REPORT, 'utf8')).patch;
   const series = JSON.parse(fs.readFileSync(path.join(env.GH_AW_TMP, 'replacement.json'), 'utf8'));
   const config = JSON.parse(fs.readFileSync(path.join(env.GH_AW_TMP, 'config.json'), 'utf8')).push_to_pull_request_branch;
-  if (!report?.commit_files || report.base_commit !== config?.replacement_base ||
+  if (!report?.commit_files || !/^[0-9a-f]{40}$/.test(report.base_commit ?? '') || !config?.replacement_base ||
+      ![config.replacement_base, env.CURRENT_BASE].includes(report.base_commit) ||
       series.base_commit !== report.base_commit || !config.replacement_max_commits ||
       series.commits.length !== report.commit_files.length ||
       series.commits.length > config.replacement_max_commits) throw new Error('Unchecked replacement series');
-  // Fetch the exact base seen by policy, not an arbitrary producer commit.
-  git(['fetch', '--no-tags', `https://github.com/${env.REPO}`, report.base_commit]);
-  return materialize(series, report.commit_files, env.RUNNER_TEMP);
+  // Fetch only a policy snapshot or the current base resolved by trusted apply.
+  git(['fetch', '--no-tags', remote, report.base_commit], repo);
+  return materialize(series, report.commit_files, env.RUNNER_TEMP, repo);
 }
 
 function materialize(series, checkedFiles, temp, repo = process.cwd()) {

@@ -130,8 +130,8 @@ Check and apply use fresh VMs and treat artifacts as data. The reusable
 workflow uses no build cache. Apply trials the patch on a fetched base
 ancestor and compares changed paths, with rename detection disabled.
 Top-level dot-folders are protected by default. Caller bounds may exempt
-`.github`, and only it, for pull requests to repositories they name exactly
-(a push never has it, since gh-aw's push handler refuses workflow files); git configuration
+`.github`, and only it, for pull requests to repositories they name exactly,
+including fix pushes to the open PR's apply-owned fork branch; git configuration
 and the other fixed patch refusals remain protected. Apply never executes the
 workflows it pushes, but the target's own `pull_request` CI runs a fork pull
 request's edited workflows before anyone reviews them. So the output check

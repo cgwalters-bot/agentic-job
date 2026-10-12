@@ -319,13 +319,13 @@ the policy's, before it fetches or pushes anything for it, and one from a
 repository its identity does not own before it forks; it MUST give gh-aw's handler that
 fork as the only head repository it may push to. It MUST NOT push a partial
 run's change. Except for RC-023, it MUST push without force, with no fallback to a new pull
-request and without `allow_workflows`, so that gh-aw's handler too refuses
-a change under `.github/workflows/`, and fail unless the branch then holds
+request. Only the exact-repository `.github` exemption MAY enable
+`allow_workflows` and its matching dot-folder exclusion. Apply MUST fail unless the branch then holds
 the checked tree as one commit on that head.
 Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
 `push_requests_against_the_bounds`, `a_push_policy_names_its_pull_request_and_always_a_max`,
 `push_bounds_must_name_branches_and_one_push`, `push_bounds_intersect`,
-`a_push_never_carries_a_folder_exemption` and
+`push_folder_exemptions_are_repository_scoped_and_intersected` and
 `what_the_job_token_cannot_apply_is_refused`;
 [push.test.cjs](../workflow/push.test.cjs), `a push resolves an open pull
 request from a fork's branch and refuses hostile routing`;
@@ -349,7 +349,8 @@ capabilities and token boundary`.
 only when the caller explicitly bounds `replacement_max_commits` (default
 zero, maximum 50); organization bounds MUST only tighten this ceiling.
 The complete strict-JSON `replacement.json` MUST fit the patch byte ceiling,
-name the PR base head resolved by read-only policy, and contain a nonempty
+name the base branch head resolved by read-only policy or its current head
+independently resolved by trusted apply, and contain a nonempty
 array of individually nonempty, single-commit format-patch mails. It MUST NOT
 coexist with `base.json` or an ordinary patch. Check MUST apply RC-007 to every
 mail and bound the union of paths, including edits later reverted. Apply MUST
@@ -364,8 +365,9 @@ Enforcement: [replacement.rs](../crates/agentic-job/src/check/replacement.rs),
 `replacement_series_are_individually_bounded` in
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), and
 [replacement.test.cjs](../workflow/replacement.test.cjs).
-The implementation admits the base snapshot read by policy; a newer base
-requires a new run. Live forge application remains unverified locally.
+Run MUST fetch the policy base snapshot into the producer checkout. Check
+MUST validate a full commit ID; apply MUST bind it to one of these trusted
+heads before reconstruction. Live forge application remains unverified locally.
 
 **RC-021 — Pull requests from a fork.** Apply MUST NOT push an agent's commit
 to a branch of the output repository. It MUST NOT push target base commits

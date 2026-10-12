@@ -31,9 +31,16 @@ pub fn check(content: &[u8], push: &Push, max_bytes: u64) -> Result<PatchInfo> {
     );
     let series: Replacement = serde_json::from_slice(content)?;
     ensure!(
-        push.replacement_base.as_deref() == Some(series.base_commit.as_str()),
-        "replacement is not on the base head resolved by policy"
+        push.replacement_base.is_some()
+            && series.base_commit.len() == 40
+            && series
+                .base_commit
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "replacement requires a resolved policy base and a full commit id"
     );
+    // Apply binds this claim to the policy snapshot or the base branch head
+    // it resolves itself. Check has no forge access and grants no write.
     ensure!(
         !series.commits.is_empty() && series.commits.len() <= push.replacement_max_commits as usize,
         "replacement commit count is outside bounds"

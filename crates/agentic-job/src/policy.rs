@@ -440,11 +440,9 @@ pub struct Push {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_base: Option<String>,
     pub protected_files: Vec<String>,
-    /// Always true, with no exemption: gh-aw's push handler refuses a
-    /// change under `.github/workflows/` without `allow_workflows`, which
-    /// apply never sets, so an exempt `.github` would let check pass a
-    /// patch that apply then fails. Only a pull request carries one.
     pub protect_top_level_dot_folders: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unprotected_dot_folders: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
     /// The largest patch, in KB.
     pub max_patch_size: u64,
@@ -478,7 +476,7 @@ impl Push {
         PatchRules {
             protected_files: &self.protected_files,
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
-            unprotected_dot_folders: &[],
+            unprotected_dot_folders: &self.unprotected_dot_folders,
             max_patch_files: self.max_patch_files,
         }
     }
@@ -573,6 +571,10 @@ impl Policy {
             ensure!(pr.max == MAX_PULL_REQUESTS, "more than one pull request");
         }
         if let Some(push) = &self.safe_outputs.push_to_pull_request_branch {
+            validate_dot_folders(
+                &push.unprotected_dot_folders,
+                "push_to_pull_request_branch.unprotected_dot_folders",
+            )?;
             ensure!(
                 self.kind == Kind::Branch && self.safe_outputs.create_pull_request.is_none(),
                 "a push in an analysis run, or beside a pull request"
@@ -988,6 +990,7 @@ impl Bounds {
                 replacement_base: None,
                 protected_files: self.protected_files(repo),
                 protect_top_level_dot_folders: true,
+                unprotected_dot_folders: self.dot_folders(repo),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 max_patch_size: self.max_patch_bytes / KB,
                 max_patch_files: self.max_patch_files,
@@ -1138,6 +1141,8 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             )]);
         }
         (Some(mut push), Some(bound)) => {
+            push.unprotected_dot_folders
+                .retain(|name| bound.unprotected_dot_folders.contains(name));
             push.replacement_max_commits = push
                 .replacement_max_commits
                 .min(bound.replacement_max_commits);
@@ -1291,7 +1296,7 @@ files = ["README.md", "AGENTS.md"]
     }
 
     #[test]
-    fn a_push_never_carries_a_folder_exemption() {
+    fn push_folder_exemptions_are_repository_scoped_and_intersected() {
         let mut bounds = bounds();
         bounds.outputs.insert(
             PUSH_TO_PULL_REQUEST_BRANCH.into(),
@@ -1314,11 +1319,11 @@ files = ["README.md", "AGENTS.md"]
         let (carrier, rules) = policy.safe_outputs.patch_carrier().unwrap();
         assert_eq!(carrier, PUSH_TO_PULL_REQUEST_BRANCH);
         assert!(rules.protect_top_level_dot_folders);
-        assert!(rules.unprotected_dot_folders.is_empty());
-        // One written by hand with an exemption does not load.
+        assert_eq!(rules.unprotected_dot_folders, [".github"]);
+        // No other dot-folder can be exempted, even in a hand-written policy.
         let mut value = serde_json::to_value(&policy).unwrap();
         value["safe_outputs"][PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
-            serde_json::json!([".github"]);
+            serde_json::json!([".husky"]);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
@@ -1329,9 +1334,39 @@ files = ["README.md", "AGENTS.md"]
             error
                 .root_cause()
                 .to_string()
-                .contains("unknown field `unprotected_dot_folders`"),
+                .contains("may only name \".github\""),
             "{error:#}"
         );
+        for (local, org, admitted) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            let mut caller = bounds.clone();
+            let mut organization = bounds.clone();
+            if !local {
+                caller.unprotected_files.repos.clear();
+            }
+            if !org {
+                organization.unprotected_files.repos.clear();
+            }
+            let intersected = intersect(
+                caller.compile(&request).unwrap(),
+                organization.compile(&request).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                !intersected
+                    .safe_outputs
+                    .patch_carrier()
+                    .unwrap()
+                    .1
+                    .unprotected_dot_folders
+                    .is_empty(),
+                admitted
+            );
+        }
     }
 
     #[test]

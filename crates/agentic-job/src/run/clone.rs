@@ -201,6 +201,11 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
         Ok(sandbox.checked(&argv, b"", MAX_GIT_OUTPUT)?.text())
     };
     if let Some(push) = push {
+        if let Some(base) = &push.replacement_base {
+            sandbox
+                .checked(&fetch_args(dir_text, base, DEPTH), b"", MAX_GIT_OUTPUT)
+                .context("fetching the replacement base snapshot")?;
+        }
         sandbox
             .checked(
                 &fetch_args(dir_text, &push.head, DEPTH),
@@ -554,12 +559,33 @@ mod tests {
         in_repo(&["update-ref", "refs/pull/1/head", &head]);
         in_repo(&["checkout", "-q", "main"]);
         in_repo(&["branch", "-qD", "fork"]);
+        // A non-default replacement base is not in the default shallow clone.
+        in_repo(&["checkout", "-qb", "release"]);
+        in_repo(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Advance replacement base",
+        ]);
+        let replacement_base = in_repo(&["rev-parse", "HEAD"]);
+        in_repo(&["checkout", "-q", "main"]);
         let url = format!("file://{repo_text}");
         ok(&clone_args(&url, None, DEPTH, dir_text));
+        assert!(!run(&["git", "-C", dir_text, "cat-file", "-e", &replacement_base]).0);
+        ok(&fetch_args(dir_text, &replacement_base, DEPTH));
         ok(&fetch_args(dir_text, &head, DEPTH));
         let in_clone = |args: &[&str]| ok(&[&["git", "-C", dir_text], args].concat());
         in_clone(&["checkout", "--quiet", "--detach", &head, "--"]);
         assert_eq!(in_clone(&["rev-parse", "--verify", "HEAD"]), head);
+        assert_eq!(
+            in_clone(&[
+                "rev-parse",
+                "--verify",
+                &format!("{replacement_base}^{{commit}}")
+            ]),
+            replacement_base
+        );
         // A commit the repository does not have is not there to fetch.
         assert!(!run(&fetch_args(dir_text, &"3".repeat(40), DEPTH)).0);
     }

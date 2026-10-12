@@ -137,10 +137,10 @@ for (const carrier of ['create_pull_request', 'push_to_pull_request_branch']) {
         assert.ok(!Object.hasOwn(config, 'unprotected_dot_folders'));
         // gh-aw's guard stays on for every folder the policy does not exempt.
         assert.equal(config.protect_top_level_dot_folders, true);
-        // Only a pull request carries an exemption, and only `.github`.
-        const excluded = carrier === 'create_pull_request' ? (folders ?? []).filter(f => f === '.github') : [];
+        // Both carriers use the same exact-repository exemption, only `.github`.
+        const excluded = (folders ?? []).filter(f => f === '.github');
         assert.deepEqual(config.protected_dot_folder_excludes, excluded.length ? excluded : undefined);
-        assert.ok(!Object.hasOwn(config, 'allow_workflows'));
+        assert.equal(config.allow_workflows, carrier === 'push_to_pull_request_branch' && excluded.length ? true : undefined);
         assert.equal(config.protected_files_policy, 'blocked');
         assert.deepEqual(config.protected_files, ['CODEOWNERS']);
         assert.equal(config['head-repo'], 'bot/repo');
@@ -909,7 +909,8 @@ test('a pull request without a fork to open it from stops the guard', async () =
 // `config` is the policy's, and `head` the head of the pull request
 // `pulls.get` answers with.
 async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/repo', reachable = 1, made = 'bot/repo', answer = {}, actions = 'off',
-  config = {}, state = 'open', head = { ref: 'p/agent-run-7', repo: { full_name: 'bot/repo', fork: true, owner: { login: 'bot' } } }, forked = [] } = {}) {
+  config = {}, state = 'open', replacement = false, base = { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: 'owner/repo' } },
+  head = { ref: 'p/agent-run-7', repo: { full_name: 'bot/repo', fork: true, owner: { login: 'bot' } } }, forked = [] } = {}) {
   const dir = mkdtempSync(join(homedir(), 'fork-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
@@ -934,7 +935,12 @@ async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/r
         forked.push(params);
         return { data: { full_name: made, fork: true, owner: { login: made.split('/')[0] }, ...answer } };
       } },
-      pulls: { get: async params => { read.push(params); return { data: { number: params.pull_number, state, head } }; } },
+      pulls: { get: async params => { read.push(params); return { data: { number: params.pull_number, state, head, base } }; } },
+      git: { getRef: async params => {
+        assert.equal(replacement, true, 'ordinary pushes must not resolve a replacement base');
+        assert.deepEqual(params, { owner: 'owner', repo: 'repo', ref: 'heads/main' });
+        return { data: { object: { type: 'commit', sha: 'b'.repeat(40) } } };
+      } },
     } };
     const exec = { getExecOutput: async (program, args, options) => {
       tries.push([program, ...args]);
@@ -944,7 +950,14 @@ async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/r
         : { exitCode: tries.length % 2 ? 128 : 0, stdout: '' };
     } };
     await new AsyncFunction('require', 'process', 'core', 'github', 'exec', 'setTimeout', script('Fork the output repository for the pull request'))(
-      require, { env: { GH_AW_TMP: dir, OUTPUT_REPO: output, REPO: repo, BASE: 'p/agent-run-7' } }, core, github, exec, resolve => resolve());
+      name => {
+        if (name === '/workspace/apply-source/workflow/push.cjs') {
+          assert.equal(replacement, true, 'ordinary pushes have no trusted replacement checkout');
+          return require('./push.cjs');
+        }
+        return require(name);
+      }, { env: { GH_AW_TMP: dir, OUTPUT_REPO: output, REPO: repo, BASE: 'p/agent-run-7',
+        GITHUB_WORKSPACE: '/workspace', REPLACEMENT: String(replacement) } }, core, github, exec, resolve => resolve());
     return { outputs, forked, tries, settings, read };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -993,6 +1006,12 @@ test('a push goes only to a pull request apply opened from its own fork', async 
   assert.deepEqual(forked, [{ owner: 'owner', repo: 'repo', default_branch_only: true }]);
   assert.deepEqual(read, [{ owner: 'owner', repo: 'repo', pull_number: 42 }]);
   assert.deepEqual(outputs, { repo: 'bot/repo' });
+  const enabled = { push_to_pull_request_branch: { ...config.push_to_pull_request_branch, replacement_max_commits: 10 } };
+  assert.deepEqual((await fork([push], { config: enabled })).outputs, { repo: 'bot/repo' });
+  assert.deepEqual((await fork([push], { config: enabled, replacement: true, repo: 'owner/repo' })).outputs,
+    { repo: 'bot/repo', 'current-base': 'b'.repeat(40) });
+  await assert.rejects(fork([push], { config: enabled, replacement: true, repo: 'owner/repo',
+    base: { ref: 'main', repo: { full_name: 'other/repo' } } }), /Invalid pull request base/);
   // The forge's names in another case are the same repository.
   const same = { ref: 'p/agent-run-7', repo: { full_name: 'Bot/Repo', fork: true, owner: { login: 'Bot' } } };
   assert.deepEqual((await fork([push], { config, head: same })).outputs, { repo: 'bot/repo' });

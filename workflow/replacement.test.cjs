@@ -56,6 +56,17 @@ test('replacement rewords, squashes and rebases; exact reruns skip and moved hea
     fs.writeFileSync(path.join(temp, 'replacement.json'), JSON.stringify(series));
     fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { replacement_base: base, replacement_max_commits: 1 } }));
     assert.throws(() => trial({ REPORT: report, GH_AW_TMP: temp }), /Unchecked replacement/);
+    git(['push', remote, `${movedBase}:refs/heads/main`]);
+    const env = { REPORT: report, GH_AW_TMP: temp, RUNNER_TEMP: temp, CURRENT_BASE: movedBase };
+    assert.deepEqual(trial(env, repo, remote), first);
+    // Apply accepts only its own current resolution or the pinned snapshot.
+    assert.throws(() => trial({ ...env, CURRENT_BASE: original }, repo, remote), /Unchecked replacement/);
+    fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { replacement_base: movedBase, replacement_max_commits: 1 } }));
+    assert.deepEqual(trial({ ...env, CURRENT_BASE: original }, repo, remote), first);
+    for (const change of [{ replacement_max_commits: 0 }, { replacement_base: undefined }]) {
+      fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { replacement_base: movedBase, replacement_max_commits: 1, ...change } }));
+      assert.throws(() => trial(env, repo, remote), /Unchecked replacement/);
+    }
     push(remote, 'agent-run-1', original, first.head, repo);
     push(remote, 'agent-run-1', original, first.head, repo); // idempotent
     assert.equal(git(['rev-parse', 'refs/heads/agent-run-1'], remote), first.head);

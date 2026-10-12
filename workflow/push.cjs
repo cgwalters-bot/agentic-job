@@ -29,7 +29,21 @@ async function resolvePush(env, github) {
       !/^[0-9a-f]{40}$/.test(data.head?.sha ?? '') || typeof data.head?.ref !== 'string') {
     throw new Error('A push needs an open pull request of the repository it works on from a branch of a fork, the one apply opened it from');
   }
-   return { branch: data.head.ref, head: data.head.sha, base: data.base.sha };
+  return { branch: data.head.ref, head: data.head.sha,
+    base: await currentBase(env.REPO, data, github) };
 }
 
-module.exports = { resolvePush };
+// A PR's base.sha can lag behind its base branch. Only the forge names
+// that branch; no producer-provided ref or commit is used to resolve it.
+async function currentBase(repository, pull, github) {
+  if (pull.base?.repo?.full_name?.toLowerCase() !== repository.toLowerCase() ||
+      typeof pull.base?.ref !== 'string' || !pull.base.ref) throw new Error('Invalid pull request base branch');
+  const [owner, repo] = repository.split('/');
+  const { data } = await github.rest.git.getRef({ owner, repo, ref: `heads/${pull.base.ref}` });
+  if (data.object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(data.object?.sha ?? '')) {
+    throw new Error('Invalid current base head');
+  }
+  return data.object.sha;
+}
+
+module.exports = { resolvePush, currentBase };

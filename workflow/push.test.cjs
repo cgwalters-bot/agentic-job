@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { resolvePush } = require('./push.cjs');
+const { resolvePush, currentBase } = require('./push.cjs');
 
 test("a push resolves an open pull request from a fork's branch and refuses hostile routing", async () => {
   const env = { EVENT: 'false', REVIEW: 'false', KIND: 'branch', ITEM: '42', REPO: 'o/r', OUTPUT_REPO: '',
@@ -12,8 +12,11 @@ test("a push resolves an open pull request from a fork's branch and refuses host
   const api = value => ({ rest: { pulls: { get: async args => {
     assert.deepEqual(args, { owner: 'o', repo: 'r', pull_number: 42 });
     return { data: value };
+  } }, git: { getRef: async args => {
+    assert.deepEqual(args, { owner: 'o', repo: 'r', ref: 'heads/main' });
+    return { data: { object: { type: 'commit', sha: 'c'.repeat(40) } } };
   } } } });
-  const want = { branch: 'agent-run-12', head: 'a'.repeat(40), base: 'b'.repeat(40) };
+  const want = { branch: 'agent-run-12', head: 'a'.repeat(40), base: 'c'.repeat(40) };
   assert.deepEqual(await resolvePush(env, api(data)), want);
   for (const change of [{ OUTPUT_REPO: 'o/r' }, { OUTPUT_REPO: 'O/R' }, { OUTPUT_REPO: 'o/r', GITHUB_REPOSITORY: 'caller/repo' }]) {
     assert.deepEqual(await resolvePush({ ...env, ...change }, api(data)), want);
@@ -42,4 +45,21 @@ test("a push resolves an open pull request from a fork's branch and refuses host
     { head: { ...data.head, ref: undefined } }]) {
     await assert.rejects(resolvePush(env, api({ ...data, ...change })), /open pull request/, JSON.stringify(change));
   }
+});
+
+test('current replacement base is resolved from the forge branch, never the stale PR sha', async () => {
+  const pull = { base: { ref: 'release/v1', sha: 'a'.repeat(40), repo: { full_name: 'O/R' } } };
+  for (const object of [{ type: 'commit', sha: 'b'.repeat(40) }, { type: 'tag', sha: 'b'.repeat(40) },
+    { type: 'commit', sha: 'main' }, { type: 'commit', sha: 'B'.repeat(40) }, {}]) {
+    const github = { rest: { git: { getRef: async args => {
+      assert.deepEqual(args, { owner: 'o', repo: 'r', ref: 'heads/release/v1' });
+      return { data: { object } };
+    } } } };
+    if (object.type === 'commit' && object.sha === 'b'.repeat(40)) {
+      assert.equal(await currentBase('o/r', pull, github), object.sha);
+    } else await assert.rejects(currentBase('o/r', pull, github), /Invalid current base/);
+  }
+  await assert.rejects(currentBase('other/r', pull, {}), /Invalid pull request base/);
+  await assert.rejects(currentBase('o/r', { base: { ...pull.base, ref: '' } }, {}), /Invalid pull request base/);
+  await assert.rejects(currentBase('o/r', pull, { rest: { git: { getRef: async () => { throw new Error('unavailable'); } } } }), /unavailable/);
 });

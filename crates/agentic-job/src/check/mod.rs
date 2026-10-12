@@ -966,8 +966,26 @@ mod tests {
             let verdict = proposal(series.clone()).check_against(&policy);
             assert!(verdict.ok, "{:?}", verdict.errors);
             assert_eq!(verdict.patch.unwrap().commit_files.unwrap().len(), 2);
+            let workflow =
+                json!({"base_commit": BASE, "commits": [mail(".github/workflows/test.yml")]});
+            assert!(!proposal(workflow.clone()).check_against(&policy).ok);
+            let mut exempt = policy.clone();
+            exempt
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .unprotected_dot_folders = vec![".github".into()];
+            assert!(proposal(workflow).check_against(&exempt).ok);
+            // A newer base is a claim until trusted apply resolves it.
+            assert!(
+                proposal(json!({"base_commit": HEAD, "commits": [mail("src/a.rs")]}))
+                    .check_against(&policy)
+                    .ok
+            );
             for invalid in [
-                json!({"base_commit": HEAD, "commits": [mail("src/a.rs")]}),
+                json!({"base_commit": "main", "commits": [mail("src/a.rs")]}),
+                json!({"base_commit": "A".repeat(40), "commits": [mail("src/a.rs")]}),
                 json!({"base_commit": BASE, "commits": []}),
                 json!({"base_commit": BASE, "commits": [mail("src/a.rs"), mail("src/b.rs"), mail("src/c.rs")]}),
                 // Forbidden intermediate files cannot hide behind a later revert.
@@ -1043,6 +1061,29 @@ mod tests {
             let verdict =
                 with_item(json!({"pull_request_number": "42"})).check_against(&push_policy());
             assert_eq!(verdict.errors, Vec::<String>::new());
+        }
+
+        #[test]
+        fn owned_pushes_use_the_same_dot_folder_rules() {
+            let mut policy = push_policy();
+            policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .unprotected_dot_folders = vec![".github".into()];
+            for (path, admitted) in [
+                (".github/workflows/test.yml", true),
+                (".github/agentic-job/allow.toml", true),
+                (".github/CODEOWNERS", false),
+                (".github/.git/config", false),
+                (".husky/hook", false),
+            ] {
+                let verdict = handback()
+                    .with(PUSH_PATCH, Some(patch_of(path).replace(BASE, HEAD)))
+                    .check_against(&policy);
+                assert_eq!(verdict.ok, admitted, "{path}: {:?}", verdict.errors);
+            }
         }
 
         #[test]

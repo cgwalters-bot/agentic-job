@@ -51,8 +51,11 @@ This does not enable fork end-to-end CI or make a verdict merge authorization.
 `fix` takes the number of an open pull request that implement opened, from
 the applying account's fork. Its run starts from that pull request's branch
 at the head it had when dispatched, and its change is pushed there, to the
-fork, as one commit on top, never force-pushed; a pull request that moved
-meanwhile is refused, and the run has to be dispatched again. A
+fork, ordinarily as one commit on top without force. Optional
+[bounded series replacement](safe-outputs.md#replacing-the-complete-series)
+allows a rebase onto the policy snapshot or the base branch's current head
+resolved by trusted apply, using an exact head lease. A pull request whose
+head moved meanwhile is refused, and the run has to be dispatched again. A
 same-repository pull request, or one from anyone else's fork, is refused: a
 push to it would run the target's `pull_request` workflows on agent-written
 code with their write token and OIDC

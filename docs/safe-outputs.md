@@ -156,8 +156,10 @@ the file `replacement.json`. Its strict JSON shape is:
 {"base_commit":"BASE_SHA","commits":["FIRST_MAIL","SECOND_MAIL"]}
 ```
 
-`BASE_SHA` must be the exact PR base head read by the policy job (the run's
-brief names it). Each string is one plain
+`BASE_SHA` must be the base branch head read by the policy job (the run's
+brief names it), or the current head of the PR's base branch resolved by
+trusted apply. Policy resolves the branch ref, not the PR's possibly stale
+base SHA, and run fetches that snapshot into the producer checkout. Each string is one plain
 `git format-patch --stdout --no-signature --no-renames -1 COMMIT` mail with
 a valid `Date:` header, no cover letter and no base header. This is the full
 replacement series, including any original commits to keep, rather than a
@@ -179,8 +181,13 @@ Apply pushes it with `--force-with-lease=refs/heads/BRANCH:ORIGINAL_HEAD`.
 An exact already-applied head is a no-op; a different head, even with the
 same tree, refuses the replacement. The final remote head is verified.
 
-The admitted base is a snapshot: a base advancing after policy does not
-invalidate it, but rebasing onto a newer snapshot requires a new fix run.
+The policy base remains an admitted snapshot if the branch advances. A fix
+run may also fetch a newer head and rebase onto it; apply independently reads
+the PR's base branch and its current head, and refuses any other base before
+materializing or pushing. Check validates the claimed full commit ID, not its
+forge membership. A head that moves again before apply resolves it requires
+a new proposal or the policy snapshot. This prevents an arbitrary producer
+commit from becoming the root of the replacement series.
 
 `push_to_pull_request_branch` lets a follow-up run fix an open pull request:
 its change goes onto that pull request's branch as one commit, not into a new
@@ -224,17 +231,16 @@ forge serves a fork pull request's head from the target too) and starts there:
 - the run refuses to start when the checkout is not at `head`;
 - check refuses a hand-back whose base is not `head`, a push line naming any
   branch but the pull request's, and the same patch rules as a pull request
-  (protected files, every top-level dot-folder, size and file count): a push
-  is never given the `.github` exemption a pull request may have;
+   (protected files, top-level dot-folders, size and file count), including the
+   same exact-repository `.github` exemption as a new pull request;
 - apply makes or finds its fork as for a pull request, and refuses unless the
   pull request is open and its head is that fork and the policy's branch; a
   pull request from someone else's repository is refused before anything is
   forked, fetched or pushed; gh-aw's handler is given the fork as the only head
   repository it may push to, and refuses a pull request from any other;
 - the handler applies the patch on `head` and pushes one commit without force,
-   with no fallback to a new pull request and never with `allow_workflows`,
-   so the handler refuses a change under `.github/workflows/` as well as
-   check does. A
+    with no fallback to a new pull request. Only the `.github` exemption
+    enables `allow_workflows` and the matching dot-folder exclusion. A
    branch that moved since `head` was read makes the push not a fast-forward,
    which the forge refuses: the pull request has to be run again. Before the
    handler runs, apply leaves out a push if the fetched fork branch already
@@ -296,10 +302,10 @@ comment target is available, in the run's conclusion comment.
 
 The exemption does not reach protected file names or git's own files
 inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`). Organization and
-caller bounds must both permit it, and it applies to `create_pull_request`
-only: a push is refused anything under `.github/`, since gh-aw's push
-handler refuses workflow files without `allow_workflows`, which apply never
-sets. Workflow changes are pushed only to
+caller bounds must both permit it. It applies to `create_pull_request` and
+`push_to_pull_request_branch`, including replacement series, only for the
+same listed repositories. A fix push still requires the open PR and owned
+fork/branch checks described above. Workflow changes are pushed only to
 apply's fork, which has Actions turned off, and reach the repository as a
 fork pull request. Its `pull_request` CI gets no secrets and a read-only
 token, not the target repository's write credentials. Operators must configure
@@ -335,7 +341,7 @@ to push workflow files. No agent or check job gains a write credential.
 
 `policy.json` holds, as `safe_outputs`, gh-aw's own configuration format:
 the collector reads that part as it is. The additional `unprotected_dot_folders`
-list, on `create_pull_request` only, is enforced by check. Apply passes it to
+list, on both patch-carrying outputs, is enforced by check. Apply passes it to
 gh-aw's handler as `protected_dot_folder_excludes`, keeping only `.github`
 whatever the list says, and keeps `protect_top_level_dot_folders`
 on, so the handler still refuses every other dot-folder before and after it

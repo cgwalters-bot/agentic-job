@@ -201,6 +201,8 @@ jobs:
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPLACEMENT: ${{ steps.replacement.outputs.enabled }}
         with:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           script: |
@@ -226,6 +228,10 @@ jobs:
                   pull.head?.ref !== process.env.BASE) {
                 throw new Error(`pull request ${target} of ${process.env.OUTPUT_REPO} is ${pull.state}, from ${from}:${pull.head?.ref}, not open from ${me}'s fork:${process.env.BASE}: ` +
                   `a push goes only to the branch of a pull request apply opened from ${me}'s fork`);
+              }
+              if (process.env.REPLACEMENT === 'true') {
+                const { currentBase } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/push.cjs`);
+                core.setOutput('current-base', await currentBase(process.env.REPO, pull, github));
               }
             }
             const { data: fork } = await github.rest.repos.createFork({ owner, repo, default_branch_only: true });
@@ -303,6 +309,8 @@ jobs:
       - name: Apply the patch on its own base, and compare what changed with what was checked
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         id: trial
+        env:
+          CURRENT_BASE: ${{ steps.fork.outputs.current-base }}
         run: |
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0
@@ -348,18 +356,16 @@ jobs:
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true, "auto_close_issue": false}'
           # A push that fails is not to become a pull request, and an
-          # empty one fails. `allow_workflows` is never set, so the push
-          # handler refuses a change under .github/workflows/ (at the pin,
-          # on its plain push path too); policy gives a push no dot-folder
-          # exemption, so check refuses it first, before inference is spent.
+          # empty one fails. Workflow edits require the exact-repository
+          # exemption and the owned fork checked above, with Actions off.
           # Unsigned, as above. No title prefix: the push handler would
           # take it for one the pull request's title must have.
           PUSH: '{"signed_commits": false, "fallback_as_pull_request": false, "if_no_changes": "error"}'
         # A pull request's dot-folder exemption becomes the handler's
         # `protected_dot_folder_excludes`, filtered again to `.github`, the
         # only one policy admits; `protect_top_level_dot_folders` stays
-        # true, so every other dot-folder stays protected there too. A push
-        # carries none, and any found is dropped.
+        # true, so every other dot-folder stays protected there too. Push
+        # additionally needs allow_workflows for this same exemption.
         # `checkout_mapping` tells the push handler that the output
         # repository's checkout is the workspace. From a caller in another
         # repository it would otherwise look for that checkout itself, and
@@ -373,7 +379,8 @@ jobs:
                 ((.unprotected_dot_folders // [] | map(select(. == ".github"))) as $excludes | del(.unprotected_dot_folders)
                  | if $excludes != [] then .protected_dot_folder_excludes = $excludes else . end)
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |=
-                del(.unprotected_dot_folders, .protected_dot_folder_excludes)
+                ((.unprotected_dot_folders // [] | map(select(. == ".github"))) as $excludes | del(.unprotected_dot_folders, .protected_dot_folder_excludes, .allow_workflows)
+                 | if $excludes != [] then .protected_dot_folder_excludes = $excludes | .allow_workflows = true else . end)
             | (select(has("create_pull_request")).create_pull_request) += $pr
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title,
                  "head-repo": $fork, allowed_repos: [$fork]}
