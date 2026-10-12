@@ -134,6 +134,54 @@ pull-request write access). No producer or check token gains write access.
 
 ### Pushing to a pull request's branch
 
+#### Replacing the complete series
+
+The threat to stop before allowing a history rewrite is overwriting another
+writer's advance. A second threat is hiding a forbidden intermediate edit
+behind a later revert. Replacement therefore uses an exact head lease and
+checks every commit's patch, not just the final tree.
+
+Replacement is off by default. The caller may add
+`replacement_max_commits = 10` to `[outputs.push_to_pull_request_branch]`
+(maximum 50). Organization bounds intersect this ceiling; zero in either
+file forbids replacement. The ordinary one-commit push remains unchanged.
+The same apply-owned fork and apply-opened PR checks apply; no write token
+is given to the producer or checker, and a partial run cannot replace history.
+
+The producer writes `out/replacement.json` under its home, alongside its
+`push_to_pull_request_branch` request. An external proposals artifact names
+the file `replacement.json`. Its strict JSON shape is:
+
+```json
+{"base_commit":"BASE_SHA","commits":["FIRST_MAIL","SECOND_MAIL"]}
+```
+
+`BASE_SHA` must be the exact PR base head read by the policy job (the run's
+brief names it). Each string is one plain
+`git format-patch --stdout --no-signature --no-renames -1 COMMIT` mail with
+a valid `Date:` header, no cover letter and no base header. This is the full
+replacement series, including any original commits to keep, rather than a
+fixup on the old head. It can reword, squash or rebase onto that admitted
+base snapshot. Commit messages, authors and existing trailers are preserved;
+run does not append its ordinary single-commit trailers to these mails.
+Do not include `base.json` or an `aw-*.patch` alongside a replacement.
+Run copies the series without resetting the producer's checkout; it does
+not collect additional uncommitted changes on this path.
+
+The entire JSON fits `max_patch_bytes`. Check bounds the number of mails,
+checks each with the ordinary path/type rules, and bounds the union of
+changed paths by `max_patch_files`. Empty commits and multiple mails in a
+string are refused. Apply builds only a linear series using plain `git am`
+on the trusted base and compares every commit's actual paths to check's list.
+No producer repository, bundle, hooks or configuration is imported. A fixed
+committer and author-derived committer dates make the resulting head stable.
+Apply pushes it with `--force-with-lease=refs/heads/BRANCH:ORIGINAL_HEAD`.
+An exact already-applied head is a no-op; a different head, even with the
+same tree, refuses the replacement. The final remote head is verified.
+
+The admitted base is a snapshot: a base advancing after policy does not
+invalidate it, but rebasing onto a newer snapshot requires a new fix run.
+
 `push_to_pull_request_branch` lets a follow-up run fix an open pull request:
 its change goes onto that pull request's branch as one commit, not into a new
 pull request. It goes only to a pull request apply opened itself, from the

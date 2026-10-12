@@ -817,6 +817,57 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
         .and_then(|bytes| serde_json::from_slice::<Object>(&bytes).ok())
         .unwrap_or_default();
     let mut outcome = mark_stopped_early(outcome, request.harness);
+    // An explicit replacement is the complete series, not a working-tree
+    // fixup. Never reset/squash the producer's checkout on this path.
+    let replacement_path = request.home.join("out/replacement.json");
+    let replacement_path_text = clone::utf8(&replacement_path)?;
+    let has_replacement = ["-e", "-L"].iter().any(|test| {
+        runner
+            .run(&["test", test, replacement_path_text], b"", MAX_GIT_OUTPUT)
+            .is_ok_and(|output| output.success())
+    });
+    if has_replacement {
+        let text = serde_json::to_vec(&outcome)?;
+        write(&request.run_dir.join(OUTCOME_FILE), &text)?;
+        let mut change = Change {
+            files,
+            patch: Value::Null,
+            outcome: outcome.to_value(),
+            dropped: None,
+        };
+        let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
+        let content = read_agent_file(runner, &replacement_path, max);
+        let agent_text =
+            read_agent_file(runner, &request.home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+        let outputs = build_outputs(&agent_text, policy, true, &outcome, run_id);
+        if policy.safe_outputs.push_to_pull_request_branch.is_none()
+            || !outputs.wants_patch
+            || content.is_none()
+        {
+            change.drop_patch(
+                base,
+                "replacement requires a push request and a bounded regular replacement.json".into(),
+            );
+            return Ok(change);
+        }
+        if let Some(content) = content {
+            create_dir(request.safe_outputs)?;
+            write(
+                &request
+                    .safe_outputs
+                    .join(crate::check::replacement::REPLACEMENT_FILE),
+                &content,
+            )?;
+            write(
+                &request.safe_outputs.join(OUTPUTS_FILE),
+                outputs.text.as_bytes(),
+            )?;
+            change.patch = json!({"base": base, "bytes": content.len()});
+        }
+        return Ok(change);
+    }
     let staged = if policy.kind == Kind::Branch && changed && !unreadable {
         stage_patch(&git, base, status.as_deref().unwrap_or_default())
     } else {
@@ -1588,6 +1639,52 @@ mod tests {
         let verdict = home.verdict(&policy);
         assert!(verdict.ok, "{:?}", verdict.errors);
         assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
+    }
+
+    #[test]
+    fn a_replacement_preserves_the_series_and_checkout() {
+        let home = Home::new();
+        let mut policy = crate::policy::tests::push_policy();
+        policy.repo = "o/r".into();
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        push.head.clone_from(&home.checkout.base_commit);
+        push.replacement_base = Some(home.checkout.base_commit.clone());
+        push.replacement_max_commits = 2;
+        sh(
+            &home.checkout.dir,
+            "echo two >> a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.invalid commit -qm 'parser: Keep the last line'",
+        );
+        let head = sh(&home.checkout.dir, "git rev-parse HEAD");
+        let mail = sh(
+            &home.checkout.dir,
+            "git format-patch --stdout --no-signature --no-renames -1 HEAD",
+        );
+        let series =
+            json!({"base_commit": home.checkout.base_commit, "commits": [mail]}).to_string();
+        std::fs::write(home.path("out/replacement.json"), &series).unwrap();
+        std::fs::write(
+            home.path(AGENT_OUTPUTS),
+            "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Replace the series\"}\n",
+        )
+        .unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert_eq!(change.dropped, None);
+        assert_eq!(sh(&home.checkout.dir, "git rev-parse HEAD"), head);
+        assert_eq!(
+            std::fs::read_to_string(home.path("safe-outputs/replacement.json")).unwrap(),
+            series
+        );
+        assert!(!home.path("safe-outputs/base.json").exists());
+        let verdict = home.verdict(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(
+            verdict.patch.unwrap().commit_files,
+            Some(vec![vec!["a.txt".into()]])
+        );
     }
 
     #[test]

@@ -68,6 +68,7 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
 
 /// A run hands back one patch, so at most one pull request, or one push.
 const MAX_PULL_REQUESTS: u32 = 1;
+const MAX_REPLACEMENT_COMMITS: u32 = 50;
 
 /// `--outputs all`: every type the bounds list.
 const ALL_OUTPUTS: &str = "all";
@@ -276,10 +277,23 @@ pub struct OutputLimit {
     /// Unlike `bases`, case counts: a forge's branch names keep it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<String>,
+    /// Zero (the default) forbids replacing history. A positive ceiling
+    /// admits that many individually checked, nonempty commit patches.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub replacement_max_commits: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl OutputLimit {
     fn validate(&self, output: &str) -> Result<()> {
+        ensure!(
+            self.replacement_max_commits <= MAX_REPLACEMENT_COMMITS
+                && (output == PUSH_TO_PULL_REQUEST_BRANCH || self.replacement_max_commits == 0),
+            "outputs.{output}: replacement_max_commits is supported only for a push, at most 50"
+        );
         ensure!(
             output == "update_project" || (self.projects.is_empty() && self.fields.is_empty()),
             "outputs.{output}: projects and fields are supported only for update_project"
@@ -420,6 +434,11 @@ pub struct Push {
     /// run starts from and the patch is against. A plain push of a commit
     /// on it fails if the branch moved since.
     pub head: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub replacement_max_commits: u32,
+    /// The target base head resolved by the read-only policy job, not the producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_base: Option<String>,
     pub protected_files: Vec<String>,
     /// Always true, with no exemption: gh-aw's push handler refuses a
     /// change under `.github/workflows/` without `allow_workflows`, which
@@ -563,6 +582,16 @@ impl Policy {
                 "top-level dot-folders are not protected"
             );
             ensure!(push.max == MAX_PULL_REQUESTS, "more than one push");
+            ensure!(
+                push.replacement_max_commits <= MAX_REPLACEMENT_COMMITS,
+                "over 50 replacement commits"
+            );
+            ensure!(
+                push.replacement_base
+                    .as_ref()
+                    .is_none_or(|base| COMMIT_RE.is_match(base)),
+                "invalid replacement base commit"
+            );
             ensure!(
                 PULL_NUMBER_RE.is_match(&push.target) && COMMIT_RE.is_match(&push.head),
                 "a push to no single pull request and commit"
@@ -935,6 +964,7 @@ impl Bounds {
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.fields.clone()),
             branches: Vec::new(),
+            replacement_max_commits: 0,
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -951,6 +981,11 @@ impl Bounds {
                 max: limit(PUSH_TO_PULL_REQUEST_BRANCH).max,
                 target: number.to_owned(),
                 head: head.to_owned(),
+                replacement_max_commits: self
+                    .outputs
+                    .get(PUSH_TO_PULL_REQUEST_BRANCH)
+                    .map_or(0, |bound| bound.replacement_max_commits),
+                replacement_base: None,
                 protected_files: self.protected_files(repo),
                 protect_top_level_dot_folders: true,
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
@@ -1103,6 +1138,9 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             )]);
         }
         (Some(mut push), Some(bound)) => {
+            push.replacement_max_commits = push
+                .replacement_max_commits
+                .min(bound.replacement_max_commits);
             push.max_patch_size = push.max_patch_size.min(bound.max_patch_size);
             push.max_patch_files = push.max_patch_files.min(bound.max_patch_files);
             for name in bound.protected_files {
@@ -2266,6 +2304,48 @@ files = ["README.md", "AGENTS.md"]
         org.safe_outputs.create_pull_request = None;
         let left = intersect(no_push, org).unwrap();
         assert!(left.safe_outputs.push_to_pull_request_branch.is_none());
+    }
+
+    #[test]
+    fn replacement_is_explicit_and_only_tightens() {
+        for (caller, organization, want) in [(0, 10, 0), (10, 0, 0), (10, 3, 3), (2, 10, 2)] {
+            let compile = |count| {
+                let mut bounds = push_bounds();
+                bounds
+                    .outputs
+                    .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+                    .unwrap()
+                    .replacement_max_commits = count;
+                bounds.validate().unwrap();
+                bounds.compile(&push_request()).unwrap()
+            };
+            let both = intersect(compile(caller), compile(organization)).unwrap();
+            assert_eq!(
+                both.safe_outputs
+                    .push_to_pull_request_branch
+                    .unwrap()
+                    .replacement_max_commits,
+                want
+            );
+        }
+        for (output, count, accepted) in [
+            (PUSH_TO_PULL_REQUEST_BRANCH, 50, true),
+            (PUSH_TO_PULL_REQUEST_BRANCH, 51, false),
+            (CREATE_PULL_REQUEST, 1, false),
+            ("noop", 1, false),
+        ] {
+            let limit = OutputLimit {
+                max: 1,
+                replacement_max_commits: count,
+                branches: if output == PUSH_TO_PULL_REQUEST_BRANCH {
+                    vec!["agent-run-*".into()]
+                } else {
+                    Vec::new()
+                },
+                ..OutputLimit::default()
+            };
+            assert_eq!(limit.validate(output).is_ok(), accepted);
+        }
     }
 
     #[test]

@@ -196,7 +196,7 @@ test('policy errors preserve the exit status and escape annotation data', () => 
 });
 
 const head = 'a'.repeat(40);
-const push = { PUSH_ITEM: '42', PUSH_BRANCH: 'agent-run-1', PUSH_HEAD: head, OUTPUT_REPO: '', GITHUB_REPOSITORY: 'o/r' };
+const push = { PUSH_ITEM: '42', PUSH_BRANCH: 'agent-run-1', PUSH_HEAD: head, REPLACEMENT_BASE: 'b'.repeat(40), OUTPUT_REPO: '', GITHUB_REPOSITORY: 'o/r' };
 const pushArgs = ['--pull-request', '42', '--head', head, '--output-repo'];
 for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token']], ['', '64', ['--job-token']], ['apply', '64', []],
   ['apply', '0', null], ['apply', '64 ', null], ['apply', 'owner/repo#64', null], ['apply', '$(exit 0)', null],
@@ -210,7 +210,7 @@ for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token
       mkdirSync(join(dir, 'workflow'));
       // Stands in for the CLI: the arguments it was given are the policy.
       writeFileSync(join(dir, 'workflow/policy-command.cjs'),
-        'process.stdout.write(JSON.stringify(process.argv.slice(2)))');
+        'process.stdout.write(JSON.stringify({args: process.argv.slice(2), safe_outputs: {push_to_pull_request_branch: {}}}))');
       const script = policy.split("- name: Check the request against the caller's bounds\n")[1]
         .split('        run: |\n')[1].split(/\n      [^ ]/)[0]
         .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
@@ -222,8 +222,10 @@ for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token
       // An issue is a number, or the run stops before the policy is written.
       assert.equal(result.status, expected ? 0 : 1, result.stderr);
       if (!expected) return assert.match(result.stdout, /::error::issue is not a number/);
-      const args = JSON.parse(readFileSync(join(dir, 'policy.json'), 'utf8'));
+      const compiled = JSON.parse(readFileSync(join(dir, 'policy.json'), 'utf8'));
+      const args = compiled.args;
       assert.deepEqual(args.slice(args.indexOf('--max-outputs') + 2), expected);
+      if (extra.PUSH_ITEM) assert.equal(compiled.safe_outputs.push_to_pull_request_branch.replacement_base, extra.REPLACEMENT_BASE);
       // Policy hands on the issue it checked, not the input.
       assert.match(policy, /^      issue: \$\{\{ steps\.request\.outputs\.issue \}\}$/m);
       assert.ok(readFileSync(join(dir, 'output'), 'utf8').split('\n').includes(`issue=${issue}`));

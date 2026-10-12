@@ -25,10 +25,11 @@ async function resolvePush(env, github) {
   const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(env.ITEM) });
   if (data.number !== Number(env.ITEM) || data.state !== 'open' || !same(data.base?.repo?.full_name, env.REPO) ||
       data.head?.repo?.fork !== true || typeof data.head.repo.full_name !== 'string' || same(data.head.repo.full_name, env.REPO) ||
+      !/^[0-9a-f]{40}$/.test(data.base?.sha ?? '') ||
       !/^[0-9a-f]{40}$/.test(data.head?.sha ?? '') || typeof data.head?.ref !== 'string') {
     throw new Error('A push needs an open pull request of the repository it works on from a branch of a fork, the one apply opened it from');
   }
-  return { branch: data.head.ref, head: data.head.sha };
+   return { branch: data.head.ref, head: data.head.sha, base: data.base.sha };
 }
 
 module.exports = { resolvePush };

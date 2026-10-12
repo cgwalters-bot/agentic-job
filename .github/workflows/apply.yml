@@ -154,6 +154,16 @@ jobs:
         with:
           artifact-ids: ${{ fromJSON(inputs.check).outputs.artifact-id }}
           path: ${{ env.GH_AW_TMP }}
+      - id: replacement
+        run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.replacement.outputs.enabled == 'true' }}
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: apply-source
+          sparse-checkout: workflow
+          persist-credentials: false
       # `git am` keeps the patch's author and needs a committer, and is to
       # keep a carriage return at a line's end, as the trial below does. Without
       # rename detection a patch that does not apply as it is stops with a
@@ -297,6 +307,10 @@ jobs:
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0
           base=$(jq -er '.patch.base_commit' "$REPORT")
+          if jq -e '.patch.commit_files != null' "$REPORT" > /dev/null; then
+            node apply-source/workflow/replacement.cjs
+            exit 0
+          fi
           git merge-base --is-ancestor "$base" refs/agentic-job/target-base ||
             { echo "::error::the patch starts from $base, which is not a commit of the $BASE fetched above"; exit 1; }
           git worktree add --quiet --detach "$RUNNER_TEMP/trial" "$base"
@@ -430,6 +444,7 @@ jobs:
           # Whether the token below is the PAT; the secret itself stays there.
           TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
           TREE: ${{ steps.trial.outputs.tree }}
+          REPLACEMENT_HEAD: ${{ steps.trial.outputs.head }}
         with:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           script: |
@@ -459,6 +474,14 @@ jobs:
             const kept = [], skipped = [];
             for (const [index, item] of output.items.entries()) {
               if (item.type === 'push_to_pull_request_branch') {
+                const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
+                if (report.patch?.commit_files) {
+                  const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch;
+                  const { push } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/replacement.cjs`);
+                  push(`https://github.com/${process.env.FORK}`, process.env.BASE, config.head, process.env.REPLACEMENT_HEAD);
+                  skipped.push({ type: item.type, url: `https://github.com/${owner}/${repo}/pull/${config.target}` });
+                  continue;
+                }
                 // The fork was checked above and fetched before the trial.
                 // Like the post-push check, require exactly one parent and
                 // the checked tree: an unrelated advance is not applied.
@@ -741,6 +764,7 @@ jobs:
           PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
           TREE: ${{ steps.trial.outputs.tree }}
           FORK: ${{ steps.fork.outputs.repo }}
+          REPLACEMENT_HEAD: ${{ steps.trial.outputs.head }}
         run: |
           [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
           # gh-aw counts a push its handler skipped as no failure: the
@@ -750,8 +774,12 @@ jobs:
              jq -e 'any(.already_applied[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/applied.json" > /dev/null; then
             head=$(jq -r '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
             git fetch --no-tags "https://github.com/$FORK" "+refs/heads/$BASE:refs/agentic-job/pushed"
+            if [ -n "$REPLACEMENT_HEAD" ]; then
+              [ "$(git rev-parse refs/agentic-job/pushed)" = "$REPLACEMENT_HEAD" ] || { echo '::error::the replacement head changed'; exit 1; }
+            else
             [ "$(git show -s --format=%P refs/agentic-job/pushed)" = "$head" ] && [ "$(git rev-parse 'refs/agentic-job/pushed^{tree}')" = "$TREE" ] ||
               { echo "::error::$BASE of $FORK does not hold the checked change as one commit on $head"; exit 1; }
+            fi
           fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json")

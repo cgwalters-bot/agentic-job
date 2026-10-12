@@ -136,7 +136,8 @@ Enforcement: [proposals.test.cjs](../workflow/proposals.test.cjs),
 `wrapper passes trusted checker inputs directly and exports all checker outputs`.
 
 **RC-005 — Hand-back files.** Check MUST accept only `outputs.jsonl`, optional
-`base.json` and at most one `aw-BRANCH.patch`. It MUST refuse unexpected files,
+`base.json` and at most one `aw-BRANCH.patch`, or the replacement form of RC-023.
+It MUST refuse unexpected files,
 symlinks, directories, oversized files and recognized secret-shaped strings.
 A pull-request request MUST have exactly its named patch and valid base
 metadata matching the policy repository/base and patch header; a patch without
@@ -311,13 +312,13 @@ the number as the push's `target`, the head commit as its `head`, and `max`
 as 1, MUST NOT allow `create_pull_request` beside it, and MUST refuse two
 bounds files whose policies pin different pushes. The run MUST start from
 that head and stop if the clone is elsewhere. Check MUST refuse a push to any
-branch but that pull request's, and a patch whose base is not that head,
+branch but that pull request's, and an ordinary patch whose base is not that head,
 under the patch rules of RC-007. Apply MUST refuse a pull request that is
 not open, whose head repository is not its own fork, or whose branch is not
 the policy's, before it fetches or pushes anything for it, and one from a
 repository its identity does not own before it forks; it MUST give gh-aw's handler that
 fork as the only head repository it may push to. It MUST NOT push a partial
-run's change. It MUST push without force, with no fallback to a new pull
+run's change. Except for RC-023, it MUST push without force, with no fallback to a new pull
 request and without `allow_workflows`, so that gh-aw's handler too refuses
 a change under `.github/workflows/`, and fail unless the branch then holds
 the checked tree as one commit on that head.
@@ -343,6 +344,28 @@ output repository and a stale base is refused`;
 [proposals.test.cjs](../workflow/proposals.test.cjs), the push cases of `the
 policy command is told when apply holds only the job token`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary`.
+
+**RC-023 — Bounded history replacement.** A push MAY replace its full series
+only when the caller explicitly bounds `replacement_max_commits` (default
+zero, maximum 50); organization bounds MUST only tighten this ceiling.
+The complete strict-JSON `replacement.json` MUST fit the patch byte ceiling,
+name the PR base head resolved by read-only policy, and contain a nonempty
+array of individually nonempty, single-commit format-patch mails. It MUST NOT
+coexist with `base.json` or an ordinary patch. Check MUST apply RC-007 to every
+mail and bound the union of paths, including edits later reverted. Apply MUST
+construct a linear, merge-free series on that admitted base, compare each
+actual commit's paths to the checked paths, and MUST NOT execute or import
+producer repository configuration. It MUST retain RC-020's PR, fork ownership
+and partial-run restrictions. It MUST force-push only with a lease on the
+original admitted head, accept only the exact reconstructed head as already
+applied on a rerun, and verify the resulting remote head. A valid author date
+and fixed committer identity MUST make reconstruction deterministic.
+Enforcement: [replacement.rs](../crates/agentic-job/src/check/replacement.rs),
+`replacement_series_are_individually_bounded` in
+[check/mod.rs](../crates/agentic-job/src/check/mod.rs), and
+[replacement.test.cjs](../workflow/replacement.test.cjs).
+The implementation admits the base snapshot read by policy; a newer base
+requires a new run. Live forge application remains unverified locally.
 
 **RC-021 — Pull requests from a fork.** Apply MUST NOT push an agent's commit
 to a branch of the output repository. It MUST NOT push target base commits

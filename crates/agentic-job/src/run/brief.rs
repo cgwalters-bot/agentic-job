@@ -151,6 +151,14 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
         );
     }
     if push.is_some() {
+        if let Some(push) = push.filter(|push| push.replacement_max_commits > 0) {
+            let _ = writeln!(
+                text,
+                "  Alternatively, leave `out/replacement.json` under your home as {{\"base_commit\": \"{}\", \"commits\": [\"MAIL\", ...]}}. This replaces the entire branch with at most {} nonempty commits on that exact base. Each MAIL is one plain `git format-patch --stdout --no-signature --no-renames -1 COMMIT` output, including its Date header, with no base header or cover letter. Every commit passes the same path rules, and the whole JSON fits the patch byte limit. Include a `push_to_pull_request_branch` request; do not also propose a working-tree patch. A moved branch is refused with an exact lease. Commit messages and existing trailers in these mails are preserved; no trailers are added.",
+                push.replacement_base.as_deref().unwrap_or("unresolved"),
+                push.replacement_max_commits
+            );
+        }
         text.push_str(
             "  To word the commit yourself, write `{\"type\": \"push_to_pull_request_branch\", \
              \"message\": \"...\"}`: the message's first line is the commit's subject and the \

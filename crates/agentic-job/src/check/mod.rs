@@ -13,6 +13,7 @@
 //! and base; and the patch passes the rules of [`patch`].
 
 mod patch;
+pub mod replacement;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -98,6 +99,9 @@ pub struct PatchInfo {
     /// The paths the patch names. git can still apply it to others (see
     /// [`patch`]): whoever applies it compares this with what changed.
     pub files: Vec<String>,
+    /// Present only for a bounded replacement; apply checks every commit diff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_files: Option<Vec<Vec<String>>>,
 }
 
 /// What gh-aw's collector writes: the requests it accepted, and why it
@@ -487,7 +491,10 @@ fn redirections_to(
 }
 
 fn is_handback_file(name: &str) -> bool {
-    name == OUTPUTS_FILE || name == BASE_FILE || PATCH_FILE_RE.is_match(name)
+    name == OUTPUTS_FILE
+        || name == BASE_FILE
+        || name == replacement::REPLACEMENT_FILE
+        || PATCH_FILE_RE.is_match(name)
 }
 
 /// The most a file of a hand-back may hold.
@@ -645,6 +652,19 @@ fn check_outputs_to(
     let request =
         carrier.and_then(|(output, _)| items.iter().find(|item| item_type(item) == output));
     let mut patch = None;
+    if let Some(content) = contents.get(replacement::REPLACEMENT_FILE) {
+        if request.is_none() || policy.safe_outputs.push_to_pull_request_branch.is_none() {
+            errors.push("a replacement without a push request".into());
+        } else if !patch_names.is_empty() || contents.contains_key(BASE_FILE) {
+            errors.push("a replacement alongside a patch or base.json".into());
+        } else if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
+            match replacement::check(content, push, policy.max_patch_bytes) {
+                Ok(info) => patch = Some(info),
+                Err(error) => errors.push(format!("replacement: {error}")),
+            }
+        }
+        return Ok(Verdict::new(errors, items, patch));
+    }
     match (request, carrier) {
         (Some(request), Some((output, rules))) => {
             // The patch is read against any commit base.json names, so that
@@ -690,6 +710,7 @@ fn check_outputs_to(
                         bytes: content.len(),
                         base_commit: base.commit,
                         files,
+                        commit_files: None,
                     });
                 }
                 ([_], Some(_), None) => {}
@@ -922,6 +943,60 @@ mod tests {
         use crate::policy::tests::{HEAD, push_policy};
 
         const PUSH_PATCH: &str = "aw-agent-run-12.patch";
+
+        #[test]
+        fn replacement_series_are_individually_bounded() {
+            let mut policy = push_policy();
+            let config = policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap();
+            config.replacement_max_commits = 2;
+            config.replacement_base = Some(BASE.into());
+            let mail =
+                |path| patch_of(path).replace(&format!("{BASE_COMMIT_HEADER}: {BASE}\n"), "");
+            let series =
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs"), mail("src/b.rs")]});
+            let proposal = |series: Value| Handback {
+                items: vec![push()],
+                files: vec![(replacement::REPLACEMENT_FILE, series.to_string())],
+                ..Handback::default()
+            };
+            let verdict = proposal(series.clone()).check_against(&policy);
+            assert!(verdict.ok, "{:?}", verdict.errors);
+            assert_eq!(verdict.patch.unwrap().commit_files.unwrap().len(), 2);
+            for invalid in [
+                json!({"base_commit": HEAD, "commits": [mail("src/a.rs")]}),
+                json!({"base_commit": BASE, "commits": []}),
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs"), mail("src/b.rs"), mail("src/c.rs")]}),
+                // Forbidden intermediate files cannot hide behind a later revert.
+                json!({"base_commit": BASE, "commits": [mail("package.json"), mail("src/a.rs")]}),
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs") + &mail("src/b.rs")]}),
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs")], "bundle": "ignored?"}),
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs").lines().filter(|line| !line.starts_with("Date:")).collect::<Vec<_>>().join("\n")]}),
+            ] {
+                let verdict = proposal(invalid.clone()).check_against(&policy);
+                assert!(!verdict.ok, "{invalid}");
+            }
+            let mut off = policy.clone();
+            off.safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .replacement_max_commits = 0;
+            assert!(!proposal(series.clone()).check_against(&off).ok);
+            let mut small = policy.clone();
+            small.max_patch_bytes = 10;
+            assert!(!proposal(series.clone()).check_against(&small).ok);
+            policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .max_patch_files = 1;
+            assert!(!proposal(series).check_against(&policy).ok);
+        }
 
         fn push() -> Value {
             json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "Fix the thing\n\nWhy.", "branch": "agent-run-12"})

@@ -565,9 +565,11 @@ jobs:
         with:
           script: |
             const { resolvePush } = require(process.env.SOURCE_DIR + '/workflow/push.cjs');
-            const { branch, head } = await resolvePush(process.env, github);
+            const { branch, head, base } = await resolvePush(process.env, github);
             core.setOutput('branch', branch);
             core.setOutput('head', head);
+            if (!/^[0-9a-f]{40}$/.test(base ?? '')) throw new Error('Invalid pull request base head');
+            core.setOutput('replacement-base', base);
       # The base is the pull request's where an event named one, or the
       # branch of the one a run pushes to, and the bounds have to cover it
       # like any other. Comments go to the item the event was about unless
@@ -588,6 +590,7 @@ jobs:
           PUSH_ITEM: ${{ inputs.push-item }}
           PUSH_BRANCH: ${{ steps.push.outputs.branch }}
           PUSH_HEAD: ${{ steps.push.outputs.head }}
+          REPLACEMENT_BASE: ${{ steps.push.outputs.replacement-base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
@@ -605,6 +608,10 @@ jobs:
           fi
           node "$SOURCE_DIR/workflow/policy-command.cjs" "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" \
             --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json"
+          if [ -n "$PUSH_ITEM" ]; then
+            jq --arg base "$REPLACEMENT_BASE" '.safe_outputs.push_to_pull_request_branch.replacement_base = $base' "$JOB_DIR/policy.json" > "$JOB_DIR/policy-base.json"
+            mv "$JOB_DIR/policy-base.json" "$JOB_DIR/policy.json"
+          fi
           jq . "$JOB_DIR/policy.json"
           printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
       - id: binary

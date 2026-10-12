@@ -186,7 +186,7 @@ jobs:
             core.setOutput('reason', reasons.join('; ').slice(0, 4000));
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
-        run: find "$JOB_DIR/safe-outputs" -maxdepth 1 -name 'aw-*.patch' -exec cp -t "$GH_AW_TMP" {} +
+        run: find "$JOB_DIR/safe-outputs" -maxdepth 1 \( -name 'aw-*.patch' -o -name replacement.json \) -exec cp -t "$GH_AW_TMP" {} +
       - id: upload
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -197,5 +197,6 @@ jobs:
             ${{ env.GH_AW_TMP }}/config.json
             ${{ env.GH_AW_TMP }}/report.json
             ${{ env.GH_AW_TMP }}/aw-*.patch
+            ${{ env.GH_AW_TMP }}/replacement.json
           retention-days: 30
           if-no-files-found: error

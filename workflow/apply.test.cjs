@@ -189,7 +189,7 @@ test("a push is applied to the policy pull request from apply's fork, never as a
 // one commit on the pinned head with the checked tree, whatever gh-aw counted.
 test('a push is verified on the branch it went to: one commit on the pinned head, with the checked tree', () => {
   const name = 'Every output was applied';
-  const run = (tip, skipped = false) => {
+  const run = (tip, skipped = false, replacement = false) => {
     const root = mkdtempSync(join(homedir(), 'apply-test-'));
     try {
       // The fork on the forge, and the output repository the work tree
@@ -233,7 +233,7 @@ test('a push is verified on the branch it went to: one commit on the pinned head
       writeFileSync(join(tmp, 'agent_output.json'), JSON.stringify({ items: skipped ? [] : [push] }));
       writeFileSync(join(tmp, 'applied.json'), JSON.stringify({ pull_request: null, refused: false, already_applied: skipped ? [push] : [] }));
       const result = command(work, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
-        GH_AW_TMP: tmp, BASE: 'agent-run-12', OUTPUT_REPO: 'owner/repo', TREE: tree, FORK: 'bot/repo',
+        GH_AW_TMP: tmp, BASE: 'agent-run-12', OUTPUT_REPO: 'owner/repo', TREE: tree, FORK: 'bot/repo', REPLACEMENT_HEAD: replacement ? moved : '',
         OUTCOME: 'success', FAILED: '0', PROJECT_REFUSED: 'false',
         GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${fork}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/bot/repo',
       });
@@ -249,6 +249,12 @@ test('a push is verified on the branch it went to: one commit on the pinned head
       assert.equal(got.status, expected, `${tip} skipped=${skipped}: ${got.out}`);
       if (expected) assert.match(got.out, /agent-run-12 of bot\/repo does not hold the checked change as one commit on/, tip);
     }
+  }
+  for (const skipped of [false, true]) {
+    assert.equal(run('moved', skipped, true).status, 0);
+    const wrong = run('pushed', skipped, true); // Same tree, different series.
+    assert.equal(wrong.status, 1);
+    assert.match(wrong.out, /replacement head changed/);
   }
 });
 
@@ -631,13 +637,13 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Runs the guard against a forge holding `posted`, by whoever posted it,
 // with the job token or, with `pat`, a PAT that /user names as `me`.
-async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked' } = {}) {
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false } = {}) {
   const dir = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head: 'head' } }));
     const file = `aw-agent-run-${run}.patch`;
-    writeFileSync(join(dir, 'report.json'), JSON.stringify({ patch: patch === null ? null : { file } }));
+    writeFileSync(join(dir, 'report.json'), JSON.stringify({ patch: patch === null ? null : { file, ...(replacement ? { commit_files: [['a.txt']] } : {}) } }));
     if (patch !== null) writeFileSync(join(dir, file), patch);
     const outputs = {}, summary = [], warnings = [];
     const core = { setOutput: (key, value) => { outputs[key] = value; }, warning: text => { warnings.push(text); },
@@ -655,7 +661,8 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
       },
     };
     const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', GITHUB_RUN_ID: run,
-      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork, TREE: checkedTree };
+      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork, TREE: checkedTree,
+      GITHUB_WORKSPACE: '/workspace', BASE: 'agent-run-7', REPLACEMENT_HEAD: 'replacement-head' };
     const exec = { getExecOutput: async (program, args) => {
       assert.equal(program, 'git');
       if (args[0] === 'show') {
@@ -667,12 +674,16 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
     } };
     // gh-aw's normalize_branch_name.cjs, as far as these prefixes go.
     const normalizeBranchName = name => name.replace(/[^a-zA-Z0-9\-_/.]+/g, '-');
-    const fakeRequire = path => path === '/runner/gh-aw/actions/normalize_branch_name.cjs' ? { normalizeBranchName } : require(path);
+    const pushes = [];
+    const fakeRequire = path => {
+      if (path === '/workspace/apply-source/workflow/replacement.cjs') return { push: (...args) => { pushes.push(args); } };
+      return path === '/runner/gh-aw/actions/normalize_branch_name.cjs' ? { normalizeBranchName } : require(path);
+    };
     await new AsyncFunction('require', 'process', 'core', 'github', 'exec', script('Leave out what an earlier attempt applied'))(
       fakeRequire, { env }, core, github, exec);
     const kept = JSON.parse(readFileSync(join(dir, 'agent_output.json'), 'utf8')).items;
     const skipped = JSON.parse(readFileSync(join(dir, 'skipped.json'), 'utf8'));
-    return { kept, skipped, outputs, summary, queries, warnings };
+    return { kept, skipped, outputs, summary, queries, warnings, pushes };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -690,6 +701,20 @@ const comment = (body = 'first') => ({ type: 'add_comment', body });
 // The name the guard put in a body it kept: its last line.
 const nameIn = item => item.body.split('\n').at(-1);
 const pull = { type: 'create_pull_request', title: 't', body: 'change', branch: 'agent-run-7' };
+
+test('replacement uses the trusted leased applier and never reaches the gh-aw push handler', async () => {
+  const item = { type: 'push_to_pull_request_branch', branch: 'agent-run-7' };
+  const result = await leaveOutApplied([item], [], { replacement: true });
+  assert.deepEqual(result.pushes, [['https://github.com/bot/repo', 'agent-run-7', 'head', 'replacement-head']]);
+  assert.deepEqual(result.kept, []);
+  assert.deepEqual(result.skipped, [{ type: item.type, url: 'https://github.com/owner/repo/pull/42' }]);
+  const source = workflow.split('path: apply-source')[0].split('- uses: actions/checkout@').at(-1);
+  assert.match(source, /repository: \$\{\{ job.workflow_repository \}\}/);
+  assert.match(source, /ref: \$\{\{ job.workflow_sha \}\}/);
+  assert.ok(workflow.indexOf('- name: Mark what a partial run') < workflow.indexOf('- name: Leave out what an earlier attempt applied'));
+  assert.match(workflow, /REPLACEMENT_HEAD: \$\{\{ steps.trial.outputs.head \}\}/);
+  assert.match(workflow, /node apply-source\/workflow\/replacement.cjs/);
+});
 
 test('a re-run leaves out only a push already holding the checked tree as one commit on the pinned head', async () => {
   const push = { type: 'push_to_pull_request_branch', branch: 'p/agent-run-7' };
