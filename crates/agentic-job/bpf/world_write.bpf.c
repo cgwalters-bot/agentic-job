@@ -25,7 +25,7 @@ struct file { unsigned int f_mode; struct inode *f_inode; } CORE;
 struct dentry { struct inode *d_inode; } CORE;
 struct iattr { unsigned int ia_valid; } CORE;
 
-// BPF_MAP_TYPE_ARRAY, one entry. This is OFF until a future loader writes
+// BPF_MAP_TYPE_ARRAY, one entry. This is OFF until the bpftool loader writes
 // enabled=1 with the root filesystem's kernel dev_t (major << 20 | minor).
 // Userspace stat's st_dev must not be copied without that conversion.
 struct root_config { u32 device; u32 enabled; };

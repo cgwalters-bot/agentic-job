@@ -20,19 +20,57 @@ kernel features or runtime enforcement; the setup checks and probes still
 have to pass. It applies to the composite action, not direct CLI invocation.
 Container image distributions are independent of the supported host systems.
 
-## Candidate access-time world-write policy (not enabled)
+## Experimental access-time world-write policy (opt-in)
 
-`crates/agentic-job/bpf/world_write.bpf.c` is a candidate replacement for
-the chmod walk, not an installed control. The existing walk and its setuid
-inventory remain in use until a pinned object, bpftool loader and privileged
-acceptance probes are integrated. Building the candidate is not evidence of
-enforcement; the current final probe still checks the existing hardening.
+`world-write-bpf: 'true'` enables the candidate
+`crates/agentic-job/bpf/world_write.bpf.c` through the action's
+[`bpftool loader`](../secure-host/world-write.mjs), before sandbox setup takes
+root away. It is off by default. This is a loading/enforcement smoke-test slice,
+not yet the replacement for the chmod walk. Existing setup, its setuid inventory
+and the final sandbox probe are unchanged; that probe still proves the old
+hardening, not the BPF policy. No new filesystem traversal is added.
+
+Install `clang`, `runuser` (util-linux) and bpftool before the action. On Ubuntu
+the CI job installs `linux-tools-common` and `linux-tools-$(uname -r)`; RHEL 10's
+package is `bpftool`. The hosted job explicitly installs the tools rather than
+assuming the runner has them. This slice builds the object from the pinned
+action source, both in the action and its dedicated CI job. It does not fetch
+an unverified object or ship a release asset yet: source-bound release manifest,
+checksum and fetching changes are deferred to keep this enforcement change
+reviewable. The compiler therefore remains a setup prerequisite for this opt-in.
+
+Loading uses `bpftool prog loadall OBJECT PIN/links autoattach pinmaps PIN/maps`.
+The four program-name pins under `/sys/fs/bpf/agentic-job-world-write/links`
+must each be **tracing links**, not program pins. Then one map update atomically
+sets the root device and enables the policy. Existing pin/build directories,
+compilation, load, attachment, inspection, map-update or probe failures stop
+the action; there is no fallback. Pins are root-only and outlive the loader
+process. On failure any partial attachments are left in place and the job
+must not continue with untrusted code; reuse of that host is unsupported.
+
+[bpftool v7.6.0's `auto_attach_program`](https://github.com/libbpf/bpftool/blob/v7.6.0/src/prog.c)
+calls `bpf_program__attach` and pins its link, but can fall back to pinning an
+unattached program. That is why the loader checks every link.
+[libbpf v1.6.0](https://github.com/libbpf/libbpf/blob/v1.6.0/src/libbpf.c)
+routes `fmod_ret` to `attach_trace`, creating a BTF-targeted link with
+`BPF_MODIFY_RETURN`. This is the same mechanism for both supported systems,
+not selection based on the active LSM list. Actual kernel acceptance remains
+a runtime check, not an inference from the OS version.
+
+Before enabling, the loader proves a root-owned mode-0666 file on `/` is
+writable as `nobody`. After enabling, the same write must fail with `EACCES`,
+while a mode-0666 file owned by `nobody` remains writable. These are two fixed
+fixtures, not a walk; each external command has a 120-second timeout.
+The [hosted Ubuntu job](../.github/workflows/world-write.yml) additionally
+repeats denied/owner-control writes in a separate step after the loader exits,
+proving attachment lifetime. It has read-only repository permission, no secrets
+and a ten-minute bound, and executes proposed code as root only on a fresh VM.
 
 The concrete threat is an unprivileged process modifying another user's
 globally writable host files or non-sticky directories. The candidate uses
 only modify-return programs on `security_*` wrappers, independently of the
-active LSM list. Its single configuration map is off by default. A loader
-must record the root filesystem's **kernel** device number (major shifted
+active LSM list. Its single configuration map is off by default. The loader
+records the root filesystem's **kernel** device number (major shifted
 left 20 bits, OR minor), not the libc encoding of `stat.st_dev`, before
 enabling it. Other superblocks' devices are outside the policy; bind mounts
 of the root filesystem are still inside it.
@@ -55,8 +93,12 @@ memory-mapped writes. Mapping coverage and kernel caller-path verification
 remain integration work; this candidate must not be represented as complete
 write protection. The host-native test exhausts mode bits, inode types,
 ownership, root/nonroot users and filesystem matches. CI also compiles the
-CO-RE object, but has not yet proved loading, attachment, kernel relocation
-or denial on Ubuntu or RHEL. No new setup-time measurements are available.
+CO-RE object. Hosted loading, attachment, relocation and denial results must
+be read from this change's CI before claiming they work on Ubuntu; RHEL runtime
+is still unverified. The full directory-entry, sticky-directory, tmpfs and
+Podman-overlay acceptance matrix is left for the next slice, as are default
+enablement, walk removal and this PR's before/after job-to-agent timings.
+No new setup-time measurements are available.
 
 ```yaml
 jobs:
@@ -393,6 +435,7 @@ file says, and the file's own default where it says nothing.
 | `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
 | `binary` | An `agentic-job` already on the machine, in place of fetching or building one |
 | `build` | `true` builds the binary even where a release fits |
+| `world-write-bpf` | Experimental bpftool-only access-time policy, off by default; requires clang and bpftool; does not yet replace existing setup or cover writable mappings |
 
 The second user is always created: the network rules and most of the
 probes are about it, and one that is never used costs a line in

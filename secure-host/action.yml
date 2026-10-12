@@ -75,6 +75,13 @@ inputs:
       Build the binary from the action's source, also where a release fits its commit and would
       be fetched by its checksum. A build needs rustup and takes about two minutes
     default: "false"
+  world-write-bpf:
+    description: >-
+      Experimental access-time denial of writes to another user's world-writable root-filesystem
+      files and non-sticky directories. Requires clang and bpftool installed before this action;
+      builds the CO-RE object from action source, fails closed on load/attach errors.
+      Does not replace the existing setup policy or cover existing writable mappings
+    default: "false"
 
 outputs:
   sandbox-user:
@@ -157,6 +164,12 @@ runs:
         grep -qx '\[inference\]' "$RUNNER_TEMP/secure-host/config.toml" || exit 0
         python3 "$ACTION/../workflow/inference-preflight.py" "$RUNNER_TEMP/secure-host/config.toml"
     # The last thing in the job that has root, unless `lock` is off.
+    - name: Load experimental world-write policy
+      if: ${{ inputs.world-write-bpf == 'true' }}
+      shell: bash
+      env:
+        ACTION: ${{ github.action_path }}
+      run: sudo node "$ACTION/world-write.mjs"
     - name: Secure the host
       shell: bash
       run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
