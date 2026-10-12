@@ -123,7 +123,9 @@ test('scripted fix from a different caller layout reaches the target checkout an
       // and hands no push to the handler. Use real git, not fabricated OIDs.
       git(work, 'fetch', '-q', fork, '+refs/heads/agent-run-7:refs/agentic-job/target-base');
       writeFileSync(join(outputs, 'agent_output.json'), JSON.stringify({ items: [request], errors: [] }));
-      Object.assign(process.env, { OUTPUT_REPO: 'Owner/Target', TREE: tree, TOKEN_IS_PAT: 'false' });
+      const report = join(outputs, 'report.json');
+      writeFileSync(report, JSON.stringify({ patch: { file: 'aw-agent-run-7.patch' } }));
+      Object.assign(process.env, { OUTPUT_REPO: 'Owner/Target', TREE: tree, TOKEN_IS_PAT: 'false', REPORT: report });
       global.core.summary.addHeading = () => global.core.summary;
       global.core.summary.addList = () => global.core.summary;
       const guard = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split('\n      - ')[0]
