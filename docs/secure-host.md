@@ -90,6 +90,30 @@ Use fresh hosted runners when comparing traversal changes; a second walk
 on the same machine benefits from the filesystem cache and is not a
 representative setup measurement.
 
+The default traversal uses GNU `find`'s already-read mode to stream NUL-framed
+world-writable paths to setup, which clears only the other-write bit with one
+permission syscall per match. It avoids `chmod`'s second metadata lookup and
+retains only ten diagnostic examples, not the whole list. The same traversal
+still inventories setuid-root programs, including in shared temporary trees;
+the exclusions and final probes are unchanged. Like the previous path-based
+`find`/`chmod` pass, this needs a fresh, quiescent host before untrusted code
+runs, not a filesystem concurrently modified by an adversary. An unreadable
+record, failed permission change or failed traversal refuses setup.
+
+The baseline hosted log for
+[run 38241518211, e2e-full agent](https://github.com/cgwalters-forge/agentic-job/actions/runs/38241518211/job/114785247560)
+has a 138.297-second traversal, 29.248 seconds creating the user, 14.711 seconds
+installing packages, 8.952 seconds starting the proxy and 3.030 seconds querying
+setuid package ownership. `secure-host` took 222 seconds by the Actions step
+timestamps, including about 25.2 seconds for the final check; job start to the
+run action was 227 seconds. This is a real Ubuntu 26.04 baseline, not a claim
+that the supplied approximately 83-second figure is reproducible on every
+runner. A local 30,000-world-writable-file fixture measured the old pass at
+0.590/0.595 seconds and streaming at 0.192/0.188 seconds, with both execution
+orders and permissions reset each time. That is not a hosted after measurement
+or proof of under-a-minute setup; collect this change's own CI timings before
+closing the setup-time issue.
+
 Before acquiring the binary or installing setup packages, the action runs
 [`apt.mjs`](../secure-host/apt.mjs) as root. CI's sandbox and static-build jobs
 and the reusable workflow's source-build fallback use the same snippet.

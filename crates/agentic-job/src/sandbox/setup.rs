@@ -15,8 +15,9 @@
 //! how the probes prove it.
 
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::IpAddr;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -917,22 +918,89 @@ fn strip_world_write() -> Result<()> {
             }
         }
     }
-    let fixed =
-        host::run(
-            Command::new("find")
-                .args(args)
-                .args(["-fprint", SETUID_LIST, ")", ")"]),
-        )?;
-    let paths: Vec<&str> = fixed.lines().collect();
-    if !paths.is_empty() {
-        let shown: Vec<&str> = paths.iter().copied().take(10).collect();
+    let (count, shown) = run_hardening_find(&args, Path::new(SETUID_LIST))?;
+    if count != 0 {
         println!(
             "Removed world write access from {} paths, such as:\n  {}",
-            paths.len(),
+            count,
             shown.join("\n  ")
         );
     }
     Ok(())
+}
+
+/// Use the mode find already statted instead of asking chmod to stat every
+/// match again. Setup runs before untrusted processes, on a fresh host; like
+/// the old find/chmod pass this requires the traversed tree to be quiescent.
+/// NUL framing keeps whitespace and non-UTF-8 paths exact. Retain only ten
+/// examples, not the image's potentially hundreds of thousands of matches.
+fn run_hardening_find(args: &[String], inventory: &Path) -> Result<(usize, Vec<String>)> {
+    let mut child = Command::new("find")
+        .args(args)
+        .arg("-fprint")
+        .arg(inventory)
+        .args([")", ")"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("starting hardening walk")?;
+    let result = (|| {
+        let stdout = child.stdout.take().context("hardening walk stdout")?;
+        harden_find_records(BufReader::new(stdout))
+    })();
+    // A failed chmod or malformed record must not leave a producer blocked on
+    // its pipe, or a setup subprocess running after the refusal.
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().context("waiting for hardening walk")?;
+    let fixed = result?;
+    ensure!(status.success(), "hardening walk failed ({status})");
+    Ok(fixed)
+}
+
+fn harden_find_records(mut reader: impl BufRead) -> Result<(usize, Vec<String>)> {
+    // Allow room beyond Linux's path-based chmod limit, but refuse oversized
+    // records rather than retaining unbounded find output from a deep tree.
+    const MAX_RECORD: u64 = 8192;
+    let mut record = Vec::new();
+    let mut count = 0;
+    let mut shown = Vec::new();
+    loop {
+        record.clear();
+        let size = reader
+            .by_ref()
+            .take(MAX_RECORD + 1)
+            .read_until(0, &mut record)?;
+        if size == 0 {
+            break;
+        }
+        ensure!(
+            size as u64 <= MAX_RECORD && record.last() == Some(&0),
+            "invalid hardening walk record length"
+        );
+        record.pop();
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b' ')
+            .context("hardening walk record missing mode")?;
+        let mode = u32::from_str_radix(std::str::from_utf8(&record[..separator])?, 8)
+            .context("invalid hardening walk mode")?;
+        ensure!(
+            mode <= MODE_BITS && mode & 0o002 != 0 && mode & 0o1000 == 0,
+            "unexpected hardening walk mode"
+        );
+        let path = Path::new(std::ffi::OsStr::from_bytes(&record[separator + 1..]));
+        ensure!(path.is_absolute(), "hardening walk path is not absolute");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o002))
+            .with_context(|| format!("removing world write from {}", path.display()))?;
+        count += 1;
+        if shown.len() < 10 {
+            shown.push(format!("{:?}", path));
+        }
+    }
+    Ok((count, shown))
 }
 
 /// Keep mount paths as bytes escaped by the kernel, never as find patterns.
@@ -1034,12 +1102,8 @@ fn hardening_find(root: &str, readonly: &[String]) -> Vec<String> {
             "!",
             "-perm",
             "-1000",
-            "-print",
-            "-exec",
-            "chmod",
-            "o-w",
-            "{}",
-            "+",
+            "-printf",
+            "%m %p\\0",
             ")",
             ",",
             "(",
@@ -1578,6 +1642,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hardening_records_are_exact_and_bounded() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let mut records = Vec::new();
+        let mut paths = Vec::new();
+        for index in 0..12 {
+            let name = format!("space newline\n{index}").into_bytes();
+            let mut name = name;
+            name.push(0xff);
+            let path = root.join(std::ffi::OsStr::from_bytes(&name));
+            fs::write(&path, b"fixture").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o6766)).unwrap();
+            records.extend_from_slice(b"6766 ");
+            records.extend_from_slice(path.as_os_str().as_bytes());
+            records.push(0);
+            paths.push(path);
+        }
+        let (count, shown) = harden_find_records(&records[..]).unwrap();
+        assert_eq!(count, 12);
+        assert_eq!(shown.len(), 10);
+        for path in paths {
+            assert_eq!(fs::metadata(path).unwrap().mode() & MODE_BITS, 0o6764);
+        }
+        for record in [
+            b"666 /missing".as_slice(),
+            b"invalid\0",
+            b"1777 /tmp\0",
+            b"666 relative\0",
+            b"666 /nonexistent-hardening-fixture\0",
+        ] {
+            assert!(harden_find_records(record).is_err(), "{record:?}");
+        }
+        assert!(harden_find_records(&vec![b'x'; 8193][..]).is_err());
+        assert!(
+            run_hardening_find(
+                &hardening_find("/nonexistent-hardening-fixture", &[]),
+                &root.join("list")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn traversal_stages_follow_the_selected_mode() {
         for (enabled, expected) in [
             (false, &[][..]),
@@ -1771,15 +1878,8 @@ mod tests {
         // only the inventory's owner predicate to exercise the same action.
         let owner = args.iter().position(|arg| arg == "-user").unwrap() + 1;
         args[owner] = uid.to_string();
-        let output = Command::new("find")
-            .args(args)
-            .args(["-fprint", list.to_str().unwrap(), ")", ")"])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        let found = String::from_utf8(output.stdout).unwrap();
-        assert!(found.lines().any(|path| Path::new(path) == open));
-        assert!(!found.lines().any(|path| Path::new(path) == hidden));
+        let (count, _) = run_hardening_find(&args, &list).unwrap();
+        assert_eq!(count, 1);
         assert_eq!(fs::metadata(open).unwrap().mode() & 0o777, 0o775);
         assert_eq!(fs::metadata(hidden).unwrap().mode() & 0o777, 0o777);
         assert_eq!(fs::metadata(shared_open).unwrap().mode() & 0o777, 0o777);
@@ -1813,12 +1913,7 @@ mod tests {
             let mut args = hardening_find(root.to_str().unwrap(), &[]);
             let owner = args.iter().position(|arg| arg == "-user").unwrap() + 1;
             args[owner] = uid.to_string();
-            let output = Command::new("find")
-                .args(args)
-                .args(["-fprint", list.to_str().unwrap(), ")", ")"])
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{label}: {output:?}");
+            assert_eq!(run_hardening_find(&args, &list).unwrap().0, 1, "{label}");
             // A later job step opening the directory must not expose a path
             // that retained world-write or escaped the setuid inventory.
             fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1830,6 +1925,54 @@ mod tests {
             );
             assert_eq!(fs::metadata(&hidden).unwrap().mode() & 0o002, 0, "{label}");
         }
+    }
+
+    #[test]
+    fn streaming_walk_preserves_selection_and_exact_paths() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let inventory = root.join("inventory");
+        let cases = [
+            ("ordinary", 0o666, 0o664),
+            ("sticky", 0o1666, 0o1666),
+            ("readonly", 0o644, 0o644),
+            ("executable", 0o777, 0o775),
+        ];
+        for (name, mode, _) in cases {
+            let path = root.join(name);
+            fs::write(&path, b"fixture").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let exact = root.join(std::ffi::OsStr::from_bytes(b"space \n\xff"));
+        fs::write(&exact, b"fixture").unwrap();
+        fs::set_permissions(&exact, fs::Permissions::from_mode(0o666)).unwrap();
+        let directory = root.join("directory");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o666)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        let args = hardening_find(root.to_str().unwrap(), &[]);
+        assert_eq!(run_hardening_find(&args, &inventory).unwrap().0, 4);
+        for (name, _, expected) in cases {
+            assert_eq!(
+                fs::metadata(root.join(name)).unwrap().mode() & MODE_BITS,
+                expected,
+                "{name}"
+            );
+        }
+        assert_eq!(fs::metadata(&exact).unwrap().mode() & MODE_BITS, 0o664);
+        assert_eq!(fs::metadata(&directory).unwrap().mode() & MODE_BITS, 0o775);
+        assert_eq!(
+            fs::metadata(outside.path()).unwrap().mode() & MODE_BITS,
+            0o666
+        );
+        // A traversal error still refuses setup even after successful changes.
+        let mut failing = args;
+        failing.insert(2, root.join("missing").to_str().unwrap().to_owned());
+        fs::set_permissions(&exact, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(run_hardening_find(&failing, &inventory).is_err());
+        assert_eq!(fs::metadata(&exact).unwrap().mode() & MODE_BITS, 0o664);
     }
 
     #[test]
@@ -1870,12 +2013,7 @@ mod tests {
             fs::set_permissions(&open, fs::Permissions::from_mode(0o666)).unwrap();
             let list = temp.path().join("inventory");
             let args = hardening_find(temp.path().to_str().unwrap(), &[]);
-            let status = Command::new("find")
-                .args(args)
-                .args(["-fprint", list.to_str().unwrap(), ")", ")"])
-                .status()
-                .unwrap();
-            assert!(status.success(), "{base}");
+            run_hardening_find(&args, &list).unwrap();
             assert!(
                 fs::read_to_string(&list)
                     .unwrap()
@@ -1932,33 +2070,33 @@ mod tests {
         }
         let list = root.join("setuid-list");
         let root_str = root.to_str().unwrap();
-        let mut before = world_writable_find(root_str);
-        before.extend(
-            [
-                "-print",
-                "-exec",
-                "chmod",
-                "o-w",
-                "{}",
-                "+",
-                ",",
-                "-type",
-                "f",
-                "-perm",
-                "-4000",
-                "-user",
-                "root",
-                "-fprint",
-                list.to_str().unwrap(),
-            ]
-            .map(str::to_owned),
+        let after = hardening_find(root_str, &[]);
+        let mut before = after.clone();
+        let printf = before.iter().position(|arg| arg == "-printf").unwrap();
+        before.splice(
+            printf..printf + 2,
+            ["-print", "-exec", "chmod", "o-w", "{}", "+"].map(str::to_owned),
         );
-        let mut after = hardening_find(root_str, &[]);
-        after.extend(["-fprint", list.to_str().unwrap(), ")", ")"].map(str::to_owned));
-        for (label, args) in [("before", before), ("after", after)] {
+        before.extend(["-fprint", list.to_str().unwrap(), ")", ")"].map(str::to_owned));
+        for label in ["before", "after", "after", "before"] {
+            for index in 0..30000 {
+                fs::set_permissions(
+                    private.join(index.to_string()),
+                    fs::Permissions::from_mode(0o666),
+                )
+                .unwrap();
+            }
             let start = Instant::now();
-            let output = Command::new("find").args(args).output().unwrap();
-            assert!(output.status.success(), "{output:?}");
+            if label == "before" {
+                let output = Command::new("find").args(&before).output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(
+                    output.stdout.split(|byte| *byte == b'\n').count() - 1,
+                    30000
+                );
+            } else {
+                assert_eq!(run_hardening_find(&after, &list).unwrap().0, 30000);
+            }
             println!(
                 "Local synthetic walk {label}: {:.6}s (30000 files in private tree)",
                 start.elapsed().as_secs_f64()
