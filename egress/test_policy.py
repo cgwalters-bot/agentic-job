@@ -38,10 +38,13 @@ class PolicyTest(unittest.TestCase):
             ("POST", "registry.npmjs.org", "/-/npm/v1/security/advisories/bulk/x", {}, False),
             ("PUT", "registry.npmjs.org", "/some-package", {}, False),
             # gh's reads; the read-only token is what refuses a mutation
+            ("GET", "api.github.com", "/repos/a/b/pulls/1/comments?per_page=100", {}, True),
+            ("GET", "api.github.com", "/repos/a/b/pulls/1/reviews", {}, True),
             ("POST", "api.github.com", "/graphql", {}, True),
             ("POST", "api.github.com", "/graphql/x", {}, False),
             ("POST", "github.com", "/graphql", {}, False),
             ("POST", "api.github.com", "/repos/a/b/issues/1/comments", {}, False),
+            ("POST", "api.github.com", "/repos/a/b/pulls/1/comments", {}, False),
             ("PATCH", "api.github.com", "/repos/a/b/issues/1", {}, False),
             ("PUT", "api.github.com", "/graphql", {}, False),
             ("DELETE", "example.com", "/", {}, False),

@@ -91,6 +91,47 @@ test('dispatch and event status use the same trusted helper, opt-in only', () =>
   assert.match(read('apply'), /Edit the status comment\n[^\n]*\n        continue-on-error: true/);
 });
 
+test('conclude carries the encoded reason only for a successful no-result run', () => {
+  const workflow = readFileSync(`${__dirname}/../.github/workflows/apply.yml`, 'utf8');
+  assert.match(workflow, /no-result-reason: \$\{\{ steps\.result\.outputs\.no-result-reason \}\}/);
+  assert.match(workflow, /NO_RESULT_REASON: \$\{\{ needs\.apply\.outputs\.no-result-reason \}\}/);
+  assert.match(workflow, /NO_RESULT_REASON: \$\{\{ steps\.ended\.outputs\.no-result-reason \}\}/);
+  const source = workflow.split('- name: How the run ended\n')[1]
+    .split('        run: |\n')[1].split('\n      #')[0].split('\n').map(line => line.slice(10)).join('\n');
+  const reason = '> ask `@maintainer`\n> text=injected\n> $(exit 9)\n> "quoted" \\ path';
+  for (const [results, quiet, refusal, included] of [
+    ['success/success/success', 'true', '', true],
+    ['success/success/success', '', '', false],
+    ['success/success/failure', 'true', '', false],
+    ['success/skipped/skipped', 'true', '', false],
+    ['cancelled/skipped/skipped', 'true', '', false],
+    ['success/success/success', 'true', 'refused', false],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), 'conclude-'));
+    try {
+      const output = join(dir, 'output');
+      writeFileSync(output, '');
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', source], {
+        env: { ...process.env, RESULTS: results, EXIT: '0', PR: '', NO_RESULT: quiet,
+          NO_RESULT_REASON: JSON.stringify(reason), REFUSAL: refusal, RESULT_URL: '',
+          WORKFLOW: 'test', RUN_URL: 'https://example.invalid/run', GITHUB_OUTPUT: output }, encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const fields = Object.fromEntries(readFileSync(output, 'utf8').trim().split('\n').map(line => {
+        const at = line.indexOf('=');
+        return [line.slice(0, at), line.slice(at + 1)];
+      }));
+      assert.deepEqual(Object.keys(fields).sort(), included ? ['no-result-reason', 'reaction', 'text'] : ['reaction', 'text']);
+      const calls = [];
+      upsert({ ...env, TEXT: fields.text, NO_RESULT_REASON: fields['no-result-reason'] },
+        (...args) => { calls.push(args); return args[0] === 'GET' ? [] : { id: 42 }; });
+      assert.equal(calls[1][2], `${fields.text}${included ? ` Its reason:\n\n${reason}` : ''}\n\n<!-- agentic-job-run: 100 -->\n\n${MARKER}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('non-event target selection accepts only numeric targets, with or without an event file', () => {
   const policy = readFileSync(`${__dirname}/../.github/workflows/policy.yml`, 'utf8');
   const source = policy.split('- name: What to react to, and where to comment\n')[1]

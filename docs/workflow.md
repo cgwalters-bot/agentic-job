@@ -37,8 +37,10 @@ Notifications are off by default (`notify: none`). With `notify: comment`,
 event items and numeric `comment-target` values (including dispatch, schedule
 and proposals-only runs) have one bot status comment, found by a hidden marker
 and edited at start and finish across runs. It links the Actions run and the
-result, or names the failed jobs/check refusal. No-result reasons remain in
-the run summary; apply no longer posts a separate no-result or result-link notice.
+result, or names the failed jobs/check refusal. For a run that hands back only
+`missing_data`, `missing_tool` or `noop`, it includes the agent's reason, using
+the same sanitizer as other agent text, limited to 1000 characters and quoted.
+The same reason remains in the run summary; apply posts no separate notice.
 The shipped dispatch caller opts in except for reviews, which remain silent.
 The comment uses the caller's job token, never the apply PAT; the built-in
 job token cannot write to cross-repository targets, so notify skips those
@@ -855,8 +857,9 @@ bounds' events and the run ends in the policy job.
 ### GitHub reads from the agent
 
 The agent gets a GitHub token as `GH_TOKEN`, so `gh` and the API can read
-issues, pull requests, workflow runs and their logs, with a higher rate
-limit than anonymous reads. It is the agent job's own token, which asks
+issues, pull requests (including review comments), workflow runs and their
+logs, with a higher rate limit than anonymous reads. It is the agent job's
+own token, which asks
 for `contents`, `issues`, `pull-requests` and `actions` read only, and
 expires when the job ends. The agent can leak it, and that is accepted:
 whoever gets it can read what the agent could, until the job ends, and

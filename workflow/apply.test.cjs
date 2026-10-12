@@ -1302,12 +1302,10 @@ for (const [name, change, url, linked] of [
   });
 }
 
-// A run that handed back only what posts nothing: the comment target is
-// told, with the agent's reason, neutralized, cut short and quoted, where
-// the bounds allow a comment; [case, change, target told, summary, comment
-// when it is not the summary's text].
+// A run that handed back only what posts nothing exports the same neutralized,
+// bounded and quoted reason for the summary and conclude's opted-in status.
 const quiet = 'The [run](https://github.com/caller/repo/actions/runs/7) for this ended with no result: it handed back only';
-for (const [name, change, posts, said, body = said] of [
+for (const [name, change, , said] of [
   ['missing data', { items: [{ type: 'missing_data', data_type: 'workflow', reason: 'needs .github/ edits, ask @maintainer' }] }, 64,
     `${quiet} missing_data. Its reason:\n\n> workflow: needs .github/ edits, ask \`@maintainer\``],
   ['a noop and a missing tool', { items: [{ type: 'noop', message: 'nothing\n<b>to</b> do' }, { type: 'missing_tool', tool: 'tla', reason: 'no TLC' }] }, 64,
@@ -1324,20 +1322,22 @@ for (const [name, change, posts, said, body = said] of [
     `${quiet} missing_tool. Its reason:\n\n> tla: no TLC\n> alternatives: apalache`],
   ['missing data with context', { items: [{ type: 'missing_data', data_type: 'log', reason: 'gone', context: 'run 5', alternatives: 'rerun' }] }, 64,
     `${quiet} missing_data. Its reason:\n\n> log: gone\n> context: run 5\n> alternatives: rerun`],
-  // Bounds without add_comment let the agent put no text on the item: the workflow's own notice goes there.
+  // Status is an existing caller opt-in, independent of add_comment bounds.
   ['a noop under bounds without add_comment', { items: [{ type: 'noop', message: 'ask @maintainer' }], bounds: ['create_pull_request', 'noop'] }, 64,
-    `${quiet} noop. Its reason:\n\n> ask \`@maintainer\``, `${quiet} noop. Its reason is in the run's summary.`],
+    `${quiet} noop. Its reason:\n\n> ask \`@maintainer\``],
   ['a missing tool under bounds without add_comment', { items: [{ type: 'missing_tool', tool: 'x', reason: 'y' }], bounds: ['missing_tool'] }, 64,
-    `${quiet} missing_tool. Its reason:\n\n> x: y`, `${quiet} missing_tool. Its reason is in the run's summary.`],
+    `${quiet} missing_tool. Its reason:\n\n> x: y`],
   // A review's noop is silent on the pull request.
   ['a noop of a review', { items: [{ type: 'noop', message: 'm' }], review: 'true' }, null, `${quiet} noop. Its reason:\n\n> m`],
 ]) {
-  test(`a run that handed back ${name} says it made nothing in its summary alone`, async () => {
+  test(`a run that handed back ${name} exports its summary reason without posting`, async () => {
     sanitized.length = 0;
     const { outputs, summary, created } = await result(change);
     assert.equal(outputs['result-url'], '');
     assert.equal(outputs['no-result'], 'true');
     assert.deepEqual(summary, ['No result', said]);
+    assert.equal(JSON.parse(outputs['no-result-reason']), said.split('Its reason:\n\n')[1]);
+    assert.doesNotMatch(outputs['no-result-reason'], /[\r\n]/);
     assert.deepEqual(sanitized, [1000]);
     assert.equal(created.length, 0);
   });
@@ -1369,7 +1369,9 @@ test('a run with no result quotes its reason through the pinned gh-aw sanitizer'
   assert.doesNotMatch(reason, /hidden|<!--|https:\/\/evil/);
   assert.match(reason, /\(evil\.example\/redacted\)/);
   assert.ok(reason.length < 1200, `${reason.length}`);
-  // Under bounds without add_comment none of it reaches the item.
+  assert.equal(JSON.parse(outputs['no-result-reason']), reason);
+  // Bounds without add_comment still export the sanitized reason for status.
   const quietly = await result({ items: [{ type: 'noop', message }], real: true, bounds: ['create_pull_request', 'noop'] });
   assert.deepEqual(quietly.created, []);
+  assert.equal(quietly.outputs['no-result-reason'], outputs['no-result-reason']);
 });

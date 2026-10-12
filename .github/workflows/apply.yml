@@ -81,6 +81,7 @@ jobs:
       result-url: ${{ steps.result.outputs.result-url }}
       # `true` when the run handed back only noop, missing_tool or missing_data, for conclude.
       no-result: ${{ steps.result.outputs.no-result }}
+      no-result-reason: ${{ steps.result.outputs.no-result-reason }}
     env:
       OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
       # The issue the caller made the run for, a number policy checked.
@@ -688,7 +689,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
       # Export the result for conclude's single status comment. No-result
-      # reasons are agent text: sanitize and quote them in the summary only.
+      # reasons are agent text: sanitize and quote them before exporting.
       # A decline stays green: the pieces worked, and rerunning changes nothing.
       - name: Say where what the run made is
         id: result
@@ -720,11 +721,13 @@ jobs:
               const said = items.map(item => [[item.tool ?? item.data_type, item.reason ?? item.message].filter(Boolean).join(': '),
                 item.context && `context: ${item.context}`, item.alternatives && `alternatives: ${item.alternatives}`].filter(Boolean).join('\n')).join('\n');
               const reason = sanitizeContent(said || 'none given', 1000).split(/\r\n|\r|\n/).map(line => `> ${line}`).join('\n');
+              // JSON keeps agent newlines from becoming job-output fields in conclude.
+              core.setOutput('no-result-reason', JSON.stringify(reason));
               const types = [...new Set(items.map(item => item.type))].join(', ') || 'nothing';
               const ended = `The [run](${process.env.RUN_URL}) for this ended with no result: it handed back only ${types}.`;
               const text = `${ended} Its reason:\n\n${reason}`;
               await core.summary.addHeading('No result', 3).addRaw(text).write();
-              // Conclude edits the single status comment; agent reasons stay in the summary.
+              // Conclude edits the single opted-in status comment with the same reason.
               return;
             }
             await core.summary.addHeading('What the run made', 3).addLink(url, url).write();
@@ -792,13 +795,19 @@ jobs:
           EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
           PR: ${{ needs.apply.outputs.pull-request }}
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
+          NO_RESULT_REASON: ${{ needs.apply.outputs.no-result-reason }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ ]]
           case "$RESULTS" in
             success/success/success) text="✅ [$WORKFLOW]($RUN_URL) ended well${PR:+ and opened pull request #$PR}." reaction=rocket
-              [ "$NO_RESULT" != true ] || text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back no result." ;;
+              if [ "$NO_RESULT" = true ]; then
+                text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back no result."
+                if [ -z "$REFUSAL" ] && [ -n "$NO_RESULT_REASON" ]; then
+                  printf '%s\n' "no-result-reason=$NO_RESULT_REASON" >> "$GITHUB_OUTPUT"
+                fi
+              fi ;;
             success/skipped/skipped) text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back nothing to apply." reaction=rocket ;;
             *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
             *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
@@ -822,6 +831,7 @@ jobs:
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}
           REPO: ${{ fromJSON(inputs.policy).notify-repo }}
           TEXT: ${{ steps.ended.outputs.text }}
+          NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason }}
         run: |
           node "$GITHUB_WORKSPACE/.agentic-job-source/workflow/status.cjs"
       # A notify that failed before it found what to react to leaves no

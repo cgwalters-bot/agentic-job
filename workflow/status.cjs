@@ -10,7 +10,10 @@ function upsert(env, api) {
     throw new Error('status requires a caller repository and numeric item');
   }
   if (!/^[1-9][0-9]*$/.test(run ?? '')) throw new Error('status requires a numeric Actions run ID');
-  const body = `${text}\n\n<!-- agentic-job-run: ${run} -->\n\n${MARKER}`;
+  // Apply already bounded, sanitized and quoted this text. Decode only here,
+  // after it has crossed shell/job outputs as a single JSON string.
+  const reason = env.NO_RESULT_REASON ? ` Its reason:\n\n${JSON.parse(env.NO_RESULT_REASON)}` : '';
+  const body = `${text}${reason}\n\n<!-- agentic-job-run: ${run} -->\n\n${MARKER}`;
   // The job token's bot identity, not a marker copied into a user's comment.
   for (let page = 1; page <= MAX_PAGES; page++) {
     const comments = api('GET', `repos/${repo}/issues/${item}/comments?per_page=100&page=${page}`);
