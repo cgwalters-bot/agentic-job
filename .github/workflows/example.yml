@@ -39,7 +39,7 @@ jobs:
     # Another repository names the workflow by the commit it has read:
     #   uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
     # The binary is built from that same commit.
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:

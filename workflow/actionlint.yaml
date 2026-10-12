@@ -1,3 +1,18 @@
 # actionlint 1.7.12 predates this GitHub-hosted image; do not suppress runner-label findings.
 self-hosted-runner:
   labels: [ubuntu-26.04]
+
+paths:
+  # Match both repository paths and ingress's isolated temporary blobs.
+  '**/{apply,check,policy}.yml':
+    ignore:
+      # GitHub exposes the executing reusable workflow's source in these job fields.
+      - '^property "workflow_(repository|sha)" is not defined in object type \{check_run_id: number; container: .*; status: string\}$'
+  '**/policy.yml':
+    ignore:
+      # Reusable workflow output: notify's result is used to distinguish a skipped job.
+      - '^property "result" is not defined in object type \{outputs: \{comment-id: string; id: string; item: string; kind: string\}\}$'
+  '**/example-secure-host.yml':
+    ignore:
+      # Deliberate hostile-log probes and their trusted positive control, not production commands.
+      - '^workflow command "(set-env|set-output)" was deprecated\.'

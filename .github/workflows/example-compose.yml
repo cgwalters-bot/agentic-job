@@ -56,7 +56,7 @@ jobs:
   # actions (the policy call's source-repository and source-sha):
   #   uses: cgwalters-forge/agentic-job/.github/workflows/NAME.yml@COMMIT
   policy:
-    uses: ./.github/workflows/policy.yml
+    uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     # Policy reads; activate and notify act on no event here.
     permissions:
       contents: read
@@ -119,7 +119,7 @@ jobs:
           ref: ${{ needs.policy.outputs.source-sha }}
           path: .agentic-job-source
           persist-credentials: false
-      - uses: ./.agentic-job-source/prepare
+      - uses: ./.agentic-job-source/prepare # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
           policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
@@ -133,13 +133,13 @@ jobs:
       - name: A caller's privileged step (example)
         run: sudo install -m 0600 -o root -g root /dev/null /var/lib/compose-caller-step
       # ---- End of your privileged steps. ----
-      - uses: ./.agentic-job-source/secure-host
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml
       - id: run
         timeout-minutes: 340
-        uses: ./.agentic-job-source/run
+        uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           # Without the secret, the job's own read token.
           github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
@@ -163,7 +163,7 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
-    uses: ./.github/workflows/check.yml
+    uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
@@ -171,7 +171,7 @@ jobs:
   apply:
     needs: [policy, agent, check]
     if: ${{ always() && needs.policy.result == 'success' }}
-    uses: ./.github/workflows/apply.yml
+    uses: ./.github/workflows/apply.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     # The explicit name is forwarded even when its value is available
     # only in apply's environment.
     secrets:

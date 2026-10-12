@@ -31,10 +31,16 @@ working. A new exemption is for a maintainer to land, bypassing the ruleset,
 after reading its reason. It goes on the line zizmor reports; a comment
 elsewhere, such as at the top of the file, does nothing. The same holds for the
 first change to a workflow that has findings today. Actionlint has no
-inline-ignore syntax: fix its findings instead. PR configuration files cannot
+inline-ignore syntax: fix real findings instead. PR configuration files cannot
 disable either analyzer. The trusted `workflow/actionlint.yaml` adds the
 GitHub-hosted `ubuntu-26.04` label missing from actionlint's built-in list; it
-does not disable label checks.
+does not disable label checks. It also filters the pinned analyzer's unknown
+`job.workflow_repository`/`job.workflow_sha` fields in policy, check and apply,
+and `jobs.notify.result` in policy. Only the secret-free secure-host test
+workflow may use deprecated log commands: its hostile probes and positive
+control verify that sandbox log escaping stops runner-command injection.
+These message- and file-specific filters also cover the isolated Git blobs;
+other expression and deprecated-command errors still fail.
 
 This check catches patterns the analyzers know to be bad, and new exemptions
 from them. It does **not** stop a hostile PR. In particular it does not judge

@@ -297,7 +297,7 @@ jobs:
   # A local call runs at this file's commit, which its jobs name as
   # `job.workflow_*`: the binary and the actions below are that commit's.
   policy:
-    uses: ./.github/workflows/policy.yml
+    uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository,excessive-permissions] Call this revision; inherit caller permissions for activate/notify while policy.yml narrows its policy job to read-only.
     with:
       id: ${{ inputs.id }}
       task: ${{ inputs.task }}
@@ -389,14 +389,14 @@ jobs:
           ref: ${{ needs.policy.outputs.source-sha }}
           path: .agentic-job-source
           persist-credentials: false
-      - uses: ./.agentic-job-source/prepare
+      - uses: ./.agentic-job-source/prepare # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
           policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
       # `sandbox setup`, which ends by taking root from this job, and
       # `sandbox check`, with the binary and configuration of the policy
       # job. Every step after it is this file's, and none of them has root.
-      - uses: ./.agentic-job-source/secure-host
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml
@@ -404,7 +404,7 @@ jobs:
       # left in this job, and uploads before reporting a limit.
       - id: run
         timeout-minutes: 340
-        uses: ./.agentic-job-source/run
+        uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           github-token: ${{ inputs.github-reads && (secrets.GH_READ_TOKEN || github.token) || '' }}
 
@@ -416,7 +416,7 @@ jobs:
       contents: read
     # No secrets cross this read-only boundary; trusted IDs come directly
     # from policy, and only the proposals' from the agent job.
-    uses: ./.github/workflows/check.yml
+    uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
@@ -424,9 +424,9 @@ jobs:
   # Also after a cancelled or failed run, for its conclusion; its jobs
   # decide from the results whether anything is applied.
   apply:
-    needs: [policy, agent, check]
+    needs: [policy, agent, check] # zizmor: ignore[excessive-permissions] Safe outputs and conclusion status require the caller-selected write permissions.
     if: ${{ always() && needs.policy.result == 'success' }}
-    uses: ./.github/workflows/apply.yml
+    uses: ./.github/workflows/apply.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     with:

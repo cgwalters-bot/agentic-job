@@ -18,7 +18,7 @@ name: example-pull-request
 run-name: "agent on pull request #${{ github.event.pull_request.number }}"
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Base-branch policy and setup only; the PR head is data read inside the credential-free sandbox.
     types: [labeled]
 
 permissions: {}
@@ -34,7 +34,7 @@ jobs:
     # other label would cancel a run waiting its turn.
     concurrency:
       group: agent-pull-${{ github.event.pull_request.number }}
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:

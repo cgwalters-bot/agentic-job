@@ -141,7 +141,7 @@ jobs:
     # This repository runs the caller against its own source commit. When
     # copying elsewhere, replace this with the full reviewed source SHA:
     # cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     # Scripted CI passes no credential value. The explicit name is forwarded
     # even when its value is available only in apply's environment.
     # No write credential reaches target, the agent process or the nested

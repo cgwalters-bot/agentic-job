@@ -37,7 +37,7 @@ test('apply alone consumes the optional safe outputs PAT with job-token fallback
   // The wrapper hands the PAT to the apply call, and to nothing else.
   const wrapperJobs = wrapper.split('\njobs:\n')[1].split(/\n  (?=[-\w]+:\n)/);
   assert.deepEqual(wrapperJobs.filter(job => job.includes('secrets.SAFE_OUTPUTS_PAT')).map(job => job.split(':')[0]), ['apply']);
-  assert.match(wrapperJobs.find(job => job.startsWith('apply:')), /uses: \.\/\.github\/workflows\/apply\.yml\n/);
+  assert.match(wrapperJobs.find(job => job.startsWith('apply:')), /uses: \.\/\.github\/workflows\/apply\.yml *(?:#[^\n]*)?\n/);
   const selection = 'secrets.SAFE_OUTPUTS_PAT';
   for (const key of ['token', 'github-token']) {
     assert.ok(apply.includes(`${key}: \${{ ${selection} || github.token }}`));

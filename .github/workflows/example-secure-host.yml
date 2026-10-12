@@ -38,7 +38,7 @@ jobs:
       #   uses: cgwalters-forge/agentic-job/secure-host@COMMIT
       - name: Secure the host
         id: host
-        uses: ./secure-host
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action under test.
       - name: No step has root from here on
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
@@ -88,7 +88,7 @@ jobs:
         id: hostile-log
         shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
         env:
-          ACTIONS_ALLOW_UNSECURE_COMMANDS: "true"
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: "true" # zizmor: ignore[insecure-commands] Read-only, secret-free positive control for sandbox log escaping; this variable is not passed into the sandbox.
         run: |
           printf '::set-output name=forged::stdout\n::add-mask::sandbox-mask-probe\n'
           printf '::set-output name=forged_stderr::stderr\n::add-mask::sandbox-mask-probe\n' >&2

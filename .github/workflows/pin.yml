@@ -29,7 +29,7 @@ jobs:
 
   build:
     needs: source
-    uses: ./.github/workflows/build.yml
+    uses: ./.github/workflows/build.yml # zizmor: ignore[self-repository] Build this revision's source with its reusable workflow.
     with:
       cache: false
       release: ${{ needs.source.outputs.tag }}

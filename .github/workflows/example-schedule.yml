@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   run:
-    uses: ./.github/workflows/agentic-job.yml
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:

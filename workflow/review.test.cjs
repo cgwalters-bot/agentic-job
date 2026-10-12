@@ -216,7 +216,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
   const checker = fs.readFileSync(path.join(__dirname, '../.github/workflows/check.yml'), 'utf8');
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
-  assert.match(caller, /pull_request_target:\s+types: \[opened, synchronize, reopened, ready_for_review\]/);
+  assert.match(caller, /pull_request_target: *(?:#[^\n]*)?\n\s+types: \[opened, synchronize, reopened, ready_for_review\]/);
   assert.match(caller, /kind: analysis/);
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit|pull_request.head|refs\/pull/);

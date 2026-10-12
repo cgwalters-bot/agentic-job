@@ -17,7 +17,7 @@
 # events, with its own copies of the bounds, the task and hosted.toml.
 name: review
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Base-branch policy and actions only; the PR head is data read inside the credential-free sandbox.
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
@@ -41,7 +41,7 @@ jobs:
       (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
-    uses: ./.github/workflows/policy.yml
+    uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     # The policy job reads; activate and notify have nothing to do.
     permissions:
       contents: read
@@ -124,7 +124,7 @@ jobs:
           ref: ${{ needs.policy.outputs.source-sha }}
           path: .agentic-job-source
           persist-credentials: false
-      - uses: ./.agentic-job-source/prepare
+      - uses: ./.agentic-job-source/prepare # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
           policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
@@ -136,13 +136,13 @@ jobs:
         uses: cgwalters-forge/actions/tailscale@d7bfa158217182d8c0b0b775189dcf91a6afcdde
         with:
           hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}
-      - uses: ./.agentic-job-source/secure-host
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml
       - id: run
         timeout-minutes: 340
-        uses: ./.agentic-job-source/run
+        uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           github-token: ${{ github.token }}
 
@@ -151,7 +151,7 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
-    uses: ./.github/workflows/check.yml
+    uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
@@ -162,7 +162,7 @@ jobs:
   apply:
     needs: [policy, agent, check]
     if: ${{ always() && needs.policy.result == 'success' }}
-    uses: ./.github/workflows/apply.yml
+    uses: ./.github/workflows/apply.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:

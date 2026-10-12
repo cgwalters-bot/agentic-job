@@ -8,12 +8,40 @@ from ingress import check, git
 
 
 class IngressTests(unittest.TestCase):
+    def test_repository_baseline(self):
+        """Once a maintainer lands exemptions, ordinary edits pass ingress."""
+        root = Path(__file__).resolve().parent.parent
+        sources = sorted((root / ".github/workflows").glob("*.yml"))
+        sources += sorted(root.glob("*/action.yml"))
+        self.assertTrue(sources)
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            repo = Path(temp)
+            git(repo, "init", "-q")
+            git(repo, "config", "user.name", "Test")
+            git(repo, "config", "user.email", "test@example.org")
+            for source in sources:
+                target = repo / source.relative_to(root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "maintainer baseline")
+            base = git(repo, "rev-parse", "HEAD").decode().strip()
+            for source in sources:
+                target = repo / source.relative_to(root)
+                target.write_bytes(target.read_bytes() + b"\n# ordinary PR edit\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "ordinary edits")
+            head = git(repo, "rev-parse", "HEAD").decode().strip()
+            self.assertTrue(check(repo, base, head))
+
     def test_changed_files(self):
         good = ("name: test\non: push\npermissions: {}\njobs:\n  test:\n"
                 "    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n")
         bad_action = ("name: local\ndescription: test\nruns:\n  using: composite\n"
                       "  steps:\n    - shell: bash\n      run: echo ${{ github.event.issue.title }}\n")
         ignored = good.replace("- run: echo ok", "- uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses] intentional test\n        with:\n          persist-credentials: false")
+        source_context = good.replace(
+            "- run: echo ok", "- run: echo $SOURCE\n        env:\n          SOURCE: ${{ job.workflow_repository }}")
         # (path, head content, expected[, base content if it differs])
         cases = [
             (".github/workflows/test.yml", good, True),
@@ -22,6 +50,14 @@ class IngressTests(unittest.TestCase):
             (".github/workflows/test.yml", ignored, True),
             (".github/workflows/test.yml", ignored, False, good),
             (".github/workflows/test.yml", ignored.replace("intentional test", "reworded"), False, ignored),
+            (".github/workflows/policy.yml", source_context, True),
+            (".github/workflows/check.yml", source_context, True),
+            (".github/workflows/apply.yml", source_context, True),
+            (".github/workflows/test.yml", source_context, False),
+            (".github/workflows/policy.yml", source_context.replace("workflow_repository", "workflow_repositroy"), False),
+            (".github/workflows/policy.yml", source_context.replace("job.workflow_repository", "job.result"), False),
+            (".github/workflows/policy.yml", good.replace("ubuntu-24.04", "ubuntu-nonexistent"), False),
+            (".github/workflows/policy.yml", good.replace("echo ok", "echo '::set-output name=bad::value'"), False),
             ("local/action.yml", bad_action, False),
             (":(literal)local/action.yml", bad_action, False),
             (".github/unrelated.yml", "not a workflow", True),
