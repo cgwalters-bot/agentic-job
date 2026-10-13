@@ -58,6 +58,14 @@ does not make an approved change trusted.
 
 ## The verdict
 
+The reviewer reads the diff and surrounding code and reports findings. It does
+not build the project or run tests, formatters or linters, and does not look up
+or report CI results. The verdict has no `Verification:` paragraph. This applies
+to both `review.yml`'s standing task and dispatch's `review` profile. CI is a
+separate required check; the merge gate combines the checks, not the reviewer.
+These are review instructions, not an execution restriction enforced by the
+sandbox. Job permissions, token separation and output validation are unchanged.
+
 The one output is a comment whose first line starts with `VERDICT: APPROVE` or
 `VERDICT: CHANGES`, or a noop. `VERDICT: REJECT`, which briefs written for the
 earlier format still ask for, counts as CHANGES; the earlier `REASON:` line is
@@ -167,7 +175,9 @@ the verdict grammar, hostile outputs, the status for each combination of
 check, verdict, apply and open pull requests at the head (`reviewStatus` and
 `reportStatus` against a fake API) and, by reading `review.yml`, which job
 holds which token, which authors start automatic reviews and what the status
-job runs. `node --test
+job runs. It also checks that both review prompts require code analysis without
+running checks or consulting CI, and that the review agent job has no project
+toolchain installation or build-cache restore. `node --test
 workflow/agent-actions.test.cjs` checks that the tailnet join is one pinned
 step of the agent job, between `prepare` and `secure-host`. In the crate,
 `tests/event.rs` runs the binary against both shipped bounds files as

@@ -212,6 +212,25 @@ test('scripted review reports the checked-out SHA', () => {
   }
 });
 
+test('automatic and dispatched review prompts request code analysis, not verification', () => {
+  const standing = fs.readFileSync(path.join(__dirname, 'review.md'), 'utf8');
+  const dispatch = fs.readFileSync(path.join(__dirname, '../.github/workflows/dispatch.yml'), 'utf8');
+  const instructions = dispatch.match(/const instructions = profile === 'review'\s+\? '([^']+)'/)[1];
+  for (const prompt of [standing, instructions]) {
+    assert.match(prompt, /Read the diff and the code around it, and report findings only\./);
+    assert.match(prompt, /Do not build the project or run tests, formatters or linters\./);
+    assert.match(prompt, /Do not look up or report CI results\./);
+    assert.match(prompt, /Do not include a `?Verification:`? paragraph\./);
+    assert.match(prompt, /exact admitted head SHA/);
+    assert.match(prompt, /cite files and lines for actionable findings/);
+    assert.doesNotMatch(prompt, /Run relevant tests|what you verified or could not verify/);
+  }
+  const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
+  assert.match(caller, /review-task: workflow\/review.md/);
+  const agent = caller.split('\n  agent:')[1].split('\n  check:')[0];
+  assert.doesNotMatch(agent, /rust-toolchain|rust-cache|setup-(?:node|python|go|java)|cargo (?:build|test|fmt|clippy)|npm (?:test|ci)/);
+});
+
 test('caller and write job retain the trusted-source boundary', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
   const checker = fs.readFileSync(path.join(__dirname, '../.github/workflows/check.yml'), 'utf8');

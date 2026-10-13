@@ -47,6 +47,10 @@ that SHA from the target repository without forge credentials, never from an
 author-supplied fork URL or branch name. The base supplies trusted instructions;
 the head remains untrusted data. No job permissions or token access change.
 This does not enable fork end-to-end CI or make a verdict merge authorization.
+The real reviewer reads the diff and surrounding code and reports findings; it
+does not build or run tests, formatters or linters, or look up or report CI
+results. It omits the `Verification:` paragraph. CI remains a separate required
+check, combined with review by the merge gate, not by the reviewer.
 
 `fix` takes the number of an open pull request that implement opened, from
 the applying account's fork. Its run starts from that pull request's branch
