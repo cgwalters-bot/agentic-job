@@ -30,21 +30,29 @@ not yet the replacement for the chmod walk. Existing setup, its setuid inventory
 and the final sandbox probe are unchanged; that probe still proves the old
 hardening, not the BPF policy. No new filesystem traversal is added.
 
-Install `clang`, `runuser` (util-linux) and bpftool before the action. On Ubuntu
+Install `runuser` (util-linux) and bpftool before the action. On Ubuntu
 the CI job installs `linux-tools-common` and `linux-tools-$(uname -r)`; RHEL 10's
 package is `bpftool`. The hosted job explicitly installs the tools rather than
-assuming the runner has them. This slice builds the object from the pinned
-action source, both in the action and its dedicated CI job. It does not fetch
-an unverified object or ship a release asset yet: source-bound release manifest,
-checksum and fetching changes are deferred to keep this enforcement change
-reviewable. The compiler therefore remains a setup prerequisite for this opt-in.
+assuming the runner has them. The host needs no compiler: the object
+`world_write.bpf.o` ships the way the binaries do
+([`binary.mjs`](../secure-host/binary.mjs)). The build compiles it once with
+clang (`-target bpfel`, CO-RE), the source-addressed release publishes it, and
+its SHA-256 is in the attested `release.json` next to the binaries'. A job
+fetches it with them and refuses it on a mismatch; a manifest without its
+checksum is refused whole. Where no release exists for the source, the same
+build that compiles the binaries compiles the object (installing clang with
+musl-tools when missing). `binary.mjs` is part of the source digest, so a
+release published before the object was one of its files is never taken for
+this source. With the `binary` input, the object must be `world_write.bpf.o`
+beside that binary, or loading is refused. The dedicated CI job compiles it
+with `binary.mjs object`, the command the release build runs.
 
 Loading uses `bpftool prog loadall OBJECT PIN/links autoattach pinmaps PIN/maps`.
 The four program-name pins under `/sys/fs/bpf/agentic-job-world-write/links`
 must each be **tracing links**, not program pins. Then one map update atomically
-sets the root device and enables the policy. Existing pin/build directories,
-compilation, load, attachment, inspection, map-update or probe failures stop
-the action; there is no fallback. Pins are root-only and outlive the loader
+sets the root device and enables the policy. A missing or non-regular object,
+an existing pin directory, load, attachment, inspection, map-update or probe
+failures stop the action; there is no fallback. Pins are root-only and outlive the loader
 process. On failure any partial attachments are left in place and the job
 must not continue with untrusted code; reuse of that host is unsupported.
 
@@ -97,10 +105,18 @@ The hooks chosen for the candidate are:
   opened before activation, or before ownership/mode changes;
 - `security_inode_setattr`, for `ATTR_SIZE`: truncate and ftruncate.
 
-These hooks do **not** revoke existing writable mappings or mediate all
-memory-mapped writes. Mapping coverage and kernel caller-path verification
-remain integration work; this candidate must not be represented as complete
-write protection. The host-native test exhausts mode bits, inode types,
+Writable mappings are a stated gap, not covered. A new shared writable
+mapping needs a descriptor opened for writing, and after activation that
+open is refused by `security_file_open` (and the `MAY_WRITE` check of
+`security_inode_permission`), so a mapping cannot be made afresh. But a
+mapping made before activation keeps writing to the page cache, and a
+descriptor opened for writing before activation can still be mapped:
+`security_file_permission` stops its `write(2)`, not stores through memory.
+There is no `security_mmap_file` or `security_file_mprotect` program, because
+in `secure-host` the policy is active before any untrusted step runs, so no
+untrusted process holds such a descriptor or mapping. Kernel caller-path
+verification remains integration work; this candidate must not be
+represented as complete write protection. The host-native test exhausts mode bits, inode types,
 ownership, root/nonroot users and filesystem matches. CI also compiles the
 CO-RE object. Hosted loading, attachment, relocation and denial results must
 be read from this change's CI before claiming they work on Ubuntu; RHEL runtime
@@ -112,10 +128,34 @@ Operations run as `nobody` after loading; only fixed fixtures are inspected.
 path for these entry operations; no additional hook is introduced. Sticky
 entries belong to the worker so sticky-directory DAC permits their removal.
 Tmpfs is limited to 1 MiB and each command to 120 seconds. These are CI
-assertions, not locally observed kernel denials. Podman-overlay acceptance
-remains unfinished, as do default
-enablement, walk removal and this PR's before/after job-to-agent timings.
-No new setup-time measurements are available.
+assertions, not locally observed kernel denials.
+
+The matrix also runs every operation in an overlay mounted by root whose
+upper and work directories are on the root filesystem, as rootful Podman's
+storage is. The overlay's own superblock is a different device, but the
+upper inodes are on the root filesystem, and overlayfs repeats the access
+there with credentials of its own:
+
+- Write, unlink and both renames are allowed after activation. Overlayfs
+  checks the upper inode again (`ovl_permission`) and unlinks and renames in
+  the upper layer with the credentials of whoever mounted it; the test's
+  fixtures and rename parents are owned by root, the mounter.
+- Create is **denied** after activation. Overlayfs creates the upper entry
+  with creator credentials whose fsuid and fsgid are the caller's
+  (`ovl_create_or_link` in `fs/overlayfs/dir.c`; hard links excepted), so
+  the policy sees `nobody` creating in a root-owned, world-writable,
+  non-sticky directory on the root filesystem. The hosted job showed this
+  `EACCES` on a hosted runner, and the control asserts it.
+
+So in a container whose storage is on the root filesystem, a non-sticky
+world-writable directory is closed to creation by anyone but its owner, and
+any world-writable upper-layer object owned by someone other than the mounter
+is refused even through the overlay: in a rootless container, an object of a
+container user other than the one mapped to the sandbox user; in a rootful
+one, an object not owned by root. Sticky directories such as `/tmp` are
+unaffected. The test runs no Podman.
+Default enablement, walk removal and before/after job-to-agent timings
+remain unfinished. No new setup-time measurements are available.
 
 ```yaml
 jobs:
@@ -452,7 +492,7 @@ file says, and the file's own default where it says nothing.
 | `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
 | `binary` | An `agentic-job` already on the machine, in place of fetching or building one |
 | `build` | `true` builds the binary even where a release fits |
-| `world-write-bpf` | Experimental bpftool-only access-time policy, off by default; requires clang and bpftool; does not yet replace existing setup or cover writable mappings |
+| `world-write-bpf` | Experimental bpftool-only access-time policy, off by default; requires bpftool, loads the object that comes with the binary; does not yet replace existing setup or cover writable mappings |
 
 The second user is always created: the network rules and most of the
 probes are about it, and one that is never used costs a line in
@@ -466,8 +506,8 @@ release's binary, `false` for a build, empty when `binary` was supplied).
 [`binary.mjs`](../secure-host/binary.mjs) computes the source digest at
 the action's pinned commit and fetches `build-FULL_DIGEST`. It verifies
 the release manifest's GitHub attestation before checking the source
-digest and binary checksums. A missing release falls back to a source
-build with a notice; failed verification stops the job. Main publishes
+digest and the checksums of the binaries and the world-write policy
+object. A missing release falls back to a source build with a notice; failed verification stops the job. Main publishes
 these releases automatically, without a pin PR. See
 [the workflow's binary trust model](workflow.md#things-a-caller-should-know)
 for the verification and publishing boundaries. Fetching needs Node and

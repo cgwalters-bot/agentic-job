@@ -1,13 +1,12 @@
 // Experimental access-time protection; all kernel loading goes through bpftool.
 import { execFileSync } from "node:child_process";
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, rmdirSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, lstatSync, mkdirSync, mkdtempSync, rmdirSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { endianness } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireSupportedHost } from "./platform.mjs";
 
 export const PIN = "/sys/fs/bpf/agentic-job-world-write";
-export const BUILD = "/var/lib/agentic-job-world-write";
 export const PROGRAMS = ["world_write_permission", "world_write_open",
   "world_write_file_permission", "world_write_setattr"];
 
@@ -69,21 +68,19 @@ export function reportRefusal(error, run = runCommand, log = console.error) {
   }
 }
 
-export function load() {
+// OBJECT is the release's, taken by its pinned checksum with the binary
+// (binary.mjs), or compiled with a build of the same source: no compiler here.
+export function load(object) {
   requireSupportedHost();
   if (process.getuid() !== 0) throw new Error("world-write loading requires root");
+  if (!object || !lstatSync(object).isFile()) throw new Error(`policy object ${object} is not a regular file`);
   const run = runCommand;
   if (Number(statfsSync("/sys/fs/bpf").type) !== 0xcafe4a11) {
     run("mount", ["-t", "bpf", "bpf", "/sys/fs/bpf"]);
   }
-  // Exclusive, root-owned directories: refuse reruns/stale pins instead of
-  // replacing a live policy. bpftool mounts bpffs when needed.
-  mkdirSync(BUILD, { mode: 0o700 });
+  // An exclusive, root-owned directory: refuse reruns/stale pins instead of
+  // replacing a live policy.
   mkdirSync(PIN, { mode: 0o700 });
-  const source = fileURLToPath(new URL("../crates/agentic-job/bpf/world_write.bpf.c", import.meta.url));
-  const object = `${BUILD}/world_write.bpf.o`;
-  run("clang", ["-O2", "-g", "-target", endianness() === "LE" ? "bpfel" : "bpfeb",
-    "-Wall", "-Wextra", "-Werror", "-c", source, "-o", object]);
   const uid = Number(run("id", ["-u", "nobody"]).trim());
   if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("requires an unprivileged nobody user for the activation probe");
   // Fixed-size fixtures, not an inventory. A baseline and owned positive
@@ -116,7 +113,7 @@ export function load() {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    load();
+    load(process.argv[2]);
   } catch (error) {
     reportRefusal(error);
     process.exitCode = 1;

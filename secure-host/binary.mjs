@@ -15,6 +15,7 @@
 // nothing on trust but this repository's attestation.
 //
 //   binary.mjs get --out DIR [--build]   the binaries, into DIR
+//   binary.mjs object --out DIR          the world-write policy object, into DIR
 //   binary.mjs digest [--root DIR]       the digest of the source at DIR
 //   binary.mjs pin --dist DIR --release TAG [--repository OWNER/NAME]
 //                                        release.json for a build of this source
@@ -41,8 +42,10 @@ export const REPOSITORY = "cgwalters-forge/agentic-job";
 // What the binaries are built from. Whatever the build comes to read from
 // elsewhere (an `include_str!` of a file outside these, a toolchain file)
 // has to be added, or a job would take a release for its own source when
-// it is not; CI's `release-pin` looks for the first of those.
-export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress"];
+// it is not; CI's `release-pin` looks for the first of those. This file
+// decides what a release holds: a release published before that changed
+// lacks a file this one requires, and must not be taken for this source.
+export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "secure-host/binary.mjs"];
 
 // The scripted agent too: a run with `agent: fake` needs it.
 export const NAMES = ["agentic-job", "fake-agent"];
@@ -50,10 +53,17 @@ export const NAMES = ["agentic-job", "fake-agent"];
 // One static binary, so that it runs on whatever the job's runner is.
 export const TARGET = "x86_64-unknown-linux-musl";
 
+// The access-time world-write policy, compiled once with the binaries and
+// taken by its checksum, so that a host loading it needs no compiler. CO-RE
+// relocates it to the running kernel; it is little-endian, as TARGET is.
+export const OBJECT = "world_write.bpf.o";
+const OBJECT_SOURCE = "crates/agentic-job/bpf/world_write.bpf.c";
+
 const FETCH_TRIES = 3;
 const FETCH_TIMEOUT_MS = 120_000;
 const OWNER_EXECUTE = 0o100;
 const MODE_PROGRAM = 0o755;
+const MODE_FILE = 0o644;
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -83,7 +93,7 @@ export function digest(root = ROOT) {
 
 export function readPin(path) {
   const pin = JSON.parse(readFileSync(path, "utf8"));
-  for (const name of NAMES) {
+  for (const name of [...NAMES, OBJECT]) {
     if (pin.release && !/^[0-9a-f]{64}$/.test(pin.sha256?.[name] ?? "")) throw new Error(`${path} pins ${pin.release} with no checksum for ${name}`);
   }
   return pin;
@@ -134,6 +144,7 @@ export async function fetchRelease(source, out, { fetchFile = download, verify =
   for (const name of NAMES) {
     writeFileSync(join(out, name), checked(pin, name, await fetchFile(`${from}/${name}-${TARGET}`)), { mode: MODE_PROGRAM });
   }
+  writeFileSync(join(out, OBJECT), checked(pin, OBJECT, await fetchFile(`${from}/${OBJECT}`)), { mode: MODE_FILE });
   return true;
 }
 
@@ -145,13 +156,22 @@ function run(program, args, options = {}) {
 
 const has = (program) => spawnSync("sh", ["-c", `command -v ${program}`], { stdio: "ignore" }).status === 0;
 
-// musl-gcc is for the C that dependencies bring with them.
+export function compileObject(out, runner = run) {
+  mkdirSync(out, { recursive: true });
+  runner("clang", ["-O2", "-g", "-target", "bpfel", "-Wall", "-Wextra", "-Werror",
+    "-c", join(ROOT, OBJECT_SOURCE), "-o", join(out, OBJECT)]);
+}
+
+// musl-gcc is for the C that dependencies bring with them, clang for the
+// policy object.
 function build(out) {
-  if (!has("musl-gcc")) {
-    if (!has("apt-get")) throw new Error("a build needs musl-gcc, and this machine has no apt-get to install it with");
+  const missing = [["musl-gcc", "musl-tools"], ["clang", "clang"]].filter(([program]) => !has(program)).map(([, pkg]) => pkg);
+  if (missing.length) {
+    if (!has("apt-get")) throw new Error(`a build needs ${missing.join(" and ")}, and this machine has no apt-get to install them with`);
     run("sudo", ["node", join(HERE, "apt.mjs")]);
-    run("sudo", ["apt-get", "install", "-y", "--no-install-recommends", "musl-tools"]);
+    run("sudo", ["apt-get", "install", "-y", "--no-install-recommends", ...missing]);
   }
+  compileObject(out);
   run("rustup", ["target", "add", TARGET]);
   run("cargo", ["build", "--release", "--locked", "--target", TARGET, "-p", "agentic-job"], { cwd: ROOT });
   for (const name of NAMES) {
@@ -180,6 +200,7 @@ async function get({ out, build: asked }) {
 function pin({ dist, release, repository }) {
   if (!dist || !release) throw new Error("pin: --dist DIR and --release TAG are required");
   const sums = NAMES.map((name) => [name, sha256(readFileSync(join(dist, `${name}-${TARGET}`)))]);
+  sums.push([OBJECT, sha256(readFileSync(join(dist, OBJECT)))]);
   const pinned = { repository: repository || REPOSITORY, release, target: TARGET, source: digest(), sha256: Object.fromEntries(sums) };
   console.log(JSON.stringify(pinned, null, 2));
 }
@@ -188,6 +209,7 @@ function verify({ dist }) {
   if (!dist) throw new Error("verify: --dist DIR is required");
   const pin = readPin(join(dist, "release.json"));
   for (const name of NAMES) checked(pin, name, readFileSync(join(dist, `${name}-${pin.target}`)));
+  checked(pin, OBJECT, readFileSync(join(dist, OBJECT)));
   console.log(`${dist} holds ${pin.release}, by the pinned checksums`);
 }
 
@@ -203,7 +225,11 @@ async function main() {
       repository: { type: "string" },
     },
   });
-  const commands = { get, pin, verify, digest: ({ root }) => console.log(digest(root)) };
+  const object = ({ out }) => {
+    if (!out) throw new Error("object: --out DIR is required");
+    compileObject(out);
+  };
+  const commands = { get, pin, verify, object, digest: ({ root }) => console.log(digest(root)) };
   const command = commands[positionals[0]];
   if (!command || positionals.length !== 1) throw new Error(`usage: binary.mjs ${Object.keys(commands).join("|")} [options]`);
   await command(values);

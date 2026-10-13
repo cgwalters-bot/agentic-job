@@ -21,7 +21,10 @@ jobs:
       - run: node --test secure-host/world-write.test.mjs secure-host/world-write-cases.test.mjs
       - name: Writable before policy activation
         run: sudo node secure-host/world-write-host.mjs before
-      - name: Build, load, attach, pin, scope and prove the policy
-        run: sudo node secure-host/world-write.mjs
-      - name: Denials and sticky, owner and tmpfs controls after loader exits
+      # As the release build compiles it (binary.mjs), not on the host that loads it.
+      - name: Compile the policy object
+        run: node secure-host/binary.mjs object --out "$RUNNER_TEMP/world-write"
+      - name: Load, attach, pin, scope and prove the policy
+        run: sudo node secure-host/world-write.mjs "$RUNNER_TEMP/world-write/world_write.bpf.o"
+      - name: Denials and sticky, owner, tmpfs and overlay controls after loader exits
         run: sudo node secure-host/world-write-host.mjs after

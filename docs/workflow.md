@@ -1484,14 +1484,16 @@ uploads take only what `run` put under its own directory after the gate.
 
 **Where the binary comes from.**
 [`secure-host/binary.mjs`](../secure-host/binary.mjs) hashes the content,
-modes and names of `Cargo.lock`, `Cargo.toml`, `crates` and `egress` at
-the caller's pinned commit. It looks for `build-FULL_DIGEST`, not the
-latest release. The release contains a manifest with that source digest
-and the binaries' SHA-256 checksums, plus a GitHub build-provenance bundle.
+modes and names of `Cargo.lock`, `Cargo.toml`, `crates`, `egress` and
+itself (it decides what a release holds) at the caller's pinned commit.
+It looks for `build-FULL_DIGEST`, not the latest release. The release
+contains a manifest with that source digest and the SHA-256 checksums of
+the binaries and the world-write policy object, plus a GitHub
+build-provenance bundle.
 Before trusting the manifest, `gh attestation verify` checks that it was
 signed by this repository's `pin.yml` workflow on `refs/heads/main`, on a
 GitHub-hosted runner. Then the script checks the manifest's source,
-repository, target and release name, and checks each binary's checksum.
+repository, target and release name, and checks each file's checksum.
 Replacing release assets, signing from a PR or using another workflow
 cannot substitute a binary. The trust anchor is GitHub's attestation
 service and this repository's main-branch publishing workflow, not a

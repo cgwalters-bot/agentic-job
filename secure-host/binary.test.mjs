@@ -3,18 +3,20 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { BUILT_FROM, NAMES, REPOSITORY, TARGET, checked, digest, fetchRelease, readPin } from "./binary.mjs";
+import { BUILT_FROM, NAMES, OBJECT, REPOSITORY, TARGET, checked, digest, fetchRelease, readPin } from "./binary.mjs";
 
 function tree() {
   const root = mkdtempSync(join(tmpdir(), "source-"));
   for (const name of BUILT_FROM) {
-    if (name.includes(".")) writeFileSync(join(root, name), name);
-    else {
+    if (name.includes(".")) {
+      mkdirSync(dirname(join(root, name)), { recursive: true });
+      writeFileSync(join(root, name), name);
+    } else {
       mkdirSync(join(root, name, "src"), { recursive: true });
       writeFileSync(join(root, name, "src", "lib.rs"), "// lib\n");
     }
@@ -30,6 +32,7 @@ test("the digest is of content, modes and names, and of nothing else", () => {
     ["the executable bit", (root) => chmodSync(join(root, "crates/src/lib.rs"), 0o755), true],
     ["a link", (root) => symlinkSync("lib.rs", join(root, "crates/src/link.rs")), true],
     ["Cargo.lock", (root) => writeFileSync(join(root, "Cargo.lock"), "changed"), true],
+    ["what a release holds", (root) => writeFileSync(join(root, "secure-host/binary.mjs"), "changed"), true],
     ["a file's time", (root) => utimesSync(join(root, "crates/src/lib.rs"), 1, 1), false],
     ["group and other bits", (root) => chmodSync(join(root, "crates/src/lib.rs"), 0o600), false],
     ["an empty directory", (root) => mkdirSync(join(root, "crates/empty")), false],
@@ -69,13 +72,16 @@ test("a release without checksums does not read", () => {
   const path = join(mkdtempSync(join(tmpdir(), "pin-")), "release.json");
   writeFileSync(path, JSON.stringify({ release: "v1", sha256: { [NAMES[0]]: "0".repeat(64) } }));
   assert.throws(() => readPin(path), /no checksum for/);
+  // A release from before the policy object was one of its files.
+  writeFileSync(path, JSON.stringify({ release: "v1", sha256: Object.fromEntries(NAMES.map((name) => [name, "0".repeat(64)])) }));
+  assert.throws(() => readPin(path), new RegExp(`no checksum for ${OBJECT}`));
 });
 
 test("source-addressed releases verify before trusting bytes and fail closed", async () => {
   const source = "a".repeat(64);
   const bytes = Buffer.from("binary");
   const manifest = { repository: REPOSITORY, release: `build-${source}`, target: TARGET, source,
-    sha256: Object.fromEntries(NAMES.map((name) => [name, createHash("sha256").update(bytes).digest("hex")])) };
+    sha256: Object.fromEntries([...NAMES, OBJECT].map((name) => [name, createHash("sha256").update(bytes).digest("hex")])) };
   const cases = [
     ["valid", {}, false, false, true],
     ["absent", null, false, false, false],
@@ -85,6 +91,7 @@ test("source-addressed releases verify before trusting bytes and fail closed", a
     ["wrong tag", { release: "latest" }, false, false, /refusing/],
     ["bad attestation", {}, true, false, /signature/],
     ["bad binary", {}, false, true, /refusing/],
+    ["bad object", {}, false, OBJECT, /refusing/],
   ];
   for (const [name, change, badSignature, badBytes, expected] of cases) {
     let verified = false;
@@ -97,7 +104,8 @@ test("source-addressed releases verify before trusting bytes and fail closed", a
         }
         if (url.endsWith("provenance.jsonl")) return Buffer.from("bundle");
         assert.equal(verified, true, "binary downloaded before verification");
-        return badBytes ? Buffer.from("tampered") : bytes;
+        const bad = badBytes === true || (badBytes && url.endsWith(`/${badBytes}`));
+        return bad ? Buffer.from("tampered") : bytes;
       },
       verify: (program, args) => {
         assert.equal(program, "gh");
@@ -112,8 +120,12 @@ test("source-addressed releases verify before trusting bytes and fail closed", a
     const out = mkdtempSync(join(tmpdir(), "release-"));
     if (expected instanceof RegExp) await assert.rejects(fetchRelease(source, out, options), expected, name);
     else assert.equal(await fetchRelease(source, out, options), expected, name);
+    if (expected === true) {
+      assert.equal(statSync(join(out, NAMES[0])).mode & 0o777, 0o755);
+      assert.equal(statSync(join(out, OBJECT)).mode & 0o777, 0o644);
+    }
   }
-  for (const failedAsset of ["release.json", "provenance.jsonl", `agentic-job-${TARGET}`]) {
+  for (const failedAsset of ["release.json", "provenance.jsonl", `agentic-job-${TARGET}`, OBJECT]) {
     await assert.rejects(fetchRelease(source, mkdtempSync(join(tmpdir(), "failure-")), {
       fetchFile: async (url) => {
         if (url.endsWith(`/${failedAsset}`)) throw new Error("download failed");

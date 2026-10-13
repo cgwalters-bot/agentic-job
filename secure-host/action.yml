@@ -78,8 +78,9 @@ inputs:
   world-write-bpf:
     description: >-
       Experimental access-time denial of writes to another user's world-writable root-filesystem
-      files and non-sticky directories. Requires clang and bpftool installed before this action;
-      builds the CO-RE object from action source, fails closed on load/attach errors.
+      files and non-sticky directories. Requires bpftool installed before this action; loads the
+      CO-RE object that comes with the binary (by the release's checksums, or built with it), and
+      with `binary`, the `world_write.bpf.o` beside it. Fails closed on load/attach errors.
       Does not replace the existing setup policy or cover existing writable mappings
     default: "false"
 
@@ -169,7 +170,8 @@ runs:
       shell: bash
       env:
         ACTION: ${{ github.action_path }}
-      run: sudo node "$ACTION/world-write.mjs"
+        BINARY: ${{ inputs.binary || format('{0}/secure-host/bin/agentic-job', runner.temp) }}
+      run: sudo node "$ACTION/world-write.mjs" "$(dirname "$BINARY")/world_write.bpf.o"
     - name: Secure the host
       shell: bash
       run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"

@@ -39,17 +39,16 @@ jobs:
         with:
           key: ${{ env.TARGET }}
       - run: cargo build --release --locked --target "$TARGET" -p agentic-job
-      # Compile the candidate policy, but do not distribute or enable it until
-      # source-bound pins, loading and privileged acceptance probes are wired in.
-      - name: Check the candidate world-write policy
+      - name: Check the world-write policy's predicate
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror crates/agentic-job/bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
           "$RUNNER_TEMP/world-write-test"
-          clang -O2 -g -target bpf -Wall -Wextra -Werror -c crates/agentic-job/bpf/world_write.bpf.c -o "$RUNNER_TEMP/world_write.bpf.o"
-      # The scripted agent too: a run with `agent: fake` needs it.
+      # The scripted agent too: a run with `agent: fake` needs it. The
+      # world-write policy object goes with them, its checksum in the manifest.
       - name: Stage the binaries and their checksums
         run: |
           mkdir dist
+          node secure-host/binary.mjs object --out dist
           cd dist
           for name in agentic-job fake-agent; do
             cp "../target/$TARGET/release/$name" "$name-$TARGET"

@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { exercise, fixtures } from "./world-write-cases.mjs";
 
 test("fixtures populate parents before exposing them to the no-root-exemption policy", () => {
-  for (const [sticky, owner] of [[false, false], [true, false], [false, true]]) {
+  for (const [sticky, owner, workerTarget] of [[false, false, true], [true, false, true], [false, true, true], [false, false, false]]) {
     const entries = new Map();
     const io = {
       mkdirSync(path, { mode }) { entries.set(path, { uid: 0, gid: 0, mode }); },
@@ -21,10 +21,10 @@ test("fixtures populate parents before exposing them to the no-root-exemption po
         entries.set(path, { uid: 0, gid: 0, mode: 0o644 });
       },
     };
-    fixtures("/fixture", sticky, owner, 123, io);
+    fixtures("/fixture", sticky, owner, 123, { io, workerTarget });
     for (const dir of ["/fixture", "/fixture-target"]) {
       assert.equal(entries.get(dir).mode, sticky ? 0o1777 : 0o777);
-      assert.equal(entries.get(dir).uid, owner || dir.endsWith("-target") ? 123 : 0);
+      assert.equal(entries.get(dir).uid, owner || (workerTarget && dir.endsWith("-target")) ? 123 : 0);
     }
     for (const name of ["file", "unlink", "rename"]) {
       assert.equal(entries.get(`/fixture/${name}`).mode, 0o666);
@@ -57,6 +57,21 @@ test("a missing fixture is not accepted as a policy denial", () => {
   try {
     assert.throws(() => exercise(`${root}/absent`, true), { code: "ERR_ASSERTION" });
     assert.throws(() => exercise(`${root}/absent`, false), { code: "ENOENT" });
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("named denials must each be refused, and only names of operations are accepted", () => {
+  const root = mkdtempSync(join(tmpdir(), "world-write-cases-"));
+  const path = `${root}/fixture`;
+  try {
+    fixtures(path, false, true, process.getuid());
+    assert.throws(() => exercise(path, ["truncate"]), { code: "ERR_ASSERTION" });
+    assert.equal(existsSync(`${path}/created`), false);
+    // write is allowed and runs; the unexpectedly allowed create is not a denial.
+    assert.throws(() => exercise(path, ["create"]), { code: "ERR_ASSERTION", message: /create/ });
+    assert.ok(existsSync(`${path}/created`));
   } finally {
     rmSync(root, { recursive: true });
   }
