@@ -43,7 +43,9 @@
 //!
 //! A `task` is a subagent's tool call as opencode reports one, done at
 //! once. A `sleep` (seconds) ends early when the client cancels the turn.
-//! A `stop` ends the turn there with that stop reason, and an `exit` the
+//! A `stop` ends the turn there with that stop reason, even after a
+//! cancel, as an agent whose last reply was complete when the cancel
+//! came; and an `exit` the
 //! process with that status, as an agent that crashed. A `finish` ends
 //! the turn as done and then the process with that status, as an agent
 //! that doesn't wait for its client to hang up. As real agents do,
@@ -345,7 +347,7 @@ fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<Strin
             };
             for (i, step) in steps.iter().enumerate() {
                 conn.poll();
-                if conn.cancelled {
+                if conn.cancelled && !matches!(step, Step::Stop(_)) {
                     return Ok(CANCELLED.to_owned());
                 }
                 match step {

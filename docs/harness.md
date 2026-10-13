@@ -148,7 +148,16 @@ Claude Code is not: its adapter would end the running turn for one. At
 starts more tasks than allowed, the turn is cancelled and one more
 prompt asks the agent to hand back what it has. At the limit the
 session is cancelled. Spending over `budget` stops it at once, with no
-hand-back ([then](workflow.md#a-run-stopped-at-a-limit)).
+hand-back ([then](workflow.md#a-run-stopped-at-a-limit)). The cost
+comes after each model reply, so the reply that crosses the budget is
+often the last of a turn the agent has already ended. If the agent
+answers the cancel with `end_turn`, the run ends well, exit state 0:
+its `harness.json` message says how far over it went, the run action
+warns and sets its `over-budget` output, and the status comment says so.
+A turn answered with `cancelled` is a stop as before. A turn that ends
+just as the timeout cancels it is treated the same way. The budget cannot
+refuse a reply in advance, because no one knows its cost before it
+comes; `max-requests` is the cap that acts before a request is made.
 
 ## How a run ends
 

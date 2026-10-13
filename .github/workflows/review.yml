@@ -133,6 +133,7 @@ jobs:
       id-token: write
     outputs:
       exit: ${{ steps.run.outputs.exit }}
+      over-budget: ${{ steps.run.outputs.over-budget }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
     steps:
       # The base commit the policy job decided, never the head.

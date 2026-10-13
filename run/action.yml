@@ -15,6 +15,11 @@ outputs:
   exit:
     description: Exit state of agentic-job run
     value: ${{ steps.run.outputs.exit }}
+  over-budget:
+    description: >-
+      For a run that ended well although the cost its agent reported went over the budget, how far
+      ("565.9 of 500 AIC"); empty otherwise
+    value: ${{ steps.run.outputs.over-budget }}
   safe-outputs-artifact-id:
     description: Immutable untrusted proposals upload ID; never a policy or checked artifact
     value: ${{ steps.safe-outputs.outputs.artifact-id }}
@@ -114,6 +119,15 @@ runs:
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"
         [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        # The cost is reported after each reply, so the last one can cross
+        # the budget of a turn that then ends well: a warning, not a failure.
+        over=
+        [ ! -e "$JOB_DIR/out/run/summary.json" ] ||
+          over=$(jq -r 'select(.result == "success" and (.aic | type) == "number" and (.aic_budget | type) == "number" and .aic > .aic_budget) | "\(.aic) of \(.aic_budget) AIC"' "$JOB_DIR/out/run/summary.json") || over=
+        if [ -n "$over" ]; then
+          echo "::warning::the agent ended its turn over budget: spent $over"
+          echo "over-budget=$over" >> "$GITHUB_OUTPUT"
+        fi
     # Read-only Actions metadata; never expose this credential to the agent.
     - name: Report job setup duration
       continue-on-error: true # telemetry must not prevent artifact hand-back

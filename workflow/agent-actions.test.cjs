@@ -1,6 +1,6 @@
 // Exercise the extracted actions' actual shell without changing this host.
 const assert = require('node:assert/strict');
-const { readFileSync, readdirSync, mkdtempSync, rmSync } = require('node:fs');
+const { mkdirSync, readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -102,6 +102,25 @@ test('agent exit is captured before uploads and partial result gate is unchanged
     }
   }
   assert.ok(run.indexOf('id: safe-outputs') < run.indexOf("name: The run's result"));
+  // A run that ended well over its budget says so, as a warning and an
+  // output of numbers; one stopped at the budget is the exit state's.
+  mkdirSync(join(directory, 'out/run'), { recursive: true });
+  for (const [summary, over] of [
+    [{ result: 'success', aic: 565.9, aic_budget: 500 }, '565.9 of 500 AIC'],
+    [{ result: 'success', aic: 499.9, aic_budget: 500 }, ''],
+    [{ result: 'success', aic: 565.9, aic_budget: null }, ''],
+    [{ result: 'success', aic: '565.9 $(exit 9)', aic_budget: 500 }, ''],
+    [{ result: 'budget', aic: 565.9, aic_budget: 500 }, ''],
+  ]) {
+    writeFileSync(join(directory, 'out/run/summary.json'), JSON.stringify(summary));
+    const output = join(directory, 'output-over');
+    const result = shell('agentic-job() { return 0; };\n' + step(run, 'Run the agent'), {
+      JOB_DIR: directory, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(output, 'utf8'), `exit=0\n${over && `over-budget=${over}\n`}`);
+    assert.equal(result.stdout.includes(`::warning::the agent ended its turn over budget: spent ${over}\n`), over !== '');
+    rmSync(output);
+  }
   assert.match(run, /steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != ''/);
 });
 

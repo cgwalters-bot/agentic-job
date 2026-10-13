@@ -6,7 +6,8 @@
 //! percent of the time, `HAND_BACK_REQUESTS` before the last model
 //! request) to write its outcome, and only then the stop. Spending is the
 //! exception: the agent reports it after the fact, so an overrun stops the
-//! session at once.
+//! session at once, unless the turn had already ended: then it is only a
+//! warning.
 //!
 //! This is the arithmetic and the words; the driver delivers them over ACP.
 

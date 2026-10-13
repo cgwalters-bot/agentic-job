@@ -445,8 +445,8 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
 
 // Item-scoped status upserts are exercised in status.test.cjs.
 
-// How conclude says the run ended: [results, pull request, no result, text].
-for (const [results, pr, none, text, url = ''] of [
+// How conclude says the run ended: [results, pull request, no result, text, result URL, over budget].
+for (const [results, pr, none, text, url = '', over = ''] of [
   ['success/success/success', '', '', '✅ [w](u) ended well.'],
   ['success/success/success', '39', '', '✅ [w](u) ended well and opened pull request #39.'],
   // apply's own comment says the run made nothing; the status must not say otherwise.
@@ -455,13 +455,17 @@ for (const [results, pr, none, text, url = ''] of [
   ['success/success/failure', '', 'true', '❌ [w](u) failed (agent, check, apply: success/success/failure; the agent\'s exit state: 0).'],
   ['success/success/success', '', '', '✅ [w](u) ended well. Result: https://github.com/o/r/issues/7#issuecomment-1', 'https://github.com/o/r/issues/7#issuecomment-1'],
   ['cancelled/skipped/skipped', '', '', '⏹️ [w](u) was cancelled.'],
+  // A turn that ended well although its last reply crossed the budget.
+  ['success/success/success', '', '', '✅ [w](u) ended well. Its last reply took the agent over budget: it spent 565.9 of 500 AIC.', '', '565.9 of 500 AIC'],
+  ['success/success/success', '', '', '✅ [w](u) ended well.', '', '565.9 of 500 AIC $(exit 9)'],
+  ['success/success/failure', '', '', '❌ [w](u) failed (agent, check, apply: success/success/failure; the agent\'s exit state: 0).', '', '565.9 of 500 AIC'],
 ]) {
   test(`conclude says ${text}`, () => {
     const dir = mkdtempSync(join(homedir(), 'ended-'));
     try {
       const output = join(dir, 'output');
       const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('How the run ended')], {
-        RESULTS: results, EXIT: '0', PR: pr, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
+        RESULTS: results, EXIT: '0', PR: pr, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, OVER_BUDGET: over, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
       assert.equal(ran.status, 0, ran.stderr);
       assert.equal(readFileSync(output, 'utf8').split('\n')[0], `text=${text}`);
     } finally {

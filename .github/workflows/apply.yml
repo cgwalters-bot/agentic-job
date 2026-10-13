@@ -828,6 +828,7 @@ jobs:
         env:
           RESULTS: ${{ fromJSON(inputs.policy).proposals-artifact != '' && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
           EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
+          OVER_BUDGET: ${{ fromJSON(inputs.agent).outputs.over-budget }}
           PR: ${{ needs.apply.outputs.pull-request }}
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
           NO_RESULT_REASON: ${{ needs.apply.outputs.no-result-reason }}
@@ -850,6 +851,9 @@ jobs:
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
+          # Numbers alone: the agent reported the cost they come from.
+          [[ ! "$OVER_BUDGET" =~ ^[0-9]+(\.[0-9]+)?\ of\ [0-9]+(\.[0-9]+)?\ AIC$ ]] || [ "$reaction" != rocket ] ||
+            text="$text Its last reply took the agent over budget: it spent $OVER_BUDGET."
           printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
       # The same bounded lookup at start and finish, including retries.
       # Checkout only this workflow's pinned source, never the producer's tree.

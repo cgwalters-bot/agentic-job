@@ -402,6 +402,33 @@ fn reported_cost_over_budget() {
     assert!(r.elapsed < Duration::from_secs(30), "took {:?}", r.elapsed);
 }
 
+/// The reply that crosses the budget is the turn's last: the agent's
+/// answer to the cancel is that its turn had ended, so its work stands
+/// and the overrun is only a warning.
+#[test]
+fn reported_cost_over_budget_after_the_turn_ended() {
+    let r = run(
+        &["script", "{dir}/script.json"],
+        Setup {
+            files: &[(
+                "script.json",
+                r#"[{"cost": {"usd": 0.5}}, {"sleep": 20}, {"stop": "end_turn"}]"#,
+            )],
+            timeout_s: 60,
+            budget_aic: Some(10.0),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    let message = "over budget: spent 50.0 of 10 AIC; the agent had already ended its turn";
+    assert_eq!(r.result["message"], message);
+    assert!(r.log.contains(&format!("⚠ {message}")), "{}", r.log);
+    assert_eq!(r.result["stop_reason"], "end_turn");
+    assert_eq!(r.result["handed_back"], false);
+    // The cancel cut the sleep short.
+    assert!(r.elapsed < Duration::from_secs(15), "took {:?}", r.elapsed);
+}
+
 #[test]
 fn unadvertised_requests_are_refused() {
     // Each would hang for the fake agent's 5s if left unanswered.

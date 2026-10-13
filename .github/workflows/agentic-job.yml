@@ -366,6 +366,7 @@ jobs:
       id-token: write
     outputs:
       exit: ${{ steps.run.outputs.exit }}
+      over-budget: ${{ steps.run.outputs.over-budget }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
     # The same steps a caller-owned agent job has, with no steps of the
     # caller's between prepare and secure-host or after run.

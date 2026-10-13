@@ -745,14 +745,28 @@ async fn stop_turn<F>(
     turn: Turn<'_, F>,
 ) -> Ended
 where
-    F: Future,
+    F: Future<Output = Result<PromptResponse, agent_client_protocol::Error>>,
 {
     let Some(why) = why else {
         return Ended::failure(LOST_STOP_SIGNAL.to_owned());
     };
-    tap.log(&[format!("⚠ {}", stopped(&why).1)]);
-    let _ = cancel_turn(cx, sid, cancelling, turn).await;
-    Ended::stopped(&why, false)
+    let (_, msg) = stopped(&why);
+    tap.log(&[format!("⚠ {msg}")]);
+    let answer = cancel_turn(cx, sid, cancelling, turn).await;
+    match answer.map(prompt_result) {
+        // The turn had ended before the cancel reached it: spending is
+        // reported after the fact, so the reply that crossed the limit is
+        // usually the last one, and what the agent finished stands.
+        Some(ended) if ended.outcome == Outcome::Success => {
+            let msg = format!("{msg}; the agent had already ended its turn");
+            tap.log(&[format!("⚠ {msg}")]);
+            Ended {
+                message: Some(msg),
+                ..ended
+            }
+        }
+        _ => Ended::stopped(&why, false),
+    }
 }
 
 /// initialize, session/new and the model: the session's id, or how it
