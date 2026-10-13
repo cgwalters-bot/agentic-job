@@ -248,7 +248,7 @@ test('caller and write job retain the trusted-source boundary', () => {
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
   assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'apply', 'status']);
   for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: [],
-    refusal: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
+    refusal: ['pull-requests'], apply: ['pull-requests'], status: ['pull-requests', 'statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);
     if (name !== 'apply') assert.doesNotMatch(jobs[name], /secrets/, name);

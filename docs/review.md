@@ -45,15 +45,16 @@ could start them, opening pull requests, or closing and reopening one, would
 drain the shared cap and stall every implement, fix and review run until its
 window resets. One of those authors can still do that; per-author limits are
 [remaining work](plan.md).
-A malicious head can still sway its own verdict; the verdict is text and a
-status, never a GitHub approval.
+A malicious head can still sway its own verdict, including an opt-in GitHub
+approval. Model review is not a trust boundary.
 
 The `review` status is not a security control. The author of a pull request
 writes both the code reviewed and the title and body the agent reads, so they
 can talk their own review into APPROVE. On a pull request from someone without
 write access, `review` success must not, alone or together with `ci`, gate
 auto-merge or a merge queue: a person with write access has to approve the
-merge. Requiring `review` stops a change from merging without a review; it
+merge. The same restriction applies to an automated GitHub approval: admitting
+a `/review` is not human merge approval. Requiring `review` stops a change from merging without a review; it
 does not make an approved change trusted.
 
 ## The verdict
@@ -77,10 +78,11 @@ field that would retarget the comment. The `status` job then sets the commit
 status `review` on the reviewed head: `success` only for a checked APPROVE
 whose comment was posted, `failure` for CHANGES, a noop or a run that did not
 get that far. The status job
-holds only `statuses: write`, `pull-requests: read` and `contents: read` (to
+holds `statuses: write`, `pull-requests: write` and `contents: read` (to
 check out `workflow/review.cjs` from the policy call's pinned source, never
 the head), and reads no agent text: the verdict is one of two words check.yml
-set, mapped by `reviewStatus`.
+set, mapped by `reviewStatus`. With real reviews enabled it also reads the
+applied comment as inert review-body data.
 
 A status belongs to the commit, and the pull request's title and body reach
 the agent, so anyone could open a second pull request at someone else's head
@@ -98,10 +100,50 @@ Automatic events cancel a superseded review; only admitted runs enter the
 per-PR group, so a comment cannot cancel one. A cancelled run sets no status,
 and a head no run finished leaves a required `review` expected.
 
-## Requiring it
+## Real reviews and the poll contract
 
-`review` is meant to be required for pull requests, next to `ci`. It is not
-required yet, and must not be added to the ruleset while `main` has a merge
+Set repository variable `AGENT_REAL_REVIEWS=true` to opt in; unset is off.
+The status job uses its own `GITHUB_TOKEN`, never `SAFE_OUTPUTS_PAT`, to submit
+an `APPROVED` or `CHANGES_REQUESTED` review after check and apply succeed.
+Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
+Actions to create and approve pull requests**. The reviewer is
+`github-actions[bot]`, distinct from the bot account opening the PR. PRs opened
+by that Actions identity cannot use this approval path. The body is the applied
+comment, unchanged, with `VERDICT:` still its first line. Inline findings remain
+file/line citations in the body; no inline review comments are generated.
+
+The review is bound to `commit_id`, and a head that already changed is skipped.
+At most 300 files (three API pages) are inspected; incomplete or oversized lists
+fail closed. Automated APPROVE is withheld if either side of a rename touches
+`.github/` or `workflow/`: a PR must not approve changes to its own approval
+workflow or trusted scripts. CHANGES can still be submitted. Such PRs need a
+human approval, regardless of the compatibility comment/status verdict.
+
+Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
+comment text or the `review` status. For `github-actions[bot]`, select the latest
+non-pending, non-comment review by submission time (ID breaks ties). Only
+`APPROVED` with `commit_id` equal to the current head is approval;
+`CHANGES_REQUESTED` triggers the existing fix dispatch and its body supplies
+findings. `DISMISSED`, absent or stale approval means wait, not approval.
+Other reviewers' outstanding change requests remain GitHub's merge gate; the
+poller must not override them. Noop, cancellation, refusal, protected-path
+approval or submission failure produces no new approval. This repository does
+not implement the external tracker's poll loop.
+
+For `main`, enable the pull-request rule with **1 required approving review**,
+and **Dismiss stale pull request approvals when new commits are pushed**.
+Keep the merge queue and
+required `ci` check, remove `review` from required status checks, and give the
+automation identity no ruleset bypass. GitHub blocks an outstanding change
+request; the review requirement gates queue entry. Repository settings cannot
+be changed by this PR. Enabling repository auto-merge and requesting queue
+entry at PR creation belong to the opening controller; this workflow never
+merges or enables auto-merge itself.
+
+### Compatibility status
+
+`review` is a compatibility status, not the merge gate. It must not be added
+to the ruleset while `main` has a merge
 queue. The status is reported on the pull request's head commit only:
 `review.yml` has no `merge_group` trigger, and merge-group runs are not
 reviewed. A queue
@@ -128,7 +170,8 @@ needs these repository or organization variables, and no secret:
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's configuration is; passed only when `AGENT` is `opencode`, as in `dispatch.yml` |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
-rather than `github-actions[bot]`. Here the agent job's identity token names
+rather than `github-actions[bot]`; real reviews always use the status job's
+token. Here the agent job's identity token names
 this repository's own `review.yml` as its `job_workflow_ref`, so the broker
 needs the `any_workflow` entry narrowed to this repository, and the tailnet's
 federated identity has to admit it too
@@ -172,6 +215,11 @@ same paths, and sets the variables above. The broker entry for it is the
 `called_workflows` form, naming `review.yml` at that commit.
 
 ## Tests
+
+`node --test workflow/real-review.test.cjs` covers opt-in submission, both
+review states, unchanged bodies and exact commits, stale heads, failed runs,
+protected paths and renames, bounded pagination and invalid comment targets.
+The tests use fake APIs; actual forge writes are left to real workflow runs.
 
 `node --test workflow/review.test.cjs` covers admission, request bounds,
 the verdict grammar, hostile outputs, the status for each combination of

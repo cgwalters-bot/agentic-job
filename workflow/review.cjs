@@ -113,6 +113,55 @@ async function reportStatus(env, github, core) {
   return status;
 }
 
+// This job runs only base-revision code. A head must not obtain an approval
+// for changes to the workflow or the trusted scripts which issue approvals.
+async function submitReview(env, github, core) {
+  if (env.REAL_REVIEWS !== 'true') return;
+  const run = { pull: env.PULL, head: env.HEAD_SHA, check: env.CHECK_RESULT,
+    verdict: env.VERDICT, apply: env.APPLY_RESULT, url: env.RESULT_URL };
+  reviewStatus(run, [Number(run.pull)]); // Validate the target before API calls.
+  if (run.check !== 'success' || run.apply !== 'success' || !run.url ||
+      !['APPROVE', 'CHANGES'].includes(run.verdict)) return;
+  const [owner, repo] = env.GITHUB_REPOSITORY.split('/');
+  const target = { owner, repo, pull_number: Number(run.pull) };
+  const { data: pull } = await github.rest.pulls.get(target);
+  if (pull.state !== 'open' || pull.head.sha !== run.head) {
+    core.notice('No review submitted: the reviewed head is no longer current');
+    return;
+  }
+  // Fail closed rather than paginate an unbounded diff. Renames must check
+  // both names so moving trusted code out does not evade the human gate.
+  if (!Number.isSafeInteger(pull.changed_files) || pull.changed_files < 0 || pull.changed_files > 300) {
+    throw new Error('Real review requires at most 300 changed files');
+  }
+  const { data: files } = await github.rest.pulls.listFiles({ ...target, per_page: 100, page: 1 });
+  for (let page = 2; files.length < pull.changed_files && page <= 3; page++) {
+    const { data } = await github.rest.pulls.listFiles({ ...target, per_page: 100, page });
+    files.push(...data);
+  }
+  if (files.length !== pull.changed_files) throw new Error('Incomplete review file list');
+  if (run.verdict === 'APPROVE' && files.some(file =>
+    [file.filename, file.previous_filename].some(name =>
+      name && (name.startsWith('.github/') || name.startsWith('workflow/'))))) {
+    core.notice('Automated approval withheld: trusted workflow changes require a human review');
+    return;
+  }
+  const prefix = `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#issuecomment-`;
+  const id = run.url.startsWith(prefix) ? run.url.slice(prefix.length) : '';
+  if (!/^[1-9][0-9]*$/.test(id) || !Number.isSafeInteger(Number(id))) {
+    throw new Error('Review body must come from the applied comment on this pull request');
+  }
+  const { data: comment } = await github.rest.issues.getComment({ owner, repo, comment_id: Number(id) });
+  if (comment.issue_url !== `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/issues/${run.pull}` ||
+      checkOutputs({ items: [{ type: 'add_comment', body: comment.body }] }, run.pull) !== run.verdict) {
+    throw new Error('Applied comment does not match the checked review');
+  }
+  // commit_id prevents a racing push from making this an approval of new code;
+  // stale-review dismissal in the branch ruleset is also required.
+  await github.rest.pulls.createReview({ ...target, commit_id: run.head,
+    event: run.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES', body: comment.body });
+}
+
 async function resolveDispatch(env, github) {
   if (env.REVIEW !== 'true' || env.EVENT !== 'false' || env.KIND !== 'analysis' ||
       env.OUTPUTS !== 'add_comment,noop' || env.MAX_OUTPUTS !== '1' ||
@@ -152,4 +201,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch, refusalText };
+module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };

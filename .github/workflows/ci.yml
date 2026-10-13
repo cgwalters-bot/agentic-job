@@ -126,6 +126,7 @@ jobs:
           ACTIONLINT: ${{ runner.temp }}/actionlint
       - run: node --test workflow/refusal.test.cjs
       - run: node --test workflow/review.test.cjs
+      - run: node --test workflow/real-review.test.cjs
       - run: node --test workflow/push.test.cjs
       - run: node --test workflow/proposals.test.cjs
       - run: node --test workflow/agent-actions.test.cjs
