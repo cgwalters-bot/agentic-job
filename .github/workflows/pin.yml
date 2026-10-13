@@ -4,7 +4,7 @@ name: prebuilt
 on:
   push:
     branches: [main]
-    paths: [Cargo.lock, Cargo.toml, "crates/**", "egress/**", "secure-host/binary.mjs", ".github/workflows/build.yml", ".github/workflows/pin.yml"]
+    paths: [Cargo.lock, Cargo.toml, "crates/**", "egress/**", "skills/**", "workflow/review.md", "secure-host/binary.mjs", ".github/workflows/build.yml", ".github/workflows/pin.yml"]
   workflow_dispatch:
 
 permissions:

@@ -133,6 +133,8 @@ Set operator-controlled repository variables (not dispatch inputs):
 
 Preflight names **all** missing model, runner, URL and audience variables at
 once, before policy/build or agent startup. It rejects unknown agents.
+With `claude` or `opencode`, `implement` installs the [skills](skills.md) and
+its task names the skill ("Use the implement skill") in place of the procedure.
 Real agents have a 150-request cap; scripted sessions have no inference and
 `max-requests: 0`. Real agents do not install scripted sessions.
 Hosted Ubuntu alone cannot reach a private broker. The shipped dispatch

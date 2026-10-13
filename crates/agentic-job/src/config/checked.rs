@@ -188,7 +188,7 @@ mod tests {
         );
 
         let text = format!(
-            "{CLAUDE}{PROXY}{OIDC}[limits]\ntimeout-minutes = 10\nmax-requests = 150\n\
+            "{CLAUDE}skills = true\n{PROXY}{OIDC}[limits]\ntimeout-minutes = 10\nmax-requests = 150\n\
              {DIRECT}[commit]\nauthor = \"A Bot <bot@example.org>\"\ntrailers = [\"Generated-by: AI\"]\n"
         );
         let claude = checked(&text).unwrap();
@@ -202,6 +202,11 @@ mod tests {
                 audience: "proxy".into()
             }
         );
+
+        let text = format!(
+            "[agent]\nname = \"opencode\"\nmodel = \"m\"\nskills = true\n{PROXY}{OIDC}{CAPPED}{DIRECT}"
+        );
+        assert_eq!(checked(&text).unwrap().kind, Kind::Opencode);
     }
 
     /// One row for each table a command used to check by itself: the
@@ -219,6 +224,14 @@ mod tests {
             (
                 format!("{FAKE}config-repo = \"https://example.org/x\"\n{CAPPED}"),
                 "the fake agent has no configuration",
+            ),
+            (
+                format!("{FAKE}skills = true\n{CAPPED}"),
+                "agent.skills is supported only for claude and opencode, not fake",
+            ),
+            (
+                format!("[agent]\nname = \"vibe\"\nmodel = \"m\"\nskills = true\n{CAPPED}"),
+                "agent.skills is supported only for claude and opencode, not vibe",
             ),
             (
                 format!("{FAKE}config-ref = \"main\"\n{CAPPED}"),

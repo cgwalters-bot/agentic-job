@@ -237,6 +237,19 @@ fn load_config(path: &Path) -> Result<Config> {
     Config::parse(&text).with_context(|| format!("in {}", path.display()))
 }
 
+/// The sandbox user's files a run of KIND writes or removes beside the
+/// agent's generated configuration: the read-only GitHub TOKEN's, and
+/// the skills AGENT turns on or off.
+fn home_files(
+    kind: Kind,
+    agent: &config::Agent,
+    token: Option<&str>,
+) -> Result<Vec<agent::HomeFile>> {
+    let mut files = vec![agent::github_token(token)?];
+    files.extend(agent::skills(kind, agent.skills));
+    Ok(files)
+}
+
 /// A field of `--meta` that is a name or a number.
 fn meta_field(meta: &Value, key: &str) -> Option<String> {
     match meta.get(key) {
@@ -518,7 +531,7 @@ impl Plan {
         };
         configuration
             .files
-            .push(agent::github_token(github.as_deref())?);
+            .extend(home_files(self.kind, &self.agent, github.as_deref())?);
         agent::install(sandbox, &configuration)?;
         if let (Some(run), Some(file)) = (&run, self.kind.token_file()) {
             let given = match self.endpoint.as_ref().map(|endpoint| &endpoint.mode) {
@@ -1049,6 +1062,39 @@ mod tests {
                     head
                 };
                 assert_eq!(session_cwd(kind, review, base, head), expected);
+            }
+        }
+    }
+
+    /// `[agent] skills` reaches what `prepare` installs: on, each skill
+    /// is written where the configured agent reads it; off, one an
+    /// earlier run left is removed.
+    #[test]
+    fn configured_skills_are_installed() {
+        for (agent, dir) in [
+            ("[agent]\nname = \"claude\"\n", ".claude/"),
+            (
+                "[agent]\nname = \"opencode\"\nmodel = \"m\"\n",
+                ".config/opencode/",
+            ),
+        ] {
+            for on in [false, true] {
+                let text = format!(
+                    "{agent}skills = {on}\n[inference]\nurl = \"http://100.64.0.1:18080\"\n\
+                     register = \"github-oidc\"\naudience = \"proxy\"\n\
+                     [limits]\ntimeout-minutes = 10\nbudget = 100\n\
+                     [egress]\ndirect = [\"http://100.64.0.1:18080\"]\n"
+                );
+                let config = Config::parse(&text).unwrap();
+                let kind = config.check().unwrap().kind;
+                let files = home_files(kind, &config.agent, Some("t")).unwrap();
+                assert_eq!(files[0], agent::github_token(Some("t")).unwrap());
+                let skill = files
+                    .iter()
+                    .find(|file| file.path == format!("{dir}skills/implement/SKILL.md"))
+                    .unwrap();
+                assert_eq!(skill.content.is_some(), on, "{text}");
+                assert_eq!(files[1..], agent::skills(kind, on), "{text}");
             }
         }
     }

@@ -83,6 +83,8 @@ lists the files to change, the adapter contract and the security tests.
 pin and binary-fetch script. `egress/` holds the mitmproxy addon, policy,
 hashed dependencies and Python tests. The runtime Python files, default
 policy and requirements file are embedded in the binary; the tests are not.
+`skills/` holds the agents' [skills](skills.md) and subagents, also
+embedded.
 
 `safe-outputs/` holds integration scripts, derived validation rules and
 fixtures. gh-aw's collector and handlers come from its pinned setup

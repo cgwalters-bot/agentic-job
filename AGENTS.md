@@ -13,6 +13,7 @@ Start with the [README](README.md) for usage, limitations and topic documentatio
 - `secure-host/`: composite hardening action, binary fetching/checksums and release pin.
 - `safe-outputs/`: validation derived from pinned gh-aw workflows, generator and refusal diagnostics.
 - `workflow/`: event activation/label consumption and its Node tests.
+- `skills/`: agent skills and subagents embedded in the binary ([skills](docs/skills.md)).
 - `.github/workflows/`: reusable workflow, CI, examples, release and pin automation.
 - `.github/agentic-job/`: caller bounds/configuration and scripted end-to-end scenarios.
 - `docs/`: topic guides, [requirements](docs/requirements.md) and [remaining work](docs/plan.md).
@@ -85,7 +86,9 @@ environment keys. Extend case-table tests for acceptance/refusal boundaries
 (for example `policy.rs`, `config/compose.rs` and `session/budget.rs`) rather
 than duplicating test bodies. Rustfmt and warning-free Clippy are required.
 Tests must not use `include_str!` for files outside `crates/` or `egress/`;
-read those files at test time instead. The `release-pin` check enforces this.
+read those files at test time instead. The binary may also embed `skills/`
+and `workflow/review.md`, which the source digest covers; the `release-pin`
+check refuses anything else.
 Recent commits usually use `area: Imperative subject` (for example `run: Leave…`);
 explain the reason for a change, not just the diff, in its commit message.
 

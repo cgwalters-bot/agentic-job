@@ -357,6 +357,11 @@ pub struct Agent {
     pub config_ref: Option<String>,
     /// The directory of it the configuration is in (default: its root).
     pub config_path: Option<PathBuf>,
+    /// Installs this binary's skills and subagents where the agent reads
+    /// them (`run::agent::skills`), for a task that names one. Off: a
+    /// task that does not use them gets no instructions it did not ask
+    /// for.
+    pub skills: bool,
 }
 
 /// What stops a run. Zero means not set. `session::Limits::from_config`

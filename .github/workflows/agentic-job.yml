@@ -118,6 +118,10 @@ on:
         description: The directory of it the configuration is in (empty for its root)
         type: string
         default: ""
+      agent-skills:
+        description: Install the binary's skills and subagents for claude or opencode, for a task that names one (docs/skills.md)
+        type: boolean
+        default: false
       runner:
         description: The runner of the policy, check and apply jobs, as JSON (a label or a list of labels). It needs rustup, apt and Node
         type: string
@@ -334,6 +338,7 @@ jobs:
       agent-config-repo: ${{ inputs.agent-config-repo }}
       agent-config-ref: ${{ inputs.agent-config-ref }}
       agent-config-path: ${{ inputs.agent-config-path }}
+      agent-skills: ${{ inputs.agent-skills }}
       runner: ${{ inputs.runner }}
       build-binary: ${{ inputs.build-binary }}
       inference-url: ${{ inputs.inference-url }}

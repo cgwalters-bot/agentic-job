@@ -40,6 +40,10 @@
 //! other configuration files and run plugins, tools and commands found
 //! beside its configuration, none of which the provider check covers.
 //!
+//! With `[agent] skills`, either also gets this binary's skills and
+//! subagents ([`skills`]), the same text for both, so that a task can say
+//! "use the implement skill" rather than spell the procedure out.
+//!
 //! An agent is code here, and not an entry of a table a caller writes,
 //! on purpose: what keeps its inference at the proxy is different for
 //! each one and has to be known, not described. "Adding an agent" in
@@ -112,6 +116,38 @@ const BUILTIN_PROVIDER_PACKAGE: &str = "@ai-sdk/openai";
 const OPENCODE_SCHEMA: &str = "https://opencode.ai/config.json";
 /// The built-in instructions for Claude Code.
 const CLAUDE_INSTRUCTIONS: &str = include_str!("claude-instructions.txt");
+/// The skills and subagents of `[agent] skills`, in the Agent Skills
+/// format (`skills/` at the repository's root). The review skill is the
+/// review caller's standing task, so that the two cannot drift apart.
+const IMPLEMENT_SKILL: &str = include_str!("../../../../skills/implement/SKILL.md");
+const REVIEW_SKILL: &str = concat!(
+    "---\nname: review\ndescription: Review a pull request read-only and return one verdict \
+     comment. Use when the task says to use the review skill.\n---\n\n",
+    include_str!("../../../../workflow/review.md")
+);
+const DIFF_REVIEWER: &str = include_str!("../../../../skills/agents/diff-reviewer.md");
+/// Where each agent reads them in the sandbox user's home, as their
+/// sources say: Claude Code its user skills and subagents (the ACP
+/// adapter loads the `user` setting source); opencode the `skills/` and
+/// `agents/` of its global configuration directory, the only ones left
+/// when the launcher turns off project configuration and external
+/// skills. A target repository's own `.claude/agents/` would win over
+/// Claude Code's user subagents of the same name: the reviewer's name is
+/// one a repository is unlikely to use, and the review it makes is the
+/// agent's own diligence, not the check after the run.
+const CLAUDE_SKILLS: &[(&str, &str)] = &[
+    (".claude/skills/implement/SKILL.md", IMPLEMENT_SKILL),
+    (".claude/skills/review/SKILL.md", REVIEW_SKILL),
+    (".claude/agents/diff-reviewer.md", DIFF_REVIEWER),
+];
+const OPENCODE_SKILLS: &[(&str, &str)] = &[
+    (
+        ".config/opencode/skills/implement/SKILL.md",
+        IMPLEMENT_SKILL,
+    ),
+    (".config/opencode/skills/review/SKILL.md", REVIEW_SKILL),
+    (".config/opencode/agents/diff-reviewer.md", DIFF_REVIEWER),
+];
 /// The largest file taken from a configuration repository.
 const MAX_SOURCE_BYTES: usize = 1 << 20;
 /// What a failing command may say.
@@ -756,6 +792,13 @@ fn source_request(agent: &config::Agent) -> Result<Option<(&str, Option<&str>, &
 /// What can be said of the `[agent]` table before anything is fetched or
 /// registered.
 pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
+    // Refused rather than ignored: a task that says "use the implement
+    // skill" to an agent without it would run with no procedure at all.
+    ensure!(
+        !agent.skills || matches!(kind, Kind::Claude | Kind::Opencode),
+        "agent.skills is supported only for claude and opencode, not {}",
+        kind.as_str()
+    );
     match (kind, source_request(agent)?) {
         (Kind::Vibe, None) => {
             ensure!(
@@ -862,6 +905,24 @@ pub fn generate(
         }
         Kind::Fake => Configuration::default(),
     })
+}
+
+/// The skills and subagents of KIND, installed when ON and removed when
+/// not, so that none an earlier run left is read. Vibe and the scripted
+/// agent have none ([`check`] refuses `skills` for them).
+pub fn skills(kind: Kind, on: bool) -> Vec<HomeFile> {
+    let files = match kind {
+        Kind::Claude => CLAUDE_SKILLS,
+        Kind::Opencode => OPENCODE_SKILLS,
+        Kind::Vibe | Kind::Fake => &[],
+    };
+    files
+        .iter()
+        .map(|(path, text)| HomeFile {
+            path,
+            content: on.then(|| (*text).to_owned()),
+        })
+        .collect()
 }
 
 /// The file that holds TOKEN, the run's read-only GitHub token, or that
@@ -1421,6 +1482,73 @@ provider = "llamacpp"
             .map(|i| format!("[[models]]\nname = \"m{i}\"\nprovider = \"mistral\"\n"))
             .collect();
         assert!(vibe(&endpoint(Mode::Plain), &token(), Some("m0"), Some(&most)).is_ok());
+    }
+
+    /// The `name` and `description` of the frontmatter TEXT starts with,
+    /// which both agents require, as a YAML parser reads them.
+    fn frontmatter(text: &str) -> (String, String) {
+        let yaml = text
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .unwrap()
+            .0;
+        let doc = &yaml_rust2::YamlLoader::load_from_str(yaml).unwrap()[0];
+        let field = |key: &str| doc[key].as_str().unwrap().to_owned();
+        (field("name"), field("description"))
+    }
+
+    /// Each agent gets the same skills, each where that agent reads it
+    /// and under the name it is called by; a run without them removes
+    /// what an earlier one left.
+    #[test]
+    fn skills_go_where_each_agent_reads_them() {
+        let want = [
+            "skills/implement/SKILL.md",
+            "skills/review/SKILL.md",
+            "agents/diff-reviewer.md",
+        ];
+        for (kind, dir) in [
+            (Kind::Claude, ".claude/"),
+            (Kind::Opencode, ".config/opencode/"),
+        ] {
+            let files = skills(kind, true);
+            let paths: Vec<_> = files.iter().map(|file| file.path).collect();
+            assert_eq!(paths, want.map(|path| format!("{dir}{path}")), "{kind:?}");
+            for file in &files {
+                let text = file.content.as_deref().unwrap();
+                let (name, description) = frontmatter(text);
+                // A skill is called by its directory's name, a subagent by
+                // its file's.
+                let path = Path::new(file.path);
+                let called = match path.file_name() {
+                    Some(skill) if skill == "SKILL.md" => path.parent().unwrap().file_name(),
+                    _ => path.file_stem(),
+                };
+                assert_eq!(called, Some(std::ffi::OsStr::new(&name)), "{}", file.path);
+                assert!(description.contains("Use "), "{}", file.path);
+            }
+            let removed: Vec<_> = paths
+                .iter()
+                .map(|path| HomeFile {
+                    path,
+                    content: None,
+                })
+                .collect();
+            assert_eq!(skills(kind, false), removed);
+        }
+        // The review skill is the review caller's standing task.
+        let standing = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow/review.md"),
+        )
+        .unwrap();
+        assert!(REVIEW_SKILL.ends_with(&standing));
+        // opencode makes it a subagent only by its mode; Claude Code
+        // ignores the key.
+        assert!(DIFF_REVIEWER.contains("\nmode: subagent\n"));
+        assert!(IMPLEMENT_SKILL.contains("`diff-reviewer` subagent"));
+        for kind in [Kind::Vibe, Kind::Fake] {
+            assert_eq!(skills(kind, true), []);
+        }
     }
 
     #[test]

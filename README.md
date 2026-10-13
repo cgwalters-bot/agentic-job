@@ -229,6 +229,8 @@ to five minutes on a hosted runner. Nobody but its authors has used it.
 - [docs/inference.md](docs/inference.md): the proxy, and what it needs.
 - [docs/events.md](docs/events.md): starting runs from events.
 - [docs/dispatch.md](docs/dispatch.md): fixed operator dispatch profiles and setup.
+- [docs/skills.md](docs/skills.md): the skills and subagents a run installs
+  for its agent.
 - [docs/related-projects.md](docs/related-projects.md): other projects
   in this space.
 - [docs/plan.md](docs/plan.md): what is left.

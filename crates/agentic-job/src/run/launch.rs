@@ -49,7 +49,7 @@ const XDG_BASE_DIRS: &[&str] = &[
 /// What keeps opencode to its global configuration: the target
 /// repository's `opencode.json` and `.opencode/` could add providers and
 /// plugins, and the model list is not fetched from elsewhere.
-const OPENCODE_SWITCHES: &[(&str, &str)] = &[
+pub const OPENCODE_SWITCHES: &[(&str, &str)] = &[
     ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
     ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
     // External skills have their own project/home discovery, independent

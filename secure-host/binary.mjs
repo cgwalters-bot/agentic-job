@@ -45,7 +45,8 @@ export const REPOSITORY = "cgwalters-forge/agentic-job";
 // it is not; CI's `release-pin` looks for the first of those. This file
 // decides what a release holds: a release published before that changed
 // lacks a file this one requires, and must not be taken for this source.
-export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "secure-host/binary.mjs"];
+// `skills` and `workflow/review.md` are the agents' skills, built in.
+export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.mjs"];
 
 // The scripted agent too: a run with `agent: fake` needs it.
 export const NAMES = ["agentic-job", "fake-agent"];

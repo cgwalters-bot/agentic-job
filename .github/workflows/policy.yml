@@ -111,6 +111,10 @@ on:
         description: The directory of it the configuration is in (empty for its root)
         type: string
         default: ""
+      agent-skills:
+        description: Install the binary's skills and subagents for claude or opencode, for a task that names one (docs/skills.md)
+        type: boolean
+        default: false
       runner:
         description: The runner of the policy, check and apply jobs, as JSON (a label or a list of labels). It needs rustup, apt and Node
         type: string
@@ -658,6 +662,8 @@ jobs:
           CONFIG_REPO: ${{ inputs.agent-config-repo != '' && format('https://github.com/{0}', inputs.agent-config-repo) || '' }}
           CONFIG_REF: ${{ inputs.agent-config-ref }}
           CONFIG_PATH: ${{ inputs.agent-config-path }}
+          # Off sets nothing, so the caller's file stands.
+          SKILLS: ${{ inputs.agent-skills && 'true' || '' }}
           URL: ${{ inputs.inference-url }}
           REGISTER: ${{ inputs.inference-url != '' && inputs.inference-register || '' }}
           AUDIENCE: ${{ inputs.inference-audience }}
@@ -677,6 +683,7 @@ jobs:
           "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} --repo "$REPO" \
             --string agent.name="$AGENT" --string agent.model="$MODEL" --string agent.config-repo="$CONFIG_REPO" \
             --string agent.config-ref="$CONFIG_REF" --string agent.config-path="$CONFIG_PATH" \
+            --boolean agent.skills="$SKILLS" \
             --string inference.url="$URL" --string inference.register="$REGISTER" \
             --string inference.audience="$AUDIENCE" --string inference.token-file="$TOKEN_FILE" \
             --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \

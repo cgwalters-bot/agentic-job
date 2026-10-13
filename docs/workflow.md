@@ -686,6 +686,9 @@ Vibe reads `config.toml` and takes only its models and `active_model`;
 with it, `model` is optional in a direct call and still wins when supplied. See
 [the harness](harness.md#agents) for what is taken and why.
 
+`agent-skills: true` installs the built-in [skills](skills.md) for
+`claude` or `opencode`; dispatch turns it on for `implement`.
+
 ### What a caller provides
 
 **A bounds file** in its repository (`allow`): which repositories and
@@ -1497,8 +1500,8 @@ uploads take only what `run` put under its own directory after the gate.
 
 **Where the binary comes from.**
 [`secure-host/binary.mjs`](../secure-host/binary.mjs) hashes the content,
-modes and names of `Cargo.lock`, `Cargo.toml`, `crates`, `egress` and
-itself (it decides what a release holds) at the caller's pinned commit.
+modes and names of `Cargo.lock`, `Cargo.toml`, `crates`, `egress`, the
+skills it installs (`skills`, `workflow/review.md`) and itself (it decides what a release holds) at the caller's pinned commit.
 It looks for `build-FULL_DIGEST`, not the latest release. The release
 contains a manifest with that source digest and the SHA-256 checksums of
 the binaries and the world-write policy object, plus a GitHub
