@@ -5,9 +5,13 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-// Release API's SHA-256, pinned in source, never fetched beside the executable.
-const url = 'https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar';
-const sha256 = '7beec0f04818732a62fa193731711a99aa4f11279499b2360a7d156c519ea78d';
+// Stable v1.7.4, not the v1.8.0 prerelease whose jar upstream re-uploads. The
+// v1.7.4 release notes publish SHA-1 bee4a54f3ee3d4afc347c3240ec2d9e93b075104;
+// this is the SHA-256 of the download matching it, pinned in source and never
+// fetched beside the executable. TLC 1.7.4 writes no SpecTE trace module unless
+// asked to (-generateSpecTE), so the checkout stays clean.
+const url = 'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar';
+const sha256 = '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88';
 const directory = dirname(fileURLToPath(import.meta.url));
 const results = mkdtempSync(join(tmpdir(), 'agentic-job-tlc-'));
 console.log(`Full TLC reports: ${results}`);
@@ -31,7 +35,7 @@ const cases = [
 for (const [config, invariant] of cases) {
   const run = spawnSync(process.env.JAVA_BIN || 'java', [
     '-XX:+UseParallelGC', '-Xmx512m', '-cp', jar, 'tlc2.TLC',
-    '-noGenerateSpecTE', '-workers', '1', '-seed', '1', '-fp', '0', '-config', join(directory, `${config}.cfg`),
+    '-workers', '1', '-seed', '1', '-fp', '0', '-config', join(directory, `${config}.cfg`),
     '-metadir', join(results, config), join(directory, 'Pipeline.tla'),
   ], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   const output = (run.stdout || '') + (run.stderr || '');
