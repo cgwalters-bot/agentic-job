@@ -63,7 +63,7 @@ test('scripted fix from a different caller layout reaches the target checkout an
       const shell = section.split('run: |\n')[1].split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
       writeFileSync(join(outputs, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head } }));
       const configResult = spawnSync('bash', ['-euo', 'pipefail', '-c', shell], { cwd: work, encoding: 'utf8',
-        env: { ...process.env, GITHUB_ENV: join(root, 'env'), OUTPUT_REPO: 'Owner/Target', REPO: 'Owner/Target', BASE: 'agent-run-7',
+        env: { ...process.env, GITHUB_ENV: join(root, 'env'), OUTPUT_REPO: 'Owner/Target', ITEM_REPO: 'Owner/Target', REPO: 'Owner/Target', BASE: 'agent-run-7',
           FORK: 'bot/target', BRANCH_PREFIX: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}',
           BASH_ENV: '',
           PUSH: '{"signed_commits":false,"fallback_as_pull_request":false,"if_no_changes":"error"}' } });
@@ -125,7 +125,7 @@ test('scripted fix from a different caller layout reaches the target checkout an
       writeFileSync(join(outputs, 'agent_output.json'), JSON.stringify({ items: [request], errors: [] }));
       const report = join(outputs, 'report.json');
       writeFileSync(report, JSON.stringify({ patch: { file: 'aw-agent-run-7.patch' } }));
-      Object.assign(process.env, { OUTPUT_REPO: 'Owner/Target', TREE: tree, TOKEN_IS_PAT: 'false', REPORT: report });
+      Object.assign(process.env, { OUTPUT_REPO: 'Owner/Target', ITEM_REPO: 'Owner/Target', TREE: tree, TOKEN_IS_PAT: 'false', REPORT: report });
       global.core.summary.addHeading = () => global.core.summary;
       global.core.summary.addList = () => global.core.summary;
       const guard = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split('\n      - ')[0]

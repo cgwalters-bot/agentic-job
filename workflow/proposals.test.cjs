@@ -203,7 +203,13 @@ for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token
   // A push names where apply applies it, for the binary to refuse any
   // repository but the run's: the calling one when `output-repo` is empty.
   ['apply', '', [...pushArgs, 'o/r'], push], ['', '', [...pushArgs, 'o/r', '--job-token'], push],
-  ['apply', '', [...pushArgs, 'x/y'], { ...push, OUTPUT_REPO: 'x/y' }]]) {
+  ['apply', '', [...pushArgs, 'x/y'], { ...push, OUTPUT_REPO: 'x/y' }],
+  // The binary holds an item's repository to the bounds; an event's item is the caller's.
+  ['apply', '64', ['--item-repo', 'o/tracker'], { ITEM_REPO: 'o/tracker' }],
+  ['apply', '', null, { ITEM_REPO: 'o/tracker', EVENT: 'true' }],
+  // A review's or a push's pull request is the target's.
+  ['apply', '', null, { ITEM_REPO: 'o/tracker', REVIEW_ITEM: '42' }],
+  ['apply', '', null, { ...push, ITEM_REPO: 'o/tracker' }]]) {
   test(`the policy command is told when apply holds only the job token: environment ${JSON.stringify(environment)}, issue ${JSON.stringify(issue)}, ${JSON.stringify(extra)}`, () => {
     const dir = mkdtempSync(join(homedir(), 'request-'));
     try {
@@ -221,7 +227,10 @@ for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token
       });
       // An issue is a number, or the run stops before the policy is written.
       assert.equal(result.status, expected ? 0 : 1, result.stderr);
-      if (!expected) return assert.match(result.stdout, /::error::issue is not a number/);
+      if (!expected) {
+        return assert.match(result.stdout, extra.EVENT ? /::error::item-repo is not for an event-triggered run/
+          : extra.ITEM_REPO ? /::error::item-repo is not for a review or a push/ : /::error::issue is not a number/);
+      }
       const compiled = JSON.parse(readFileSync(join(dir, 'policy.json'), 'utf8'));
       const args = compiled.args;
       assert.deepEqual(args.slice(args.indexOf('--max-outputs') + 2), expected);

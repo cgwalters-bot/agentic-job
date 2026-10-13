@@ -621,6 +621,7 @@ fn rules() -> PullRequest {
         protect_top_level_dot_folders: true,
         unprotected_dot_folders: Vec::new(),
         protected_files_policy: ProtectedFilesPolicy::Blocked,
+        owned_repo: false,
         draft: true,
         max_patch_size: 1024,
         max_patch_files: MAX_PATCH_FILES,

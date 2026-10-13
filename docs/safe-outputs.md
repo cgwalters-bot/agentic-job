@@ -305,7 +305,10 @@ inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`). Organization and
 caller bounds must both permit it. It applies to `create_pull_request` and
 `push_to_pull_request_branch`, including replacement series, only for the
 same listed repositories. A fix push still requires the open PR and owned
-fork/branch checks described above. Workflow changes are pushed only to
+fork/branch checks described above. A repository the bounds also name in
+[`owned_repos`](workflow.md#a-repository-the-applying-account-owns), whose
+branch is pushed to it and not to a fork, cannot have the `.github`
+exemption: policy refuses the bounds file. Workflow changes are pushed only to
 apply's fork, which has Actions turned off, and reach the repository as a
 fork pull request. Its `pull_request` CI gets no secrets and a read-only
 token, not the target repository's write credentials. Operators must configure

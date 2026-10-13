@@ -202,6 +202,11 @@ pub struct Args {
     /// unless it is `--repo`, where the pull request is
     #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
     pub output_repo: Option<String>,
+    /// The repository the run's item (its issue and status comment) is
+    /// in, where that is not the output repository; it must be within
+    /// `repos`, as `--repo` must
+    #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
+    pub item_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -232,6 +237,14 @@ pub struct Bounds {
     /// Files exempt from protection.
     #[serde(default)]
     pub unprotected_files: Unprotected,
+    /// Repositories the applying account owns, named exactly (no globs),
+    /// where apply pushes a new pull request's branch to the repository
+    /// itself: such an account has no fork of it to push to. Its CI then
+    /// runs the agent's commit as one of its own branches, with its
+    /// secrets and a write token, so only a repository whose workflows
+    /// hold nothing the agent is not to have belongs here.
+    #[serde(default)]
+    pub owned_repos: Vec<String>,
     /// Which events may start a run, and who may start one
     /// (`agentic-job event`). Absent, none may.
     #[serde(default)]
@@ -285,6 +298,10 @@ pub struct OutputLimit {
 
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl OutputLimit {
@@ -371,6 +388,8 @@ pub struct Request<'a> {
     /// Where apply applies the outputs; a push must name the run's own
     /// repository here.
     pub output_repo: Option<&'a str>,
+    /// Where the run's item is, when not in the output repository.
+    pub item_repo: Option<&'a str>,
 }
 
 /// What `policy.json` holds: the request, once it is within the bounds.
@@ -415,6 +434,12 @@ pub struct PullRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprotected_dot_folders: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
+    /// The repository is one of the bounds' `owned_repos`: apply pushes
+    /// the branch there when the account it applies as owns it, and to
+    /// that account's fork otherwise. Our setting; apply removes it
+    /// before gh-aw's handler reads the configuration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub owned_repo: bool,
     pub draft: bool,
     /// The largest patch, in KB.
     pub max_patch_size: u64,
@@ -569,6 +594,10 @@ impl Policy {
                 "top-level dot-folders are not protected"
             );
             ensure!(pr.max == MAX_PULL_REQUESTS, "more than one pull request");
+            ensure!(
+                !pr.owned_repo || pr.unprotected_dot_folders.is_empty(),
+                "a pull request pushed in its own repository with .github exempted"
+            );
         }
         if let Some(push) = &self.safe_outputs.push_to_pull_request_branch {
             validate_dot_folders(
@@ -694,6 +723,19 @@ impl Bounds {
                 "unprotected_files.repos requires exact repository names: {repo:?}"
             );
         }
+        for repo in &self.owned_repos {
+            ensure!(
+                REPO_RE.is_match(repo) && !dotted(repo),
+                "owned_repos requires exact repository names: {repo:?}"
+            );
+            // A workflow the agent wrote would run on its branch's `push`,
+            // in the repository itself and with its secrets: the `.github`
+            // exemption is only for a branch pushed to a fork.
+            ensure!(
+                self.dot_folders(repo).is_empty(),
+                "owned_repos and unprotected_files.dot_folders both name {repo:?}: a workflow file an agent wrote would run on its own branch there"
+            );
+        }
         validate_dot_folders(
             &self.unprotected_files.dot_folders,
             "unprotected_files.dot_folders",
@@ -780,6 +822,7 @@ impl Bounds {
             job_token,
             pull_request,
             output_repo,
+            item_repo,
         } = *request;
         let mut errors = Vec::new();
 
@@ -793,6 +836,19 @@ impl Bounds {
         // Checked against the repository only if that is a name at all.
         if repo_ok && let Some(problem) = self.clone_url_problem(clone_url, repo) {
             errors.push(problem);
+        }
+        // Its issue's text joins the task and its status comment is posted
+        // with the apply credential: a repository the bounds let runs work
+        // on, not any one a caller names.
+        if let Some(item_repo) = item_repo
+            && (!REPO_RE.is_match(item_repo)
+                || dotted(item_repo)
+                || !glob_matches(&self.repos, item_repo))
+        {
+            errors.push(format!(
+                "item repo {item_repo:?} is not within the bounds ({})",
+                self.repos.join(", ")
+            ));
         }
         // An analysis run has no change to propose.
         let no_change = kind == Kind::Analysis;
@@ -975,6 +1031,10 @@ impl Bounds {
                 protect_top_level_dot_folders: true,
                 unprotected_dot_folders: self.dot_folders(repo),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
+                owned_repo: self
+                    .owned_repos
+                    .iter()
+                    .any(|own| own.eq_ignore_ascii_case(repo)),
                 draft: true,
                 max_patch_size: self.max_patch_bytes / KB,
                 max_patch_files: self.max_patch_files,
@@ -1048,6 +1108,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         job_token: args.job_token,
         pull_request: args.pull_request.as_deref().zip(args.head.as_deref()),
         output_repo: args.output_repo.as_deref(),
+        item_repo: args.item_repo.as_deref(),
     };
     let compiled = bounds
         .compile(&request)
@@ -1117,6 +1178,7 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
         (Some(mut pr), Some(bound)) => {
             pr.unprotected_dot_folders
                 .retain(|name| bound.unprotected_dot_folders.contains(name));
+            pr.owned_repo &= bound.owned_repo;
             pr.max_patch_size = pr.max_patch_size.min(bound.max_patch_size);
             pr.max_patch_files = pr.max_patch_files.min(bound.max_patch_files);
             for name in bound.protected_files {
@@ -1207,6 +1269,7 @@ files = ["README.md", "AGENTS.md"]
             job_token: false,
             pull_request: None,
             output_repo: None,
+            item_repo: None,
         }
     }
 
@@ -1293,6 +1356,84 @@ files = ["README.md", "AGENTS.md"]
         let mut bounds = bounds();
         bounds.unprotected_files.repos = vec!["bootc-dev/*".into()];
         assert!(bounds.validate().is_err());
+    }
+
+    #[test]
+    fn owned_repos_are_exact_and_intersect() {
+        assert!(
+            !policy()
+                .safe_outputs
+                .create_pull_request
+                .unwrap()
+                .owned_repo
+        );
+        for (repos, owned) in [
+            (vec![REPO], true),
+            (vec!["BOOTC-DEV/BOOTC"], true),
+            (vec!["bootc-dev/other"], false),
+        ] {
+            let mut bounds = bounds();
+            bounds.owned_repos = repos.into_iter().map(str::to_owned).collect();
+            bounds.validate().unwrap();
+            let policy = bounds.compile(&request()).unwrap();
+            policy.validate().unwrap();
+            assert_eq!(
+                policy
+                    .safe_outputs
+                    .create_pull_request
+                    .as_ref()
+                    .unwrap()
+                    .owned_repo,
+                owned
+            );
+            let loaded: Policy =
+                serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+            assert_eq!(loaded, policy);
+            // Both bounds files have to name it.
+            for (left, right, survives) in [
+                (policy.clone(), self::policy(), false),
+                (self::policy(), policy.clone(), false),
+                (policy.clone(), policy, owned),
+            ] {
+                let intersected = intersect(left, right).unwrap();
+                assert_eq!(
+                    intersected
+                        .safe_outputs
+                        .create_pull_request
+                        .unwrap()
+                        .owned_repo,
+                    survives
+                );
+            }
+        }
+        let mut bounds = bounds();
+        bounds.owned_repos = vec![REPO.into()];
+        bounds.unprotected_files.repos = vec!["Bootc-Dev/Bootc".into()];
+        bounds.validate().unwrap();
+        bounds.unprotected_files.dot_folders = vec![".github".into()];
+        assert!(
+            bounds
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("owned_repos and unprotected_files.dot_folders both name")
+        );
+        let mut policy = self::policy();
+        let pr = policy.safe_outputs.create_pull_request.as_mut().unwrap();
+        pr.owned_repo = true;
+        pr.unprotected_dot_folders = vec![".github".into()];
+        assert_eq!(
+            policy.validate().unwrap_err().to_string(),
+            "a pull request pushed in its own repository with .github exempted"
+        );
+        for name in ["bootc-dev/*", "*", "bootc-dev", "bootc-dev/..", ""] {
+            let mut bounds = self::bounds();
+            bounds.owned_repos = vec![name.into()];
+            assert_eq!(
+                bounds.validate().unwrap_err().to_string(),
+                format!("owned_repos requires exact repository names: {name:?}")
+            );
+        }
     }
 
     #[test]
@@ -1393,6 +1534,7 @@ files = ["README.md", "AGENTS.md"]
                 job_token: false,
                 pull_request: None,
                 output_repo: None,
+                item_repo: None,
             });
             assert_eq!(result.is_ok(), allowed, "{base}, {outputs}: {result:?}");
         }
@@ -1808,6 +1950,38 @@ files = ["README.md", "AGENTS.md"]
                 },
                 Some("does not name"),
             ),
+            (
+                "an item in another repository the bounds allow",
+                Request {
+                    item_repo: Some("cgwalters-forge/tracker"),
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "an item in a repository the bounds do not allow",
+                Request {
+                    item_repo: Some("evil/tracker"),
+                    ..ok
+                },
+                Some("item repo \"evil/tracker\" is not within"),
+            ),
+            (
+                "an item in a repository of dots",
+                Request {
+                    item_repo: Some("cgwalters-forge/.."),
+                    ..ok
+                },
+                Some("item repo "),
+            ),
+            (
+                "an item in a malformed repository",
+                Request {
+                    item_repo: Some("cgwalters-forge/tracker/x"),
+                    ..ok
+                },
+                Some("item repo "),
+            ),
         ];
         let bounds = bounds();
         for (name, request, want) in cases {
@@ -1946,6 +2120,7 @@ files = ["README.md", "AGENTS.md"]
             job_token: false,
             pull_request: None,
             output_repo: None,
+            item_repo: None,
         };
         let errors = bounds().compile(&request).unwrap_err();
         assert_eq!(errors.len(), 5, "{errors:?}");
