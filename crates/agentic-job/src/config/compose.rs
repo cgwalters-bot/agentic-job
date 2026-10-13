@@ -569,10 +569,12 @@ mod tests {
                 "sandbox.lock-runner= false ",
                 "egress.proxy=false",
                 "sandbox.allow-existing-user=",
+                "sandbox.deny-runner-metadata=",
             ],
             &["sandbox.stop-services=docker.socket docker.service"],
         ));
         assert!(!config.sandbox.lock_runner);
+        assert!(!config.sandbox.deny_runner_metadata);
         assert!(!config.egress.proxy);
         assert!(!config.sandbox.allow_existing_user);
         assert_eq!(
@@ -580,6 +582,8 @@ mod tests {
             ["docker.socket", "docker.service"]
         );
         assert_eq!(config.agent.name, "");
+        let denied = composed(&host_args(&["sandbox.deny-runner-metadata=true"], &[]));
+        assert!(denied.sandbox.lock_runner && denied.sandbox.deny_runner_metadata);
         // The same file, as a run's: `run` could not use it.
         let run = Args {
             host: false,
@@ -593,6 +597,14 @@ mod tests {
                 "sandbox.lock-runner: \"yes\" is neither true nor false",
             ),
             (vec!["sandbox.user=true"], vec![], "invalid type: boolean"),
+            (
+                vec![
+                    "sandbox.lock-runner=false",
+                    "sandbox.deny-runner-metadata=true",
+                ],
+                vec![],
+                "sandbox.deny-runner-metadata needs sandbox.lock-runner",
+            ),
             (
                 vec![],
                 vec!["sandbox.stop-services=docker"],

@@ -72,7 +72,8 @@ impl Command {
                         &args.uids,
                         &direct,
                         args.proxy_uid,
-                        &args.resolver
+                        &args.resolver,
+                        &[]
                     )
                 );
                 Ok(Exit::Success)

@@ -332,7 +332,7 @@ not a guarantee that every network path is filtered.
 **The runner's user is still the runner's user.** The lock takes its
 root, not what it owns. A step that runs as it reads the checkout, the
 caches, the job's token and every secret a step is given, reaches the
-network freely, and can change the files of the actions the job has
+network freely (all but the metadata service with `deny-runner-metadata`), and can change the files of the actions the job has
 downloaded, the ones whose post steps run later. Code the job does not
 trust therefore runs as the sandbox user; the lock is what keeps a
 mistake there, or in any step, from becoming root.
@@ -350,6 +350,110 @@ would add ([compiler.md](compiler.md)), a fixed shape of
 job in which only the setup step has root. The reusable workflow has
 that shape by construction.
 
+## One trust level for the rest of the job
+
+The aim of [agentic-job#503](https://github.com/cgwalters-forge/agentic-job/issues/503)
+is that a job does not need a second user to be safe from its own later
+steps. Every step after this one, `run:` or `uses:`, a third-party action
+and its post step included, runs as the runner's user. That user is the
+unprivileged thing. This is the first slice of that design, and it is opt-in:
+
+```yaml
+- uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+  with:
+    deny-runner-metadata: true
+```
+
+After it, no later step has root:
+
+- `lock` (the default) takes sudo, polkit and the daemons of root-equivalent
+  groups, `docker` first of all, and keeps the setuid inventory as before.
+- The world-write policy refuses writes to another user's world-writable files on
+  the root filesystem when they happen. That includes files the walk leaves
+  alone: it skips the shared temporary directories, so a root-owned mode-0666
+  file in `/var/tmp` stays writable without the policy.
+- `deny-runner-metadata` refuses the cloud metadata service to the runner's
+  user and its subordinate uids: at `169.254.169.254` through the same
+  nftables rule that refuses the sandbox user, and at EC2's IPv6 address
+  `fd00:ec2::254` as well. The sandbox user's uids, which the runner may
+  still enter through `sandbox exec`, are refused the IPv6 address too, so
+  that is no way around it. The threat it stops is a step asking the metadata
+  service for the instance's identity, or, on a self-hosted cloud runner,
+  for the instance role's credentials, which the job never granted.
+  Without this rule the runner's user reaches the service on a hosted
+  `ubuntu-26.04` runner after the lock: `metadata-control` passes in
+  [main's secure-host job](https://github.com/cgwalters-forge/agentic-job/actions/runs/38334947347/job/115092813921).
+
+The kernel has no way to change another process's credentials. So the
+runner's processes, and every step they start, keep the supplementary
+groups they started with: `docker` is still in a step's `id -G` after the
+lock. The lock does not rely on group membership. It stops the daemon
+behind each such group and takes the files of `disk` and `shadow` back
+for root.
+
+**Proof.** CI's `confined` job runs a probe as the runner's user: once before
+the action (the control, in which sudo, `docker info`, writing that root-owned
+`/var/tmp` file and the metadata service all work), and after it from a
+`run:` step and from a JavaScript action's main step (`actions/github-script`
+imports the checkout's [probe](../.github/actions/confine-probe/main.mjs)).
+Each route must fail. A file of the runner's own, also mode 0666,
+must still take a write. Each probe prints its record in its log, and the job
+uploads the records as an artifact, whether or not a probe failed. A post
+step is not yet proven by CI; that proof is tracked in
+[agentic-job#513](https://github.com/cgwalters-forge/agentic-job/issues/513). The check
+that the action runs adds `runner-metadata` and `runner-metadata-v6`
+([sandbox-check.md](sandbox-check.md#the-network-probes)). Only hosted Ubuntu
+26.04 runs this proof; RHEL 10 is unverified. A hosted runner serves no
+IPv6 metadata address, so the IPv6 refusal has a unit test of its rule and a
+probe without a control, not a hosted proof.
+
+**What a confined step can still do with the job's tokens.** The lock covers
+root and the metadata service. It does not separate one step from the job's
+tokens, and this is how far they reach (runner 2.337 source, read for
+[agentic-job#501](https://github.com/cgwalters-forge/agentic-job/issues/501)):
+
+- The runner gives every JavaScript and container action
+  `ACTIONS_RUNTIME_TOKEN`, with the artifact, results and cache service URLs.
+  The probe's record shows the token present in the action and absent in
+  the `run:` step.
+- A `run:` step gets `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, the same value, when
+  the job has `id-token: write`.
+- Any step can steer later ones: `GITHUB_ENV` refuses only `NODE_OPTIONS`, so
+  `LD_PRELOAD` or `BASH_ENV` set by one step reach every later action. The
+  workspace, the home directory and the downloaded actions under
+  `_work/_actions`, whose post steps run later, are the runner user's files.
+
+So any confined step can do what those tokens allow on endpoints it can still
+reach. Its network is open apart from the metadata service:
+
+- upload or replace this run's artifacts;
+- write cache entries in the run's scope. A run started by `push`,
+  `workflow_dispatch` or `schedule` on the default branch writes the scope
+  that later branches and pull requests restore from. A `pull_request` run
+  writes only its merge ref;
+- with `id-token: write`, mint identity tokens for any audience.
+
+What follows for job design: a job that runs code it does not trust should
+hold no `id-token` permission, and should treat its own artifacts and cache
+writes as that code's output. The reusable workflow's agent job registers
+with the inference broker by identity token today, so that registration has
+to move first. It could be done in a preceding job, or by a broker call that
+secure-host makes before it confines. Until then the agent's untrusted code
+still runs as the sandbox user.
+
+**What is left**, each its own slice of #503:
+
+1. Host-wide egress, with the runner's own endpoint list. Today the runner's
+   user reaches every host but the metadata service. #501 found two
+   difficulties. The runner writes logs, artifacts and caches to
+   `*.blob.core.windows.net`, and allowing that suffix allows any storage
+   account, an attacker's included. The Worker also reads its proxy
+   settings only when it starts.
+2. The agent's `run` built on this, with `sandbox exec` and the sandbox
+   user optional.
+3. An agent job without tokens: no `id-token`, and inference registration
+   moved out as above.
+
 ## What a job has to know
 
 **Order: everything that needs root comes before the step.** Package
@@ -366,8 +470,8 @@ with the container daemon. After it:
 | `docker`, Docker container actions, `services:` and `container:` on the job | gone: the daemon is stopped, since its group is root by another name. A job that needs them is not a job for this step; rootless podman, installed before it, is the container tool the sandbox user has |
 | A post step that calls `sudo` | fails or warns, as that action decides: a network join's logout has to only warn, and leave a node that expires by itself |
 
-CI exercises the rows it can: the checkout, a Rust cache saved by its
-post step, an artifact upload, `sudo` and `docker` refused. The rest
+CI exercises a `run:` step and a JavaScript action's main step after
+secure-host, an artifact upload, and `sudo` and `docker` refused. The rest
 follows from who owns which files and has not been run here.
 
 ### Containers
@@ -496,6 +600,7 @@ file says, and the file's own default where it says nothing.
 | `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
 | `binary` | An `agentic-job` already on the machine, in place of fetching or building one; the world-write policy's `world_write.bpf.o` must be beside it |
 | `build` | `true` builds the binary even where a release fits |
+| `deny-runner-metadata` | `true` refuses the cloud metadata service to the runner's user and its subordinate uids as well, so to every later step and action. Needs `lock`. Default `false` ([one trust level](#one-trust-level-for-the-rest-of-the-job)) |
 
 The second user is always created: the network rules and most of the
 probes are about it, and one that is never used costs a line in

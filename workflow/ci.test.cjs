@@ -173,6 +173,22 @@ test('E2E callers, concurrency and apt safeguards remain wired', () => {
   assert.match(binary, /run\("sudo", \["node", join\(HERE, "apt.mjs"\)\]\);\s+run\("sudo", \["apt-get"/);
 });
 
+test('confined proves the checkout from run and JavaScript action main steps only', () => {
+  const job = ci.split('\n  confined:\n')[1].split('\n  required-checks:\n')[0];
+  assert.doesNotMatch(job, /uses: (?:cgwalters-forge\/agentic-job|\.\/)|zizmor: ignore/);
+  assert.match(job, /binary\.mjs get --build --out "\$RUNNER_TEMP\/secure-host\/bin"/);
+  assert.match(job, /world-write\.mjs "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o"/);
+  assert.match(job, /--boolean sandbox\.deny-runner-metadata=true/);
+  assert.match(job, /agentic-job sandbox check --record/);
+  assert.match(job, /probe\.mjs confined run-step/);
+  assert.ok(job.includes('/confine-probe/main.mjs'));
+  assert.doesNotMatch(job, /post\.mjs|post entry point/);
+  assert.equal((job.match(/uses: actions\/github-script@/g) || []).length, 1);
+  assert.ok(job.indexOf('/confine-probe/main.mjs') < job.indexOf('uses: actions/upload-artifact@'));
+  assert.match(job, /name: The JavaScript action main step is confined/);
+  assert.match(job, /- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions\/upload-artifact@/);
+});
+
 test('the workflow classifies real Git paths without executing PR scripts', () => {
   const root = fs.mkdtempSync(path.join(os.homedir(), 'ci-test-'));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();

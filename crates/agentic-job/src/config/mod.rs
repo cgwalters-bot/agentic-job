@@ -68,6 +68,13 @@ pub struct Sandbox {
     /// writable only in its home and the temporary directories. Off by
     /// default; the world-write policy applies either way.
     pub filesystem_view: bool,
+    /// Whether the network rules also refuse the runner's user (and its
+    /// subordinate uids) the cloud metadata service, as they always
+    /// refuse the sandbox user: a step of the job, a third-party action
+    /// among them, then cannot ask it for the instance's identity or a
+    /// cloud role's credentials. Off by default; needs [`Self::lock_runner`],
+    /// since with sudo the runner's user could remove the rule.
+    pub deny_runner_metadata: bool,
     /// More directories closed to every user but their owner, besides
     /// the runner user's home and [`Sandbox::ALWAYS_PRIVATE_DIRS`]. One
     /// that does not exist is skipped.
@@ -140,6 +147,10 @@ impl Sandbox {
                 "sandbox.runner-user: {runner:?} must be a user other than the sandbox user"
             );
         }
+        ensure!(
+            self.lock_runner || !self.deny_runner_metadata,
+            "sandbox.deny-runner-metadata needs sandbox.lock-runner: a runner's user with sudo could remove the rule"
+        );
         for group in &self.groups {
             ensure!(
                 name_ok(group),
@@ -193,6 +204,7 @@ impl Default for Sandbox {
             runner_user: None,
             lock_runner: true,
             filesystem_view: false,
+            deny_runner_metadata: false,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
             env: BTreeMap::new(),
@@ -475,6 +487,7 @@ mod tests {
             [sandbox]
             groups = ["kvm", "render"]
             runner-user = "runner"
+            deny-runner-metadata = true
             private-dirs = ["/opt/hca"]
             stop-services = ["docker.socket", "docker.service"]
             env = { PATH = "/home/agent/.cargo/bin:/usr/bin" }
@@ -495,6 +508,7 @@ mod tests {
             "[sandbox]\nuser = \"a b\"",
             "[sandbox]\nuser = \"x) ALL=(ALL) NOPASSWD: ALL #\"",
             "[sandbox]\nuser = \"agent\"\nrunner-user = \"agent\"",
+            "[sandbox]\nlock-runner = false\ndeny-runner-metadata = true",
             "[sandbox]\ngroups = [\"docker\"]",
             "[sandbox]\ngroups = [\"wheel\"]",
             "[sandbox]\nprivate-dirs = [\"relative\"]",

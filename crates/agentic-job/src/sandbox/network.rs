@@ -10,6 +10,13 @@
 //! opens connections only to DNS and to public addresses, so the proxy
 //! cannot be used to reach what the sandbox user may not.
 //!
+//! With `sandbox.deny-runner-metadata`, the runner's user and its
+//! subordinate uids are refused the metadata service too, at its IPv4
+//! and its IPv6 address, and only that:
+//! every step of the job then shares that one refusal. The sandbox's
+//! uids are then refused the IPv6 address as well, so that the runner,
+//! which may still enter the sandbox user, has no way around it.
+//!
 //! The tailnet rules are defence in depth under the tailnet's own access
 //! rules for the runner, which are the real control there.
 
@@ -30,6 +37,10 @@ pub const TABLE: &str = "runner_sandbox";
 pub const RULES_FILE: &str = "/etc/agentic-job/rules.nft";
 
 const METADATA_ADDRESS: &str = "169.254.169.254";
+
+/// The metadata service's IPv6 address, where a cloud serves one (EC2's
+/// Nitro instances, when enabled).
+const METADATA_V6_ADDRESS: &str = "fd00:ec2::254";
 
 /// Tailscale's address ranges and its interface. The filter matches
 /// both: the interface because with accepted subnet routes other
@@ -193,17 +204,40 @@ pub fn direct(egress: &Egress) -> Result<Vec<Direct>> {
 /// subordinate ranges as `START-END`). Rejected rather than dropped, so
 /// a blocked connection fails at once.
 pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> String {
-    rules_with_resolvers(uids, direct, proxy_uid, &[])
+    rules_with_resolvers(uids, direct, proxy_uid, &[], &[])
 }
 
 /// DNS exceptions apply only to these resolver addresses. All other DNS
 /// destinations are rejected, including otherwise public addresses.
+///
+/// `runner_uids` (`sandbox.deny-runner-metadata`: the runner's user and
+/// its subordinate ranges) are refused the metadata service and nothing
+/// else; none leaves the ruleset as it was. With them the sandbox's uids
+/// are refused its IPv6 address too, which the runner could otherwise
+/// reach through `sandbox exec` when there is no egress proxy.
 pub fn rules_with_resolvers(
     uids: &[String],
     direct: &[Direct],
     proxy_uid: Option<u32>,
     resolvers: &[IpAddr],
+    runner_uids: &[String],
 ) -> String {
+    let (runner_set, runner_rules) = if runner_uids.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!(
+                "\n  set runner_uids {{ type uid; flags interval; elements = {{ {} }} }}",
+                runner_uids.join(", ")
+            ),
+            format!(
+                "
+    meta skuid @sandbox_uids ip6 daddr {METADATA_V6_ADDRESS} counter reject
+    meta skuid @runner_uids ip daddr {METADATA_ADDRESS} counter reject
+    meta skuid @runner_uids ip6 daddr {METADATA_V6_ADDRESS} counter reject"
+            ),
+        )
+    };
     let allowed: Vec<String> = direct.iter().map(Direct::element).collect();
     let (tailnet_set, tailnet_rules) = if allowed.is_empty() {
         (String::new(), String::new())
@@ -248,10 +282,10 @@ pub fn rules_with_resolvers(
         "table inet {TABLE}
 delete table inet {TABLE}
 table inet {TABLE} {{
-  set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{tailnet_set}
+  set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{runner_set}{tailnet_set}
   chain output {{
     type filter hook output priority 0; policy accept;
-    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{tailnet_rules}{egress_rules}
+    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{runner_rules}{tailnet_rules}{egress_rules}
   }}
 }}
 ",
@@ -398,6 +432,89 @@ table inet runner_sandbox {
         assert_eq!(rules(&["1002".to_owned()], &[], None), want);
     }
 
+    /// The runner's uids get the metadata refusal and nothing more: the
+    /// rest of the ruleset is the sandbox user's alone, but for its IPv6
+    /// metadata refusal, which the runner could reach through `sandbox
+    /// exec` without it.
+    #[test]
+    fn ruleset_refusing_the_runner_the_metadata_service() {
+        let runner = ["1001".to_owned(), "100000-165535".to_owned()];
+        let want = r#"table inet runner_sandbox
+delete table inet runner_sandbox
+table inet runner_sandbox {
+  set sandbox_uids { type uid; flags interval; elements = { 1002 } }
+  set runner_uids { type uid; flags interval; elements = { 1001, 100000-165535 } }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject
+    meta skuid @runner_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @runner_uids ip6 daddr fd00:ec2::254 counter reject
+  }
+}
+"#;
+        assert_eq!(
+            rules_with_resolvers(&["1002".to_owned()], &[], None, &[], &runner),
+            want
+        );
+        let proxied = rules_with_resolvers(&["1002".to_owned()], &[], Some(993), &[], &runner);
+        assert_eq!(proxied.matches("@runner_uids").count(), 2);
+        assert_eq!(
+            proxied.replace(
+                "\n  set runner_uids { type uid; flags interval; elements = { 1001, 100000-165535 } }",
+                ""
+            )
+            .replace(
+                "\n    meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject\n    meta skuid @runner_uids ip daddr 169.254.169.254 counter reject\n    meta skuid @runner_uids ip6 daddr fd00:ec2::254 counter reject",
+                ""
+            ),
+            rules(&["1002".to_owned()], &[], Some(993))
+        );
+    }
+
+    /// With the runner refused, no uid set the ruleset names keeps a path
+    /// to either metadata address in either family, with or without the
+    /// proxy and direct endpoints: each set's refusal comes before its
+    /// first accept. The sandbox's uids matter without the proxy, since
+    /// the runner may run anything as the sandbox user.
+    #[test]
+    fn no_uid_set_reaches_the_metadata_service_when_the_runner_is_refused() {
+        let sandbox = ["1002".to_owned(), "165536-231071".to_owned()];
+        let runner = ["1001".to_owned(), "100000-165535".to_owned()];
+        let direct = [direct_of("http://100.101.102.103:18080")];
+        for proxy in [None, Some(993)] {
+            for direct in [&direct[..], &[]] {
+                let ruleset = rules_with_resolvers(&sandbox, direct, proxy, &[], &runner);
+                for set in ["@sandbox_uids", "@runner_uids"] {
+                    let accept = ruleset
+                        .lines()
+                        .position(|line| line.contains(set) && line.ends_with("accept"))
+                        .unwrap_or(usize::MAX);
+                    for (family, address) in
+                        [("ip", METADATA_ADDRESS), ("ip6", METADATA_V6_ADDRESS)]
+                    {
+                        let rule =
+                            format!("    meta skuid {set} {family} daddr {address} counter reject");
+                        let at = ruleset.lines().position(|line| line == rule);
+                        assert!(
+                            at.is_some_and(|at| at < accept),
+                            "{set} {family} with {proxy:?}, {} direct:\n{ruleset}",
+                            direct.len()
+                        );
+                    }
+                }
+                if let Some(proxy) = proxy {
+                    assert!(ruleset.contains(&format!(
+                        "meta skuid {proxy} ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,"
+                    )));
+                    assert!(ruleset.contains(&format!(
+                        "meta skuid {proxy} ip6 daddr {{ ::1/128, ::ffff:0:0/96, fc00::/7,"
+                    )));
+                }
+            }
+        }
+    }
+
     #[test]
     fn resolvers_on_the_tailnet() {
         let conf = "# made by tailscale\nnameserver 100.100.100.100\nnameserver fd7a:115c:a1e0::53\nnameserver 168.63.129.16\nnameserver 127.0.0.53\nsearch example.ts.net\n";
@@ -436,7 +553,7 @@ table inet runner_sandbox {
     #[test]
     fn dns_exceptions_are_scoped_and_below_tailnet_denial() {
         let addresses = resolvers("nameserver 10.0.0.2\nnameserver 2001:db8::53\n").unwrap();
-        let rules = rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses);
+        let rules = rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses, &[]);
         let tailnet = rules
             .find("ip6 daddr fd7a:115c:a1e0::/48 counter reject")
             .unwrap();
@@ -450,7 +567,8 @@ table inet runner_sandbox {
         }
         assert!(!rules.contains("th dport 53 accept\n    meta skuid 993 ip daddr {"));
         assert!(
-            !rules_with_resolvers(&["1002".into()], &[], None, &addresses).contains("dport 53")
+            !rules_with_resolvers(&["1002".into()], &[], None, &addresses, &[])
+                .contains("dport 53")
         );
     }
 

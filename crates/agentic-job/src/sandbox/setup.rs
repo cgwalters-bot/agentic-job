@@ -359,14 +359,19 @@ fn setup(args: &Args) -> Result<Exit> {
     if config.sandbox.filesystem_view {
         timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
     }
-    let subuids = timed_setup("environment-and-private-dirs", || {
-        let subuids = subuid_ranges(
-            &sandbox,
-            &fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?,
-        )?;
+    let (subuids, runner_uids) = timed_setup("environment-and-private-dirs", || {
+        let text = fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?;
+        let subuids = subuid_ranges(&sandbox, &text)?;
+        let runner_uids: Vec<String> = if config.sandbox.deny_runner_metadata {
+            std::iter::once(runner.uid.to_string())
+                .chain(subordinate_ranges(&runner, &text))
+                .collect()
+        } else {
+            Vec::new()
+        };
         drop_image_environment()?;
         close_private_dirs(&config, &runner)?;
-        Ok(subuids)
+        Ok((subuids, runner_uids))
     })?;
     timed_setup("stop-services", || {
         stop_services(&config.sandbox.stop_services)
@@ -411,9 +416,20 @@ fn setup(args: &Args) -> Result<Exit> {
             .chain(subuids.iter().cloned())
             .collect();
         network::apply(&network::rules_with_resolvers(
-            &uids, &direct, proxy_uid, &resolvers,
+            &uids,
+            &direct,
+            proxy_uid,
+            &resolvers,
+            &runner_uids,
         ))
     })?;
+    if !runner_uids.is_empty() {
+        println!(
+            "{} (uids {}) can't reach the metadata service either: sandbox.deny-runner-metadata",
+            runner.name,
+            runner_uids.join(", ")
+        );
+    }
     match proxy_uid {
         Some(_) => println!(
             "{} reaches the network only through the egress proxy, {}",
@@ -650,9 +666,21 @@ fn create_user(config: &Config, runner: &User, existing: Option<User>) -> Result
 /// The subordinate uid ranges of `user`, each as `START-END`. Containers
 /// the sandbox user starts run as these, so the network rules name them.
 pub fn subuid_ranges(user: &User, subuid: &str) -> Result<Vec<String>> {
+    let ranges = subordinate_ranges(user, subuid);
+    ensure!(
+        !ranges.is_empty(),
+        "{} has no subordinate uids in {SUBUID}, which rootless podman needs",
+        user.name
+    );
+    Ok(ranges)
+}
+
+/// [`subuid_ranges`], none being an answer: the runner's user may have
+/// no rootless containers to cover.
+fn subordinate_ranges(user: &User, subuid: &str) -> Vec<String> {
     // subuid(5) names the owner or gives its uid.
     let uid = user.uid.to_string();
-    let ranges: Vec<String> = subuid
+    subuid
         .lines()
         .filter_map(|line| {
             let mut fields = line.split(':');
@@ -664,13 +692,7 @@ pub fn subuid_ranges(user: &User, subuid: &str) -> Result<Vec<String>> {
             ((name == user.name || name == uid) && count > 0)
                 .then(|| format!("{start}-{}", start + count - 1))
         })
-        .collect();
-    ensure!(
-        !ranges.is_empty(),
-        "{} has no subordinate uids in {SUBUID}, which rootless podman needs",
-        user.name
-    );
-    Ok(ranges)
+        .collect()
 }
 
 /// The sudoers rules: the sandbox user has nothing; the runner's user,
@@ -1370,6 +1392,8 @@ mod tests {
                 subuid_ranges(&agent(user), text).is_err(),
                 "{user} in {text:?}"
             );
+            // The runner's user may have none; that is no refusal.
+            assert!(subordinate_ranges(&agent(user), text).is_empty());
         }
     }
 

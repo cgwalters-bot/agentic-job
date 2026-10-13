@@ -42,6 +42,12 @@ inputs:
       but the threat feed, writes by rule). `false` leaves its network open but for the cloud
       metadata service and the tailnet. Empty for what the configuration says, `true` by default
     default: ""
+  deny-runner-metadata:
+    description: >-
+      Whether the runner's user, and so every later step and action of the job, is refused the cloud
+      metadata service as the sandbox user is: no instance identity or cloud role credentials for
+      any step. Needs `lock`. Empty for what the configuration says, `false` by default
+    default: ""
   egress-policy:
     description: The egress proxy's write rules, a file, in place of the ones that come with the binary
     default: ""
@@ -132,6 +138,7 @@ runs:
         CONFIG: ${{ inputs.config }}
         LOCK: ${{ inputs.lock }}
         EGRESS: ${{ inputs.egress }}
+        DENY_RUNNER_METADATA: ${{ inputs.deny-runner-metadata }}
         EGRESS_POLICY: ${{ inputs.egress-policy }}
         STOP_SERVICES: ${{ inputs.stop-services }}
         SANDBOX_USER: ${{ inputs.sandbox-user }}
@@ -140,7 +147,8 @@ runs:
       run: |
         mkdir -p "$RUNNER_TEMP/secure-host"
         agentic-job config --host --from "${CONFIG:-$ACTION/hosted.toml}" \
-          --boolean sandbox.lock-runner="$LOCK" --boolean egress.proxy="$EGRESS" --string egress.policy="$EGRESS_POLICY" \
+          --boolean sandbox.lock-runner="$LOCK" --boolean sandbox.deny-runner-metadata="$DENY_RUNNER_METADATA" \
+          --boolean egress.proxy="$EGRESS" --string egress.policy="$EGRESS_POLICY" \
           --list sandbox.stop-services="$STOP_SERVICES" --string sandbox.user="$SANDBOX_USER" \
           --string sandbox.runner-user="$RUNNER_USER" --string setup.script="$SCRIPT" \
           > "$RUNNER_TEMP/secure-host/config.toml"

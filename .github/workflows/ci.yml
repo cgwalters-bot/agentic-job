@@ -1033,9 +1033,69 @@ jobs:
       - name: Denials and sticky, owner, tmpfs and overlay controls after loader exits
         run: sudo node secure-host/world-write-host.mjs after
 
+  # After secure-host, a `run:` step and a JavaScript action's main step
+  # try sudo, docker, a root-owned world-writable file and the cloud
+  # metadata service, and each must fail. Read-only token, no id-token,
+  # no secrets; probes run as the runner's user, root only before setup.
+  # github-script gives the checkout's probe the action's runtime token.
+  # A post step is not yet proven by CI:
+  # https://github.com/cgwalters-forge/agentic-job/issues/513
+  confined:
+    name: Confined run step and JavaScript action main step
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: node --test .github/actions/confine-probe/probe.test.mjs
+      - run: sudo node secure-host/apt.mjs
+      - name: Install compiler and bpftool
+        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common linux-tools-$(uname -r)
+        timeout-minutes: 5
+      # Root's and world-writable, where setup's walk does not look (a
+      # shared temporary directory): the access-time policy is all that
+      # refuses a write to it after the action.
+      - name: Leave a world-writable root file
+        run: sudo install -m 0666 -o root -g root /dev/null /var/tmp/agentic-job-confine-root-file
+      - name: Before the lock each route works (control)
+        run: node .github/actions/confine-probe/probe.mjs control before
+      # Execute the checked-out action's entry points without a new local
+      # action exemption. Build both artifacts from this checkout, never a release.
+      - run: node secure-host/platform.mjs
+      - run: node secure-host/binary.mjs get --build --out "$RUNNER_TEMP/secure-host/bin"
+      - name: Install the checkout's binary
+        run: sudo install -m 0755 "$RUNNER_TEMP/secure-host/bin/agentic-job" /usr/local/bin/agentic-job
+      - name: Write the confinement configuration
+        run: |
+          agentic-job config --host --from secure-host/hosted.toml \
+            --boolean sandbox.deny-runner-metadata=true > "$RUNNER_TEMP/secure-host/config.toml"
+      - name: Load the checkout's world-write object
+        run: sudo node secure-host/world-write.mjs "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
+      - name: Secure the host
+        run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
+      - run: agentic-job sandbox exec -- id -un
+      - run: agentic-job sandbox check --record
+      - name: A run step is confined
+        run: node .github/actions/confine-probe/probe.mjs confined run-step
+      - name: The JavaScript action main step is confined
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: await import(`${process.env.GITHUB_WORKSPACE}/.github/actions/confine-probe/main.mjs`)
+      # The records of the probes that failed as well.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: confined-job
+          path: ${{ runner.temp }}/confine/
+          retention-days: 1
+          if-no-files-found: error
+
   required-checks:
     if: ${{ always() }}
-    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, world-write, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

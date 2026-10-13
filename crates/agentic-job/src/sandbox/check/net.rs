@@ -12,6 +12,11 @@ use crate::sandbox::{egress, host, network};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
+/// The metadata service at its IPv6 address (EC2's), which only
+/// `sandbox.deny-runner-metadata` names; `-g` keeps curl from reading
+/// the brackets as a glob.
+const METADATA_V6: &[&str] = &["-g", "http://[fd00:ec2::254]/latest/meta-data/"];
+
 /// Azure's WireServer, which serves the VM's configuration.
 const WIRESERVER_URL: &str = "http://168.63.129.16/?comp=versions";
 
@@ -82,11 +87,34 @@ impl Checker<'_> {
             got,
         );
         let metadata = direct(&["-H", "Metadata:true", METADATA_URL]);
-        self.control_or_note(
-            "metadata-control",
-            "the instance metadata service",
-            &metadata,
-        );
+        if self.config.sandbox.deny_runner_metadata {
+            // The runner's user is the control everywhere else, and here
+            // it is refused too: the probes say less, and say so.
+            let runner = self.runner.name.clone();
+            let got = super::runner_reaches(&metadata);
+            self.report.expect(
+                Want::Fail,
+                "runner-metadata",
+                format!("{runner} can't reach the instance metadata service (sandbox.deny-runner-metadata)"),
+                got,
+            );
+            let got = super::runner_reaches(&direct(METADATA_V6));
+            self.report.expect(
+                Want::Fail,
+                "runner-metadata-v6",
+                format!("{runner} can't reach the instance metadata service over IPv6 (sandbox.deny-runner-metadata)"),
+                got,
+            );
+            self.report.note(&format!(
+                "{runner} is refused the instance metadata service as well, so the probes of it have no control"
+            ));
+        } else {
+            self.control_or_note(
+                "metadata-control",
+                "the instance metadata service",
+                &metadata,
+            );
+        }
         let got = self.sandbox_succeeds(&metadata)?;
         self.report.expect(
             Want::Fail,

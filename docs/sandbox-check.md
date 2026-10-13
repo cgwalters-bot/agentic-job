@@ -271,6 +271,17 @@ A control the runner's user cannot make either (no WireServer on this
 cloud, a tailnet that already refuses the port) is printed as a note
 and the probe stands without it.
 
+With `sandbox.deny-runner-metadata = true` the rules refuse the runner's
+user and its subordinate uids the metadata service too, at `169.254.169.254`
+and at EC2's IPv6 `fd00:ec2::254`, and only that; the sandbox user's uids
+are refused the IPv6 address too, so that `sandbox exec` is no way around
+it without the egress proxy. Then `runner-metadata`
+and `runner-metadata-v6` expect the runner's own requests to fail in place of
+`metadata-control`, and a note says the metadata probes have no control.
+Off by default; the
+[confined job](secure-host.md#one-trust-level-for-the-rest-of-the-job)
+makes its control before the action instead.
+
 The proxy's TCP and UDP port 53 exception now names only the literal
 resolvers in `/etc/resolv.conf` at setup time. Other DNS destinations are
 rejected for new connections before the public-address policy; the existing
