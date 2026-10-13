@@ -95,8 +95,10 @@ fork's Actions and open the pull request are known.
 
 ## Interactive sessions
 
-Attachment is not built. [interactive.md](interactive.md) describes the
-existing notification seam and the unresolved session design.
+A run with a relay waits for one client's prompts after its task's turn
+([session runs](../specs/session.md)); the relay, its chat pane and writes
+during a session are not built. [interactive.md](interactive.md) keeps
+the rest of the design.
 
 ## What needs the operator
 

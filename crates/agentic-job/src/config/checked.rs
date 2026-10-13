@@ -19,9 +19,10 @@ use anyhow::{Result, bail, ensure};
 use super::{Config, Limits as LimitsTable};
 use crate::run::agent::{self, Kind};
 use crate::run::handback;
-use crate::run::inference::Endpoint;
+use crate::run::inference::{Endpoint, Mode};
 use crate::sandbox::network::{self, Direct};
 use crate::session::Limits;
+use crate::session::bridge::Relay;
 
 /// What `sandbox setup` takes from a configuration it may act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub struct Checked {
     /// `None` for a run with no inference proxy.
     pub endpoint: Option<Endpoint>,
     pub limits: Limits,
+    /// `None` for a task run, which no client attaches to.
+    pub relay: Option<Relay>,
 }
 
 /// The limits, with the proxy's part in them checked: a cap on model
@@ -125,11 +128,24 @@ impl Config {
         }
         handback::author(&self.commit)?;
         handback::check_trailers(&self.commit.trailers)?;
+        let relay = Relay::from_config(&self.session)?;
+        // A token the relay was given must be no use at the proxy: the
+        // relay could otherwise register runs, and spend, as this job.
+        if let (Some(Mode::GithubOidc { audience }), Some(relay)) =
+            (endpoint.as_ref().map(|endpoint| &endpoint.mode), &relay)
+        {
+            ensure!(
+                relay.audience.as_ref() != Some(audience),
+                "session.audience is the inference proxy's ({audience:?}): the relay could \
+                 use the token it is sent there"
+            );
+        }
         Ok(Checked {
             host,
             kind,
             endpoint,
             limits,
+            relay,
         })
     }
 }
@@ -137,7 +153,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::inference::Mode;
 
     const FAKE: &str = "[agent]\nname = \"fake\"\n";
     const CLAUDE: &str = "[agent]\nname = \"claude\"\n";
@@ -161,6 +176,15 @@ mod tests {
         assert_eq!(
             (fake.limits.timeout_s, fake.limits.budget_aic),
             (600, Some(100.0))
+        );
+        assert_eq!(fake.relay, None);
+        let session = checked(&format!(
+            "{FAKE}{CAPPED}[session]\nrelay = \"relay.example.ts.net:7000\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            session.relay.map(|relay| relay.address).as_deref(),
+            Some("relay.example.ts.net:7000")
         );
 
         let text = format!(
@@ -237,6 +261,17 @@ mod tests {
                 "is not an http or https URL",
             ),
             (FAKE.to_owned(), "limits.timeout-minutes is not set"),
+            (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}{CAPPED}{DIRECT}[session]\nrelay = \"relay:7000\"\n\
+                     audience = \"proxy\"\n"
+                ),
+                "session.audience is the inference proxy's",
+            ),
+            (
+                format!("{FAKE}{CAPPED}[session]\nrelay = \"https://relay\"\n"),
+                "session.relay: \"https://relay\" is not HOST:PORT",
+            ),
             (
                 format!("{FAKE}[limits]\nbudget = 100\n"),
                 "limits.timeout-minutes is not set",

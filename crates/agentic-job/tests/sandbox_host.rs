@@ -1124,6 +1124,7 @@ fn session_view(config: &Config, entry: &Entry) {
             wrapper: sandbox.wrapper(&work).unwrap(),
         },
         clients: Clients::none(),
+        bridge: None,
         log: Box::new(std::io::sink()),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -8,6 +8,11 @@
 //! a limit, a `session/cancel` of the turn and one more prompt turn in
 //! which the agent hands back; and at the limit a last `session/cancel`.
 //!
+//! With a bridge (`bridge`), the session does not end with the task's
+//! turn: it waits for its client's prompts, each a turn of its own under
+//! the same limits, until the client leaves or sends none for the idle
+//! timeout (`conversation`).
+//!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
 //! agent runs in a login session of that user's, where a signal to the
@@ -33,9 +38,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::agents::AgentSpec;
+use super::bridge::{Bridge, FromClient};
 use super::budget::{Budget, LABEL_HAND_BACK, Limits, Signal, Stop, Usage};
 use super::clients::Clients;
 use super::digest::{self, Dir};
@@ -58,6 +64,10 @@ const EXIT_GRACE: Duration = Duration::from_secs(1);
 const CLIENT_NAME: &str = env!("CARGO_PKG_NAME");
 const LOST_STOP_SIGNAL: &str = "the session lost its stop signal";
 const AGENT_EXITED: &str = "the agent exited";
+const CLIENT_LEFT: &str = "the client left";
+const SESSION_ENDED: &str = "the session has ended";
+const NO_CANCEL_ANSWER: &str = "the agent did not answer the cancellation";
+const TURN_RUNNING: &str = "a turn is running: cancel it or wait for its answer";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -155,6 +165,9 @@ pub struct Options {
     pub launch: Launch,
     /// The clients attached to the session; none for a task run.
     pub clients: Clients,
+    /// Where a client is reached after the task's turn; none for a task
+    /// run, which ends with it.
+    pub bridge: Option<Bridge>,
     /// Where the condensed transcript goes, a line per event.
     pub log: Log,
 }
@@ -257,7 +270,8 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         limits,
         requests,
         launch,
-        clients,
+        mut clients,
+        bridge,
         log,
     } = opts;
     // A cap that nothing counts would be no cap, and silently: the
@@ -274,6 +288,21 @@ pub async fn run(opts: Options) -> Result<RunResult> {
             Some(process::SandboxUser::find(user, Root::detect()).await?)
         }
         Launch::Direct => None,
+    };
+    // Before the agent starts: a relay that cannot be reached is a
+    // session that cannot be held.
+    let (session_id, attach_to) = watch::channel(None);
+    let (conversation, hang_up) = match bridge {
+        Some(bridge) => {
+            let connected = bridge.connect(attach_to).await?;
+            clients.attach(connected.send);
+            let conversation = Conversation {
+                from_client: connected.from_client,
+                idle: connected.idle,
+            };
+            (Some(conversation), Some(connected.close))
+        }
+        None => (None, None),
     };
     let (stop_tx, stop_rx) = watch::channel(None);
     let tap = Arc::new(Tap::create(
@@ -314,6 +343,8 @@ pub async fn run(opts: Options) -> Result<RunResult> {
                 stop: stop_rx,
                 nudges: nudge_rx,
                 cancelling: Arc::new(AtomicBool::new(false)),
+                session_id,
+                conversation,
             };
             let (ended, exited) = drive(
                 &mut agent,
@@ -346,6 +377,9 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         ),
     };
     watcher.abort();
+    if let Some(hang_up) = hang_up {
+        hang_up.close().await;
+    }
     let finished = chrono::Utc::now();
 
     let Ended {
@@ -562,6 +596,17 @@ impl Ended {
         Ended::failure(format!("{AGENT_EXITED} ({status}){last_words}{request}"))
     }
 
+    /// A conversation that ended as it may: the client left, or went
+    /// quiet.
+    fn done(message: String) -> Self {
+        Ended {
+            outcome: Outcome::Success,
+            stop_reason: None,
+            message: Some(message),
+            handed_back: false,
+        }
+    }
+
     /// Stopped by the session for WHY.
     fn stopped(why: &Stop, handed_back: bool) -> Self {
         let (outcome, msg) = stopped(why);
@@ -586,6 +631,25 @@ struct Signals {
     /// Set from a session/cancel until the turn it cancels has answered:
     /// permission requests are cancelled meanwhile.
     cancelling: Arc<AtomicBool>,
+    /// The agent's session, once it has one, for the bridge's client.
+    session_id: watch::Sender<Option<String>>,
+    conversation: Option<Conversation>,
+}
+
+/// What the session goes on to after the task's turn, with a bridge.
+struct Conversation {
+    from_client: mpsc::Receiver<FromClient>,
+    /// How long the session waits for the client's next prompt.
+    idle: Duration,
+}
+
+/// The client's next message, or `None` once it left; never without a
+/// client.
+async fn next_from_client(conversation: &mut Option<Conversation>) -> Option<FromClient> {
+    match conversation {
+        Some(talk) => talk.from_client.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Why the session was stopped, as its result.
@@ -642,6 +706,8 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         mut stop,
         mut nudges,
         cancelling,
+        session_id,
+        mut conversation,
     } = signals;
     let sid = tokio::select! {
         r = setup(&cx, task) => match r {
@@ -657,20 +723,40 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
             return Ended::stopped(&why, false);
         }
     };
+    // Nobody waits for it in a task run.
+    let _ = session_id.send(Some(sid.to_string()));
     let request = PromptRequest::new(
         sid.clone(),
         vec![ContentBlock::Text(TextContent::new(task.prompt.to_owned()))],
     );
     let mut response = std::pin::pin!(cx.send_request(request).block_task());
+    // Whether the client cancelled the task's turn: the session is then
+    // the client's to go on with.
+    let mut client_cancelled = false;
     let (why, text, window) = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
             // which would start another.
             biased;
-            // A task run ends with its turn. With a client attached
-            // (`clients`) the session would go on to that client's next
-            // prompt, which nothing can send yet.
-            r = &mut response => return prompt_result(r),
+            // A task run ends with its turn; with a bridge, a turn that
+            // ended well, or that the client cancelled, is followed by the
+            // client's.
+            r = &mut response => {
+                cancelling.store(false, Ordering::Relaxed);
+                let ended = prompt_result(r);
+                let goes_on = ended.outcome == Outcome::Success
+                    || (client_cancelled && ended.outcome == Outcome::Cancelled);
+                let Some(talk) = conversation.take().filter(|_| goes_on) else {
+                    return ended;
+                };
+                let link = Link { cx: &cx, tap, sid: &sid, cancelling: &cancelling, notices: task.notices };
+                return match converse(&link, &mut stop, &mut nudges, talk).await {
+                    Talked::Ended(ended) => ended,
+                    Talked::HandBack { why, text, window } => {
+                        hand_back(&link, &mut stop, &why, text, window).await
+                    }
+                };
+            }
             why = wait_stop(&mut stop) => {
                 return stop_turn(&cx, tap, &sid, &cancelling, why, response.as_mut()).await;
             }
@@ -689,6 +775,23 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     });
                 }
                 Nudge::HandBack { why, text, window } => break (why, text, window),
+            },
+            // A client that attached during the task's turn is treated as
+            // during its own turns.
+            msg = next_from_client(&mut conversation) => match msg {
+                Some(FromClient::Cancel) => {
+                    client_cancelled = true;
+                    cancelling.store(true, Ordering::Relaxed);
+                    let _ = cx.send_notification(CancelNotification::new(sid.clone()));
+                }
+                Some(FromClient::Prompt { answer, .. }) => {
+                    let _ = answer.send(Err(TURN_RUNNING.to_owned()));
+                }
+                // The task's turn goes on without it, and ends the session.
+                None => {
+                    tap.log(&[format!("⚠ {CLIENT_LEFT}: the task's turn goes on")]);
+                    conversation = None;
+                }
             },
         }
     };
@@ -712,26 +815,228 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         // It doesn't answer, so it can't be asked anything.
         None => return Ended::stopped(&why, false),
     }
+    let link = Link {
+        cx: &cx,
+        tap,
+        sid: &sid,
+        cancelling: &cancelling,
+        notices: task.notices,
+    };
+    hand_back(&link, &mut stop, &why, text, window).await
+}
+
+/// The agent's session, as the session's turns are sent to it.
+struct Link<'a> {
+    cx: &'a ConnectionTo<Agent>,
+    tap: &'a Tap,
+    sid: &'a SessionId,
+    cancelling: &'a AtomicBool,
+    notices: bool,
+}
+
+/// Near a limit, with no turn running: the agent's last turn, in which it
+/// hands back.
+async fn hand_back(
+    link: &Link<'_>,
+    stop: &mut watch::Receiver<Option<Stop>>,
+    why: &Stop,
+    text: String,
+    window: Duration,
+) -> Ended {
+    let Link {
+        cx,
+        tap,
+        sid,
+        cancelling,
+        ..
+    } = *link;
     // The limit itself, reached while the turn was being cancelled.
     if stop.borrow().is_some() {
-        return Ended::stopped(&why, false);
+        return Ended::stopped(why, false);
     }
-    let request = notice_prompt(&sid, LABEL_HAND_BACK, text);
+    let request = notice_prompt(sid, LABEL_HAND_BACK, text);
     let mut response = std::pin::pin!(cx.send_request(request).block_task());
     let answer = tokio::select! {
         r = &mut response => Some(r),
         _ = tokio::time::sleep(window) => None,
-        _ = wait_stop(&mut stop) => None,
+        _ = wait_stop(stop) => None,
     };
     let handed_back = match answer {
         Some(r) => prompt_result(r).outcome == Outcome::Success,
         None => {
             tap.log(&["⚠ the agent didn't hand back in time".to_owned()]);
-            let _ = cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await;
+            let _ = cancel_turn(cx, sid, cancelling, response.as_mut()).await;
             false
         }
     };
-    Ended::stopped(&why, handed_back)
+    Ended::stopped(why, handed_back)
+}
+
+/// How a conversation ended.
+enum Talked {
+    Ended(Ended),
+    /// Near a limit: the agent is to hand back, no turn running.
+    HandBack {
+        why: Stop,
+        text: String,
+        window: Duration,
+    },
+}
+
+/// Sends a client the answer to its prompt, once.
+fn reply(
+    answer: &mut Option<oneshot::Sender<Result<Value, String>>>,
+    value: Result<Value, String>,
+) {
+    if let Some(answer) = answer.take() {
+        // A client that went away is told nothing.
+        let _ = answer.send(value);
+    }
+}
+
+/// The session after the task's turn: the client's prompts, one turn at a
+/// time, under the same limits, until the client leaves or sends none for
+/// the idle timeout. A prompt sent during a turn is refused: the client
+/// cancels the turn or waits for it.
+async fn converse(
+    link: &Link<'_>,
+    stop: &mut watch::Receiver<Option<Stop>>,
+    nudges: &mut mpsc::UnboundedReceiver<Nudge>,
+    talk: Conversation,
+) -> Talked {
+    let Link {
+        cx,
+        tap,
+        sid,
+        cancelling,
+        notices,
+    } = *link;
+    let Conversation {
+        mut from_client,
+        idle,
+    } = talk;
+    let stopped_by = |why: Option<Stop>| match why {
+        Some(why) => {
+            tap.log(&[format!("⚠ {}", stopped(&why).1)]);
+            Ended::stopped(&why, false)
+        }
+        None => Ended::failure(LOST_STOP_SIGNAL.to_owned()),
+    };
+    tap.log(&[format!(
+        "⇄ waiting for the client's prompt (up to {}s)",
+        idle.as_secs()
+    )]);
+    let mut deadline = tokio::time::Instant::now() + idle;
+    let mut last_failed = None;
+    loop {
+        let next = tokio::select! {
+            biased;
+            why = wait_stop(stop) => return Talked::Ended(stopped_by(why)),
+            _ = tokio::time::sleep_until(deadline) => {
+                return Talked::Ended(last_failed.unwrap_or_else(|| {
+                    Ended::done(format!("no prompt from the client for {}s", idle.as_secs()))
+                }));
+            }
+            Some(nudge) = nudges.recv() => match nudge {
+                // A notice is for a turn, and none is running.
+                Nudge::Notice { .. } => continue,
+                Nudge::HandBack { why, text, window } => {
+                    tap.log(&[format!("⚠ {}: asking the agent to hand back", stopped(&why).1)]);
+                    return Talked::HandBack { why, text, window };
+                }
+            },
+            next = from_client.recv() => next,
+        };
+        let (prompt, answer) = match next {
+            None => {
+                return Talked::Ended(
+                    last_failed.unwrap_or_else(|| Ended::done(CLIENT_LEFT.to_owned())),
+                );
+            }
+            // No turn to cancel.
+            Some(FromClient::Cancel) => continue,
+            Some(FromClient::Prompt { prompt, answer }) => (prompt, answer),
+        };
+        let mut answer = Some(answer);
+        let blocks: Vec<ContentBlock> = match serde_json::from_value(prompt) {
+            Ok(blocks) => blocks,
+            Err(e) => {
+                reply(
+                    &mut answer,
+                    Err(format!("the prompt is not a list of content blocks: {e}")),
+                );
+                continue;
+            }
+        };
+        let request = PromptRequest::new(sid.clone(), blocks);
+        let mut response = std::pin::pin!(cx.send_request(request).block_task());
+        loop {
+            tokio::select! {
+                biased;
+                r = &mut response => {
+                    cancelling.store(false, Ordering::Relaxed);
+                    let r: Result<PromptResponse, agent_client_protocol::Error> = r;
+                    let value = r.as_ref().map_err(|e| e.to_string()).and_then(|resp| {
+                        serde_json::to_value(resp).map_err(|e| e.to_string())
+                    });
+                    let ended = prompt_result(r);
+                    last_failed = (ended.outcome != Outcome::Success).then_some(ended);
+                    reply(&mut answer, value);
+                    break;
+                }
+                why = wait_stop(stop) => {
+                    let ended = stop_turn(cx, tap, sid, cancelling, why, response.as_mut()).await;
+                    reply(&mut answer, Err(SESSION_ENDED.to_owned()));
+                    return Talked::Ended(ended);
+                }
+                Some(nudge) = nudges.recv() => match nudge {
+                    Nudge::Notice { .. } if !notices => {}
+                    Nudge::Notice { label, text } => {
+                        let answer = cx.send_request(notice_prompt(sid, &label, text)).block_task();
+                        tokio::spawn(async move {
+                            let _ = answer.await;
+                        });
+                    }
+                    Nudge::HandBack { why, text, window } => {
+                        tap.log(&[format!(
+                            "⚠ {}: interrupting the agent to hand back",
+                            stopped(&why).1
+                        )]);
+                        let r = cancel_turn(cx, sid, cancelling, response.as_mut()).await;
+                        reply(&mut answer, Err(SESSION_ENDED.to_owned()));
+                        return match r {
+                            Some(Ok(_)) => Talked::HandBack { why, text, window },
+                            _ => Talked::Ended(Ended::stopped(&why, false)),
+                        };
+                    }
+                },
+                msg = from_client.recv() => match msg {
+                    // Permission requests are cancelled until the turn
+                    // answers, as ACP asks of a client that cancelled.
+                    Some(FromClient::Cancel) => {
+                        cancelling.store(true, Ordering::Relaxed);
+                        let _ = cx.send_notification(CancelNotification::new(sid.clone()));
+                    }
+                    Some(FromClient::Prompt { answer, .. }) => {
+                        let _ = answer.send(Err(TURN_RUNNING.to_owned()));
+                    }
+                    None => {
+                        tap.log(&[format!("⚠ {CLIENT_LEFT}: cancelling its turn")]);
+                        // A turn that never answered neither finished nor
+                        // stopped: it fails rather than passing as done.
+                        let ended = match cancel_turn(cx, sid, cancelling, response.as_mut()).await {
+                            Some(r) => prompt_result(r),
+                            None => Ended::failure(format!("{CLIENT_LEFT}; {NO_CANCEL_ANSWER}")),
+                        };
+                        last_failed = (ended.outcome != Outcome::Success).then_some(ended);
+                        return Talked::Ended(last_failed.unwrap_or_else(|| Ended::done(CLIENT_LEFT.to_owned())));
+                    }
+                },
+            }
+        }
+        // Only an actual turn earns a fresh idle interval.
+        deadline = tokio::time::Instant::now() + idle;
+    }
 }
 
 /// Ends the turn at a limit. The caller then closes the connection and

@@ -203,7 +203,8 @@ jobs:
           sudo useradd --create-home "$AGENTIC_JOB_TEST_SANDBOX_USER"
           sudo install -m 0755 target/debug/fake-agent "$AGENTIC_JOB_TEST_FAKE_AGENT"
       # All of them, not the one by name: a filter that matches nothing
-      # passes.
+      # passes. They include a scripted client that talks to the agent
+      # over a loopback relay (specs/session.md).
       - run: cargo test --locked --test session
       # `run` itself, with the fake agent as that user: the clone, the
       # run's registration at a mock proxy, the session, the end of the

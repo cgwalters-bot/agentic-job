@@ -284,6 +284,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
             requests: Some(requests_count),
             launch: Launch::Direct,
             clients: Clients::none(),
+            bridge: None,
             log: Box::new(std::io::sink()),
         }))
         .unwrap();

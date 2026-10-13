@@ -164,6 +164,18 @@ on:
         description: The most the run may spend, in AIC (hundredths of a dollar; 0 for no such cap)
         type: string
         default: "500"
+      relay:
+        description: "A relay on the agent runner's network, as HOST:PORT: after the task's turn the session waits there for a client's prompts (specs/session.md); empty for a run that ends with its task"
+        type: string
+        default: ""
+      relay-audience:
+        description: With `relay`, the audience of the identity token the run proves itself with to it; empty to send none
+        type: string
+        default: ""
+      idle-minutes:
+        description: With `relay`, how long the session waits for the client's next prompt (empty for 10, at most 60)
+        type: string
+        default: ""
       packages:
         description: Packages the task needs, installed by the runner's package manager; names with spaces between them
         type: string
@@ -332,6 +344,9 @@ jobs:
       max-requests: ${{ inputs.max-requests }}
       max-tasks: ${{ inputs.max-tasks }}
       budget: ${{ inputs.budget }}
+      relay: ${{ inputs.relay }}
+      relay-audience: ${{ inputs.relay-audience }}
+      idle-minutes: ${{ inputs.idle-minutes }}
       packages: ${{ inputs.packages }}
       npm: ${{ inputs.npm }}
       setup: ${{ inputs.setup }}

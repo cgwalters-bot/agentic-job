@@ -30,6 +30,7 @@ pub struct Config {
     pub limits: Limits,
     pub setup: Setup,
     pub commit: Commit,
+    pub session: Session,
 }
 
 impl Config {
@@ -428,6 +429,22 @@ pub struct Commit {
     /// Lines put at the end of the commit's message, each `Key: value`:
     /// `Generated-by: AI`, for one.
     pub trailers: Vec<String>,
+}
+
+/// A conversation over a relay after the task's turn (specs/session.md).
+/// Off unless `relay` is set. `session::bridge::Relay::from_config`
+/// checks it.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Session {
+    /// The relay `run` dials, as `HOST:PORT` on the runner's network.
+    pub relay: String,
+    /// The audience of the identity token `run` proves the job with to
+    /// the relay. Without it the relay is sent no token.
+    pub audience: Option<String>,
+    /// How long the session waits for the client's next prompt. Zero
+    /// means the default.
+    pub idle_minutes: u64,
 }
 
 #[cfg(test)]

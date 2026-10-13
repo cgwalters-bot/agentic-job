@@ -13,7 +13,8 @@
 // where a panic is just as much the test's failure.
 #![allow(clippy::unwrap_used)]
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agentic_job::exit::Exit;
+use agentic_job::session::bridge::{self, Bridge, Relay};
 use agentic_job::session::digest::Digest;
 use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy, Record};
 use serde_json::{Value, json};
@@ -64,6 +66,70 @@ struct Setup<'a> {
     launch: Launch,
     /// The agent's program, where it isn't the one cargo built.
     agent: Option<String>,
+    /// A client at a relay on loopback, played by this function on its
+    /// end of the connection, and how long the session waits for it.
+    client: Option<(Play, Duration)>,
+}
+
+/// What a test's client does on its end of the relay.
+type Play = fn(&mut Client);
+
+/// A client's end of the relay: everything it was sent, hello first.
+struct Client {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
+    got: Vec<Value>,
+}
+
+impl Client {
+    fn send(&mut self, msg: Value) {
+        writeln!(self.writer, "{msg}").unwrap();
+    }
+
+    /// The next message, or `None` once the session hung up.
+    fn recv(&mut self) -> Option<Value> {
+        let mut line = String::new();
+        if self.reader.read_line(&mut line).unwrap() == 0 {
+            return None;
+        }
+        let msg: Value = serde_json::from_str(&line).unwrap();
+        self.got.push(msg.clone());
+        Some(msg)
+    }
+
+    /// Sends a request and waits for its response, taking what comes
+    /// before it.
+    fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        loop {
+            let msg = self.recv().expect("the session hung up");
+            if msg["id"] == id && msg["method"].is_null() {
+                return msg;
+            }
+        }
+    }
+}
+
+/// Listens on loopback for the session's bridge and plays CLIENT on what
+/// connects; the thread returns everything the client was sent.
+fn relay(play: Play) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        let mut client = Client {
+            reader: BufReader::new(stream.try_clone().unwrap()),
+            writer: stream,
+            got: Vec::new(),
+        };
+        client.recv().expect("no hello");
+        play(&mut client);
+        client.got
+    });
+    (address, thread)
 }
 
 struct Run {
@@ -71,6 +137,8 @@ struct Run {
     elapsed: Duration,
     /// The condensed log.
     log: String,
+    /// What the relay's client was sent, hello first.
+    client: Vec<Value>,
     /// harness.json
     result: Value,
     /// acp.jsonl
@@ -169,6 +237,22 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     );
     let log = Captured::default();
     let (count, requests) = watch::channel(None);
+    let (bridge, client) = setup
+        .client
+        .map(|(client, idle)| {
+            let (address, thread) = relay(client);
+            let bridge = Bridge {
+                relay: Relay {
+                    address,
+                    audience: None,
+                    idle,
+                },
+                hello: bridge::hello("test-run", None),
+                redact: Arc::new(|text: &str| text.replace(SECRET, "[REDACTED]")),
+            };
+            (bridge, thread)
+        })
+        .unzip();
     let options = Options {
         name: "fake".to_owned(),
         agent: session::agents::parse(&registry, "fake").unwrap(),
@@ -188,6 +272,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         requests: setup.count_requests.then_some(requests),
         launch: setup.launch,
         clients: Clients::none(),
+        bridge,
         log: Box::new(log.clone()),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -212,10 +297,12 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let client = client.map_or_else(Vec::new, |thread| thread.join().unwrap());
     Run {
         exit: returned.result.exit(),
         elapsed,
         log,
+        client,
         result,
         records,
         dir,
@@ -552,6 +639,7 @@ fn a_cap_nothing_counts_is_refused() {
         requests: None,
         launch: Launch::Direct,
         clients: Clients::none(),
+        bridge: None,
         log: Box::new(std::io::sink()),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -837,6 +925,20 @@ fn run0(user: &str, cwd: &Path) -> Vec<String> {
     .to_vec()
 }
 
+/// As the sandbox user where the environment names one, as a real run
+/// does; otherwise as this one.
+fn launch() -> Launch {
+    match std::env::var(SANDBOX_USER_VAR) {
+        // The agent works where the session tells it to; the wrapper only
+        // needs somewhere that exists.
+        Ok(user) => Launch::Sandbox {
+            wrapper: run0(&user, Path::new("/")),
+            user,
+        },
+        Err(_) => Launch::Direct,
+    }
+}
+
 fn processes_of(user: &str) -> String {
     let out = Command::new("pgrep")
         .args(["-l", "-u", user])
@@ -860,21 +962,12 @@ fn nothing_survives_the_session() {
       {"say": "Left two behind."}
     ]"#;
     let sandbox_user = std::env::var(SANDBOX_USER_VAR).ok();
-    let launch = match &sandbox_user {
-        // The agent works where the session tells it to; the wrapper only
-        // needs somewhere that exists.
-        Some(user) => Launch::Sandbox {
-            user: user.clone(),
-            wrapper: run0(user, Path::new("/")),
-        },
-        None => Launch::Direct,
-    };
     let r = run(
         SCRIPT_MODE,
         Setup {
             files: &[("script.json", STRAYS)],
             timeout_s: 60,
-            launch,
+            launch: launch(),
             agent: std::env::var(FAKE_AGENT_VAR).ok(),
             ..Setup::default()
         },
@@ -913,4 +1006,520 @@ fn nothing_survives_the_session() {
                 .status();
         }
     }
+}
+
+/// What the agent says that the client must not see.
+const SECRET: &str = "sekrit-value";
+const LATER: &str = r#"[{"say": "Answered sekrit-value."}]"#;
+
+fn text_prompt(sid: &Value, text: &str) -> Value {
+    json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]})
+}
+
+/// The session's own turn, then a client at the relay: it attaches to the
+/// session already running, is refused what the bridge does not serve,
+/// and has a prompt answered with the run's secret replaced; when it
+/// hangs up the session ends as done. Where the environment names a
+/// sandbox user (the session-sandbox job), the agent runs as that user.
+#[test]
+fn a_client_talks_to_the_session() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[
+                ("script.json", r#"[{"say": "Task done."}]"#),
+                ("later.json", LATER),
+            ],
+            timeout_s: 60,
+            launch: launch(),
+            agent: std::env::var(FAKE_AGENT_VAR).ok(),
+            client: Some((
+                |client| {
+                    let init = client.request(1, "initialize", json!({"protocolVersion": 1}));
+                    assert_eq!(init["result"]["protocolVersion"], 1, "{init}");
+                    let early = client.request(2, "session/prompt", text_prompt(&json!("x"), "hi"));
+                    assert_eq!(early["error"]["code"], -32602, "{early}");
+                    let new = client.request(
+                        3,
+                        "session/new",
+                        json!({"cwd": "/", "mcpServers": [{"name": "x", "command": "/bin/sh", "args": [], "env": []}]}),
+                    );
+                    let sid = new["result"]["sessionId"].clone();
+                    assert!(sid.is_string(), "{new}");
+                    for method in ["session/load", "session/set_mode", "fs/read_text_file"] {
+                        let refused = client.request(4, method, json!({"sessionId": sid}));
+                        assert_eq!(refused["error"]["code"], -32601, "{method}: {refused}");
+                    }
+                    let other =
+                        client.request(5, "session/prompt", text_prompt(&json!("other"), "hi"));
+                    assert_eq!(other["error"]["code"], -32602, "{other}");
+                    let bad = client.request(
+                        6,
+                        "session/prompt",
+                        json!({"sessionId": sid, "prompt": "hi"}),
+                    );
+                    assert!(
+                        bad["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("content blocks"),
+                        "{bad}"
+                    );
+                    let answer =
+                        client.request(7, "session/prompt", text_prompt(&sid, "Hello, agent."));
+                    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "the client left", "{}", r.log);
+    let hello = &r.client[0];
+    assert_eq!(
+        (&hello["schema"], &hello["run"], &hello["token"]),
+        (
+            &json!(bridge::HELLO_SCHEMA),
+            &json!("test-run"),
+            &Value::Null
+        )
+    );
+    let said: String = r
+        .client
+        .iter()
+        .filter(|m| m["method"] == "session/update")
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect();
+    assert!(said.contains("Answered [REDACTED]."), "{:#?}", r.client);
+    assert!(!said.contains(SECRET));
+    // The client's prompt went to the agent, and into the transcript,
+    // after the task's.
+    let prompts: Vec<&Value> = r
+        .records
+        .iter()
+        .filter(|x| x["dir"] == "send" && x["msg"]["method"] == "session/prompt")
+        .map(|x| &x["msg"]["params"]["prompt"][0]["text"])
+        .collect();
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert_eq!(prompts[1], "Hello, agent.");
+    // The client's mcpServers went nowhere: the agent saw one session/new,
+    // the session's own.
+    let new: Vec<&Value> = r
+        .records
+        .iter()
+        .filter(|x| x["dir"] == "send" && x["msg"]["method"] == "session/new")
+        .collect();
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0]["msg"]["params"]["mcpServers"], json!([]));
+}
+
+#[test]
+fn unsuccessful_client_turns_survive_disconnect_or_idle() {
+    for (reason, code, outcome) in [
+        ("max_turn_requests", 3, "budget"),
+        ("not_an_acp_stop_reason", 1, "failure"),
+    ] {
+        for wait in [false, true] {
+            let later = json!([{"stop": reason}]).to_string();
+            let play: Play = if wait {
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.request(2, "session/prompt", text_prompt(&sid, "hi"));
+                    while client.recv().is_some() {}
+                }
+            } else {
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.request(2, "session/prompt", text_prompt(&sid, "hi"));
+                }
+            };
+            let r = run(
+                SCRIPT_AND_LATER,
+                Setup {
+                    files: &[("script.json", "[]"), ("later.json", &later)],
+                    timeout_s: 15,
+                    client: Some((play, Duration::from_secs(1))),
+                    ..Setup::default()
+                },
+            );
+            assert_result(&r, code, outcome);
+        }
+    }
+}
+
+/// A client that leaves during its turn, while the agent runs a command
+/// and so cannot answer the cancel: the turn never ended, so the session
+/// fails rather than passing as done.
+#[test]
+fn a_client_leaving_an_unanswered_turn_fails() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[
+                ("script.json", "[]"),
+                (
+                    "later.json",
+                    r#"[{"execute": {"title": "Bash", "command": "sleep 45"}}]"#,
+                ),
+            ],
+            timeout_s: 90,
+            client: Some((
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.send(
+                        json!({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+                                       "params": text_prompt(&sid, "hi")}),
+                    );
+                    while let Some(msg) = client.recv() {
+                        if msg["params"]["update"]["status"] == "in_progress" {
+                            break;
+                        }
+                    }
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 1, "failure");
+    assert_eq!(
+        r.result["message"], "the client left; the agent did not answer the cancellation",
+        "{}",
+        r.log
+    );
+}
+
+#[test]
+fn idle_messages_do_not_extend_the_deadline() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[("script.json", "[]"), ("later.json", LATER)],
+            timeout_s: 15,
+            client: Some((
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    // Keep invalid traffic arriving beyond the idle interval, but
+                    // stop writing once the harness closes the connection.
+                    for id in 2..22 {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let msg = if id % 2 == 0 {
+                            json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
+                        } else {
+                            json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": {"sessionId": sid, "prompt": [42]}})
+                        };
+                        if writeln!(client.writer, "{msg}").is_err() {
+                            break;
+                        }
+                    }
+                    while client.recv().is_some() {}
+                },
+                Duration::from_secs(1),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "no prompt from the client for 1s");
+    assert!(r.elapsed < Duration::from_secs(3), "{:?}", r.elapsed);
+}
+
+/// A client that sends nothing: the session ends at the idle timeout, as
+/// done, well within the run's own timeout.
+#[test]
+fn a_quiet_client_ends_the_session() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[("script.json", "[]"), ("later.json", LATER)],
+            timeout_s: 60,
+            client: Some((
+                |client| while client.recv().is_some() {},
+                Duration::from_secs(1),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "no prompt from the client for 1s");
+    assert!(r.elapsed < Duration::from_secs(30), "{:?}", r.elapsed);
+    assert!(
+        r.log.contains("waiting for the client's prompt"),
+        "{}",
+        r.log
+    );
+}
+
+/// The run's limits hold while the session waits: at the timeout it is
+/// stopped as for a task run, whatever the idle timeout says.
+#[test]
+fn the_timeout_holds_while_waiting_for_the_client() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[("script.json", "[]"), ("later.json", LATER)],
+            timeout_s: 2,
+            client: Some((
+                |client| while client.recv().is_some() {},
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 124, "timeout");
+}
+
+/// A relay that cannot be reached is a session that is not run.
+#[test]
+fn an_unreachable_relay_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    // A port that was free a moment ago.
+    let address = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let options = Options {
+        name: "fake".to_owned(),
+        agent: session::agents::builtin("fake").unwrap(),
+        model: None,
+        cwd: dir.path().to_owned(),
+        prompt: "Do the fake task.\n".to_owned(),
+        out: dir.path().join("out"),
+        permissions: Policy::allow_all(),
+        limits: Limits {
+            timeout_s: 60,
+            ..Limits::default()
+        },
+        requests: None,
+        launch: Launch::Direct,
+        clients: Clients::none(),
+        bridge: Some(Bridge {
+            relay: Relay {
+                address,
+                audience: None,
+                idle: Duration::from_secs(60),
+            },
+            hello: bridge::hello("test-run", None),
+            redact: Arc::new(str::to_owned),
+        }),
+        log: Box::new(std::io::sink()),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let err = runtime.block_on(session::run(options)).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("connecting to the relay"),
+        "{err:#}"
+    );
+}
+
+/// A client's cancel reaches the agent's turn, and a second prompt while
+/// the turn runs is refused rather than queued behind it.
+#[test]
+fn a_client_cancels_its_turn() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[
+                ("script.json", "[]"),
+                ("later.json", r#"[{"sleep": 30}, {"say": "Too late."}]"#),
+            ],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    client.request(1, "initialize", json!({"protocolVersion": 1}));
+                    let new =
+                        client.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
+                    let sid = new["result"]["sessionId"].clone();
+                    let prompt = |id, text| {
+                        json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt",
+                               "params": text_prompt(&sid, text)})
+                    };
+                    client.send(prompt(3, "Take your time."));
+                    let second =
+                        client.request(4, "session/prompt", text_prompt(&sid, "And this."));
+                    assert!(
+                        second["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("a turn is running"),
+                        "{second}"
+                    );
+                    client.send(json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}));
+                    let answer = loop {
+                        let msg = client.recv().expect("the session hung up");
+                        if msg["id"] == 3 {
+                            break msg;
+                        }
+                    };
+                    assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 1, "cancelled");
+    assert!(r.elapsed < Duration::from_secs(30), "{:?}", r.elapsed);
+    let cancels = r
+        .records
+        .iter()
+        .filter(|x| x["dir"] == "send" && x["msg"]["method"] == "session/cancel")
+        .count();
+    assert_eq!(cancels, 1);
+}
+
+/// A client that attaches during the task's turn is treated as during its
+/// own: its prompt is refused while the turn runs, its cancel ends the
+/// turn, and the session is then the client's.
+#[test]
+fn a_client_cancels_the_tasks_turn() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[
+                ("script.json", r#"[{"sleep": 30}, {"say": "Too late."}]"#),
+                ("later.json", LATER),
+            ],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    client.request(1, "initialize", json!({"protocolVersion": 1}));
+                    let new =
+                        client.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
+                    let sid = new["result"]["sessionId"].clone();
+                    let busy = client.request(3, "session/prompt", text_prompt(&sid, "Now."));
+                    assert!(
+                        busy["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("a turn is running"),
+                        "{busy}"
+                    );
+                    client.send(json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}));
+                    // Refused until the cancelled turn has answered.
+                    let answer = (4..100)
+                        .map(|id| client.request(id, "session/prompt", text_prompt(&sid, "Hello.")))
+                        .find(|answer| {
+                            std::thread::sleep(Duration::from_millis(100));
+                            answer["error"].is_null()
+                        })
+                        .unwrap();
+                    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "the client left", "{}", r.log);
+    assert!(r.elapsed < Duration::from_secs(30), "{:?}", r.elapsed);
+    let said: String = r
+        .client
+        .iter()
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect();
+    assert!(said.contains("Answered [REDACTED]."), "{said}");
+    assert!(!said.contains("Too late."), "{said}");
+    // The task's prompt and the one the client had answered; the refused
+    // ones never reached the agent.
+    let sent = |method: &str| {
+        r.records
+            .iter()
+            .filter(|x| x["dir"] == "send" && x["msg"]["method"] == method)
+            .count()
+    };
+    assert_eq!((sent("session/prompt"), sent("session/cancel")), (2, 1));
+}
+
+/// A client that sends requests and reads none of the answers: the
+/// session stops reading once the answers fill the room for them, rather
+/// than queueing them without end.
+#[test]
+fn a_client_that_reads_nothing_is_not_read() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[("script.json", "[]"), ("later.json", LATER)],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    client
+                        .writer
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    // Each answer repeats the request's 4 KiB id.
+                    let request = json!({"jsonrpc": "2.0", "id": "i".repeat(4 << 10),
+                                         "method": "initialize", "params": {}});
+                    let batch = format!("{request}\n").repeat(256);
+                    let mut sent = 0;
+                    let err = loop {
+                        assert!(sent < 256 << 20, "the session took {sent} bytes unread");
+                        if let Err(e) = client.writer.write_all(batch.as_bytes()) {
+                            break e;
+                        }
+                        sent += batch.len();
+                    };
+                    assert!(
+                        matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ),
+                        "{err}"
+                    );
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "the client left", "{}", r.log);
+    assert!(r.elapsed < Duration::from_secs(30), "{:?}", r.elapsed);
+}
+
+/// An attached client that stops reading while the agent goes on talking
+/// is hung up on once what it is owed fills the room for it; the task's
+/// turn goes on.
+#[test]
+fn a_client_that_falls_behind_is_hung_up_on() {
+    let say = json!({"say": "x".repeat(1 << 20)});
+    let script = format!(
+        "[{{\"sleep\": 1}}, {}]",
+        vec![say.to_string(); 40].join(", ")
+    );
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[("script.json", &script), ("later.json", LATER)],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    client.request(1, "initialize", json!({"protocolVersion": 1}));
+                    client.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
+                    std::thread::sleep(Duration::from_secs(5));
+                    // A line may be cut short by the hang-up.
+                    std::io::copy(&mut client.reader, &mut std::io::sink()).unwrap();
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert!(
+        r.log.contains("the client left: the task's turn goes on"),
+        "{}",
+        r.log
+    );
+    assert!(r.elapsed < Duration::from_secs(30), "{:?}", r.elapsed);
 }
