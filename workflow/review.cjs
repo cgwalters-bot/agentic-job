@@ -113,8 +113,29 @@ async function reportStatus(env, github, core) {
   return status;
 }
 
-// This job runs only base-revision code. A head must not obtain an approval
-// for changes to the workflow or the trusted scripts which issue approvals.
+// The review's own gate: the workflow, script and task that decide and
+// submit approvals, the reusable workflows it calls to admit the event,
+// validate its output and apply it, their review-path helpers and admission
+// configuration, the selected agent configuration it composes (which can
+// select the reviewer's instructions), the workflow-ingress check and its
+// analyzer configuration, and the ruleset settings in docs/review.md. Other
+// workflow changes are approved on the review's judgement like any change,
+// with the base branch's required ingress check
+// as their deterministic guard. A change to these would otherwise merge on
+// an approval from the very gate it weakens, with nobody reading it.
+const GATE_FILES = new Set(['.github/workflows/review.yml', '.github/workflows/policy.yml',
+  '.github/workflows/check.yml', '.github/workflows/apply.yml', '.github/workflows/workflow-ingress.yml',
+  '.github/agentic-job/hosted.toml',
+  'workflow/review.cjs', 'workflow/review.md', 'workflow/activation.cjs',
+  'workflow/policy-command.cjs', 'workflow/status.cjs', 'workflow/review.toml',
+  'workflow/review-command.toml', 'workflow/ingress.py', 'workflow/actionlint.yaml', 'docs/review.md']);
+
+// First line of the COMMENT review left in place of a withheld approval.
+// Agent text never starts a review body (its first line is VERDICT:), so
+// a poll can match this line exactly and label the pull request.
+const WITHHELD = "Approval withheld: this pull request changes the review's own gate and needs a human approval.";
+
+// This job runs only base-revision code.
 async function submitReview(env, github, core) {
   if (env.REAL_REVIEWS !== 'true') return;
   const run = { pull: env.PULL, head: env.HEAD_SHA, check: env.CHECK_RESULT,
@@ -130,7 +151,7 @@ async function submitReview(env, github, core) {
     return;
   }
   // Fail closed rather than paginate an unbounded diff. Renames must check
-  // both names so moving trusted code out does not evade the human gate.
+  // both names so moving gate code out does not evade the human gate.
   if (!Number.isSafeInteger(pull.changed_files) || pull.changed_files < 0 || pull.changed_files > 300) {
     throw new Error('Real review requires at most 300 changed files');
   }
@@ -140,12 +161,9 @@ async function submitReview(env, github, core) {
     files.push(...data);
   }
   if (files.length !== pull.changed_files) throw new Error('Incomplete review file list');
-  if (run.verdict === 'APPROVE' && files.some(file =>
-    [file.filename, file.previous_filename].some(name =>
-      name && (name.startsWith('.github/') || name.startsWith('workflow/'))))) {
-    core.notice('Automated approval withheld: trusted workflow changes require a human review');
-    return;
-  }
+  const config = path.posix.normalize(env.AGENT_CONFIG || '.github/agentic-job/hosted.toml');
+  const gate = files.some(file => [file.filename, file.previous_filename]
+    .some(name => GATE_FILES.has(name) || name === config));
   const prefix = `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#issuecomment-`;
   const id = run.url.startsWith(prefix) ? run.url.slice(prefix.length) : '';
   if (!/^[1-9][0-9]*$/.test(id) || !Number.isSafeInteger(Number(id))) {
@@ -158,6 +176,12 @@ async function submitReview(env, github, core) {
   }
   // commit_id prevents a racing push from making this an approval of new code;
   // stale-review dismissal in the branch ruleset is also required.
+  if (run.verdict === 'APPROVE' && gate) {
+    core.notice(WITHHELD);
+    await github.rest.pulls.createReview({ ...target, commit_id: run.head,
+      event: 'COMMENT', body: `${WITHHELD}\n\n${comment.body}` });
+    return;
+  }
   await github.rest.pulls.createReview({ ...target, commit_id: run.head,
     event: run.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES', body: comment.body });
 }
@@ -201,4 +225,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };
+module.exports = { WITHHELD, admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { submitReview } = require('./review.cjs');
+const { WITHHELD, submitReview } = require('./review.cjs');
 
 const head = 'a'.repeat(40);
 const env = { REAL_REVIEWS: 'true', PULL: '12', HEAD_SHA: head,
@@ -43,13 +43,47 @@ test('off by default, incomplete runs and stale heads submit nothing', async () 
   assert.equal(f.reviews.length, 0);
 });
 
-test('trusted workflow changes including renames cannot receive approval', async () => {
-  for (const file of [{ filename: '.github/workflows/review.yml' },
-    { filename: 'workflow/review.cjs' },
-    { filename: 'elsewhere.cjs', previous_filename: 'workflow/review.cjs' }]) {
-    const f = fixture({ files: [file] });
-    await submitReview(env, f.github, f.core);
-    assert.equal(f.reviews.length, 0);
+test('only changes to the review gate, including renames, withhold approval', async () => {
+  for (const [file, withheld] of [[{ filename: '.github/workflows/review.yml' }, true],
+    [{ filename: '.github/workflows/policy.yml' }, true], [{ filename: '.github/workflows/check.yml' }, true],
+    [{ filename: '.github/workflows/apply.yml' }, true],
+    [{ filename: '.github/workflows/workflow-ingress.yml' }, true],
+    [{ filename: 'workflow/review.cjs' }, true], [{ filename: 'workflow/ingress.py' }, true],
+    ...['workflow/activation.cjs', 'workflow/policy-command.cjs', 'workflow/status.cjs',
+      'workflow/review.toml', 'workflow/review-command.toml', 'workflow/actionlint.yaml',
+      'workflow/review.md', '.github/agentic-job/hosted.toml'].flatMap(filename => [
+      [{ filename }, true], [{ filename: 'elsewhere.cjs', previous_filename: filename }, true],
+      [{ filename, previous_filename: 'elsewhere.cjs' }, true],
+    ]),
+    [{ filename: 'docs/review.md' }, true],
+    [{ filename: 'elsewhere.cjs', previous_filename: 'workflow/review.cjs' }, true],
+    [{ filename: '.github/workflows/ci.yml' }, false], [{ filename: 'workflow/push.cjs' }, false],
+    [{ filename: 'docs/review.md.bak' }, false],
+    [{ filename: '.github/agentic-job/hosted.toml.bak' }, false]]) {
+    for (const verdict of ['APPROVE', 'CHANGES']) {
+      const body = `VERDICT: ${verdict}\nFindings`;
+      const f = fixture({ files: [file], body });
+      await submitReview({ ...env, VERDICT: verdict }, f.github, f.core);
+      const event = verdict === 'CHANGES' ? 'REQUEST_CHANGES' : withheld ? 'COMMENT' : 'APPROVE';
+      assert.deepEqual(f.reviews, [{ owner: 'owner', repo: 'repo', pull_number: 12, commit_id: head,
+        event, body: event === 'COMMENT' ? `${WITHHELD}\n\n${body}` : body }], file.filename);
+    }
+  }
+});
+
+test('the selected non-default reviewer configuration requires human approval, including renames', async () => {
+  for (const config of ['.github/agentic-job/reviewer.toml', 'config/reviewer.toml']) {
+    for (const file of [{ filename: config },
+      { filename: 'elsewhere.toml', previous_filename: config },
+      { filename: config, previous_filename: 'elsewhere.toml' }]) {
+      const f = fixture({ files: [file] });
+      await submitReview({ ...env, AGENT_CONFIG: `./${config}` }, f.github, f.core);
+      assert.equal(f.reviews[0].event, 'COMMENT');
+      assert.equal(f.reviews[0].body, `${WITHHELD}\n\nVERDICT: APPROVE\nFindings`);
+    }
+    const f = fixture({ files: [{ filename: `${config}.bak` }] });
+    await submitReview({ ...env, AGENT_CONFIG: config }, f.github, f.core);
+    assert.equal(f.reviews[0].event, 'APPROVE');
   }
 });
 

@@ -108,16 +108,30 @@ an `APPROVED` or `CHANGES_REQUESTED` review after check and apply succeed.
 Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
 Actions to create and approve pull requests**. The reviewer is
 `github-actions[bot]`, distinct from the bot account opening the PR. PRs opened
-by that Actions identity cannot use this approval path. The body is the applied
-comment, unchanged, with `VERDICT:` still its first line. Inline findings remain
+by that Actions identity cannot use this approval path. An approval's or change
+request's body is the applied comment, unchanged, with `VERDICT:` still its first line. Inline findings remain
 file/line citations in the body; no inline review comments are generated.
 
 The review is bound to `commit_id`, and a head that already changed is skipped.
 At most 300 files (three API pages) are inspected; incomplete or oversized lists
-fail closed. Automated APPROVE is withheld if either side of a rename touches
-`.github/` or `workflow/`: a PR must not approve changes to its own approval
-workflow or trusted scripts. CHANGES can still be submitted. Such PRs need a
-human approval, regardless of the compatibility comment/status verdict.
+fail closed. Workflow changes in general are approved or not on the review's
+judgement; their deterministic guard is the base branch's
+[workflow-ingress check](workflow-ingress.md), so keep it a required check in
+the ruleset. Approval is
+withheld only when either side of a rename is part of the review's own gate:
+`review.yml`, the `policy.yml`, `check.yml` and `apply.yml` it calls,
+`workflow-ingress.yml`, `workflow/review.cjs`, `workflow/review.md`,
+the admission files `workflow/activation.cjs`, `workflow/policy-command.cjs`,
+`workflow/review.toml` and `workflow/review-command.toml`, the default agent
+configuration `.github/agentic-job/hosted.toml`, the reporting helper
+`workflow/status.cjs`, `workflow/ingress.py`, its analyzer configuration
+`workflow/actionlint.yaml` or this document, which records the
+ruleset. Otherwise a change weakening the gate would merge on that gate's own
+approval. The status job then submits a `COMMENTED` review whose first line is
+exactly `Approval withheld: this pull request changes the review's own gate and
+needs a human approval.`, followed by the applied comment; agent text cannot
+start a review body, so a poll can match that line to label the PR for a human.
+CHANGES is submitted as usual.
 
 Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
 comment text or the `review` status. For `github-actions[bot]`, select the latest
@@ -126,7 +140,7 @@ non-pending, non-comment review by submission time (ID breaks ties). Only
 `CHANGES_REQUESTED` triggers the existing fix dispatch and its body supplies
 findings. `DISMISSED`, absent or stale approval means wait, not approval.
 Other reviewers' outstanding change requests remain GitHub's merge gate; the
-poller must not override them. Noop, cancellation, refusal, protected-path
+poller must not override them. Noop, cancellation, refusal, a withheld gate
 approval or submission failure produces no new approval. This repository does
 not implement the external tracker's poll loop.
 

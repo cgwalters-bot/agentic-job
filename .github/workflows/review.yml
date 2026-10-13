@@ -206,7 +206,7 @@ jobs:
       check: ${{ toJSON(needs.check) }}
 
   # Opt-in real reviews use the Actions identity, not the PR-opening PAT.
-  # Trusted workflow changes cannot receive automated approval (review.cjs).
+  # Changes to the review's own gate cannot receive automated approval (review.cjs).
   # The verdict as a commit status on the pull request's head: success only
   # for a checked APPROVE whose comment was posted, failure for CHANGES,
   # a noop or a run that did not get that far. It reads no agent text:
@@ -253,6 +253,7 @@ jobs:
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REAL_REVIEWS: ${{ vars.AGENT_REAL_REVIEWS }}
+          AGENT_CONFIG: ${{ vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
         with:
           script: |
             const { reportStatus, submitReview } = require(`${process.env.GITHUB_WORKSPACE}/.agentic-job-source/workflow/review.cjs`);
