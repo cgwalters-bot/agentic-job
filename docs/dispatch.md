@@ -11,7 +11,10 @@ Copy these files to the **same paths** in your repository:
 
 - [dispatch.yml](../.github/workflows/dispatch.yml)
 - [dispatch.toml](../.github/agentic-job/dispatch.toml)
-- [hosted.toml](../.github/agentic-job/hosted.toml)
+
+The runner's configuration, [hosted.toml](../.github/agentic-job/hosted.toml),
+is read from this repository at the pinned commit; there is no copy to keep.
+A caller that kept an edited copy sets `AGENT_CONFIG` to its path.
 
 In `dispatch.yml`, replace `uses: ./.github/workflows/agentic-job.yml` with
 `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
@@ -118,7 +121,9 @@ Set operator-controlled repository variables (not dispatch inputs):
 - `INFERENCE_URL`: the reachable broker URL, for example `http://BROKER:PORT`.
 - `INFERENCE_AUDIENCE`: the broker's configured GitHub OIDC audience.
 - `AGENT_CONFIG`: the caller's runner configuration path if not using hosted
-  Ubuntu 26.04. The default is `.github/agentic-job/hosted.toml`; verify sandbox
+  Ubuntu 26.04 or giving your targets a toolchain. The default is this
+  repository's `hosted.toml` at the pinned commit; a scripted trial always
+  uses that and ignores `AGENT_CONFIG`. Verify sandbox
   probes on your own image rather than copying hosted-image socket exceptions.
 - `AGENT_CONFIG_REPO`: optional public `OWNER/NAME` repository holding opencode's
   or Vibe's configuration; `AGENT_CONFIG_PATH` selects its directory (empty for the root).
@@ -182,8 +187,10 @@ the apply job uses its job token instead; no environment is needed.
 ## Giving runs a toolchain
 
 A sandbox has only what the runner image and the runner configuration
-(`AGENT_CONFIG`, by default [hosted.toml](../.github/agentic-job/hosted.toml))
-put there. `[setup] packages` is installed for every run;
+(`AGENT_CONFIG`, by default this repository's
+[hosted.toml](../.github/agentic-job/hosted.toml), which gives only this
+repository a toolchain) put there. A caller whose targets need one keeps a
+copy with its own entries and names it in `AGENT_CONFIG`. `[setup] packages` is installed for every run;
 `[setup.repo-packages]` adds a list for the target repository, or the
 `default` list for a target with none:
 
@@ -204,10 +211,11 @@ this repository's own end-to-end jobs, which share `hosted.toml`. The
 [secure-host action](secure-host.md) has no target and gets only the
 `default` list.
 
-The list comes only from the caller's file, never from the target
-repository: its contents, a pull request's head included, are untrusted,
-and a package list read from them would let anyone who can open a pull
-request choose what is installed as root. For the same reason
+The list comes only from the runner configuration, the caller's file or
+this repository's at the pinned commit, never from the target repository:
+its contents, a pull request's head included, are untrusted, and a package
+list read from them would let anyone who can open a pull request choose
+what is installed as root. For the same reason
 `rust-toolchain.toml`, `.tool-versions` and the like are not read. A
 toolchain the distribution lacks needs a `setup` script of the caller's
 (the reusable workflow's input; the shipped dispatch caller passes none),

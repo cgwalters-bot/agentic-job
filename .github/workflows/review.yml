@@ -14,7 +14,7 @@
 # tailnet's federated identity have to admit it (docs/inference.md).
 #
 # Another repository calls this file at a pinned commit from the same
-# events, with its own copies of the bounds, the task and hosted.toml.
+# events, with its own copies of the bounds and the task.
 name: review
 on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] Base-branch policy and actions only; the PR head is data read inside the credential-free sandbox.
@@ -60,8 +60,10 @@ jobs:
       # narrows them to owner, members and collaborators); `/review` from
       # someone who can write.
       allow: ${{ github.event_name == 'issue_comment' && 'workflow/review-command.toml' || 'workflow/review.toml' }}
-      # The runner's configuration, as dispatch.yml picks it.
-      config: ${{ vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
+      # The runner's configuration, as dispatch.yml picks it: the caller's
+      # file named by AGENT_CONFIG, else this repository's hosted.toml at
+      # the pinned commit, from the policy job's checkout of this source.
+      config: ${{ vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}
       # No fallback: without the variables the run fails in policy, where
       # a scripted agent would post a verdict nobody made.
       agent: ${{ vars.AGENT }}

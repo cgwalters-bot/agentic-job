@@ -83,7 +83,8 @@ on:
         description: >-
           A configuration file in the calling repository (TOML) for what the inputs below do not
           cover: the services to stop on the runner, the sockets it may keep, the egress rules,
-          the commit's author. The inputs below go over it
+          the commit's author. The inputs below go over it. A path under `.agentic-job-source/`
+          is in this workflow's own source at the called commit, as for this repository's hosted.toml
         type: string
         default: ""
       agent:

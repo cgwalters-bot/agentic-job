@@ -176,7 +176,7 @@ needs these repository or organization variables, and no secret:
 | `AGENT_MODEL` | the model, as the proxy serves it |
 | `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and the audience of the run's identity token |
 | `AGENT_RUNNER` | optional, a runner label as JSON |
-| `AGENT_CONFIG` | optional, the runner's configuration file; default `.github/agentic-job/hosted.toml`, written for `ubuntu-26.04` |
+| `AGENT_CONFIG` | optional, the caller's runner configuration file; default this repository's [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit, written for `ubuntu-26.04` |
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
@@ -219,9 +219,13 @@ jobs:
 `COMMIT` is the full SHA of a reviewed commit of this repository. The caller
 copies [`workflow/review.toml`](../workflow/review.toml),
 [`workflow/review-command.toml`](../workflow/review-command.toml) (both with
-its own `repos` and `bases`), [`workflow/review.md`](../workflow/review.md) and
-[`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml) to the
-same paths, and sets the variables above. The broker entry for it is the
+its own `repos` and `bases`) and [`workflow/review.md`](../workflow/review.md)
+to the same paths, and sets the variables above. It needs no copy of
+`hosted.toml`: without `AGENT_CONFIG` the policy job reads the one in
+this repository at `COMMIT`, so a reviewed pin also pins the runner
+hardening, and a caller on another image names its own file instead. A
+caller that kept an edited copy sets `AGENT_CONFIG` to its path, or the
+copy is no longer read. The broker entry for it is the
 `called_workflows` form, naming `review.yml` at that commit.
 
 ## Tests

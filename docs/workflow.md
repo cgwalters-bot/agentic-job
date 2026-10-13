@@ -828,13 +828,12 @@ your repository:
   uses the scripted agent's built-in file-changing session, not a setup script.
 - **Dedicated review:** [`.github/workflows/review.yml`](../.github/workflows/review.yml),
   [`workflow/review.toml`](../workflow/review.toml),
-  [`workflow/review-command.toml`](../workflow/review-command.toml),
-  [`workflow/review.md`](../workflow/review.md) and
-  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml).
+  [`workflow/review-command.toml`](../workflow/review-command.toml) and
+  [`workflow/review.md`](../workflow/review.md).
   This runs on pull request events or `/review`, not a label, with a real
   agent. Unlike the others, `review.yml` composes `policy.yml`, `check.yml`
   and `apply.yml` itself and is meant to be called, not copied: copy only
-  the bounds, the task and `hosted.toml`, and call it as in
+  the bounds and the task, and call it as in
   [another repository](review.md#another-repository).
 
 In each other caller, replace `uses: ./.github/workflows/agentic-job.yml` with

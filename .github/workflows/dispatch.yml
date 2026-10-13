@@ -1,4 +1,4 @@
-# Copy this file and .github/agentic-job/{dispatch,hosted}.toml at the same paths.
+# Copy this file and .github/agentic-job/dispatch.toml at the same paths.
 # Pin the reusable call to this source commit; see docs/dispatch.md.
 name: dispatch
 run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}
@@ -181,7 +181,10 @@ jobs:
       agent-config-repo: ${{ (needs.target.outputs.agent == 'opencode' || needs.target.outputs.agent == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
       agent-config-path: ${{ (needs.target.outputs.agent == 'opencode' || needs.target.outputs.agent == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       agent-runner: ${{ inputs.scripted && '"ubuntu-26.04"' || vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
-      config: ${{ inputs.scripted && '.github/agentic-job/hosted.toml' || vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
+      # The caller's runner configuration, else this repository's own for
+      # hosted ubuntu-26.04 at the pinned commit: policy.yml checks this
+      # source out at .agentic-job-source, so no caller keeps a copy of it.
+      config: ${{ !inputs.scripted && vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}
       fake-profile: ${{ needs.target.outputs.agent == 'fake' && ((inputs.kind == 'triage' || inputs.kind == 'research') && 'comment' || (inputs.kind == 'fix' && 'implement' || inputs.kind)) || '' }}
       max-requests: ${{ needs.target.outputs.agent == 'fake' && '0' || '150' }}
       review: ${{ inputs.kind == 'review' }}

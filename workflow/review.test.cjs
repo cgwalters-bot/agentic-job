@@ -370,3 +370,30 @@ test('refused event reviews update one author-owned bounded status comment', () 
   assert.match(refusal, /run: node .agentic-job-source\/workflow\/review.cjs refusal/);
   assert.match(refusal, /group: agentic-job-status-/);
 });
+
+// A caller sets AGENT_CONFIG only to override: without it, review and
+// dispatch read this repository's hosted.toml at the called commit, from
+// the checkout policy.yml makes of its own source, and no caller copies it.
+test('review and dispatch default to this source\'s hosted.toml', () => {
+  const read = file => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const source = '.agentic-job-source/';
+  const hosted = `${source}.github/agentic-job/hosted.toml`;
+  assert.ok(fs.statSync(path.join(__dirname, '..', hosted.slice(source.length))).isFile());
+  // In the policy job, before the step that reads it.
+  const policy = read('.github/workflows/policy.yml').split('\n  policy:\n')[1].split('- name: Write the configuration')[0];
+  assert.match(policy,
+    /\n          repository: \$\{\{ job\.workflow_repository \}\}\n          ref: \$\{\{ job\.workflow_sha \}\}\n          path: \.agentic-job-source\n/);
+  // dispatch.yml's goes through agentic-job.yml unchanged.
+  assert.match(read('.github/workflows/agentic-job.yml'), /^      config: \$\{\{ inputs\.config \}\}$/m);
+  for (const file of ['review.yml', 'dispatch.yml']) {
+    const expression = read(`.github/workflows/${file}`).match(/^      config: \$\{\{ (.+) \}\}$/m)?.[1];
+    assert.ok(expression, file);
+    const value = Function('inputs', 'vars', `return ${expression}`);
+    for (const scripted of [false, true]) {
+      assert.equal(value({ scripted }, {}), hosted, file);
+      assert.equal(value({ scripted }, { AGENT_CONFIG: '' }), hosted, file);
+      assert.equal(value({ scripted }, { AGENT_CONFIG: 'own.toml' }),
+        file === 'dispatch.yml' && scripted ? hosted : 'own.toml', file);
+    }
+  }
+});

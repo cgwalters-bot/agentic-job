@@ -101,6 +101,14 @@ test('event caller copy lists include every referenced companion file', () => {
       // as a path.
       const companions = value.startsWith('${{') ? [...value.matchAll(/'([^'/]*\/[^']*)'/g)].map(([, file]) => file) : [value];
       for (const companion of companions) {
+        // A file of policy.yml's own source checkout comes with the pinned
+        // commit: it must exist here, and nobody copies it.
+        const own = companion.match(/^\.agentic-job-source\/(.+)$/)?.[1];
+        if (own) {
+          assert.ok(fs.statSync(own).isFile(), `missing source file ${own}`);
+          assert.ok(!list.includes(`](../${own})`), `${workflow} copy list names ${own}, which comes with the pin`);
+          continue;
+        }
         assert.ok(fs.statSync(companion).isFile(), `missing companion ${companion}`);
         assert.ok(list.includes(`](../${companion})`), `${workflow} copy list omits ${companion}`);
       }
