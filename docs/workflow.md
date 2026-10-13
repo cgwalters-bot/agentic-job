@@ -646,10 +646,10 @@ the following. Hosted Ubuntu alone cannot reach a private proxy.
   `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
   virtual environment before hardening; it does not use the `npm` input.
   Set `model` to the broker's bare Mistral model name (for example
-  `devstral-small-latest`) and `inference-url` to the broker root, **not**
+  `devstral-small-latest`; optional with a configuration repository, below) and `inference-url` to the broker root, **not**
   its `/mistral/v1` route. Keep `inference-register: github-oidc` and set
   `inference-audience` as for the other real agents. No Mistral key is
-  passed to the job. Vibe is opt-in, accepts no `agent-config-repo`, and
+  passed to the job. Vibe is opt-in and
   requires `max-requests`: an arbitrary broker model has no authoritative
   price in Vibe, so its local `budget` cannot be the only cap. The existing
   timeout, request-count and subagent limits still apply.
@@ -680,9 +680,13 @@ Claude reads `CLAUDE.md` from a configuration repository; it does not use
 opencode's files. Its `model` input is optional in the reusable workflow
 and selects the adapter's model when supplied. The shipped dispatch
 caller's preflight still requires `AGENT_MODEL` and `AGENT_RUNNER` for
-both real agents. Dispatch forwards configuration repository/path only
-for opencode; a direct or composed policy call can also select the ref
-or Claude's configuration repository.
+all real agents. Dispatch and review forward configuration repository/path
+only for opencode and Vibe; a direct or composed policy call can also
+select the ref or Claude's configuration repository.
+
+Vibe reads `config.toml` and takes only its models and `active_model`;
+with it, `model` is optional in a direct call and still wins when supplied. See
+[the harness](harness.md#agents) for what is taken and why.
 
 ### What a caller provides
 

@@ -177,7 +177,7 @@ needs these repository or organization variables, and no secret:
 | `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and the audience of the run's identity token |
 | `AGENT_RUNNER` | optional, a runner label as JSON |
 | `AGENT_CONFIG` | optional, the runner's configuration file; default `.github/agentic-job/hosted.toml`, written for `ubuntu-26.04` |
-| `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's configuration is; passed only when `AGENT` is `opencode`, as in `dispatch.yml` |
+| `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the status job's

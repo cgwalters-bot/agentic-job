@@ -178,8 +178,8 @@ jobs:
       allow: .github/agentic-job/dispatch.toml
       agent: ${{ needs.target.outputs.agent }}
       model: ${{ needs.target.outputs.agent != 'fake' && vars.AGENT_MODEL || '' }}
-      agent-config-repo: ${{ needs.target.outputs.agent == 'opencode' && vars.AGENT_CONFIG_REPO || '' }}
-      agent-config-path: ${{ needs.target.outputs.agent == 'opencode' && vars.AGENT_CONFIG_PATH || '' }}
+      agent-config-repo: ${{ (needs.target.outputs.agent == 'opencode' || needs.target.outputs.agent == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
+      agent-config-path: ${{ (needs.target.outputs.agent == 'opencode' || needs.target.outputs.agent == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       agent-runner: ${{ inputs.scripted && '"ubuntu-26.04"' || vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
       config: ${{ inputs.scripted && '.github/agentic-job/hosted.toml' || vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
       fake-profile: ${{ needs.target.outputs.agent == 'fake' && ((inputs.kind == 'triage' || inputs.kind == 'research') && 'comment' || (inputs.kind == 'fix' && 'implement' || inputs.kind)) || '' }}

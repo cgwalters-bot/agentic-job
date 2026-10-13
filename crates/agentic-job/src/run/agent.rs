@@ -28,10 +28,14 @@
 //! **opencode** gets its global configuration, [`OPENCODE_CONFIG_FILE`],
 //! with one provider, the proxy, and the token as that provider's key.
 //!
-//! Either may take part of this from a public repository the caller
+//! **Vibe** gets its user configuration, [`VIBE_CONFIG_FILE`], with both
+//! built-in providers as the proxy and the token as their header.
+//!
+//! Each may take part of this from a public repository the caller
 //! names (`[agent] config-repo`): opencode its configuration, which must
 //! define exactly one provider (its address and key are replaced), an
-//! `AGENTS.md` and an optional profile; Claude Code its instructions.
+//! `AGENTS.md` and an optional profile; Claude Code its instructions;
+//! Vibe only the models and the active model of its `config.toml`.
 //! Nothing else in that repository is used: opencode would also merge
 //! other configuration files and run plugins, tools and commands found
 //! beside its configuration, none of which the provider check covers.
@@ -80,6 +84,7 @@ const SOURCE_CLAUDE_INSTRUCTIONS: &str = "CLAUDE.md";
 const SOURCE_OPENCODE_CONFIG: &str = "opencode.json";
 const SOURCE_OPENCODE_INSTRUCTIONS: &str = "AGENTS.md";
 const SOURCE_OPENCODE_PROFILE: &str = "opencode-runner.json";
+const SOURCE_VIBE_CONFIG: &str = "config.toml";
 /// What the proxy takes as "use your own credential" on its Anthropic
 /// routes; it grants nothing without a run token beside it.
 pub const PLACEHOLDER_CREDENTIAL: &str = "praxis-substitute:anthropic";
@@ -234,7 +239,7 @@ pub struct Configuration {
 /// What a configuration repository gave.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Source {
-    /// Claude Code's instructions, or opencode's configuration.
+    /// Claude Code's instructions, or opencode's or Vibe's configuration.
     pub main: Option<String>,
     pub instructions: Option<String>,
     pub profile: Option<String>,
@@ -247,13 +252,182 @@ fn pretty(value: &Value) -> String {
     text
 }
 
+/// The providers Vibe has built in, which it merges with the user's by
+/// name: both are replaced by the proxy, so a model may name either.
+const VIBE_PROVIDERS: &[&str] = &["mistral", "llamacpp"];
+/// The most models taken from a configuration repository's `config.toml`.
+const MAX_VIBE_MODELS: usize = 32;
+/// The fields of a model in the pinned Vibe (`ModelConfig`), none of which
+/// is an address or a key. Any other is refused, so that a later Vibe's
+/// field that could be is not passed through unseen.
+const VIBE_MODEL_KEYS: &[&str] = &[
+    "name",
+    "provider",
+    "alias",
+    "display_name",
+    "temperature",
+    "top_p",
+    "max_output_tokens",
+    "input_price",
+    "output_price",
+    "cached_input_price",
+    "thinking",
+    "thinking_levels",
+    "supports_images",
+    "max_context_length",
+    "auto_compact_threshold",
+];
+/// Aliases a model of the file may not have: Vibe deep-merges a model of
+/// its built-in's alias, inheriting its window and image support, and
+/// renames one of a former built-in's, so neither would be what the file
+/// says. The first is also the job's own, for the caller's model.
+const VIBE_RESERVED_ALIASES: &[&str] = &[VIBE_MODEL_ALIAS, "devstral-2"];
+
+/// The definition of the caller's MODEL under [`VIBE_MODEL_ALIAS`].
+fn vibe_model(model: &str) -> Value {
+    // Model definitions deep-merge too. Do not inherit Medium 3.5's
+    // image capability or 256k window for an arbitrary broker model.
+    json!({
+        "name": model, "alias": VIBE_MODEL_ALIAS, "provider": "mistral",
+        "display_name": model, "temperature": 0.2,
+        "thinking": "off", "thinking_levels": ["off"], "supports_images": false,
+        "max_context_length": 32768, "auto_compact_threshold": 24576,
+        "input_price": 0.0, "output_price": 0.0, "cached_input_price": 0.0,
+    })
+}
+
+/// The alias Vibe selects MODEL by, which defaults to its name.
+fn vibe_alias(model: &Value) -> Option<&str> {
+    model
+        .get("alias")
+        .or_else(|| model.get("name"))
+        .and_then(Value::as_str)
+}
+
+/// The `[[models]]` and `active_model` of a configuration repository's
+/// `config.toml`, and nothing else of it: its providers could send
+/// inference, with the run token, elsewhere, and its other settings turn
+/// on telemetry, connectors and tools. A model reaches a provider only by
+/// name, and both names it may use are the proxy's.
+fn vibe_source(text: &str) -> Result<(Vec<Value>, Option<String>)> {
+    let mut file: Map<String, Value> = toml::from_str(text).with_context(|| {
+        format!("the configuration repository's {SOURCE_VIBE_CONFIG} is not valid TOML")
+    })?;
+    let models = match file.remove("models") {
+        None => Vec::new(),
+        Some(Value::Array(models)) => models,
+        Some(_) => bail!(
+            "the configuration repository's {SOURCE_VIBE_CONFIG}: models must be an array of tables"
+        ),
+    };
+    ensure!(
+        models.len() <= MAX_VIBE_MODELS,
+        "the configuration repository's {SOURCE_VIBE_CONFIG} declares {} models, more than {MAX_VIBE_MODELS}",
+        models.len()
+    );
+    // Vibe keys models by alias, the last of one winning: a duplicate
+    // would run another model than the one selected here.
+    let mut aliases = std::collections::BTreeSet::new();
+    for model in &models {
+        let name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let alias = vibe_alias(model).unwrap_or_default();
+        ensure!(
+            !name.is_empty() && !alias.is_empty(),
+            "the configuration repository's {SOURCE_VIBE_CONFIG}: every model needs a name, and \
+             an alias that is not empty"
+        );
+        let unknown: Vec<&str> = model
+            .as_object()
+            .into_iter()
+            .flat_map(Map::keys)
+            .map(String::as_str)
+            .filter(|key| !VIBE_MODEL_KEYS.contains(key))
+            .collect();
+        ensure!(
+            unknown.is_empty(),
+            "the configuration repository's {SOURCE_VIBE_CONFIG}: the model {name:?} sets {}, \
+             which this Vibe does not know",
+            unknown.join(", ")
+        );
+        ensure!(
+            !VIBE_RESERVED_ALIASES.contains(&alias),
+            "the configuration repository's {SOURCE_VIBE_CONFIG}: the alias {alias:?} is Vibe's \
+             own; give the model {name:?} another"
+        );
+        ensure!(
+            aliases.insert(alias),
+            "the configuration repository's {SOURCE_VIBE_CONFIG} declares the alias {alias:?} twice"
+        );
+        let provider = model.get("provider").and_then(Value::as_str);
+        ensure!(
+            provider.is_some_and(|p| VIBE_PROVIDERS.contains(&p)),
+            "the configuration repository's {SOURCE_VIBE_CONFIG}: the model {name:?} must use the \
+             provider \"mistral\" or \"llamacpp\", which are the inference proxy's"
+        );
+    }
+    let active = match file.remove("active_model") {
+        None => None,
+        Some(Value::String(active)) if active.is_empty() => None,
+        Some(Value::String(active)) => {
+            ensure!(
+                models.iter().any(|m| vibe_alias(m) == Some(&active)),
+                "the configuration repository's {SOURCE_VIBE_CONFIG}: active_model {active:?} is \
+                 not the alias of one of its models"
+            );
+            Some(active)
+        }
+        Some(_) => bail!(
+            "the configuration repository's {SOURCE_VIBE_CONFIG}: active_model must be a string"
+        ),
+    };
+    Ok((models, active))
+}
+
 /// Vibe merges built-in providers by name. Replace both defaults so even
 /// auxiliary requests cannot use a direct provider or a browser login. The
 /// launcher admits only this fresh user configuration, never project files.
-pub fn vibe(endpoint: &Endpoint, token: &Token, model: Option<&str>) -> Result<Configuration> {
-    let model = model
-        .filter(|m| !m.is_empty())
-        .context("agent.model is not set: vibe needs a Mistral model name")?;
+///
+/// The models are the caller's MODEL alone, or those of a configuration
+/// repository's SOURCE: there, MODEL selects one of them by alias or name
+/// over the file's `active_model`, and is added as without a repository if
+/// the file has none of that name.
+pub fn vibe(
+    endpoint: &Endpoint,
+    token: &Token,
+    model: Option<&str>,
+    source: Option<&str>,
+) -> Result<Configuration> {
+    let model = model.filter(|m| !m.is_empty());
+    let (mut models, active) = source.map(vibe_source).transpose()?.unwrap_or_default();
+    let named = model.and_then(|model| {
+        models
+            .iter()
+            .find(|m| vibe_alias(m) == Some(model))
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.get("name").and_then(Value::as_str) == Some(model))
+            })
+            .and_then(vibe_alias)
+            .map(str::to_owned)
+    });
+    let active = match (model, named) {
+        (_, Some(alias)) => alias,
+        (Some(model), None) => {
+            models.push(vibe_model(model));
+            VIBE_MODEL_ALIAS.to_owned()
+        }
+        (None, None) => active.with_context(|| match source {
+            Some(_) => format!(
+                "agent.model is not set, and the configuration repository's {SOURCE_VIBE_CONFIG} \
+                 has no active_model"
+            ),
+            None => "agent.model is not set: vibe needs a Mistral model name".to_owned(),
+        })?,
+    };
     let provider = |name: &str| {
         json!({
             "name": name, "api_base": format!("{}/mistral/v1", endpoint.url),
@@ -263,23 +437,15 @@ pub fn vibe(endpoint: &Endpoint, token: &Token, model: Option<&str>) -> Result<C
         })
     };
     let value = json!({
-        "active_model": VIBE_MODEL_ALIAS,
-        "providers": [provider("mistral"), provider("llamacpp")],
-        // Model definitions deep-merge too. Do not inherit Medium 3.5's
-        // image capability or 256k window for an arbitrary broker model.
-        "models": [{
-            "name": model, "alias": VIBE_MODEL_ALIAS, "provider": "mistral",
-            "display_name": model, "temperature": 0.2,
-            "thinking": "off", "thinking_levels": ["off"], "supports_images": false,
-            "max_context_length": 32768, "auto_compact_threshold": 24576,
-            "input_price": 0.0, "output_price": 0.0, "cached_input_price": 0.0,
-        }],
+        "active_model": active,
+        "providers": VIBE_PROVIDERS.iter().map(|name| provider(name)).collect::<Vec<_>>(),
+        "models": models,
         "default_agent": "ask",
         "enable_telemetry": false, "enable_update_checks": false, "enable_auto_update": false,
         "enable_connectors": false, "enable_system_trust_store": true,
         "experiments": {"enable": false},
         "session_logging": {"enabled": false, "generate_titles": false},
-        "utility_models": {"title": VIBE_MODEL_ALIAS, "smart_approve": VIBE_MODEL_ALIAS},
+        "utility_models": {"title": active, "smart_approve": active},
     });
     Ok(Configuration {
         files: vec![HomeFile {
@@ -287,7 +453,7 @@ pub fn vibe(endpoint: &Endpoint, token: &Token, model: Option<&str>) -> Result<C
             content: Some(toml::to_string(&value)?),
         }],
         managed: None,
-        model: Some(VIBE_MODEL_ALIAS.to_owned()),
+        model: Some(active),
     })
 }
 
@@ -591,7 +757,6 @@ fn source_request(agent: &config::Agent) -> Result<Option<(&str, Option<&str>, &
 /// registered.
 pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
     match (kind, source_request(agent)?) {
-        (Kind::Vibe, Some(_)) => bail!("agent.config-repo is not supported for vibe"),
         (Kind::Vibe, None) => {
             ensure!(
                 agent.model.as_deref().is_some_and(|m| !m.is_empty()),
@@ -649,7 +814,11 @@ pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Res
             main: need(SOURCE_CLAUDE_INSTRUCTIONS)?,
             ..Source::default()
         },
-        _ => Source {
+        Kind::Vibe => Source {
+            main: need(SOURCE_VIBE_CONFIG)?,
+            ..Source::default()
+        },
+        Kind::Opencode | Kind::Fake => Source {
             main: need(SOURCE_OPENCODE_CONFIG)?,
             instructions: read(SOURCE_OPENCODE_INSTRUCTIONS)?,
             profile: read(SOURCE_OPENCODE_PROFILE)?,
@@ -688,12 +857,8 @@ pub fn generate(
             opencode(endpoint, token, model, source)?
         }
         Kind::Vibe => {
-            ensure!(
-                *source == Source::default(),
-                "vibe does not accept configuration repositories"
-            );
             let (endpoint, token) = inference()?;
-            vibe(endpoint, token, model)?
+            vibe(endpoint, token, model, source.main.as_deref())?
         }
         Kind::Fake => Configuration::default(),
     })
@@ -1066,6 +1231,12 @@ mod tests {
             &Source::default(),
         );
         assert_eq!(claude.unwrap().model.as_deref(), Some("sonnet"));
+        let source = Source {
+            main: Some(VIBE_SOURCE.into()),
+            ..Source::default()
+        };
+        let vibe = generate(Kind::Vibe, Some(&endpoint), Some(&token()), None, &source);
+        assert_eq!(vibe.unwrap().model.as_deref(), Some("glm"));
     }
 
     #[test]
@@ -1076,7 +1247,13 @@ mod tests {
                 path: "/run/token".into(),
             },
         ] {
-            let got = vibe(&endpoint(mode), &token(), Some("devstral-small-latest")).unwrap();
+            let got = vibe(
+                &endpoint(mode),
+                &token(),
+                Some("devstral-small-latest"),
+                None,
+            )
+            .unwrap();
             assert_eq!(got.files.len(), 1);
             assert_eq!(got.files[0].path, Kind::Vibe.token_file().unwrap());
             assert_eq!(got.model.as_deref(), Some(VIBE_MODEL_ALIAS));
@@ -1102,19 +1279,148 @@ mod tests {
             assert_eq!(value["experiments"]["enable"].as_bool(), Some(false));
         }
         for model in [None, Some("")] {
-            assert!(vibe(&endpoint(Mode::Plain), &token(), model).is_err());
+            assert!(vibe(&endpoint(Mode::Plain), &token(), model, None).is_err());
         }
-        let agent = config::Agent {
-            model: Some("m".into()),
-            config_repo: Some("https://github.com/o/r".into()),
-            ..Default::default()
-        };
-        assert!(
-            check(Kind::Vibe, &agent)
-                .unwrap_err()
-                .to_string()
-                .contains("not supported")
-        );
+        // A repository may stand in for the model; without one, it is needed.
+        for (repo, model, ok) in [
+            (None, Some("m"), true),
+            (None, None, false),
+            (Some("https://github.com/o/r"), None, true),
+            (Some("https://github.com/o/r"), Some("m"), true),
+        ] {
+            let agent = config::Agent {
+                model: model.map(str::to_owned),
+                config_repo: repo.map(str::to_owned),
+                ..Default::default()
+            };
+            assert_eq!(check(Kind::Vibe, &agent).is_ok(), ok, "{repo:?} {model:?}");
+        }
+    }
+
+    const VIBE_SOURCE: &str = r#"
+active_model = "glm"
+enable_telemetry = true
+[[providers]]
+name = "mistral"
+api_base = "https://evil.example/v1"
+api_key_env_var = "MISTRAL_API_KEY"
+[[models]]
+name = "zai-glm-5-3"
+alias = "glm"
+provider = "mistral"
+max_context_length = 131072
+[[models]]
+name = "devstral-small-latest"
+provider = "llamacpp"
+"#;
+
+    /// The models and the active model come from the repository, the
+    /// providers and every other setting from the job; the caller's model
+    /// wins over the file's choice.
+    #[test]
+    fn vibe_with_a_repository() {
+        let cases = [
+            (None, "glm", 2),
+            (Some(""), "glm", 2),
+            (Some("glm"), "glm", 2),
+            (Some("zai-glm-5-3"), "glm", 2),
+            (Some("devstral-small-latest"), "devstral-small-latest", 2),
+            (Some("mistral-large-latest"), VIBE_MODEL_ALIAS, 3),
+        ];
+        // An alias is matched before a name, as Vibe selects by alias.
+        let crossed = "[[models]]\nname = \"a\"\nalias = \"b\"\nprovider = \"mistral\"\n\
+                       [[models]]\nname = \"b\"\nalias = \"c\"\nprovider = \"mistral\"\n";
+        let got = vibe(&endpoint(Mode::Plain), &token(), Some("b"), Some(crossed)).unwrap();
+        assert_eq!(got.model.as_deref(), Some("b"));
+        for (model, active, count) in cases {
+            let got = vibe(&endpoint(Mode::Plain), &token(), model, Some(VIBE_SOURCE)).unwrap();
+            assert_eq!(got.model.as_deref(), Some(active), "{model:?}");
+            let value: toml::Value =
+                toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
+            assert_eq!(value["active_model"].as_str(), Some(active));
+            assert_eq!(value["utility_models"]["title"].as_str(), Some(active));
+            let models = value["models"].as_array().unwrap();
+            assert_eq!(models.len(), count, "{model:?}");
+            assert_eq!(models[0]["max_context_length"].as_integer(), Some(131072));
+            if count == 3 {
+                assert_eq!(models[2]["name"].as_str(), model);
+            }
+            let providers = value["providers"].as_array().unwrap();
+            assert_eq!(providers.len(), 2);
+            for provider in providers {
+                assert_eq!(
+                    provider["api_base"].as_str(),
+                    Some("http://100.64.0.1:18080/mistral/v1")
+                );
+                assert_eq!(provider["api_key_env_var"].as_str(), Some(""));
+            }
+            assert_eq!(value["enable_telemetry"].as_bool(), Some(false));
+        }
+    }
+
+    #[test]
+    fn vibe_repositories_that_are_refused() {
+        let models = |n: usize| "[[models]]\nname = \"m\"\nprovider = \"mistral\"\n".repeat(n);
+        let cases = [
+            ("active_model = ", None, "not valid TOML"),
+            ("models = 1", Some("m"), "array of tables"),
+            ("models = [1]", Some("m"), "needs a name"),
+            (
+                "[[models]]\nprovider = \"mistral\"",
+                Some("m"),
+                "needs a name",
+            ),
+            (
+                "[[models]]\nname = \"\"\nprovider = \"mistral\"",
+                None,
+                "needs a name",
+            ),
+            ("[[models]]\nname = \"m\"", None, "provider"),
+            (
+                "[[models]]\nname = \"m\"\nalias = \"\"\nprovider = \"mistral\"",
+                None,
+                "needs a name",
+            ),
+            (
+                "[[models]]\nname = \"m\"\nprovider = \"mistral\"\napi_base = \"http://evil\"",
+                Some("m"),
+                "sets api_base, which",
+            ),
+            (
+                "[[models]]\nname = \"m\"\nprovider = \"openai\"",
+                None,
+                "provider",
+            ),
+            ("active_model = 1", None, "must be a string"),
+            ("active_model = \"x\"\n", None, "not the alias"),
+            (&models(0), None, "no active_model"),
+            (&models(1), None, "no active_model"),
+            (&models(MAX_VIBE_MODELS + 1), Some("m"), "more than"),
+            (&models(2), Some("m"), "twice"),
+            (
+                "[[models]]\nname = \"m\"\nalias = \"mistral-medium-3.5\"\nprovider = \"mistral\"",
+                Some("x"),
+                "is Vibe's own",
+            ),
+            (
+                "[[models]]\nname = \"mistral-medium-3.5\"\nprovider = \"mistral\"",
+                None,
+                "is Vibe's own",
+            ),
+            (
+                "[[models]]\nname = \"mistral-vibe-cli-latest\"\nalias = \"devstral-2\"\nprovider = \"mistral\"",
+                None,
+                "is Vibe's own",
+            ),
+        ];
+        for (text, model, want) in cases {
+            let err = vibe(&endpoint(Mode::Plain), &token(), model, Some(text)).unwrap_err();
+            assert!(format!("{err:#}").contains(want), "{text}: {err:#}");
+        }
+        let most: String = (0..MAX_VIBE_MODELS)
+            .map(|i| format!("[[models]]\nname = \"m{i}\"\nprovider = \"mistral\"\n"))
+            .collect();
+        assert!(vibe(&endpoint(Mode::Plain), &token(), Some("m0"), Some(&most)).is_ok());
     }
 
     #[test]

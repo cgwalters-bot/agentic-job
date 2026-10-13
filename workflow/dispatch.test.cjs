@@ -141,17 +141,24 @@ test('real agent preflight names all missing deployment variables together', asy
     /a scripted run is given none, so it cannot implement, fix or write to another repository\): APPLY_ENVIRONMENT$/);
 });
 
-test('opencode configuration variables do not affect other agents', () => {
-  for (const [input, variable] of [
-    ['agent-config-repo', 'AGENT_CONFIG_REPO'], ['agent-config-path', 'AGENT_CONFIG_PATH'],
+test('agent configuration variables reach only opencode and vibe', () => {
+  const review = fs.readFileSync(path.join(root, '.github/workflows/review.yml'), 'utf8');
+  for (const [text, context] of [
+    [workflow, agent => ({ needs: { target: { outputs: { agent } } } })],
+    [review, agent => ({ vars: { AGENT: agent } })],
   ]) {
-    const expression = workflow.match(new RegExp(`^      ${input}: \\$\\{\\{ (.+) \\}\\}$`, 'm'))?.[1];
-    assert.ok(expression, input);
-    const value = Function('needs', 'vars', `return ${expression}`);
-    for (const agent of ['fake', 'claude', 'opencode', 'vibe']) {
-      for (const config of ['', 'operator-config']) {
-        assert.equal(value({ target: { outputs: { agent } } }, { [variable]: config }),
-          agent === 'opencode' ? config : '');
+    for (const [input, variable] of [
+      ['agent-config-repo', 'AGENT_CONFIG_REPO'], ['agent-config-path', 'AGENT_CONFIG_PATH'],
+    ]) {
+      const expression = text.match(new RegExp(`^      ${input}: \\$\\{\\{ (.+) \\}\\}$`, 'm'))?.[1];
+      assert.ok(expression, input);
+      const value = Function('needs', 'vars', `return ${expression}`);
+      for (const agent of ['fake', 'claude', 'opencode', 'vibe']) {
+        for (const config of ['', 'operator-config']) {
+          const { needs = {}, vars = {} } = context(agent);
+          assert.equal(value(needs, { ...vars, [variable]: config }),
+            ['opencode', 'vibe'].includes(agent) ? config : '', `${input} ${agent}`);
+        }
       }
     }
   }

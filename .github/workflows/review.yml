@@ -66,10 +66,10 @@ jobs:
       # a scripted agent would post a verdict nobody made.
       agent: ${{ vars.AGENT }}
       model: ${{ vars.AGENT_MODEL }}
-      # Only opencode reads an instructions repository, as in dispatch.yml:
-      # passed to Claude, it would demand Claude's file there.
-      agent-config-repo: ${{ vars.AGENT == 'opencode' && vars.AGENT_CONFIG_REPO || '' }}
-      agent-config-path: ${{ vars.AGENT == 'opencode' && vars.AGENT_CONFIG_PATH || '' }}
+      # Only opencode and Vibe read a configuration repository, as in
+      # dispatch.yml: passed to Claude, it would demand Claude's file there.
+      agent-config-repo: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
+      agent-config-path: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       inference-url: ${{ vars.INFERENCE_URL }}
       inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       # What one review may spend, stated here rather than inherited: model

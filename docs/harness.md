@@ -54,9 +54,28 @@ source and isolated Python imports: `.vibe/config.toml`, project profiles
 and checkout modules cannot redirect inference. Both built-in provider
 names are replaced with the broker's `/mistral/v1` chat-completions route;
 the caller's model replaces the built-in model under a fixed session alias.
-Configuration repositories and mid-turn notices are not supported. The
-broker model uses text-only tools and a conservative 32k context window
-with compaction at 24k, rather than inheriting Medium 3.5's capabilities.
+Mid-turn notices are not supported. That broker model uses text-only tools
+and a conservative 32k context window with compaction at 24k, rather than
+inheriting Medium 3.5's capabilities.
+
+A configuration repository (`agent-config-repo`, `agent-config-path`) may
+instead declare the models, in its `config.toml`. Only its `[[models]]`
+(at most 32) and `active_model`, the alias of one of them, are taken; each
+model's `provider` must be `mistral` or `llamacpp`, the two names the job
+writes as the broker, and a model may set only the fields of the pinned
+Vibe's model definition, none of them an address or a key, under an alias
+that is not Vibe's own (`mistral-medium-3.5`, `devstral-2`), which Vibe
+would merge with its built-in or rename. The file's
+providers and every other setting are ignored: they could send inference
+and the run token elsewhere, or turn on telemetry and connectors. The file
+holds no key. Its models' window, compaction, thinking and output settings
+apply as written; only `max-requests` bounds what they spend. A model the
+caller names still wins over `active_model`: it selects the declared model
+of that alias, else of that name, or, if none is declared, is added as
+above. Dispatch and review always pass `AGENT_MODEL`, so there the file
+only declares models. Vibe keeps its built-in model beside the file's, on
+the same broker provider, where it may serve as the image fallback of a
+text-only active model.
 The run token lives only in the private generated TOML, as an Authorization
 header, with no provider key or browser login. Telemetry, experiments,
 connectors and update checks are disabled. Instructions are pointed out

@@ -23,8 +23,85 @@ fn pinned_vibe_acp() {
         .unwrap();
     assert!(version.status.success());
     assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), "2.26.1");
+    repository_models(&python);
     for handback in [false, true] {
         run_vibe(&python, handback);
+    }
+}
+
+/// Models from a configuration repository's file, with its provider and
+/// telemetry ignored, are what Vibe resolves, and the caller's model wins.
+fn repository_models(python: &str) {
+    let source = r#"
+active_model = "glm"
+enable_telemetry = true
+[[providers]]
+name = "mistral"
+api_base = "https://evil.example/v1"
+[[models]]
+name = "zai-glm-5-3"
+alias = "glm"
+provider = "mistral"
+[[models]]
+name = "devstral-small-latest"
+provider = "llamacpp"
+"#;
+    for (model, active, name) in [
+        (None, "glm", "zai-glm-5-3"),
+        (
+            Some("devstral-small-latest"),
+            "devstral-small-latest",
+            "devstral-small-latest",
+        ),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let config = agent::vibe(
+            &Endpoint {
+                url: "http://127.0.0.1:1".into(),
+                mode: Mode::Plain,
+                anthropic_url: String::new(),
+                openai_url: String::new(),
+            },
+            &Token::new("local-test-token-for-vibe").unwrap(),
+            model,
+            Some(source),
+        )
+        .unwrap();
+        assert_eq!(config.model.as_deref(), Some(active));
+        let path = home.path().join(config.files[0].path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, config.files[0].content.as_ref().unwrap()).unwrap();
+        let script = format!(
+            r#"
+import asyncio
+from vibe.core.paths import bootstrap_vibe_home
+from vibe.core.config.harness_files import init_harness_files_manager
+bootstrap_vibe_home()
+init_harness_files_manager("user")
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+config = asyncio.run(build_default_orchestrator()).config
+model = config.get_active_model()
+assert model.alias == "{active}" and model.name == "{name}", model
+assert not config.enable_telemetry
+# Vibe keeps its built-in model beside the file's; all are on the broker.
+assert set(config.models) == {{"glm", "devstral-small-latest", "mistral-medium-3.5"}}
+for m in config.models.values():
+    assert config.get_provider_for_model(m).api_base == "http://127.0.0.1:1/mistral/v1"
+"#
+        );
+        let out = std::process::Command::new(python)
+            .args(["-I", "-c", &script])
+            .env_clear()
+            .env("HOME", home.path())
+            .env("VIBE_HOME", home.path().join(agent::VIBE_HOME))
+            .current_dir(home.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
@@ -53,6 +130,7 @@ fn run_vibe(python: &str, handback: bool) {
         },
         &token,
         Some("broker-model"),
+        None,
     )
     .unwrap();
     for file in &config.files {

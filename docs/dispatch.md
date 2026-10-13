@@ -121,8 +121,9 @@ Set operator-controlled repository variables (not dispatch inputs):
   Ubuntu 26.04. The default is `.github/agentic-job/hosted.toml`; verify sandbox
   probes on your own image rather than copying hosted-image socket exceptions.
 - `AGENT_CONFIG_REPO`: optional public `OWNER/NAME` repository holding opencode's
-  configuration; `AGENT_CONFIG_PATH` selects its directory (empty for the root).
-  These are used only with `AGENT=opencode`, not in the scripted trial. They
+  or Vibe's configuration; `AGENT_CONFIG_PATH` selects its directory (empty for the root).
+  These are used only with `AGENT=opencode` or `AGENT=vibe`, not in the scripted trial;
+  a directory shared by both agents needs both `opencode.json` and `config.toml`. They
   select agent configuration, not the runner TOML named by `AGENT_CONFIG`.
 
 Preflight names **all** missing model, runner, URL and audience variables at
