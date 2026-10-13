@@ -212,18 +212,21 @@ test('scripted review reports the checked-out SHA', () => {
   }
 });
 
-test('automatic and dispatched review prompts request code analysis, not verification', () => {
+test('automatic and dispatched review prompts allow concern-specific experiments, not routine verification', () => {
   const standing = fs.readFileSync(path.join(__dirname, 'review.md'), 'utf8');
   const dispatch = fs.readFileSync(path.join(__dirname, '../.github/workflows/dispatch.yml'), 'utf8');
   const instructions = dispatch.match(/const instructions = profile === 'review'\s+\? '([^']+)'/)[1];
   for (const prompt of [standing, instructions]) {
     assert.match(prompt, /Read the diff and the code around it, and report findings only\./);
-    assert.match(prompt, /Do not build the project or run tests, formatters or linters\./);
+    assert.match(prompt, /Do not run existing test suites, formatters or linters to confirm they pass\./);
+    assert.match(prompt, /Build and run code when needed to test whether a specific concern holds,/);
+    assert.match(prompt, /for example whether a function can fail under a condition no test covers\./);
+    assert.match(prompt, /Report what you ran and what it showed, only for that concern\./);
     assert.match(prompt, /Do not look up or report CI results\./);
     assert.match(prompt, /Do not include a `?Verification:`? paragraph\./);
     assert.match(prompt, /exact admitted head SHA/);
     assert.match(prompt, /cite files and lines for actionable findings/);
-    assert.doesNotMatch(prompt, /Run relevant tests|what you verified or could not verify/);
+    assert.doesNotMatch(prompt, /Do not build|Run relevant tests|what you verified or could not verify/);
   }
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   assert.match(caller, /review-task: workflow\/review.md/);

@@ -59,8 +59,11 @@ does not make an approved change trusted.
 ## The verdict
 
 The reviewer reads the diff and surrounding code and reports findings. It does
-not build the project or run tests, formatters or linters, and does not look up
-or report CI results. The verdict has no `Verification:` paragraph. This applies
+not run existing test suites, formatters or linters to confirm they pass, and
+does not look up or report CI results. It may build and run code to test whether
+a specific concern holds, such as a function failing under a condition no test
+covers, and reports what it ran and what it showed only for that concern.
+The verdict has no `Verification:` paragraph. This applies
 to both `review.yml`'s standing task and dispatch's `review` profile. CI is a
 separate required check; the merge gate combines the checks, not the reviewer.
 These are review instructions, not an execution restriction enforced by the
