@@ -80,7 +80,10 @@ identity per repository.
 What a reusable workflow cannot do is constrain the jobs the caller
 writes beside it. That is why the job that applies the outputs, the only
 one with a write token, is inside agentic-job's workflow and not left to
-the caller ([safe-outputs.md](safe-outputs.md)).
+the caller ([safe-outputs.md](safe-outputs.md)). A checker over the
+caller's plain workflow files can constrain those jobs, run as a check
+from the base branch: [`agentic-job workflows check`](workflows-check.md)
+ports the rules above that do not depend on generated steps.
 
 ## The options that were not chosen
 

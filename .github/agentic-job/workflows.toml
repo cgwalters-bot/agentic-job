@@ -1,0 +1,30 @@
+# The workflow files `agentic-job workflows check` does not hold to its
+# rules, each with the reason (docs/workflows-check.md). An exempt file
+# runs with none of the guarantees the check gives, so each entry is
+# for a maintainer to land after reading its reason.
+#
+# This repository is the reusable workflow and secure-host's source, and
+# its own CI. Its files call them by local path, to test this revision,
+# where a caller names cgwalters-forge/agentic-job/...@COMMIT; or are the
+# reusable workflow's own jobs; or build, release and test the binaries.
+[exempt]
+"agentic-job.yml" = "The reusable workflow itself: its agent job runs secure-host from the policy-selected source checkout, and policy, check and apply run no untrusted step."
+"apply.yml" = "Part of the reusable workflow: the apply job, the only one with a write token, runs no untrusted step."
+"check.yml" = "Part of the reusable workflow: reads the agent's outputs as data, with a read-only token."
+"policy.yml" = "Part of the reusable workflow: decides admission and writes policy before any untrusted step."
+"review.yml" = "This repository's review runs: the reusable workflow's jobs, with an agent job of its own for its one privileged step, joining the inference tailnet."
+"dispatch.yml" = "Calls this revision's reusable workflow by local path; a copy in another repository pins it by commit."
+"example.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
+"example-command.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
+"example-compose.yml" = "Composes this revision's policy, check and apply workflows by local path to test them."
+"example-pull-request.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
+"example-schedule.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
+"example-secure-host.yml" = "Runs this revision's secure-host by local path, and probes runner-command injection with deprecated log commands."
+"ci.yml" = "This repository's CI: tests this revision's source, secure-host and reusable workflow, naming them by local path, and the host hardening itself."
+"build.yml" = "Builds this revision's binaries, for CI, release and pinning."
+"pin.yml" = "Publishes the release pin for a pushed main revision."
+"release.yml" = "Publishes released binaries for a pushed tag."
+"safe-outputs-probe.yml" = "Drives gh-aw's collector and handlers on a recorded artifact, by hand, with no agent and no untrusted step."
+"specs.yml" = "Model-checks this repository's specifications with a read-only token."
+"workflow-ingress.yml" = "Runs the base branch's analyzers on proposed workflow files as data."
+"world-write.yml" = "Called from CI: tests the world-write BPF loader on its own, on a hosted runner, with a read-only token."

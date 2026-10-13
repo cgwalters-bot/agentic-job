@@ -348,7 +348,10 @@ It secures what runs after it. A step before it runs with the runner's
 sudo, and nothing holds a job to the order: that is what a compiler
 would add ([compiler.md](compiler.md)), a fixed shape of
 job in which only the setup step has root. The reusable workflow has
-that shape by construction.
+that shape by construction. `agentic-job workflows check`
+([workflows-check.md](workflows-check.md)) refuses a job whose actions
+before this one are not on a short allowlist, but only for a repository
+that runs it.
 
 ## One trust level for the rest of the job
 

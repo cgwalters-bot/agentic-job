@@ -64,6 +64,11 @@ Until then [review](review.md) starts automatic reviews only for the owner,
 members and collaborators, and the broker's shared cap bounds spending.
 The offline audit command is already implemented.
 
+[`workflows check`](workflows-check.md) exists as a command
+([#508](https://github.com/cgwalters-forge/agentic-job/issues/508)); running
+it from the base branch as a required check, with the base branch's
+exemptions, and documenting it for callers is the next slice.
+
 Pushing to a pull request's branch
 ([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) is off in
 every shipped bounds file. Before one turns it on, a scripted `fix` case in CI's

@@ -523,7 +523,7 @@ jobs:
   e2e-full:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
-    permissions: &e2e-permissions
+    permissions:
       contents: read
       issues: write # add_comment
       pull-requests: write # the status comment and reaction on the pull request e2e-event is for
@@ -551,7 +551,12 @@ jobs:
   e2e-limit:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
-    permissions: *e2e-permissions
+    permissions:
+      contents: read
+      issues: write # add_comment
+      pull-requests: write # the status comment and reaction on the pull request e2e-event is for
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the agent job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-limit-${{ github.run_id }}
@@ -583,7 +588,12 @@ jobs:
   e2e-event:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
-    permissions: *e2e-permissions
+    permissions:
+      contents: read
+      issues: write # add_comment
+      pull-requests: write # the status comment and reaction on the pull request e2e-event is for
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the agent job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-event-${{ github.run_id }}

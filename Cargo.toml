@@ -33,6 +33,10 @@ toml = "1"
 # which is fetched over TLS. Blocking, and far smaller than a client on
 # hyper; rustls with ring builds for musl with a C compiler alone.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# `workflows check` reads workflow files through its events, so that it
+# builds the tree itself, bounded; no encoding detection, as GitHub reads
+# workflows as UTF-8.
+yaml-rust2 = { version = "0.13", default-features = false }
 zstd = { version = "0.13", default-features = false }
 
 [workspace.lints.rust]

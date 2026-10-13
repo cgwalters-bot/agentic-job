@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::compose;
 use crate::exit::Exit;
-use crate::{audit, check, event, policy, run, sandbox};
+use crate::{audit, check, event, policy, run, sandbox, workflows};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentic-job", version, about, propagate_version = true)]
@@ -34,6 +34,9 @@ pub enum Command {
     Event(event::Args),
     /// Write a run's configuration from a file and settings given one at a time
     Config(compose::Args),
+    /// Check a repository's workflow files for the job shape that keeps untrusted steps sandboxed
+    #[command(subcommand)]
+    Workflows(workflows::Command),
     /// Become the agent, as the sandbox user: what `run` has the session start
     #[command(name = run::launch::COMMAND, hide = true)]
     LaunchAgent(run::launch::Args),
@@ -52,6 +55,7 @@ impl Command {
             Self::Check(args) => check::run(args),
             Self::Event(args) => event::run(args),
             Self::Config(args) => compose::run(args),
+            Self::Workflows(command) => command.run(),
             Self::LaunchAgent(args) => run::launch::run(args),
             Self::Helper(op) => sandbox::helper::run(op),
         }

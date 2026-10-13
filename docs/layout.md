@@ -21,6 +21,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `event/` | Event admission, run guards and fenced task context |
 | `check/` | Output policy and strict mail-patch parsing |
 | `audit.rs` | Offline artifact inspection and finding codes |
+| `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `files.rs`, `redact.rs` | Bounded file reads and secret redaction |
 | `sandbox/setup.rs` | Host preparation |
 | `sandbox/check/` | Host, runner-lock and network probes |

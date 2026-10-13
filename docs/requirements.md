@@ -101,7 +101,9 @@ user could do.
 External actions in the workflow are pinned by commit. The binary is
 fetched by a checksum at that commit when the release source digest
 matches, or built from that source. Pinning is maintained by review;
-there is no compiler enforcing it on caller workflows. Downloads an
+there is no compiler enforcing it on caller workflows.
+[`workflows check`](workflows-check.md) refuses unpinned actions in
+a repository that runs it. Downloads an
 action performs require separate review.
 
 ### R10. What the guarantees depend on

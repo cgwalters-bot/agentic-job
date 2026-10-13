@@ -18,5 +18,6 @@ pub mod redact;
 pub mod run;
 pub mod sandbox;
 pub mod session;
+pub mod workflows;
 
 mod workflow_commands;
