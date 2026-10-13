@@ -76,8 +76,22 @@ earlier format still ask for, counts as CHANGES; the earlier `REASON:` line is
 no longer required. The check job refuses anything else, and any
 field that would retarget the comment. A redundant `item_number` equal to the
 fixed pull request number is accepted; other routing fields remain refused.
-The prompts ask for only `type` and `body`. When check refuses the output or
-apply fails to post it, the existing failure status says
+The prompts ask for only `type` and `body`.
+
+Each finding is tagged blocker, important or nit, and only a blocker earns
+CHANGES: a finding that makes the change wrong for its main purpose, loses
+data, or opens a security hole with a concrete path the reviewer can state,
+such as what a weakened permission, gate, bound, pin, token placement or
+trigger now lets someone do. Both prompts ask for every finding in one pass
+and, in an approving review, for important findings and nits under
+"Follow-ups" with file and line, for later pull requests; a fix for a blocker
+may take them along. Blocking on each new narrow finding cost a fix, CI and
+review run per finding, ten rounds on one pull request. Check does not read
+severities: refusing a mislabelled verdict would only lose its comment, and
+the status would fail as it does for CHANGES.
+
+When check refuses the output or apply fails to post it, the existing failure
+status says
 `The review did not post; see the workflow run` and links to that run.
 The `status` job then sets the commit
 status `review` on the reviewed head: `success` only for a checked APPROVE
@@ -241,7 +255,8 @@ check, verdict, apply and open pull requests at the head (`reviewStatus` and
 `reportStatus` against a fake API) and, by reading `review.yml`, which job
 holds which token, which authors start automatic reviews and what the status
 job runs. It also checks that both review prompts require code analysis without
-running checks or consulting CI, and that the review agent job has no project
+running checks or consulting CI, findings tagged blocker, important or nit and
+CHANGES only for a blocker, and that the review agent job has no project
 toolchain installation or build-cache restore. `node --test
 workflow/agent-actions.test.cjs` checks that the tailnet join is one pinned
 step of the agent job, between `prepare` and `secure-host`. In the crate,

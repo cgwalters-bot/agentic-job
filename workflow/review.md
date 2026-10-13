@@ -37,12 +37,21 @@ mistaken for a review of a newer push.
 Return exactly one safe output: add_comment on the triggering pull request,
 or noop if no useful review can be made. Set only type and body on add_comment;
 do not set item_number or other routing fields: the workflow fixes the target.
-The comment's first line starts with
-VERDICT: APPROVE when nothing blocks merging, or VERDICT: CHANGES when there is
-something actionable to fix, and may go on with a short reason. Keep that
-line to the one verdict: a first line that also names the other verdict (or
-REJECT next to APPROVE) is refused and the comment is lost. Then come the
-findings, most important first. Do not include a `Verification:` paragraph.
+Report every finding you can see in this one pass, not only the first.
+Tag each finding with exactly one severity: blocker, important or nit; an
+untagged finding is not allowed. A blocker makes the change wrong for its
+main purpose, loses data, or opens a security hole with a concrete path you
+can state, such as what a weakened permission, gate, bound, pin, token
+placement or trigger now lets someone do. Anything less is important or a nit.
+The comment's first line starts with VERDICT: CHANGES only when there is at
+least one blocker, and VERDICT: APPROVE otherwise, and may go on with a short
+reason. Keep that line to the one verdict: a first line that also names the
+other verdict (or REJECT next to APPROVE) is refused and the comment is lost.
+Then come the findings, most important first. In an approving review, list
+important findings and nits under a "Follow-ups" heading, each with its file
+and line, for later pull requests. When there is a blocker, the fix may take
+important findings and nits along.
+Do not include a `Verification:` paragraph.
 Skip praise and style nits a linter would catch.
 This verdict is only text, never a GitHub approval or merge authorization; an
 APPROVE sets the commit status `review` to success.
