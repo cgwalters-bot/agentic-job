@@ -113,7 +113,15 @@ test('only a single verdict comment on this PR or noop passes', () => {
     { type: 'add_comment', body: 'VERDICT: APPROVE', issue_number: 148 },
     { type: 'add_comment', body: 'VERDICT: APPROVE', pull_request_number: 148 },
   ]) assert.throws(() => check(item), undefined, JSON.stringify(item));
-  for (const key of ['item_number', 'pr', 'pr_number', 'repo', 'comment_id',
+  for (const item_number of [147, '147']) {
+    assert.equal(check({ type: 'add_comment', body: 'VERDICT: APPROVE', item_number }), 'APPROVE');
+  }
+  for (const item_number of [148, '148', null, false, {}, [147], '0147', '147\n',
+    'aw_other', 0, -1, 1.47, 9007199254740992]) {
+    assert.throws(() => check({ type: 'add_comment', body: 'VERDICT: APPROVE', item_number }),
+      /triggering pull request/, JSON.stringify(item_number));
+  }
+  for (const key of ['pr', 'pr_number', 'repo', 'comment_id',
     'reply_to_id', 'target', 'temporary_id']) {
     assert.throws(() => check({ type: 'add_comment',
       body: 'VERDICT: APPROVE', [key]: '147' }), undefined, key);
@@ -128,17 +136,18 @@ test('the review status maps each run to one state, only for the one open pull r
   const approved = { pull: '147', head, check: 'success', verdict: 'APPROVE', apply: 'success',
     url: 'https://github.com/o/r/pull/147#issuecomment-1' };
   const did = { state: 'failure', description: 'The review did not approve this commit' };
+  const notPosted = { state: 'failure', description: 'The review did not post; see the workflow run' };
   for (const [name, change, open, expected] of [
     ['approved', {}, [147], { state: 'success', description: 'The review approved this commit' }],
-    ['changes', { verdict: 'CHANGES', url: '' }, [147], { state: 'failure', description: 'The review asked for changes' }],
+    ['changes', { verdict: 'CHANGES' }, [147], { state: 'failure', description: 'The review asked for changes' }],
     ['noop', { verdict: '' }, [147], did],
-    ['check failed', { check: 'failure', verdict: '' }, [147], did],
-    ['check failed after the verdict', { check: 'failure' }, [147], did],
-    ['changes, check failed', { check: 'failure', verdict: 'CHANGES' }, [147], did],
-    ['check skipped', { check: 'skipped', verdict: '' }, [147], did],
-    ['apply failed', { apply: 'failure' }, [147], did],
-    ['apply skipped', { apply: 'skipped', url: '' }, [147], did],
-    ['no comment posted', { url: '' }, [147], did],
+    ['check failed', { check: 'failure', verdict: '' }, [147], notPosted],
+    ['check failed after the verdict', { check: 'failure' }, [147], notPosted],
+    ['changes, check failed', { check: 'failure', verdict: 'CHANGES' }, [147], notPosted],
+    ['check skipped', { check: 'skipped', verdict: '' }, [147], notPosted],
+    ['apply failed', { apply: 'failure' }, [147], notPosted],
+    ['apply skipped', { apply: 'skipped', url: '' }, [147], notPosted],
+    ['no comment posted', { url: '' }, [147], notPosted],
     ['no open pull request', {}, [], { skip: `No review status on ${head}: its open pull requests are none, not only #147` }],
     ['two open pull requests', {}, [147, 148], { skip: `No review status on ${head}: its open pull requests are 147, 148, not only #147` }],
     ['another pull request', {}, [148], { skip: `No review status on ${head}: its open pull requests are 148, not only #147` }],
@@ -168,6 +177,10 @@ test('the review status is posted only after the open pull requests are listed',
   assert.equal((await reportStatus(env, github, core)).state, 'success');
   assert.deepEqual(calls.posted, [{ owner: 'o', repo: 'r', sha: head, context: 'review',
     state: 'success', description: 'The review approved this commit', target_url: 'https://x/run' }]);
+  ({ calls, github, core } = fake([{ number: 147, head: { sha: head } }]));
+  await reportStatus({ ...env, CHECK_RESULT: 'failure', VERDICT: '', APPLY_RESULT: 'skipped', RESULT_URL: '' }, github, core);
+  assert.deepEqual(calls.posted, [{ owner: 'o', repo: 'r', sha: head, context: 'review',
+    state: 'failure', description: 'The review did not post; see the workflow run', target_url: 'https://x/run' }]);
   ({ calls, github, core } = fake([{ number: 147, head: { sha: head } }, { number: 148, head: { sha: head } }]));
   assert.ok((await reportStatus(env, github, core)).skip);
   assert.deepEqual(calls.posted, []);
@@ -216,6 +229,9 @@ test('automatic and dispatched review prompts allow concern-specific experiments
   const standing = fs.readFileSync(path.join(__dirname, 'review.md'), 'utf8');
   const dispatch = fs.readFileSync(path.join(__dirname, '../.github/workflows/dispatch.yml'), 'utf8');
   const instructions = dispatch.match(/const instructions = profile === 'review'\s+\? '([^']+)'/)[1];
+  for (const prompt of [standing, dispatch]) {
+    assert.match(prompt, /do not set item_number or other routing fields: the workflow fixes the target\./);
+  }
   for (const prompt of [standing, instructions]) {
     assert.match(prompt, /Read the diff and the code around it, and report findings only\./);
     assert.match(prompt, /Do not run existing test suites, formatters or linters to confirm they pass\./);
@@ -271,6 +287,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(jobs.status, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
   assert.match(jobs.status, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
   assert.match(jobs.status, /await reportStatus\(process.env, github, core\)/);
+  assert.match(jobs.status, /if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.agent.result != 'cancelled' \}\}/);
   assert.match(jobs.status, /runs-on: ubuntu-26.04/);
   // Automatic reviews only for the owner, members and collaborators;
   // anyone else, a past contributor included, waits for a `/review`.

@@ -30,7 +30,9 @@ State the exact admitted head SHA in the findings so a stale review cannot be
 mistaken for a review of a newer push.
 
 Return exactly one safe output: add_comment on the triggering pull request,
-or noop if no useful review can be made. The comment's first line starts with
+or noop if no useful review can be made. Set only type and body on add_comment;
+do not set item_number or other routing fields: the workflow fixes the target.
+The comment's first line starts with
 VERDICT: APPROVE when nothing blocks merging, or VERDICT: CHANGES when there is
 something actionable to fix, and may go on with a short reason. Keep that
 line to the one verdict: a first line that also names the other verdict (or

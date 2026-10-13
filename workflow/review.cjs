@@ -59,9 +59,15 @@ function checkOutputs(output, number) {
   const item = output.items[0];
   if (item.type === 'noop') return '';
   // gh-aw recognizes aliases and editing/reply routes. The handler's trusted
-  // configuration fixes the target: the agent supplies only text.
+  // configuration fixes the target. A redundant item_number cannot redirect
+  // the comment; aliases and editing/reply routes remain forbidden.
   if (item.type !== 'add_comment' || typeof item.body !== 'string' ||
-      Object.keys(item).some(key => !['type', 'body'].includes(key))) {
+      Object.keys(item).some(key => !['type', 'body', 'item_number'].includes(key)) ||
+      (Object.hasOwn(item, 'item_number') &&
+        (!/^[1-9][0-9]*$/.test(String(item.item_number)) ||
+          !['number', 'string'].includes(typeof item.item_number) ||
+          !Number.isSafeInteger(Number(item.item_number)) ||
+          String(item.item_number) !== String(number)))) {
     throw new Error('Review output must be a comment on the triggering pull request');
   }
   // One word, then the end of the line, a space or a stop; a first line
@@ -87,10 +93,13 @@ function reviewStatus(run, open) {
     return { skip: `No review status on ${run.head}: its open pull requests are ${open.join(', ') || 'none'}, not only #${run.pull}` };
   }
   const checked = run.check === 'success';
-  if (checked && run.verdict === 'APPROVE' && run.apply === 'success' && run.url) {
+  if (!checked || run.apply !== 'success' || !run.url) {
+    return { state: 'failure', description: 'The review did not post; see the workflow run' };
+  }
+  if (run.verdict === 'APPROVE') {
     return { state: 'success', description: 'The review approved this commit' };
   }
-  if (checked && run.verdict === 'CHANGES') {
+  if (run.verdict === 'CHANGES') {
     return { state: 'failure', description: 'The review asked for changes' };
   }
   return { state: 'failure', description: 'The review did not approve this commit' };

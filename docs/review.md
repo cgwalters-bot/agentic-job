@@ -74,7 +74,12 @@ The one output is a comment whose first line starts with `VERDICT: APPROVE` or
 `VERDICT: CHANGES`, or a noop. `VERDICT: REJECT`, which briefs written for the
 earlier format still ask for, counts as CHANGES; the earlier `REASON:` line is
 no longer required. The check job refuses anything else, and any
-field that would retarget the comment. The `status` job then sets the commit
+field that would retarget the comment. A redundant `item_number` equal to the
+fixed pull request number is accepted; other routing fields remain refused.
+The prompts ask for only `type` and `body`. When check refuses the output or
+apply fails to post it, the existing failure status says
+`The review did not post; see the workflow run` and links to that run.
+The `status` job then sets the commit
 status `review` on the reviewed head: `success` only for a checked APPROVE
 whose comment was posted, `failure` for CHANGES, a noop or a run that did not
 get that far. The status job
