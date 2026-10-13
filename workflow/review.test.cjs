@@ -67,7 +67,7 @@ test('review request has no branch, alternate target/token or notification autho
     MAX_OUTPUTS: '1', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
     OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
   checkRequest(env);
-  for (const AGENT of ['fake', 'claude', 'opencode']) {
+  for (const AGENT of ['fake', 'claude', 'opencode', 'vibe']) {
     checkRequest({ ...env, AGENT });
   }
   for (const AGENT of ['', 'unknown']) {

@@ -95,7 +95,7 @@ jobs:
               throw new Error('Unknown dispatch profile');
             }
             const agent = process.env.AGENT;
-            if (!['fake', 'opencode', 'claude'].includes(agent)) throw new Error('AGENT must be fake, opencode or claude');
+            if (!['fake', 'opencode', 'claude', 'vibe'].includes(agent)) throw new Error('AGENT must be fake, opencode, claude or vibe');
             const missing = agent === 'fake' ? [] :
               ['AGENT_MODEL', 'AGENT_RUNNER', 'INFERENCE_URL', 'INFERENCE_AUDIENCE']
                 .filter(key => !process.env[key]?.trim());

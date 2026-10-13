@@ -208,10 +208,11 @@ impl ToolCall {
             self.raw_output = fields["rawOutput"].clone();
         }
         // ACP v1 has no tool name; `name` is a draft field, and agents put
-        // theirs in _meta (claude-agent-acp: claudeCode.toolName).
+        // theirs in _meta (Claude: claudeCode.toolName; Vibe: tool_name).
         if let Some(n) = fields["name"]
             .as_str()
             .or(fields["_meta"]["claudeCode"]["toolName"].as_str())
+            .or(fields["_meta"]["tool_name"].as_str())
         {
             self.name = n.to_owned();
         }
@@ -883,6 +884,14 @@ mod tests {
             task("t3", json!({"title": "bash", "kind": "execute"})),
             // A command, whatever it is called.
             task("t4", json!({"title": "task", "kind": "execute"})),
+            task(
+                "t5",
+                json!({"title": "Running explore agent", "kind": "think", "_meta": {"tool_name": "task"}}),
+            ),
+            task(
+                "t5",
+                json!({"title": "Ran explore agent", "kind": "think", "_meta": {"tool_name": "task"}}),
+            ),
             notice(1, "60%", "[bot-harness budget notice] Converge.\nmore"),
             notice(2, "80%", "[bot-harness budget notice] Finish."),
             // A queued notice's answer isn't the run's, refused or not.
@@ -901,12 +910,12 @@ mod tests {
                 "⚠ notice to the agent: Converge. more",
                 "⚠ notice to the agent: Finish.",
                 "⚠ the agent refused a notice: busy",
-                "done: cancelled, 4 tool calls",
+                "done: cancelled, 5 tool calls",
                 "⚠ notice to the agent: Hand back now.",
-                "done: end_turn, 4 tool calls",
+                "done: end_turn, 5 tool calls",
             ]
         );
-        assert_eq!(d.tasks, 2);
+        assert_eq!(d.tasks, 3);
         assert_eq!(d.notices, ["60%", "80%", "hand back"]);
         assert_eq!(d.error, None);
         assert_eq!(d.stop_reason.as_deref(), Some("end_turn"));

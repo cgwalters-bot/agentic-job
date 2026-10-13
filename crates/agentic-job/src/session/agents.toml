@@ -25,6 +25,24 @@ env = { ANTHROPIC_MODEL = "opus" }
 command = ["opencode", "acp"]
 notices = true
 
+# Vibe's ACP entrypoint enables project configuration unconditionally. Use
+# its library entrypoint with only the user source: a repository must not
+# redirect inference through .vibe/config.toml or project agent profiles.
+# Python isolated mode also excludes the checkout from its import path.
+# No notices until mid-turn prompt behavior is established.
+[vibe]
+command = ["/opt/agentic-job/vibe/bin/python3", "-I", "-c", '''
+import sys
+from vibe.core.paths import bootstrap_vibe_home
+from vibe.core.config.harness_files import init_harness_files_manager
+bootstrap_vibe_home()
+init_harness_files_manager("user")
+from vibe.acp.agent import run_acp_server
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+run_acp_server(legacy_harness=True)
+''']
+
 # A scripted agent with no model behind it (src/bin/fake-agent.rs), for
 # runs without inference: it plays fake-agent-demo.json.
 [fake]

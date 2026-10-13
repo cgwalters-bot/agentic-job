@@ -121,8 +121,13 @@ test('caller fixes capabilities and token boundary', () => {
 });
 
 test('real agent preflight names all missing deployment variables together', async () => {
-  await assert.rejects(preflight({ AGENT: 'opencode' }),
-    /AGENT_MODEL, AGENT_RUNNER, INFERENCE_URL, INFERENCE_AUDIENCE/);
+  for (const AGENT of ['opencode', 'claude', 'vibe']) {
+    await assert.rejects(preflight({ AGENT }),
+      /AGENT_MODEL, AGENT_RUNNER, INFERENCE_URL, INFERENCE_AUDIENCE/);
+    const calls = await preflight({ AGENT, AGENT_MODEL: 'm', AGENT_RUNNER: 'ubuntu-26.04',
+      INFERENCE_URL: 'http://broker', INFERENCE_AUDIENCE: 'broker' });
+    assert.equal(calls.agent, AGENT);
+  }
   await assert.rejects(preflight({ TARGET_REPO: 'other/repo' }), /APPLY_ENVIRONMENT/);
   // A pull request is opened from a fork, and a fix pushed to one, which
   // the job token cannot make.
@@ -136,14 +141,14 @@ test('real agent preflight names all missing deployment variables together', asy
     /a scripted run is given none, so it cannot implement, fix or write to another repository\): APPLY_ENVIRONMENT$/);
 });
 
-test('opencode configuration variables do not affect scripted or Claude runs', () => {
+test('opencode configuration variables do not affect other agents', () => {
   for (const [input, variable] of [
     ['agent-config-repo', 'AGENT_CONFIG_REPO'], ['agent-config-path', 'AGENT_CONFIG_PATH'],
   ]) {
     const expression = workflow.match(new RegExp(`^      ${input}: \\$\\{\\{ (.+) \\}\\}$`, 'm'))?.[1];
     assert.ok(expression, input);
     const value = Function('needs', 'vars', `return ${expression}`);
-    for (const agent of ['fake', 'claude', 'opencode']) {
+    for (const agent of ['fake', 'claude', 'opencode', 'vibe']) {
       for (const config of ['', 'operator-config']) {
         assert.equal(value({ target: { outputs: { agent } } }, { [variable]: config }),
           agent === 'opencode' ? config : '');

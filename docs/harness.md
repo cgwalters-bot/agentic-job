@@ -48,7 +48,29 @@ code. ACP makes the session transport common, not provider setup.
 `opencode acp`, and `fake` is `fake-agent demo`, which plays a recorded
 session and needs no model.
 
-`run` does not start the first two by those commands. It starts
+`vibe` is Mistral Vibe 2.26.1, using its legacy Python ACP runtime.
+The launcher uses its library entrypoint with only the user configuration
+source and isolated Python imports: `.vibe/config.toml`, project profiles
+and checkout modules cannot redirect inference. Both built-in provider
+names are replaced with the broker's `/mistral/v1` chat-completions route;
+the caller's model replaces the built-in model under a fixed session alias.
+Configuration repositories and mid-turn notices are not supported. The
+broker model uses text-only tools and a conservative 32k context window
+with compaction at 24k, rather than inheriting Medium 3.5's capabilities.
+The run token lives only in the private generated TOML, as an Authorization
+header, with no provider key or browser login. Telemetry, experiments,
+connectors and update checks are disabled. Instructions are pointed out
+in the task rather than automatically loaded from the project.
+
+The credentialless hosted adapter test uses generated configuration and
+a loopback model to verify ACP model selection, a permission-requested
+file write, cancellation followed by hand-back, and hostile project config
+and import canaries. Run it with
+`AGENTIC_JOB_TEST_VIBE_PYTHON=/path/to/venv/bin/python3 cargo test --locked --test vibe -- --nocapture`
+after installing `mistral-vibe==2.26.1` there. This is adapter evidence,
+not a privileged sandbox or live broker test.
+
+`run` does not start the real agents by those commands. It starts
 `agentic-job launch-agent NAME`, a hidden command that runs as the
 sandbox user, reads the one file holding the run token, sets the
 agent's environment and becomes the agent. So the binary must be where

@@ -147,6 +147,24 @@ jobs:
         env:
           GH_AW_JS: ${{ github.workspace }}/gh-aw/actions/setup/js
 
+  # Real pinned Vibe, generated configuration and ACP session against a
+  # loopback broker. Read-only job token; no model key or privileged setup.
+  vibe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install pinned Vibe
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vibe"
+          "$RUNNER_TEMP/vibe/bin/pip" install --disable-pip-version-check mistral-vibe==2.26.1
+      - run: cargo test --locked --test vibe -- --nocapture
+        env:
+          AGENTIC_JOB_TEST_VIBE_PYTHON: ${{ runner.temp }}/vibe/bin/python3
+
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left
   # running takes a second user and root, which the tests of the rust job
@@ -1106,7 +1124,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, docs, rust, vibe, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

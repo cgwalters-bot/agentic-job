@@ -94,7 +94,7 @@ on:
         type: string
         default: ""
       agent:
-        description: "The agent: `claude`, `opencode`, or `fake`, a scripted one that needs no inference"
+        description: "The agent: `claude`, `opencode`, `vibe`, or `fake`, a scripted one that needs no inference"
         type: string
         default: fake
       fake-profile:

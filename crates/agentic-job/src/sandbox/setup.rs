@@ -394,6 +394,9 @@ fn setup(args: &Args) -> Result<Exit> {
     timed_setup("packages", || install_packages(&config.setup.packages))?;
     timed_setup("privileged-binary-allowlist", privileged_binaries::check)?;
     timed_setup("npm", || install_npm(&config.setup.npm))?;
+    if config.agent.name == "vibe" {
+        timed_setup("vibe", install_vibe)?;
+    }
     // After the packages: one of them may be what a rule is for (polkit,
     // at), and a rule is written only for what is there. The runner's
     // rules take effect now too, which nothing running needs: the job's
@@ -1301,6 +1304,21 @@ fn install_npm(specs: &[String]) -> Result<()> {
         "npm install -g {} failed ({status})",
         specs.join(" ")
     );
+    Ok(())
+}
+
+/// Installed before credentials and network rules, like the npm agents.
+/// Neither the checkout nor caller setup code selects the package or path.
+fn install_vibe() -> Result<()> {
+    const HOME: &str = "/opt/agentic-job/vibe";
+    const PACKAGE: &str = "mistral-vibe==2.26.1";
+    install_packages(&["python3-venv".to_owned()])?;
+    host::run(Command::new("python3").args(["-m", "venv", HOME]))?;
+    host::run(Command::new(format!("{HOME}/bin/pip")).args([
+        "install",
+        "--disable-pip-version-check",
+        PACKAGE,
+    ]))?;
     Ok(())
 }
 

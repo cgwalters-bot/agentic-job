@@ -1,0 +1,236 @@
+//! Opt-in, credentialless adapter evidence on a hosted runner. The real pinned
+//! package talks only to a loopback broker fixture; no forge writes or setup.
+#![allow(clippy::unwrap_used)]
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
+use std::time::Duration;
+
+use agentic_job::run::agent::{self, VIBE_MODEL_ALIAS};
+use agentic_job::run::inference::{Endpoint, Mode, Token};
+use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy};
+use serde_json::{Value, json};
+
+#[test]
+fn pinned_vibe_acp() {
+    let Ok(python) = std::env::var("AGENTIC_JOB_TEST_VIBE_PYTHON") else {
+        eprintln!("skipped: set AGENTIC_JOB_TEST_VIBE_PYTHON to the pinned Vibe venv's Python");
+        return;
+    };
+    let version = std::process::Command::new(&python)
+        .args(["-I", "-c", "import vibe; print(vibe.__version__)"])
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), "2.26.1");
+    for handback in [false, true] {
+        run_vibe(&python, handback);
+    }
+}
+
+fn run_vibe(python: &str, handback: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let work = home.join("work");
+    std::fs::create_dir_all(work.join(".vibe")).unwrap();
+    // Isolated Python imports and user-only config must ignore both canaries.
+    std::fs::write(work.join("vibe.py"), "raise RuntimeError('project import')").unwrap();
+    std::fs::write(
+        work.join(".vibe/config.toml"),
+        "active_model = 'evil'\n[[providers]]\nname = 'mistral'\napi_base = 'http://127.0.0.1:1'\n",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let token = Token::new("local-test-token-for-vibe").unwrap();
+    let config = agent::vibe(
+        &Endpoint {
+            url,
+            mode: Mode::Plain,
+            anthropic_url: String::new(),
+            openai_url: String::new(),
+        },
+        &token,
+        Some("broker-model"),
+    )
+    .unwrap();
+    for file in &config.files {
+        let path = home.join(file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, file.content.as_ref().unwrap()).unwrap();
+    }
+    // Validate the effective config, not just TOML: Vibe deep-merges its
+    // default model, which otherwise leaks Medium capabilities and prices.
+    let effective = std::process::Command::new(python)
+        .args([
+            "-I",
+            "-c",
+            r#"
+import asyncio
+from vibe.core.paths import bootstrap_vibe_home
+from vibe.core.config.harness_files import init_harness_files_manager
+bootstrap_vibe_home()
+init_harness_files_manager("user")
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+config = asyncio.run(build_default_orchestrator()).config
+model = config.get_active_model()
+assert len(config.models) == 1
+assert model.name == model.display_name == "broker-model"
+assert model.provider == "mistral" and not model.supports_images
+assert model.max_context_length == 32768
+assert model.auto_compact_threshold == 24576
+assert model.temperature == 0.2 and model.thinking_levels == ["off"]
+assert model.input_price == model.output_price == model.cached_input_price == 0
+assert {p.name for p in config.providers} == {"mistral", "llamacpp"}
+assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in config.providers)
+"#,
+        ])
+        .env_clear()
+        .env("HOME", &home)
+        .env("VIBE_HOME", home.join(agent::VIBE_HOME))
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(
+        effective.status.success(),
+        "{}",
+        String::from_utf8_lossy(&effective.stderr)
+    );
+    let target = work.join("result.txt");
+    let (count, requests_count) = tokio::sync::watch::channel(Some(0));
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut requests = Vec::new();
+        while requests.len() < if handback { 3 } else { 2 } {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Vibe did not reach the broker"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "POST /mistral/v1/chat/completions HTTP/1.1");
+            let mut length = 0;
+            let mut authorized = false;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.split_once(':').unwrap();
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
+                }
+                if name.eq_ignore_ascii_case("authorization") {
+                    authorized = value.trim() == "Bearer local-test-token-for-vibe";
+                }
+            }
+            assert!(authorized);
+            assert!(length < 1 << 20);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["model"], "broker-model");
+            if handback && requests.len() == 1 {
+                // Cancel a live model request, then accept the harness's
+                // hand-back prompt through the same ACP session.
+                count.send_replace(Some(91));
+                std::thread::sleep(Duration::from_secs(2));
+                requests.push(body);
+                continue;
+            }
+            let first = requests.is_empty();
+            let delta = if first {
+                let tools = body["tools"].as_array().unwrap();
+                let name = tools
+                    .iter()
+                    .find_map(|tool| {
+                        let name = tool["function"]["name"].as_str()?;
+                        name.ends_with("write_file").then_some(name)
+                    })
+                    .expect("Vibe must offer its own filesystem tool");
+                json!({"tool_calls": [{"index": 0, "id": "write", "type": "function", "function": {
+                    "name": name, "arguments": json!({"file_path": target, "content": "adapter control\n"}).to_string(),
+                }}]})
+            } else {
+                json!({"content": "Done."})
+            };
+            let response = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                json!({"id": "mock", "object": "chat.completion.chunk", "model": "broker-model", "choices": [{"index": 0, "delta": delta, "finish_reason": null}]}),
+                json!({"id": "mock", "object": "chat.completion.chunk", "model": "broker-model", "choices": [{"index": 0, "delta": {}, "finish_reason": if first { "tool_calls" } else { "stop" }}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+            );
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            requests.push(body);
+        }
+        requests
+    });
+    let mut spec = session::agents::builtin("vibe").unwrap();
+    spec.command[0] = python.to_owned();
+    spec.env
+        .insert("HOME".into(), home.to_str().unwrap().into());
+    spec.env.insert(
+        "VIBE_HOME".into(),
+        home.join(agent::VIBE_HOME).to_str().unwrap().into(),
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let out = root.path().join("out");
+    let result = runtime
+        .block_on(session::run(Options {
+            name: "vibe".into(),
+            agent: spec,
+            model: Some(VIBE_MODEL_ALIAS.into()),
+            cwd: work.clone(),
+            prompt: "Write the requested file and stop.".into(),
+            out: out.clone(),
+            permissions: Policy::for_task(&home).unwrap(),
+            limits: Limits {
+                timeout_s: 60,
+                budget_aic: None,
+                max_requests: Some(100),
+                max_tasks: Some(0),
+            },
+            requests: Some(requests_count),
+            launch: Launch::Direct,
+            clients: Clients::none(),
+            log: Box::new(std::io::sink()),
+        }))
+        .unwrap();
+    assert_eq!(
+        result.result.exit().code(),
+        if handback { 3 } else { 0 },
+        "{result:?}: {}",
+        std::fs::read_to_string(out.join("agent-stderr.log")).unwrap()
+    );
+    assert_eq!(result.handed_back, handback);
+    let requests = server.join().unwrap();
+    assert!(
+        requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "tool")
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.join("result.txt")).unwrap(),
+        "adapter control\n"
+    );
+    assert!(
+        std::fs::read_to_string(out.join(session::ACP_LOG))
+            .unwrap()
+            .contains("session/request_permission")
+    );
+}

@@ -59,6 +59,11 @@ pub const OPENCODE_CONFIG_DIR: &str = ".config/opencode";
 pub const OPENCODE_CONFIG_FILE: &str = ".config/opencode/opencode.json";
 pub const OPENCODE_INSTRUCTIONS_FILE: &str = ".config/opencode/AGENTS.md";
 pub const OPENCODE_PROFILE_FILE: &str = ".config/opencode/opencode-runner.json";
+pub const VIBE_HOME: &str = ".config/agentic-job/vibe";
+pub const VIBE_CONFIG_FILE: &str = ".config/agentic-job/vibe/config.toml";
+/// A fixed alias avoids interpreting a caller's model as a Vibe profile or
+/// provider selection. It replaces Vibe's sole built-in model, not adds one.
+pub const VIBE_MODEL_ALIAS: &str = "mistral-medium-3.5";
 /// The run's read-only GitHub token, for `gh` and the GitHub API: the
 /// launcher and the fake agent give it to the agent as
 /// [`GITHUB_TOKEN_VAR`].
@@ -130,12 +135,13 @@ const REMOVE_SCRIPT: &str = r#"rm -f -- "$HOME/$1""#;
 pub enum Kind {
     Claude,
     Opencode,
+    Vibe,
     /// The scripted agent, with no model behind it.
     Fake,
 }
 
 impl Kind {
-    const ALL: &'static [Self] = &[Self::Claude, Self::Opencode, Self::Fake];
+    const ALL: &'static [Self] = &[Self::Claude, Self::Opencode, Self::Vibe, Self::Fake];
 
     /// The agent `[agent] name` names.
     pub fn parse(name: &str) -> Result<Self> {
@@ -160,6 +166,7 @@ impl Kind {
         match self {
             Self::Claude => "claude",
             Self::Opencode => "opencode",
+            Self::Vibe => "vibe",
             Self::Fake => "fake",
         }
     }
@@ -174,6 +181,7 @@ impl Kind {
         match self {
             Self::Claude => Some(&endpoint.anthropic_url),
             Self::Opencode => Some(&endpoint.openai_url),
+            Self::Vibe => Some(&endpoint.url),
             Self::Fake => None,
         }
     }
@@ -184,6 +192,7 @@ impl Kind {
         match self {
             Self::Claude => Some(CLAUDE_ENV_FILE),
             Self::Opencode => Some(OPENCODE_CONFIG_FILE),
+            Self::Vibe => Some(VIBE_CONFIG_FILE),
             Self::Fake => None,
         }
     }
@@ -196,6 +205,7 @@ impl Kind {
         match self {
             Self::Claude => &["AGENTS.md"],
             Self::Opencode => &["AGENTS.md", "CLAUDE.md"],
+            Self::Vibe => &["AGENTS.md", "CLAUDE.md"],
             Self::Fake => &[],
         }
     }
@@ -235,6 +245,50 @@ fn pretty(value: &Value) -> String {
     let mut text = serde_json::to_string_pretty(value).unwrap_or_default();
     text.push('\n');
     text
+}
+
+/// Vibe merges built-in providers by name. Replace both defaults so even
+/// auxiliary requests cannot use a direct provider or a browser login. The
+/// launcher admits only this fresh user configuration, never project files.
+pub fn vibe(endpoint: &Endpoint, token: &Token, model: Option<&str>) -> Result<Configuration> {
+    let model = model
+        .filter(|m| !m.is_empty())
+        .context("agent.model is not set: vibe needs a Mistral model name")?;
+    let provider = |name: &str| {
+        json!({
+            "name": name, "api_base": format!("{}/mistral/v1", endpoint.url),
+            "api_style": "openai", "backend": "generic", "api_key_env_var": "",
+            "browser_auth_base_url": "", "browser_auth_api_base_url": "",
+            "extra_headers": {"Authorization": format!("Bearer {}", token.expose())},
+        })
+    };
+    let value = json!({
+        "active_model": VIBE_MODEL_ALIAS,
+        "providers": [provider("mistral"), provider("llamacpp")],
+        // Model definitions deep-merge too. Do not inherit Medium 3.5's
+        // image capability or 256k window for an arbitrary broker model.
+        "models": [{
+            "name": model, "alias": VIBE_MODEL_ALIAS, "provider": "mistral",
+            "display_name": model, "temperature": 0.2,
+            "thinking": "off", "thinking_levels": ["off"], "supports_images": false,
+            "max_context_length": 32768, "auto_compact_threshold": 24576,
+            "input_price": 0.0, "output_price": 0.0, "cached_input_price": 0.0,
+        }],
+        "default_agent": "ask",
+        "enable_telemetry": false, "enable_update_checks": false, "enable_auto_update": false,
+        "enable_connectors": false, "enable_system_trust_store": true,
+        "experiments": {"enable": false},
+        "session_logging": {"enabled": false, "generate_titles": false},
+        "utility_models": {"title": VIBE_MODEL_ALIAS, "smart_approve": VIBE_MODEL_ALIAS},
+    });
+    Ok(Configuration {
+        files: vec![HomeFile {
+            path: VIBE_CONFIG_FILE,
+            content: Some(toml::to_string(&value)?),
+        }],
+        managed: None,
+        model: Some(VIBE_MODEL_ALIAS.to_owned()),
+    })
 }
 
 /// The environment the launcher gives Claude Code: the proxy, and the
@@ -537,6 +591,14 @@ fn source_request(agent: &config::Agent) -> Result<Option<(&str, Option<&str>, &
 /// registered.
 pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
     match (kind, source_request(agent)?) {
+        (Kind::Vibe, Some(_)) => bail!("agent.config-repo is not supported for vibe"),
+        (Kind::Vibe, None) => {
+            ensure!(
+                agent.model.as_deref().is_some_and(|m| !m.is_empty()),
+                "agent.model is not set: vibe needs a Mistral model name"
+            );
+            Ok(())
+        }
         (Kind::Fake, Some(_)) => {
             bail!("agent.config-repo is set, and the fake agent has no configuration")
         }
@@ -624,6 +686,14 @@ pub fn generate(
         Kind::Opencode => {
             let (endpoint, token) = inference()?;
             opencode(endpoint, token, model, source)?
+        }
+        Kind::Vibe => {
+            ensure!(
+                *source == Source::default(),
+                "vibe does not accept configuration repositories"
+            );
+            let (endpoint, token) = inference()?;
+            vibe(endpoint, token, model)?
         }
         Kind::Fake => Configuration::default(),
     })
@@ -966,6 +1036,7 @@ mod tests {
         for (name, kind) in [
             ("claude", Kind::Claude),
             ("opencode", Kind::Opencode),
+            ("vibe", Kind::Vibe),
             ("fake", Kind::Fake),
         ] {
             assert_eq!(Kind::parse(name).unwrap(), kind);
@@ -980,7 +1051,7 @@ mod tests {
             assert!(err.contains(want), "{err}");
         }
         // An agent with a model behind it does not start without a proxy.
-        for kind in [Kind::Claude, Kind::Opencode] {
+        for kind in [Kind::Claude, Kind::Opencode, Kind::Vibe] {
             let err = generate(kind, None, None, Some("m"), &Source::default()).unwrap_err();
             assert!(format!("{err:#}").contains("needs inference"), "{err:#}");
         }
@@ -995,6 +1066,55 @@ mod tests {
             &Source::default(),
         );
         assert_eq!(claude.unwrap().model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn vibe_configuration() {
+        for mode in [
+            Mode::Plain,
+            Mode::TokenFile {
+                path: "/run/token".into(),
+            },
+        ] {
+            let got = vibe(&endpoint(mode), &token(), Some("devstral-small-latest")).unwrap();
+            assert_eq!(got.files.len(), 1);
+            assert_eq!(got.files[0].path, Kind::Vibe.token_file().unwrap());
+            assert_eq!(got.model.as_deref(), Some(VIBE_MODEL_ALIAS));
+            assert!(got.managed.is_none());
+            let value: toml::Value =
+                toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
+            for provider in value["providers"].as_array().unwrap() {
+                assert_eq!(
+                    provider["api_base"].as_str(),
+                    Some("http://100.64.0.1:18080/mistral/v1")
+                );
+                assert_eq!(
+                    provider["extra_headers"]["Authorization"].as_str(),
+                    Some(format!("Bearer {TOKEN}").as_str())
+                );
+                assert_eq!(provider["backend"].as_str(), Some("generic"));
+                assert_eq!(provider["browser_auth_base_url"].as_str(), Some(""));
+            }
+            assert_eq!(
+                value["models"][0]["name"].as_str(),
+                Some("devstral-small-latest")
+            );
+            assert_eq!(value["experiments"]["enable"].as_bool(), Some(false));
+        }
+        for model in [None, Some("")] {
+            assert!(vibe(&endpoint(Mode::Plain), &token(), model).is_err());
+        }
+        let agent = config::Agent {
+            model: Some("m".into()),
+            config_repo: Some("https://github.com/o/r".into()),
+            ..Default::default()
+        };
+        assert!(
+            check(Kind::Vibe, &agent)
+                .unwrap_err()
+                .to_string()
+                .contains("not supported")
+        );
     }
 
     #[test]
@@ -1076,7 +1196,7 @@ mod tests {
         let secret = root.path().join("secret");
         std::fs::write(&secret, "the runner's").unwrap();
         for round in ["first", "second"] {
-            for path in [CLAUDE_ENV_FILE, OPENCODE_CONFIG_FILE] {
+            for path in [CLAUDE_ENV_FILE, OPENCODE_CONFIG_FILE, VIBE_CONFIG_FILE] {
                 let out = sh(WRITE_SCRIPT, &home, &[path], round.as_bytes());
                 assert!(
                     out.status.success(),

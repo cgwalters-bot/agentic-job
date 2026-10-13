@@ -31,7 +31,14 @@ const ZOMBIE: &str = "Z";
 /// provider, credential and configuration, which come from the run's
 /// configuration and nowhere else. The old tree's launchers cleared the
 /// second kind.
-const NOT_INHERITED: &[&str] = &["ACTIONS_", "ANTHROPIC_", "CLAUDE_", "OPENCODE_"];
+const NOT_INHERITED: &[&str] = &[
+    "ACTIONS_",
+    "ANTHROPIC_",
+    "CLAUDE_",
+    "OPENCODE_",
+    "VIBE_",
+    "MISTRAL_",
+];
 
 /// Where the agent runs.
 #[derive(Debug, Clone, Default)]
@@ -63,9 +70,16 @@ impl Launch {
 
 /// Whether the variable NAME is one of [`NOT_INHERITED`].
 pub fn is_inherited_setting(name: &OsStr) -> bool {
-    NOT_INHERITED
-        .iter()
-        .any(|prefix| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
+    NOT_INHERITED.iter().any(|prefix| {
+        if *prefix == "VIBE_" {
+            // Vibe's pydantic-settings environment layer is case-insensitive.
+            name.as_encoded_bytes()
+                .get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
+        } else {
+            name.as_encoded_bytes().starts_with(prefix.as_bytes())
+        }
+    })
 }
 
 /// The variables of this process that a command it starts must not get.

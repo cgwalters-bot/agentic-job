@@ -20,7 +20,9 @@ The proxy is the `[inference]` table of the binary's configuration.
 `url` is its root, http or https; without it there is no proxy and the
 rest of the table is refused. `anthropic-url` and `openai-url` say
 where it serves each API, by default `URL/anthropic` and `URL/v1`:
-Claude Code is given the first and opencode the second. `register` says
+Claude Code is given the first and opencode the second. Vibe uses
+`URL/mistral/v1/chat/completions`, with the same run token; its route is
+not selected by `openai-url`. `register` says
 how the run gets its token, and has **no default**. A proxy without it
 is refused, and so is a key that belongs to another mode:
 

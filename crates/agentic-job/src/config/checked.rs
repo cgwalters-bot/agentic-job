@@ -115,6 +115,14 @@ impl Config {
             self.check_reachable(kind, endpoint, &host.direct)?;
         }
         let limits = limits(&self.limits, endpoint.as_ref())?;
+        // Vibe cannot price an arbitrary broker model. A caller's budget
+        // alone would appear capped but never bind, so require counted requests.
+        if kind == Kind::Vibe {
+            ensure!(
+                limits.max_requests.is_some(),
+                "vibe needs limits.max-requests: its model has no authoritative local price"
+            );
+        }
         handback::author(&self.commit)?;
         handback::check_trailers(&self.commit.trailers)?;
         Ok(Checked {
@@ -408,6 +416,24 @@ model = \"m\"
                 (Err(err), Err(want)) => {
                     assert!(format!("{err:#}").contains(want), "{text}: {err:#}");
                 }
+                (got, want) => panic!("{text}: got {got:?}, wanted {want:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn vibe_requires_a_counted_request_cap() {
+        let agent = "[agent]\nname = \"vibe\"\nmodel = \"devstral-small-latest\"\n";
+        for (limits, error) in [
+            ("max-requests = 100", None),
+            ("budget = 500", Some("vibe needs limits.max-requests")),
+            ("uncapped = true", Some("vibe needs limits.max-requests")),
+        ] {
+            let text =
+                format!("{agent}{PROXY}{OIDC}[limits]\ntimeout-minutes = 10\n{limits}\n{DIRECT}");
+            match (checked(&text), error) {
+                (Ok(_), None) => {}
+                (Err(err), Some(want)) => assert!(format!("{err:#}").contains(want), "{err:#}"),
                 (got, want) => panic!("{text}: got {got:?}, wanted {want:?}"),
             }
         }

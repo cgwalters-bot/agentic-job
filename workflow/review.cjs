@@ -43,7 +43,7 @@ function checkRequest(env) {
   if (env.EVENT !== 'true' || env.KIND !== 'analysis' || env.OUTPUTS !== 'add_comment,noop' ||
       env.MAX_OUTPUTS !== '1' || env.NOTIFY !== 'none' || env.TARGET ||
       env.REPO !== env.GITHUB_REPOSITORY || env.OUTPUT_REPO || env.APPLY_ENVIRONMENT ||
-      env.APPLY_PARTIAL !== 'false' || !['fake', 'claude', 'opencode'].includes(env.AGENT)) {
+      env.APPLY_PARTIAL !== 'false' || !['fake', 'claude', 'opencode', 'vibe'].includes(env.AGENT)) {
     throw new Error('Review requires an analysis event run, one comment or noop on the triggering repository, no notifications, alternate token or partial application, and a supported agent');
   }
 }

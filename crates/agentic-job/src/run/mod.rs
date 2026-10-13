@@ -278,6 +278,7 @@ const fn aic_pricing(kind: Kind) -> &'static str {
         Kind::Fake => "mock",
         Kind::Opencode => "subscription",
         Kind::Claude => "api-equivalent",
+        Kind::Vibe => "unpriced",
     }
 }
 

@@ -643,6 +643,17 @@ the following. Hosted Ubuntu alone cannot reach a private proxy.
   `model`, `max-requests`, `budget` and `timeout` with the operator.
   These package pins do not pin every transitive dependency.
 
+  `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
+  virtual environment before hardening; it does not use the `npm` input.
+  Set `model` to the broker's bare Mistral model name (for example
+  `devstral-small-latest`) and `inference-url` to the broker root, **not**
+  its `/mistral/v1` route. Keep `inference-register: github-oidc` and set
+  `inference-audience` as for the other real agents. No Mistral key is
+  passed to the job. Vibe is opt-in, accepts no `agent-config-repo`, and
+  requires `max-requests`: an arbitrary broker model has no authoritative
+  price in Vibe, so its local `budget` cannot be the only cap. The existing
+  timeout, request-count and subagent limits still apply.
+
 The policy job validates the effective configuration, including overrides
 of the caller's `config`, before starting the agent machine. After the
 caller's own steps, `secure-host` makes a TCP connection to the effective

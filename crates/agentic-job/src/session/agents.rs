@@ -186,7 +186,12 @@ command = ["opencode", "acp"]
     /// are sent notices.
     #[test]
     fn notices() {
-        for (agent, want) in [("opencode", true), ("fake", true), ("claude", false)] {
+        for (agent, want) in [
+            ("opencode", true),
+            ("fake", true),
+            ("claude", false),
+            ("vibe", false),
+        ] {
             assert_eq!(builtin(agent).unwrap().notices, want, "{agent}");
         }
         assert!(!parse(REGISTRY, "opencode").unwrap().notices);

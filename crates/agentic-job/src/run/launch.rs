@@ -180,6 +180,12 @@ fn environment(
                 }
             }
         }
+        Kind::Vibe => {
+            env.insert(
+                "VIBE_HOME".into(),
+                home.join(super::agent::VIBE_HOME).into(),
+            );
+        }
         Kind::Fake => {}
     }
     if let Some(token) = github_token(home, &read)? {
@@ -433,5 +439,37 @@ mod tests {
         assert_eq!(program(Kind::Opencode).unwrap(), ["opencode", "acp"]);
         assert_eq!(program(Kind::Claude).unwrap(), ["claude-agent-acp"]);
         assert!(program(Kind::Fake).is_err());
+    }
+
+    #[test]
+    fn vibe_ignores_ambient_configuration() {
+        let env = environment(
+            Kind::Vibe,
+            inherited(&[
+                ("VIBE_HOME", "/evil"),
+                ("VIBE_PROVIDERS", "[]"),
+                ("MISTRAL_API_KEY", "ambient"),
+                ("VIBE_ACTIVE_MODEL", "evil"),
+                ("vibe_providers", "[]"),
+                ("KEEP_ME", "kept"),
+            ]),
+            Path::new(HOME),
+            missing,
+        )
+        .unwrap();
+        assert_eq!(
+            strings(&env),
+            BTreeMap::from([
+                ("KEEP_ME", "kept"),
+                ("VIBE_HOME", "/home/agent/.config/agentic-job/vibe"),
+            ])
+        );
+        let argv = program(Kind::Vibe).unwrap();
+        assert_eq!(
+            &argv[..3],
+            ["/opt/agentic-job/vibe/bin/python3", "-I", "-c"]
+        );
+        assert!(argv[3].contains("init_harness_files_manager(\"user\")"));
+        assert!(!argv[3].contains("init_harness_files_manager(\"user\", \"project\")"));
     }
 }
