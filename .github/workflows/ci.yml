@@ -294,7 +294,7 @@ jobs:
       - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs
       # The pin's digest is of Cargo.lock, Cargo.toml, crates, egress and binary.mjs:
       # a file the build includes from anywhere else would not be in it.
-      - name: Nothing is built in from outside what the pin's digest covers
+      - name: "Nothing is built in from outside what the pin's digest covers"
         run: |
           grep -rnE 'include_(str|bytes)!\("(\.\./)+' crates | tee /dev/stderr | grep -vE '!\("(\.\./)+egress/[a-z_.]+"\)' > "$RUNNER_TEMP/outside" || true
           test ! -s "$RUNNER_TEMP/outside"
@@ -411,7 +411,7 @@ jobs:
           node workflow/setup-timing.mjs "$RUNNER_TEMP/sandbox-setup.log" "$FILESYSTEM_VIEW"
       # From here on this job's user has no sudo: root is the test's
       # service, or the helper.
-      - name: The runner's user has no root after setup
+      - name: "The runner's user has no root after setup"
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           sudo -n -l
@@ -682,7 +682,7 @@ jobs:
       repo: ${{ github.repository }}
       base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}
       kind: analysis
-      task: Try to comment outside the caller's fixed destination.
+      task: "Try to comment outside the caller's fixed destination."
       outputs: add_comment
       max-outputs: '1'
       comment-target: '64'
@@ -848,7 +848,7 @@ jobs:
         with:
           name: full-checked-outputs
           path: ${{ runner.temp }}/rerun
-      - name: Run the full run's apply guard again
+      - name: "Run the full run's apply guard again"
         if: ${{ always() && needs.e2e-full.result == 'success' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -879,8 +879,7 @@ jobs:
           jq -e 'map(.type) == ["add_comment"]' "$RUNNER_TEMP/rerun/skipped.json"
           jq -e '[.items[] | select(.type == "add_comment")] == []' "$RUNNER_TEMP/rerun/agent_output.json"
           name=$(jq -r '.[] | select(.type == "add_comment").name' "$RUNNER_TEMP/rerun/skipped.json")
-          gh api --paginate "repos/$GH_REPO/issues/64/comments" | jq -se --arg marker "<!-- $name -->" '
-            [ .[][] | select(.body | contains($marker)) ] | length == 1'
+          gh api --paginate "repos/$GH_REPO/issues/64/comments" | jq -se --arg marker "<!-- $name -->" '[ .[][] | select(.body | contains($marker)) ] | length == 1'
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
@@ -952,8 +951,7 @@ jobs:
         run: |
           gh api --paginate "repos/$GH_REPO/issues/$PR/comments" --jq '.[] | .body' > "$RUNNER_TEMP/review-comments"
           grep -F 'VERDICT: APPROVE' "$RUNNER_TEMP/review-comments"
-          gh api --paginate "repos/$GH_REPO/issues/$PR/comments" | jq -se --arg run "$RUN" --arg sha "$HEAD_SHA" '
-            [ .[][] | select((.body | startswith("VERDICT: APPROVE\nREASON: Scripted review")) and (.body | contains($run)) and (.body | contains("Reviewed SHA: " + $sha + "\n"))) ] | length == 1'
+          gh api --paginate "repos/$GH_REPO/issues/$PR/comments" | jq -se --arg run "$RUN" --arg sha "$HEAD_SHA" '[ .[][] | select((.body | startswith("VERDICT: APPROVE\nREASON: Scripted review")) and (.body | contains($run)) and (.body | contains("Reviewed SHA: " + $sha + "\n"))) ] | length == 1'
       - name: The event-triggered run commented on the pull request, and said how it ended
         if: ${{ github.event_name == 'pull_request' }}
         env:
@@ -967,11 +965,7 @@ jobs:
       # others: none that could push.
       - name: The handlers are those of the outputs asked for
         run: |
-          jq -e '
-            .partial == false and .fork == null and .pull_request == null
-            and (.handlers | keys) == ["add_comment", "noop"]
-            and (.handlers.add_comment | keys) == ["max", "target", "target-repo"]
-          ' "$RUNNER_TEMP/full/applied.json"
+          jq -e '.partial == false and .fork == null and .pull_request == null and (.handlers | keys) == ["add_comment", "noop"] and (.handlers.add_comment | keys) == ["max", "target", "target-repo"]' "$RUNNER_TEMP/full/applied.json"
       # The comments of this run among those of the runs beside it.
       - name: The topic-branch analysis posted one comment on the named issue
         env:
@@ -986,14 +980,11 @@ jobs:
           grep -F "an add\_comment with item\_number outside the caller's fixed item" <<< "$REFUSAL"
           test "$REFUSED_EXIT" = 0
           test -z "$REFUSED_APPLIED"
-          gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" | jq -se --arg run "$RUN" '
-            [ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run))
-              and (.body | contains("A comment from the scripted agent of an event-triggered run."))) ] | length == 1'
+          gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" | jq -se --arg run "$RUN" '[ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run)) and (.body | contains("A comment from the scripted agent of an event-triggered run."))) ] | length == 1'
       - name: The refused comment was not posted on either item
         run: |
           for item in "$ISSUE" 65; do
-            gh api --paginate "repos/$GH_REPO/issues/$item/comments" | jq -se --arg run "$RUN" '
-              any(.[][]; ((.body | contains($run)) and (.body | contains("This misdirected analysis must be refused.")))) | not'
+            gh api --paginate "repos/$GH_REPO/issues/$item/comments" | jq -se --arg run "$RUN" 'any(.[][]; ((.body | contains($run)) and (.body | contains("This misdirected analysis must be refused.")))) | not'
           done
       - name: The comments are on the scratch issue, and the run stopped at a limit says so
         env:
@@ -1062,15 +1053,14 @@ jobs:
       - name: Denials and sticky, owner, tmpfs and overlay controls after loader exits
         run: sudo node secure-host/world-write-host.mjs after
 
-  # After secure-host, a `run:` step and a JavaScript action's main step
-  # try sudo, docker, a root-owned world-writable file and the cloud
-  # metadata service, and each must fail. Read-only token, no id-token,
-  # no secrets; probes run as the runner's user, root only before setup.
-  # github-script gives the checkout's probe the action's runtime token.
-  # A post step is not yet proven by CI:
-  # https://github.com/cgwalters-forge/agentic-job/issues/513
+  # After secure-host, a `run:` step and a JavaScript action's main and
+  # post steps try sudo, docker, a root-owned world-writable file and the
+  # cloud metadata service, and each must fail. Read-only token, no
+  # id-token, no secrets; probes run as the runner's user, root only
+  # before setup. The action is the checkout's own, so the runner gives
+  # it the runtime token and runs its post step as it would a downloaded one's.
   confined:
-    name: Confined run step and JavaScript action main step
+    name: Confined run step and JavaScript action main and post steps
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -1091,17 +1081,17 @@ jobs:
         run: sudo install -m 0666 -o root -g root /dev/null /var/tmp/agentic-job-confine-root-file
       - name: Before the lock each route works (control)
         run: node .github/actions/confine-probe/probe.mjs control before
-      # Execute the checked-out action's entry points without a new local
-      # action exemption. Build both artifacts from this checkout, never a release.
+      # Run secure-host's entry points from the checkout, not as a local
+      # action. Build both artifacts from this checkout, never a release.
       - run: node secure-host/platform.mjs
       - run: node secure-host/binary.mjs get --build --out "$RUNNER_TEMP/secure-host/bin"
-      - name: Install the checkout's binary
+      - name: "Install the checkout's binary"
         run: sudo install -m 0755 "$RUNNER_TEMP/secure-host/bin/agentic-job" /usr/local/bin/agentic-job
       - name: Write the confinement configuration
         run: |
           agentic-job config --host --from secure-host/hosted.toml \
             --boolean sandbox.deny-runner-metadata=true > "$RUNNER_TEMP/secure-host/config.toml"
-      - name: Load the checkout's world-write object
+      - name: "Load the checkout's world-write object"
         run: sudo node secure-host/world-write.mjs "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
       - name: Secure the host
         run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
@@ -1109,10 +1099,13 @@ jobs:
       - run: agentic-job sandbox check --record
       - name: A run step is confined
         run: node .github/actions/confine-probe/probe.mjs confined run-step
-      - name: The JavaScript action main step is confined
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: await import(`${process.env.GITHUB_WORKSPACE}/.github/actions/confine-probe/main.mjs`)
+      # Its post step runs after the upload below, and fails the job if a
+      # route is open; its record is in that step's log. The ingress check
+      # (docs/workflow-ingress.md) accepts this ignore only while every line
+      # of this file closes its quotes, so a plain scalar with an apostrophe
+      # is quoted, and a jq program stays on one line.
+      - name: The JavaScript action main and post steps are confined
+        uses: ./.github/actions/confine-probe # zizmor: ignore[self-repository] The probe under test is this revision's.
       # The records of the probes that failed as well.
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1128,7 +1121,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: A fork's pull request cannot run the end-to-end jobs
+      - name: "A fork's pull request cannot run the end-to-end jobs"
         if: ${{ needs.changes.outputs.fork-e2e == 'true' }}
         run: |
           echo '::error::Without a merge queue this fork pull request cannot run the required write-capable end-to-end jobs. Enable the queue or test from a branch of this repository.'
@@ -1140,10 +1133,7 @@ jobs:
           FORK_E2E: ${{ needs.changes.outputs.fork-e2e }}
         run: >-
           jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork_e2e "$FORK_E2E"
-          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or
-          (.value.result == "skipped" and $e2e == "false" and
-            (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
-           (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"
+          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and $e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"
 
   # Only this sentinel is required in the ruleset. Always report a failure
   # if the aggregate did not succeed (a skipped required check can pass).

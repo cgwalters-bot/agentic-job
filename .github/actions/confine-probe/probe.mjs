@@ -3,14 +3,14 @@
 // world-writable file) and to the cloud metadata service. The job in
 // ci.yml runs it once before the action as the positive control, where
 // each must work, and after it from a `run:` step and from this
-// directory's probe imported by a JavaScript action's main step, where each must fail
+// directory's action, in its main step and its post step, where each must fail
 // (docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
 //
 //   node probe.mjs control|confined LABEL
 //
 // It writes what it found to $RUNNER_TEMP/confine/LABEL.json for the
-// job's artifact, and to its log. A post step is not yet proven by CI:
-// https://github.com/cgwalters-forge/agentic-job/issues/513
+// job's artifact, and to its log. The post step's record is only in its
+// log: the upload is a main step, so it runs before any post step.
 // Booleans and group names, never a variable's value.
 
 import { spawnSync } from 'node:child_process';

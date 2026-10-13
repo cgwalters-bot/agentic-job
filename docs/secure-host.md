@@ -397,13 +397,14 @@ for root.
 **Proof.** CI's `confined` job runs a probe as the runner's user: once before
 the action (the control, in which sudo, `docker info`, writing that root-owned
 `/var/tmp` file and the metadata service all work), and after it from a
-`run:` step and from a JavaScript action's main step (`actions/github-script`
-imports the checkout's [probe](../.github/actions/confine-probe/main.mjs)).
-Each route must fail. A file of the runner's own, also mode 0666,
+`run:` step and from a JavaScript action's main and post steps (the checkout's
+[probe action](../.github/actions/confine-probe/action.yml), which the runner
+runs like a downloaded one, its post step after the job's last step).
+Each route must fail, or the step fails the job. A file of the runner's own, also mode 0666,
 must still take a write. Each probe prints its record in its log, and the job
-uploads the records as an artifact, whether or not a probe failed. A post
-step is not yet proven by CI; that proof is tracked in
-[agentic-job#513](https://github.com/cgwalters-forge/agentic-job/issues/513). The check
+uploads the records as an artifact, whether or not a probe failed; the post
+step runs after that upload, so its record is only in its log. The runner's
+own cleanup after the post steps is not probed. The check
 that the action runs adds `runner-metadata` and `runner-metadata-v6`
 ([sandbox-check.md](sandbox-check.md#the-network-probes)). Only hosted Ubuntu
 26.04 runs this proof; RHEL 10 is unverified. A hosted runner serves no

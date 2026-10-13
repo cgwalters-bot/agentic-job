@@ -530,7 +530,7 @@ test('scripted negative analysis reaches check with a misdirected comment', () =
 test('negative analysis verification refuses any posted misdirected comment', () => {
   const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   const filter = ci.split('- name: The refused comment was not posted on either item\n')[1]
-    .split("--arg run \"$RUN\" '\n")[1].split("'\n")[0].trim();
+    .split("--arg run \"$RUN\" '")[1].split("'\n")[0].trim();
   const hostile = { body: 'This misdirected analysis must be refused. actions/runs/123' };
   for (const [comments, expected] of [
     [[], 0],

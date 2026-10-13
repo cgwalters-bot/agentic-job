@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { MODES, failures, fixtureProblem } from './probe.mjs';
 
@@ -38,4 +41,16 @@ test('a fixture that DAC would refuse anyway proves nothing', () => {
     assert.equal(fixtureProblem(stat(overrides)), problem);
   }
   assert.equal(fixtureProblem(undefined), 'missing');
+});
+
+test('the action probes in both its main and its post step', () => {
+  // Without a post entry the runner runs no post step, and the job passes
+  // without the proof docs/secure-host.md claims.
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const action = fs.readFileSync(path.join(dir, 'action.yml'), 'utf8');
+  for (const [key, file, label] of [['main', 'main.mjs', 'action'], ['post', 'post.mjs', 'post']]) {
+    assert.match(action, new RegExp(`^  ${key}: ${file.replace('.', '\\.')}$`, 'm'));
+    assert.match(fs.readFileSync(path.join(dir, file), 'utf8'), new RegExp(`^await probe\\('confined', '${label}'\\);$`, 'm'));
+  }
+  assert.match(action, /^  using: node\d+$/m);
 });

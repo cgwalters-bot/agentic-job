@@ -173,19 +173,23 @@ test('E2E callers, concurrency and apt safeguards remain wired', () => {
   assert.match(binary, /run\("sudo", \["node", join\(HERE, "apt.mjs"\)\]\);\s+run\("sudo", \["apt-get"/);
 });
 
-test('confined proves the checkout from run and JavaScript action main steps only', () => {
+test('confined proves the checkout from run steps and a local action main and post step', () => {
   const job = ci.split('\n  confined:\n')[1].split('\n  required-checks:\n')[0];
-  assert.doesNotMatch(job, /uses: (?:cgwalters-forge\/agentic-job|\.\/)|zizmor: ignore/);
+  // The one local action is the probe, exempted only from self-repository.
+  assert.doesNotMatch(job, /uses: cgwalters-forge\/agentic-job/);
+  const local = '        uses: ./.github/actions/confine-probe # zizmor: ignore[self-repository] ';
+  assert.equal(job.split('uses: ./').length, 2);
+  assert.equal(job.split('zizmor: ignore').length, 2);
+  assert.ok(job.includes(`      - name: The JavaScript action main and post steps are confined\n${local}`));
   assert.match(job, /binary\.mjs get --build --out "\$RUNNER_TEMP\/secure-host\/bin"/);
   assert.match(job, /world-write\.mjs "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o"/);
   assert.match(job, /--boolean sandbox\.deny-runner-metadata=true/);
   assert.match(job, /agentic-job sandbox check --record/);
   assert.match(job, /probe\.mjs confined run-step/);
-  assert.ok(job.includes('/confine-probe/main.mjs'));
-  assert.doesNotMatch(job, /post\.mjs|post entry point/);
-  assert.equal((job.match(/uses: actions\/github-script@/g) || []).length, 1);
-  assert.ok(job.indexOf('/confine-probe/main.mjs') < job.indexOf('uses: actions/upload-artifact@'));
-  assert.match(job, /name: The JavaScript action main step is confined/);
+  // After setup, so its main and post steps run under the lock.
+  assert.ok(job.indexOf('sudo agentic-job sandbox setup') < job.indexOf(local));
+  assert.ok(job.indexOf(local) < job.indexOf('uses: actions/upload-artifact@'));
+  assert.doesNotMatch(job, /actions\/github-script@/);
   assert.match(job, /- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions\/upload-artifact@/);
 });
 
