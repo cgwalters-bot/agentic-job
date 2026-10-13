@@ -21,17 +21,24 @@ changed path under `.github` that is a symlink or submodule. Zizmor runs
 offline, without repository configuration, including its default audits;
 actionlint checks workflows with shellcheck/pyflakes disabled.
 Any finding in a changed file fails, even if it existed before this PR.
-Deleted and unchanged files are not audited. No custom YAML policy, job digest
-or finding-identity grandfathering is involved.
+Deleted and unchanged files are not audited. No job digest or finding-identity
+grandfathering is involved.
 
-An inline `# zizmor: ignore[...]` comment switches a finding off, so a PR cannot
-add one: a changed file whose diff against the merge-base adds or changes a
-line with such a comment fails. Ignores already on the base branch keep
-working. A new exemption is for a maintainer to land, bypassing the ruleset,
-after reading its reason. It goes on the line zizmor reports; a comment
-elsewhere, such as at the top of the file, does nothing. The same holds for the
-first change to a workflow that has findings today. Actionlint has no
-inline-ignore syntax: fix real findings instead. PR configuration files cannot
+An inline `# zizmor: ignore[...]` comment can silence unrelated findings, so
+added or changed ignores in the diff against the merge-base fail, with one
+exception: exactly `# zizmor: ignore[self-repository]` on a step's `uses:` line
+whose literal path begins with `./`. This permits local actions, not remote
+actions or job-level reusable workflows; their code still needs human review.
+The checker accepts block-style steps with `- uses:` or `- name:`/`- id:` followed
+by `uses:`, with a plain single-line name/id, an unquoted or single-/double-quoted
+local path and an optional reason after the directive. The exception requires
+LF line endings and quotes closed on their line, including in script bodies.
+Other spellings and placements fail closed.
+Ignores already on the base branch keep working. Every other new or changed
+exemption is refused, including additional audit names on a local step.
+It goes on the line zizmor reports; a comment elsewhere does nothing.
+Actionlint has no inline-ignore syntax: fix real findings instead.
+PR configuration files cannot
 disable either analyzer. The trusted `workflow/actionlint.yaml` adds the
 GitHub-hosted `ubuntu-26.04` label missing from actionlint's built-in list; it
 does not disable label checks. It also filters the pinned analyzer's unknown

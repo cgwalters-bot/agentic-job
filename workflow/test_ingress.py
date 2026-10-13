@@ -4,10 +4,41 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ingress import check, git
+from ingress import check, git, local_step_ignores
 
 
 class IngressTests(unittest.TestCase):
+    def test_local_ignore_syntax(self):
+        prefix = "jobs:\n  test:\n    steps:\n"
+        cases = [
+            ("      - uses: ./local # zizmor: ignore[self-repository]", True),
+            ("      - name: Local\n        uses: './local' # zizmor: ignore[self-repository] reason", True),
+            ('      - id: local\n        uses: "./local" # zizmor: ignore[self-repository]', True),
+            ("      - uses: remote/action@v1 # zizmor: ignore[self-repository]", False),
+            ("      - uses: ./local # zizmor: ignore[self-repository, unpinned-uses]", False),
+            ("      - uses: ./local # ZIZMOR: ignore[self-repository]", False),
+            ("      - uses: ./local # zizmor: ignore[self-repository] # zizmor: ignore[other]", False),
+            ("      - run: |\n          uses: ./local # zizmor: ignore[self-repository]", False),
+            ("      - name: |\n          uses: ./local # zizmor: ignore[self-repository]\n        run: echo ok", False),
+            ("      - name: >\n          uses: ./local # zizmor: ignore[self-repository]\n        run: echo ok", False),
+            ("      - name: plain\n          uses: ./local # zizmor: ignore[self-repository]\n        run: echo ok", False),
+            ('      - name: "multiline\n        uses: ./local # zizmor: ignore[self-repository]\n        end"\n        run: echo ok', False),
+            ("      - uses: ./local\n        # zizmor: ignore[self-repository]", False),
+        ]
+        for step, expected in cases:
+            with self.subTest(step=step):
+                self.assertEqual(bool(local_step_ignores(prefix + step)), expected)
+        self.assertFalse(local_step_ignores(
+            "jobs:\n  test:\n    uses: ./local # zizmor: ignore[self-repository]"))
+        self.assertTrue(local_step_ignores(
+            "runs:\n  using: composite\n  steps:\n    - uses: ./local # zizmor: ignore[self-repository]"))
+        for separator in ("\r", "\r\n", "\x85", "\u2028", "\u2029"):
+            with self.subTest(separator=repr(separator)):
+                self.assertFalse(local_step_ignores(
+                    prefix.replace("\n", separator) + cases[0][0]))
+        self.assertFalse(local_step_ignores(
+            'name: "multiline\n' + prefix + cases[0][0] + '\nend"\n'))
+
     def test_repository_baseline(self):
         """Once a maintainer lands exemptions, ordinary edits pass ingress."""
         root = Path(__file__).resolve().parent.parent
@@ -42,6 +73,8 @@ class IngressTests(unittest.TestCase):
         ignored = good.replace("- run: echo ok", "- uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses] intentional test\n        with:\n          persist-credentials: false")
         source_context = good.replace(
             "- run: echo ok", "- run: echo $SOURCE\n        env:\n          SOURCE: ${{ job.workflow_repository }}")
+        local = good.replace("- run: echo ok", "- name: Local\n        uses: ./local # zizmor: ignore[self-repository] reviewed")
+        scalar_ignore = good.replace("- run: echo ok", "- name: |\n          uses: ./local # zizmor: ignore[self-repository]\n        run: echo ok")
         # (path, head content, expected[, base content if it differs])
         cases = [
             (".github/workflows/test.yml", good, True),
@@ -50,6 +83,21 @@ class IngressTests(unittest.TestCase):
             (".github/workflows/test.yml", ignored, True),
             (".github/workflows/test.yml", ignored, False, good),
             (".github/workflows/test.yml", ignored.replace("intentional test", "reworded"), False, ignored),
+            (".github/workflows/test.yml", local, True, good),
+            (".github/workflows/test.yml", local.replace("reviewed", "new reason"), True, local),
+            (".github/workflows/test.yml", local.replace("- name: Local\n        uses:", "- uses:"), True, good),
+            (".github/workflows/test.yml", local.replace("./local", "'./local'"), True, good),
+            (".github/workflows/test.yml", local.replace("./local", '"./local"'), True, good),
+            (".github/workflows/test.yml", local.replace("./local", "remote/action@" + "a" * 40), False, good),
+            (".github/workflows/test.yml", "name: test\non: push\npermissions: {}\njobs:\n  test:\n    uses: ./.github/workflows/local.yml # zizmor: ignore[self-repository]\n", False, good),
+            (".github/workflows/test.yml", local.replace("./local", "actions/checkout@v4"), False, good),
+            (".github/workflows/test.yml", local.replace("self-repository", "self-repository, unpinned-uses"), False, good),
+            (".github/workflows/test.yml", local + "# zizmor: ignore[unpinned-uses]\n", False, good),
+            (".github/workflows/test.yml", local.replace("uses: ./local", "uses: ./other"), True, local),
+            (".github/workflows/test.yml", local.replace("self-repository", "unpinned-uses"), False, local),
+            (".github/workflows/test.yml", scalar_ignore, False, good),
+            (".github/workflows/test.yml", 'name: "multiline\njobs:\n  test:\n    steps:\n      - uses: ./local # zizmor: ignore[self-repository]\nend"\n' + good.replace("name: test\n", ""), False, good),
+            (".github/workflows/test.yml", "# first\r# second\n" + local + "      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]\n        with:\n          persist-credentials: false\n", False, "# first\r# second\n" + local),
             (".github/workflows/policy.yml", source_context, True),
             (".github/workflows/check.yml", source_context, True),
             (".github/workflows/apply.yml", source_context, True),
@@ -59,6 +107,7 @@ class IngressTests(unittest.TestCase):
             (".github/workflows/policy.yml", good.replace("ubuntu-24.04", "ubuntu-nonexistent"), False),
             (".github/workflows/policy.yml", good.replace("echo ok", "echo '::set-output name=bad::value'"), False),
             ("local/action.yml", bad_action, False),
+            ("local/action.yml", "name: local\ndescription: test\nruns:\n  using: composite\n  steps:\n    - uses: ./other # zizmor: ignore[self-repository]\n", True, "name: local\ndescription: test\nruns:\n  using: composite\n  steps:\n    - run: echo ok\n      shell: bash\n"),
             (":(literal)local/action.yml", bad_action, False),
             (".github/unrelated.yml", "not a workflow", True),
             ("unrelated.yml", "not a workflow", True),

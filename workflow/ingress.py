@@ -11,6 +11,47 @@ import tempfile
 
 # Looser than zizmor's own syntax, so a near miss fails too.
 IGNORE = re.compile(r"zizmor\s*:\s*ignore", re.IGNORECASE)
+LOCAL_IGNORE = re.compile(
+    r"(?:- )?uses: (?:\./[^\s#'\"]+|'\./[^'\r\n]+'|\"\./[^\"\r\n]+\")"
+    r" +# zizmor: ignore\[self-repository\](?: +[^\r\n]*)?")
+
+
+def local_step_ignores(text):
+    """Recognize a conservative block-style subset, not arbitrary YAML syntax."""
+    allowed = set()
+    parents = []
+    # Git's hunk coordinates count LF, not Python/YAML's other line breaks.
+    # Refuse other YAML line breaks rather than normalize them.
+    if any(char in text for char in "\r\x85\u2028\u2029"):
+        return allowed
+    # A multiline quoted scalar can contain unindented, YAML-looking text.
+    # Do not mistake it for structure. Conservatively require quotes to close
+    # on their line, even in script bodies; the analyzers handle full YAML.
+    for line in text.split("\n"):
+        unquoted = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"", "", line)
+        if any(quote in unquoted.split("#", 1)[0] for quote in "'\""):
+            return allowed
+    for number, line in enumerate(text.split("\n"), 1):
+        stripped = line.lstrip(" ")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        while parents and parents[-1][0] >= indent:
+            parents.pop()
+        path = [value for _, value in parents]
+        # Only steps, never a job's reusable-workflow uses. Keeping every other
+        # line as an opaque parent also excludes comments inside block scalars.
+        if (not stripped.startswith("- ") and path and
+                indent == parents[-1][0] + 2 and re.fullmatch(
+                    r"- (?:name|id): [^\s|>'\"!&][^\r\n]*", path[-1])):
+            path = path[:-1]
+        step = (len(path) == 3 and path[0] == "jobs:" and
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*:", path[1]) and
+                path[2] == "steps:") or path == ["runs:", "steps:"]
+        if step and LOCAL_IGNORE.fullmatch(stripped) and len(IGNORE.findall(line)) == 1:
+            allowed.add(number)
+        parents.append((indent, stripped))
+    return allowed
 
 
 def git(repo, *args):
@@ -45,11 +86,24 @@ def check(repo, base, head):
             source = Path(temp) / Path(name).name
             source.write_bytes(git(repo, "cat-file", "blob", oid.decode()))
             print(f"Checking {name!r}", flush=True)
-            # An ignore switches a finding off, so the change it vets cannot add one.
+            # A PR must not silence unrelated findings. Local action steps are
+            # the sole exception; their code still needs human review.
+            allowed = local_step_ignores(source.read_bytes().decode(errors="replace"))
             patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--text", "--no-renames",
-                        "-U0", ancestor, head, "--", name).decode(errors="replace")
-            if any(line.startswith("+") and IGNORE.search(line) for line in patch.splitlines()):
-                print(f"New or changed zizmor ignore in {name!r}: a maintainer must land new exemptions.")
+                         "-U0", ancestor, head, "--", name).decode(errors="replace")
+            new_line = 0
+            refused = False
+            for line in patch.split("\n"):
+                hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+                if hunk:
+                    new_line = int(hunk[1])
+                elif line.startswith("+") and new_line:
+                    refused |= bool(IGNORE.search(line) and new_line not in allowed)
+                    new_line += 1
+                elif line.startswith(" "):
+                    new_line += 1
+            if refused:
+                print(f"New or changed zizmor ignore in {name!r}: only self-repository on a local action step is allowed.")
                 failed = True
             commands = [[os.environ.get("ZIZMOR", "zizmor"), "--offline", "--no-config",
                          "--strict-collection", "--no-progress", str(source)]]
