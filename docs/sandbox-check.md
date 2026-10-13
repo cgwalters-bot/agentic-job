@@ -86,12 +86,10 @@ matches on them.
 | `env-job-variables`, `oidc-value:NAME` | see `ACTIONS_*` variables in its own environment, or the values of the identity-token request variables in any process it can read | it runs `env`; the checking process has the variables | the same, and refusal by name |
 | `private-dir:DIR` | list or enter the runner's home, `/opt/hca`, tailscaled's socket directory, each of `sandbox.private-dirs`, and the job's work directories if they are elsewhere | the runner lists its home | mode 0700 |
 | `filesystem-view`, `filesystem-view-manager`, `filesystem-view-socket` | create a file in the planted sandbox-group-writable host directory via run0, a user service clearing its path properties, and socket activation | each entry writes home; removing the manager view permits its write | inherited read-only mount views |
-| `runner-world-write` (walk mode only) | the runner creates a file in the host directory planted world-writable before hardening | the runner creates a file in its home | opt-in host-wide chmod pass |
+| `world-write`, `runner-world-write` | as the sandbox user, and as the runner, create a file in the root-owned mode-0777 directory `/etc/agentic-job/world-write-probe` or append to its root-owned mode-0666 `file` | each creates a file in its own home | the world-write policy secure-host loads before setup ([secure-host.md](secure-host.md#what-the-final-probe-proves)); under the view, also its read-only mounts for the sandbox user |
 | `filesystem-view-nested` | remount `/` writable and write outside the allowed paths in a nested user/mount namespace | nested namespace writes home | inherited read-only mounts cannot be unlocked |
 | `filesystem-view-pam` | ptrace, write memory, open `/proc/PID/mem` or use `/proc/PID/root` of same-uid PAM handlers | attach to and write memory of a child | credential change makes the trusted handler nondumpable |
 | `filesystem-view-userns`, `filesystem-view-kvm`, `container-build`, `container-built-run` | compatibility controls: Podman user/mount namespaces, KVM API, rootless build and run | existing container pull/network controls | no blanket namespace, device or privilege-elevation prohibition |
-| `world-writable` (walk mode only) | find anything world-writable on the root filesystem outside temporary directories and the planted view probe | it finds a directory made for it | opt-in setup removes world write |
-| `setuid-unowned` (walk mode only) | (the sandbox user's search) find a setuid-root program no package owns | it finds `sudo` or `su` | setup's walk took the bit off such programs |
 | `ptrace-scope` | (none: reads the kernel setting) | | setup raises it to 1 |
 | `cron`, `at` | install a crontab; use `at` | the runner's user may | `/etc/cron.deny`, `/etc/at.deny` |
 | `service:UNIT` | (none: asks systemd) | journald is active | `sandbox.stop-services` |
@@ -107,7 +105,7 @@ require that the host-permitted namespace entry point works, can write the sandb
 home, and cannot remount the host view writable to write the planted directory.
 The build probe writes a real Containerfile and builds with networking and pulls
 disabled; the built-image run also forbids pulls and fails distinctly without
-running if its build failed. Both the view and legacy-walk baseline report a
+running if its build failed. Hosts with and without the view report a
 non-failing util-linux `unshare` diagnostic, including stderr on failure. With
 Ubuntu's AppArmor user namespace restriction on (23.10 and later), that note
 reads `unshare: write failed /proc/self/uid_map: Operation not permitted`:
@@ -147,20 +145,15 @@ tries it: `docker`, `podman`, `lxd`, `incus`, `libvirt` (their daemons
 are stopped, sockets included), `disk` (the block devices lose group
 and other access), `shadow` (the password files are closed). `adm` and
 `systemd-journal` read the host's logs, which is not root; they are
-noted. Setuid: in both modes setup stats the known privileged binary paths
-of the image allowlist and refuses one present with another owner, group or
-mode. In walk mode, the default, the same single pass that strips world write
-also lists the setuid-root programs, and one that no package owns loses the
-bit, as someone's own way to root; the distribution's (`sudo`, `su`,
-`pkexec`, `mount`) stay, each closed by its own policy or needing a password
-root does not have. The inventory includes the temporary trees, whose world
-write is deliberately left alone. A subordinate owner can reopen a closed
-directory; its setuid programs must therefore remain inventoried. File
-capabilities (`cap_setuid` on a program) are not looked for. The world-write,
-`setuid-unowned` and runner world-write refusal probes run in walk mode.
-Explicit view mode tests actual sandbox write refusal, not host permission
-bits, and neither searches for nor strips unknown image-supplied setuid helpers.
-The runner and cleanup remain outside the view and retain ordinary DAC access.
+noted. Setuid: setup stats the known privileged binary paths of the image
+allowlist and refuses one present with another owner, group or mode. It no
+longer searches for, or strips, setuid-root programs no package owns: that
+inventory went with the world-write walk
+([secure-host.md](secure-host.md#what-went-with-the-walk)), and a trusted fresh
+image is assumed. File capabilities (`cap_setuid` on a program) are not looked
+for. The world-write probes test actual write refusal, not permission bits,
+for the runner and the sandbox user alike. The runner and cleanup remain
+outside the view.
 See [setup](sandbox.md#what-sandbox-setup-does) for the trusted-image requirement.
 
 The nested-namespace positive controls and container build/run probes log their
@@ -237,8 +230,8 @@ and nothing holds the caller to the order. That is what a compiler
 would add (docs/compiler.md): a fixed shape of job in which only the
 setup step has root. Protections that are per agent unit (a mount
 namespace, an AppArmor profile on the agent alone) do not satisfy
-this principle and are not used; the world-writable walk is host-wide,
-and a replacement must be too ([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)).
+this principle and are not used; the world-write policy is host-wide,
+as the walk it replaced was ([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)).
 
 ### The runner's probes
 
@@ -297,7 +290,7 @@ runner has to join without the tailnet's DNS.
 
 Three of these are new against the old tree's
 `agent-isolation-check.mjs`, which had no probe for them: `cron`, `at`
-and `linger`; `world-writable`; and `local-sockets` with `local-tcp`.
+and `linger`; `world-write`; and `local-sockets` with `local-tcp`.
 
 ## The job's work directories
 
@@ -355,7 +348,7 @@ away, alone and with a rule that grants; opens the runner's home, and
 leaves it searchable only; works in a directory outside it; puts a job
 variable into the system manager's environment, and the request
 token's value into a sandbox process; takes the user off the cron and
-at deny lists; makes a file in `/etc` world-writable; resets ptrace;
+at deny lists; switches the world-write policy off in its map; resets ptrace;
 starts a stopped unit; opens two listeners; and, for the run token,
 loosens the configuration's modes, leaves a copy in `/tmp`, puts the
 token on a command line, and puts the runner's copy where anyone reads
@@ -363,9 +356,11 @@ it. For the runner's user it adds a sudoers rule that sorts after the
 deny rule, a polkit rule that grants it with the deny rule moved away,
 and starts the daemon of a group it is in (`docker`, on the hosted image).
 
-The fifth host uses the default walk instead of the explicitly selected view
-and runs the cron, at, world-write, runner-write and unowned-setuid removal
-cases without sharding; the last installs a setuid-root program no package owns.
+The fifth host runs without the view, the default, and runs the cron, at and
+world-write-policy removal cases without sharding. Switching the policy off
+must fail `world-write` and `runner-world-write` there, and only
+`runner-world-write` under the view, whose read-only mounts still refuse the
+sandbox user.
 Removing `cron.deny` there
 must permit installing a crontab, so the `cron` probe fails. With the view on,
 the same removal must still refuse installation with a read-only-filesystem
@@ -375,11 +370,10 @@ removing `at.deny` remains observable in both configurations. Private-directory
 probes list and enter directories, and socket probes connect rather than write
 socket files; read-only mounts do not hide their permission-removal cases.
 The manager-view removal uses a root-owned directory writable by the sandbox
-group. The default view leaves its world-write permissions intact, proving
-mount confinement rather than DAC refusal. In walk mode, restoring world-write
-on that directory must fail the runner refusal probe. Each removal pass also
-asserts that the selected mode's probe IDs are present and the other mode's
-walk/view probes are absent.
+group and not world-writable, so its write is DAC-permitted and outside the
+world-write policy: the probe proves mount confinement alone. Each removal
+pass also asserts that the world-write probes are present, and the view's
+exactly when the view is on.
 These assertions still require fresh-host CI; local workspace tests do not
 establish privileged enforcement or provide hosted stage timings.
 

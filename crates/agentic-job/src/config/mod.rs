@@ -64,9 +64,10 @@ pub struct Sandbox {
     /// must keep root for the runner's user after the job, which the
     /// docs say is no machine an agent should run on.
     pub lock_runner: bool,
-    /// Apply host-wide world-write hardening instead of the mount view.
-    /// On by default: the view alone does not confine later runner-user steps.
-    pub world_write_walk: bool,
+    /// Confine the sandbox user's commands to a read-only view of the host,
+    /// writable only in its home and the temporary directories. Off by
+    /// default; the world-write policy applies either way.
+    pub filesystem_view: bool,
     /// More directories closed to every user but their owner, besides
     /// the runner user's home and [`Sandbox::ALWAYS_PRIVATE_DIRS`]. One
     /// that does not exist is skipped.
@@ -191,7 +192,7 @@ impl Default for Sandbox {
             allow_existing_user: false,
             runner_user: None,
             lock_runner: true,
-            world_write_walk: true,
+            filesystem_view: false,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
             env: BTreeMap::new(),

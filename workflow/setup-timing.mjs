@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export function checkSetupStages(log, legacyWalk) {
-  assert.ok(['true', 'false'].includes(legacyWalk), 'invalid legacy-walk value');
-  const walk = legacyWalk === 'true';
+// The walk's stages are gone: the world-write policy is loaded before setup.
+export function checkSetupStages(log, filesystemView) {
+  assert.ok(['true', 'false'].includes(filesystemView), 'invalid filesystem-view value');
+  const view = filesystemView === 'true';
   for (const [stage, expected] of [
     ['privileged-binary-allowlist', true],
-    ['world-write-and-setuid-walk', walk],
-    ['setuid-package-ownership', walk],
-    ['filesystem-view', !walk],
+    ['world-write-and-setuid-walk', false],
+    ['setuid-package-ownership', false],
+    ['filesystem-view', view],
   ]) {
     const lines = log.split('\n').filter(line => line.startsWith(`Sandbox setup stage ${stage}:`));
     assert.equal(lines.length, expected ? 1 : 0, `unexpected setup stage: ${stage}`);
@@ -20,6 +21,6 @@ export function checkSetupStages(log, legacyWalk) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  assert.equal(process.argv.length, 4, 'usage: setup-timing.mjs LOG LEGACY_WALK');
+  assert.equal(process.argv.length, 4, 'usage: setup-timing.mjs LOG FILESYSTEM_VIEW');
   checkSetupStages(readFileSync(process.argv[2], 'utf8'), process.argv[3]);
 }

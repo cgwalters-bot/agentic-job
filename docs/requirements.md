@@ -53,10 +53,11 @@ without proof; `token-file` has no request accounting or revocation by `run`.
 ### R4. The runner's user loses root before the agent runs
 
 Setup locks general sudo and polkit by default, closes root-equivalent
-group access. Both modes validate known privileged binary metadata. The
-default walk also strips world write and the setuid bit of setuid-root
-programs no package owns; the optional view does neither, so it requires a
-trusted image without such helpers and does not protect later runner-user steps. The runner retains
+group access. Setup validates known privileged binary metadata, and refuses a
+host without the world-write policy, which keeps every user but the owner,
+the runner's included, from changing a world-writable root-filesystem object.
+Setuid-root programs no package owns are not searched for, so a trusted image
+without such helpers is required. The runner retains
 only the root-owned helper's fixed operations. `ptrace_scope` is raised
 to at least 1. The runner-lock probes test these restrictions.
 `sandbox.lock-runner = false` deliberately gives up this requirement.

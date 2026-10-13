@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { attach, PIN, PROGRAMS, reportRefusal, rootConfig, runCommand } from "./world-write.mjs";
+import { attach, bpftoolInstall, ensureBpftool, PIN, PROGRAMS, reportRefusal, rootConfig, runCommand } from "./world-write.mjs";
 
 // Shape emitted by bpftool -j -f link show (not single-link show pinned).
 const links = PROGRAMS.map((name, index) => ({
@@ -109,10 +109,58 @@ test("world-write enforcement feeds the ruleset-required CI aggregate", () => {
   assert.match(ci, /ci:\n    if: \$\{\{ always\(\) \}\}\n    needs: required-checks/);
 });
 
-test("action loading is explicitly opt-in and precedes removal of root", () => {
+test("the action always loads the policy, before setup takes root away", () => {
   const action = readFileSync(new URL("./action.yml", import.meta.url), "utf8");
-  assert.match(action, /world-write-bpf:[\s\S]*?default: "false"/);
-  assert.match(action, /if: \$\{\{ inputs.world-write-bpf == 'true' \}\}/);
+  assert.doesNotMatch(action, /world-write-bpf/);
+  const step = action.split("    - name: Load the world-write policy\n")[1].split("\n    - ")[0];
+  assert.doesNotMatch(step, /\bif:/);
+  assert.match(step, /sudo node "\$ACTION\/world-write.mjs"/);
   assert.ok(action.indexOf('sudo node "$ACTION/world-write.mjs"') <
     action.indexOf("sudo agentic-job sandbox setup"));
+});
+
+test("the agent job's prepare installs the object beside the binary secure-host is given", () => {
+  const prepare = readFileSync(new URL("../prepare/action.yml", import.meta.url), "utf8");
+  assert.match(prepare, /sudo install -m 0644 "\$JOB_DIR\/world_write.bpf.o" \/usr\/local\/bin\/world_write.bpf.o/);
+});
+
+// Setup refuses a host without these pins (sandbox/setup.rs), and the
+// sandbox probes switch the policy off through its map.
+test("setup looks for the pins this loader makes", () => {
+  const setup = readFileSync(new URL("../crates/agentic-job/src/sandbox/setup.rs", import.meta.url), "utf8");
+  assert.ok(setup.includes(`WORLD_WRITE_PIN: &str = "${PIN}";`));
+  const links = /WORLD_WRITE_LINKS: &\[&str\] = &\[([^\]]*)\]/.exec(setup)[1];
+  assert.deepEqual([...links.matchAll(/"([a-z_]+)"/g)].map(match => match[1]), PROGRAMS);
+});
+
+test("bpftool is installed only where it does not run, from the host's packages", () => {
+  const ubuntu = 'NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="26.04"\n';
+  const rhel = 'NAME="Red Hat Enterprise Linux"\nID="rhel"\nVERSION_ID="10.1"\n';
+  assert.deepEqual(bpftoolInstall(ubuntu, "7.0.0-1012-azure"), ["apt-get", ["-o", "Acquire::Retries=3",
+    "install", "-y", "--no-install-recommends", "linux-tools-common", "linux-tools-7.0.0-1012-azure"]]);
+  assert.deepEqual(bpftoolInstall(rhel, "6.12.0-55.el10.x86_64"), ["dnf", ["install", "-y", "bpftool"]]);
+  assert.throws(() => bpftoolInstall(ubuntu, "7.0 -x"), /unexpected kernel release/);
+  assert.throws(() => bpftoolInstall("ID=fedora\n", "6.12"), /no bpftool package known for fedora/);
+  for (const [present, release, expected] of [
+    [true, ubuntu, [["bpftool", ["version"]]]],
+    [false, ubuntu, [["bpftool", ["version"]], ["uname", ["-r"]], bpftoolInstall(ubuntu, "7.0.0-1012-azure"),
+      ["bpftool", ["version"]]]],
+    [false, rhel, [["bpftool", ["version"]], ["uname", ["-r"]], ["dnf", ["install", "-y", "bpftool"]],
+      ["bpftool", ["version"]]]],
+  ]) {
+    const calls = [];
+    let installed = present;
+    ensureBpftool((command, args) => {
+      calls.push([command, args]);
+      if (command === "bpftool" && !installed) throw new Error("bpftool missing");
+      if (command === "apt-get" || command === "dnf") installed = true;
+      return command === "uname" ? "7.0.0-1012-azure\n" : "";
+    }, release);
+    assert.deepEqual(calls, expected);
+  }
+  // An install that leaves no working bpftool refuses.
+  assert.throws(() => ensureBpftool((command) => {
+    if (command === "bpftool") throw new Error("bpftool missing");
+    return "7.0.0-1012-azure\n";
+  }, ubuntu), /bpftool missing/);
 });

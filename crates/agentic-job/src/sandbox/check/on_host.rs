@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, TcpListener};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -34,6 +34,10 @@ const DECOY_TRIES: u32 = 50;
 /// mode 0711 hides its names and still gives up every file whose name is
 /// known.
 const LIST_OR_ENTER: &str = r#"ls -- "$1" >/dev/null 2>&1 || cd -- "$1""#;
+
+/// Succeeds if `$1` can be created (and is then removed) or, failing
+/// that, `$2` opened to append: either is a write.
+const WRITE_OR_APPEND: &str = r#"{ : > "$1" && rm -f -- "$1"; } 2>/dev/null || : >> "$2""#;
 
 /// Either enumeration, directory access, or a known-PID command-line read
 /// exposes the other user's process. hidepid=1 is not sufficient.
@@ -102,14 +106,21 @@ const ALWAYS_ACTIVE_UNIT: &str = "systemd-journald.service";
 /// probe does. The `&&` keeps the shell from replacing itself with it.
 const PKEXEC_FROM_A_SHELL: &str = "pkexec true && true";
 
-/// The control directory while it is being made, then open to all
-/// without the sticky bit, which is what the search looks for.
-const MODE_PRIVATE: u32 = 0o700;
-
-const MODE_OPEN_DIR: u32 = 0o777;
-
 /// A socket any user may connect to.
 const MODE_OPEN_SOCKET: u32 = 0o666;
+
+/// Whether this user can create `path`; what it made is removed again.
+fn create_and_remove(path: &Path) -> Result<bool> {
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .is_ok();
+    if created {
+        std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    Ok(created)
+}
 
 /// The names of the variables in `environs`, the `NAME=value` entries of
 /// any number of processes with a NUL after each, that have `needle`
@@ -519,68 +530,13 @@ impl Checker<'_> {
              keeps it"
         };
         self.report.note(&format!(
-            "util-linux-userns-diagnostic: success={diagnostic}; world_write_walk={}{why}",
-            self.config.sandbox.world_write_walk
+            "util-linux-userns-diagnostic: success={diagnostic}; filesystem_view={}{why}",
+            self.config.sandbox.filesystem_view
         ));
-        if !self.config.sandbox.world_write_walk {
+        if self.config.sandbox.filesystem_view {
             self.filesystem_view()?;
         }
-        if self.config.sandbox.world_write_walk {
-            self.runner_filesystem_write()?;
-            // The control is a directory of ours that any user may write,
-            // found by the same search the probe makes.
-            let open_dir = PathBuf::from(format!("/tmp/agentic-job-{}", self.canary));
-            std::fs::DirBuilder::new()
-                .mode(MODE_PRIVATE)
-                .create(&open_dir)
-                .with_context(|| format!("creating {}", open_dir.display()))?;
-            std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(MODE_OPEN_DIR))?;
-            let find = |root: &str| -> Result<String> {
-                let mut argv = vec!["find".to_owned()];
-                argv.extend(setup::world_writable_find(root));
-                // Not its own: what it made world-writable itself, in its
-                // home, gives it nothing.
-                argv.extend(
-                    [
-                        "!",
-                        "-user",
-                        user.as_str(),
-                        "!",
-                        "-path",
-                        setup::VIEW_PROBE_DIR,
-                        "-print",
-                        "-quit",
-                    ]
-                    .map(str::to_owned),
-                );
-                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-                // find also fails for what it may not read; what it printed counts.
-                let output = self.sandbox(&argv, b"")?;
-                Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            };
-            let control = find(&open_dir.display().to_string());
-            let found = find("/");
-            let _ = std::fs::remove_dir(&open_dir);
-            let (control, found) = (control?, found?);
-            self.report.expect(
-                Want::Succeed,
-                "world-writable-control",
-                format!("{user} finds a world-writable directory made for it (control)"),
-                !control.is_empty(),
-            );
-            self.report.expect(
-                Want::Fail,
-                "world-writable",
-                if found.is_empty() {
-                    format!("{user} finds nothing world-writable on the root filesystem outside the temporary directories")
-                } else {
-                    format!("{user} finds {found} world-writable")
-                },
-                !found.is_empty(),
-            );
-            // The walk's own inventory removed these; the view has no walk.
-            self.setuid_programs()?;
-        }
+        self.world_write()?;
 
         let scope = std::fs::read_to_string(PTRACE_SCOPE).unwrap_or_default();
         self.report.expect(
@@ -595,87 +551,70 @@ impl Checker<'_> {
         Ok(())
     }
 
-    /// A setuid-root program the host's packages do not account for is
-    /// someone's own way to root, and the lock cannot know whose: setup
-    /// takes the bit off such a program, and this looks for any left.
-    /// The search is the sandbox user's, since it is on the same side of
-    /// the boundary as the probe; the control is a program every host
-    /// has.
-    fn setuid_programs(&mut self) -> Result<()> {
+    /// The world-write policy, by what it does: ordinary permissions let
+    /// any user create in the planted directory and append to the planted
+    /// file, and the policy must refuse both to the runner's user and to
+    /// the sandbox user, neither of which owns them. No denial log is
+    /// read. Each user's control is the same attempt in its own home. The
+    /// runner has no view, so its probe proves the policy alone; under the
+    /// view the sandbox user's attempt also meets a read-only mount.
+    fn world_write(&mut self) -> Result<()> {
         let user = self.user().to_owned();
-        let argv: Vec<String> = std::iter::once("find".to_owned())
-            .chain(setup::setuid_root_find("/"))
-            .collect();
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        // find also fails for what it may not read; what it printed counts.
-        let output = self.sandbox(&argv, b"")?;
-        let found = String::from_utf8_lossy(&output.stdout);
-        let found: Vec<&str> = found.lines().filter(|line| !line.is_empty()).collect();
-        self.report.expect(
-            Want::Succeed,
-            "setuid-control",
-            format!("{user} finds a setuid-root program every host has (control)"),
-            found
-                .iter()
-                .any(|path| setup::SETUID_CONTROLS.contains(path)),
-        );
-        let unowned: Vec<&str> = found
-            .iter()
-            .copied()
-            .filter(|path| !setup::package_owned(path))
-            .collect();
-        self.report.expect(
-            Want::Fail,
-            "setuid-unowned",
-            if unowned.is_empty() {
-                format!(
-                    "every setuid-root program {user} finds belongs to a package ({} found)",
-                    found.len()
-                )
-            } else {
-                format!(
-                    "{user} finds setuid-root programs no package owns: {}",
-                    unowned.join(", ")
-                )
-            },
-            !unowned.is_empty(),
-        );
-        Ok(())
-    }
-
-    /// The runner has no mount view: setup must have removed its write access.
-    fn runner_filesystem_write(&mut self) -> Result<()> {
-        let outside = format!("{}/{}", setup::VIEW_PROBE_DIR, self.canary);
-        let control = self.runner.home.join(&self.canary);
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&control);
-        let home_writable = file.is_ok();
-        drop(file);
-        if home_writable {
-            std::fs::remove_file(&control).context("removing runner home write control")?;
-        }
+        let created = format!("{}/{}", setup::WORLD_WRITE_PROBE_DIR, self.canary);
+        let home_writable = create_and_remove(&self.runner.home.join(&self.canary))?;
         self.report.expect(
             Want::Succeed,
             "runner-world-write-control",
             "runner can write its own home",
             home_writable,
         );
-        let host_control = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&outside);
-        let writable = host_control.is_ok();
-        drop(host_control);
-        if writable {
-            std::fs::remove_file(&outside).context("removing host filesystem-view control")?;
-        }
+        let wrote = create_and_remove(Path::new(&created))?
+            || std::fs::OpenOptions::new()
+                .append(true)
+                .open(setup::WORLD_WRITE_PROBE_FILE)
+                .is_ok();
         self.report.expect(
             Want::Fail,
             "runner-world-write",
-            "runner cannot write the host directory planted before hardening",
-            writable,
+            format!(
+                "runner can neither create in {} nor append to {}, root's and world-writable",
+                setup::WORLD_WRITE_PROBE_DIR,
+                setup::WORLD_WRITE_PROBE_FILE
+            ),
+            wrote,
+        );
+        let home = self.entry.home().join(&self.canary);
+        let control = self.sandbox_succeeds(&[
+            "sh",
+            "-c",
+            WRITE_OR_APPEND,
+            "sh",
+            &home.display().to_string(),
+            &home.display().to_string(),
+        ])?;
+        let wrote = self.sandbox_succeeds(&[
+            "sh",
+            "-c",
+            WRITE_OR_APPEND,
+            "sh",
+            &created,
+            setup::WORLD_WRITE_PROBE_FILE,
+        ])?;
+        self.report.expect(
+            Want::Succeed,
+            "world-write-control",
+            format!("{user} can write its own home (control)"),
+            control,
+        );
+        self.report.expect(
+            Want::Fail,
+            "world-write",
+            format!(
+                "{user} can neither create in {} nor append to {}, root's and world-writable",
+                setup::WORLD_WRITE_PROBE_DIR,
+                setup::WORLD_WRITE_PROBE_FILE
+            ),
+            wrote,
         );
         Ok(())
     }

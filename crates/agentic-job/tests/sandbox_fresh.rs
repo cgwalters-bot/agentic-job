@@ -62,6 +62,8 @@ fn setup_refuses_a_machine_that_is_not_fresh() {
         !Path::new(CONFIG_DIR).exists(),
         "`sandbox setup` already ran here"
     );
+    // A fresh host that loaded the policy would be set up by the last case.
+    root(&["test", "!", "-e", "/sys/fs/bpf/agentic-job-world-write"]);
     root(&["useradd", "--create-home", EXISTING_USER]);
     root(&["usermod", "-aG", "adm", EXISTING_USER]);
     root(&["mkdir", LEFTOVER_HOME]);
@@ -84,6 +86,12 @@ fn setup_refuses_a_machine_that_is_not_fresh() {
         (
             "[sandbox]\nuser = \"aj-test-new\"\ngroups = [\"no-such-group\"]\n".to_owned(),
             "no group no-such-group",
+        ),
+        // Fresh, but the world-write policy is not loaded yet: CI runs
+        // this before its loader.
+        (
+            "[sandbox]\nuser = \"aj-test-new\"\ngroups = []\n".to_owned(),
+            "the world-write policy is not loaded",
         ),
     ];
     let wrong: Vec<String> = cases

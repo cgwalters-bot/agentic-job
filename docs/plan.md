@@ -38,7 +38,8 @@ include author validation and reporting failures without losing results.
 [Apply checks (#17)](https://github.com/cgwalters-forge/agentic-job/issues/17)
 need review against the base, file-list and rename checks already implemented.
 [Setup performance (#108)](https://github.com/cgwalters-forge/agentic-job/issues/108)
-still tracks the host-wide walk, feed-pin maintenance and source-attested releases.
+still tracks feed-pin maintenance and source-attested releases; the host-wide
+walk is gone, replaced by the access-time world-write policy.
 
 The agent reads GitHub with a read-only token
 ([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)).

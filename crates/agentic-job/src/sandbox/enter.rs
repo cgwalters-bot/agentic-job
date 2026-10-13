@@ -108,7 +108,7 @@ impl Entry {
             user,
             env,
             root,
-            filesystem_view: !sandbox.world_write_walk,
+            filesystem_view: sandbox.filesystem_view,
         }
     }
 
@@ -621,10 +621,13 @@ mod tests {
     }
 
     #[test]
-    fn the_view_is_an_explicit_alternative_to_default_host_hardening() {
-        for (text, walk) in [("", true), ("[sandbox]\nworld-write-walk = false", false)] {
+    fn the_view_is_opt_in() {
+        // The walk's switch is gone: a configuration that still asks for
+        // it is refused rather than taken for protection it no longer has.
+        assert!(Config::parse("[sandbox]\nworld-write-walk = true").is_err());
+        for (text, view) in [("", false), ("[sandbox]\nfilesystem-view = true", true)] {
             let config = Config::parse(text).unwrap();
-            assert_eq!(config.sandbox.world_write_walk, walk);
+            assert_eq!(config.sandbox.filesystem_view, view);
             let entry = Entry::for_user(
                 entry(&[]).user,
                 &config.sandbox,
@@ -635,7 +638,7 @@ mod tests {
             assert_eq!(
                 argv.iter()
                     .any(|arg| arg == "--property=ProtectSystem=strict"),
-                !walk
+                view
             );
         }
     }

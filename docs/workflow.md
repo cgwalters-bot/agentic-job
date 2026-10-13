@@ -1467,10 +1467,10 @@ it. A successful fetch still has to pass the pinned checksum check.
 
 The retry and requirements-file regression tests address only part of
 [#108](https://github.com/cgwalters-forge/agentic-job/issues/108). That
-issue remains the tracking item for a faster world-write walk with an
-equivalent protection argument, automated feed-pin maintenance, and a
-CI embedded-source scan that handles `concat!` and multiline macros.
-The host-wide walk is unchanged; no narrower protection is claimed here.
+issue remains the tracking item for automated feed-pin maintenance and a
+CI embedded-source scan that handles `concat!` and multiline macros. The
+world-write walk it also tracked is gone, replaced by the access-time
+policy ([secure-host.md](secure-host.md#access-time-world-write-policy)).
 Source-attested prebuilt releases now replace manual release pins;
 their trust model is described below.
 

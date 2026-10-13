@@ -70,20 +70,21 @@ order, it:
 - denies the sandbox user sudo, every polkit action, cron, at and
   lingering;
 - starts the egress proxy and loads the network rules (below);
-- removes world-write permissions by default, or installs the explicitly
-  selected read-only view on the user's manager and every `run0` command;
-  raises `ptrace_scope` from 0 to 1;
+- refuses a host where the world-write policy is not loaded (secure-host
+  loads it first: [secure-host.md](secure-host.md#access-time-world-write-policy));
+  with `sandbox.filesystem-view = true`, installs the read-only view on the
+  user's manager and every `run0` command; raises `ptrace_scope` from 0 to 1;
 - runs `setup.script` as the sandbox user, never as root;
 - installs the root-owned helper and configuration under `/etc/agentic-job/`;
 - by default, locks the runner's user out of general sudo and polkit,
   closes root-equivalent group access. [The lock and its probes](sandbox-check.md#after-setup-nothing-has-root)
   describe the remaining privileged operations.
 
-The default retains host-wide world-write hardening and the runner-write refusal
-probe. The view is opt-in: `sandbox.world-write-walk = false` explicitly selects it.
-The view confines the sandbox user's processes, not the runner's subsequent
-steps, supervision or cleanup; it does not remove world-write permissions for
-the runner. Use the default when later runner steps need this protection.
+The world-write policy applies to every user but an object's owner, the
+runner's user included, and `sandbox check` probes it for both users. The view
+is opt-in, `sandbox.filesystem-view = true`, on top of it. The view confines
+the sandbox user's processes, not the runner's subsequent steps, supervision
+or cleanup.
 A root-owned drop-in on the **system** unit `user@UID.service`
 and properties on each transient `run0` service set `ProtectSystem=strict`
 and `ProtectHome=read-only`, with
@@ -100,28 +101,24 @@ view does not grant permissions or make a read-only filesystem writable.
 No `PrivateUsers`, `PrivateDevices`, mount syscall filter or `NoNewPrivileges`
 is added: those would hide KVM or break Podman's subordinate-id helpers.
 
-`sandbox.world-write-walk = true` (the default) uses a GNU `find -O3`
-world-write pass instead of the mount view. The same pass lists setuid-root
-programs, and one no package owns loses the bit, at no extra traversal. After
-package installation, both modes also stat the paths in
+After package installation, setup stats the paths in
 `crates/agentic-job/src/sandbox/setup/privileged-binaries.tsv`, following
 links (Ubuntu's `/usr/bin/sudo` is an alternatives link to sudo-rs). A listed
 path absent from the image is skipped; one present as a non-regular file or
 with a different uid, gid or mode refuses setup. This is a metadata check of
 known binaries, not a content check or an inventory, and it does not search
-the filesystem. The view mode has no filesystem traversal, so this allowlist
+the filesystem. Setup has no filesystem traversal, so this allowlist
 is its only setuid check: it neither finds nor strips unknown
-image-supplied setuid programs. Choosing it accepts that, as the
-operator decided for #188, and needs a trusted fresh image without arbitrary
-root-shell helpers. Distribution subordinate-id helpers remain available in
-both modes.
+image-supplied setuid programs. That accepts what the operator decided for
+the view in #188, now for every host, and needs a trusted fresh image without
+arbitrary root-shell helpers. Distribution subordinate-id helpers remain
+available with and without the view.
 
 The Ubuntu 26.04 entries were stat-checked in a fresh `ubuntu:26.04`
 container with the relevant packages installed, not on a GitHub-hosted runner
 image; the RHEL entries on a RHEL 10.2 devspace, not a stock host. Neither list
 proves stock-image completeness. Setup fails closed on deviations; do not
 silently accept them or add unknown paths by scanning the filesystem.
-Skipping the traversal alone does not establish the under-a-minute setup goal.
 
 There is one trusted exception: systemd 257 forks `(sd-pam)` before applying
 the mount namespace. It runs systemd/PAM code, not agent-supplied code. The
@@ -156,11 +153,17 @@ checks only that `run0` is there.
 
 ### Why a systemd read-only view has not replaced the walk
 
+The walk has since been replaced, by the access-time world-write policy
+([secure-host.md](secure-host.md#access-time-world-write-policy)), not by the
+view. The kernel applies the policy by uid to every process, whatever its mount
+namespace, `(sd-pam)` included. What follows is why the view alone did not meet
+that condition, and why it stays an opt-in layer.
+
 The proposal in [#188](https://github.com/cgwalters-forge/agentic-job/issues/188#issuecomment-6081914015)
 would prevent writes to world-writable host paths outside the sandbox's own
 directories without inventorying the image. It must cover every process running
-as the sandbox user, not just the command launched by `sandbox exec`. The walk
-remains mandatory: the proposed two-unit guard does not meet that condition.
+as the sandbox user, not just the command launched by `sandbox exec`. The
+proposed two-unit guard does not meet that condition.
 
 In systemd **257**, the [execution documentation](https://github.com/systemd/systemd/blob/v257/man/systemd.exec.xml)
 distinguishes these cases:
@@ -216,12 +219,10 @@ propagated later from the host remain writable inside the unit; the manual
 explicitly warns of both limitations. Namespace support may also be gracefully
 disabled, so a successful unit start is not proof of enforcement.
 
-For the all-process requirement, stop at the PAM-handler exception rather than
-disable the walk or make it opt-in behind a partial guard. A future replacement
-needs a boundary established **before** PAM forks, plus fresh-host tests of the
-session, user-manager units, allowed IPC paths, nested namespaces, Podman and a
-planted world-writable directory outside the allowed paths. These privileged
-tests and hosted before/after timings have not been run for this proposal.
+For the all-process requirement, the view stopped at the PAM-handler exception
+rather than replace the walk behind a partial guard. The world-write policy
+that did replace it is a boundary of that kind: the kernel checks it at access
+time, whichever process attempts the write, so it holds before PAM forks.
 
 ## Network
 

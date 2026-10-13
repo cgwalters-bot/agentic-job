@@ -49,6 +49,8 @@ runs:
         [[ "$want" =~ ^[0-9a-f]{40}$ && "$have" == "$want" ]] ||
           { echo "::error::policy.yml ran at ${want:-no commit}, this action at ${have:-no commit}: pin all pieces to one commit"; exit 1; }
     # The scripted agent too, where the policy job's run.json names it.
+    # The world-write policy object beside the binary, where secure-host
+    # looks for it.
     - name: Install the binary
       shell: bash
       env:
@@ -56,6 +58,7 @@ runs:
       run: |
         agent=$(jq -er .agent "$JOB_DIR/run.json")
         sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job
+        sudo install -m 0644 "$JOB_DIR/world_write.bpf.o" /usr/local/bin/world_write.bpf.o
         [ "$agent" != fake ] || sudo install -m 0755 "$JOB_DIR/fake-agent" /usr/local/bin/fake-agent
         agentic-job --version
     # The task is the policy job's, and what the run is called is this

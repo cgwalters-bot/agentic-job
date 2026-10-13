@@ -1,6 +1,6 @@
-// Experimental access-time protection; all kernel loading goes through bpftool.
+// Access-time world-write protection; all kernel loading goes through bpftool.
 import { execFileSync } from "node:child_process";
-import { chmodSync, chownSync, lstatSync, mkdirSync, mkdtempSync, rmdirSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, statfsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { endianness } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,32 @@ export function attach(object, dev, run) {
     "key", "hex", "00", "00", "00", "00", "value", "hex", ...rootConfig(dev)]);
 }
 
+// Where the image lacks it. Ubuntu's bpftool is a wrapper for the running
+// kernel's linux-tools package (hosted ubuntu-26.04 ships both); RHEL's is
+// the bpftool package. os-release was admitted by requireSupportedHost.
+export function bpftoolInstall(osRelease, kernel) {
+  const id = /^ID="?([a-z0-9.]+)"?$/m.exec(osRelease)?.[1];
+  if (id === "ubuntu") {
+    if (!/^[A-Za-z0-9.+-]+$/.test(kernel)) throw new Error(`unexpected kernel release ${JSON.stringify(kernel)}`);
+    return ["apt-get", ["-o", "Acquire::Retries=3", "install", "-y", "--no-install-recommends",
+      "linux-tools-common", `linux-tools-${kernel}`]];
+  }
+  if (id === "rhel") return ["dnf", ["install", "-y", "bpftool"]];
+  throw new Error(`no bpftool package known for ${id ?? "this host"}`);
+}
+
+export function ensureBpftool(run, osRelease) {
+  try {
+    run("bpftool", ["version"]);
+    return;
+  } catch {
+    // Missing, or Ubuntu's wrapper without the running kernel's tools.
+  }
+  const [command, args] = bpftoolInstall(osRelease, run("uname", ["-r"]).trim());
+  run(command, args);
+  run("bpftool", ["version"]);
+}
+
 export function runCommand(command, args) {
   try {
     return execFileSync(command, args, {
@@ -75,6 +101,7 @@ export function load(object) {
   if (process.getuid() !== 0) throw new Error("world-write loading requires root");
   if (!object || !lstatSync(object).isFile()) throw new Error(`policy object ${object} is not a regular file`);
   const run = runCommand;
+  ensureBpftool(run, readFileSync("/etc/os-release", "utf8"));
   if (Number(statfsSync("/sys/fs/bpf").type) !== 0xcafe4a11) {
     run("mount", ["-t", "bpf", "bpf", "/sys/fs/bpf"]);
   }

@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener};
 use std::os::linux::net::SocketAddrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{SocketAddr as UnixAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -57,9 +57,6 @@ const SUDOERS_RUNNER_GRANT: &str = "/etc/sudoers.d/zzz-test-runner-grant";
 /// A polkit rule for the runner's user alone, read before the deny rule.
 const POLKIT_RUNNER_GRANT: &str = "/etc/polkit-1/rules.d/00-aaa-test-runner-grant.rules";
 
-/// A setuid-root copy of `true` no package owns.
-const UNOWNED_SETUID: &str = "/usr/local/bin/agentic-job-test-setuid";
-
 /// polkitd watches its rules directory; give it a moment to reload.
 const POLKIT_SETTLE: Duration = Duration::from_secs(3);
 
@@ -72,8 +69,6 @@ const POLKIT_GRANT: &str = "/etc/polkit-1/rules.d/00-aaa-test-grant.rules";
 
 /// Sorts after the deny rule: the last matching sudoers rule wins.
 const SUDOERS_GRANT: &str = "/etc/sudoers.d/zzz-test-grant";
-
-const WORLD_WRITABLE: &str = "/etc/agentic-job-test-world-writable";
 
 const TAILSCALE_DIR: &str = "/var/run/tailscale";
 
@@ -103,28 +98,23 @@ fn scheduler_failures(id: &str, view_masks_cron: bool) -> &'static [&'static str
     }
 }
 
-fn baseline_case(name: &str) -> bool {
-    matches!(
-        name,
-        "cron"
-            | "at"
-            | "a world-writable file in /etc"
-            | "the runner's world-write hardening"
-            | "a setuid-root program no package owns"
-    )
+/// Under the view, the sandbox user's write meets a read-only mount
+/// before the world-write policy: only the runner's probe is left to fail.
+fn world_write_failures(view: bool) -> &'static [&'static str] {
+    if view {
+        &["runner-world-write"]
+    } else {
+        &["runner-world-write", "world-write"]
+    }
 }
 
-fn removal_case_enabled(name: &str, walk: bool) -> bool {
-    if walk {
-        baseline_case(name)
-    } else {
-        !matches!(
-            name,
-            "a world-writable file in /etc"
-                | "the runner's world-write hardening"
-                | "a setuid-root program no package owns"
-        )
-    }
+/// The cases a layer can mask, which the host without the view runs too.
+fn baseline_case(name: &str) -> bool {
+    matches!(name, "cron" | "at" | "the world-write policy")
+}
+
+fn removal_case_enabled(name: &str, view: bool) -> bool {
+    view || baseline_case(name)
 }
 
 #[test]
@@ -137,28 +127,49 @@ fn layered_removal_cases_are_observable() {
         assert_eq!(scheduler_failures(id, masked), expected);
         assert!(baseline_case(id));
     }
-    for (name, expected) in [
-        ("a world-writable file in /etc", true),
-        ("a setuid-root program no package owns", true),
-        ("the runner's world-write hardening", true),
-        ("the runner's home open", false),
-        ("the user manager's filesystem view", false),
-    ] {
-        assert_eq!(baseline_case(name), expected);
-    }
-    for (name, view, walk) in [
+    assert_eq!(world_write_failures(true), ["runner-world-write"]);
+    assert_eq!(
+        world_write_failures(false),
+        ["runner-world-write", "world-write"]
+    );
+    for (name, without_view, with_view) in [
         ("cron", true, true),
         ("at", true, true),
-        ("a world-writable file in /etc", false, true),
-        ("a setuid-root program no package owns", false, true),
-        ("the runner's world-write hardening", false, true),
-        ("the runner's home open", true, false),
-        ("the user manager's filesystem view", true, false),
+        ("the world-write policy", true, true),
+        ("the runner's home open", false, true),
+        ("the user manager's filesystem view", false, true),
     ] {
-        for (enabled, expected) in [(false, view), (true, walk)] {
-            assert_eq!(removal_case_enabled(name, enabled), expected, "{name}");
+        assert_eq!(baseline_case(name), without_view);
+        for (view, expected) in [(false, without_view), (true, with_view)] {
+            assert_eq!(removal_case_enabled(name, view), expected, "{name}");
         }
     }
+}
+
+/// The policy's map value, as secure-host/world-write.mjs writes it: the
+/// root filesystem's kernel dev_t (major << 20 | minor), then whether it
+/// is enabled, each a native-endian u32, in hex bytes for bpftool.
+fn world_write_config(enabled: bool) -> Vec<String> {
+    let dev = std::fs::metadata("/").unwrap().dev();
+    let device = (rustix::fs::major(dev) << 20) | rustix::fs::minor(dev);
+    device
+        .to_ne_bytes()
+        .into_iter()
+        .chain(u32::from(enabled).to_ne_bytes())
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `bpftool` setting the policy's one map entry to `value`.
+fn world_write_update(value: &[String]) -> Vec<String> {
+    let map = format!("{}/maps/root_fs", setup::WORLD_WRITE_PIN);
+    let head = ["bpftool", "map", "update", "pinned", &map];
+    let key = ["key", "hex", "00", "00", "00", "00", "value", "hex"];
+    strings(&head)
+        .into_iter()
+        .chain(strings(&key))
+        .chain(value.iter().cloned())
+        .collect()
 }
 
 /// The shard `AGENTIC_JOB_TEST_SHARD` names, as (index, count); every
@@ -707,7 +718,7 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
     ] {
         let user = user.clone();
         let entry = entry.clone();
-        let view_masks_cron = !config.sandbox.world_write_walk && id == "cron";
+        let view_masks_cron = config.sandbox.filesystem_view && id == "cron";
         cases.push(Case::new(
             name,
             scheduler_failures(id, view_masks_cron),
@@ -730,33 +741,20 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             },
         ));
     }
+    // Switched off in its map, as it was before the loader enabled it;
+    // its links stay attached.
     cases.push(Case::new(
-        "a setuid-root program no package owns",
-        &["setuid-unowned"],
+        "the world-write policy",
+        world_write_failures(config.sandbox.filesystem_view),
         || {
-            root(&["install", "-m", "4755", "/bin/true", UNOWNED_SETUID]);
-            Removed::by(&[], &[&["rm", "-f", UNOWNED_SETUID]])
-        },
-    ));
-    cases.push(Case::new(
-        "a world-writable file in /etc",
-        &["world-writable"],
-        || {
-            root_write(WORLD_WRITABLE, "", "0666");
-            Removed::by(&[], &[&["rm", "-f", WORLD_WRITABLE]])
-        },
-    ));
-    cases.push(Case::new(
-        "the runner's world-write hardening",
-        &["runner-world-write"],
-        || {
-            Removed::by(
-                &[&["chmod", "o+w", setup::VIEW_PROBE_DIR]],
-                &[&["chmod", "o-w", setup::VIEW_PROBE_DIR]],
+            assert!(root_ok(&world_write_update(&world_write_config(false))));
+            Removed::new(
+                vec![world_write_update(&world_write_config(true))],
+                Vec::new(),
             )
         },
     ));
-    if !config.sandbox.world_write_walk {
+    if config.sandbox.filesystem_view {
         let uid = entry.user().uid;
         cases.push(Case::new(
             "the user manager's filesystem view",
@@ -1048,19 +1046,18 @@ fn failed(config: &Config, token: Option<RunToken<'_>>) -> BTreeSet<String> {
     for id in [
         "runner-world-write-control",
         "runner-world-write",
-        "world-writable-control",
-        "world-writable",
+        "world-write-control",
+        "world-write",
     ] {
-        assert_eq!(
+        assert!(
             report.outcomes().iter().any(|outcome| outcome.id == id),
-            config.sandbox.world_write_walk,
-            "unexpected walk probe selection: {id}"
+            "the world-write policy's probe did not run: {id}"
         );
     }
     for id in ["filesystem-view", "filesystem-view-manager"] {
         assert_eq!(
             report.outcomes().iter().any(|outcome| outcome.id == id),
-            !config.sandbox.world_write_walk,
+            config.sandbox.filesystem_view,
             "unexpected view probe selection: {id}"
         );
     }
@@ -1162,7 +1159,7 @@ fn each_probe_fails_when_its_protection_is_removed() {
     let none = BTreeSet::new();
 
     assert_eq!(failed(&config, None), none, "before anything is removed");
-    if !config.sandbox.world_write_walk {
+    if config.sandbox.filesystem_view {
         for path in [
             entry.home().join("exec-view-control"),
             PathBuf::from(format!("{}/exec-view", setup::VIEW_PROBE_DIR)),
@@ -1192,7 +1189,7 @@ fn each_probe_fails_when_its_protection_is_removed() {
     // Kill only a sacrificial run0 PAM handler, never the manager's. Killing
     // it need not terminate its parent on systemd 257; no surviving command
     // may acquire the handler's unrestricted mount view.
-    if !config.sandbox.world_write_walk {
+    if config.sandbox.filesystem_view {
         let killed = entry.run(&["python3", "-I", "-c", r#"
 import os, pathlib, subprocess, time
 # The handler is this command's child, which hidepid hides from /proc even
@@ -1244,7 +1241,7 @@ else:
         // The baseline proves the layers masked by the view, without repeating
         // all four shards on a fifth host. at -l and private-dir probes are
         // reads/traversals, so read-only mounts do not mask their removal.
-        .filter(|case| removal_case_enabled(case.name, config.sandbox.world_write_walk))
+        .filter(|case| removal_case_enabled(case.name, config.sandbox.filesystem_view))
         .skip(index)
         .step_by(count);
     let mut wrong = Vec::new();

@@ -20,20 +20,28 @@ kernel features or runtime enforcement; the setup checks and probes still
 have to pass. It applies to the composite action, not direct CLI invocation.
 Container image distributions are independent of the supported host systems.
 
-## Experimental access-time world-write policy (opt-in)
+## Access-time world-write policy
 
-`world-write-bpf: 'true'` enables the candidate
-`crates/agentic-job/bpf/world_write.bpf.c` through the action's
-[`bpftool loader`](../secure-host/world-write.mjs), before sandbox setup takes
-root away. It is off by default. This is a loading/enforcement smoke-test slice,
-not yet the replacement for the chmod walk. Existing setup, its setuid inventory
-and the final sandbox probe are unchanged; that probe still proves the old
-hardening, not the BPF policy. No new filesystem traversal is added.
+The action always loads `crates/agentic-job/bpf/world_write.bpf.c` through its
+[bpftool loader](../secure-host/world-write.mjs), before sandbox setup and
+while it still has root. There is no input to turn it off. It replaces the
+walk that setup used to make over the whole root filesystem, taking world
+write off every path it found and the setuid bit off setuid-root programs no
+package owned: no user but the owner may change a world-writable file or
+non-sticky directory on the root filesystem, decided when the change is
+attempted. `sandbox setup` refuses a host where the policy's four links are
+not pinned, before it changes anything, and `sandbox check` proves the policy
+by what it does (below). Running `sandbox setup` without the action means
+running the loader first, as CI's `sandbox` job does.
 
-Install `runuser` (util-linux) and bpftool before the action. On Ubuntu
-the CI job installs `linux-tools-common` and `linux-tools-$(uname -r)`; RHEL 10's
-package is `bpftool`. The hosted job explicitly installs the tools rather than
-assuming the runner has them. The host needs no compiler: the object
+The loader needs `runuser` (util-linux) and bpftool. Where `bpftool version`
+fails, it installs bpftool first: on Ubuntu, `linux-tools-common` and
+`linux-tools-$(uname -r)` (`linux-tools-common` holds only a wrapper for the
+running kernel's tools); on RHEL 10, the `bpftool` package. GitHub's hosted
+ubuntu-26.04 image already has both Ubuntu packages, as the `world-write`
+job's install log shows: "already the newest version" for
+`linux-tools-7.0.0-1012-azure`. An installation that leaves no working bpftool
+refuses the step. The host needs no compiler: the object
 `world_write.bpf.o` ships the way the binaries do
 ([`binary.mjs`](../secure-host/binary.mjs)). The build compiles it once with
 clang (`-target bpfel`, CO-RE), the source-addressed release publishes it, and
@@ -44,8 +52,11 @@ build that compiles the binaries compiles the object (installing clang with
 musl-tools when missing). `binary.mjs` is part of the source digest, so a
 release published before the object was one of its files is never taken for
 this source. With the `binary` input, the object must be `world_write.bpf.o`
-beside that binary, or loading is refused. The dedicated CI job compiles it
-with `binary.mjs object`, the command the release build runs.
+beside that binary, or loading is refused. The reusable workflow's agent job
+gets the object with the binary from the policy job's upload, and
+[`prepare`](../prepare/action.yml) installs it beside `/usr/local/bin/agentic-job`.
+The dedicated CI job compiles it with `binary.mjs object`, the command the
+release build runs.
 
 Loading uses `bpftool prog loadall OBJECT PIN/links autoattach pinmaps PIN/maps`.
 The four program-name pins under `/sys/fs/bpf/agentic-job-world-write/links`
@@ -84,7 +95,7 @@ including merge-queue runs. Enforcement failure cannot be treated as a skipped
 optional job; the check runs for all changes, including the world-write paths.
 
 The concrete threat is an unprivileged process modifying another user's
-globally writable host files or non-sticky directories. The candidate uses
+globally writable host files or non-sticky directories. The policy uses
 only modify-return programs on `security_*` wrappers, independently of the
 active LSM list. Its single configuration map is off by default. The loader
 records the root filesystem's **kernel** device number (major shifted
@@ -95,7 +106,7 @@ of the root filesystem are still inside it.
 The predicate compares inode ownership with the task's kernel `fsuid`
 using CO-RE field reads. It has no group, user-namespace or root exemption.
 Sticky **directories** are allowed; a sticky regular file is not exempt.
-The hooks chosen for the candidate are:
+The hooks it uses are:
 
 - `security_inode_permission`, for `MAY_WRITE`: file write access and
   parent-directory write permission for create, link, unlink, rename
@@ -115,7 +126,7 @@ descriptor opened for writing before activation can still be mapped:
 There is no `security_mmap_file` or `security_file_mprotect` program, because
 in `secure-host` the policy is active before any untrusted step runs, so no
 untrusted process holds such a descriptor or mapping. Kernel caller-path
-verification remains integration work; this candidate must not be
+verification remains integration work; this policy must not be
 represented as complete write protection. The host-native test exhausts mode bits, inode types,
 ownership, root/nonroot users and filesystem matches. CI also compiles the
 CO-RE object. Hosted loading, attachment, relocation and denial results must
@@ -154,8 +165,43 @@ is refused even through the overlay: in a rootless container, an object of a
 container user other than the one mapped to the sandbox user; in a rootful
 one, an object not owned by root. Sticky directories such as `/tmp` are
 unaffected. The test runs no Podman.
-Default enablement, walk removal and before/after job-to-agent timings
-remain unfinished. No new setup-time measurements are available.
+
+### What the final probe proves
+
+`sandbox check` proves the policy itself and reads no denial log. Setup plants
+`/etc/agentic-job/world-write-probe`, a root-owned mode-0777 directory that is
+not sticky, and in it `file`, root-owned mode 0666. Ordinary permissions let
+any user create in the one and append to the other. The probe `runner-world-write`
+tries both as the runner's user, and `world-write` as the sandbox user; each
+must fail. Their controls, `runner-world-write-control` and `world-write-control`,
+make the same attempt in each user's own home. The runner has no view, so its
+probe proves the policy alone. With `sandbox.filesystem-view` the sandbox
+user's attempt also meets a read-only mount. CI's host test switches the policy
+off in its map (enabled = 0, links still attached) and requires these probes,
+and no others, to fail. The view's probe directory is now group-writable only,
+so the policy and the view are each tested on a directory the other leaves alone.
+
+### What went with the walk
+
+Setup's world-write and setuid walk is gone, with its configuration switch
+`sandbox.world-write-walk` and the probes that searched the filesystem after it
+(`world-writable`, `setuid-control`, `setuid-unowned`). A configuration that still
+names the switch is refused, so it cannot be taken for protection it no longer
+gives. The setuid inventory is not replaced. That inventory took the bit off
+setuid-root programs no package owned. On the hosted image it found 24, all
+in containerd snapshot layers under `/var/lib/containerd`, whose snapshot
+directory is closed to every user but root (main's
+[run 38346554783](https://github.com/cgwalters-forge/agentic-job/actions/runs/38346554783/job/115129872754)).
+What stays is the
+[privileged-binary allowlist](sandbox.md#what-sandbox-setup-does), which checks
+known paths, as the view mode already did since #188. That needs a trusted
+fresh image without arbitrary setuid-root helpers.
+
+The walk's other effect was host-wide: it took world write away from the
+runner's user and from root as well. The policy keeps the first: the runner's
+user is not the owner, and the probe above checks it. Root is not exempt
+either. A root process may still change what root owns, but not a
+world-writable object of another user's on the root filesystem.
 
 ```yaml
 jobs:
@@ -209,8 +255,7 @@ machine that is thrown away after the job:
 - last, takes root away from the runner's user too: a sudo rule read
   last denies it everything, polkit denies it, the daemons of its
    root-equivalent groups are stopped. Known privileged binary paths are
-   checked against the image metadata allowlist, and the default walk takes
-   the setuid bit off setuid-root programs no package owns
+   checked against the image metadata allowlist
   ([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
 
 The check probes these restrictions as the runner's user and as the
@@ -220,72 +265,31 @@ not hold.
 
 Setup logs monotonic wall times for every stage, in order: the preflight
 (the configuration, the users and the refusals of a machine that is not
-fresh), creating the sandbox user, the filesystem view (with
-`sandbox.world-write-walk = false`), the environment and private
-directories, service shutdown, installing itself, package installation,
-the privileged-binary allowlist, npm installation, denying privileges, proxy
-startup, the network rules, the view probe directory, world-write and
-setuid traversal and package ownership (the default), ssh and ptrace, the
-optional sandbox script, the configuration and locking the runner. Each
+fresh, or has no world-write policy loaded), creating the sandbox user, the
+filesystem view (with `sandbox.filesystem-view = true`), the environment and
+private directories, service shutdown, installing itself, package
+installation, the privileged-binary allowlist, npm installation, denying
+privileges, proxy startup, the network rules, the probe directories, ssh and
+ptrace, the optional sandbox script, the configuration and locking the runner. Each
 `Sandbox setup stage NAME: SECONDSs (ok|failed)` line measures only that
 stage, including its subprocesses; a failed stage still reports its time
 and returns its original error. `Sandbox setup total: SECONDSs (ok|failed)`
 follows, from the start of setup, so that what the stages leave out is
 the difference. These are not timings for the whole `secure-host` step:
-binary acquisition and the final probes are separate.
-Use fresh hosted runners when comparing traversal changes; a second walk
-on the same machine benefits from the filesystem cache and is not a
-representative setup measurement.
+binary acquisition, loading the world-write policy and the final probes are
+separate.
 
-The default traversal uses GNU `find`'s already-read mode to stream NUL-framed
-world-writable paths to setup, which clears only the other-write bit with one
-permission syscall per match. It avoids `chmod`'s second metadata lookup and
-retains only ten diagnostic examples, not the whole list. The same traversal
-still inventories setuid-root programs, including in shared temporary trees;
-the exclusions and final probes are unchanged. Like the previous path-based
-`find`/`chmod` pass, this needs a fresh, quiescent host before untrusted code
-runs, not a filesystem concurrently modified by an adversary. An unreadable
-record, failed permission change or failed traversal refuses setup.
+### Job start to the agent, before and after the walk went
 
-The baseline hosted log for
-[run 38241518211, e2e-full agent](https://github.com/cgwalters-forge/agentic-job/actions/runs/38241518211/job/114785247560)
-has a 138.297-second traversal, 29.248 seconds creating the user, 14.711 seconds
-installing packages, 8.952 seconds starting the proxy and 3.030 seconds querying
-setuid package ownership. `secure-host` took 222 seconds by the Actions step
-timestamps, including about 25.2 seconds for the final check; job start to the
-run action was 227 seconds. This is a real Ubuntu 26.04 baseline, not a claim
-that the supplied approximately 83-second figure is reproducible on every
-runner. A local 30,000-world-writable-file fixture measured the old pass at
-0.590/0.595 seconds and streaming at 0.192/0.188 seconds, with both execution
-orders and permissions reset each time. That is not a hosted after measurement
-or proof of under-a-minute setup; collect this change's own CI timings before
-closing the setup-time issue.
-
-After #488, the current-main
-[run 38248520519, e2e-full agent](https://github.com/cgwalters-forge/agentic-job/actions/runs/38248520519/job/114809161130)
-at `4b0b75f1b24b6fead5c1815b15437451239fe386` took 171 seconds from job
-start to the run action (172.376 seconds to its inner Run the agent step).
-Actions reports setup 1 second, target checkout 1, source assertion 0, source
-checkout 1, prepare 2 and secure-host 165; the remaining second is between
-steps. Inside secure-host: apt configuration 0.263 seconds, binary acquisition
-skipped, binary installation 0.016, configuration 0.022, reachability 0.015,
-sandbox setup 139.220, sandbox-user entry 0.081 and final check 24.801.
-Setup's largest stages were traversal 75.974, user creation 33.226, packages
-16.975, proxy startup 8.696 and package ownership 3.602 seconds. The walk is
-still the largest cost. Neither this 171/165-second observation nor the earlier
-227/222-second baseline reproduces the supplied pre-#488 estimate of 83/72
-seconds; different hosted runners vary substantially.
-
-The next traversal optimization prunes symlinks before filesystem-type tests
-force a metadata lookup. GNU find does not follow links here, and neither
-hardening action selects them: regular files and directories retain the same
-selection and traversal, including closed directories and setuid programs in
-temporary trees. No tree exclusion, security control or probe is added or
-removed. A local 30,000-dangling-symlink fixture, in both execution orders,
-measured 0.085771/0.085993 seconds before and 0.070781/0.069982 after.
-This isolates unnecessary link metadata work, not the full hosted walk.
-Hosted after timings remain unmeasured until the proposed change runs in CI;
-this does not establish under-a-minute setup.
+Before, from main at `4e803cb`
+([run 38346554783, e2e-full agent](https://github.com/cgwalters-forge/agentic-job/actions/runs/38346554783/job/115129872754)):
+225 seconds from job start to the run action, of which secure-host took 218.
+Setup totalled 189.592 seconds. Its walk took 126.202 seconds over 732,751
+world-writable paths and package ownership another 4.224. Its next largest
+stages were user creation 30.490, packages 18.073 and proxy startup 9.937. In
+main's `world-write` job, loading and proving the policy took about one second
+by the step timestamps. The after figure is this change's own e2e-full agent
+job, read from its CI; it is not recorded here before that has run.
 
 Before acquiring the binary or installing setup packages, the action runs
 [`apt.mjs`](../secure-host/apt.mjs) as root. CI's sandbox and static-build jobs
@@ -467,10 +471,10 @@ install what the sandbox user builds with from packages before the
 step, or with the `script` input, which runs as the sandbox user and
 can put a toolchain in its home.
 
-**Time.** On a hosted runner setup takes two to five minutes, nearly
-all of it one walk of the image's filesystem for world-writable paths
-([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)),
-and the check under a minute. The binary is fetched in a second when a
+**Time.** On a hosted runner, setup's largest stages are creating the
+user, installing packages and starting the proxy, each under a minute
+([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)).
+Loading the world-write policy takes about a second, and the check under a minute. The binary is fetched in a second when a
 release fits the action's commit, and built in about two minutes when
 none does.
 
@@ -490,9 +494,8 @@ file says, and the file's own default where it says nothing.
 | `runner-user` | The user the job's steps run as. Default: the one that runs the step |
 | `script` | A file: a script setup runs as the sandbox user at its end |
 | `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
-| `binary` | An `agentic-job` already on the machine, in place of fetching or building one |
+| `binary` | An `agentic-job` already on the machine, in place of fetching or building one; the world-write policy's `world_write.bpf.o` must be beside it |
 | `build` | `true` builds the binary even where a release fits |
-| `world-write-bpf` | Experimental bpftool-only access-time policy, off by default; requires bpftool, loads the object that comes with the binary; does not yet replace existing setup or cover writable mappings |
 
 The second user is always created: the network rules and most of the
 probes are about it, and one that is never used costs a line in
