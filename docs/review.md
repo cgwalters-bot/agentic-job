@@ -118,24 +118,15 @@ request's body is the applied comment, unchanged, with `VERDICT:` still its firs
 file/line citations in the body; no inline review comments are generated.
 
 The review is bound to `commit_id`, and a head that already changed is skipped.
-At most 300 files (three API pages) are inspected; incomplete or oversized lists
-fail closed. Workflow changes in general are approved or not on the review's
-judgement; their deterministic guard is the base branch's
-[workflow-ingress check](workflow-ingress.md), so keep it a required check in
-the ruleset. Approval is
-withheld only when either side of a rename is part of the review's own gate:
-`review.yml`, the `policy.yml`, `check.yml` and `apply.yml` it calls,
-`workflow-ingress.yml`, `workflow/review.cjs`, `workflow/review.md`,
-the admission files `workflow/activation.cjs`, `workflow/policy-command.cjs`,
-`workflow/review.toml` and `workflow/review-command.toml`, the default agent
-configuration `.github/agentic-job/hosted.toml`, the reporting helper
-`workflow/status.cjs`, `workflow/ingress.py`, its analyzer configuration
-`workflow/actionlint.yaml` or this document, which records the
-ruleset. Otherwise a change weakening the gate would merge on that gate's own
-approval. The status job then submits a `COMMENTED` review whose first line is
-exactly `Approval withheld: this pull request changes the review's own gate and
-needs a human approval.`, followed by the applied comment; agent text cannot
-start a review body, so a poll can match that line to label the PR for a human.
+An APPROVE is submitted whatever files the pull request changes, including
+workflows, bounds and the review's own workflow, script and instructions.
+By the operator's decision (#540), the adversarial review is the merge gate for
+this harness's own changes; no gate-file list holds them for a person. The
+deterministic guards stay: keep `ci` and the base branch's
+[workflow-ingress check](workflow-ingress.md) required in the ruleset. The
+consequence is that a change weakening the review can merge on that review's
+approval, so the reviewer is told to argue against such changes and to ask for
+a person when it finds a risk it cannot bound.
 CHANGES is submitted as usual.
 
 Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
@@ -145,8 +136,8 @@ non-pending, non-comment review by submission time (ID breaks ties). Only
 `CHANGES_REQUESTED` triggers the existing fix dispatch and its body supplies
 findings. `DISMISSED`, absent or stale approval means wait, not approval.
 Other reviewers' outstanding change requests remain GitHub's merge gate; the
-poller must not override them. Noop, cancellation, refusal, a withheld gate
-approval or submission failure produces no new approval. This repository does
+poller must not override them. Noop, cancellation, refusal or submission
+failure produces no new approval. This repository does
 not implement the external tracker's poll loop.
 
 For `main`, enable the pull-request rule with **1 required approving review**,

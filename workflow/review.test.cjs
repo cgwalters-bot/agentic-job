@@ -251,6 +251,11 @@ test('automatic and dispatched review prompts allow concern-specific experiments
     assert.match(prompt, /cite files and lines for actionable findings/);
     assert.doesNotMatch(prompt, /Do not build|Run relevant tests|what you verified or could not verify/);
   }
+  // Only review.yml submits approvals, and by the operator's decision (#540)
+  // for every file: its reviewer reviews harder rather than defer to a person.
+  assert.match(standing, /this review is\s+the merge gate for every change here, including workflows, bounds and the\s+review's own files/);
+  assert.match(standing, /do not ask for changes\s+merely because no person stands behind a change/);
+  assert.match(standing, /Ask for a person only when\s+you find a concrete risk you cannot bound, and say which\./);
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   assert.match(caller, /review-task: workflow\/review.md/);
   const agent = caller.split('\n  agent:')[1].split('\n  check:')[0];
