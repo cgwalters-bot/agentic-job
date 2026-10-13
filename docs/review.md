@@ -133,6 +133,15 @@ needs a human approval.`, followed by the applied comment; agent text cannot
 start a review body, so a poll can match that line to label the PR for a human.
 CHANGES is submitted as usual.
 
+Callers may add `with: human-approval-paths` in their base-revision
+`.github/workflows/review.yml` to hold authority files for a person: a newline
+list of relative exact paths or simple globs (`*` stays within one path
+component; `**` as a whole component matches zero or more components), empty
+by default, limited to 64 patterns of 256 characters and 16 KiB total.
+Both rename names are checked; invalid lists fail closed, and this additive
+input cannot remove the built-in gates, including the caller's `review.yml`
+that must receive human approval to shorten the list.
+
 Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
 comment text or the `review` status. For `github-actions[bot]`, select the latest
 non-pending, non-comment review by submission time (ID breaks ties). Only

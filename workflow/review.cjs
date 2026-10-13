@@ -135,9 +135,46 @@ const GATE_FILES = new Set(['.github/workflows/review.yml', '.github/workflows/p
 // a poll can match this line exactly and label the pull request.
 const WITHHELD = "Approval withheld: this pull request changes the review's own gate and needs a human approval.";
 
+function heldPaths(input = '') {
+  // Caller authority files must not merge on a model's approval alone. This
+  // additive list comes from the base caller workflow, never the reviewed head.
+  // Limit both compilation and matching work; no regex or negation syntax.
+  if (typeof input !== 'string' || input.length > 16384) {
+    throw new Error('Human approval paths must be a string of at most 16 KiB');
+  }
+  const patterns = input.split('\n').map(line => line.trim()).filter(Boolean);
+  if (patterns.length > 64) throw new Error('Human approval paths allow at most 64 patterns');
+  return patterns.map(pattern => {
+    if (pattern.length > 256 || !/^[A-Za-z0-9_.+@=,*\/-]+$/.test(pattern) ||
+        pattern.split('/').some(part => !part || part === '.' || part === '..' ||
+          (part.includes('**') && part !== '**'))) {
+      throw new Error('Human approval paths require relative paths, * within a component or ** as a whole component, at most 256 characters');
+    }
+    return pattern.split('/');
+  });
+}
+
+// Dynamic programming avoids regex backtracking on adversarial file names.
+function wildcardMatch(pattern, values) {
+  let row = Array(values.length + 1).fill(false);
+  row[0] = true;
+  for (const token of pattern) {
+    const next = Array(values.length + 1).fill(false);
+    const star = Array.isArray(pattern) ? token === '**' : token === '*';
+    next[0] = star && row[0];
+    for (let i = 1; i <= values.length; i++) {
+      next[i] = star ? row[i] || next[i - 1] :
+        row[i - 1] && (Array.isArray(pattern) ? wildcardMatch(token, values[i - 1]) : token === values[i - 1]);
+    }
+    row = next;
+  }
+  return row[values.length];
+}
+
 // This job runs only base-revision code.
 async function submitReview(env, github, core) {
   if (env.REAL_REVIEWS !== 'true') return;
+  const held = heldPaths(env.HUMAN_APPROVAL_PATHS);
   const run = { pull: env.PULL, head: env.HEAD_SHA, check: env.CHECK_RESULT,
     verdict: env.VERDICT, apply: env.APPLY_RESULT, url: env.RESULT_URL };
   reviewStatus(run, [Number(run.pull)]); // Validate the target before API calls.
@@ -163,7 +200,8 @@ async function submitReview(env, github, core) {
   if (files.length !== pull.changed_files) throw new Error('Incomplete review file list');
   const config = path.posix.normalize(env.AGENT_CONFIG || '.github/agentic-job/hosted.toml');
   const gate = files.some(file => [file.filename, file.previous_filename]
-    .some(name => GATE_FILES.has(name) || name === config));
+    .some(name => GATE_FILES.has(name) || name === config ||
+      (typeof name === 'string' && held.some(pattern => wildcardMatch(pattern, name.split('/'))))));
   const prefix = `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#issuecomment-`;
   const id = run.url.startsWith(prefix) ? run.url.slice(prefix.length) : '';
   if (!/^[1-9][0-9]*$/.test(id) || !Number.isSafeInteger(Number(id))) {

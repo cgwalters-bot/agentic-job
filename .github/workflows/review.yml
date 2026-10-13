@@ -22,6 +22,12 @@ on:
   issue_comment:
     types: [created]
   workflow_call:
+    inputs:
+      human-approval-paths:
+        description: 'Additional paths needing human approval, one per line; * matches within a component, ** matches whole components'
+        type: string
+        required: false
+        default: ''
     # Forward only this declared credential, never inherit.
     secrets:
       SAFE_OUTPUTS_PAT:
@@ -253,6 +259,8 @@ jobs:
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REAL_REVIEWS: ${{ vars.AGENT_REAL_REVIEWS }}
+          # workflow_call inputs come from the base caller, not the PR head.
+          HUMAN_APPROVAL_PATHS: ${{ inputs.human-approval-paths || '' }}
           AGENT_CONFIG: ${{ vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
         with:
           script: |
