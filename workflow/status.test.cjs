@@ -86,7 +86,7 @@ test('dispatch and event status use the same trusted helper, opt-in only', () =>
   assert.match(policy, /notify-repo:\n[^\n]*\n        value: \$\{\{ jobs.policy.outputs.item != '' && github.repository \|\| inputs.output-repo \|\| github.repository \}\}/);
   assert.doesNotMatch(policy.split('\n  notify:\n')[1].split('runs-on:')[0], /inputs.event/);
   for (const source of [policy, read('apply')]) assert.match(source, /workflow\/status.cjs/);
-  assert.match(read('dispatch'), /notify: \$\{\{ inputs.kind == 'review' && 'none' \|\| 'comment' \}\}/);
+  assert.match(read('dispatch'), /notify: \$\{\{ \(inputs.kind == 'review' \|\| inputs.scripted\) && 'none' \|\| 'comment' \}\}/);
   assert.doesNotMatch(read('apply'), /await once\(/);
   assert.match(read('apply'), /Edit the status comment\n[^\n]*\n        continue-on-error: true/);
 });

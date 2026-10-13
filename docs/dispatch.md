@@ -93,6 +93,15 @@ The result's URL is the
 comment, and the run stays green. The agent's sanitized reason stays in the
 run summary. Reviews have no status comment.
 
+Runs of one kind for one item run one at a time, and only one waits: a
+dispatch made while another for the same kind and item is pending cancels the
+pending one. To run several of one kind on one item, start each after the
+last has started. Runs of any kind on one item also share their status jobs,
+one at a time with one waiting, so more than two at once can cancel a waiting
+one and fail its run. CI's reusable call (`scripted: true`, not the trial
+above) is also grouped by the caller's run and posts no status comment, so
+separate CI runs do not cancel each other.
+
 All targets must use `main` and fit the committed bounds. Do not use globs.
 Protected documentation is refused by default; to deliberately permit a file,
 use `[unprotected_files]` in the bounds file as shown in its commented example.

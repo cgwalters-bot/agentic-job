@@ -26,6 +26,10 @@ on:
       GH_READ_TOKEN:
         required: false
     inputs:
+      scripted:
+        description: CI's call, grouped by its run so that CI runs do not cancel each other's
+        type: boolean
+        default: false
       task:
         type: string
         required: true
@@ -45,9 +49,11 @@ on:
 
 permissions: {}
 
-# One run at a time for each issue.
+# One run at a time for each issue. CI calls this with a fixed issue,
+# so its call is grouped by its run as well: GitHub cancels the older of
+# two pending runs in a group, and one CI run must not fail another's.
 concurrency:
-  group: compose-${{ inputs.item }}
+  group: compose-${{ inputs.item }}${{ inputs.scripted && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:

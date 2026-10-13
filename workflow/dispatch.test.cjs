@@ -88,7 +88,7 @@ test('caller fixes capabilities and token boundary', () => {
   }
   for (const line of ['allow: .github/agentic-job/dispatch.toml',
     'comment-target: ${{ inputs.item }}', 'issue: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}',
-    'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', "notify: ${{ inputs.kind == 'review' && 'none' || 'comment' }}",
+    'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', "notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}",
     'model: ${{ needs.target.outputs.agent != \'fake\' && vars.AGENT_MODEL || \'\' }}', 'inference-url: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_URL || \'\' }}',
     'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
     assert.ok(workflow.includes(line), line);
@@ -215,6 +215,21 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   // A fork's pull request is no reason to pass a skipped job: it fails ci.
   assert.doesNotMatch(aggregate, /\$fork\b/);
   assert.match(aggregate, /'\$fork_e2e == "false" and all\(/);
+});
+
+test('CI runs do not share a dispatch or compose concurrency group, and a real dispatch keeps one per item', () => {
+  // CI names a fixed item: without its run id, one queue entry's pending
+  // call cancels another's and fails its e2e-dispatch-verify (#544).
+  assert.match(workflow, /^  group: dispatch-\$\{\{ inputs\.kind \}\}-\$\{\{ inputs\.repo \}\}-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$/m);
+  const compose = fs.readFileSync(path.join(root, '.github/workflows/example-compose.yml'), 'utf8');
+  assert.match(compose, /^  group: compose-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$/m);
+  const ci = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  for (const [job, file] of [['e2e-dispatch', 'dispatch'], ['e2e-compose', 'example-compose']]) {
+    const caller = ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z-]*:\n/)[0];
+    assert.match(caller, new RegExp(`uses: \\./\\.github/workflows/${file}\\.yml[^\\n]*\\n    with:\\n(?:      [^\\n]*\\n)*?      scripted: true\\n`), job);
+  }
+  // A 5xx listing the run's jobs is retried rather than failing ci.
+  assert.match(ci, /- name: Bound the hosted end-to-end agent job\n        uses: actions\/github-script@[0-9a-f]{40} # v\S+\n        with:\n(?:          #[^\n]*\n)?          retries: [1-9]\n/);
 });
 
 test('CI verifies actual dispatch comments and pinned SHA, not only job success', () => {

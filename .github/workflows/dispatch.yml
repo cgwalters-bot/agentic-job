@@ -57,8 +57,13 @@ on:
         required: true
 
 permissions: {}
+# One run per kind and item: GitHub keeps at most one run pending in a
+# group and cancels the older, so a second dispatch for the same item
+# replaces a waiting one. CI's scripted calls name a fixed item, and its
+# run id keeps two CI runs (merge queue entries, or a pull request and a
+# queue entry) from cancelling each other's call.
 concurrency:
-  group: dispatch-${{ inputs.kind }}-${{ inputs.repo }}-${{ inputs.item }}
+  group: dispatch-${{ inputs.kind }}-${{ inputs.repo }}-${{ inputs.item }}${{ inputs.scripted && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -193,6 +198,10 @@ jobs:
       issue: ${{ inputs.item }}
       apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}
       apply-partial: false
-      notify: ${{ inputs.kind == 'review' && 'none' || 'comment' }}
+      # Status jobs are grouped by item alone, and a third waiting one
+      # cancels the older pending: scripted CI runs, which share an item
+      # across runs, post none. CI covers notify and conclude on an
+      # event's item (e2e-event), not on a dispatched comment-target.
+      notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}
       artifact-prefix: dispatch-${{ inputs.kind }}-
       branch-prefix: dispatch/${{ inputs.kind }}/

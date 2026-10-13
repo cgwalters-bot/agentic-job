@@ -755,6 +755,7 @@ jobs:
     uses: ./.github/workflows/example-compose.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       task: Exercise the composed example caller; no model is needed.
+      scripted: true
       item: '64'
 
   e2e-review:
@@ -818,6 +819,8 @@ jobs:
       - name: Bound the hosted end-to-end agent job
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          # A read: retry a transient 5xx rather than fail ci on it.
+          retries: 3
           script: |
             const { checkJobDuration } = require('./workflow/job-timing.cjs');
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
