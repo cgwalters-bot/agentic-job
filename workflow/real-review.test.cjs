@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { WITHHELD, submitReview } = require('./review.cjs');
 
 const head = 'a'.repeat(40);
@@ -9,6 +11,17 @@ const env = { REAL_REVIEWS: 'true', PULL: '12', HEAD_SHA: head,
   CHECK_RESULT: 'success', APPLY_RESULT: 'success', VERDICT: 'APPROVE',
   RESULT_URL: 'https://github.com/owner/repo/pull/12#issuecomment-123',
   GITHUB_REPOSITORY: 'owner/repo' };
+
+test('review guidance does not present advisory ingress as the merge-queue trust gate', () => {
+  const review = fs.readFileSync(path.join(__dirname, '../docs/review.md'), 'utf8')
+    .replace(/\s+/g, ' ');
+  assert.match(review, /workflow-ingress check.*is advisory, not a merge gate/);
+  assert.match(review, /required `ci` aggregate does not include it/);
+  assert.match(review, /Human approval of the current head before queue admission is the trust gate/);
+  assert.match(review, /opt-in agent approval is not a substitute/);
+  assert.match(review, /Require review from Code Owners.*`\*` naming only trusted maintainers/);
+  assert.doesNotMatch(review, /keep it a required check in the ruleset/);
+});
 
 function fixture({ files = [{ filename: 'src/lib.rs' }], sha = head, count = files.length,
   body = 'VERDICT: APPROVE\nFindings', issue = '12' } = {}) {

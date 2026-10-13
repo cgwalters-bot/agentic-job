@@ -115,9 +115,16 @@ file/line citations in the body; no inline review comments are generated.
 The review is bound to `commit_id`, and a head that already changed is skipped.
 At most 300 files (three API pages) are inspected; incomplete or oversized lists
 fail closed. Workflow changes in general are approved or not on the review's
-judgement; their deterministic guard is the base branch's
-[workflow-ingress check](workflow-ingress.md), so keep it a required check in
-the ruleset. Approval is
+judgement. With `main`'s merge queue, the base branch's
+[workflow-ingress check](workflow-ingress.md#merge-queue-limitation) is advisory,
+not a merge gate: the required `ci` aggregate does not include it, and ingress
+does not run on merge groups. A required status name is not a substitute for a
+ruleset-required trusted workflow, since PR-owned workflows can imitate it.
+Human approval of the current head before queue admission is the trust gate;
+neither analyzer findings nor an automated approval makes queued code safe to
+run with repository write and OIDC permissions. Enforcing ingress on merge
+groups would require a trusted ruleset workflow vetting `base_sha..head_sha`;
+that is not implemented. Approval is
 withheld only when either side of a rename is part of the review's own gate:
 `review.yml`, the `policy.yml`, `check.yml` and `apply.yml` it calls,
 `workflow-ingress.yml`, `workflow/review.cjs`, `workflow/review.md`,
@@ -126,8 +133,8 @@ the admission files `workflow/activation.cjs`, `workflow/policy-command.cjs`,
 configuration `.github/agentic-job/hosted.toml`, the reporting helper
 `workflow/status.cjs`, `workflow/ingress.py`, its analyzer configuration
 `workflow/actionlint.yaml` or this document, which records the
-ruleset. Otherwise a change weakening the gate would merge on that gate's own
-approval. The status job then submits a `COMMENTED` review whose first line is
+merge-gate requirements. Otherwise a change weakening the gate would merge on
+that gate's own approval. The status job then submits a `COMMENTED` review whose first line is
 exactly `Approval withheld: this pull request changes the review's own gate and
 needs a human approval.`, followed by the applied comment; agent text cannot
 start a review body, so a poll can match that line to label the PR for a human.
@@ -146,7 +153,14 @@ not implement the external tracker's poll loop.
 
 For `main`, enable the pull-request rule with **1 required approving review**,
 and **Dismiss stale pull request approvals when new commits are pushed**.
-Keep the merge queue and
+Require **approval of the most recent push** by someone other than its pusher.
+These alone count an approval from `github-actions[bot]`, so with real reviews
+on they would let the agent approval admit a head unreviewed by a human. Also
+enable **Require review from Code Owners**, with a `CODEOWNERS` rule `*` naming
+only trusted maintainers (users or a team), so every queued path needs a fresh
+human approval. An Actions or app identity cannot be a code owner, so the opt-in
+agent approval is not a substitute: it only signals the poller. Without such a
+`CODEOWNERS` file, leave `AGENT_REAL_REVIEWS` unset. Keep the merge queue and
 required `ci` check, remove `review` from required status checks, and give the
 automation identity no ruleset bypass. GitHub blocks an outstanding change
 request; the review requirement gates queue entry. Repository settings cannot
