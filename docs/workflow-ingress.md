@@ -1,18 +1,17 @@
 # Workflow changes at pull request ingress
 
 [`workflow-ingress.yml`](../.github/workflows/workflow-ingress.yml) runs on
-`pull_request_target`. It has only `contents: read`, no secrets or OIDC
+`pull_request_target` and `merge_group`. It has only `contents: read`, no secrets or OIDC
 permission, and never executes PR code. The checker and the SHA-256-verified
 actionlint 1.7.12 and zizmor 1.30.1 pins come from `github.sha`, which for this
 event is the tip of the PR's base branch, not its head. The workflow definition
 comes from the base branch too, or from the ref the ruleset names when a
 ruleset runs it.
 
-On its own the workflow runs when a PR that touches `.github/` or an
-`action.yml`/`action.yaml` is opened, synchronized, reopened or edited. Required
-by a ruleset, GitHub ignores those `types` and `paths` filters: the job then
-runs for every PR (it passes at once when nothing relevant changed) and only
-when one is opened, synchronized or reopened. Retargeting a PR to another base
+The job reports as `vet` on every PR, so a ruleset can require that status
+context; it passes at once when no `.github/` or `action.yml`/`action.yaml`
+file changed. It runs when a PR is opened, synchronized, reopened or edited;
+required by a ruleset, GitHub ignores those `types`. Retargeting a PR to another base
 does not run it again, so close and reopen a retargeted PR, or push to it.
 
 The checker reads changed workflow/action files at the PR head as Git blobs
@@ -68,15 +67,15 @@ need an app/PAT-triggered event. Private-repository unauthenticated fetches are
 not supported. Hosted event delivery and ruleset enforcement need verification
 on GitHub, not just local tests.
 
-## Merge queue limitation
+## Merge queue
 
-This PR-only workflow cannot enforce ingress on merge groups. Enabling a queue
-with the [current CI rollout](workflow.md#ci-runner-use) requires removing its
-required-workflow rule: **ingress is then no longer enforced**, even though its
-PR runs still provide advisory findings. A required status name cannot replace
-the trusted workflow. Preserving enforcement would instead require a
-ruleset-defined `merge_group` workflow that vets `base_sha..head_sha` using
-trusted checker code; that is not implemented or verified here.
+A queue merges a group commit, not the head the PR run vetted, so `vet` also
+runs on `merge_group` and checks `base_sha..head_sha` with the checker and
+analyzer pins checked out at `base_sha`, never the queued tree. That workflow
+definition is the queued one, though: a PR that edits this workflow, or adds
+another job reporting `vet`, can pass the group's check. The PR-time run from
+the base branch still audits such an edit; the human approval required below
+is the gate for it.
 
 Enqueueing runs the proposed workflows and code with repository write and OIDC
 permissions before landing, even if the group later fails. Therefore the queue

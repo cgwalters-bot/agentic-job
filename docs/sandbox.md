@@ -19,9 +19,9 @@ and no network path that carries data out in a write.
 
 This protects against the sandboxed process, not an untrusted workflow running
 outside the sandbox. A merge queue executes proposed workflow files and code
-with write and OIDC permissions before landing. The current PR-only
-[ingress checker](workflow-ingress.md#merge-queue-limitation) is not enforced on
-that path; human approval before enqueueing is the trust gate, including for
+with write and OIDC permissions before landing. The
+[ingress checker](workflow-ingress.md#merge-queue) vets each merge group, but
+the group's own workflow definition runs it; human approval before enqueueing is the trust gate, including for
 workflow steps that build or execute the proposed binary outside the sandbox.
 
 The boundary is a second Unix user on the same machine. It is not a

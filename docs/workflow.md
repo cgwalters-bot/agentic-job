@@ -390,11 +390,9 @@ the read-only `changes` job queries the base branch's effective rules. With a
 Without a queue, same-repository pull requests also run those callers. A rules
 API failure fails the gate rather than guessing that testing can be deferred.
 Pushes to main retain the existing suite. The
-[ingress workflow](workflow-ingress.md) is PR-only and does not run for a merge
-group. Enabling the queue with this PR-only ingress workflow means **ingress
-is no longer enforced**: the administrator must remove its required-workflow
-rule, not merely stop requiring its status name. `ci` is the required CI name,
-not a replacement for trusted ingress. A merge group runs the queued pull request's
+[ingress workflow](workflow-ingress.md#merge-queue) also runs for merge groups;
+the ruleset requires its `vet` context besides `ci`, whose aggregate does not
+include it. A merge group runs the queued pull request's
 own workflow files and code with this repository's job token, including the
 write and OIDC permissions of the end-to-end callers, before it lands. Entering
 the queue is what grants them, so whatever admits a pull request to the queue

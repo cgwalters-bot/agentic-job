@@ -1,10 +1,14 @@
-# Only base-branch code runs here; proposed files are Git blobs, not actions.
+# Only base-revision code runs here; proposed files are Git blobs, not actions.
+# The main ruleset requires the vet check, so it reports on every PR and merge
+# group, passing at once when no workflow or action file changed.
 name: workflow-ingress
 
 on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] Read-only, base-branch checker; PR blobs are data only.
     types: [opened, synchronize, reopened, edited]
-    paths: ['.github/**', '**/action.yml', '**/action.yaml']
+  # The queue merges a group, not the PR head vetted above: vet it again.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -16,12 +20,15 @@ jobs:
     # Any fork can trigger this without approval: a new push supersedes the
     # previous head's run.
     concurrency:
-      group: workflow-ingress-${{ github.repository }}-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      # Each merge group has its own ref and must report; never cancel one.
+      group: workflow-ingress-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          # github.sha is the base branch tip for pull_request_target but the
+          # queued, unvetted merge commit for merge_group: use the group's base.
+          ref: ${{ github.event.merge_group.base_sha || github.sha }}
           persist-credentials: false
           fetch-depth: 0
       - name: Install verified static analyzers
@@ -34,13 +41,20 @@ jobs:
           tar -xzf zizmor.tar.gz zizmor
       - name: Fetch proposed Git objects without checking them out
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           PR: ${{ github.event.pull_request.number }}
           ZIZMOR: ${{ runner.temp }}/zizmor
           ACTIONLINT: ${{ runner.temp }}/actionlint
         run: |
-          [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ && "$PR" =~ ^[0-9]+$ ]]
-          git fetch --no-tags origin "$BASE" "refs/pull/$PR/head"
+          [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            # The group head descends from its base, so the checker's
+            # merge-base diff is exactly the queued change.
+            git fetch --no-tags origin "$BASE" "$HEAD"
+          else
+            [[ "$PR" =~ ^[0-9]+$ ]]
+            git fetch --no-tags origin "$BASE" "refs/pull/$PR/head"
+          fi
           git cat-file -e "$HEAD^{commit}"
           python3 workflow/ingress.py . "$BASE" "$HEAD"

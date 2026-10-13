@@ -19,6 +19,22 @@ test('PR CI tests the ingress checker with the same verified analyzers', () => {
   assert.match(ci, /python3 -m unittest discover -s workflow -p 'test_\*\.py' -v\n {8}env:\n {10}ZIZMOR: /);
 });
 
+test('required ingress check reports on every PR and vets merge groups with base code', () => {
+  const ingress = fs.readFileSync(path.join(__dirname, '../.github/workflows/workflow-ingress.yml'), 'utf8');
+  const on = ingress.split('\non:\n')[1].split('\npermissions:')[0];
+  // A paths filter would leave the required check pending on other PRs.
+  assert.doesNotMatch(on, /paths/);
+  assert.match(on, /\n {2}merge_group:\n {4}types: \[checks_requested\]\n/);
+  assert.match(ingress, /\npermissions:\n {2}contents: read\n\njobs:\n {2}vet:\n/);
+  assert.doesNotMatch(ingress, /: write|secrets\.|id-token/);
+  // For merge_group, github.sha is the queued commit: never check it out.
+  assert.match(ingress, /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_sha \|\| github\.sha \}\}\n/);
+  assert.match(ingress, /BASE: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha \}\}/);
+  assert.match(ingress, /HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.event\.merge_group\.head_sha \}\}/);
+  assert.match(ingress, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}/);
+  assert.match(ingress, /python3 workflow\/ingress\.py \. "\$BASE" "\$HEAD"\n/);
+});
+
 test('privileged jobs and required check remain gated for forks', () => {
   assert.match(ci, /\non:\n  pull_request:\n  merge_group:\n  push:\n    branches: \[main\]\n\n/);
   assert.doesNotMatch(ci, /pull_request_target|workflow_run|secrets\./);
