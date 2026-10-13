@@ -23,12 +23,12 @@ noop = { max = 1 }
 missing_tool = { max = 3 }
 missing_data = { max = 3 }
 
-# Default protected names include dependency manifests/lockfiles, README.md,
-# AGENTS.md, CLAUDE.md, CONTRIBUTING.md, SECURITY.md and CODEOWNERS.
+# Default protected names include dependency manifests/lockfiles, AGENTS.md,
+# CLAUDE.md, CONTRIBUTING.md, SECURITY.md and CODEOWNERS; README.md is not one.
 # Opt out only for exact repositories (no globs); see docs/safe-outputs.md.
 # [unprotected_files]
 # repos = ["OWNER/REPO"]
-# files = ["README.md"]
+# files = ["CONTRIBUTING.md"]
 # dot_folders = [".github"] allows workflow edits; read the prerequisites in
 # docs/safe-outputs.md first. This cannot allow other dot-folders, git
 # internals, binaries, symlinks, submodules, new executables, renames or

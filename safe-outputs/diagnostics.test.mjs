@@ -50,7 +50,7 @@ test('diagnostics bounds input and refusal evidence', async () => {
 
 for (const [name, errors, expected] of [
   ['agent_output.json', ['collector refusal'], ['collector refusal']],
-  ['report.json', ['protected files: README.md'], ['protected files: README.md']],
+  ['report.json', ['protected files: CONTRIBUTING.md'], ['protected files: CONTRIBUTING.md']],
   ['report.json', [], []],
   ['report.json', ['bad\n::error::\r@user [link](x) `code`'],
     ['bad ::error:: @\u200buser \\[link\\](x) \\`code\\`']],

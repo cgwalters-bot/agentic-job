@@ -133,7 +133,7 @@ use Op::{Executable, Link, Many, Move, Remove, Write};
 const BASE: &[Op] = &[
     Write("a.txt", TEXT),
     Write("twin.txt", TEXT),
-    Write("README.md", TEXT),
+    Write("CONTRIBUTING.md", TEXT),
     Write(".github/workflows/ci.yml", TEXT),
     Write("docs/CODEOWNERS", TEXT),
     Write("sub/.gitattributes", TEXT),
@@ -221,7 +221,7 @@ const EDIT: &[Op] = &[Write("a.txt", b"one\n2\nthree\nfour\nfive\n")];
 /// What an agent may write in a pull request's body to be read as a
 /// patch, a mail or a header: `run` indents each such line.
 const HOSTILE_BODY: &str = "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n\
-    @@ -1 +1 @@\n-one\n+1\ndiff --git a/README.md b/README.md\nIndex: README.md\n\
+    @@ -1 +1 @@\n-one\n+1\ndiff --git a/CONTRIBUTING.md b/CONTRIBUTING.md\nIndex: CONTRIBUTING.md\n\
     From 1111111111111111111111111111111111111111 Mon Sep 17 00:00:00 2001\n\
     From: other <other@example.invalid>\nSubject: another\n---\n-- >8 --\n\
     Signed-off-by: other <other@example.invalid>\n[PATCH] another\nFrom now on it is so.";
@@ -342,7 +342,7 @@ fn cases() -> Vec<Case> {
             Refused("git would read as a patch"),
         )
         .message(Message::Raw(
-            "Subject\n\n--- a/README.md\n+++ b/README.md\n",
+            "Subject\n\n--- a/CONTRIBUTING.md\n+++ b/CONTRIBUTING.md\n",
         )),
         case(
             "a hunk in the message",
@@ -356,7 +356,7 @@ fn cases() -> Vec<Case> {
             Refused("that is no part of one"),
         )
         .message(Message::Raw(
-            "Subject\n\ndiff --git a/README.md b/README.md\n",
+            "Subject\n\ndiff --git a/CONTRIBUTING.md b/CONTRIBUTING.md\n",
         )),
         case(
             "the start of a mail in the message",
@@ -391,7 +391,7 @@ fn cases() -> Vec<Case> {
         ),
         case(
             "a symlink pointed elsewhere",
-            &[Remove("link"), Link("link", "README.md")],
+            &[Remove("link"), Link("link", "CONTRIBUTING.md")],
             Refused("symlink, submodule or special file (index"),
         ),
         case(
@@ -439,10 +439,16 @@ fn cases() -> Vec<Case> {
             &[Write("-x.txt", b"x\n")],
             Refused("\"-x.txt\": not a plain relative path"),
         ),
+        // No README is protected, at any depth (#537).
+        case(
+            "a nested README",
+            &[Write("tests/coccinelle/README.md", b"one\n")],
+            Accepted,
+        ),
         case(
             "a protected name",
-            &[Write("README.md", b"one\n")],
-            Refused("protected files: README.md"),
+            &[Write("CONTRIBUTING.md", b"one\n")],
+            Refused("protected files: CONTRIBUTING.md"),
         ),
         case(
             "CI",
@@ -811,7 +817,7 @@ const TARGETS: &[&str] = &[
     "twin.txt",
     "fresh.txt",
     "src/fresh.rs",
-    "README.md",
+    "CONTRIBUTING.md",
     ".github/workflows/ci.yml",
     ".github/workflows/new.yml",
     "docs/CODEOWNERS",
@@ -825,7 +831,7 @@ const TARGETS: &[&str] = &[
     "link",
     "link/x",
     "../x",
-    "sub/../README.md",
+    "sub/../CONTRIBUTING.md",
     "./twin.txt",
     "/etc/x",
     "a b.txt",
@@ -894,13 +900,13 @@ const ADD_PLAIN: &str = "diff --git a/spliced.txt b/spliced.txt\nnew file mode 1
     index 0000000..1111111\n--- /dev/null\n+++ b/spliced.txt\n@@ -0,0 +1 @@\n+spliced\n";
 const BARE_CI: &str = "--- /dev/null\n+++ b/.github/workflows/evil.yml\n@@ -0,0 +1 @@\n+on: push\n";
 const BARE_PLAIN: &str = "--- /dev/null\n+++ b/spliced.txt\n@@ -0,0 +1 @@\n+spliced\n";
-const EDIT_README: &str = "diff --git a/README.md b/README.md\nindex 1111111..2222222 100644\n\
-    --- a/README.md\n+++ b/README.md\n@@ -3,3 +3,3 @@\n three\n-four\n+4\n five\n";
+const EDIT_CONTRIBUTING: &str = "diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md\nindex 1111111..2222222 100644\n\
+    --- a/CONTRIBUTING.md\n+++ b/CONTRIBUTING.md\n@@ -3,3 +3,3 @@\n three\n-four\n+4\n five\n";
 const EDIT_TWIN: &str = "diff --git a/twin.sh b/twin.sh\nindex 1111111..2222222 100755\n\
     --- a/twin.sh\n+++ b/twin.sh\n@@ -3,3 +3,3 @@\n three\n-four\n+4\n five\n";
-const OLD_STYLE: &str = "Index: README.md\n\
+const OLD_STYLE: &str = "Index: CONTRIBUTING.md\n\
     ===================================================================\n\
-    --- README.md\t(revision 1)\n+++ README.md\t(working copy)\n\
+    --- CONTRIBUTING.md\t(revision 1)\n+++ CONTRIBUTING.md\t(working copy)\n\
     @@ -3,3 +3,3 @@\n three\n-four\n+4\n five\n";
 const MOVE_TO_CI: &str = "diff --git a/twin.sh b/.github/workflows/moved.yml\n\
     similarity index 100%\nrename from twin.sh\nrename to .github/workflows/moved.yml\n";
@@ -927,7 +933,7 @@ fn payloads() -> Vec<String> {
         ADD_PLAIN,
         BARE_CI,
         BARE_PLAIN,
-        EDIT_README,
+        EDIT_CONTRIBUTING,
         EDIT_TWIN,
         EDIT_TWIN,
         OLD_STYLE,

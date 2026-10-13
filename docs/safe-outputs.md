@@ -279,19 +279,19 @@ machine starts.
 
 Some things no bounds file can change. A run hands back one patch, so at
 most one pull request. A pull request is a draft. An `analysis` run may
-not ask for one. gh-aw's default list of protected file names and every
-top-level dot-folder are protected by default; a bounds file can take names off
+not ask for one. gh-aw's default list of protected file names, less
+`README.md`, and every top-level dot-folder are protected by default; a bounds file can take names off
 that list and exempt the `.github` folder for repositories it names exactly
 (case-insensitive OWNER/REPO, no globs), and cannot add to the list. No
 other dot-folder can be exempted: check refuses `.husky/`, `.vscode/`,
 `.circleci/` and `.tekton/` whatever the policy says.
-For example, to allow README and workflow edits in one repository, add this to the
+For example, to allow CONTRIBUTING.md and workflow edits in one repository, add this to the
 bounds file (not to the caller workflow):
 
 ```toml
 [unprotected_files]
 repos = ["OWNER/REPO"]
-files = ["README.md"]
+files = ["CONTRIBUTING.md"]
 dot_folders = [".github"] # optional, and only ".github"; see the protections below
 ```
 
@@ -366,6 +366,11 @@ run started from, with gh-aw's `X-GH-AW-Base-Commit` header. The
 hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
+
+The brief also lists what check would refuse, and tells the agent to leave
+such a part out of a change and say so, except when it is the whole task: then
+the agent makes it anyway, so that the run fails with check naming the file
+rather than ending well with nothing handed back.
 
 For a `push_to_pull_request_branch` request without `message`, `run` fills
 that field from the outcome summary (or its default run description), the

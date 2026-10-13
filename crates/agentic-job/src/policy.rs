@@ -84,9 +84,12 @@ const KB: u64 = 1024;
 pub const EXEMPTABLE_DOT_FOLDER: &str = ".github";
 
 /// The files a patch may not touch, at any depth: the defaults gh-aw's
-/// compiler writes for `create-pull-request` (v0.90.1). A bounds file can
-/// take names off this list for the repositories it names, and cannot add
-/// to it.
+/// compiler writes for `create-pull-request` (v0.90.1), less `README.md`.
+/// A README steers no build, dependency, owner or agent, and protecting it
+/// lost real runs their whole change (a README refresh; a new
+/// `tests/coccinelle/README.md`). This list, not gh-aw's, is what both
+/// check and apply's handler are given. A bounds file can take names off
+/// this list for the repositories it names, and cannot add to it.
 pub const DEFAULT_PROTECTED_FILES: &[&str] = &[
     "package.json",
     "bun.lockb",
@@ -124,7 +127,6 @@ pub const DEFAULT_PROTECTED_FILES: &[&str] = &[
     "uv.lock",
     "CODEOWNERS",
     "DESIGN.md",
-    "README.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "CODE_OF_CONDUCT.md",
@@ -1185,7 +1187,7 @@ missing_data = { max = 3 }
 
 [unprotected_files]
 repos = ["cgwalters-bot/homegit", "cgwalters-forge/review"]
-files = ["README.md", "AGENTS.md"]
+files = ["CONTRIBUTING.md", "AGENTS.md"]
 "#;
 
     const REPO: &str = "bootc-dev/bootc";
@@ -2473,7 +2475,7 @@ files = ["README.md", "AGENTS.md"]
             assert_eq!(policy.safe_outputs.max_of("missing_data"), None);
             let pr = policy.safe_outputs.create_pull_request.unwrap();
             assert_eq!(pr.max_patch_files, 3);
-            assert!(pr.protected_files.contains(&"README.md".into()));
+            assert!(pr.protected_files.contains(&"CONTRIBUTING.md".into()));
         }
         assert!(
             org.compile(&Request {
@@ -2526,7 +2528,7 @@ files = ["README.md", "AGENTS.md"]
                 .filter(|name| !protected.iter().any(|p| p.as_str() == *name))
                 .collect();
             let want: &[&str] = if own {
-                &["README.md", "AGENTS.md"]
+                &["CONTRIBUTING.md", "AGENTS.md"]
             } else {
                 &[]
             };

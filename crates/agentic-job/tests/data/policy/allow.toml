@@ -24,4 +24,4 @@ missing_data = { max = 3 }
 # repositories named here exactly.
 [unprotected_files]
 repos = ["cgwalters-bot/homegit"]
-files = ["README.md", "AGENTS.md"]
+files = ["CONTRIBUTING.md", "AGENTS.md"]

@@ -1517,8 +1517,8 @@ mod tests {
             ),
             (
                 "a protected file",
-                pr().with(PATCH_NAME, Some(patch_of("README.md"))),
-                "aw-agent-run-7.patch: protected files: README.md",
+                pr().with(PATCH_NAME, Some(patch_of("CONTRIBUTING.md"))),
+                "aw-agent-run-7.patch: protected files: CONTRIBUTING.md",
             ),
             (
                 "a pull request for another repository",

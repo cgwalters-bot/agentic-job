@@ -32,7 +32,7 @@ for (const phase of ['collector', 'policy', 'review']) {
         errors: phase === 'collector' ? ['collector refused'] : [], items: [],
       }));
       if (phase === 'policy') fs.writeFileSync(join(dir, 'report.json'), JSON.stringify({
-        ok: false, errors: ['protected files: README.md'],
+        ok: false, errors: ['protected files: CONTRIBUTING.md'],
       }));
       if (phase === 'review') await new AsyncFunction('require', 'process', 'core',
         script('Validate the review verdict', 'script'))(require, { env }, core);

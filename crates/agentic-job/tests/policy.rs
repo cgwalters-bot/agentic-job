@@ -94,12 +94,10 @@ fn a_request_within_the_bounds_prints_its_policy() {
     let pr = &outputs["create_pull_request"];
     assert_eq!(pr["draft"], true);
     assert_eq!(pr["protected_files_policy"], "blocked");
-    assert!(
-        pr["protected_files"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::from("README.md"))
-    );
+    let protected = pr["protected_files"].as_array().unwrap();
+    assert!(protected.contains(&Value::from("CONTRIBUTING.md")));
+    // Not protected in any repository (#537).
+    assert!(!protected.contains(&Value::from("README.md")));
 }
 
 #[test]
@@ -317,7 +315,7 @@ fn dispatch_documented_unprotected_files_hint_is_valid() {
     let protected = policy["safe_outputs"]["create_pull_request"]["protected_files"]
         .as_array()
         .unwrap();
-    assert!(!protected.contains(&serde_json::json!("README.md")));
+    assert!(!protected.contains(&serde_json::json!("CONTRIBUTING.md")));
     assert!(protected.contains(&serde_json::json!("AGENTS.md")));
 }
 

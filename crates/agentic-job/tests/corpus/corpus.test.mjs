@@ -53,6 +53,16 @@ const BOUNDS = join(scratch(), "allow.toml");
   ].join("\n") + "\n");
 }
 
+// The old tree's policy, less the one deliberate difference: README.md is
+// protected nowhere (#537). So a difference in a verdict is still one in
+// the code.
+function oldPolicy(inputs) {
+  const was = old.compilePolicy(inputs);
+  const pr = was.policy?.safe_outputs?.create_pull_request;
+  if (pr) pr.protected_files = pr.protected_files.filter((name) => name !== "README.md");
+  return was;
+}
+
 const agenticJob = (...args) => spawnSync(AGENTIC_JOB, args, { encoding: "utf8" });
 
 // `agentic-job policy` for the old tree's dispatch inputs: {status, policy, stderr}.
@@ -91,7 +101,7 @@ test("gh-aw's collector is the code the old tree vendored", () => {
 });
 
 const INPUTS = { repo: REPO, base: BASE, workflow: "branch", outputs: "create_pull_request,noop", maxOutputs: "3" };
-// The bot's own repository, where README.md and AGENTS.md may change.
+// The bot's own repository, where AGENTS.md may change too.
 const OWN_REPO = "cgwalters-bot/homegit";
 
 test("policy: a request against the bounds", () => {
@@ -141,7 +151,7 @@ test("policy: a request against the bounds", () => {
     ["a type with a quote", { outputs: 'noop","create_issue":{"max":9},"x":"' }],
   ]) {
     const inputs = { ...INPUTS, ...change };
-    const was = old.compilePolicy(inputs);
+    const was = oldPolicy(inputs);
     const now = newPolicy(inputs);
     assert.equal(now.status === 0, was.errors.length === 0, `${name}: old ${JSON.stringify(was.errors)}, new ${now.stderr}`);
     if (!now.policy) continue;
@@ -175,7 +185,7 @@ function bothPolicies(change = {}) {
   const key = JSON.stringify(change);
   if (!policies.has(key)) {
     const inputs = { ...INPUTS, ...change };
-    policies.set(key, { was: old.compilePolicy(inputs).policy, now: newPolicy(inputs).policy });
+    policies.set(key, { was: oldPolicy(inputs).policy, now: newPolicy(inputs).policy });
     assert.ok(policies.get(key).was && policies.get(key).now, `a policy for ${key}`);
   }
   return policies.get(key);
@@ -213,6 +223,7 @@ test("check: what both accept", async () => {
     // The cases of the old tree's test.
     ["a pull request", withPatch(GOOD), 1],
     ["a pull request and a noop", withPatch(GOOD, [PR, NOOP]), 2],
+    ["a nested README", withPatch(patchOf(edit({ "tests/coccinelle/README.md": "x\n" }))), 1],
     ["a change to an executable file", withPatch(patchOf(edit({ "run.sh": "#!/bin/sh\necho hi\n" }), ...EXECUTABLES)), 1],
     ["the deletion of an executable file", withPatch(patchOf((d) => rmSync(join(d, "gone.sh")), ...EXECUTABLES)), 1],
     ["a noop alone", { lines: [NOOP], base: null }, 1],
@@ -268,7 +279,7 @@ test("check: what both refuse", async () => {
     ["a base.json for another base", { ...withPatch(GOOD), baseJson: { repo: REPO, ref: "bot/x", commit: GOOD.base } }, /base\.json is not/],
     ["a patch of another base commit", { lines: [PR], patch: GOOD.patch, base: "0".repeat(40) }, /X-GH-AW-Base-Commit/],
     ["a stray file", { lines: [], base: null, extra: { "notes.txt": "hi" } }, /unexpected file "notes\.txt"/],
-    ["a protected file (README.md, gh-aw's list)", withPatch(bad({ "README.md": "x\n" })), /protected files.*README\.md/],
+    ["a protected file (CONTRIBUTING.md, gh-aw's list)", withPatch(bad({ "CONTRIBUTING.md": "x\n" })), /protected files.*CONTRIBUTING\.md/],
     ["a manifest (package.json)", withPatch(bad({ "package.json": "{}\n" })), /protected files.*package\.json/],
     ["CI (.github/)", withPatch(bad({ ".github/workflows/x.yml": "on: push\n" })), /\.github/],
     ["a nested git file", withPatch(bad({ "sub/.gitattributes": "* -diff\n" })), /protected path/],
@@ -319,7 +330,7 @@ test("check: what both refuse", async () => {
 test("check: docs are unprotected only in the repositories the bounds name", async () => {
   const docs = { "README.md": "x\n", "AGENTS.md": "x\n", "docs/README.md": "x\n", "docs/design.md": "x\n" };
   for (const [name, files, own, upstream] of [
-    ["README.md, AGENTS.md and docs/", docs, null, /protected files.*: (?=.*README\.md)(?=.*AGENTS\.md)/],
+    ["README.md, AGENTS.md and docs/", docs, null, /protected files.*: AGENTS\.md/],
     ["docs/ alone", { "docs/design.md": "x\n" }, null, null],
     ["other protected docs", { "CONTRIBUTING.md": "x\n" }, /protected files.*CONTRIBUTING\.md/, /protected files.*CONTRIBUTING\.md/],
     ["a manifest", { "package.json": "{}\n" }, /protected files.*package\.json/, /protected files.*package\.json/],

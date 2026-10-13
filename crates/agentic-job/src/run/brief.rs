@@ -36,7 +36,9 @@ const REFUSED_KINDS: &str = "adds an executable, adds, changes or deletes a symb
 /// What a change may not touch and how many files it may, for an agent
 /// that would otherwise learn it only from `check` refusing all it did:
 /// the first real run lost its whole change to one line added to a
-/// README.
+/// README. A task that is nothing but such a change is still made: told
+/// only to leave it out, an agent handed back a noop and the run ended
+/// well with no result (#537); refused, it fails naming the file.
 fn patch_rules(rules: &PatchRules<'_>) -> String {
     let mut text = String::from(
         " A change is refused whole, with everything else in it, if it touches one of these: ",
@@ -75,7 +77,9 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
         text,
         "{ALWAYS_PROTECTED}. So is a change to more than {} files, and one that \
          {REFUSED_KINDS}. Where the task asks for a change that would be refused, leave that \
-         part out and say so in your report.",
+         part out and say so in your report; but if it is all the task asks for, make it \
+         anyway, so that the run fails naming the file instead of ending well with nothing \
+         handed back.",
         rules.max_patch_files
     );
     text
@@ -329,7 +333,7 @@ mod tests {
     #[test]
     fn a_pull_request_run_is_told_what_a_change_may_not_touch() {
         const NAMES: &str =
-            "a file of one of these names, in any directory: `README.md`, `go.mod`; ";
+            "a file of one of these names, in any directory: `DESIGN.md`, `go.mod`; ";
         const DOT_FOLDERS: &str = "a top-level directory whose name starts with a dot";
         struct Case {
             files: &'static [&'static str],
@@ -346,7 +350,7 @@ mod tests {
         };
         let cases = [
             Case {
-                files: &["README.md", "go.mod"],
+                files: &["DESIGN.md", "go.mod"],
                 dot_folders: true,
                 has: &[NAMES, DOT_FOLDERS],
                 has_not: &[],
@@ -358,7 +362,7 @@ mod tests {
                 has_not: &["of one of these names"],
             },
             Case {
-                files: &["README.md", "go.mod"],
+                files: &["DESIGN.md", "go.mod"],
                 dot_folders: false,
                 has: &[NAMES],
                 has_not: &[DOT_FOLDERS],
@@ -381,6 +385,7 @@ mod tests {
                 "`CODEOWNERS`",
                 "more than 20 files",
                 "leave that part out and say so in your",
+                "if it is all the task asks for, make it anyway",
             ];
             for want in has.iter().chain(&always) {
                 assert!(brief.contains(want), "{want}\n{brief}");
@@ -390,7 +395,7 @@ mod tests {
             }
         }
         // A run that proposes no change has no such rules to be told.
-        let analysis = text(&policy(Kind::Analysis, rules(&["README.md"], true)));
+        let analysis = text(&policy(Kind::Analysis, rules(&["DESIGN.md"], true)));
         assert!(!analysis.contains("refused whole"), "{analysis}");
     }
 

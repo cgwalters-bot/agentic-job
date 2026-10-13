@@ -738,6 +738,11 @@ mod tests {
                 head() + &remove("gone.sh", "100755"),
             ),
             ("content that looks like headers", head() + dashes),
+            // No README is protected, at any depth (#537).
+            (
+                "a README, at the top and nested",
+                head() + &edit("README.md") + &add("tests/coccinelle/README.md", "100644"),
+            ),
             ("a signature", head() + &edit("a.rs") + "-- \n2.52.0\n\n"),
             ("a message that is not ASCII", mime + &edit("a.rs")),
             ("a folded subject", folded + &edit("a.rs")),
@@ -880,13 +885,13 @@ mod tests {
             ),
             (
                 "a protected file",
-                head() + &edit("README.md"),
-                "protected files: README.md",
+                head() + &edit("CONTRIBUTING.md"),
+                "protected files: CONTRIBUTING.md",
             ),
             (
                 "a protected file below",
-                head() + &edit("docs/README.md"),
-                "protected files: docs/README.md",
+                head() + &edit("docs/CONTRIBUTING.md"),
+                "protected files: docs/CONTRIBUTING.md",
             ),
             (
                 "a manifest",
@@ -1142,8 +1147,11 @@ mod tests {
     #[test]
     fn unprotected_names_and_folders_follow_the_policy() {
         let mut rules = policy().safe_outputs.create_pull_request.unwrap();
-        rules.protected_files.retain(|name| name != "README.md");
-        let patch = head() + &edit("README.md") + &edit("docs/README.md") + &edit("AGENTS.md");
+        rules
+            .protected_files
+            .retain(|name| name != "CONTRIBUTING.md");
+        let patch =
+            head() + &edit("CONTRIBUTING.md") + &edit("docs/CONTRIBUTING.md") + &edit("AGENTS.md");
         assert_eq!(
             patch_problems(&patch, &rules, BASE),
             ["protected files: AGENTS.md"]

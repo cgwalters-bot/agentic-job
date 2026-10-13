@@ -20,4 +20,4 @@ missing_data = { max = 1 }
 # To deliberately permit protected documentation:
 # [unprotected_files]
 # repos = ["OWNER/REPO"]
-# files = ["README.md"]
+# files = ["CONTRIBUTING.md"]
