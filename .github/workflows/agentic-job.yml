@@ -59,7 +59,9 @@ on:
         description: >-
           Positive pull request number in `repo` whose branch a branch run starts from and pushes one
           commit to (`push_to_pull_request_branch`, off unless the bounds allow it); replaces `base`.
-          Only a pull request apply opened from the fork of the identity it applies as
+          Apply pushes only where its user may, never to a default or protected branch, and to a
+          branch of anything but its user's fork (`repo` itself or another's fork) only where that
+          repository accepts it
         type: string
         default: ""
       repo:

@@ -5,6 +5,7 @@ const { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } = require(
 const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { test } = require('node:test');
+const { OWNER_BRANCHES } = require('./push.cjs');
 
 const workflow = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
 const wrapper = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
@@ -178,6 +179,13 @@ test("a push is applied to the policy pull request from apply's fork, never as a
       // caller is another repository: it looks the name up in lower case.
       checkout_mapping: { 'owner/repo': '.' },
     });
+    // Another head repository the fork step named, the output repository
+    // itself included (gh-aw then pushes to the checkout's own remote), is
+    // the only one, and still without workflows.
+    for (const head of ['carol/repo', 'Owner/Repo']) {
+      const config = handlers(head).push_to_pull_request_branch;
+      assert.deepEqual([config['head-repo'], config.allowed_repos, config.allow_workflows], [head, [head], undefined], head);
+    }
     // Without a fork there is no handler that could push to the output repository.
     assert.deepEqual(handlers(''), {});
   } finally {
@@ -911,9 +919,10 @@ test('a pull request without a fork to open it from stops the guard', async () =
 // `actions` is what the fork's Actions settings do: turn off, refuse to,
 // or stay on whatever is asked.
 // `config` is the policy's, and `head` the head of the pull request
-// `pulls.get` answers with.
+// `pulls.get` answers with; `accepts` lists the repositories whose default
+// branch holds push.cjs's OWNER_BRANCHES.
 async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/repo', reachable = 1, made = 'bot/repo', answer = {}, actions = 'off',
-  config = {}, state = 'open', replacement = false, base = { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: 'owner/repo' } },
+  config = {}, accepts = [], state = 'open', replacement = false, base = { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: 'owner/repo' } },
   head = { ref: 'p/agent-run-7', repo: { full_name: 'bot/repo', fork: true, owner: { login: 'bot' } } }, forked = [] } = {}) {
   const dir = mkdtempSync(join(homedir(), 'fork-test-'));
   try {
@@ -946,6 +955,19 @@ async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/r
         return { data: { object: { type: 'commit', sha: 'b'.repeat(40) } } };
       } },
     } };
+    // The head repository of a pull request a push goes to: every one but
+    // the output repository is a fork, `mallory` gives the identity no push
+    // there, and only those in `accepts` accept a push to their branches.
+    Object.assign(github.rest.repos, {
+      get: async ({ owner }) => ({ data: { default_branch: 'main', fork: owner !== 'owner', parent: { full_name: 'owner/repo' }, permissions: { push: owner !== 'mallory' } } }),
+      getBranch: async () => ({ data: { protected: false } }),
+      getBranchRules: async () => ({ data: [] }),
+      getContent: async ({ owner, repo, path }) => {
+        if (!accepts.includes(`${owner}/${repo}`) || path !== OWNER_BRANCHES) throw Object.assign(new Error('Not Found'), { status: 404 });
+        const content = Buffer.from(`${owner}/${repo}\n`);
+        return { data: { type: 'file', path, encoding: 'base64', size: content.length, content: content.toString('base64') } };
+      },
+    });
     const exec = { getExecOutput: async (program, args, options) => {
       tries.push([program, ...args]);
       assert.equal(options.ignoreReturnCode, true);
@@ -956,7 +978,7 @@ async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/r
     await new AsyncFunction('require', 'process', 'core', 'github', 'exec', 'setTimeout', script('Fork the output repository for the pull request'))(
       name => {
         if (name === '/workspace/apply-source/workflow/push.cjs') {
-          assert.equal(replacement, true, 'ordinary pushes have no trusted replacement checkout');
+          assert.ok(replacement || items.some(item => item.type === 'push_to_pull_request_branch'), 'only a push has the trusted source checkout');
           return require('./push.cjs');
         }
         return require(name);
@@ -1001,44 +1023,70 @@ test('a pull request is opened from a fork the token owns, made if missing and r
 });
 
 // A same-repository pull request's branch would have the target's CI run
-// the agent's commit with a write token and OIDC (#430), and anyone else's
-// fork is not apply's to push to.
-test('a push goes only to a pull request apply opened from its own fork', async () => {
+// the agent's commit with its secrets, a write token and OIDC (#430), so
+// it is pushed to only where the repository accepts that. A pull request
+// from the identity's own fork is pushed to there, with Actions turned off
+// as for a new pull request; one from anywhere else goes to its head
+// repository only as push.cjs allows (#553), and nothing is forked or
+// turned off for it.
+test("a push goes to its pull request's head repository, the identity's fork as a new pull request's", async () => {
   const push = { type: 'push_to_pull_request_branch', branch: 'p/agent-run-7' };
   const config = { push_to_pull_request_branch: { target: '42', head: '2'.repeat(40) } };
   const { outputs, forked, read } = await fork([push], { config });
   assert.deepEqual(forked, [{ owner: 'owner', repo: 'repo', default_branch_only: true }]);
-  assert.deepEqual(read, [{ owner: 'owner', repo: 'repo', pull_number: 42 }]);
+  // push.cjs reads it first, and leaves the identity's fork to the step.
+  assert.deepEqual(read, Array(2).fill({ owner: 'owner', repo: 'repo', pull_number: 42 }));
   assert.deepEqual(outputs, { repo: 'bot/repo' });
   const enabled = { push_to_pull_request_branch: { ...config.push_to_pull_request_branch, replacement_max_commits: 10 } };
   assert.deepEqual((await fork([push], { config: enabled })).outputs, { repo: 'bot/repo' });
   assert.deepEqual((await fork([push], { config: enabled, replacement: true, repo: 'owner/repo' })).outputs,
     { repo: 'bot/repo', 'current-base': 'b'.repeat(40) });
   await assert.rejects(fork([push], { config: enabled, replacement: true, repo: 'owner/repo',
-    base: { ref: 'main', repo: { full_name: 'other/repo' } } }), /Invalid pull request base/);
+    base: { ref: 'main', repo: { full_name: 'other/repo' } } }), /not open from a branch named/);
   // The forge's names in another case are the same repository.
   const same = { ref: 'p/agent-run-7', repo: { full_name: 'Bot/Repo', fork: true, owner: { login: 'Bot' } } };
   assert.deepEqual((await fork([push], { config, head: same })).outputs, { repo: 'bot/repo' });
   const from = (full_name, owner, fork = true, ref = 'p/agent-run-7') => ({ head: { ref, repo: { full_name, fork, owner: { login: owner } } } });
+  // Another fork the identity can push to and whose owner accepts it,
+  // whoever opened the pull request and whoever owns the output repository.
+  const carol = { ...from('carol/repo', 'carol'), accepts: ['carol/repo'] };
+  for (const me of ['bot', 'owner']) {
+    const result = await fork([push], { me, config, ...carol });
+    assert.deepEqual([result.outputs, result.forked, result.settings, result.tries], [{ repo: 'carol/repo' }, [], [], []], me);
+  }
+  assert.deepEqual((await fork([push], { config: enabled, replacement: true, repo: 'owner/repo', ...carol })).outputs,
+    { repo: 'carol/repo', 'current-base': 'b'.repeat(40) });
+  // A branch of the output repository, which accepts it.
+  const accepted = await fork([push], { config, ...from('owner/repo', 'owner', false), accepts: ['owner/repo'] });
+  assert.deepEqual([accepted.outputs, accepted.forked, accepted.settings], [{ repo: 'owner/repo' }, [], []]);
+  const exempt = { push_to_pull_request_branch: { ...config.push_to_pull_request_branch, unprotected_dot_folders: ['.github'] } };
+  assert.deepEqual((await fork([push], { config: exempt })).outputs, { repo: 'bot/repo' });
   for (const [name, options, error, forks] of [
-    ['a same-repository pull request', from('owner/repo', 'owner', false), /is open, from owner\/repo:p\/agent-run-7, not open from bot's fork/, 0],
-    ["someone else's fork", from('mallory/repo', 'mallory'), /from mallory\/repo:p\/agent-run-7, not open from bot's fork/, 0],
-    ['a deleted head repository', { head: { ref: 'p/agent-run-7', repo: null } }, /not open from bot's fork/, 0],
-    ["another branch of apply's fork", from('bot/repo', 'bot', true, 'main'), /from bot\/repo:main, not open from bot's fork:p\/agent-run-7/, 0],
+    // Without its own opt-in, as this mock's output repository has none.
+    ['a same-repository pull request', from('owner/repo', 'owner', false), /from a branch of owner\/repo itself, .*add \.github\/agentic-job\/accept-owner-branches/, 0],
+    ["a same-repository pull request, with its owner's token", { me: 'owner', ...from('owner/repo', 'owner', false) }, /from a branch of owner\/repo itself/, 0],
+    // Write access is not its owner's acceptance that its workflows run the
+    // agent's commit with its secrets.
+    ['another fork, without its opt-in', from('carol/repo', 'carol'), /is from carol\/repo, not bot's fork .*add \.github\/agentic-job\/accept-owner-branches naming carol\/repo to its default branch/, 0],
+    ["another fork, with the output repository's opt-in only", { ...from('carol/repo', 'carol'), accepts: ['owner/repo'] }, /add \.github/, 0],
+    ['a fork the identity cannot push to', from('mallory/repo', 'mallory'), /is from mallory\/repo, which bot cannot push to/, 0],
+    // Its Actions are not turned off, and a workflow the agent wrote would run.
+    ['another fork, with .github exempted', { ...carol, config: exempt }, /is from carol\/repo, not from bot's fork .*\.github exempted/, 0],
+    ['a deleted head repository', { head: { ref: 'p/agent-run-7', repo: null } }, /is open, from a deleted repository:p\/agent-run-7, not open from a branch named/, 0],
+    ["another branch of apply's fork", from('bot/repo', 'bot', true, 'main'), /from bot\/repo:main, not open from a branch named p\/agent-run-7/, 0],
     ['a closed pull request', { state: 'closed' }, /is closed, from bot\/repo/, 0],
     ['no pull request in the policy', { config: { push_to_pull_request_branch: {} } }, /names no pull request/, 0],
     ['a pull request the policy does not name', { config: {} }, /names no pull request/, 0],
-    // The owner of the output repository has no fork of it.
-    ["the output repository's owner", { me: 'owner' }, /owns owner\/repo/, 0],
     ['a token /user does not name', { me: null }, /GET \/user names none/, 0],
     // Another repository of the identity's is not the fork the forge answers with.
     ["a repository of the identity's that is not its fork", from('bot/other', 'bot'), /is from bot\/other:p\/agent-run-7, not from bot\/repo/, 1],
   ]) {
-    // Nothing is forked for a pull request that is not the identity's.
     const forked = [];
     await assert.rejects(fork([push], { config, ...options, forked }), error, name);
     assert.equal(forked.length, forks, name);
   }
+  // A push's checks are the trusted source's, checked out for it.
+  assert.match(workflow, /\n {8}if: \$\{\{ steps\.replacement\.outputs\.enabled == 'true' \|\| fromJSON\(inputs\.policy\)\.push-item != '' \}\}\n {8}with:\n {10}repository: \$\{\{ job\.workflow_repository \}\}\n/);
   // The pull request's branch is the fork's: the checkout is of the output
   // repository's default branch, by policy's own output, and the base is
   // fetched from the fork the step above checked.

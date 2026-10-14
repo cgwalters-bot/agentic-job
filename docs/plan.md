@@ -74,7 +74,8 @@ Pushing to a pull request's branch
 every shipped bounds file. Before one turns it on, a scripted `fix` case in CI's
 end-to-end dispatch should push to a throwaway pull request from the applying
 account's fork: today the handler's configuration with `head-repo`, its patch
-lookup for a nested branch and its push to the fork are covered only by unit
+lookup for a nested branch and its push to the fork, to another fork or to an
+accepting repository's own branch are covered only by unit
 tests and by reading gh-aw's code. That needs the same bot PAT as the fork
 case below.
 Dispatch refuses a scripted `fix` today: a push needs an apply environment,

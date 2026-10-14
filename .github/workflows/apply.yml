@@ -135,9 +135,9 @@ jobs:
       # the agent started from, which a shallow clone does not have. The
       # handlers push with this checkout's credentials. Only check's accepted
       # patch report enables it; comment-only outputs need no repository/base.
-      # A push's base is a branch of the fork its pull request is from, not
-      # of the output repository: the checkout's own default is taken, and
-      # the fork's branch fetched below.
+      # A push's base is its pull request's branch, in the head repository
+      # the fork step names: the checkout's own default is taken, and that
+      # branch fetched below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         with:
@@ -157,7 +157,8 @@ jobs:
       - id: replacement
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ steps.replacement.outputs.enabled == 'true' }}
+        # A push's pull request is checked with its `pushTarget`, too.
+        if: ${{ steps.replacement.outputs.enabled == 'true' || fromJSON(inputs.policy).push-item != '' }}
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -192,11 +193,13 @@ jobs:
       # off. This comes before anything is pushed.
       #
       # A push goes to the same fork, and only to the branch of a pull
-      # request apply opened from it: never to a branch of the output
-      # repository, whose CI would run the agent's commit with a write
-      # token and OIDC, nor to anyone else's fork. The handler pushes to the
-      # pull request's head repository only if it is this fork (`head-repo`
-      # below); it is checked here too, before anything is fetched from it.
+      # request apply opened from it, where the pull request is from that
+      # fork. One from anywhere else goes to its head repository, whose CI
+      # then runs the agent's commit, only as `pushTarget` in
+      # workflow/push.cjs allows (#553). The handler pushes to the pull
+      # request's head repository only if it is the one named here
+      # (`head-repo` below); it is checked here too, before anything is
+      # fetched from it.
       - name: Fork the output repository for the pull request
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
@@ -212,6 +215,18 @@ jobs:
             if (!push && !output.items.some(item => item.type === 'create_pull_request')) return;
             const me = await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null);
             if (!me) throw new Error("a pull request is opened from a fork of the identity apply holds, and GET /user names none: SAFE_OUTPUTS_PAT must be a user's token");
+            // A push to a pull request from anywhere but `me`'s fork goes to
+            // its head repository, as workflow/push.cjs checks; that fork's
+            // is checked below.
+            if (push) {
+              const { pushTarget } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/push.cjs`);
+              const target = await pushTarget(process.env, me, github);
+              if (target) {
+                if (target.base) core.setOutput('current-base', target.base);
+                core.setOutput('repo', target.repo);
+                return;
+              }
+            }
             const [owner, repo] = process.env.OUTPUT_REPO.split('/');
             if (owner.toLowerCase() === me.toLowerCase()) {
               throw new Error(`${me} owns ${process.env.OUTPUT_REPO} and has no fork of it to push to: apply as an account that does not own it`);
@@ -270,7 +285,7 @@ jobs:
       # output repository: its push workflows could run with privileges.
       # A push's pull request is in the repository the run worked on (policy
       # refuses any other): checked again here. Its base is the pull
-      # request's branch, in the fork the step above checked, and nothing
+      # request's branch, in the repository the step above checked, and nothing
       # here pushes for it.
       - name: Fetch the target's base branch
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
@@ -343,8 +358,8 @@ jobs:
       # guard below finds the exact checked change already applied. One
       # rewritten since the trial above fetched it,
       # so that the head is no longer in it, the handler applies the patch
-      # on instead, as only the fork's owner or a maintainer of the output
-      # repository can do; the last step then fails the job.
+      # on instead, as only someone who may push to the head repository can
+      # do; the last step then fails the job.
       - name: Write the handlers' configuration
         env:
           FORK: ${{ steps.fork.outputs.repo }}
@@ -446,7 +461,8 @@ jobs:
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
           ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
-          # Where a pull request's branch is pushed, the step above's fork.
+          # Where a pull request's branch is pushed: the step above's fork, or
+          # a push's head repository.
           FORK: ${{ steps.fork.outputs.repo }}
           # Whether the token below is the PAT; the secret itself stays there.
           TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}

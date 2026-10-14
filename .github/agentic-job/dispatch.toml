@@ -12,9 +12,10 @@ add_comment = { max = 1 }
 noop = { max = 1 }
 missing_tool = { max = 1 }
 missing_data = { max = 1 }
-# The fix profile is off. It pushes only to the branch of a pull request
-# apply opened from its own fork (#430), so it needs SAFE_OUTPUTS_PAT in an
-# apply environment. To enable it, with the branches it may push to:
+# The fix profile is off. It pushes to an open pull request's branch where
+# the applying user may push and apply allows (#553), so it needs
+# SAFE_OUTPUTS_PAT in an apply environment. To enable it, with the
+# branches it may push to:
 # push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"] }
 
 # To deliberately permit protected documentation:

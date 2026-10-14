@@ -112,9 +112,9 @@ jobs:
                 !/^[1-9][0-9]*$/.test(item) || !Number.isSafeInteger(Number(item))) {
               throw new Error('Expected OWNER/NAME and a positive safe issue number');
             }
-            // Another repository is written to, and a pull request opened from
-            // a fork or a fix pushed to one, only with a user's token: the job
-            // token can do none of these.
+            // Another repository is written to, a pull request opened from a
+            // fork, and a fix pushed to a pull request's branch, only with a
+            // user's token: the job token can do none of these.
             if ((repo !== context.repo.owner + '/' + context.repo.repo || profile === 'implement' || profile === 'fix') &&
                 !process.env.APPLY_ENVIRONMENT?.trim()) missing.push('APPLY_ENVIRONMENT');
             // A scripted run, as CI starts, is given none of the repository
@@ -168,9 +168,11 @@ jobs:
       GH_READ_TOKEN: ${{ !inputs.scripted && secrets.GH_READ_TOKEN || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
-      # use these writes; neither executes agent-produced code. Every push,
-      # a new pull request's branch or a fix to one, goes to a fork with the
-      # apply environment's token: the job token pushes nothing.
+      # use these writes; neither executes agent-produced code. Every push
+      # is with the apply environment's token: a new pull request's branch
+      # goes to a fork, and a fix to a pull request's branch where that
+      # token may push and workflow/push.cjs allows. The job token pushes
+      # nothing.
       contents: read
       issues: write
       pull-requests: write

@@ -47,10 +47,10 @@ pub const OUTPUT_TYPES: &[&str] = &[
 /// it, and the credential each needs instead. GitHub gives a workflow's
 /// token no permission on Projects, and no account to fork into: apply
 /// opens a pull request only from a fork of the identity it applies as,
-/// and pushes only to such a pull request's branch in that fork, so that
-/// the target's CI runs agent-written code as a fork's, with a read-only
-/// token. Every other type writes to a repository, which the token can
-/// when it is the calling one.
+/// so that the target's CI runs agent-written code as a fork's, with a
+/// read-only token, and pushes to a pull request's branch only as a user
+/// it can name and check may push there. Every other type writes to a
+/// repository, which the token can when it is the calling one.
 const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
     (
         CREATE_PULL_REQUEST,
@@ -58,7 +58,7 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
     ),
     (
         PUSH_TO_PULL_REQUEST_BRANCH,
-        "the token of the user whose fork the pull request is from, as SAFE_OUTPUTS_PAT in an apply environment",
+        "a user's token that can push to the pull request's branch, as SAFE_OUTPUTS_PAT in an apply environment",
     ),
     (
         "update_project",
@@ -892,8 +892,9 @@ impl Bounds {
         }
         if push {
             // The pull request is in the repository the run works on: its
-            // outputs are applied there, and the push goes to the fork
-            // apply opened that pull request from (docs/safe-outputs.md).
+            // outputs are applied there, and the push goes to that pull
+            // request's head repository, which apply checks
+            // (docs/safe-outputs.md).
             if !output_repo.is_some_and(|output_repo| output_repo.eq_ignore_ascii_case(repo)) {
                 errors.push(format!(
                     "{PUSH_TO_PULL_REQUEST_BRANCH} goes to {repo:?}, the repository the run works on, not to {}",
@@ -2098,9 +2099,9 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 },
                 None,
             ),
-            // The push goes to the applying identity's fork, as a new
-            // pull request's branch does: any repository the bounds let
-            // runs work on, and never with the job token, which has none.
+            // The push goes to the pull request's branch wherever apply's
+            // user may push to it: any repository the bounds let runs
+            // work on, and never with the job token, which names no user.
             (
                 "another repository the bounds allow runs in",
                 Request {
@@ -2118,7 +2119,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                     ..ok
                 },
                 Some(
-                    "output type \"push_to_pull_request_branch\" needs the token of the user whose fork",
+                    "output type \"push_to_pull_request_branch\" needs a user's token that can push to the pull request's branch",
                 ),
             ),
             (

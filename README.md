@@ -97,8 +97,8 @@ fenced off as data. See [docs/events.md](docs/events.md).
 a scripted agent, so it needs no model. The scripted agent tries the
 things it must not be able to do and changes one file, and the change
 comes back as a draft pull request from a fork owned by the bot account
-whose PAT an `agent-apply` environment holds: apply never pushes an
-agent's commit to the repository itself.
+whose PAT an `agent-apply` environment holds: apply never pushes a new
+pull request's branch to the repository itself.
 The scripted agent ignores the task text. The [dispatch trial](docs/dispatch.md)
 includes editable sessions for patches, comments and reviews without a model.
 

@@ -182,10 +182,11 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     // A run that never started may be tried again on the same machine:
     // what an earlier try left is not the base of this one.
     sandbox.checked(&["rm", "-rf", "--", dir_text], b"", MAX_GIT_OUTPUT)?;
-    // A push's branch is in the fork apply opened its pull request from,
-    // not in the repository cloned, which serves the pinned head by its
-    // commit (as it serves the pull request's `refs/pull/N/head`): that
-    // is fetched and checked out, detached, on the default branch's clone.
+    // A push's branch is in its pull request's head repository, often a
+    // fork rather than the repository cloned, which serves the pinned head
+    // by its commit (as it serves the pull request's `refs/pull/N/head`):
+    // that is fetched and checked out, detached, on the default branch's
+    // clone.
     let push = policy.safe_outputs.push_to_pull_request_branch.as_ref();
     git_clone(
         sandbox,

@@ -145,7 +145,7 @@ Replacement is off by default. The caller may add
 `replacement_max_commits = 10` to `[outputs.push_to_pull_request_branch]`
 (maximum 50). Organization bounds intersect this ceiling; zero in either
 file forbids replacement. The ordinary one-commit push remains unchanged.
-The same apply-owned fork and apply-opened PR checks apply; no write token
+The same head repository and branch checks apply; no write token
 is given to the producer or checker, and a partial run cannot replace history.
 
 The producer writes `out/replacement.json` under its home, alongside its
@@ -191,17 +191,34 @@ commit from becoming the root of the replacement series.
 
 `push_to_pull_request_branch` lets a follow-up run fix an open pull request:
 its change goes onto that pull request's branch as one commit, not into a new
-pull request. It goes only to a pull request apply opened itself, from the
-fork of the identity it applies as
-([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)):
-never to a branch of the target repository, whose `pull_request` workflows
-would run the agent's commit with whatever write token and OIDC access they
-hold ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
-[#430](https://github.com/cgwalters-forge/agentic-job/issues/430)), and never
-to anyone else's fork. The target's CI runs the pushed commit as it ran the
-pull request's first one: as a fork's, with a read-only token, no secrets and
-no OIDC token. It is off unless a bounds file lists it, with globs of the
-branches a push may go to:
+pull request. It goes to the pull request's head repository, whoever opened
+the pull request, where the identity apply holds may push: its own fork
+([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)),
+another fork whose owner gave it write access, or the target repository
+itself. The target's CI runs a fork's commit as it ran the pull request's
+first one: as a fork's, with a read-only token, no secrets and no OIDC token.
+The head repository's own workflows are different: apply turns Actions off
+only in its own fork, and elsewhere the `push` and `pull_request` workflows
+of the target or of the other fork run the agent's commit with whatever
+secrets, write token and OIDC access they hold
+([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
+[#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). So apply
+pushes to any head repository but its own fork only when that repository's
+default branch has the file `.github/agentic-job/accept-owner-branches`
+naming that repository (`owner/repo`) on a line of its own. Write access
+given to the account is not that acceptance, nor is a file a fork inherited
+from the target it was made or synced from, which names the target. It is
+the head repository's own decision, not a caller's: only a commit to its
+default branch adds the file, which apply never pushes. Refusing `.github`
+keeps the agent from adding workflows there, not from changing the build
+scripts, tests and local actions the existing ones run. Add it only to a repository whose
+workflows give a branch nothing an agent is not to have; where that
+repository is also the caller, keep its apply environment to the default
+branch, so that a branch's workflows cannot use its token. Any other head
+repository has to be a fork, and not the calling repository, which holds the
+run's secrets. "May push" is write access to the head repository: a fork's
+pull request that lets the target's maintainers edit it is not enough. It is
+off unless a bounds file lists it, with globs of the branches a push may go to:
 
 ```toml
 [outputs.push_to_pull_request_branch]
@@ -217,9 +234,9 @@ of a pull request apply opened is the caller's `branch-prefix` followed by
 The caller names the pull request by number (`push-item`, the `fix` profile of
 [dispatch](dispatch.md)); the agent never does. The policy job reads that pull
 request with its read-only token and refuses it unless it is open, its base is
-in the run's repository and its head in a fork of it. The outputs must be
+in the run's repository and its head repository still exists. The outputs must be
 applied there (`output-repo` empty or that repository), and apply must hold
-`SAFE_OUTPUTS_PAT` from an `apply-environment`: the job token has no fork.
+`SAFE_OUTPUTS_PAT` from an `apply-environment`: the job token names no user.
 Policy refuses anything else before the agent runs. Its branch must match
 `branches` (`bases` does not apply), and `policy.json` records the number as
 the push's `target` and the head commit the branch was at as its `head`. A
@@ -233,19 +250,25 @@ forge serves a fork pull request's head from the target too) and starts there:
   branch but the pull request's, and the same patch rules as a pull request
    (protected files, top-level dot-folders, size and file count), including the
    same exact-repository `.github` exemption as a new pull request;
-- apply makes or finds its fork as for a pull request, and refuses unless the
-  pull request is open and its head is that fork and the policy's branch; a
-  pull request from someone else's repository is refused before anything is
-  forked, fetched or pushed; gh-aw's handler is given the fork as the only head
-  repository it may push to, and refuses a pull request from any other;
+- apply reads the pull request again with its own token, before anything is
+  forked, fetched or pushed, and refuses unless it is open, from the policy's
+  branch, and that branch is neither its head repository's default branch nor
+  protected nor one a ruleset applies to (any rule: a ruleset on every branch
+  leaves nothing to push to); it refuses a head repository its
+  identity cannot push to, saying so, one that is neither a fork of the target nor the
+  target, the calling repository unless it is the target, a branch of the
+  target itself that the target does not accept, and the `.github` exemption anywhere but its own fork. For a pull request from that
+  fork it makes or finds the fork and turns its Actions off, as for a new
+  pull request. gh-aw's handler is given the head repository as the only one
+  it may push to, and refuses a pull request from any other;
 - the handler applies the patch on `head` and pushes one commit without force,
     with no fallback to a new pull request. Only the `.github` exemption
     enables `allow_workflows` and the matching dot-folder exclusion. A
    branch that moved since `head` was read makes the push not a fast-forward,
    which the forge refuses: the pull request has to be run again. Before the
-   handler runs, apply leaves out a push if the fetched fork branch already
+   handler runs, apply leaves out a push if the fetched head branch already
    holds exactly one commit on `head` with the checked tree. This succeeds as
-   already applied, without pushing again. Apply then fetches the branch back from the fork and
+   already applied, without pushing again. Apply then fetches the branch back from the head repository and
    refuses unless it is that one commit on `head` with the checked tree.
 
 The final check also runs for an already-applied push: a branch moved between
@@ -256,13 +279,14 @@ A partial run (one stopped at a limit, applied under `apply-partial`) is not
 pushed: nothing on a pushed commit would say the work was cut short, so
 apply fails instead.
 
-Only the fork's owner, the identity apply holds, and maintainers of the target
-the pull request lets edit it can move its branch. One of them rewriting it so
+Anyone who may push to the head repository, the identity apply holds, and
+maintainers of the target a fork's pull request lets edit it can move its
+branch. One of them rewriting it so
 that `head` is no longer in it is the case the handler does not refuse: it
 logs a warning and applies the patch with `git am --3way` on the branch as it
 finds it, that push succeeds, and apply's last step fails after the commit is
-on the branch. The handler does not check the pull request's state; apply's
-fork step does, so a pull request closed before apply runs is not pushed to.
+on the branch. The handler does not check the pull request's state; apply
+does, so a pull request closed before apply runs is not pushed to.
 
 ## The bounds and the policy
 
@@ -304,8 +328,9 @@ The exemption does not reach protected file names or git's own files
 inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`). Organization and
 caller bounds must both permit it. It applies to `create_pull_request` and
 `push_to_pull_request_branch`, including replacement series, only for the
-same listed repositories. A fix push still requires the open PR and owned
-fork/branch checks described above. Workflow changes are pushed only to
+same listed repositories. A fix push still requires the open PR and head
+repository/branch checks described above, and is refused the exemption
+anywhere but apply's own fork. Workflow changes are pushed only to
 apply's fork, which has Actions turned off, and reach the repository as a
 fork pull request. Its `pull_request` CI gets no secrets and a read-only
 token, not the target repository's write credentials. Operators must configure

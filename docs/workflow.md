@@ -290,10 +290,11 @@ unknown input; drop it when bumping the pin. A caller that asks for
 repository ([pull requests come from a fork](#pull-requests-come-from-a-fork)),
 and no longer needs `contents: write`, which only pushed the branch.
 
-`push_to_pull_request_branch` goes the same way: only to a pull request
-apply opened from its fork, never to a same-repository one or anyone
-else's fork
-([#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). Its
+`push_to_pull_request_branch` went the same way: only to a pull request
+apply opened from its fork
+([#430](https://github.com/cgwalters-forge/agentic-job/issues/430)); it
+now goes to any open pull request's branch apply may push to
+([#553](https://github.com/cgwalters-forge/agentic-job/issues/553)). Its
 bounds lose `repos`, which a bounds file that still names it is refused
 for: drop it. A call that pushes needs `apply-environment`, and no call
 needs `contents: write` for it any more.
@@ -969,8 +970,11 @@ cannot open a pull request either ([below](#pull-requests-come-from-a-fork)).
 
 ### Pull requests come from a fork
 
-Apply never pushes an agent's commit to a branch of the output
-repository. Before the handlers run, it forks the output repository
+Apply never pushes a new pull request's branch to the output
+repository; only a fix may go to a branch of it, where the output
+repository accepts that
+([pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
+Before the handlers run, it forks the output repository
 into the account that `GET /user` names for `SAFE_OUTPUTS_PAT` (the
 forge answers with the existing fork when there is one), waits until
 git reaches the fork, and gives gh-aw's `create_pull_request` handler
@@ -984,11 +988,15 @@ requires for outside contributors. A workflow there on
 `pull_request_target` or `workflow_run` still runs with privileges and
 must not check out or run the pull request's code.
 
-A `push_to_pull_request_branch` goes the same way, to the branch of a
-pull request apply opened from that fork and to no other: apply refuses a
-pull request whose head is not its own fork's before it fetches or pushes
-anything, and gives the push handler the fork as its `head-repo`, which
-refuses any other head repository.
+A `push_to_pull_request_branch` goes to the branch of its pull request
+wherever that is: to this fork the same way, and otherwise to another
+fork of it the account may push to, or to a branch of the output
+repository, only where that head repository accepts it and never with
+`.github` exempted;
+never to a default or protected branch
+([pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
+Apply checks this before it fetches or pushes anything, and gives the push
+handler that repository as its `head-repo`, which refuses any other.
 
 A push with a PAT, unlike one with the job token, starts the fork's
 workflows on `push`, with the fork's secrets and a token that writes to
@@ -1011,7 +1019,10 @@ recommend: a classic PAT writes to every repository its account can
 reach, and every handler of apply holds it. Use a dedicated bot account
 with access to nothing but its own forks (no organization membership, no
 collaborator invitations, no repositories of its own beyond the forks),
-so that what the token can push to is what apply means it to. That does
+so that what the token can push to is what apply means it to. A fix to a
+pull request from elsewhere needs write access to its head repository,
+and the token can then push to any unprotected branch there: grant it
+only where that is acceptable. That does
 not bound everything: like any GitHub account, it can still comment, open
 issues and pull requests, and fork on every public repository, and create
 repositories and gists of its own, and every handler of apply holds the
@@ -1028,7 +1039,8 @@ anything when `GET /user` names nobody (an App's token), or when that
 user owns the output repository and so has no fork of it, or when what
 the forge answers is not that user's own fork (the user's repository in
 the network can be its root, or the caller's repository). There is no
-mode that pushes to the output repository instead.
+mode that pushes a new pull request's branch to the output repository
+instead.
 
 Every agent's pull request is then a fork's, and so is treated as one
 everywhere. This repository's CI skips the end-to-end jobs for it, as
@@ -1139,15 +1151,19 @@ secret is passed, so a PAT passed without an environment is refused it too.
 For `push_to_pull_request_branch`, the caller passes the pull request's
 number as `push-item` on a `branch` run; it is off unless the bounds list it
 (see [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
-It goes only to a pull request apply opened from its fork, so it needs
-`apply-environment` and its `SAFE_OUTPUTS_PAT`, as a new pull request does;
+It goes only where the user `SAFE_OUTPUTS_PAT` names may push, so it needs
+`apply-environment` and that token, as a new pull request does;
 the job token is refused it. The policy job reads the pull request's branch
 and head with its read-only token (`pull-requests: read`, which the call
 already grants), and the run starts from that head. The pull request is in
 the run's own repository, so `output-repo` is left out or names it; policy
 refuses any other before the agent runs, and apply checks again. Apply checks
-that the pull request's head is its own fork before it fetches or pushes
-anything for it, and the push goes to the fork with the environment's token. No other job's permissions change, and no token reaches the agent, check
+the pull request's head repository and branch
+([above](#pull-requests-come-from-a-fork)) before it fetches or pushes
+anything for it, and the push goes there with the environment's token. A
+branch of the repository itself, or of someone else's fork, runs that
+repository's workflows on the agent's commit with its secrets, which is why
+that repository has to accept it. No other job's permissions change, and no token reaches the agent, check
 or policy beyond the read-only ones they hold already.
 
 The project workflow changes leave permissions, action pins and token placement
@@ -1164,7 +1180,8 @@ the token used, through checked outputs only. And everything the token
 can do is within reach of that one job, so give it no more than forking
 the output repository, pushing to its own fork, and opening pull requests
 and comments in the output repository. It needs no push access to the
-output repository for a pull request.
+output repository for a pull request; a fix to a pull request not from its
+fork needs push access to that pull request's head repository.
 
 For a patch, when `output-repo` is not the target, it is taken to be a fork of
 it: its base branch must already contain the patch's base commit, or apply

@@ -58,17 +58,24 @@ covers, and reports what it ran and what it showed only for that concern.
 It omits the `Verification:` paragraph. CI remains a separate required
 check, combined with review by the merge gate, not by the reviewer.
 
-`fix` takes the number of an open pull request that implement opened, from
-the applying account's fork. Its run starts from that pull request's branch
+`fix` takes the number of an open pull request of the target, whoever
+opened it. Its run starts from that pull request's branch
 at the head it had when dispatched, and its change is pushed there, to the
-fork, ordinarily as one commit on top without force. Optional
+pull request's head repository, ordinarily as one commit on top without force. Optional
 [bounded series replacement](safe-outputs.md#replacing-the-complete-series)
 allows a rebase onto the policy snapshot or the base branch's current head
 resolved by trusted apply, using an exact head lease. A pull request whose
-head moved meanwhile is refused, and the run has to be dispatched again. A
-same-repository pull request, or one from anyone else's fork, is refused: a
-push to it would run the target's `pull_request` workflows on agent-written
-code with their write token and OIDC
+head moved meanwhile is refused, and the run has to be dispatched again.
+Apply refuses, before it pushes, a head repository the applying account
+cannot push to (saying so), one that is neither a fork of the target nor the target, the
+head repository's default branch or a protected branch, and the `.github`
+exemption anywhere but that account's own fork, whose Actions it turns off. A branch
+of any other head repository, the target itself or someone else's fork, is
+refused unless that repository's default branch has the file
+[`.github/agentic-job/accept-owner-branches`](safe-outputs.md#pushing-to-a-pull-requests-branch)
+naming it:
+a push there runs its `push` and `pull_request` workflows on
+agent-written code with their secrets, write token and OIDC
 ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
 [#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). Like
 implement it needs `APPLY_ENVIRONMENT`. It is **off** in the shipped bounds;
