@@ -170,16 +170,14 @@ on:
         description: The most the run may spend, in AIC (hundredths of a dollar; 0 for no such cap)
         type: string
         default: "500"
-      relay:
-        description: "A relay on the agent runner's network, as HOST:PORT: after the task's turn the session waits there for a client's prompts (specs/session.md); empty for a run that ends with its task"
-        type: string
-        default: ""
-      relay-audience:
-        description: With `relay`, the audience of the identity token the run proves itself with to it; empty to send none
-        type: string
-        default: ""
+      session:
+        description: >-
+          After the task's turn, wait for the operator's prompts over the tailnet (specs/session.md).
+          Who may attach and from which page is the configuration's `[session]` table, not an input
+        type: boolean
+        default: false
       idle-minutes:
-        description: With `relay`, how long the session waits for the client's next prompt (empty for 10, at most 60)
+        description: With `session`, how long the session waits for the client's next prompt (empty for 10, at most 60)
         type: string
         default: ""
       packages:
@@ -279,6 +277,12 @@ on:
         description: Optional read-only GitHub token for the agent; defaults to the agent job's read-only token
         required: false
     outputs:
+      session-endpoint:
+        description: >-
+          With `session`, the `wss://` address on the runner's tailnet name where the operator
+          attached. Like every output it resolves when the agent job ends; while it runs, the
+          address is in that job's log and is the runner's tailnet name (specs/session.md)
+        value: ${{ jobs.agent.outputs.session-endpoint }}
       review-head:
         description: The exact review head resolved by the read-only policy job
         value: ${{ jobs.policy.outputs.review-head }}
@@ -351,8 +355,7 @@ jobs:
       max-requests: ${{ inputs.max-requests }}
       max-tasks: ${{ inputs.max-tasks }}
       budget: ${{ inputs.budget }}
-      relay: ${{ inputs.relay }}
-      relay-audience: ${{ inputs.relay-audience }}
+      session: ${{ inputs.session }}
       idle-minutes: ${{ inputs.idle-minutes }}
       packages: ${{ inputs.packages }}
       npm: ${{ inputs.npm }}
@@ -391,6 +394,9 @@ jobs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      # With `session`: where the operator attaches; also in the job's
+      # summary from when the agent starts.
+      session-endpoint: ${{ steps.secure-host.outputs.session-endpoint }}
     # The same steps a caller-owned agent job has, with no steps of the
     # caller's between prepare and secure-host or after run.
     steps:
@@ -423,6 +429,7 @@ jobs:
       # `sandbox check`, with the binary and configuration of the policy
       # job. Every step after it is this file's, and none of them has root.
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        id: secure-host
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml

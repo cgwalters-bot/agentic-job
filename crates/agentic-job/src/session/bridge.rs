@@ -1,8 +1,19 @@
-//! The bridge: how a client reaches a session on a machine that takes no
-//! inbound connection (specs/session.md). `run` dials out to a relay,
-//! sends it one hello line, and from then on the connection carries
-//! ACP's newline-delimited JSON-RPC, with the session in the agent's role
-//! toward the client at the relay's far end.
+//! The bridge: how an operator reaches a session (specs/session.md).
+//! `run` listens on a loopback port, which its root helper exposes on
+//! the runner's tailnet name with `tailscale serve`, as HTTPS. A client
+//! opens a WebSocket there, and each of its text messages is one of
+//! ACP's JSON-RPC messages, with the session in the agent's role toward
+//! it.
+//!
+//! Who connects is decided at the handshake, from what `tailscale serve`
+//! adds: `Tailscale-User-Login`, the tailnet login of the person at the
+//! other end, which serve sets for a user's device and strips from what
+//! the client sent, must be one of `session.operators`. `Origin` must be
+//! one of `session.origins`, so that a page of another site the
+//! operator's browser has open cannot use the operator's tailnet identity
+//! to attach (cross-site WebSocket hijacking). A refused handshake leaves
+//! the bridge listening; the first client let in is the only one, and
+//! when it leaves the session ends.
 //!
 //! The client gets a narrow part of ACP: `initialize`; `session/new`,
 //! which attaches it to the session already running instead of starting
@@ -14,31 +25,51 @@
 //! reach the client once it has attached, with the run's secrets
 //! replaced; its permission requests stay with the session's policy.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::config;
 
-/// The first line `run` sends the relay, before any of ACP's.
-pub const HELLO_SCHEMA: &str = "agentic-job-relay/v1";
+/// The loopback port `run` listens on and its root helper serves: fixed,
+/// so that both know it, and below Linux's ephemeral range, so that no
+/// outgoing connection holds it.
+pub const PORT: u16 = 7790;
+/// Where `sandbox setup` leaves the address the client connects to,
+/// `wss://NAME/` for the runner's tailnet name, for the job to publish.
+pub const ENDPOINT_FILE: &str = "/etc/agentic-job/session-endpoint";
+/// What `tailscale serve` sets to the tailnet login of a user's device
+/// (`tailscale serve --help`); it drops one the client sent.
+pub const LOGIN_HEADER: &str = "Tailscale-User-Login";
 /// How long the session waits for a prompt unless `session.idle-minutes`
 /// says otherwise: a runner waiting for nobody still costs its minutes.
 const DEFAULT_IDLE_MINUTES: u64 = 10;
 const MAX_IDLE_MINUTES: u64 = 60;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most operators and origins: a few people and pages, not a
+/// directory.
+const MAX_ALLOWED: usize = 16;
+/// The longest login or origin taken, in bytes.
+const MAX_NAME_BYTES: usize = 256;
+/// How long a connection has to finish its handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_HANDSHAKES: usize = 16;
 /// How long what is left to send the client gets once the session ended.
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
-/// The longest line taken from the client: a prompt as large as the
+/// The longest message taken from the client: a prompt as large as the
 /// largest task, with room for its JSON. A longer one ends the bridge.
-const MAX_LINE_BYTES: u64 = 2 * crate::run::MAX_TASK_BYTES;
+const MAX_MESSAGE_BYTES: usize = 2 * crate::run::MAX_TASK_BYTES as usize;
 /// The client's requests that wait for the session at once: the reading
 /// stops beyond them.
 const INBOX: usize = 4;
@@ -59,54 +90,52 @@ const INTERNAL_ERROR: i64 = -32603;
 /// Replaces the run's secrets in a string sent to the client.
 pub type Redact = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// The relay of a run's configuration, checked.
+/// The session of a run's configuration, checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Relay {
-    /// `HOST:PORT`.
-    pub address: String,
-    pub audience: Option<String>,
+pub struct Listen {
+    pub operators: Vec<String>,
+    pub origins: Vec<String>,
     pub idle: Duration,
 }
 
-impl Relay {
-    /// `None` where `session.relay` is not set: a task run.
+impl Listen {
+    /// `None` where `session.listen` is not set: a task run.
     pub fn from_config(table: &config::Session) -> Result<Option<Self>> {
         let config::Session {
-            relay,
-            audience,
+            listen,
+            operators,
+            origins,
             idle_minutes,
         } = table;
-        if relay.is_empty() {
-            ensure!(
-                audience.is_none() && *idle_minutes == 0,
-                "session.audience and session.idle-minutes mean nothing without session.relay"
-            );
+        // The rest is inert without it: a caller's file names who may
+        // attach once, and the workflow's `session` input turns it on per
+        // run.
+        if !listen {
             return Ok(None);
         }
-        let port = relay
-            .rsplit_once(':')
-            .filter(|(host, _)| {
-                // A name, an IPv4 address, or an IPv6 one in brackets.
-                let (host, extra) = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-                    Some(v6) => (v6, b":".as_slice()),
-                    None => (*host, b".-".as_slice()),
-                };
-                !host.is_empty()
-                    && host
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
-            })
-            .and_then(|(_, port)| port.parse::<u16>().ok())
-            .filter(|port| *port != 0);
-        ensure!(port.is_some(), "session.relay: {relay:?} is not HOST:PORT");
-        if let Some(audience) = audience {
-            // It goes into the query of the token request as it is.
+        for (key, list) in [("operators", operators), ("origins", origins)] {
+            // Empty would let nobody in: a session nobody can reach is a
+            // runner spent for nothing.
             ensure!(
-                !audience.is_empty()
-                    && audience
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b)),
-                "session.audience: {audience:?} is not letters, digits and ._:/-"
+                (1..=MAX_ALLOWED).contains(&list.len()),
+                "session.{key} needs 1 to {MAX_ALLOWED} entries with session.listen"
+            );
+        }
+        for login in operators {
+            // Compared as it is with the header: something like
+            // `name@github` or `name@example.com`.
+            ensure!(
+                login.len() <= MAX_NAME_BYTES
+                    && login.contains('@')
+                    && login.bytes().all(|b| b.is_ascii_graphic()),
+                "session.operators: {login:?} is not a tailnet login"
+            );
+        }
+        for origin in origins {
+            ensure!(
+                origin.len() <= MAX_NAME_BYTES && is_origin(origin),
+                "session.origins: {origin:?} is not an origin: https://HOST[:PORT], with HOST \
+                 in lower case, or http:// for localhost"
             );
         }
         let minutes = match *idle_minutes {
@@ -118,27 +147,85 @@ impl Relay {
             "session.idle-minutes = {minutes} is over {MAX_IDLE_MINUTES}"
         );
         Ok(Some(Self {
-            address: relay.clone(),
-            audience: audience.clone(),
+            operators: operators.clone(),
+            origins: origins.clone(),
             idle: Duration::from_secs(minutes * 60),
         }))
     }
+
+    /// Why REQUEST, a client's handshake, is refused; `None` to let it
+    /// in. Each header must be there once, so that no proxy and no
+    /// client can disagree about which counts.
+    fn refusal(&self, request: &Request) -> Option<&'static str> {
+        let one = |name: &str| {
+            let mut values = request.headers().get_all(name).iter();
+            match (values.next(), values.next()) {
+                (Some(value), None) => value.to_str().ok(),
+                _ => None,
+            }
+        };
+        match (one(LOGIN_HEADER), one("Origin")) {
+            (None, _) => {
+                Some("no tailnet login: not through tailscale serve, or from a tagged device")
+            }
+            (Some(login), _) if !self.operators.iter().any(|o| o == login) => {
+                Some("the tailnet login is not one of session.operators")
+            }
+            (_, None) => Some("no Origin"),
+            (_, Some(origin)) if !self.origins.iter().any(|o| o == origin) => {
+                Some("the Origin is not one of session.origins")
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether TEXT is an origin as a browser sends it: a scheme, a host and
+/// a port where it is not the scheme's, and nothing after them. Plain
+/// HTTP only for a page on the operator's own machine: anyone on the path
+/// to another could put script in it, which would then connect with the
+/// operator's tailnet identity.
+fn is_origin(text: &str) -> bool {
+    let (local, authority) = match text.strip_prefix("https://") {
+        Some(authority) => (false, authority),
+        None => match text.strip_prefix("http://") {
+            Some(authority) => (true, authority),
+            None => return false,
+        },
+    };
+    let (host, port) = authority.split_once(':').unwrap_or((authority, "80"));
+    let host_ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b));
+    let port_ok = port.parse::<u16>().is_ok_and(|p| p != 0) && !port.starts_with('0');
+    host_ok && port_ok && (!local || matches!(host, "localhost" | "127.0.0.1"))
 }
 
 /// What a session is given to reach its client.
 pub struct Bridge {
-    pub relay: Relay,
-    /// The first line: [`hello`].
-    pub hello: Value,
+    pub listen: Listen,
+    /// Bound already, on loopback, so that a port that is taken stops
+    /// the run before the agent starts.
+    pub listener: std::net::TcpListener,
     pub redact: Redact,
 }
 
-/// The hello for the run NAME, with TOKEN, the job's identity token for
-/// the relay's audience, where it has one. The relay decides from it
-/// whether this run is one it expects; nothing else on the connection
-/// says who is at this end.
-pub fn hello(name: &str, token: Option<&str>) -> Value {
-    json!({"schema": HELLO_SCHEMA, "run": name, "token": token})
+impl Bridge {
+    /// Binds [`PORT`] on loopback, where the root helper's `tailscale serve` passes
+    /// connections on. Loopback alone: the tailnet's peers come through
+    /// serve, which names them; the sandbox user is kept from this port
+    /// by the network rules (`sandbox::network`).
+    pub fn bind(listen: Listen, redact: Redact) -> Result<Self> {
+        let address = (std::net::Ipv4Addr::LOCALHOST, PORT);
+        let listener = std::net::TcpListener::bind(address)
+            .with_context(|| format!("listening on 127.0.0.1:{PORT} for the session's client"))?;
+        Ok(Self {
+            listen,
+            listener,
+            redact,
+        })
+    }
 }
 
 /// What the client asks of the session.
@@ -190,10 +277,10 @@ struct Outbox {
 }
 
 impl Outbox {
-    /// MSG as a line, with the room it takes; none for a line that could
-    /// never fit.
+    /// MSG as a message's text, with the room it takes; none for one
+    /// that could never fit.
     fn line(&self, msg: Value) -> (String, Option<u32>) {
-        let text = redacted(msg, &self.redact).to_string() + "\n";
+        let text = redacted(msg, &self.redact).to_string();
         let size = u32::try_from(text.len())
             .ok()
             .filter(|n| *n as usize <= MAX_QUEUED_BYTES);
@@ -231,7 +318,7 @@ impl Outbox {
     }
 }
 
-/// A bridge that is connected.
+/// A bridge that is listening.
 pub(super) struct Connected {
     /// Passes a notification of the agent's on to the client.
     pub send: Box<dyn Fn(Value) + Send + Sync>,
@@ -240,49 +327,75 @@ pub(super) struct Connected {
     pub close: Close,
 }
 
-/// Hangs up on the client once the session has ended: the relay learns
-/// of the end at once, not when `run` exits after its hand-back.
+/// Stops listening, and hangs up on the client once the session has
+/// ended: the client learns of the end at once, not when `run` exits
+/// after its hand-back.
 pub(super) struct Close {
+    guard: Option<crate::sandbox::session::Guard>,
+    /// Listens, and then reads the client's messages.
     reader: tokio::task::JoinHandle<()>,
-    writer: tokio::task::JoinHandle<()>,
+    /// The writer, once a client was let in.
+    writer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     done: oneshot::Sender<()>,
 }
 
 impl Close {
-    pub(super) async fn close(self) {
+    pub(super) async fn close(self) -> Result<()> {
+        // Root retains its duplicate even if revocation fails or this future
+        // is cancelled. Release our listener only after requesting teardown.
+        let revoked = match self.guard {
+            Some(guard) => guard.close().await,
+            None => Ok(()),
+        };
         self.reader.abort();
         // The writer sends what was queued for the client, and hangs up.
         let _ = self.done.send(());
-        let mut writer = self.writer;
+        let writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(mut writer) = writer else {
+            return revoked;
+        };
         if tokio::time::timeout(CLOSE_GRACE, &mut writer)
             .await
             .is_err()
         {
             writer.abort();
         }
+        revoked
     }
 }
 
+type Socket = WebSocketStream<TcpStream>;
+
+/// What waits for the client to be let in.
+struct Waiting {
+    listener: TcpListener,
+    listen: Listen,
+    out: Outbox,
+    inbox: mpsc::Sender<FromClient>,
+    session_id: watch::Receiver<Option<String>>,
+    closing: oneshot::Receiver<()>,
+    writer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
 impl Bridge {
-    /// Dials the relay and sends the hello. SESSION_ID is the agent's
+    /// Starts listening for the client. SESSION_ID is the agent's
     /// session, once there is one: the client attaches to it.
-    pub(super) async fn connect(
-        self,
-        session_id: watch::Receiver<Option<String>>,
-    ) -> Result<Connected> {
-        let address = &self.relay.address;
-        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
-            .await
-            .ok()
-            .with_context(|| format!("connecting to the relay at {address}: timed out"))?
-            .with_context(|| format!("connecting to the relay at {address}"))?;
-        let (read, mut write) = stream.into_split();
-        // Not redacted: the token in it is for the relay.
-        let hello = serde_json::to_string(&self.hello)? + "\n";
-        write
-            .write_all(hello.as_bytes())
-            .await
-            .with_context(|| format!("greeting the relay at {address}"))?;
+    pub(super) fn start(self, session_id: watch::Receiver<Option<String>>) -> Result<Connected> {
+        let guard = if std::path::Path::new(ENDPOINT_FILE).exists() {
+            Some(crate::sandbox::session::Guard::start(&self.listener)?)
+        } else {
+            // Unprepared hosts are used by the loopback-only protocol tests.
+            None
+        };
+        self.listener
+            .set_nonblocking(true)
+            .context("listening for the session's client")?;
+        let listener =
+            TcpListener::from_std(self.listener).context("listening for the session's client")?;
         let (lines, outgoing) = mpsc::unbounded_channel();
         let (gone, _) = watch::channel(false);
         let hang_up = HangUp {
@@ -291,25 +404,138 @@ impl Bridge {
         };
         let out = Outbox {
             lines,
-            hang_up: hang_up.clone(),
+            hang_up,
             attached: Arc::new(AtomicBool::new(false)),
             redact: self.redact,
         };
         let (inbox, from_client) = mpsc::channel(INBOX);
         let (done, closing) = oneshot::channel();
-        let writer = tokio::spawn(write_lines(write, outgoing, closing, hang_up));
-        let reader = tokio::spawn(read_lines(read, out.clone(), inbox, session_id));
+        let writer = Arc::new(Mutex::new(None));
+        let idle = self.listen.idle;
+        let waiting = Waiting {
+            listener,
+            listen: self.listen,
+            out: out.clone(),
+            inbox,
+            session_id,
+            closing,
+            writer: writer.clone(),
+        };
+        let reader = tokio::spawn(serve(waiting, outgoing));
         Ok(Connected {
-            // A client that went away is no reason to stop the agent.
+            // A client that went away, or has not come yet, is no reason
+            // to stop the agent.
             send: Box::new(move |msg| out.notify(msg)),
             from_client,
-            idle: self.relay.idle,
+            idle,
             close: Close {
+                guard,
                 reader,
                 writer,
                 done,
             },
         })
+    }
+}
+
+/// Takes connections until one is let in, and then serves it alone: a
+/// later connection is closed unanswered, and the session ends when this
+/// client leaves.
+async fn serve(waiting: Waiting, outgoing: mpsc::UnboundedReceiver<Line>) {
+    let Waiting {
+        listener,
+        listen,
+        out,
+        inbox,
+        session_id,
+        closing,
+        writer,
+    } = waiting;
+    let socket = admit(&listener, &listen).await;
+    eprintln!("session: a client is attached");
+    let (sink, stream) = socket.split();
+    let hang_up = out.hang_up.clone();
+    *writer.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some(tokio::spawn(write_lines(sink, outgoing, closing, hang_up)));
+    // The port stays owned until serve is revoked, even if reaping fails:
+    // an agent that bound it once
+    // it was free would be handed every later connection through serve,
+    // with the operator's login on it.
+    tokio::select! {
+        () = read_lines(stream, out, inbox, session_id) => {}
+        () = refuse_all(&listener) => {}
+    }
+    refuse_all(&listener).await;
+}
+
+/// A stalled unauthenticated connection cannot occupy the only admission
+/// slot. Bound both the number of pending upgrades and their lifetime.
+async fn admit(listener: &TcpListener, listen: &Listen) -> Socket {
+    let mut pending = Vec::new();
+    loop {
+        tokio::select! {
+            stream = accept(listener) => {
+                if pending.len() == MAX_HANDSHAKES {
+                    // Do not let parked unauthenticated sockets reserve all
+                    // slots: a newcomer displaces the oldest pending upgrade.
+                    drop(pending.remove(0));
+                }
+                pending.push(Box::pin(tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(stream, listen))));
+            }
+            (result, index, _) = async { futures::future::select_all(pending.iter_mut()).await }, if !pending.is_empty() => {
+                drop(pending.remove(index));
+                match result {
+                    Ok(Ok(socket)) => return socket,
+                    Ok(Err(why)) => eprintln!("session: refused a connection: {why}"),
+                    Err(_) => eprintln!("session: refused a connection: handshake timed out"),
+                }
+            }
+        }
+    }
+}
+
+/// The next connection on LISTENER.
+async fn accept(listener: &TcpListener) -> TcpStream {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => return stream,
+            // Out of descriptors, for one: not a reason to stop, nor to
+            // spin.
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+}
+
+/// Closes every connection on LISTENER as it comes; never returns.
+async fn refuse_all(listener: &TcpListener) {
+    loop {
+        drop(accept(listener).await);
+    }
+}
+
+/// The WebSocket handshake on STREAM, refused unless LISTEN lets the
+/// client in; why it was refused otherwise.
+// The refusal's type is tungstenite's `Callback`'s.
+#[allow(clippy::result_large_err)]
+async fn handshake(stream: TcpStream, listen: &Listen) -> Result<Socket, String> {
+    let mut refused = None;
+    let check = |request: &Request, response: Response| match listen.refusal(request) {
+        None => Ok(response),
+        Some(why) => {
+            refused = Some(why);
+            let mut answer = ErrorResponse::new(Some(format!("{why}\n")));
+            *answer.status_mut() = StatusCode::FORBIDDEN;
+            Err(answer)
+        }
+    };
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_MESSAGE_BYTES));
+    let socket = tokio_tungstenite::accept_hdr_async_with_config(stream, check, Some(config)).await;
+    match (socket, refused) {
+        (_, Some(why)) => Err(why.to_owned()),
+        (Ok(socket), None) => Ok(socket),
+        (Err(e), None) => Err(format!("not a WebSocket handshake: {e}")),
     }
 }
 
@@ -327,10 +553,10 @@ fn redacted(value: Value, redact: &Redact) -> Value {
     }
 }
 
-/// Writes the client's lines until the session has ended and they are
+/// Writes the client's messages until the session has ended and they are
 /// all sent, the connection fails or it is hung up.
 async fn write_lines(
-    mut write: OwnedWriteHalf,
+    mut write: SplitSink<Socket, Message>,
     mut outgoing: mpsc::UnboundedReceiver<Line>,
     mut closing: oneshot::Receiver<()>,
     hang_up: HangUp,
@@ -356,7 +582,7 @@ async fn write_lines(
         // A write the client does not take is no reason to wait past a
         // hang-up.
         let written = tokio::select! {
-            r = write.write_all(line.text.as_bytes()) => r.is_ok(),
+            r = write.send(Message::text(line.text)) => r.is_ok(),
             () = hung_up(&mut gone) => false,
         };
         if !written {
@@ -364,7 +590,7 @@ async fn write_lines(
         }
     }
     hang_up.now();
-    let _ = write.shutdown().await;
+    let _ = write.close().await;
 }
 
 fn response(id: Value, result: Value) -> Value {
@@ -375,32 +601,33 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-/// Reads the client's messages until the relay closes the connection,
-/// sends a line too long or the session stops listening; returning closes
-/// the session's inbox, which ends the conversation.
+/// Reads the client's messages until it closes the connection, sends
+/// one too long or the session stops listening; returning closes the
+/// session's inbox, which ends the conversation.
 async fn read_lines(
-    read: OwnedReadHalf,
+    mut read: SplitStream<Socket>,
     out: Outbox,
     inbox: mpsc::Sender<FromClient>,
     mut session_id: watch::Receiver<Option<String>>,
 ) {
     let mut gone = out.hang_up.gone.subscribe();
     let pending = Arc::new(Semaphore::new(PENDING_ANSWERS));
-    let mut reader = BufReader::new(read);
-    let mut line = Vec::new();
     let mut attached = None;
     loop {
-        line.clear();
-        let mut limited = (&mut reader).take(MAX_LINE_BYTES);
         let read = tokio::select! {
-            read = limited.read_until(b'\n', &mut line) => read,
+            read = read.next() => read,
             () = hung_up(&mut gone) => return,
         };
-        // Closed, failed, or a line without its end within the limit.
-        if !matches!(read, Ok(1..)) || line.last() != Some(&b'\n') {
-            return;
-        }
-        let Ok(msg) = serde_json::from_slice::<Value>(&line) else {
+        let parsed = match read {
+            // Each text message is one of ACP's.
+            Some(Ok(Message::Text(text))) => serde_json::from_str::<Value>(&text).ok(),
+            Some(Ok(Message::Binary(_))) => None,
+            // Answered by the library, or nothing.
+            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+            // Closed, failed, or a message over the limit.
+            Some(Ok(Message::Close(_)) | Err(_)) | None => return,
+        };
+        let Some(msg) = parsed else {
             if !out.send(error(Value::Null, PARSE_ERROR, "not JSON")).await {
                 return;
             }
@@ -478,7 +705,7 @@ async fn read_lines(
                 out.send(error(
                     id,
                     METHOD_NOT_FOUND,
-                    &format!("{} is not served over the relay", method.unwrap_or("?")),
+                    &format!("{} is not served to the session's client", method.unwrap_or("?")),
                 ))
                 .await
             }
@@ -496,52 +723,232 @@ async fn read_lines(
 mod tests {
     use super::*;
 
-    fn table(relay: &str, audience: Option<&str>, idle_minutes: u64) -> config::Session {
+    const OPERATOR: &str = "operator@github";
+    const ORIGIN: &str = "https://review.example.ts.net";
+
+    #[tokio::test]
+    async fn stalled_handshake_does_not_block_the_operator() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let listen = Listen::from_config(&table(true, &[OPERATOR], &[ORIGIN], 0))
+            .unwrap()
+            .unwrap();
+        let mut stalled = Vec::new();
+        for _ in 0..MAX_HANDSHAKES {
+            stalled.push(TcpStream::connect(address).await.unwrap());
+        }
+        let mut request = format!("ws://{address}/").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert(LOGIN_HEADER, OPERATOR.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("Origin", ORIGIN.parse().unwrap());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let client = async {
+                let stream = TcpStream::connect(address).await.unwrap();
+                tokio_tungstenite::client_async(request, stream).await
+            };
+            let (server, client) = tokio::join!(admit(&listener, &listen), client);
+            client.unwrap();
+            drop(server);
+        })
+        .await
+        .expect("one stalled handshake must not hold up an operator for ten seconds");
+        drop(stalled);
+    }
+
+    fn table(
+        listen: bool,
+        operators: &[&str],
+        origins: &[&str],
+        idle_minutes: u64,
+    ) -> config::Session {
+        let owned = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect();
         config::Session {
-            relay: relay.to_owned(),
-            audience: audience.map(str::to_owned),
+            listen,
+            operators: owned(operators),
+            origins: owned(origins),
             idle_minutes,
         }
     }
 
     #[test]
-    fn relays_that_are_taken() {
-        assert_eq!(Relay::from_config(&table("", None, 0)).unwrap(), None);
+    fn sessions_that_are_taken() {
+        for off in [
+            table(false, &[], &[], 0),
+            table(false, &[OPERATOR], &[ORIGIN], 5),
+        ] {
+            assert_eq!(Listen::from_config(&off).unwrap(), None);
+        }
         let cases = [
-            (table("relay.example.ts.net:7000", None, 0), 10 * 60),
-            (table("100.64.0.9:7000", Some("review-relay"), 3), 3 * 60),
-            (table("[fd7a::1]:7000", None, MAX_IDLE_MINUTES), 60 * 60),
+            (table(true, &[OPERATOR], &[ORIGIN], 0), 10 * 60),
+            (
+                table(
+                    true,
+                    &[OPERATOR, "a.b@example.com"],
+                    &["http://localhost:5173", ORIGIN],
+                    3,
+                ),
+                3 * 60,
+            ),
+            (
+                table(
+                    true,
+                    &[OPERATOR],
+                    &[
+                        "https://review.example.ts.net:8443",
+                        "http://127.0.0.1:8080",
+                    ],
+                    MAX_IDLE_MINUTES,
+                ),
+                60 * 60,
+            ),
         ];
         for (table, idle_s) in cases {
-            let relay = Relay::from_config(&table).unwrap().unwrap();
-            assert_eq!(relay.address, table.relay);
-            assert_eq!(relay.audience, table.audience);
-            assert_eq!(relay.idle, Duration::from_secs(idle_s));
+            let listen = Listen::from_config(&table).unwrap().unwrap();
+            assert_eq!(listen.operators, table.operators);
+            assert_eq!(listen.origins, table.origins);
+            assert_eq!(listen.idle, Duration::from_secs(idle_s));
         }
     }
 
     #[test]
-    fn relays_that_are_refused() {
+    fn sessions_that_are_refused() {
+        let many: Vec<String> = (0..=MAX_ALLOWED).map(|i| format!("u{i}@github")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
         let cases = [
             (
-                table("", Some("x"), 0),
-                "mean nothing without session.relay",
+                table(true, &[], &[ORIGIN], 0),
+                "session.operators needs 1 to",
             ),
-            (table("", None, 5), "mean nothing without session.relay"),
-            (table("relay", None, 0), "is not HOST:PORT"),
-            (table(":7000", None, 0), "is not HOST:PORT"),
-            (table("relay:0", None, 0), "is not HOST:PORT"),
-            (table("relay:http", None, 0), "is not HOST:PORT"),
-            (table("relay:7000:7001", None, 0), "is not HOST:PORT"),
-            (table("[]:7000", None, 0), "is not HOST:PORT"),
-            (table("http://relay:7000", None, 0), "is not HOST:PORT"),
-            (table("relay:7000", Some(""), 0), "session.audience"),
-            (table("relay:7000", Some("a&b"), 0), "session.audience"),
-            (table("relay:7000", None, MAX_IDLE_MINUTES + 1), "is over"),
+            (
+                table(true, &[OPERATOR], &[], 0),
+                "session.origins needs 1 to",
+            ),
+            (
+                table(true, &many, &[ORIGIN], 0),
+                "session.operators needs 1 to",
+            ),
+            (
+                table(true, &["operator"], &[ORIGIN], 0),
+                "is not a tailnet login",
+            ),
+            (
+                table(true, &["a b@github"], &[ORIGIN], 0),
+                "is not a tailnet login",
+            ),
+            (table(true, &[""], &[ORIGIN], 0), "is not a tailnet login"),
+            (table(true, &[OPERATOR], &["*"], 0), "is not an origin"),
+            (
+                table(true, &[OPERATOR], &["https://"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["review.example.ts.net"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://review.example.ts.net/"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://Review.example.ts.net"], 0),
+                "is not an origin",
+            ),
+            (table(true, &[OPERATOR], &["null"], 0), "is not an origin"),
+            (
+                table(true, &[OPERATOR], &["http://review.example.ts.net"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://a:b:c"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://]"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://review:0"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://review:"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &["https://review:65536"], 0),
+                "is not an origin",
+            ),
+            (
+                table(true, &[OPERATOR], &[ORIGIN], MAX_IDLE_MINUTES + 1),
+                "is over",
+            ),
         ];
         for (table, expected) in cases {
-            let err = format!("{:#}", Relay::from_config(&table).unwrap_err());
+            let err = format!("{:#}", Listen::from_config(&table).unwrap_err());
             assert!(err.contains(expected), "{table:?}: {err}");
+        }
+    }
+
+    /// The handshake's headers, as `tailscale serve` passes them on.
+    #[test]
+    fn who_is_let_in() {
+        let listen = Listen::from_config(&table(true, &[OPERATOR], &[ORIGIN], 0))
+            .unwrap()
+            .unwrap();
+        type Headers<'a> = &'a [(&'a str, &'a str)];
+        let cases: [(Headers, Option<&str>); 8] = [
+            (&[(LOGIN_HEADER, OPERATOR), ("Origin", ORIGIN)], None),
+            (&[("Origin", ORIGIN)], Some("no tailnet login")),
+            (
+                &[(LOGIN_HEADER, "other@github"), ("Origin", ORIGIN)],
+                Some("not one of session.operators"),
+            ),
+            (
+                &[(LOGIN_HEADER, "OPERATOR@github"), ("Origin", ORIGIN)],
+                Some("not one of session.operators"),
+            ),
+            (
+                &[
+                    (LOGIN_HEADER, "other@github"),
+                    (LOGIN_HEADER, OPERATOR),
+                    ("Origin", ORIGIN),
+                ],
+                Some("no tailnet login"),
+            ),
+            (&[(LOGIN_HEADER, OPERATOR)], Some("no Origin")),
+            (
+                &[(LOGIN_HEADER, OPERATOR), ("Origin", "https://evil.example")],
+                Some("not one of session.origins"),
+            ),
+            (
+                &[
+                    (LOGIN_HEADER, OPERATOR),
+                    ("Origin", ORIGIN),
+                    ("Origin", ORIGIN),
+                ],
+                Some("no Origin"),
+            ),
+        ];
+        for (headers, expected) in cases {
+            let mut request = Request::new(());
+            for (name, value) in headers {
+                request.headers_mut().append(*name, value.parse().unwrap());
+            }
+            let refusal = listen.refusal(&request);
+            match expected {
+                None => assert_eq!(refusal, None, "{headers:?}"),
+                Some(why) => assert!(
+                    refusal.is_some_and(|r| r.contains(why)),
+                    "{headers:?}: {refusal:?}"
+                ),
+            }
         }
     }
 

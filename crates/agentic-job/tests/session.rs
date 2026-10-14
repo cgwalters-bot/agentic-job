@@ -13,7 +13,7 @@
 // where a panic is just as much the test's failure.
 #![allow(clippy::unwrap_used)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -22,11 +22,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agentic_job::exit::Exit;
-use agentic_job::session::bridge::{self, Bridge, Relay};
+use agentic_job::session::bridge::{self, Bridge, Listen};
 use agentic_job::session::digest::Digest;
 use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy, Record};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::{self, Message, WebSocket};
 
 const FAKE_AGENT: &str = env!("CARGO_BIN_EXE_fake-agent");
 const SANDBOX_USER_VAR: &str = "AGENTIC_JOB_TEST_SANDBOX_USER";
@@ -34,6 +36,11 @@ const FAKE_AGENT_VAR: &str = "AGENTIC_JOB_TEST_FAKE_AGENT";
 /// How often the test stands in for the proxy's count of model requests.
 const REQUESTS_POLL: Duration = Duration::from_millis(50);
 const MAX_REQUESTS: u64 = 100;
+/// The one operator, and the one page, a test's session lets in.
+const OPERATOR: &str = "operator@github";
+const ORIGIN: &str = "https://review.example.ts.net";
+/// What `tailscale serve` passes on for the operator at that page.
+const ADMITTED: Headers = &[(bridge::LOGIN_HEADER, OPERATOR), ("Origin", ORIGIN)];
 
 /// Where the condensed log of a session under test goes.
 #[derive(Clone, Default)]
@@ -66,9 +73,11 @@ struct Setup<'a> {
     launch: Launch,
     /// The agent's program, where it isn't the one cargo built.
     agent: Option<String>,
-    /// A client at a relay on loopback, played by this function on its
-    /// end of the connection, and how long the session waits for it.
+    /// A client on loopback, played by this function on its end of the
+    /// connection, and how long the session waits for it.
     client: Option<(Play, Duration)>,
+    /// Handshakes that client's thread makes first, each to be refused.
+    refused_first: &'static [Headers],
     /// Session config options set after the model.
     config_options: &'a [(&'a str, &'a str)],
     /// The model the session selects.
@@ -77,30 +86,94 @@ struct Setup<'a> {
     provider_error: Option<&'a str>,
 }
 
-/// What a test's client does on its end of the relay.
+/// What a test's client does on its end of the connection.
 type Play = fn(&mut Client);
 
-/// A client's end of the relay: everything it was sent, hello first.
+/// A handshake's headers, as `tailscale serve` would pass them on.
+type Headers = &'static [(&'static str, &'static str)];
+
+/// A client's end of the bridge: everything it was sent.
 struct Client {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    socket: WebSocket<TcpStream>,
+    /// Where the bridge listens.
+    address: String,
     got: Vec<Value>,
 }
 
 impl Client {
+    /// Connects to the bridge at ADDRESS with HEADERS; the HTTP status of
+    /// the refusal otherwise.
+    fn connect(address: &str, headers: Headers) -> Result<Self, u16> {
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        let mut request = format!("ws://{address}/").into_client_request().unwrap();
+        for (name, value) in headers {
+            request.headers_mut().append(*name, value.parse().unwrap());
+        }
+        match tungstenite::client(request, stream) {
+            Ok((socket, _)) => Ok(Self {
+                socket,
+                address: address.to_owned(),
+                got: Vec::new(),
+            }),
+            Err(tungstenite::HandshakeError::Failure(tungstenite::Error::Http(response))) => {
+                Err(response.status().as_u16())
+            }
+            Err(e) => panic!("handshake: {e}"),
+        }
+    }
+
+    /// Sends MSG; false once the session hung up.
+    fn try_send(&mut self, msg: &Value) -> bool {
+        self.socket.send(Message::text(msg.to_string())).is_ok()
+    }
+
     fn send(&mut self, msg: Value) {
-        writeln!(self.writer, "{msg}").unwrap();
+        assert!(self.try_send(&msg), "the session hung up");
     }
 
     /// The next message, or `None` once the session hung up.
     fn recv(&mut self) -> Option<Value> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line).unwrap() == 0 {
-            return None;
+        loop {
+            match self.socket.read() {
+                Ok(Message::Text(text)) => {
+                    let msg: Value = serde_json::from_str(&text).unwrap();
+                    self.got.push(msg.clone());
+                    return Some(msg);
+                }
+                Ok(Message::Close(_)) => return None,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("nothing from the session within the read timeout")
+                }
+                Err(_) => return None,
+            }
         }
-        let msg: Value = serde_json::from_str(&line).unwrap();
-        self.got.push(msg.clone());
-        Some(msg)
+    }
+
+    /// Waits until the session SID takes a prompt: the task's turn may
+    /// still run when the client attaches, and a prompt meanwhile is
+    /// refused. A prompt that is no list of content blocks is refused
+    /// without reaching the agent, as running or as malformed.
+    fn wait_for_the_task(&mut self, sid: &Value) {
+        let probe = json!({"sessionId": sid, "prompt": "not blocks"});
+        for _ in 0..600 {
+            let answer = self.request(u64::MAX, "session/prompt", probe.clone());
+            let why = answer["error"]["message"].as_str().unwrap_or_default();
+            if why.contains("content blocks") {
+                return;
+            }
+            assert!(why.contains("a turn is running"), "{answer}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the task's turn did not end");
     }
 
     /// Sends a request and waits for its response, taking what comes
@@ -116,26 +189,39 @@ impl Client {
     }
 }
 
-/// Listens on loopback for the session's bridge and plays CLIENT on what
-/// connects; the thread returns everything the client was sent.
-fn relay(play: Play) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+/// A bridge on a free loopback port, and the thread that, once the
+/// session listens, makes the REFUSED handshakes, each of which must be
+/// refused, and then plays CLIENT as the operator; the thread returns
+/// everything the client was sent.
+fn bridge_and_client(
+    play: Play,
+    idle: Duration,
+    refused: &'static [Headers],
+) -> (Bridge, std::thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
+    let bridge = Bridge {
+        listen: Listen {
+            operators: vec![OPERATOR.to_owned()],
+            origins: vec![ORIGIN.to_owned()],
+            idle,
+        },
+        listener,
+        redact: Arc::new(|text: &str| text.replace(SECRET, "[REDACTED]")),
+    };
     let thread = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(60)))
-            .unwrap();
-        let mut client = Client {
-            reader: BufReader::new(stream.try_clone().unwrap()),
-            writer: stream,
-            got: Vec::new(),
-        };
-        client.recv().expect("no hello");
+        for headers in refused {
+            assert_eq!(
+                Client::connect(&address, headers).err(),
+                Some(403),
+                "{headers:?}"
+            );
+        }
+        let mut client = Client::connect(&address, ADMITTED).unwrap();
         play(&mut client);
         client.got
     });
-    (address, thread)
+    (bridge, thread)
 }
 
 struct Run {
@@ -143,7 +229,7 @@ struct Run {
     elapsed: Duration,
     /// The condensed log.
     log: String,
-    /// What the relay's client was sent, hello first.
+    /// What the client was sent.
     client: Vec<Value>,
     /// harness.json
     result: Value,
@@ -248,19 +334,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     let (count, requests) = watch::channel(None);
     let (bridge, client) = setup
         .client
-        .map(|(client, idle)| {
-            let (address, thread) = relay(client);
-            let bridge = Bridge {
-                relay: Relay {
-                    address,
-                    audience: None,
-                    idle,
-                },
-                hello: bridge::hello("test-run", None),
-                redact: Arc::new(|text: &str| text.replace(SECRET, "[REDACTED]")),
-            };
-            (bridge, thread)
-        })
+        .map(|(client, idle)| bridge_and_client(client, idle, setup.refused_first))
         .unzip();
     let options = Options {
         name: "fake".to_owned(),
@@ -1283,7 +1357,7 @@ fn text_prompt(sid: &Value, text: &str) -> Value {
     json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]})
 }
 
-/// The session's own turn, then a client at the relay: it attaches to the
+/// The session's own turn, then a client on loopback: it attaches to the
 /// session already running, is refused what the bridge does not serve,
 /// and has a prompt answered with the run's secret replaced; when it
 /// hangs up the session ends as done. Where the environment names a
@@ -1320,6 +1394,7 @@ fn a_client_talks_to_the_session() {
                     let other =
                         client.request(5, "session/prompt", text_prompt(&json!("other"), "hi"));
                     assert_eq!(other["error"]["code"], -32602, "{other}");
+                    client.wait_for_the_task(&sid);
                     let bad = client.request(
                         6,
                         "session/prompt",
@@ -1343,15 +1418,6 @@ fn a_client_talks_to_the_session() {
     );
     assert_result(&r, 0, "success");
     assert_eq!(r.result["message"], "the client left", "{}", r.log);
-    let hello = &r.client[0];
-    assert_eq!(
-        (&hello["schema"], &hello["run"], &hello["token"]),
-        (
-            &json!(bridge::HELLO_SCHEMA),
-            &json!("test-run"),
-            &Value::Null
-        )
-    );
     let said: String = r
         .client
         .iter()
@@ -1393,6 +1459,7 @@ fn unsuccessful_client_turns_survive_disconnect_or_idle() {
                 |client| {
                     let sid =
                         client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.wait_for_the_task(&sid);
                     client.request(2, "session/prompt", text_prompt(&sid, "hi"));
                     while client.recv().is_some() {}
                 }
@@ -1400,6 +1467,7 @@ fn unsuccessful_client_turns_survive_disconnect_or_idle() {
                 |client| {
                     let sid =
                         client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.wait_for_the_task(&sid);
                     client.request(2, "session/prompt", text_prompt(&sid, "hi"));
                 }
             };
@@ -1437,6 +1505,7 @@ fn a_client_leaving_an_unanswered_turn_fails() {
                 |client| {
                     let sid =
                         client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.wait_for_the_task(&sid);
                     client.send(
                         json!({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
                                        "params": text_prompt(&sid, "hi")}),
@@ -1480,7 +1549,7 @@ fn idle_messages_do_not_extend_the_deadline() {
                         } else {
                             json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": {"sessionId": sid, "prompt": [42]}})
                         };
-                        if writeln!(client.writer, "{msg}").is_err() {
+                        if !client.try_send(&msg) {
                             break;
                         }
                     }
@@ -1541,52 +1610,71 @@ fn the_timeout_holds_while_waiting_for_the_client() {
     assert_result(&r, 124, "timeout");
 }
 
-/// A relay that cannot be reached is a session that is not run.
+/// A port that is taken is a session that is not run: the bridge binds
+/// it before the agent starts.
 #[test]
-fn an_unreachable_relay_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    // A port that was free a moment ago.
-    let address = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .to_string();
-    let options = Options {
-        name: "fake".to_owned(),
-        agent: session::agents::builtin("fake").unwrap(),
-        model: None,
-        config_options: Vec::new(),
-        cwd: dir.path().to_owned(),
-        prompt: "Do the fake task.\n".to_owned(),
-        out: dir.path().join("out"),
-        permissions: Policy::allow_all(),
-        limits: Limits {
-            timeout_s: 60,
-            ..Limits::default()
-        },
-        requests: None,
-        launch: Launch::Direct,
-        clients: Clients::none(),
-        bridge: Some(Bridge {
-            relay: Relay {
-                address,
-                audience: None,
-                idle: Duration::from_secs(60),
-            },
-            hello: bridge::hello("test-run", None),
-            redact: Arc::new(str::to_owned),
-        }),
-        log: Box::new(std::io::sink()),
+fn a_port_that_is_taken_is_refused() {
+    // Taken by this test, or by something else already.
+    let _held = TcpListener::bind(("127.0.0.1", bridge::PORT));
+    let listen = Listen {
+        operators: vec![OPERATOR.to_owned()],
+        origins: vec![ORIGIN.to_owned()],
+        idle: Duration::from_secs(60),
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let err = runtime.block_on(session::run(options)).unwrap_err();
+    let err = Bridge::bind(listen, Arc::new(str::to_owned)).err().unwrap();
     assert!(
-        format!("{err:#}").contains("connecting to the relay"),
+        format!("{err:#}").contains("listening on 127.0.0.1:"),
         "{err:#}"
     );
+}
+
+/// Handshakes `tailscale serve` would pass on without the operator's
+/// login, with another's, or from a page not allowed are refused, and the
+/// bridge goes on listening: the operator then attaches, and a second
+/// connection is closed unanswered while it is there.
+#[test]
+fn only_the_operator_attaches() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[("script.json", "[]"), ("later.json", LATER)],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    // Another is closed unanswered, even as the operator.
+                    let second = TcpStream::connect(&client.address).unwrap();
+                    let mut request = format!("ws://{}/", client.address)
+                        .into_client_request()
+                        .unwrap();
+                    for (name, value) in ADMITTED {
+                        request.headers_mut().append(*name, value.parse().unwrap());
+                    }
+                    assert!(tungstenite::client(request, second).is_err());
+                    client.wait_for_the_task(&sid);
+                    let answer = client.request(2, "session/prompt", text_prompt(&sid, "hi"));
+                    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+                },
+                Duration::from_secs(60),
+            )),
+            refused_first: &[
+                &[("Origin", ORIGIN)],
+                &[
+                    (bridge::LOGIN_HEADER, "intruder@github"),
+                    ("Origin", ORIGIN),
+                ],
+                &[(bridge::LOGIN_HEADER, OPERATOR)],
+                &[
+                    (bridge::LOGIN_HEADER, OPERATOR),
+                    ("Origin", "https://evil.example"),
+                ],
+            ],
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "the client left", "{}", r.log);
 }
 
 /// A client's cancel reaches the agent's turn, and a second prompt while
@@ -1611,6 +1699,7 @@ fn a_client_cancels_its_turn() {
                         json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt",
                                "params": text_prompt(&sid, text)})
                     };
+                    client.wait_for_the_task(&sid);
                     client.send(prompt(3, "Take your time."));
                     let second =
                         client.request(4, "session/prompt", text_prompt(&sid, "And this."));
@@ -1769,25 +1858,29 @@ fn a_client_that_reads_nothing_is_not_read() {
             client: Some((
                 |client| {
                     client
-                        .writer
+                        .socket
+                        .get_mut()
                         .set_write_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
                     // Each answer repeats the request's 4 KiB id.
                     let request = json!({"jsonrpc": "2.0", "id": "i".repeat(4 << 10),
-                                         "method": "initialize", "params": {}});
-                    let batch = format!("{request}\n").repeat(256);
+                                         "method": "initialize", "params": {}})
+                    .to_string();
                     let mut sent = 0;
                     let err = loop {
                         assert!(sent < 256 << 20, "the session took {sent} bytes unread");
-                        if let Err(e) = client.writer.write_all(batch.as_bytes()) {
+                        if let Err(e) = client.socket.send(Message::text(request.clone())) {
                             break e;
                         }
-                        sent += batch.len();
+                        sent += request.len();
                     };
                     assert!(
                         matches!(
-                            err.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            &err,
+                            tungstenite::Error::Io(e) if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            )
                         ),
                         "{err}"
                     );
@@ -1822,8 +1915,8 @@ fn a_client_that_falls_behind_is_hung_up_on() {
                     client.request(1, "initialize", json!({"protocolVersion": 1}));
                     client.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
                     std::thread::sleep(Duration::from_secs(5));
-                    // A line may be cut short by the hang-up.
-                    std::io::copy(&mut client.reader, &mut std::io::sink()).unwrap();
+                    // A message may be cut short by the hang-up.
+                    while client.socket.read().is_ok() {}
                 },
                 Duration::from_secs(60),
             )),

@@ -33,6 +33,7 @@ use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
 use crate::run::inference::Endpoint;
+use crate::session::bridge::{self, Listen};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -285,6 +286,8 @@ struct Preflight {
     text: String,
     config: Config,
     direct: Vec<Direct>,
+    /// A session run's: its bridge is served on the tailnet.
+    session: Option<Listen>,
     runner: User,
     /// The sandbox user, where the image ships it and that is allowed.
     existing: Option<User>,
@@ -297,6 +300,7 @@ fn setup(args: &Args) -> Result<Exit> {
         text,
         config,
         direct,
+        session,
         runner,
         existing,
         resolvers,
@@ -305,8 +309,12 @@ fn setup(args: &Args) -> Result<Exit> {
             .with_context(|| format!("reading {}", args.config.display()))?;
         let config =
             Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
-        let direct = config.check_host()?.direct;
+        let config::checked::Host { direct, session } = config.check_host()?;
         ensure!(host::is_root(), "`sandbox setup` must run as root");
+        ensure!(
+            session.is_none() || host::has_program("tailscale"),
+            "session.listen needs tailscale: the session's client reaches it over the tailnet"
+        );
         ensure!(
             host::has_program(RUN0),
             "{RUN0} not found: the sandbox is entered with it, and it needs systemd 257 or later"
@@ -343,6 +351,7 @@ fn setup(args: &Args) -> Result<Exit> {
             text,
             config,
             direct,
+            session,
             runner,
             existing,
             resolvers,
@@ -424,8 +433,13 @@ fn setup(args: &Args) -> Result<Exit> {
             proxy_uid,
             &resolvers,
             &runner_uids,
+            session.is_some().then_some(bridge::PORT),
         ))
     })?;
+    // After the rules, which keep the sandbox user from what it serves.
+    if session.is_some() {
+        timed_setup("session-serve", serve_session)?;
+    }
     if !runner_uids.is_empty() {
         println!(
             "{} (uids {}) can't reach the metadata service either: sandbox.deny-runner-metadata",
@@ -491,6 +505,34 @@ fn setup(args: &Args) -> Result<Exit> {
         );
     }
     Ok(Exit::Success)
+}
+
+/// Publishes the address. The run's trusted guard enables serve only while
+/// it holds the bridge listener, and revokes it before releasing that port.
+fn serve_session() -> Result<()> {
+    let status: serde_json::Value = serde_json::from_str(&host::run(
+        Command::new("tailscale").args(["status", "--json"]),
+    )?)
+    .context("reading tailscale status")?;
+    let name = status["Self"]["DNSName"]
+        .as_str()
+        .map(|name| name.trim_end_matches('.'))
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
+        })
+        .context("tailscale status names no DNS name for this machine")?;
+    let endpoint = format!("wss://{name}/");
+    install_file(
+        Path::new(bridge::ENDPOINT_FILE),
+        format!("{endpoint}\n").as_bytes(),
+        MODE_FILE,
+        None,
+    )?;
+    println!("The session's client connects at {endpoint}");
+    Ok(())
 }
 
 /// The agent's managed settings, root's, from the same configuration

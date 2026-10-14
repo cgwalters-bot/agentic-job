@@ -239,8 +239,11 @@ and on private, loopback and link-local addresses, except for TCP and UDP
 port 53 at literal resolvers read from `/etc/resolv.conf` during setup.
 New connections to other DNS destinations, including public ones, are rejected.
 The existing established/related-connection exception is unchanged. Tailnet
-denials precede these exceptions. The loaded text stays
-in `/etc/agentic-job/rules.nft`.
+denials precede these exceptions. For a [session run](../specs/session.md),
+the sandbox user is also rejected on loopback at the session bridge's port and
+at the node's own tailnet addresses, before any of its accepts. Otherwise the
+agent could reach the bridge itself and claim the operator's login. The loaded
+text stays in `/etc/agentic-job/rules.nft`.
 
 The design follows a suggestion cgwalters made for the gh-aw fork
 ([comment](https://github.com/cgwalters-forge/gh-aw/issues/1#issuecomment-5958830932)).

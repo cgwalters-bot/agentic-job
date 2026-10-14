@@ -97,8 +97,8 @@ fork's Actions and open the pull request are known.
 
 ## Interactive sessions
 
-A run with a relay waits for one client's prompts after its task's turn
-([session runs](../specs/session.md)); the relay, its chat pane and writes
+A session run waits for one operator's prompts after its task's turn, over
+the tailnet ([session runs](../specs/session.md)); the chat pane and writes
 during a session are not built. [interactive.md](interactive.md) keeps
 the rest of the design.
 

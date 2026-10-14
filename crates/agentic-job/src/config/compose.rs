@@ -610,6 +610,14 @@ mod tests {
                 vec!["sandbox.stop-services=docker"],
                 "sandbox.stop-services: \"docker\" is not a unit name",
             ),
+            (
+                vec!["session.listen=true"],
+                vec![
+                    "session.operators=op@github",
+                    "session.origins=https://review.example",
+                ],
+                "session.listen needs agent.name",
+            ),
         ];
         for (boolean, list, names) in cases {
             let args = host_args(&boolean, &list);

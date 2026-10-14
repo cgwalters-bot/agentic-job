@@ -91,6 +91,11 @@ outputs:
   sandbox-home:
     description: Its home, where `agentic-job sandbox exec` starts a command
     value: ${{ steps.user.outputs.home }}
+  session-endpoint:
+    description: >-
+      For a session run (`[session] listen`), the `wss://` address its operator connects to on the
+      runner's tailnet name; empty otherwise
+    value: ${{ steps.session.outputs.endpoint }}
   fetched:
     description: "`true` when the binary was a release's, taken by its checksum; `false` when it was built; empty with `binary`"
     value: ${{ steps.binary.outputs.fetched }}
@@ -181,6 +186,19 @@ runs:
     - name: Secure the host
       shell: bash
       run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
+    # A session run's (`[session] listen`): where its operator connects,
+    # which setup served on the runner's tailnet name. Outputs and the
+    # summary resolve when the job ends; setup's log line is live. Only
+    # the operators the configuration names are let in there.
+    - name: The session's endpoint
+      id: session
+      shell: bash
+      run: |
+        [ -e /etc/agentic-job/session-endpoint ] || exit 0
+        read -r endpoint < /etc/agentic-job/session-endpoint
+        [[ "$endpoint" =~ ^wss://[a-z0-9.-]+/$ ]] || { echo "::error::not a session endpoint: $endpoint"; exit 1; }
+        echo "endpoint=$endpoint" | tee -a "$GITHUB_OUTPUT"
+        printf 'Session: an operator attaches at `%s` (specs/session.md).\n' "$endpoint" >> "$GITHUB_STEP_SUMMARY"
     # Asked of the sandbox user itself, which also shows that the way in
     # to it works for the steps after this one. Before the probes: every
     # `sandbox exec` removes the record that `--record` leaves of a passing

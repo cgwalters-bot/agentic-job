@@ -18,6 +18,7 @@ pub mod host;
 pub mod local;
 pub mod network;
 pub mod root;
+pub(crate) mod session;
 pub mod setup;
 mod view;
 
@@ -73,7 +74,8 @@ impl Command {
                         &direct,
                         args.proxy_uid,
                         &args.resolver,
-                        &[]
+                        &[],
+                        None
                     )
                 );
                 Ok(Exit::Success)

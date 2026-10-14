@@ -610,8 +610,13 @@ The second user is always created: the network rules and most of the
 probes are about it, and one that is never used costs a line in
 `/etc/passwd`.
 
-Outputs: `sandbox-user` and `sandbox-home`, and `fetched` (`true` for a
-release's binary, `false` for a build, empty when `binary` was supplied).
+Outputs: `sandbox-user` and `sandbox-home`, `fetched` (`true` for a
+release's binary, `false` for a build, empty when `binary` was supplied),
+and `session-endpoint`. For a configuration with `[session] listen`, setup
+publishes the `wss://` address on the runner's tailnet name. The run's root
+helper enables `tailscale serve` while holding the bridge port, and revokes
+the mapping before releasing it; `session-endpoint` is that address
+([session runs](../specs/session.md)); otherwise it is empty.
 
 ## Where the binary comes from
 

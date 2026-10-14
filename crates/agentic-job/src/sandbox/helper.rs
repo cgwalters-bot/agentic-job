@@ -95,6 +95,8 @@ pub enum Op {
     },
     /// Print `tailscale status --json`
     TailscaleStatus,
+    /// Hold the bridge listener and revoke serve when its supervisor leaves
+    SessionServe,
     /// Run a command through pkexec, as root: a probe's control
     PkexecControl,
     /// Take away the sandbox user's lingering, after a probe enabled it
@@ -133,6 +135,10 @@ pub fn run(op: &Op) -> Result<Exit> {
             Ok(Exit::Success)
         }
         Op::TailscaleStatus => passthrough(&exec, &["tailscale", "status", "--json"]),
+        Op::SessionServe => {
+            ensure!(config.session.listen, "session serve needs session.listen");
+            super::session::serve().map(|()| Exit::Success)
+        }
         Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
         Op::DisableLinger => passthrough(&exec, &["loginctl", "disable-linger", "--", &user.name]),
         Op::CrontabRemove => passthrough(&exec, &["crontab", "-r", "-u", &user.name]),

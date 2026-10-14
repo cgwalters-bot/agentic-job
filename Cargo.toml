@@ -29,6 +29,10 @@ tar = { version = "0.4", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1"
+# The session's bridge (specs/session.md): a WebSocket server behind
+# `tailscale serve`, which terminates TLS, so only the handshake and
+# framing, without TLS or a client's connector.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # The run API of the inference proxy, and the CI system's identity token,
 # which is fetched over TLS. Blocking, and far smaller than a client on
 # hyper; rustls with ring builds for musl with a C compiler alone.

@@ -4,9 +4,9 @@
 //! client, and what it does not answer itself it can pass on. Who it
 //! passes things on to is this list. For a task run the list is empty:
 //! the session's own prompt is the only one, and the turn's end is the
-//! session's. With a relay (`bridge`, specs/session.md) the list holds
-//! the one client at its far end, attached before the agent starts, and
-//! the session goes on after the task's turn to that client's prompts.
+//! session's. With a bridge (`bridge`, specs/session.md) the list holds
+//! the one client it lets in, which may attach while the task's turn
+//! runs, and the session goes on after that turn to its prompts.
 //!
 //! Every message from the agent passes the transcript's tap, and the tap
 //! hands its notifications to this list. Requests stay with the session:

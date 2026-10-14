@@ -307,12 +307,12 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         }
         Launch::Direct => None,
     };
-    // Before the agent starts: a relay that cannot be reached is a
-    // session that cannot be held.
+    // Listening before the agent starts: a client may come during the
+    // task's turn.
     let (session_id, attach_to) = watch::channel(None);
     let (conversation, hang_up) = match bridge {
         Some(bridge) => {
-            let connected = bridge.connect(attach_to).await?;
+            let connected = bridge.start(attach_to)?;
             clients.attach(connected.send);
             let conversation = Conversation {
                 from_client: connected.from_client,
@@ -399,9 +399,11 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         ),
     };
     watcher.abort();
-    if let Some(hang_up) = hang_up {
-        hang_up.close().await;
-    }
+    let revoked = match hang_up {
+        Some(hang_up) => hang_up.close().await,
+        None => Ok(()),
+    };
+    let reaped = reaped.and(revoked);
     let finished = chrono::Utc::now();
 
     let Ended {

@@ -204,7 +204,7 @@ pub fn direct(egress: &Egress) -> Result<Vec<Direct>> {
 /// subordinate ranges as `START-END`). Rejected rather than dropped, so
 /// a blocked connection fails at once.
 pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> String {
-    rules_with_resolvers(uids, direct, proxy_uid, &[], &[])
+    rules_with_resolvers(uids, direct, proxy_uid, &[], &[], None)
 }
 
 /// DNS exceptions apply only to these resolver addresses. All other DNS
@@ -215,13 +215,29 @@ pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> Stri
 /// else; none leaves the ruleset as it was. With them the sandbox's uids
 /// are refused its IPv6 address too, which the runner could otherwise
 /// reach through `sandbox exec` when there is no egress proxy.
+///
+/// `session_port` (a session run's bridge, `session::bridge`) is refused
+/// to the sandbox's uids on loopback, and so is the node's own tailnet
+/// address, where `tailscale serve` passes it on: the bridge lets in
+/// whoever `Tailscale-User-Login` names, and a connection of the agent's
+/// own could otherwise name the operator itself, or come through serve
+/// as the node's owner, and prompt the session it runs in.
 pub fn rules_with_resolvers(
     uids: &[String],
     direct: &[Direct],
     proxy_uid: Option<u32>,
     resolvers: &[IpAddr],
     runner_uids: &[String],
+    session_port: Option<u16>,
 ) -> String {
+    let session_rules = session_port.map_or_else(String::new, |port| {
+        format!(
+            "
+    meta skuid @sandbox_uids oifname \"lo\" tcp dport {port} counter reject
+    meta skuid @sandbox_uids oifname \"lo\" ip daddr {TAILNET_V4} counter reject
+    meta skuid @sandbox_uids oifname \"lo\" ip6 daddr {TAILNET_V6} counter reject"
+        )
+    });
     let (runner_set, runner_rules) = if runner_uids.is_empty() {
         (String::new(), String::new())
     } else {
@@ -285,7 +301,7 @@ table inet {TABLE} {{
   set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{runner_set}{tailnet_set}
   chain output {{
     type filter hook output priority 0; policy accept;
-    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{runner_rules}{tailnet_rules}{egress_rules}
+    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{runner_rules}{session_rules}{tailnet_rules}{egress_rules}
   }}
 }}
 ",
@@ -454,10 +470,11 @@ table inet runner_sandbox {
 }
 "#;
         assert_eq!(
-            rules_with_resolvers(&["1002".to_owned()], &[], None, &[], &runner),
+            rules_with_resolvers(&["1002".to_owned()], &[], None, &[], &runner, None),
             want
         );
-        let proxied = rules_with_resolvers(&["1002".to_owned()], &[], Some(993), &[], &runner);
+        let proxied =
+            rules_with_resolvers(&["1002".to_owned()], &[], Some(993), &[], &runner, None);
         assert_eq!(proxied.matches("@runner_uids").count(), 2);
         assert_eq!(
             proxied.replace(
@@ -484,7 +501,7 @@ table inet runner_sandbox {
         let direct = [direct_of("http://100.101.102.103:18080")];
         for proxy in [None, Some(993)] {
             for direct in [&direct[..], &[]] {
-                let ruleset = rules_with_resolvers(&sandbox, direct, proxy, &[], &runner);
+                let ruleset = rules_with_resolvers(&sandbox, direct, proxy, &[], &runner, None);
                 for set in ["@sandbox_uids", "@runner_uids"] {
                     let accept = ruleset
                         .lines()
@@ -511,6 +528,38 @@ table inet runner_sandbox {
                         "meta skuid {proxy} ip6 daddr {{ ::1/128, ::ffff:0:0/96, fc00::/7,"
                     )));
                 }
+            }
+        }
+    }
+
+    /// A session's bridge is refused to the sandbox's uids before any of
+    /// their accepts, with or without the proxy and direct endpoints, and
+    /// a task run's ruleset is as it was.
+    #[test]
+    fn the_sandbox_cannot_reach_a_sessions_bridge() {
+        let sandbox = ["1002".to_owned()];
+        let direct = [direct_of("http://100.101.102.103:18080")];
+        let refusals = [
+            "    meta skuid @sandbox_uids oifname \"lo\" tcp dport 7790 counter reject",
+            "    meta skuid @sandbox_uids oifname \"lo\" ip daddr 100.64.0.0/10 counter reject",
+            "    meta skuid @sandbox_uids oifname \"lo\" ip6 daddr fd7a:115c:a1e0::/48 counter reject",
+        ];
+        for proxy in [None, Some(993)] {
+            for direct in [&direct[..], &[]] {
+                let task = rules_with_resolvers(&sandbox, direct, proxy, &[], &[], None);
+                let session = rules_with_resolvers(&sandbox, direct, proxy, &[], &[], Some(7790));
+                let first_accept = session
+                    .lines()
+                    .position(|line| line.contains("@sandbox_uids") && line.ends_with("accept"))
+                    .unwrap_or(usize::MAX);
+                for rule in refusals {
+                    let at = session.lines().position(|line| line == rule);
+                    assert!(at.is_some_and(|at| at < first_accept), "{rule}:\n{session}");
+                }
+                assert_eq!(
+                    session.replace(&format!("\n{}", refusals.join("\n")), ""),
+                    task
+                );
             }
         }
     }
@@ -553,7 +602,7 @@ table inet runner_sandbox {
     #[test]
     fn dns_exceptions_are_scoped_and_below_tailnet_denial() {
         let addresses = resolvers("nameserver 10.0.0.2\nnameserver 2001:db8::53\n").unwrap();
-        let rules = rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses, &[]);
+        let rules = rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses, &[], None);
         let tailnet = rules
             .find("ip6 daddr fd7a:115c:a1e0::/48 counter reject")
             .unwrap();
@@ -567,7 +616,7 @@ table inet runner_sandbox {
         }
         assert!(!rules.contains("th dport 53 accept\n    meta skuid 993 ip daddr {"));
         assert!(
-            !rules_with_resolvers(&["1002".into()], &[], None, &addresses, &[])
+            !rules_with_resolvers(&["1002".into()], &[], None, &addresses, &[], None)
                 .contains("dport 53")
         );
     }

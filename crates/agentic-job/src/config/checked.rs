@@ -19,16 +19,20 @@ use anyhow::{Result, bail, ensure};
 use super::{Config, Limits as LimitsTable};
 use crate::run::agent::{self, Kind};
 use crate::run::handback;
-use crate::run::inference::{Endpoint, Mode};
+use crate::run::inference::Endpoint;
 use crate::sandbox::network::{self, Direct};
 use crate::session::Limits;
-use crate::session::bridge::Relay;
+use crate::session::bridge::Listen;
 
 /// What `sandbox setup` takes from a configuration it may act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
     /// Where the sandbox user connects without the egress proxy.
     pub direct: Vec<Direct>,
+    /// `None` for a task run, which no client attaches to; otherwise
+    /// setup serves the bridge's port on the tailnet and keeps the
+    /// sandbox user from it.
+    pub session: Option<Listen>,
 }
 
 /// What `run` takes from a configuration it may act on.
@@ -39,8 +43,6 @@ pub struct Checked {
     /// `None` for a run with no inference proxy.
     pub endpoint: Option<Endpoint>,
     pub limits: Limits,
-    /// `None` for a task run, which no client attaches to.
-    pub relay: Option<Relay>,
 }
 
 /// The limits, with the proxy's part in them checked: a cap on model
@@ -95,8 +97,16 @@ impl Config {
     pub fn check_host(&self) -> Result<Host> {
         self.sandbox.validate()?;
         self.setup.validate()?;
+        // Setup would serve the bridge's port on the tailnet, with the
+        // operator's login on what it passes on, for any later step that
+        // listens there: only a run's bridge checks it.
+        ensure!(
+            !self.session.listen || !self.agent.name.is_empty(),
+            "session.listen needs agent.name: only `run` holds the port setup serves"
+        );
         Ok(Host {
             direct: network::direct(&self.egress)?,
+            session: Listen::from_config(&self.session)?,
         })
     }
 
@@ -128,24 +138,11 @@ impl Config {
         }
         handback::author(&self.commit)?;
         handback::check_trailers(&self.commit.trailers)?;
-        let relay = Relay::from_config(&self.session)?;
-        // A token the relay was given must be no use at the proxy: the
-        // relay could otherwise register runs, and spend, as this job.
-        if let (Some(Mode::GithubOidc { audience }), Some(relay)) =
-            (endpoint.as_ref().map(|endpoint| &endpoint.mode), &relay)
-        {
-            ensure!(
-                relay.audience.as_ref() != Some(audience),
-                "session.audience is the inference proxy's ({audience:?}): the relay could \
-                 use the token it is sent there"
-            );
-        }
         Ok(Checked {
             host,
             kind,
             endpoint,
             limits,
-            relay,
         })
     }
 }
@@ -153,6 +150,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run::inference::Mode;
 
     const FAKE: &str = "[agent]\nname = \"fake\"\n";
     const CLAUDE: &str = "[agent]\nname = \"claude\"\n";
@@ -177,14 +175,15 @@ mod tests {
             (fake.limits.timeout_s, fake.limits.budget_aic),
             (600, Some(100.0))
         );
-        assert_eq!(fake.relay, None);
+        assert_eq!(fake.host.session, None);
         let session = checked(&format!(
-            "{FAKE}{CAPPED}[session]\nrelay = \"relay.example.ts.net:7000\"\n"
+            "{FAKE}{CAPPED}[session]\nlisten = true\noperators = [\"op@github\"]\n\
+             origins = [\"https://review.example.ts.net\"]\n"
         ))
         .unwrap();
         assert_eq!(
-            session.relay.map(|relay| relay.address).as_deref(),
-            Some("relay.example.ts.net:7000")
+            session.host.session.map(|listen| listen.operators),
+            Some(vec!["op@github".to_owned()])
         );
 
         let text = format!(
@@ -275,15 +274,12 @@ mod tests {
             ),
             (FAKE.to_owned(), "limits.timeout-minutes is not set"),
             (
-                format!(
-                    "{CLAUDE}{PROXY}{OIDC}{CAPPED}{DIRECT}[session]\nrelay = \"relay:7000\"\n\
-                     audience = \"proxy\"\n"
-                ),
-                "session.audience is the inference proxy's",
+                format!("{FAKE}{CAPPED}[session]\nlisten = true\noperators = [\"op@github\"]\n"),
+                "session.origins needs 1 to",
             ),
             (
-                format!("{FAKE}{CAPPED}[session]\nrelay = \"https://relay\"\n"),
-                "session.relay: \"https://relay\" is not HOST:PORT",
+                format!("{FAKE}{CAPPED}[session]\nrelay = \"relay:7000\"\n"),
+                "unknown field `relay`",
             ),
             (
                 format!("{FAKE}[limits]\nbudget = 100\n"),
@@ -405,7 +401,13 @@ model = \"m\"
     fn the_host_check_is_the_machines_part() {
         let host_only = "[sandbox]\nstop-services = [\"docker.service\"]\n";
         let config = Config::parse(host_only).unwrap();
-        assert_eq!(config.check_host().unwrap(), Host { direct: vec![] });
+        assert_eq!(
+            config.check_host().unwrap(),
+            Host {
+                direct: vec![],
+                session: None
+            }
+        );
         assert!(config.check().is_err());
         for bad in [
             "[sandbox]\nuser = \"root\"\n",

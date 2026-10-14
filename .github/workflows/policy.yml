@@ -158,16 +158,14 @@ on:
         description: The most the run may spend, in AIC (hundredths of a dollar; 0 for no such cap)
         type: string
         default: "500"
-      relay:
-        description: "A relay on the agent runner's network, as HOST:PORT: after the task's turn the session waits there for a client's prompts (specs/session.md); empty for a run that ends with its task"
-        type: string
-        default: ""
-      relay-audience:
-        description: With `relay`, the audience of the identity token the run proves itself with to it; empty to send none
-        type: string
-        default: ""
+      session:
+        description: >-
+          After the task's turn, wait for the operator's prompts over the tailnet (specs/session.md).
+          Who may attach and from which page is the configuration's `[session]` table, not an input
+        type: boolean
+        default: false
       idle-minutes:
-        description: With `relay`, how long the session waits for the client's next prompt (empty for 10, at most 60)
+        description: With `session`, how long the session waits for the client's next prompt (empty for 10, at most 60)
         type: string
         default: ""
       packages:
@@ -673,8 +671,8 @@ jobs:
           MAX_REQUESTS: ${{ inputs.max-requests }}
           MAX_TASKS: ${{ inputs.max-tasks }}
           BUDGET: ${{ inputs.budget }}
-          RELAY: ${{ inputs.relay }}
-          RELAY_AUDIENCE: ${{ inputs.relay-audience }}
+          # Off sets nothing, so the caller's file stands.
+          SESSION: ${{ inputs.session && 'true' || '' }}
           IDLE_MINUTES: ${{ inputs.idle-minutes }}
           PACKAGES: ${{ inputs.packages }}
           NPM: ${{ inputs.npm || (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') }}
@@ -689,8 +687,7 @@ jobs:
             --string inference.audience="$AUDIENCE" --string inference.token-file="$TOKEN_FILE" \
             --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \
             --integer limits.max-tasks="$MAX_TASKS" --integer limits.budget="$BUDGET" \
-            --string session.relay="$RELAY" --string session.audience="$RELAY_AUDIENCE" \
-            --integer session.idle-minutes="$IDLE_MINUTES" \
+            --boolean session.listen="$SESSION" --integer session.idle-minutes="$IDLE_MINUTES" \
             --list setup.packages="$PACKAGES" --list setup.npm="$NPM" --string setup.script="$SETUP" \
             > "$JOB_DIR/config.toml"
           cat "$JOB_DIR/config.toml"

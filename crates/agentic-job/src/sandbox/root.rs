@@ -32,6 +32,10 @@ pub enum Root {
 }
 
 impl Root {
+    pub(crate) fn session_serve_command() -> Command {
+        Self::helper_command::<&str>("session-serve", &[])
+    }
+
     /// The helper where setup installed it and left the configuration it
     /// reads; sudo itself otherwise.
     pub fn detect() -> Self {

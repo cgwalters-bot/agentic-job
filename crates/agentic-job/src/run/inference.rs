@@ -557,18 +557,6 @@ fn identity_token(http: &ureq::Agent, request: &OidcRequest, audience: &str) -> 
     }
 }
 
-/// The job's identity token for AUDIENCE, for a service other than the
-/// proxy: the relay of a session (`session::bridge`).
-pub fn identity_token_for(
-    request: &OidcRequest,
-    audience: &str,
-    retry: Retry,
-    stopped: Stopped,
-) -> Result<String> {
-    let http = http();
-    retry.run(stopped, |_| identity_token(&http, request, audience))
-}
-
 impl Run {
     /// Announces the run and gets its token, or reads the given one.
     ///

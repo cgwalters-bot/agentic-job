@@ -67,7 +67,7 @@ use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::policy;
 use crate::redact::Redactor;
-use crate::session::bridge::{self, Bridge, Relay};
+use crate::session::bridge::{Bridge, Listen};
 use crate::session::process::SandboxUser;
 use crate::session::{self, Clients, Launch, Limits, Options, Policy, RunResult};
 
@@ -132,8 +132,8 @@ struct Plan {
     agent: config::Agent,
     limits: Limits,
     endpoint: Option<Endpoint>,
-    /// Where the session's client is, for a conversation.
-    relay: Option<Relay>,
+    /// Who may attach to the session, for a conversation.
+    session: Option<Listen>,
     identity: Identity,
     /// What `policy` allowed this run: the target, and where it is cloned
     /// from.
@@ -164,8 +164,6 @@ struct Prepared {
     /// The session config options it sets after the model.
     options: Vec<(&'static str, String)>,
     prompt: String,
-    /// The job's identity token for the relay, where it asks for one.
-    relay_token: Option<String>,
 }
 
 /// Real reviewers discover instructions from the base, not the hostile head.
@@ -321,8 +319,7 @@ impl Plan {
             kind,
             endpoint,
             limits,
-            relay,
-            host: _,
+            host,
         } = config.check()?;
         if limits.max_requests.is_none() && limits.budget_aic.is_none() {
             eprintln!(
@@ -364,10 +361,10 @@ impl Plan {
         upload::refuse_earlier_results(&args.out)?;
         // Asked for only where it is used: nothing else holds what lets
         // a process get the job's identity token.
-        let oidc = (matches!(
+        let oidc = matches!(
             endpoint.as_ref().map(|endpoint| &endpoint.mode),
             Some(inference::Mode::GithubOidc { .. })
-        ) || relay.as_ref().is_some_and(|relay| relay.audience.is_some()))
+        )
         .then(OidcRequest::from_env)
         .flatten();
         let exe = std::env::current_exe().context("finding this program's own path")?;
@@ -384,7 +381,7 @@ impl Plan {
             kind,
             limits,
             endpoint,
-            relay,
+            session: host.session,
             identity: Identity {
                 oidc,
                 name: run_name(&meta),
@@ -468,25 +465,6 @@ impl Plan {
         }
         let prompt = self.prompt(&checkout)?;
         shared.go_on()?;
-        let relay_token = match self
-            .relay
-            .as_ref()
-            .and_then(|relay| relay.audience.as_deref())
-        {
-            Some(audience) => {
-                let request = self.identity.oidc.as_ref().with_context(|| {
-                    "session.audience needs the job's identity token: the job needs the \
-                     permission id-token: write"
-                })?;
-                Some(inference::identity_token_for(
-                    request,
-                    audience,
-                    Retry::default(),
-                    &|| shared.stopped.load(Ordering::SeqCst),
-                )?)
-            }
-            None => None,
-        };
         let run = self
             .endpoint
             .as_ref()
@@ -553,7 +531,6 @@ impl Plan {
             model: configuration.model,
             options: configuration.options,
             prompt,
-            relay_token,
         })
     }
 
@@ -577,7 +554,6 @@ impl Plan {
             .map(|run| run.token().expose().to_owned())
             .into_iter()
             .chain(self.identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
-            .chain(prepared.relay_token.clone())
             .chain(own_tokens());
         let redactor = log::Shared::new(
             Redactor::new(secrets).context("building the redaction of the run's secrets")?,
@@ -587,16 +563,19 @@ impl Plan {
             .with_context(|| format!("creating {}", condensed.display()))?;
         // What the agent says reaches the client as it does the log:
         // with the run's secrets replaced.
-        let bridge = self.relay.clone().map(|relay| {
-            let redactor = redactor.clone();
-            Bridge {
-                relay,
-                hello: bridge::hello(&self.run_id, prepared.relay_token.as_deref()),
-                redact: Arc::new(move |text: &str| {
-                    redactor.with(|redactor| redactor.redact(text).into_owned())
-                }),
-            }
-        });
+        let bridge = self
+            .session
+            .clone()
+            .map(|listen| {
+                let redactor = redactor.clone();
+                Bridge::bind(
+                    listen,
+                    Arc::new(move |text: &str| {
+                        redactor.with(|redactor| redactor.redact(text).into_owned())
+                    }),
+                )
+            })
+            .transpose()?;
         let options = Options {
             name: self.kind.as_str().to_owned(),
             agent: spec,

@@ -24,8 +24,9 @@
 //! A session is the agent-facing half of an ACP proxy: the agent's
 //! client, with a list of attached clients ([`clients`]) that the agent's
 //! notifications are passed on to. The list is empty for a task run. With
-//! a relay, [`bridge`] is the client-facing half, and the session goes on
-//! after the task's turn to its client's prompts (specs/session.md).
+//! `[session] listen`, [`bridge`] is the client-facing half, and the
+//! session goes on after the task's turn to its client's prompts
+//! (specs/session.md).
 
 pub mod agents;
 pub mod bridge;

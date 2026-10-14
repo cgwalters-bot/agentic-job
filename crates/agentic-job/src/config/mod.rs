@@ -436,17 +436,21 @@ pub struct Commit {
     pub trailers: Vec<String>,
 }
 
-/// A conversation over a relay after the task's turn (specs/session.md).
-/// Off unless `relay` is set. `session::bridge::Relay::from_config`
-/// checks it.
+/// A conversation with an operator after the task's turn
+/// (specs/session.md). Off unless `listen` is set.
+/// `session::bridge::Listen::from_config` checks it.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Session {
-    /// The relay `run` dials, as `HOST:PORT` on the runner's network.
-    pub relay: String,
-    /// The audience of the identity token `run` proves the job with to
-    /// the relay. Without it the relay is sent no token.
-    pub audience: Option<String>,
+    /// Whether `run` listens for a client, which `sandbox setup` exposes
+    /// on the runner's tailnet name with `tailscale serve`.
+    pub listen: bool,
+    /// The tailnet logins that may attach, as `tailscale serve` names
+    /// them in `Tailscale-User-Login`.
+    pub operators: Vec<String>,
+    /// The `Origin`s a client may connect from, such as the review
+    /// board's `https://NAME.TAILNET.ts.net`.
+    pub origins: Vec<String>,
     /// How long the session waits for the client's next prompt. Zero
     /// means the default.
     pub idle_minutes: u64,

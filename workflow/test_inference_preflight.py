@@ -66,7 +66,7 @@ class PreflightTests(unittest.TestCase):
                 "CONFIG", "MODEL", "CONFIG_REPO", "CONFIG_REF", "CONFIG_PATH",
                 "SKILLS", "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "TIMEOUT",
                 "MAX_REQUESTS", "MAX_TASKS", "BUDGET", "PACKAGES", "NPM", "SETUP",
-                "RELAY", "RELAY_AUDIENCE", "IDLE_MINUTES",
+                "SESSION", "IDLE_MINUTES",
             ], "")
             env.update(JOB_DIR=str(root), PATH="/usr/bin:/bin", AGENT="fake", REPO="example/repo")
             result = subprocess.run(
