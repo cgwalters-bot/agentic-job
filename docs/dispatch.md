@@ -306,9 +306,10 @@ Comment routing is fixed to the dispatched item, not agent-supplied fields.
 
 `node --test workflow/dispatch.test.cjs workflow/review.test.cjs` executes the
 actual preflight, all shipped sessions and hostile review routing/output cases.
-CI calls the **same dispatch.yml**, running triage and research on pushes and
-same-repository PRs, plus review on PRs. Not implement: CI holds no PAT to
-fork with. Its separate verifier checks both issue comments and the review
+CI calls the **same dispatch.yml**, running research wherever it runs its
+end-to-end jobs, plus review on PRs; triage takes the same path with other
+profile text. Not implement: CI holds no PAT to
+fork with. Its separate verifier checks the issue comments and the review
 verdict, then existing CI cleanup removes the comments. Fork PRs skip these
 jobs.
 These tests do not prove real-model quality or connectivity to a private broker.

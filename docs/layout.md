@@ -100,7 +100,7 @@ patch and network behavior with the old tree at the pin recorded in
 checkouts; their source files document the environment variables.
 
 [ci.yml](../.github/workflows/ci.yml) runs Rust formatting, clippy and tests,
-Markdown linting and offline links, proxy tests, static builds, release-pin
-checks, sandbox mutation tests and scripted-agent E2E runs. The `ci` job
+Markdown linting and offline links, proxy tests and release-pin checks (one
+`lint` job), static builds, sandbox mutation tests and scripted-agent E2E runs. The `ci` job
 gathers their results. Host tests need disposable runners with root and
 systemd 257; they are not safe to run on a workstation.

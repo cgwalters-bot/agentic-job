@@ -10,8 +10,8 @@ which events, and how the event's text reaches the agent.
 
 **State.** The command, its wiring into the reusable workflow
 (`event: true`, [described here](workflow.md#event-triggered-callers))
-and three example callers are on main; CI runs the event path on every
-pull request and every push (`e2e-event`), and the command's decision on
+and three example callers are on main; CI runs the event path wherever it
+runs its end-to-end jobs (`e2e-event`), and the command's decision on
 recorded and hand-written payloads. The workflow does not yet fetch a
 pull request's head for general event runs (the task names it, and the agent
 fetches it); the dedicated review mode checks out the admitted SHA.

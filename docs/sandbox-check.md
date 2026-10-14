@@ -412,7 +412,7 @@ For the network it loads other rules in place of setup's: none; the
 rules of a host with no proxy; and rules that name another uid as the
 proxy's. The policy itself (what is a read, which writes have a rule,
 the threat feed) is tested by `egress/test_policy.py`, which came with
-it and runs in CI's `egress` job.
+it and runs in CI's `lint` job.
 
 What the hosted runner cannot show:
 

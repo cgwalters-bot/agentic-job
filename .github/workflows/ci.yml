@@ -24,15 +24,27 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # look up the merge group's run of a pushed commit
     # Queue detection and path classification run inline with read-only access.
     # With a queue, PRs need no write-capable E2E jobs. Without one, a fork
     # still cannot run those jobs and must not silently bypass the only gate.
     # pull_request and merge_group both run the proposed workflow; a merge
     # group's holds this repository's write-capable job token.
+    #
+    # GitHub runs at most 20 jobs at once for the account, so each job this
+    # workflow need not run shortens every other run's wait. Three gates,
+    # each 'true' or 'false': `full` is false only on a push of a commit a
+    # merge group already passed; `host` also defers the privileged host
+    # jobs from pull requests to the queue, as `e2e` does the end-to-end ones.
     outputs:
       analysis-base: ${{ steps.merge-base.outputs.branch }}
-      e2e: ${{ github.event_name == 'pull_request' && (steps.queue.outputs.enabled == 'true' || github.event.pull_request.head.repo.full_name != github.repository) && 'false' || steps.paths.outputs.e2e }}
+      full: ${{ steps.queued.outputs.passed != 'true' }}
+      host: ${{ steps.queued.outputs.passed != 'true' && (github.event_name != 'pull_request' || steps.queue.outputs.enabled != 'true') }}
+      e2e: ${{ (github.event_name == 'pull_request' && (steps.queue.outputs.enabled == 'true' || github.event.pull_request.head.repo.full_name != github.repository) || steps.queued.outputs.passed == 'true') && 'false' || steps.paths.outputs.e2e }}
       fork-e2e: ${{ github.event_name == 'pull_request' && steps.queue.outputs.enabled != 'true' && github.event.pull_request.head.repo.full_name != github.repository && steps.paths.outputs.e2e != 'false' }}
+      review: ${{ steps.review.outputs.installed }}
     steps:
       - id: merge-base
         if: ${{ github.event_name == 'merge_group' }}
@@ -42,6 +54,28 @@ jobs:
             const ref = context.payload.merge_group.head_ref;
             if (!ref.startsWith('refs/heads/')) throw new Error('merge group head is not a branch');
             core.setOutput('branch', ref.slice('refs/heads/'.length));
+      # The queue fast-forwards main to the merge group's head, so a push of
+      # a queued pull request is a commit this workflow has already passed
+      # on, every job included. Only a successful merge_group run of this
+      # very commit, built on the commit main was at before the push, counts:
+      # its branch, gh-readonly-queue/<base>/pr-<n>-<sha>, ends in that sha.
+      # Otherwise the group's path check did not see the whole push, as when
+      # one push lands several groups. Any other push, a bypass among them,
+      # runs it all. One bounded, read-only query; an API failure fails the gate.
+      - id: queued
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          retries: 3
+          script: |
+            const before = context.payload.before;
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: context.sha,
+              event: 'merge_group', status: 'success', per_page: 10,
+            });
+            core.setOutput('passed', /^[0-9a-f]{40}$/.test(before) && data.workflow_runs.some(run => run.head_sha === context.sha
+              && run.event === 'merge_group' && run.conclusion === 'success'
+              && run.head_branch.startsWith('gh-readonly-queue/') && run.head_branch.endsWith(`-${before}`)));
       # Effective branch rules include repository and organization rulesets.
       # API failures fail this job; never guess that the queue will test later.
       - id: queue
@@ -73,14 +107,38 @@ jobs:
             done < "$RUNNER_TEMP/changed-paths"
           fi
           echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
+      # Bootstrap only: the first PR adding the review caller has no
+      # base-branch task/bounds yet. Read the base commit's files; never
+      # substitute its head's to make that run pass. A merge group or push
+      # would only show a policy refusal, as e2e-event does with its bounds;
+      # tests/event.rs holds review.toml's refusal of those events.
+      - id: review
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git cat-file -e "$BASE^{commit}"
+          installed=true
+          for file in workflow/review.md workflow/review.toml .github/agentic-job/e2e/review.sh; do
+            test "$(git cat-file -t "$BASE:$file" 2> /dev/null)" = blob || installed=false
+          done
+          echo "installed=$installed" >> "$GITHUB_OUTPUT"
 
-  docs:
+  # Checks of a minute or less share one runner: Markdown, release pin
+  # selection, the egress proxy's policy and safe-output validation.
+  lint:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+      # Before anything else is checked out or written in the workspace:
+      # gh-aw's workflows are Markdown, and the digest is of the checkout.
       - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
           globs: "**/*.md"
@@ -90,10 +148,53 @@ jobs:
           args: --offline --include-fragments --no-progress "**/*.md"
           failIfEmpty: false
           fail: true
+      # Source-addressed release selection and fail-closed verification tests.
+      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs
+      # The pin's digest is of Cargo.lock, Cargo.toml, crates, egress, skills,
+      # workflow/review.md and binary.mjs:
+      # a file the build includes from anywhere else would not be in it.
+      - name: "Nothing is built in from outside what the pin's digest covers"
+        run: |
+          grep -rnE 'include_(str|bytes)!\("(\.\./)+' crates | tee /dev/stderr | grep -vE '!\("(\.\./)+(egress/[a-z_.]+|skills/[a-z/_-]+/[A-Za-z_.-]+|workflow/review\.md)"\)' > "$RUNNER_TEMP/outside" || true
+          test ! -s "$RUNNER_TEMP/outside"
+      # The digest of a checkout is the digest of the same commit as a
+      # runner fetches it for an action, an archive without git.
+      - name: The checkout and action archive have the same source digest
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/head"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/head"
+          test "$(node secure-host/binary.mjs digest --root "$RUNNER_TEMP/head")" = "$(node secure-host/binary.mjs digest)"
+      # The egress proxy's policy, with the tests that came with it.
+      - run: python3 -m unittest discover -s egress -v
+      # As `sandbox setup` installs it: every file by a hash of
+      # egress/requirements.txt, and wheels only. Then with the hashes
+      # changed, which pip must refuse for that reason and no other.
+      - name: The pinned proxy is fetched by hash, and a changed hash is refused
+        env:
+          PIP: "pip download --quiet --disable-pip-version-check --require-hashes --only-binary :all:"
+        run: |
+          $PIP --dest "$RUNNER_TEMP/wheels" -r egress/requirements.txt
+          sed 's/--hash=sha256:..../--hash=sha256:0000/' egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
+          if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
+          grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
+      # validation.json is generated from gh-aw's compiled workflows, so a
+      # change of the pin has to regenerate it. The commit is the one
+      # safe-outputs-probe.yml takes gh-aw's setup action at.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/gh-aw
+          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          path: gh-aw
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - run: node safe-outputs/validation.mjs gh-aw --check
 
   # The runner image's stable toolchain: nothing to download, and the
   # workspace's rust-version says what the code needs.
   rust:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -150,6 +251,8 @@ jobs:
   # Real pinned Vibe, generated configuration and ACP session against a
   # loopback broker. Read-only job token; no model key or privileged setup.
   vibe:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -171,6 +274,8 @@ jobs:
   # do without. run0 with --pipe needs systemd 257, newer than
   # ubuntu-24.04's.
   session-sandbox:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
@@ -221,6 +326,8 @@ jobs:
   # collector at the commit the old tree vendored it from; neither is
   # copied here.
   corpus:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -261,77 +368,12 @@ jobs:
       # checkouts: the same files, but for the commit's message.
       - run: cargo test --locked --test handback
 
-  # The egress proxy's policy, with the tests that came with it.
-  egress:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: python3 -m unittest discover -s egress -v
-      # As `sandbox setup` installs it: every file by a hash of
-      # egress/requirements.txt, and wheels only. Then with the hashes
-      # changed, which pip must refuse for that reason and no other.
-      - name: The pinned proxy is fetched by hash, and a changed hash is refused
-        env:
-          PIP: "pip download --quiet --disable-pip-version-check --require-hashes --only-binary :all:"
-        run: |
-          $PIP --dest "$RUNNER_TEMP/wheels" -r egress/requirements.txt
-          sed 's/--hash=sha256:..../--hash=sha256:0000/' egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
-          if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
-          grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
-
-  # Source-addressed release selection and fail-closed verification tests.
-  release-pin:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs
-      # The pin's digest is of Cargo.lock, Cargo.toml, crates, egress, skills,
-      # workflow/review.md and binary.mjs:
-      # a file the build includes from anywhere else would not be in it.
-      - name: "Nothing is built in from outside what the pin's digest covers"
-        run: |
-          grep -rnE 'include_(str|bytes)!\("(\.\./)+' crates | tee /dev/stderr | grep -vE '!\("(\.\./)+(egress/[a-z_.]+|skills/[a-z/_-]+/[A-Za-z_.-]+|workflow/review\.md)"\)' > "$RUNNER_TEMP/outside" || true
-          test ! -s "$RUNNER_TEMP/outside"
-      # The digest of a checkout is the digest of the same commit as a
-      # runner fetches it for an action, an archive without git.
-      - name: The checkout and action archive have the same source digest
-        shell: bash
-        run: |
-          mkdir "$RUNNER_TEMP/head"
-          git archive HEAD | tar -x -C "$RUNNER_TEMP/head"
-          test "$(node secure-host/binary.mjs digest --root "$RUNNER_TEMP/head")" = "$(node secure-host/binary.mjs digest)"
-
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
   static:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
     uses: ./.github/workflows/build.yml # zizmor: ignore[self-repository] Test this revision's reusable workflow, not a remote revision.
-
-  # validation.json is generated from gh-aw's compiled workflows, so a
-  # change of the pin has to regenerate it. The commit is the one
-  # safe-outputs-probe.yml takes gh-aw's setup action at.
-  safe-outputs:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: github/gh-aw
-          ref: c227508baacbbe271be6c5a4f303936840b3c813
-          path: gh-aw
-          sparse-checkout: .github/workflows
-          persist-credentials: false
-      - run: node safe-outputs/validation.mjs gh-aw --check
 
   # The sandbox for real, on a machine that is thrown away: `sandbox
   # setup` with the egress proxy and the network rules, every probe of
@@ -344,6 +386,8 @@ jobs:
   # over several machines, each of which sets the sandbox up for itself:
   # what one removes must not be there for another's probes to find.
   sandbox:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
@@ -434,12 +478,16 @@ jobs:
   # example a caller copies, which builds and tests after the lock, as
   # the runner's user and as the sandbox user, and proves both.
   secure-host:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
     uses: ./.github/workflows/example-secure-host.yml # zizmor: ignore[self-repository] Test this revision's reusable workflow, not a remote revision.
 
   # The same step with its switches the other way: root kept, no egress
   # proxy, another name for the sandbox user. What the lock takes is
   # still there, and the sandbox user is closed in all the same.
   secure-host-options:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
@@ -602,9 +650,9 @@ jobs:
   # it (its author holds the write role and its head is this
   # repository's), the run starts from the pull request's base, the
   # agent's comment goes to the pull request, and a status comment there
-  # says the run started and how it ended. On a push to main the bounds
-  # list no `push` event: the run ends in the policy job, a success with
-  # the other jobs skipped. e2e-verify checks both.
+  # says the run started and how it ended. On a merge group or push the
+  # bounds list no such event: the run ends in the policy job, a success
+  # with the other jobs skipped. e2e-verify checks both.
   e2e-event:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
@@ -698,36 +746,17 @@ jobs:
       budget: '100'
       artifact-prefix: analysis-refused-
 
-  # Bootstrap only: the first PR adding this caller has no base-branch
-  # task/bounds yet. Never substitute its head's files to make that run pass.
-  review-base:
-    needs: changes
-    if: ${{ needs.changes.outputs.e2e == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      installed: ${{ steps.files.outputs.installed }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
-          persist-credentials: false
-      - id: files
-        run: |
-          installed=false
-          if [ -f workflow/review.md ] && [ -f workflow/review.toml ] && [ -f .github/agentic-job/e2e/review.sh ]; then installed=true; fi
-          echo "installed=$installed" >> "$GITHUB_OUTPUT"
-
   # Exercise the shipped caller, not a separately maintained imitation.
   # Not implement: it opens a pull request only with an apply environment's
-  # PAT, which CI does not hold.
+  # PAT, which CI does not hold. Not triage: it takes the same path as
+  # research, with other profile text.
   e2e-dispatch:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(github.event_name == 'pull_request' && '["triage","research","review"]' || '["triage","research"]') }}
+        profile: ${{ fromJSON(github.event_name == 'pull_request' && '["research","review"]' || '["research"]') }}
     permissions:
       contents: read # what dispatch.yml asks for: no profile pushes with the job token
       issues: write
@@ -760,9 +789,10 @@ jobs:
       scripted: true
       item: '64'
 
+  # Pull requests only (see the review step of changes).
   e2e-review:
-    needs: [changes, review-base]
-    if: ${{ needs.changes.outputs.e2e == 'true' && needs.review-base.outputs.installed == 'true' }}
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' && needs.changes.outputs.review == 'true' }}
     permissions:
       contents: read
       pull-requests: write
@@ -888,7 +918,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -915,10 +945,10 @@ jobs:
           EXITS: ${{ needs.e2e-full.outputs.exit }} ${{ needs.e2e-limit.outputs.exit }}
         run: test "$RESULTS / $EXITS" = "success success / 0 3"
       # On a pull request the event is admitted, the run starts from the
-      # pull request's base branch and goes to the end; on a push the
-      # bounds list no such event, and the run ends in the policy job with
-      # its reason, a success with the rest skipped.
-      - name: The event-triggered run was admitted on a pull request, and refused on a push
+      # pull request's base branch and goes to the end; on a merge group or
+      # push the bounds list no such event, and the run ends in the policy
+      # job with its reason, a success with the rest skipped.
+      - name: The event-triggered run was admitted on a pull request, and refused otherwise
         env:
           EVENT: ${{ github.event_name }}
           RESULT: ${{ needs.e2e-event.result }}
@@ -936,20 +966,17 @@ jobs:
       # The agent's comment went to the pull request this run is for,
       # under the status comment the notify job posted and the conclude
       # job edited, and the eyes reaction is on the pull request.
-      - name: The review path was admitted or refused, without using head policy files
+      - name: The review path was admitted on a pull request, without using head policy files
         env:
-          INSTALLED: ${{ needs.review-base.outputs.installed }}
+          INSTALLED: ${{ needs.changes.outputs.review }}
           RESULT: ${{ needs.e2e-review.result }}
           TRIGGER: ${{ needs.e2e-review.outputs.trigger }}
           EXIT: ${{ needs.e2e-review.outputs.exit }}
         run: |
-          if [ "$INSTALLED" != true ]; then test "$RESULT" = skipped; echo 'Review E2E awaits installation of its base-branch files.' >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          case "$GITHUB_EVENT_NAME" in
-            pull_request) test "$RESULT/$TRIGGER/$EXIT" = success/admitted/0 ;;
-            push|merge_group) test "$RESULT/$TRIGGER/$EXIT" = success/refused/ ;;
-          esac
+          if [ "$INSTALLED" != true ]; then test "$RESULT" = skipped; echo 'Review E2E runs on pull requests whose base has its files.' >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          test "$RESULT/$TRIGGER/$EXIT" = success/admitted/0
       - name: Exactly one scripted verdict was posted on the triggering pull request
-        if: ${{ github.event_name == 'pull_request' && needs.review-base.outputs.installed == 'true' }}
+        if: ${{ needs.changes.outputs.review == 'true' }}
         env:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1035,6 +1062,8 @@ jobs:
   # The ruleset requires ci, not standalone workflow results. Keep the
   # privileged enforcement proof in that dependency chain, including queues.
   world-write:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1065,6 +1094,8 @@ jobs:
   # before setup. The action is the checkout's own, so the runner gives
   # it the runtime token and runs its post step as it would a downloaded one's.
   confined:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
     name: Confined run step and JavaScript action main and post steps
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -1122,7 +1153,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, docs, rust, vibe, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1130,15 +1161,22 @@ jobs:
         if: ${{ needs.changes.outputs.fork-e2e == 'true' }}
         run: |
           echo '::error::Without a merge queue this fork pull request cannot run the required write-capable end-to-end jobs. Enable the queue or test from a branch of this repository.'
+      # A job may be skipped only when the gate it is under says "false".
       - name: Every job succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
-          REVIEW_INSTALLED: ${{ needs.review-base.outputs.installed }}
+          FULL: ${{ needs.changes.outputs.full }}
+          HOST: ${{ needs.changes.outputs.host }}
           E2E: ${{ needs.changes.outputs.e2e }}
+          REVIEW: ${{ needs.changes.outputs.review }}
           FORK_E2E: ${{ needs.changes.outputs.fork-e2e }}
         run: >-
-          jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork_e2e "$FORK_E2E"
-          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and $e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"
+          jq -e --arg full "$FULL" --arg host "$HOST" --arg e2e "$E2E" --arg review "$REVIEW" --arg fork_e2e "$FORK_E2E"
+          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
+          ($full == "false" and .key != "changes") or
+          ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or
+          ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+          (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
 
   # Only this sentinel is required in the ruleset. Always report a failure
   # if the aggregate did not succeed (a skipped required check can pass).

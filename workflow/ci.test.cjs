@@ -7,8 +7,21 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
-const script = ci.split('        run: |\n')[1].split('\n  docs:')[0]
-  .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+// The run script of a step of changes, by its id.
+const stepScript = id => ci.split(`      - id: ${id}\n`)[1].split('        run: |\n')[1].split(/\n(?! {10})/)[0]
+  .split('\n').map(line => line.slice(10)).join('\n');
+const script = stepScript('paths');
+// The github-script source of a step of changes, by its id.
+const githubScript = id => ci.split(`      - id: ${id}\n`)[1].split(/\n {6}(?! )/)[0]
+  .split('          script: |\n')[1].trim().split('\n').map(line => line.trim()).join('\n');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
+const gates = {
+  full: ['lint', 'rust', 'vibe', 'corpus', 'static'],
+  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'confined'],
+  e2e: ['proposals', 'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
+    'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
+};
 
 test('PR CI tests the ingress checker with the same verified analyzers', () => {
   const ingress = fs.readFileSync(path.join(__dirname, '../.github/workflows/workflow-ingress.yml'), 'utf8');
@@ -37,7 +50,7 @@ test('required ingress check reports on every PR and vets merge groups with base
 
 test('privileged jobs and required check remain gated for forks', () => {
   assert.match(ci, /\non:\n  pull_request:\n  merge_group:\n  push:\n    branches: \[main\]\n\n/);
-  assert.doesNotMatch(ci, /pull_request_target|workflow_run|secrets\./);
+  assert.doesNotMatch(ci, /pull_request_target|\bworkflow_run\b|secrets\./);
   const jobs = ci.split('\njobs:\n')[1].split(/\n(?=  [a-z][a-z0-9-]*:\n)/);
   let privileged = 0;
   for (const job of jobs) {
@@ -51,78 +64,186 @@ test('privileged jobs and required check remain gated for forks', () => {
   assert.match(ci, /^            const rules = await github\.paginate\('GET \/repos\/\{owner\}\/\{repo\}\/rules\/branches\/\{branch\}', \{$/m);
   assert.match(ci, /branch: context.payload.pull_request.base.ref/);
   assert.match(ci, /\n  ci:\n    if: \$\{\{ always\(\) \}\}\n    needs: required-checks\n/);
-  const command = ci.slice(ci.indexOf('        run: >-\n', ci.indexOf('\n  required-checks:')), ci.indexOf('\n  ci:\n'))
-    .replace('        run: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
-  const skipped = ['proposals', 'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'];
-  const normal = ['changes', 'docs', 'rust', 'sandbox'];
-  const needs = Object.fromEntries([...normal, ...skipped].map(key => [key, { result: 'success' }]));
-  const run = (state, e2e, installed = 'true', forkE2e = 'false') => spawnSync('bash', ['-c', command], {
-    env: { ...process.env, NEEDS: JSON.stringify(state), E2E: e2e, REVIEW_INSTALLED: installed, FORK_E2E: forkE2e },
-    encoding: 'utf8',
-  }).status;
-  assert.equal(run(needs, 'true'), 0);
-  const docs = { ...needs, ...Object.fromEntries(skipped.map(key => [key, { result: 'skipped' }])) };
-  assert.equal(run(docs, 'false'), 0);
-  for (const value of ['true', '', 'unknown']) {
-    assert.notEqual(run(docs, value), 0);
-    assert.notEqual(run(docs, 'false', 'true', value), 0);
-    assert.notEqual(run(needs, 'true', 'true', value), 0);
-  }
-  for (const key of [...normal, ...skipped]) {
-    for (const result of ['failure', 'cancelled']) assert.notEqual(run({ ...docs, [key]: { result } }, 'false'), 0);
-  }
-  for (const key of normal) assert.notEqual(run({ ...docs, [key]: { result: 'skipped' } }, 'false'), 0);
-  assert.equal(run({ ...needs, 'e2e-review': { result: 'skipped' } }, 'true', 'false'), 0);
-  for (const key of skipped) assert.notEqual(run({ ...needs, [key]: { result: 'skipped' } }, 'true'), 0);
 });
 
-test('queue scheduling runs E2E on groups and on PRs only without a queue', () => {
+test('the aggregate accepts a skip only under a gate that said false', () => {
+  const required = block('required-checks');
+  const command = required.slice(required.indexOf('        run: >-\n'))
+    .replace('        run: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
+  // Every job but the sentinels and the push-only one is aggregated, under exactly one gate.
+  const all = ci.split('\njobs:\n')[1].match(/^  [a-z][a-z0-9-]*(?=:\n)/gm).map(name => name.trim())
+    .filter(name => !['required-checks', 'ci', 'secure-host-published'].includes(name));
+  assert.deepEqual(required.match(/needs: \[(.*)\]/)[1].split(', ').sort(), [...all].sort());
+  assert.deepEqual(['changes', ...Object.values(gates).flat()].sort(), [...all].sort());
+  for (const [gate, jobs] of Object.entries(gates)) {
+    for (const job of jobs) assert.match(block(job), new RegExp(`\\n    if: \\$\\{\\{ (always\\(\\) && )?needs\\.changes\\.outputs\\.${gate} == 'true'( && [^\\n]*)? \\}\\}\\n`), job);
+  }
+  assert.equal(block('changes').match(/\n    if:/), null);
+  const success = Object.fromEntries(all.map(key => [key, { result: 'success' }]));
+  const skip = (...keys) => ({ ...success, ...Object.fromEntries(keys.map(key => [key, { result: 'skipped' }])) });
+  const outputs = { FULL: 'true', HOST: 'true', E2E: 'true', REVIEW: 'true', FORK_E2E: 'false' };
+  const run = (needs, change = {}) => spawnSync('bash', ['-c', command], {
+    env: { ...process.env, ...outputs, ...change, NEEDS: JSON.stringify(needs) }, encoding: 'utf8',
+  }).status;
+  const queuedPush = { FULL: 'false', HOST: 'false', E2E: 'false', REVIEW: '' };
+  const queuedPr = { HOST: 'false', E2E: 'false', REVIEW: 'false' };
+  for (const [name, needs, change, expected] of [
+    ['everything ran', success, {}, 0],
+    ['push the queue passed', skip(...gates.full, ...gates.host, ...gates.e2e), queuedPush, 0],
+    ['PR with a queue', skip(...gates.host, ...gates.e2e), queuedPr, 0],
+    ['docs-only merge group', skip(...gates.e2e), { E2E: 'false', REVIEW: '' }, 0],
+    ['merge group skips review', skip('e2e-review'), { REVIEW: '' }, 0],
+    ['review not installed on base', skip('e2e-review'), { REVIEW: 'false' }, 0],
+    ['review installed but skipped', skip('e2e-review'), {}, 1],
+    ['changes skipped', skip('changes'), queuedPush, 1],
+    ['host skipped on a merge group', skip('sandbox'), { E2E: 'false' }, 1],
+    ['light job skipped on a PR with a queue', skip('rust'), queuedPr, 1],
+    ['e2e skipped with host off', skip('e2e-full'), { HOST: 'false' }, 1],
+    ['fork without a queue', skip(...gates.e2e), { E2E: 'false', FORK_E2E: 'true' }, 1],
+  ]) assert.equal(run(needs, change), expected, name);
+  // Each job may be skipped under its own gate, and under no other.
+  const off = { full: queuedPush, host: { HOST: 'false' }, e2e: { E2E: 'false' } };
+  for (const [gate, jobs] of Object.entries(gates)) {
+    for (const job of jobs) {
+      assert.equal(run(skip(job), off[gate]), 0, `${job} under ${gate}`);
+      for (const other of Object.keys(gates).filter(name => name !== gate && name !== 'full')) {
+        assert.notEqual(run(skip(job), off[other]), 0, `${job} under ${other}`);
+      }
+    }
+  }
+  for (const value of ['true', '', 'unknown']) {
+    for (const gate of ['FULL', 'HOST', 'E2E']) assert.notEqual(run(skip(...gates[gate.toLowerCase()]), { [gate]: value }), 0, gate);
+    assert.notEqual(run(success, { FORK_E2E: value }), 0);
+  }
+  for (const key of all) {
+    for (const result of ['failure', 'cancelled']) assert.notEqual(run({ ...success, [key]: { result } }, queuedPush), 0, key);
+  }
+});
+
+test('gates skip what a queue tested and run everything otherwise', () => {
   // Approximation for these canonical inputs only: GitHub expressions differ
   // from JavaScript in truthiness and case-insensitive string comparisons.
   // The substring assertions above check wiring; this table checks scheduling.
   const vm = require('node:vm');
-  const expressions = Object.fromEntries(['e2e', 'fork-e2e'].map(key => [key,
+  const expressions = Object.fromEntries(['full', 'host', 'e2e', 'fork-e2e'].map(key => [key,
     ci.match(new RegExp(`      ${key}: \\$\\{\\{ (.*) \\}\\}`))[1]]));
   for (const event of ['pull_request', 'merge_group', 'push']) {
     for (const queue of ['true', 'false']) {
       for (const fork of [true, false]) {
         for (const paths of ['true', 'false']) {
-          const context = {
-            github: { event_name: event, repository: 'owner/repo', event: {
-              pull_request: { head: { repo: { full_name: fork ? 'fork/repo' : 'owner/repo' } } },
-            } },
-            steps: { queue: { outputs: { enabled: queue } }, paths: { outputs: { e2e: paths } } },
-          };
-          const deferred = event === 'pull_request' && queue === 'true';
-          const unavailable = event === 'pull_request' && fork;
-          assert.equal(vm.runInNewContext(expressions.e2e, context), deferred || unavailable ? 'false' : paths);
-          assert.equal(vm.runInNewContext(expressions['fork-e2e'], context), unavailable && !deferred && paths !== 'false');
+          for (const passed of event === 'push' ? ['true', 'false'] : [undefined]) {
+            const context = {
+              github: { event_name: event, repository: 'owner/repo', event: {
+                pull_request: { head: { repo: { full_name: fork ? 'fork/repo' : 'owner/repo' } } },
+              } },
+              steps: { queue: { outputs: { enabled: event === 'pull_request' ? queue : undefined } },
+                queued: { outputs: { passed } }, paths: { outputs: { e2e: paths } } },
+            };
+            const tested = passed === 'true';
+            const deferred = event === 'pull_request' && queue === 'true';
+            const unavailable = event === 'pull_request' && fork;
+            const evaluate = key => String(vm.runInNewContext(expressions[key], context));
+            assert.equal(evaluate('full'), String(!tested));
+            assert.equal(evaluate('host'), String(!tested && !deferred));
+            assert.equal(evaluate('e2e'), tested || deferred || unavailable ? 'false' : paths);
+            assert.equal(evaluate('fork-e2e'), String(unavailable && !deferred && paths !== 'false'));
+          }
         }
       }
     }
   }
 });
 
-test('review bootstrap checks trusted base files, including on merge groups', () => {
-  const block = ci.split('\n  review-base:\n')[1].split('\n  e2e-dispatch:\n')[0];
-  const expression = block.match(/ref: \$\{\{ (.*) \}\}/)[1];
-  const vm = require('node:vm');
-  for (const [pr, group, expected] of [
-    ['pr-base', 'group-base', 'pr-base'],
-    ['', 'group-base', 'group-base'],
-    ['', '', 'push-head'],
-  ]) {
-    assert.equal(vm.runInNewContext(expression, { github: {
-      event: { pull_request: { base: { sha: pr } }, merge_group: { base_sha: group } },
-      sha: 'push-head',
-    } }), expected);
+test('a push skips only a commit whose merge group run passed', async () => {
+  const source = githubScript('queued');
+  assert.match(block('changes'), /\n    permissions:\n      contents: read\n      actions: read #[^\n]*\n/);
+  assert.match(ci, /- id: queued\n        if: \$\{\{ github\.event_name == 'push' \}\}\n/);
+  const sha = 'a'.repeat(40);
+  const before = 'c'.repeat(40);
+  const passed = async (runs, context = { repo: { owner: 'owner', repo: 'repo' }, sha, payload: { before } }) => {
+    let output;
+    await new AsyncFunction('github', 'context', 'core', source)({ rest: { actions: { listWorkflowRuns: async params => {
+      assert.deepEqual(params, { owner: 'owner', repo: 'repo', workflow_id: 'ci.yml', head_sha: sha,
+        event: 'merge_group', status: 'success', per_page: 10 });
+      if (runs instanceof Error) throw runs;
+      return { data: { workflow_runs: runs } };
+    } } } }, context, { setOutput: (key, value) => { assert.equal(key, 'passed'); output = value; } });
+    return output;
+  };
+  const group = { head_sha: sha, event: 'merge_group', conclusion: 'success',
+    head_branch: `gh-readonly-queue/main/pr-7-${before}` };
+  assert.equal(await passed([group]), true);
+  assert.equal(await passed([{ ...group, head_sha: 'b'.repeat(40) }, group]), true);
+  // The filters are the API's; what comes back is checked all the same.
+  for (const run of [{ head_sha: 'b'.repeat(40) }, { event: 'push' }, { conclusion: 'failure' }, { conclusion: null },
+    // A group built on another commit, as when one push lands two groups.
+    { head_branch: `gh-readonly-queue/main/pr-7-${'d'.repeat(40)}` }, { head_branch: `main-${before}` }]) {
+    assert.equal(await passed([{ ...group, ...run }]), false, JSON.stringify(run));
   }
+  assert.equal(await passed([]), false);
+  await assert.rejects(passed([{ ...group, head_branch: null }]));
+  const pushed = value => ({ repo: { owner: 'owner', repo: 'repo' }, sha, payload: { before: value } });
+  // A new branch's before is all zeros, which no queue branch is built on.
+  assert.equal(await passed([group], pushed('0'.repeat(40))), false);
+  for (const value of ['C'.repeat(40), '', undefined]) {
+    assert.equal(await passed([{ ...group, head_branch: `gh-readonly-queue/main/pr-7-${value}` }], pushed(value)), false, value);
+  }
+  await assert.rejects(passed(new Error('API unavailable')), /API unavailable/);
+});
+
+test('review bootstrap reads trusted base files, on pull requests only', () => {
   assert.match(ci, /pull_request and merge_group both run the proposed workflow/);
+  assert.match(ci, /- id: review\n        if: \$\{\{ github\.event_name == 'pull_request' \}\}\n        env:\n          BASE: \$\{\{ github\.event\.pull_request\.base\.sha \}\}\n/);
+  assert.match(block('e2e-dispatch'), /profile: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '\["research","review"\]' \|\| '\["research"\]'\) \}\}/);
+  const root = fs.mkdtempSync(path.join(os.homedir(), 'ci-test-'));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  const files = ['workflow/review.md', 'workflow/review.toml', '.github/agentic-job/e2e/review.sh'];
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'Test');
+    git('config', 'user.email', 'test@example.invalid');
+    const commit = names => {
+      git('rm', '-rqf', '--ignore-unmatch', '.');
+      for (const name of names) {
+        fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
+        fs.writeFileSync(path.join(root, name), 'x');
+      }
+      fs.writeFileSync(path.join(root, 'code.rs'), String(Math.random()));
+      git('add', '-A');
+      git('commit', '-qm', 'commit');
+      return git('rev-parse', 'HEAD');
+    };
+    const output = path.join(root, 'output');
+    // As GitHub runs a step: bash -e.
+    const review = base => {
+      fs.writeFileSync(output, '');
+      return spawnSync('bash', ['-e', '-c', stepScript('review')], {
+        cwd: root, encoding: 'utf8', env: { ...process.env, BASE: base, GITHUB_OUTPUT: output },
+      });
+    };
+    const installed = base => {
+      const result = review(base);
+      assert.equal(result.status, 0, result.stderr);
+      return fs.readFileSync(output, 'utf8').trim();
+    };
+    const base = commit(files);
+    for (const missing of files) assert.equal(installed(commit(files.filter(name => name !== missing))), 'installed=false', missing);
+    assert.equal(installed(commit(['workflow/review.md/nested', ...files.slice(1)])), 'installed=false');
+    // The base's files, whatever the checked-out head has.
+    commit([]);
+    assert.equal(installed(base), 'installed=true');
+    // A base that is not there fails the gate rather than skip the review.
+    for (const missing of ['b'.repeat(40), '']) {
+      assert.notEqual(review(missing).status, 0, missing);
+      assert.equal(fs.readFileSync(output, 'utf8'), '');
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('merge-group analysis uses a branch name, not a fully qualified ref', () => {
-  const source = ci.split('      - id: merge-base\n')[1].split('      # Effective branch rules')[0]
-    .split('          script: |\n')[1].trim().split('\n').map(line => line.trim()).join('\n');
+  const source = githubScript('merge-base');
   const run = ref => {
     let branch;
     new Function('context', 'core', source)(
@@ -137,9 +258,7 @@ test('merge-group analysis uses a branch name, not a fully qualified ref', () =>
 });
 
 test('queue detection fails closed and sentinel rejects non-success', async () => {
-  const source = ci.split('      - id: queue\n')[1].split('      - uses: actions/checkout@')[0]
-    .split('          script: |\n')[1].trim().split('\n').map(line => line.trim()).join('\n');
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const source = githubScript('queue');
   const detect = new AsyncFunction('github', 'context', 'core', source);
   const context = { repo: { owner: 'owner', repo: 'repo' }, payload: { pull_request: { base: { ref: 'main' } } } };
   for (const rules of [[], [{ type: 'merge_queue' }], [{ type: 'required_status_checks' }]]) {
@@ -160,7 +279,7 @@ test('queue detection fails closed and sentinel rejects non-success', async () =
 });
 
 test('E2E callers, concurrency and apt safeguards remain wired', () => {
-  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
+  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
     const block = ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z-]*:\n/)[0];
     assert.match(block, /needs:.*changes/);
     assert.match(block, /if:.*needs\.changes\.outputs\.e2e == 'true'/);

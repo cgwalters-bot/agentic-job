@@ -562,8 +562,8 @@ These limitations are not additional guarantees:
   other branches are left as they are, and the credential that pushes to it
   can push to every other repository its user owns.
 - Under RC-021 every agent's pull request is a fork's: this repository's
-  CI runs no end-to-end job for it (they run on the push to main once it
-  is merged), and the event and review callers refuse it unless their
+  CI runs no end-to-end job for it (they run in the merge queue, or on
+  the push to main once it is merged without one), and the event and review callers refuse it unless their
   bounds say `forks = true`.
 - Patch author identity is not bound to the producer or operator; see
   [issue 22](https://github.com/cgwalters-forge/agentic-job/issues/22).

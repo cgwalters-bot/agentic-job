@@ -389,7 +389,17 @@ the read-only `changes` job queries the base branch's effective rules. With a
 `merge_group` runs the end-to-end callers with this repository's job tokens.
 Without a queue, same-repository pull requests also run those callers. A rules
 API failure fails the gate rather than guessing that testing can be deferred.
-Pushes to main retain the existing suite. The
+With a queue, pull requests also leave the privileged host jobs (sandbox
+probes, secure-host, world-write, confined, session-sandbox) to the merge
+group, so a pull request learns of their failures only when queued.
+A push to main whose commit already has a successful `merge_group` run of
+this workflow, built on the commit main was at before, runs only `changes`,
+`secure-host-published` and the gate: the queue fast-forwards main to the
+tested commit, and repeating its jobs only held runner slots under the
+account's limit on concurrent jobs. Any other push runs the whole suite; a
+failed look-up fails the gate. The cost: a flaky test that passed in the
+queue is not run again on main, and main saves no fresh Rust caches, so after
+a dependency change jobs restore an older cache by prefix while one is kept. The
 [ingress workflow](workflow-ingress.md#merge-queue) also runs for merge groups;
 the ruleset requires its `vet` context besides `ci`, whose aggregate does not
 include it. A merge group runs the queued pull request's
@@ -408,9 +418,12 @@ approval of the current head for any apply-opened PR. Workflow and action edits
 (`.github/**`, `action.yml`/`action.yaml`) are examples, not the whole boundary:
 the queued tree's binary and host scripts also run outside the sandbox with
 write or OIDC authority. This restriction is not implemented here: part 3
-remains follow-up work. Event/review callers report successful policy refusals
-on merge groups, rather than trying to find a triggering pull request; dispatch
-omits its PR-only review profile. Their verifiers handle these events explicitly.
+remains follow-up work. The event caller reports a successful policy refusal
+on merge groups, rather than trying to find a triggering pull request. The
+review caller's would be another refusal, so `e2e-review` runs on pull requests
+only (that `workflow/review.toml` refuses merge groups and pushes is left to
+the crate's `review_caller_bounds_gate_roles` test), and dispatch omits its
+PR-only review profile. Their verifiers handle these events explicitly.
 
 The rules API's acceptance of percent-encoded slashes in base branch names has
 not been verified live; an API rejection fails `changes` and the `ci` gate closed.
@@ -434,9 +447,9 @@ CI green without reviewing that pre-landing authority.
 The path check uses the complete
 Git diff (PR merge base to head, merge-group base to head, or push before to after), without an API's
 changed-file pagination limit. Only `README.md` and Markdown under `docs/`
-skip the `e2e-*` callers, `review-base` and their write-capable verifier.
+skip the `e2e-*` callers and their write-capable verifier.
 Renames check both names; empty diffs, missing history and unknown events run
-the suite. Other checks, including sandbox probes, still run. In particular,
+the suite. Other checks, including sandbox probes, still run where the queue does not defer them. In particular,
 `workflow/review.md` is executable reviewer input, not documentation for this
 filter. Workflow, sandbox, policy, fixtures and checks changes run every caller.
 The aggregate accepts only those named skips when `changes` explicitly reports
@@ -876,8 +889,8 @@ with a listed role, which the plain `example.yml` does not check.
 CI's `e2e-event` job calls the workflow with `event: true` on same-repository pull
 request of this repository, where the event is admitted and the
 scripted agent's comment lands on the pull request under the status
-comment, and on every push to main, where `push` is not among the
-bounds' events and the run ends in the policy job.
+comment, and on merge groups and untested pushes to main, where those
+events are not among the bounds' events and the run ends in the policy job.
 
 ### GitHub reads from the agent
 

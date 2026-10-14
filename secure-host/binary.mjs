@@ -42,7 +42,7 @@ export const REPOSITORY = "cgwalters-forge/agentic-job";
 // What the binaries are built from. Whatever the build comes to read from
 // elsewhere (an `include_str!` of a file outside these, a toolchain file)
 // has to be added, or a job would take a release for its own source when
-// it is not; CI's `release-pin` looks for the first of those. This file
+// it is not; CI's `lint` job looks for the first of those. This file
 // decides what a release holds: a release published before that changed
 // lacks a file this one requires, and must not be taken for this source.
 // `skills` and `workflow/review.md` are the agents' skills, built in.

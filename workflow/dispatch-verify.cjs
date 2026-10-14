@@ -11,8 +11,8 @@ assert.equal(composed, 'success', 'the composed example must succeed');
 const api = endpoint => JSON.parse(execFileSync('gh', ['api', '--paginate', '--slurp', endpoint], { encoding: 'utf8' })).flat();
 const comments = item => api(`repos/${repo}/issues/${item}/comments`)
   .filter(comment => comment.user.login === 'github-actions[bot]' && comment.body.includes(run));
-// Triage, research and the composed example each comment once.
-assert.equal(comments(64).filter(comment => comment.body.includes('Scripted dispatch completed.')).length, 3);
+// Research and the composed example each comment once.
+assert.equal(comments(64).filter(comment => comment.body.includes('Scripted dispatch completed.')).length, 2);
 if (pr) {
   assert.match(head, /^[0-9a-f]{40}$/);
   const verdicts = comments(pr).filter(comment => comment.body.startsWith('VERDICT: APPROVE\nREASON: Scripted dispatch'));

@@ -837,6 +837,26 @@ const REVIEW_CASES: &[ReviewCase] = &[
         pull_request: Some("pull-13-fork.json"),
         refused: None,
     },
+    // CI's e2e-review runs on pull requests only: these refusals are not
+    // exercised end to end. The event name is checked before the payload.
+    ReviewCase {
+        name: "a merge group",
+        event_name: "merge_group",
+        event: "pull_request-same-repo.json",
+        actor: "alice",
+        permission: None,
+        pull_request: None,
+        refused: Some("do not let a merge_group event"),
+    },
+    ReviewCase {
+        name: "a push",
+        event_name: "push",
+        event: "pull_request-same-repo.json",
+        actor: "alice",
+        permission: None,
+        pull_request: None,
+        refused: Some("do not let a push event"),
+    },
 ];
 
 /// The bounds review.yml's `allow:` picks for an event: this mirrors the

@@ -324,11 +324,13 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(apply, /if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
   assert.doesNotMatch(apply, /pull_request.head|refs\/pull/);
   const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
-  assert.match(ci, /e2e-review:\s+needs: \[changes, review-base\]/);
+  // Whether the base has the review files is read from the base commit.
+  assert.match(ci, /e2e-review:\s+needs: changes\n\s+if: \$\{\{ needs\.changes\.outputs\.e2e == 'true' && needs\.changes\.outputs\.review == 'true' \}\}/);
+  assert.match(ci, /git cat-file -t "\$BASE:\$file"/);
   assert.match(ci, /Exactly one scripted verdict was posted/);
   assert.match(ci, /HEAD_SHA: \$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(ci, /contains\("Reviewed SHA: " \+ \$sha \+ "\\n"\)/);
-  assert.match(ci, /\.key == "e2e-review" and \.value.result == "skipped" and \$installed == "false"/);
+  assert.match(ci, /\(\.key == "e2e-review" and \$review != "true"\)/);
 });
 
 test('target events read workflow policy without changing the trusted review base', () => {

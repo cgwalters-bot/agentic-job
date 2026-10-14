@@ -258,7 +258,8 @@ test('CI verifies actual dispatch comments and pinned SHA, not only job success'
   const source = fs.readFileSync(path.join(root, 'workflow/dispatch-verify.cjs'), 'utf8');
   const head = 'a'.repeat(40);
   const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
-  const completed = [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')];
+  // Research and the composed example.
+  const completed = [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')];
   const verify = (change = {}) => {
     const repo = change.repo ?? 'owner/repo';
     const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147',
