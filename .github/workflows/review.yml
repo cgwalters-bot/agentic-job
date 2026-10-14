@@ -36,10 +36,18 @@ jobs:
     # close and reopen one, to drain the broker's shared cap and stall
     # every other run. GitHub sets author_association; the author cannot.
     # Their pull requests are reviewed on a `/review` from someone with
-    # write access (docs/review.md).
+    # write access (docs/review.md). Bots are none of these; one whose
+    # numeric user id the repository variable REVIEW_BOT_IDS lists (a JSON
+    # array, unset by default) is reviewed too, so that Dependabot's daily
+    # updates need no `/review`. The id, not the login, because GitHub
+    # never reassigns it; a user's id there admits nobody, being no Bot.
+    # Its bounds must also list the bot's login (review.toml `bots`). Not
+    # an array, the value would be searched as text, matching part ids.
     if: >-
       (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
+        (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
+          (github.event.pull_request.user.type == 'Bot' && startsWith(vars.REVIEW_BOT_IDS, '[') &&
+            contains(fromJSON(vars.REVIEW_BOT_IDS || '[]'), github.event.pull_request.user.id)))) ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     # The policy job reads; activate and notify have nothing to do.
@@ -57,7 +65,7 @@ jobs:
       max-outputs: '1'
       notify: none
       # Any role, forks included, for the automatic events (the `if:` above
-      # narrows them to owner, members and collaborators); `/review` from
+      # narrows them to owner, members, collaborators and listed bots); `/review` from
       # someone who can write.
       allow: ${{ github.event_name == 'issue_comment' && 'workflow/review-command.toml' || 'workflow/review.toml' }}
       # The runner's configuration, as dispatch.yml picks it: the caller's

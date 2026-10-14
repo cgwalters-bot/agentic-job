@@ -61,7 +61,8 @@ Per-author or per-window limits on admitted runs need a fresh design under
 `cooldown`/`max-runs-per-user` history protocol was removed with the pull
 request review ([#466](https://github.com/cgwalters-forge/agentic-job/issues/466)).
 Until then [review](review.md) starts automatic reviews only for the owner,
-members and collaborators, and the broker's shared cap bounds spending.
+members, collaborators and bots the repository lists by id, and the
+broker's shared cap bounds spending.
 The offline audit command is already implemented.
 
 [`workflows check`](workflows-check.md) exists as a command

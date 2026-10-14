@@ -1,7 +1,9 @@
 # Copy with review.yml, review-command.toml and review.md; set repos and
 # bases for the caller. The automatic events: any role's pull request,
 # forks included; review.yml's `if:` narrows them to the owner, members
-# and collaborators, to protect the shared inference cap.
+# and collaborators, to protect the shared inference cap, and to bots whose
+# user id the REVIEW_BOT_IDS variable lists. Such a bot must also be named
+# in `bots`: these bounds check the actor, the `if:` the author.
 # The agent reviews the head as data, without a credential.
 hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
@@ -17,5 +19,6 @@ noop = { max = 1 }
 [trigger]
 events = ["pull_request_target", "pull_request"]
 roles = ["all"]
-bots = []
+# A `[bot]` login is a GitHub App's; no user can take it.
+bots = ["dependabot[bot]"]
 forks = true

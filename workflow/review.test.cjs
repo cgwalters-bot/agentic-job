@@ -8,6 +8,21 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch } = require('./review.cjs');
 
+// The policy job's `if:` as a function of the event context and the
+// repository variables: GitHub's expression syntax is close enough to
+// JavaScript for the functions it uses, with missing properties null.
+function policyStarts(job) {
+  const expression = job.match(/\n    if: >-\n((?: {6}.*\n)+)/)[1]
+    .replace(/\b(github|vars)((?:\.\w+)+)/g, (_, root, rest) => root + rest.replaceAll('.', '?.'));
+  const fromJSON = JSON.parse;
+  const contains = (search, item) => Array.isArray(search)
+    ? search.some(element => element == item)
+    : String(search).toLowerCase().includes(String(item).toLowerCase());
+  const startsWith = (text, prefix) => String(text).toLowerCase().startsWith(String(prefix).toLowerCase());
+  const evaluate = Function('github', 'vars', 'fromJSON', 'contains', 'startsWith', `return Boolean(${expression});`);
+  return (github, vars) => evaluate(github, vars, fromJSON, contains, startsWith);
+}
+
 const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
   item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
 
@@ -413,7 +428,32 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(jobs.status, /runs-on: ubuntu-26.04/);
   // Automatic reviews only for the owner, members and collaborators;
   // anyone else, a past contributor included, waits for a `/review`.
-  assert.match(jobs.policy, /github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&\s+contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github.event.pull_request.author_association\)\) \|\|/);
+  // A bot only by its user id in REVIEW_BOT_IDS, and only a Bot.
+  const starts = policyStarts(jobs.policy);
+  const dependabot = { login: 'dependabot[bot]', id: 49699333, type: 'Bot' };
+  const listed = { REVIEW_BOT_IDS: '[49699333]' };
+  for (const [name, author, vars, started, extra = {}] of [
+    ['the owner', { type: 'User', id: 1 }, {}, true, { author_association: 'OWNER' }],
+    ['a collaborator', { type: 'User', id: 1 }, {}, true, { author_association: 'COLLABORATOR' }],
+    ['a past contributor', { type: 'User', id: 1 }, listed, false, { author_association: 'CONTRIBUTOR' }],
+    ['a collaborator\'s draft', { type: 'User', id: 1 }, {}, false, { author_association: 'COLLABORATOR', draft: true }],
+    ['Dependabot, listed', dependabot, listed, true],
+    ['Dependabot, listed as a string', dependabot, { REVIEW_BOT_IDS: '["49699333"]' }, true],
+    ['Dependabot, nothing listed', dependabot, {}, false],
+    ['Dependabot, its id not in an array', dependabot, { REVIEW_BOT_IDS: '49699333' }, false],
+    ['a bot whose id is part of a listed one', { login: 'x[bot]', id: 4969, type: 'Bot' }, { REVIEW_BOT_IDS: '"49699333"' }, false],
+    ['Dependabot, another bot listed', dependabot, { REVIEW_BOT_IDS: '[29139614]' }, false],
+    ['Dependabot\'s draft', dependabot, listed, false, { draft: true }],
+    ['another bot', { login: 'renovate[bot]', id: 29139614, type: 'Bot' }, listed, false],
+    ['a bot with Dependabot\'s login', { login: 'dependabot[bot]', id: 7, type: 'Bot' }, listed, false],
+    ['a user with a listed id', { login: 'mallory', id: 49699333, type: 'User' }, listed, false],
+  ]) {
+    const pull = { draft: false, author_association: 'NONE', user: author, ...extra };
+    assert.equal(starts({ event_name: 'pull_request_target', event: { pull_request: pull } }, vars), started, name);
+  }
+  const comment = body => ({ event_name: 'issue_comment', event: { issue: { pull_request: {} }, comment: { body } } });
+  assert.equal(starts(comment('/review'), {}), true);
+  assert.equal(starts(comment('please /review'), {}), false);
   assert.match(checker, /core.setOutput\('verdict', checkOutputs\(/);
   const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   assert.match(policy, /inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\)/);

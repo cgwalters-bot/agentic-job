@@ -12,10 +12,17 @@ request, including one from someone with commits already merged here
 (`CONTRIBUTOR`), is reviewed when someone with write access comments
 `/review`, which keeps the role check
 ([`review-command.toml`](../workflow/review-command.toml)). Bots
-are refused unless listed, so a bot's pull request gets no `review` status:
-none is listed today. This repository's Dependabot pull requests are
-therefore reviewed only when someone with write access comments `/review`,
-and where `review` is a required status they wait for that comment. The
+start no automatic review unless the repository variable `REVIEW_BOT_IDS`,
+a JSON array, lists the bot author's numeric user id, which GitHub never
+reassigns, and the bounds' `bots` list its login. `review.toml` lists only
+`dependabot[bot]`; setting `REVIEW_BOT_IDS` to `[49699333]`, Dependabot's
+id on github.com, has its pull requests reviewed without a `/review`.
+Unset, the default, every bot's pull request waits for that comment. Set,
+the agent reads such a pull request's text, upstream release notes
+included, without anyone having asked: it is data to a sandboxed agent
+without a credential, but it can steer the verdict. Dependabot has no
+write access, so, as below, a person with write access still has to
+approve the merge: the review saves the `/review`, not that approval. The
 workflow, the bounds and the
 [standing task](../workflow/review.md) come from the trusted caller, never the
 head. On `pull_request_target`, policy and task files are read at
@@ -243,6 +250,7 @@ needs these repository or organization variables, and no secret:
 | `AGENT_RUNNER` | optional, a runner label as JSON |
 | `AGENT_CONFIG` | optional, the caller's runner configuration file; default this repository's [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit, written for `ubuntu-26.04` |
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
+| `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the status job's

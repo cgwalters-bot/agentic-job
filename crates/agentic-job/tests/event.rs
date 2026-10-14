@@ -774,6 +774,35 @@ const REVIEW_CASES: &[ReviewCase] = &[
         pull_request: None,
         refused: None,
     },
+    // review.yml's `if:` picks bots by user id; these bounds then check
+    // the actor by login, and list Dependabot alone.
+    ReviewCase {
+        name: "Dependabot's pull request",
+        event_name: "pull_request_target",
+        event: "pull_request-same-repo.json",
+        actor: "dependabot[bot]",
+        permission: None,
+        pull_request: None,
+        refused: None,
+    },
+    ReviewCase {
+        name: "another bot's pull request",
+        event_name: "pull_request_target",
+        event: "pull_request-same-repo.json",
+        actor: "renovate[bot]",
+        permission: None,
+        pull_request: None,
+        refused: Some("renovate[bot] is a bot the bounds do not list"),
+    },
+    ReviewCase {
+        name: "/review by Dependabot, whom only the automatic events admit",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "dependabot[bot]",
+        permission: None,
+        pull_request: Some("pull-13.json"),
+        refused: Some("dependabot[bot] is a bot the bounds do not list"),
+    },
     ReviewCase {
         name: "/review by a read-role user on a fork's pull request",
         event_name: "issue_comment",
@@ -917,6 +946,12 @@ fn review_caller_bounds_gate_roles() {
         let dir = tempfile::tempdir().expect("scratch directory");
         let mut event = review_fixture(case.event);
         event["sender"]["login"] = case.actor.into();
+        if case.actor.ends_with("[bot]") {
+            event["sender"]["type"] = "Bot".into();
+            if let Some(pull) = event.get_mut("pull_request") {
+                pull["user"]["login"] = case.actor.into();
+            }
+        }
         if let Some(comment) = event.get_mut("comment") {
             comment["body"] = "/review".into();
             comment["user"]["login"] = case.actor.into();
