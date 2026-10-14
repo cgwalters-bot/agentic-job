@@ -19,6 +19,10 @@
 //! the same limits, until the client leaves or sends none for the idle
 //! timeout (`conversation`).
 //!
+//! A task run whose turn ends well without the output the run requires
+//! (`Options::output`) is not done either: the agent gets one reminder
+//! turn, and the run fails if it still left none (`remind`).
+//!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
 //! agent runs in a login session of that user's, where a signal to the
@@ -48,7 +52,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::agents::AgentSpec;
 use super::bridge::{Bridge, FromClient};
-use super::budget::{Budget, LABEL_HAND_BACK, Limits, Signal, Stop, Usage, hand_back_text};
+use super::budget::{
+    Budget, LABEL_HAND_BACK, LABEL_REMINDER, Limits, Signal, Stop, Usage, hand_back_text,
+};
 use super::clients::Clients;
 use super::digest::{self, Dir};
 use super::permission::{self, Policy, Request, pick_option};
@@ -81,6 +87,20 @@ const HANDING_BACK: &str = "the task's turn ended on an error: the agent is to h
 /// may have cleared by then. Never longer than the hand-back window, so
 /// a short run is not held up for it.
 const ERROR_PAUSE: Duration = Duration::from_secs(60);
+/// What the agent is told once when it ended its task's turn without the
+/// output the run requires. It names no output type, not even `noop`:
+/// which ones the run allows is the brief's to say.
+const REMINDER: &str = "You ended your turn without the output this run requires. Hand it back \
+                        now, as the brief at the start of the task says; if there is nothing to \
+                        hand back, say why in a request the brief allows.";
+const NO_OUTPUT: &str = "the agent ended its turn without the output the run requires, even \
+                         after a reminder";
+
+/// Whether the agent has left the output its run requires. It runs
+/// commands (as the sandbox user), so it is called off the runtime, and
+/// starts none once its flag is set: the session sets it when it stops
+/// waiting for the check, before it stops what the sandbox user runs.
+pub type OutputCheck = Arc<dyn Fn(&AtomicBool) -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -131,6 +151,10 @@ pub struct RunResult {
     /// finished a turn in which it was asked to hand back.
     #[serde(default)]
     pub handed_back: bool,
+    /// The agent ended its task's turn without the output the run
+    /// requires, and was reminded once.
+    #[serde(default)]
+    pub reminded: bool,
 }
 
 impl RunResult {
@@ -187,6 +211,12 @@ pub struct Options {
     pub bridge: Option<Bridge>,
     /// Where the condensed transcript goes, a line per event.
     pub log: Log,
+    /// Whether the agent has left the output the run requires; none for a
+    /// run that requires none. A task's turn that ends well without it
+    /// earns one reminder turn, and fails the run if that does not help:
+    /// an agent that answers `end_turn` having forgotten its output (as
+    /// after a compaction of its context) would otherwise pass for done.
+    pub output: Option<OutputCheck>,
 }
 
 /// Watches the budget for the whole run, from before the session exists:
@@ -291,6 +321,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         mut clients,
         bridge,
         log,
+        output,
     } = opts;
     // A cap that nothing counts would be no cap, and silently: the
     // caller drops it, knowing so, or supplies the count.
@@ -340,6 +371,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         prompt: &prompt,
         notices: spec.notices,
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
+        output,
     };
     let started = chrono::Utc::now();
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
@@ -411,6 +443,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         mut stop_reason,
         mut message,
         handed_back,
+        reminded,
         ..
     } = ended;
     let transcript = tap.finish();
@@ -446,6 +479,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         limits,
         // A transcript that couldn't be written fails the run all the same.
         handed_back: handed_back && outcome != Outcome::Failure,
+        reminded,
     };
     let path = out.join(RESULT_FILE);
     std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
@@ -475,6 +509,7 @@ struct Task<'a> {
     /// How long the agent gets to hand back after its turn ended on an
     /// error: as long as near a limit.
     hand_back_window: Duration,
+    output: Option<OutputCheck>,
 }
 
 /// Speaks ACP with a started agent, over its standard input and output,
@@ -561,8 +596,11 @@ async fn drive(
     };
     // A failure is usually the agent having died, and its exit status and
     // last words say more than the request that happened to be waiting.
+    // Not so for an agent that answered its reminder: the session failed
+    // it, and it exits only because its standard input closed.
+    let answered_reminder = ended.reminded && ended.stop_reason.is_some();
     let exited = match ended.outcome {
-        Outcome::Failure => tokio::time::timeout(EXIT_GRACE, agent.wait())
+        Outcome::Failure if !answered_reminder => tokio::time::timeout(EXIT_GRACE, agent.wait())
             .await
             .ok()
             .and_then(Result::ok),
@@ -613,6 +651,8 @@ struct Ended {
     /// The agent answered its turn with an error, or said the provider
     /// refused its request: it may still be able to hand back.
     errored: bool,
+    /// The agent was reminded of the output the run requires.
+    reminded: bool,
 }
 
 impl Ended {
@@ -623,6 +663,7 @@ impl Ended {
             message: Some(message),
             handed_back: false,
             errored: false,
+            reminded: false,
         }
     }
 
@@ -650,6 +691,7 @@ impl Ended {
             message: Some(message),
             handed_back: false,
             errored: false,
+            reminded: false,
         }
     }
 
@@ -667,6 +709,7 @@ impl Ended {
             message: Some(format!("{msg}; {how}")),
             handed_back,
             errored: false,
+            reminded: false,
         }
     }
 }
@@ -808,10 +851,17 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 }
                 let goes_on = ended.outcome == Outcome::Success
                     || (client_cancelled && ended.outcome == Outcome::Cancelled);
-                let Some(talk) = conversation.take().filter(|_| goes_on) else {
-                    return ended;
-                };
                 let link = Link { cx: &cx, tap, sid: &sid, cancelling: &cancelling, notices: task.notices };
+                let Some(talk) = conversation.take().filter(|_| goes_on) else {
+                    // A conversation's client sees for itself what the
+                    // agent left; a task run's turn is the run.
+                    return match &task.output {
+                        Some(check) if ended.outcome == Outcome::Success => {
+                            remind(&link, &mut stop, &mut nudges, check, ended).await
+                        }
+                        _ => ended,
+                    };
+                };
                 return match converse(&link, &mut stop, &mut nudges, talk).await {
                     Talked::Ended(ended) => ended,
                     Talked::HandBack { why, text, window } => {
@@ -981,6 +1031,111 @@ async fn after_error(
     match limit(stop) {
         Some(why) => limited(&why),
         None => errored,
+    }
+}
+
+/// Whether CHECK finds the agent's output (a check that could not be run
+/// finds none), unless a limit stops the session first: the check runs
+/// git on the agent's checkout, which the agent can make slow.
+async fn has_output(
+    check: &OutputCheck,
+    stop: &mut watch::Receiver<Option<Stop>>,
+) -> Result<bool, Ended> {
+    /// Sets its flag when dropped: however the wait ends, the session
+    /// returning or its future dropped on a signal, the check goes no
+    /// further than the command it is in, which the reaping then kills.
+    struct Abandon(Arc<AtomicBool>);
+    impl Drop for Abandon {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let abandon = Abandon(Arc::default());
+    let (check, stopped) = (check.clone(), abandon.0.clone());
+    tokio::select! {
+        found = tokio::task::spawn_blocking(move || check(&stopped)) => Ok(found.unwrap_or(false)),
+        why = wait_stop(stop) => Err(match why {
+            Some(why) => Ended::stopped(&why, false),
+            None => Ended::failure(LOST_STOP_SIGNAL.to_owned()),
+        }),
+    }
+}
+
+/// After the task's turn ENDED well: if the agent left no output that the
+/// run requires, one more turn in which it is reminded, under the same
+/// limits. A run whose agent still left none fails, rather than end well
+/// with nothing to show for it.
+async fn remind(
+    link: &Link<'_>,
+    stop: &mut watch::Receiver<Option<Stop>>,
+    nudges: &mut mpsc::UnboundedReceiver<Nudge>,
+    check: &OutputCheck,
+    ended: Ended,
+) -> Ended {
+    match has_output(check, stop).await {
+        Ok(true) => return ended,
+        Ok(false) => {}
+        Err(stopped) => return stopped,
+    }
+    let Link {
+        cx,
+        tap,
+        sid,
+        cancelling,
+        ..
+    } = *link;
+    tap.log(&[
+        "⚠ the agent ended its turn without its required output: reminding it once".to_owned(),
+    ]);
+    let request = notice_prompt(sid, LABEL_REMINDER, REMINDER.to_owned());
+    let mut response = std::pin::pin!(cx.send_request(request).block_task());
+    let answer = loop {
+        tokio::select! {
+            biased;
+            r = &mut response => break prompt_result(r, tap),
+            why = wait_stop(stop) => {
+                break stop_turn(cx, tap, sid, cancelling, why, response.as_mut()).await;
+            }
+            Some(nudge) = nudges.recv() => match nudge {
+                // The reminder is all the agent is to do now.
+                Nudge::Notice { .. } => {}
+                // Near a limit, as in the task's turn: interrupted, it is
+                // asked to hand back.
+                Nudge::HandBack { why, text, window } => {
+                    tap.log(&[format!(
+                        "⚠ {}: interrupting the agent to hand back",
+                        stopped(&why).1
+                    )]);
+                    let ended = match cancel_turn(cx, sid, cancelling, response.as_mut()).await {
+                        Some(Ok(_)) => hand_back(link, stop, &why, text, window).await,
+                        _ => Ended::stopped(&why, false),
+                    };
+                    return Ended {
+                        reminded: true,
+                        ..ended
+                    };
+                }
+            },
+        }
+    };
+    let reminded = Ended {
+        reminded: true,
+        ..answer
+    };
+    if reminded.outcome != Outcome::Success {
+        return reminded;
+    }
+    match has_output(check, stop).await {
+        Ok(true) => reminded,
+        Ok(false) => Ended {
+            reminded: true,
+            stop_reason: reminded.stop_reason,
+            ..Ended::failure(NO_OUTPUT.to_owned())
+        },
+        Err(stopped) => Ended {
+            reminded: true,
+            ..stopped
+        },
     }
 }
 
@@ -1291,6 +1446,7 @@ fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>, tap: &
                 message,
                 handed_back: false,
                 errored: false,
+                reminded: false,
             };
             match tap.refusal().filter(|_| outcome == Outcome::Success) {
                 Some(said) => Ended {

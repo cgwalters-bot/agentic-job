@@ -34,6 +34,7 @@
 //! clone then leaves no registration behind for the proxy to remember.
 
 pub mod agent;
+pub mod agent_log;
 pub mod brief;
 pub mod clone;
 pub mod egress;
@@ -577,6 +578,19 @@ impl Plan {
                 )
             })
             .transpose()?;
+        // Run as the sandbox user, as the hand-back is: the files are the
+        // agent's.
+        let output = handback::requires_output(&self.policy).then(|| {
+            let (sandbox, policy) = (self.sandbox.clone(), self.policy.clone());
+            let checkout = prepared.checkout.clone();
+            Arc::new(move |stopped: &AtomicBool| {
+                let runner = Stoppable {
+                    sandbox: &sandbox,
+                    stopped,
+                };
+                handback::has_output(&runner, &sandbox.home, &checkout, &policy)
+            }) as session::OutputCheck
+        });
         let options = Options {
             name: self.kind.as_str().to_owned(),
             agent: spec,
@@ -605,6 +619,7 @@ impl Plan {
                 condensed,
                 redactor.clone(),
             )),
+            output,
         };
         Ok((options, counter, redactor))
     }
@@ -628,11 +643,12 @@ impl Plan {
     ) -> Result<()> {
         let staging = &self.staging;
         let harness_dir = self.work.join(HARNESS_DIR);
+        let runner = Stoppable {
+            sandbox: &self.sandbox,
+            stopped,
+        };
         let change = handback::collect(&handback::Request {
-            runner: &Stoppable {
-                sandbox: &self.sandbox,
-                stopped,
-            },
+            runner: &runner,
             home: &self.sandbox.home,
             checkout: &session.checkout,
             policy: &self.policy,
@@ -657,6 +673,15 @@ impl Plan {
                 }
             }
         }
+        // What the agent wrote to its own logs while the session ran.
+        let since = session.started.timestamp_millis() as f64 / 1000.0;
+        let agent_logs = agent_log::collect(
+            &runner,
+            &self.sandbox.home,
+            self.kind.log_dir(),
+            since,
+            &transcript,
+        )?;
         // What the agent reached, and what it was refused.
         let access_log = transcript.join(egress::TRANSCRIPT_NAME);
         if !egress::collect(
@@ -709,6 +734,7 @@ impl Plan {
                 .collect(),
             patch: change.patch,
             egress_denied: egress::denied_in(&access_log),
+            agent_logs,
             redactions: session.redactor.count(),
         };
         let mut summary = summary::summarize(&summary::Inputs {

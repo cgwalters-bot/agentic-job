@@ -263,6 +263,19 @@ error as the reason; if it doesn't, the run fails with the error. A
 limit the run reaches meanwhile stops it as any other time, and a bridge
 client's prompts meanwhile are refused.
 
+Nor is a task's turn that ends well without the output the run requires.
+A run whose policy allows any output requires one: a request in
+`out/safe-outputs.jsonl`, a replacement, or, where the policy carries a
+change, a change of the checkout. Agents have answered `end_turn` without
+theirs, after a compaction of their context, and the run ended well with
+nothing handed back (#607). The session then checks, as the sandbox user,
+and asks once more in a prompt of its own, labelled `reminder`, under the
+same limits. If the agent still left none, the run fails, exit state 1.
+`reminded` in `harness.json` and `summary.json` says a reminder was sent.
+The check only decides the reminder; the hand-back is still collected and
+checked as before. A run with a bridge client is not reminded: the
+client sees what the agent left.
+
 ## How a run ends
 
 The session's result becomes `run`'s exit state: 0 when the agent ended
@@ -272,3 +285,18 @@ after a turn that ended on an error), and 124 for the
 timeout. [interface.md](interface.md#exit-states) has the whole table,
 with the states that are `run`'s own. `handed_back` in `summary.json`
 says whether a stopped agent handed back.
+
+The transcript also holds `agent-logs.txt`: the agent's own log files
+written during the session, which may say what its standard error and
+ACP do not, such as a dropped model stream. They are read as the sandbox
+user from one directory under its home: `~/.config/agentic-job/vibe/logs`
+(the launch command turns Vibe's log on, as its ACP entrypoint does),
+`~/.local/share/opencode/log`, and `~/.claude/debug`, which Claude Code
+writes only with debugging on. Links are not followed; the newest 16
+files are taken, the last 4 MiB of each and 16 MiB in all, and redacted
+with the rest of the transcript. `agent_logs` in `summary.json` says what
+was taken, and the summary says when the directory is missing.
+
+Vibe sends its reasoning as message chunks holding Python reprs of
+thinking blocks; the condensed log and the rendered session read them as
+reasoning in plain text, as other agents' thought chunks.

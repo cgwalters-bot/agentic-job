@@ -302,6 +302,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
             clients: Clients::none(),
             bridge: None,
             log: Box::new(std::io::sink()),
+            output: None,
         }))
         .unwrap();
     assert_eq!(

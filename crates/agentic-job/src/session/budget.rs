@@ -108,6 +108,12 @@ pub const NOTICE_PREFIX: &str = "[bot-harness budget notice]";
 /// The labels of the notices that aren't a percentage.
 pub const LABEL_LAST_TASK: &str = "last task";
 pub const LABEL_HAND_BACK: &str = "hand back";
+/// The label of the one prompt that reminds an agent which ended its
+/// turn without the output its run requires (`session::OutputCheck`).
+pub const LABEL_REMINDER: &str = "reminder";
+/// The labels of the session's prompts that start a turn of their own,
+/// rather than being queued behind the running one.
+pub const TURN_LABELS: [&str; 2] = [LABEL_HAND_BACK, LABEL_REMINDER];
 
 /// Why the session was stopped.
 #[derive(Debug, Clone, PartialEq)]

@@ -1127,6 +1127,7 @@ fn session_view(config: &Config, entry: &Entry) {
         clients: Clients::none(),
         bridge: None,
         log: Box::new(std::io::sink()),
+        output: None,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

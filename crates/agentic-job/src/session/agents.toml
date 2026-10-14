@@ -33,14 +33,18 @@ notices = true
 # its library entrypoint with only the user source: a repository must not
 # redirect inference through .vibe/config.toml or project agent profiles.
 # Python isolated mode also excludes the checkout from its import path.
-# No notices until mid-turn prompt behavior is established.
+# No notices until mid-turn prompt behavior is established. Its log file,
+# which the run collects into the transcript, is turned on as its ACP
+# entrypoint does (capped by Vibe at 10 MiB).
 [vibe]
 command = ["/opt/agentic-job/vibe/bin/python3", "-I", "-c", '''
 import sys
-from vibe.core.paths import bootstrap_vibe_home
+from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
 from vibe.core.config.harness_files import init_harness_files_manager
+from vibe.observability.logging import init_file_logging
 bootstrap_vibe_home()
 init_harness_files_manager("user")
+init_file_logging(LOG_FILE.path)
 from vibe.acp.agent import run_acp_server
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)

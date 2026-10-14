@@ -59,6 +59,9 @@ pub struct Measured {
     pub patch: Value,
     /// Requests the egress proxy refused, per host.
     pub egress_denied: Vec<Value>,
+    /// What of the agent's own logs the transcript has
+    /// (`agent_log::collect`), or null.
+    pub agent_logs: Value,
     pub redactions: usize,
 }
 
@@ -266,6 +269,7 @@ pub fn summarize(inputs: &Inputs) -> Value {
         s.insert(OMITTED_BINARY_FILES.into(), omitted.clone());
     }
     s.insert("egress_denied".into(), json!(measured.egress_denied));
+    s.insert("agent_logs".into(), measured.agent_logs.clone());
     s.insert("redactions".into(), json!(measured.redactions));
     // The model the agent says the session runs, else the one asked for.
     let model = digest.model.clone().or_else(|| measured.model.clone());
@@ -299,6 +303,12 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert(
         "handed_back".into(),
         json!(inputs.result.is_some_and(|r| r.handed_back)),
+    );
+    // Whether the agent ended its turn without the output the run
+    // requires and was reminded of it once.
+    s.insert(
+        "reminded".into(),
+        json!(inputs.result.is_some_and(|r| r.reminded)),
     );
     s.insert("notices".into(), json!(digest.notices));
     s.insert("limits".into(), json!(inputs.result.map(|r| &r.limits)));
@@ -431,6 +441,29 @@ pub fn markdown(s: &Value) -> String {
             "the agent didn't hand back, so its change is whatever the working tree held"
         };
         out.extend([String::new(), format!("Stopped at a limit: {handed_back}.")]);
+    }
+    if s["reminded"] == true {
+        out.extend([
+            String::new(),
+            "The agent ended its turn without its required output and was reminded once."
+                .to_owned(),
+        ]);
+    }
+    let log_dir = || {
+        code(&json!(cut(s["agent_logs"]["dir"]
+            .as_str()
+            .unwrap_or_default())))
+    };
+    if s["agent_logs"]["missing"] == true {
+        out.extend([
+            String::new(),
+            format!("The agent left no log in {}.", log_dir()),
+        ]);
+    } else if s["agent_logs"]["error"].is_string() {
+        out.extend([
+            String::new(),
+            format!("The agent's logs in {} could not be read.", log_dir()),
+        ]);
     }
     if let Some(error) = s["patch"]["error"].as_str() {
         out.extend([
@@ -570,6 +603,7 @@ mod tests {
             files: vec!["FAKE.md".into()],
             patch: json!({"base": "abc", "bytes": 10}),
             egress_denied: Vec::new(),
+            agent_logs: json!({"dir": "~/logs", "files": 1, "omitted_files": 0, "truncated": false}),
             redactions: 2,
         }
     }
@@ -599,6 +633,7 @@ mod tests {
                 ..Limits::default()
             },
             handed_back,
+            reminded: false,
         }
     }
 
@@ -825,6 +860,7 @@ Redacted 1 string(s).
                 "files",
                 "patch",
                 "egress_denied",
+                "agent_logs",
                 "redactions",
             ] {
                 assert!(!s[key].is_null(), "{name}: {key}");
@@ -833,6 +869,46 @@ Redacted 1 string(s).
             assert_eq!(s["workflow"], "branch");
             assert_eq!(s["patch"]["bytes"], 10);
             assert!(s.get("not_copied").is_none());
+        }
+    }
+
+    /// A reminder, and an agent's log that was not there, are said.
+    #[test]
+    fn a_reminder_and_a_missing_log_are_said() {
+        let records = initialize();
+        let mut measured = measured();
+        let reminded = RunResult {
+            reminded: true,
+            ..result(Outcome::Failure, Some("no output"), false)
+        };
+        for (result, logs, said) in [
+            (
+                result(Outcome::Success, None, false),
+                measured.agent_logs.clone(),
+                false,
+            ),
+            (
+                reminded,
+                json!({"dir": "~/.claude/debug", "missing": true}),
+                true,
+            ),
+        ] {
+            measured.agent_logs = logs;
+            let s = summarize(&Inputs {
+                records: &records,
+                result: Some(&result),
+                measured: &measured,
+                outcome: &json!({}),
+                usage: None,
+            });
+            assert_eq!(s["reminded"], said);
+            let md = markdown(&s);
+            assert_eq!(md.contains("was reminded once"), said, "{md}");
+            assert_eq!(
+                md.contains("The agent left no log in `~/.claude/debug`."),
+                said,
+                "{md}"
+            );
         }
     }
 

@@ -651,7 +651,24 @@ fn a_run_from_clone_to_the_end_of_its_run() {
     assert_eq!(job.text("out/run/condensed.log"), got.stdout);
     let transcript = job.transcript();
     let names: Vec<&str> = transcript.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["acp.jsonl", "agent-stderr.log", "harness.json"]);
+    assert_eq!(
+        names,
+        [
+            "acp.jsonl",
+            "agent-logs.txt",
+            "agent-stderr.log",
+            "harness.json"
+        ]
+    );
+    // The agent's own log, which the demo writes, is in it; this policy
+    // allows no output, so none was required of the agent.
+    let logs = String::from_utf8_lossy(&transcript[1].1).into_owned();
+    assert!(
+        logs.contains("==> fake-agent.log <==\nfake-agent demo started\n"),
+        "{logs}"
+    );
+    assert_eq!(summary["agent_logs"]["files"], 1, "{summary:#}");
+    assert_eq!(summary["reminded"], false);
     // The agent was told where its hand-back goes, before the task.
     let acp = String::from_utf8_lossy(&transcript[0].1).into_owned();
     for want in [

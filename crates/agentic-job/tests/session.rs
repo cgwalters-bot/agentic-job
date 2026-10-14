@@ -84,6 +84,9 @@ struct Setup<'a> {
     model: Option<&'a str>,
     /// The registry's `provider-error` for the agent.
     provider_error: Option<&'a str>,
+    /// The file, under the test's directory, whose existence is the
+    /// output the run requires; none for a run that requires none.
+    output: Option<&'a str>,
 }
 
 /// What a test's client does on its end of the connection.
@@ -362,6 +365,10 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         clients: Clients::none(),
         bridge,
         log: Box::new(log.clone()),
+        output: setup.output.map(|name| {
+            let file = path(name);
+            Arc::new(move |_: &std::sync::atomic::AtomicBool| file.exists()) as session::OutputCheck
+        }),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -785,6 +792,7 @@ fn a_cap_nothing_counts_is_refused() {
         clients: Clients::none(),
         bridge: None,
         log: Box::new(std::io::sink()),
+        output: None,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1239,6 +1247,142 @@ fn a_turn_that_ends_on_an_error() {
         assert_eq!(r.result["handed_back"], c.handed_back, "{name}");
         assert_eq!(r.notices(), c.notices, "{name}");
         assert_eq!(r.path("work/partial.txt").exists(), c.handed_back, "{name}");
+        assert!(
+            r.elapsed < Duration::from_secs(30),
+            "{name}: took {:?}",
+            r.elapsed
+        );
+    }
+}
+
+/// A task's turn that ends well without the output the run requires is
+/// followed by one reminder turn, under the same limits; a run whose agent
+/// still left none fails (#607), and one that requires none is not
+/// reminded.
+#[test]
+fn a_turn_that_ends_without_the_required_output() {
+    const OUTPUT: &str = "work/output.txt";
+    const WRITE: &str = r#"[
+      {"write": {"title": "Write", "path": "{cwd}/output.txt", "content": "noop\n"}},
+      {"say": "Handed back."}
+    ]"#;
+    const NOTHING: &str = r#"[{"say": "Done, I think."}]"#;
+    let at_the_limit = format!(r#"[{}, {{"sleep": 60}}]"#, use_requests(100));
+    let near_the_limit = format!(r#"[{}, {{"sleep": 60}}]"#, use_requests(95));
+    struct Case<'a> {
+        name: &'a str,
+        script: &'a str,
+        later: &'a str,
+        output: Option<&'a str>,
+        count_requests: bool,
+        status: u8,
+        result: &'a str,
+        message: Option<&'a str>,
+        /// The prompts the session sent as notices.
+        notices: &'a [&'a str],
+    }
+    let cases = [
+        Case {
+            name: "the output is there when the turn ends",
+            script: WRITE,
+            later: WRITE,
+            output: Some(OUTPUT),
+            count_requests: false,
+            status: 0,
+            result: "success",
+            message: None,
+            notices: &[],
+        },
+        Case {
+            name: "the reminder has the agent leave its output",
+            script: NOTHING,
+            later: WRITE,
+            output: Some(OUTPUT),
+            count_requests: false,
+            status: 0,
+            result: "success",
+            message: None,
+            notices: &["reminder"],
+        },
+        Case {
+            name: "the agent leaves no output even after the reminder",
+            script: NOTHING,
+            later: NOTHING,
+            output: Some(OUTPUT),
+            count_requests: false,
+            status: 1,
+            result: "failure",
+            message: Some("without the output the run requires, even after a reminder"),
+            notices: &["reminder"],
+        },
+        Case {
+            name: "a run that requires no output is not reminded",
+            script: NOTHING,
+            later: WRITE,
+            output: None,
+            count_requests: false,
+            status: 0,
+            result: "success",
+            message: None,
+            notices: &[],
+        },
+        Case {
+            name: "a limit reached during the reminder stops it",
+            script: NOTHING,
+            later: &at_the_limit,
+            output: Some(OUTPUT),
+            count_requests: true,
+            status: 3,
+            result: "budget",
+            message: Some("used 100 of 100 model requests; cancelled"),
+            notices: &["reminder"],
+        },
+        Case {
+            name: "near a limit during the reminder, the agent is asked to hand back",
+            script: NOTHING,
+            later: &near_the_limit,
+            output: Some(OUTPUT),
+            count_requests: true,
+            status: 3,
+            result: "budget",
+            message: Some("model requests; cancelled"),
+            notices: &["reminder", "hand back"],
+        },
+    ];
+    for c in cases {
+        let name = c.name;
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                files: &[("script.json", c.script), ("later.json", c.later)],
+                // Three seconds to hand back in.
+                timeout_s: 60,
+                output: c.output,
+                count_requests: c.count_requests,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, c.status, c.result);
+        if let Some(part) = c.message {
+            let message = r.result["message"].as_str().unwrap_or_default();
+            assert!(message.contains(part), "{name}: {message}");
+        } else {
+            assert!(r.result["message"].is_null(), "{name}: {}", r.result);
+        }
+        let reminded = !c.notices.is_empty();
+        assert_eq!(r.result["reminded"], reminded, "{name}");
+        assert_eq!(r.notices(), c.notices, "{name}");
+        if reminded {
+            assert!(
+                r.log
+                    .contains("without its required output: reminding it once"),
+                "{name}: {}",
+                r.log
+            );
+        }
+        if c.status != 3 {
+            assert_eq!(r.result["stop_reason"], "end_turn", "{name}");
+        }
         assert!(
             r.elapsed < Duration::from_secs(30),
             "{name}: took {:?}",

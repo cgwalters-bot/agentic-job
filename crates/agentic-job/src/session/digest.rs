@@ -297,7 +297,7 @@ impl Digest {
                         }
                         // A notice queued behind the turn starts none; the
                         // hand-back does.
-                        if label.is_none_or(|l| l == super::budget::LABEL_HAND_BACK) {
+                        if label.is_none_or(|l| super::budget::TURN_LABELS.contains(&l)) {
                             self.new_message();
                         }
                     }
@@ -340,8 +340,9 @@ impl Digest {
         out
     }
 
-    /// A budget notice the harness sent: the hand-back starts a turn of
-    /// its own, the others are queued behind the one that is running.
+    /// A notice the harness sent: the hand-back and the reminder start a
+    /// turn of their own, the others are queued behind the one that is
+    /// running.
     fn notice(&mut self, label: &str, params: &Value, id: Option<&Value>, out: &mut Vec<String>) {
         self.flush_text(out);
         let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
@@ -351,7 +352,7 @@ impl Digest {
         out.push(cut(&format!("⚠ notice to the agent: {}", text.trim())));
         self.notices.push(label.to_owned());
         if let Some(id) = id
-            && label != super::budget::LABEL_HAND_BACK
+            && !super::budget::TURN_LABELS.contains(&label)
         {
             self.sent.insert(id_key(id), NOTICE_METHOD.to_owned());
         }
@@ -418,7 +419,12 @@ impl Digest {
     }
 
     fn update(&mut self, ts: f64, update: &Value, out: &mut Vec<String>) {
-        let kind = update["sessionUpdate"].as_str().unwrap_or_default();
+        // Vibe's thinking, sent as messages, is a thought like any other.
+        let chunk = super::vibe::chunk(update);
+        let kind = match &chunk {
+            Some((kind, _)) => kind,
+            None => update["sessionUpdate"].as_str().unwrap_or_default(),
+        };
         if kind != "agent_message_chunk" {
             self.flush_text(out);
         }
@@ -430,7 +436,7 @@ impl Digest {
                     self.message = MessageLine::default();
                     self.message_id = id.cloned();
                 }
-                if let Some(t) = update["content"]["text"].as_str() {
+                if let Some((_, t)) = &chunk {
                     self.text.push(t);
                     self.message.push(t);
                 }
@@ -962,6 +968,25 @@ mod tests {
             let (d, _) = lines(&msgs);
             assert_eq!(d.last_message(), want, "{name}");
         }
+    }
+
+    /// Vibe's thinking, sent as messages, is no message of the log's,
+    /// nor the last thing the agent said (#607).
+    #[test]
+    fn vibe_thinking_is_no_message() {
+        let thinking = json!({"sessionUpdate": "agent_message_chunk", "messageId": "m",
+            "content": {"type": "text", "text": "{'type': 'thinking', 'thinking': [{'type': 'text', 'text': 'Hmm'}], 'closed': True}"}});
+        let (d, out) = lines(&[
+            update(thinking.clone()),
+            update(
+                json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"type": "text", "text": "Done."}}),
+            ),
+        ]);
+        assert_eq!(out, ["» Done."]);
+        assert_eq!(d.last_message(), Some("Done."));
+        let (d, out) = lines(&[update(thinking)]);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(d.last_message(), None);
     }
 
     #[test]

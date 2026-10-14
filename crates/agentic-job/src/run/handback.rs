@@ -38,6 +38,9 @@ use crate::session::{Outcome, RunResult};
 /// account of the run.
 pub const AGENT_OUTPUTS: &str = "out/safe-outputs.jsonl";
 pub const AGENT_OUTCOME: &str = "out/outcome.json";
+/// Under the sandbox user's home: a whole series of commits that replaces
+/// a pull request's branch.
+const REPLACEMENT_PATH: &str = "out/replacement.json";
 /// The largest of each that is taken. `check` refuses a bigger requests
 /// file as well.
 pub const MAX_OUTPUTS_BYTES: usize = 1 << 20;
@@ -784,6 +787,58 @@ fn write(path: &Path, content: &[u8]) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Whether a run of POLICY must leave an output: one that allows any.
+/// A turn that ends without one is then not done (the session's
+/// `OutputCheck`).
+pub fn requires_output(policy: &Policy) -> bool {
+    policy.safe_outputs.types().next().is_some()
+}
+
+/// Whether the agent left something to hand back: a request, a
+/// replacement, or for a branch run that may carry one, a change of its
+/// checkout. Asked while the agent still runs, only to decide whether to
+/// remind it of its output: [`collect`] decides what is handed back. So a
+/// checkout git cannot read counts as changed, and a requests file over
+/// its limit as none (`check` would refuse it).
+pub fn has_output(runner: &dyn Runner, home: &Path, checkout: &Checkout, policy: &Policy) -> bool {
+    let requests = read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
+    if requests.is_some_and(|bytes| !bytes.trim_ascii().is_empty()) {
+        return true;
+    }
+    let replacement = home.join(REPLACEMENT_PATH);
+    let Ok(replacement) = clone::utf8(&replacement) else {
+        return true;
+    };
+    if ["-e", "-L"].iter().any(|test| {
+        runner
+            .run(&["test", test, replacement], b"", MAX_GIT_OUTPUT)
+            .is_ok_and(|output| output.success())
+    }) {
+        return true;
+    }
+    if policy.kind != Kind::Branch || policy.safe_outputs.patch_carrier().is_none() {
+        return false;
+    }
+    let Ok(dir) = clone::utf8(&checkout.dir) else {
+        return true;
+    };
+    let author = (DEFAULT_AUTHOR.0.to_owned(), DEFAULT_AUTHOR.1.to_owned());
+    let git = Git::new(runner, dir, &author);
+    // A byte of it is enough to know that something changed.
+    let status = git.limited(
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        1,
+    );
+    let head = git
+        .run(&["rev-parse", "--verify", "HEAD"], b"")
+        .filter(|(status, _)| *status == 0)
+        .map(|(_, out)| String::from_utf8_lossy(&out).trim().to_owned());
+    match (status, head) {
+        (Some(status), Some(head)) => !status.is_empty() || head != checkout.base_commit,
+        _ => true,
+    }
+}
+
 /// Collects what the agent left: its outcome into the run's results, and
 /// its requests and its change into the hand-back.
 ///
@@ -833,7 +888,7 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
     let mut outcome = mark_stopped_early(outcome, request.harness);
     // An explicit replacement is the complete series, not a working-tree
     // fixup. Never reset/squash the producer's checkout on this path.
-    let replacement_path = request.home.join("out/replacement.json");
+    let replacement_path = request.home.join(REPLACEMENT_PATH);
     let replacement_path_text = clone::utf8(&replacement_path)?;
     let has_replacement = ["-e", "-L"].iter().any(|test| {
         runner
@@ -1037,6 +1092,7 @@ mod tests {
                 max_tasks: None,
             },
             handed_back: false,
+            reminded: false,
         }
     }
 
@@ -1546,6 +1602,75 @@ mod tests {
             )
             .unwrap();
             check::check_outputs(&self.path("safe-outputs"), &collected, policy).unwrap()
+        }
+    }
+
+    /// What counts as the output a run requires, for the reminder: a
+    /// request, a replacement, or a change of a branch run that may carry
+    /// one; a run that allows no output requires none.
+    #[test]
+    fn what_counts_as_output() {
+        let analysis = policy(Kind::Analysis, json!({"add_comment": {"max": 1}}));
+        let branch = policy(Kind::Branch, pull_requests());
+        let no_carrier = policy(Kind::Branch, json!({"noop": {"max": 1}}));
+        assert!(!requires_output(&policy(Kind::Branch, json!({}))));
+        assert!(requires_output(&analysis) && requires_output(&branch));
+        // (the case, what the agent does, the policy, whether it counts)
+        let cases = [
+            ("nothing", "true", &branch, false),
+            (
+                "blank requests",
+                "printf '\\n \\n' > ../../out/safe-outputs.jsonl",
+                &analysis,
+                false,
+            ),
+            (
+                "a request",
+                "echo '{}' > ../../out/safe-outputs.jsonl",
+                &analysis,
+                true,
+            ),
+            (
+                "a replacement",
+                "echo '{}' > ../../out/replacement.json",
+                &analysis,
+                true,
+            ),
+            ("an edit", "echo two >> a.txt", &branch, true),
+            ("a new file", "echo new > b.txt", &branch, true),
+            (
+                "a commit",
+                "git -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m X",
+                &branch,
+                true,
+            ),
+            (
+                "an edit no output carries",
+                "echo two >> a.txt",
+                &no_carrier,
+                false,
+            ),
+            (
+                "an edit of an analysis",
+                "echo two >> a.txt",
+                &analysis,
+                false,
+            ),
+            (
+                "a checkout git cannot read",
+                "rm -rf .git/objects",
+                &branch,
+                true,
+            ),
+        ];
+        for (case, script, policy, counts) in cases {
+            let home = Home::new();
+            sh(&home.checkout.dir, script);
+            assert_eq!(
+                has_output(&Unconfined, home.dir.path(), &home.checkout, policy),
+                counts,
+                "{case}"
+            );
         }
     }
 

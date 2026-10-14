@@ -11,7 +11,8 @@
 //!                          or the one in ~/.config/fake-agent/demo.json
 //!                          if there is one: `agentic-job run` starts the
 //!                          fake agent only this way, and its tests have
-//!                          sessions of their own to play
+//!                          sessions of their own to play; it writes a
+//!                          line to its log in ~/.local/state/fake-agent/log
 //! fake-agent script FILE [LATER]
 //!                          play the session in FILE, and for every prompt
 //!                          turn after the first the one in LATER (default:
@@ -66,7 +67,7 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use agentic_job::run::agent::GITHUB_TOKEN_VAR;
+use agentic_job::run::agent::{FAKE_LOG_DIR, GITHUB_TOKEN_VAR};
 use agentic_job::run::launch::github_token;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -77,6 +78,8 @@ const DEMO: &str = include_str!("fake-agent-demo.json");
 /// the built-in one.
 const DEMO_OVERRIDE: &str = ".config/fake-agent/demo.json";
 const NAME: &str = "fake-agent";
+/// Its log, in FAKE_LOG_DIR.
+const LOG_FILE: &str = "fake-agent.log";
 const SESSION: &str = "fake-session";
 const MODEL_OPTION: &str = "model";
 const DEFAULT_MODEL: &str = "fake";
@@ -147,7 +150,10 @@ enum Mode {
 fn parse_mode(args: &[String]) -> Result<Mode> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     Ok(match args.as_slice() {
-        ["demo"] => Mode::Script(demo_script()?, later_default()),
+        ["demo"] => {
+            write_log();
+            Mode::Script(demo_script()?, later_default())
+        }
         ["script", file] => Mode::Script(read_script(file)?, later_default()),
         ["script", file, later] => Mode::Script(read_script(file)?, read_script(later)?),
         ["fs"] => Mode::Fs,
@@ -165,6 +171,24 @@ fn demo_script() -> Result<Vec<Step>> {
         Some(Ok(text)) => parse_script(&text).with_context(|| format!("in ~/{DEMO_OVERRIDE}")),
         _ => parse_script(DEMO).context("in the built-in demo"),
     }
+}
+
+/// Writes a line to the log of its own that `demo` keeps, as a real
+/// agent does, for `run` to collect. Only `demo`, which only `run`
+/// starts, so that the tests' agents write nothing to the tester's home.
+fn write_log() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let dir = Path::new(&home).join(FAKE_LOG_DIR);
+    // A log that cannot be written is the run's to report missing.
+    let _ = std::fs::create_dir_all(&dir).and_then(|()| {
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(LOG_FILE))?;
+        writeln!(log, "{NAME} demo started")
+    });
 }
 
 fn later_default() -> Vec<Step> {

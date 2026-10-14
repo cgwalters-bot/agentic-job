@@ -201,10 +201,8 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
         }
         let u = &msg["params"]["update"];
         let kind = u["sessionUpdate"].as_str().unwrap_or_default();
-        if matches!(
-            kind,
-            "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk"
-        ) {
+        // Vibe's thinking, sent as messages, is reasoning like any other.
+        if let Some((kind, chunk)) = crate::session::vibe::chunk(u) {
             let label = match kind {
                 "agent_message_chunk" => "Assistant",
                 "agent_thought_chunk" => "Reasoning",
@@ -217,7 +215,7 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
             }
             message_id = u["messageId"].clone();
             let (_, text) = prose.get_or_insert_with(|| (label.to_owned(), String::new()));
-            text.push_str(u["content"]["text"].as_str().unwrap_or_default());
+            text.push_str(&chunk);
             continue;
         }
         flush(&mut prose, &mut blocks);
@@ -379,6 +377,32 @@ mod tests {
         assert!(!s.full.contains("```"));
         assert_eq!(s.full.matches("</details>").count(), 2);
         assert_eq!(s.preview(s.full.len()), s.full);
+    }
+
+    /// Vibe's thinking, which it sends as messages holding Python reprs,
+    /// is reasoning in plain text, apart from the message after it.
+    #[test]
+    fn vibe_thinking_is_reasoning() {
+        let thinking = |text: &str| {
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m",
+                "content": {"text": format!("{{'type': 'thinking', 'thinking': [{{'type': 'text', 'text': '{text}'}}], 'closed': True}}")}})
+        };
+        let records = vec![
+            record(0.0, thinking("Let")),
+            record(0.1, thinking(" me look.")),
+            record(
+                0.2,
+                json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"text": "Looked."}}),
+            ),
+        ];
+        let s = render(
+            &records,
+            &Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap()),
+        );
+        assert!(s.full.contains("Reasoning</summary>"), "{}", s.full);
+        assert!(s.full.contains("Let me look&#46;"), "{}", s.full);
+        assert!(s.full.contains("Looked&#46;"), "{}", s.full);
+        assert!(!s.full.contains("closed"), "{}", s.full);
     }
 
     #[test]

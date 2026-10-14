@@ -69,6 +69,9 @@ pub const OPENCODE_INSTRUCTIONS_FILE: &str = ".config/opencode/AGENTS.md";
 pub const OPENCODE_PROFILE_FILE: &str = ".config/opencode/opencode-runner.json";
 pub const VIBE_HOME: &str = ".config/agentic-job/vibe";
 pub const VIBE_CONFIG_FILE: &str = ".config/agentic-job/vibe/config.toml";
+pub const VIBE_LOG_DIR: &str = ".config/agentic-job/vibe/logs";
+/// Where the fake agent's `demo` writes a log, as a real agent would.
+pub const FAKE_LOG_DIR: &str = ".local/state/fake-agent/log";
 /// The run's read-only GitHub token, for `gh` and the GitHub API: the
 /// launcher and the fake agent give it to the agent as
 /// [`GITHUB_TOKEN_VAR`].
@@ -232,6 +235,20 @@ impl Kind {
             Self::Opencode => Some(OPENCODE_CONFIG_FILE),
             Self::Vibe => Some(VIBE_CONFIG_FILE),
             Self::Fake => None,
+        }
+    }
+
+    /// The directory of the agent's own log files, under the sandbox
+    /// user's home, which the run adds to the transcript (`agent_log`):
+    /// Vibe's (`$VIBE_HOME/logs`, which its launch command turns on),
+    /// opencode's default, and Claude Code's debug logs, which it writes
+    /// only when debugging is turned on.
+    pub const fn log_dir(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude/debug",
+            Self::Opencode => ".local/share/opencode/log",
+            Self::Vibe => VIBE_LOG_DIR,
+            Self::Fake => FAKE_LOG_DIR,
         }
     }
 
