@@ -202,6 +202,30 @@ fn item_type(item: &Map<String, Value>) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or_default()
 }
 
+/// What gh-aw's collector appends, of its own, to a result holding no
+/// request but `missing_tool` and `missing_data`, or none at all.
+const COLLECTORS_INCOMPLETE: &str = "report_incomplete";
+
+/// The diagnostics a hand-back may hold beside the incomplete report.
+const DIAGNOSTICS: &[&str] = &["missing_tool", "missing_data"];
+
+/// Drops the collector's incomplete report, which says no more than the
+/// run's own exit does and which no policy allows, so that a hand-back
+/// of nothing or of diagnostics only passes as before. Only the last
+/// item, and only where the collector puts one: anything else of that
+/// type, an agent's included (which the collector refuses as of a type
+/// its configuration lacks), is left to be refused below.
+fn drop_collectors_incomplete(items: &mut Vec<Map<String, Value>>) {
+    if let Some((last, rest)) = items.split_last()
+        && item_type(last) == COLLECTORS_INCOMPLETE
+        && rest
+            .iter()
+            .all(|item| DIAGNOSTICS.contains(&item_type(item)))
+    {
+        items.pop();
+    }
+}
+
 /// What the apply job writes, hidden, into each body it posts, so that a
 /// re-run finds what was already applied and skips it. A request holding
 /// it could make a re-run skip another request, so none may.
@@ -575,12 +599,13 @@ fn check_outputs_to(
         return Ok(Verdict::new(errors, Vec::new(), None));
     }
 
-    let collected: Collected = serde_json::from_slice(&collected_bytes).with_context(|| {
+    let mut collected: Collected = serde_json::from_slice(&collected_bytes).with_context(|| {
         format!(
             "{} is not the result of gh-aw's collector",
             collected.display()
         )
     })?;
+    drop_collectors_incomplete(&mut collected.items);
     let items = if contents.contains_key(OUTPUTS_FILE) {
         errors.extend(collected.errors);
         collected.items
@@ -830,6 +855,16 @@ mod tests {
         json!({"type": "noop", "message": "Nothing to do."})
     }
 
+    fn missing_tool() -> Value {
+        json!({"type": "missing_tool", "tool": "podman", "reason": "Not installed."})
+    }
+
+    /// What gh-aw's collector appends to a result without a request.
+    fn incomplete() -> Value {
+        json!({"type": "report_incomplete", "reason": "missing_terminal_safe_output",
+            "failureCause": "missing_terminal_safe_output", "retryCount": 0})
+    }
+
     fn base_json() -> String {
         json!({"repo": "bootc-dev/bootc", "ref": "main", "commit": BASE}).to_string()
     }
@@ -845,6 +880,9 @@ mod tests {
         files: Vec<(&'static str, String)>,
         /// Leave `outputs.jsonl` out.
         no_outputs: bool,
+        /// Append, to the collector's items only, the incomplete report
+        /// it adds of its own.
+        incomplete: bool,
     }
 
     impl Handback {
@@ -882,7 +920,9 @@ mod tests {
                 std::fs::write(out.join(name), content).unwrap();
             }
             let collected = dir.path().join("agent_output.json");
-            let result = json!({"items": self.items, "errors": self.refused});
+            let mut items = self.items.clone();
+            items.extend(self.incomplete.then(incomplete));
+            let result = json!({"items": items, "errors": self.refused});
             std::fs::write(&collected, result.to_string()).unwrap();
             check_outputs(&out, &collected, policy).unwrap()
         }
@@ -920,9 +960,48 @@ mod tests {
                 0,
                 false,
             ),
+            // gh-aw's collector reports these incomplete, of its own.
+            (
+                "nothing, reported incomplete",
+                Handback {
+                    incomplete: true,
+                    ..Handback::default()
+                },
+                0,
+                false,
+            ),
+            (
+                "no file at all, reported incomplete",
+                Handback {
+                    no_outputs: true,
+                    incomplete: true,
+                    ..Handback::default()
+                },
+                0,
+                false,
+            ),
+            (
+                "a missing tool, reported incomplete",
+                Handback {
+                    items: vec![missing_tool()],
+                    incomplete: true,
+                    ..Handback::default()
+                },
+                1,
+                false,
+            ),
         ];
+        // The diagnostics a run may be allowed beside its requests.
+        let mut policy = policy();
+        policy.safe_outputs.others.insert(
+            "missing_tool".into(),
+            crate::policy::OutputLimit {
+                max: 1,
+                ..Default::default()
+            },
+        );
         for (name, handback, items, patch) in cases {
-            let verdict = handback.check();
+            let verdict = handback.check_against(&policy);
             assert_eq!(verdict.errors, Vec::<String>::new(), "{name}");
             assert!(verdict.ok, "{name}");
             assert_eq!(verdict.items.len(), items, "{name}");
@@ -1388,6 +1467,31 @@ mod tests {
                     ..Handback::default()
                 },
                 "4 outputs, over max_outputs 3",
+            ),
+            (
+                "an incomplete report beside a request",
+                Handback {
+                    items: vec![noop(), incomplete()],
+                    ..Handback::default()
+                },
+                "\"report_incomplete\", which the policy does not allow",
+            ),
+            (
+                "an incomplete report before a diagnostic",
+                Handback {
+                    items: vec![incomplete(), missing_tool()],
+                    ..Handback::default()
+                },
+                "\"report_incomplete\", which the policy does not allow",
+            ),
+            (
+                "two incomplete reports",
+                Handback {
+                    items: vec![incomplete()],
+                    incomplete: true,
+                    ..Handback::default()
+                },
+                "\"report_incomplete\", which the policy does not allow",
             ),
             (
                 "a request without a type",

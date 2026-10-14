@@ -1357,7 +1357,10 @@ test('the pinned comment handler posts a guarded review verdict, without a no-re
   `;
   const ran = command(homedir(), 'node', ['-e', program], { ITEM: JSON.stringify(guarded.kept[0]),
     COMMENT_HOOK: script('Apply the outputs with gh-aw\'s handlers').split('client.hook.before("request", options => {')[1].split('\n  });')[0],
-    GH_AW_WORKFLOW_ID: 'agentic-job', GH_AW_WORKFLOW_NAME: 'ci', GH_AW_SAFE_OUTPUTS_URLS: 'allowed-or-code-region' });
+    GH_AW_WORKFLOW_ID: 'agentic-job', GH_AW_WORKFLOW_NAME: 'ci', GH_AW_SAFE_OUTPUTS_URLS: 'allowed-or-code-region',
+    // What Actions sets, and the step its job's check run: the handler posts nothing without them.
+    GITHUB_REPOSITORY: 'owner/repo', GITHUB_REPOSITORY_ID: '1', GITHUB_RUN_ID: '7', GITHUB_RUN_ATTEMPT: '1', GITHUB_JOB: 'apply',
+    GH_AW_JOB_CHECK_RUN_ID: scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_JOB_CHECK_RUN_ID') === '${{ job.check_run_id }}' ? '9' : '' });
   assert.equal(ran.status, 0, ran.stdout + ran.stderr);
   const { applied, created } = JSON.parse(ran.stdout);
   assert.equal(applied.success, true, JSON.stringify(applied));

@@ -90,7 +90,7 @@ jobs:
             safe-outputs
             workflow
           persist-credentials: false
-      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
         with:
           destination: ${{ runner.temp }}/gh-aw/actions
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -184,9 +184,15 @@ jobs:
             const reasons = await refusalReasons(process.env.GH_AW_TMP);
             for (const reason of reasons) core.error(`Refused by check: ${reason}`);
             core.setOutput('reason', reasons.join('; ').slice(0, 4000));
+      # Apply's handlers get the requests check accepted, and not the
+      # incomplete report gh-aw's collector adds to a result without one,
+      # which check leaves out (src/check/mod.rs) and no handler is set up for.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
-        run: find "$JOB_DIR/safe-outputs" -maxdepth 1 \( -name 'aw-*.patch' -o -name replacement.json \) -exec cp -t "$GH_AW_TMP" {} +
+        run: |
+          jq '{items: .items, errors: []}' "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
+          mv "$RUNNER_TEMP/accepted.json" "$GH_AW_TMP/agent_output.json"
+          find "$JOB_DIR/safe-outputs" -maxdepth 1 \( -name 'aw-*.patch' -o -name replacement.json \) -exec cp -t "$GH_AW_TMP" {} +
       - id: upload
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

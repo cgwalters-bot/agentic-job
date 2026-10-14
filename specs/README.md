@@ -77,7 +77,7 @@ Separate machines, read-only check permissions, and apply-only token placement
 are documented in [the workflow guide](../docs/workflow.md).
 
 Why the guard is apply's and not the handlers': the pinned
-[add-comment handler](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/actions/setup/js/add_comment.cjs)
+[add-comment handler](https://github.com/github/gh-aw/blob/462ed682857c4ab64d40f2c85e3738fa27834839/actions/setup/js/add_comment.cjs)
 calls `issues.createComment` with a `processedCount` local to a new handler
 instance, and comment-only apply has no checkout or existing-branch gate. The
 pull request handler fails on an existing branch, but once a merged pull

@@ -105,9 +105,9 @@ gh-aw's computed permission union or per-run App-token integration.
 
 ## GitHub CLI proxy reuse
 
-This investigation uses the **actual Actions setup pin** in
-`agentic-job.yml`, gh-aw commit
-`c227508baacbbe271be6c5a4f303936840b3c813`, rather than the v0.91.4
+This investigation used the Actions setup pin of its time, gh-aw commit
+`c227508baacbbe271be6c5a4f303936840b3c813` (the pin is now in
+[safe-outputs.md](safe-outputs.md#what-is-gh-aws-and-why)), rather than the v0.91.4
 comparison baseline above. The feature already exists at that pin; a
 gh-aw bump is not needed just to obtain it. These are source and artifact
 observations, not evidence of a working agentic-job integration.

@@ -184,7 +184,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
-          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          ref: 462ed682857c4ab64d40f2c85e3738fa27834839
           path: gh-aw
           sparse-checkout: .github/workflows
           persist-credentials: false
@@ -240,7 +240,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
-          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          ref: 462ed682857c4ab64d40f2c85e3738fa27834839
           path: gh-aw
           sparse-checkout: actions/setup/js
           persist-credentials: false
@@ -292,7 +292,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
-          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          ref: 462ed682857c4ab64d40f2c85e3738fa27834839
           path: gh-aw
           sparse-checkout: actions/setup/js
           persist-credentials: false
@@ -869,7 +869,7 @@ jobs:
       # posted, and the comment is there once. The handlers that would post again are not run here; that
       # they post only what the guard keeps is apply.test.cjs's to show.
       # Where apply has gh-aw's scripts: the guard names the branch with them.
-      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
         if: ${{ always() && needs.e2e-full.result == 'success' }}
         with:
           destination: ${{ runner.temp }}/gh-aw/actions

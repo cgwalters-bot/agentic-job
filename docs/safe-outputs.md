@@ -30,11 +30,16 @@ Two scripts are run as gh-aw ships them: its collector
 (`collect_ndjson_output.cjs`), which validates and sanitizes the
 requests, and its handlers (`safe_output_handler_manager.cjs`), which
 act on them. Both come from the action `github/gh-aw/actions/setup`,
-pinned at commit `c227508baacbbe271be6c5a4f303936840b3c813`
-(v0.90.1-13) in every place that uses it. Nothing of gh-aw is copied
+pinned at commit `462ed682857c4ab64d40f2c85e3738fa27834839`
+(v0.91.12-7) in every place that uses it. Nothing of gh-aw is copied
 into this repository, and none of it is reimplemented: it is validated,
 maintained code, and a second implementation would only be a second
 reading of the same rules to keep in step.
+
+The collector adds a `report_incomplete` item of its own to a result
+holding nothing but `missing_tool` and `missing_data`, or nothing at all.
+No run may hand one back: check leaves out exactly that last item, refuses
+any other, and apply's handlers get only the requests check accepted.
 
 Both run with gh-aw's
 [`safe-outputs.urls`](https://github.github.com/gh-aw/reference/glossary/#url-sanitization-policy-safe-outputsurls)
