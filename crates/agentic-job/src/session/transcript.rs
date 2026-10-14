@@ -53,6 +53,8 @@ pub(super) struct Tap {
     limits: Limits,
     stop: watch::Sender<Option<Stop>>,
     clients: Clients,
+    /// `AgentSpec::provider_error`.
+    provider_error: Option<String>,
 }
 
 struct Inner {
@@ -101,6 +103,7 @@ impl Tap {
         limits: Limits,
         stop: watch::Sender<Option<Stop>>,
         clients: Clients,
+        provider_error: Option<String>,
     ) -> Result<Self> {
         let open = |name: &str| -> Result<BufWriter<File>> {
             let path = out.join(name);
@@ -120,6 +123,7 @@ impl Tap {
             limits,
             stop,
             clients,
+            provider_error,
         })
     }
 
@@ -175,6 +179,15 @@ impl Tap {
         self.inner().digest.tasks
     }
 
+    /// What the agent said its turn ended with, if that is that the
+    /// provider refused its model request (`AgentSpec::provider_error`).
+    pub fn refusal(&self) -> Option<String> {
+        let prefix = self.provider_error.as_deref()?;
+        let inner = self.inner();
+        let said = inner.digest.last_message()?;
+        said.starts_with(prefix).then(|| said.to_owned())
+    }
+
     /// The last line the agent wrote to its standard error: of an agent
     /// that died, usually why.
     pub fn last_stderr(&self) -> Option<String> {
@@ -220,6 +233,7 @@ mod tests {
             Limits::default(),
             stop,
             Clients::none(),
+            None,
         )
         .unwrap();
         let lines = [
@@ -237,5 +251,46 @@ mod tests {
             std::fs::read_to_string(dir.path().join(STDERR_LOG)).unwrap(),
             format!("{}\n", lines.join("\n")),
         );
+    }
+
+    /// A turn whose last message starts with the agent's provider-error
+    /// words, after any leading blanks, ended on a refusal; nothing else
+    /// does, and nothing at all for an agent with no such words.
+    #[test]
+    fn refusal() {
+        // (the agent's words, what it said last, what was refused)
+        let cases = [
+            (Some("API Error:"), "API Error: 429", Some("API Error: 429")),
+            (
+                Some("API Error:"),
+                "  API Error: 429",
+                Some("API Error: 429"),
+            ),
+            (Some("API Error:"), "Done. API Error: 429", None),
+            (Some("API Error:"), "api error: 429", None),
+            (None, "API Error: 429", None),
+        ];
+        for (words, said, want) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (stop, _) = watch::channel(None);
+            let tap = Tap::create(
+                dir.path(),
+                Box::new(std::io::sink()),
+                Limits::default(),
+                stop,
+                Clients::none(),
+                words.map(str::to_owned),
+            )
+            .unwrap();
+            let chunk = serde_json::json!({"jsonrpc": "2.0", "method": "session/update",
+                "params": {"sessionId": "s", "update": {"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": said}}}});
+            let prompt = r#"{"jsonrpc": "2.0", "id": 1, "method": "session/prompt", "params": {}}"#;
+            let end = r#"{"jsonrpc": "2.0", "id": 1, "result": {"stopReason": "end_turn"}}"#;
+            tap.message(Dir::Send, prompt);
+            tap.message(Dir::Recv, &chunk.to_string());
+            tap.message(Dir::Recv, end);
+            assert_eq!(tap.refusal().as_deref(), want, "{said:?}");
+        }
     }
 }

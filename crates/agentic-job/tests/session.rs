@@ -73,6 +73,8 @@ struct Setup<'a> {
     config_options: &'a [(&'a str, &'a str)],
     /// The model the session selects.
     model: Option<&'a str>,
+    /// The registry's `provider-error` for the agent.
+    provider_error: Option<&'a str>,
 }
 
 /// What a test's client does on its end of the relay.
@@ -234,11 +236,14 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         .chain(mode.iter().copied())
         .map(fill)
         .collect();
-    let registry = format!(
+    let mut registry = format!(
         "[fake]\ncommand = {}\nnotices = {}\n",
         json!(command),
         !setup.no_notices
     );
+    if let Some(prefix) = setup.provider_error {
+        registry.push_str(&format!("provider-error = {}\n", json!(prefix)));
+    }
     let log = Captured::default();
     let (count, requests) = watch::channel(None);
     let (bridge, client) = setup
@@ -985,6 +990,189 @@ fn hand_back_near_a_limit() {
     }
 }
 
+/// A task's turn that ends on an error, as a model request the provider
+/// refused ends one: it is no success, and the agent gets a turn to hand
+/// back in, which decides between stopped at a limit and failed.
+#[test]
+fn a_turn_that_ends_on_an_error() {
+    const REFUSAL: &str = "API Error: Request rejected (429)";
+    const PREFIX: Option<&str> = Some("API Error:");
+    const HAND_BACK: &str = r#"[
+      {"write": {"title": "Write", "path": "{cwd}/partial.txt", "content": "partial\n"}},
+      {"say": "Handed back."}
+    ]"#;
+    let refused = format!(
+        r#"[{{"say": "Working."}}, {{"execute": {{"title": "Bash", "command": "true"}}}}, {{"say": "{REFUSAL}"}}]"#
+    );
+    let failed = r#"[{"say": "Working."}, {"fail": "rate limited"}]"#;
+    let limit_in_hand_back = format!(r#"[{}, {{"sleep": 60}}]"#, use_requests(100));
+    struct Case<'a> {
+        name: &'a str,
+        script: &'a str,
+        later: &'a str,
+        provider_error: Option<&'a str>,
+        status: u8,
+        result: &'a str,
+        message: &'a [&'a str],
+        handed_back: bool,
+        count_requests: bool,
+        /// The prompts the session sent as notices.
+        notices: &'a [&'a str],
+    }
+    let cases = [
+        Case {
+            name: "the agent says the provider refused, then hands back",
+            script: &refused,
+            later: HAND_BACK,
+            provider_error: PREFIX,
+            status: 3,
+            result: "budget",
+            message: &[
+                "the agent's turn ended on an error",
+                "the model provider refused the agent's request: API Error: Request rejected (429)",
+                "the agent handed back",
+            ],
+            handed_back: true,
+            count_requests: false,
+            notices: &["hand back"],
+        },
+        Case {
+            name: "the agent says the provider refused, and again while handing back",
+            script: &refused,
+            later: &refused,
+            provider_error: PREFIX,
+            status: 1,
+            result: "failure",
+            message: &["the model provider refused the agent's request: API Error"],
+            handed_back: false,
+            count_requests: false,
+            notices: &["hand back"],
+        },
+        Case {
+            name: "the agent answers its turn with an error, then hands back",
+            script: failed,
+            later: HAND_BACK,
+            provider_error: None,
+            status: 3,
+            result: "budget",
+            message: &[
+                "the agent's turn ended on an error (session/prompt failed",
+                "rate limited",
+                "the agent handed back",
+            ],
+            handed_back: true,
+            count_requests: false,
+            notices: &["hand back"],
+        },
+        Case {
+            name: "the agent answers its turn with an error, and its hand-back too",
+            script: failed,
+            later: failed,
+            provider_error: None,
+            status: 1,
+            result: "failure",
+            message: &["session/prompt failed", "rate limited"],
+            handed_back: false,
+            count_requests: false,
+            notices: &["hand back"],
+        },
+        Case {
+            name: "an agent with no provider-error is taken at its word",
+            script: &refused,
+            later: HAND_BACK,
+            provider_error: None,
+            status: 0,
+            result: "success",
+            message: &[],
+            handed_back: false,
+            count_requests: false,
+            notices: &[],
+        },
+        Case {
+            name: "an error the agent went on from, to words that are no error",
+            script: r#"[{"say": "API Error: 529"}, {"execute": {"title": "Bash", "command": "true"}}, {"say": "API Error responses are retried now."}]"#,
+            later: HAND_BACK,
+            provider_error: PREFIX,
+            status: 0,
+            result: "success",
+            message: &[],
+            handed_back: false,
+            count_requests: false,
+            notices: &[],
+        },
+        Case {
+            name: "a limit reached while the agent hands back stops it",
+            script: &refused,
+            later: &limit_in_hand_back,
+            provider_error: PREFIX,
+            status: 3,
+            result: "budget",
+            message: &[
+                "used 100 of 100 model requests; cancelled, after",
+                "the model provider refused the agent's request: API Error",
+            ],
+            handed_back: false,
+            count_requests: true,
+            notices: &["hand back"],
+        },
+        Case {
+            name: "an agent that exits as it hands back fails with the error",
+            script: failed,
+            later: r#"[{"exit": 7}]"#,
+            provider_error: None,
+            status: 1,
+            result: "failure",
+            message: &["exit status: 7", "session/prompt failed: rate limited"],
+            handed_back: false,
+            count_requests: false,
+            notices: &["hand back"],
+        },
+        Case {
+            name: "an agent that exits after its error fails with it",
+            script: r#"[{"say": "Working."}, {"fail": "rate limited"}, {"finish": 7}]"#,
+            later: HAND_BACK,
+            provider_error: None,
+            status: 1,
+            result: "failure",
+            message: &[
+                "the agent exited",
+                "exit status: 7",
+                "session/prompt failed: rate limited",
+            ],
+            handed_back: false,
+            count_requests: false,
+            notices: &[],
+        },
+    ];
+    for c in cases {
+        let name = c.name;
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                files: &[("script.json", c.script), ("later.json", c.later)],
+                // Three seconds to hand back in, and as long a pause.
+                timeout_s: 60,
+                provider_error: c.provider_error,
+                count_requests: c.count_requests,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, c.status, c.result);
+        let message = r.result["message"].as_str().unwrap_or_default();
+        for part in c.message {
+            assert!(message.contains(part), "{name}: {message}");
+        }
+        assert_eq!(r.result["handed_back"], c.handed_back, "{name}");
+        assert_eq!(r.notices(), c.notices, "{name}");
+        assert_eq!(r.path("work/partial.txt").exists(), c.handed_back, "{name}");
+        assert!(
+            r.elapsed < Duration::from_secs(30),
+            "{name}: took {:?}",
+            r.elapsed
+        );
+    }
+}
+
 /// The command that runs its arguments as USER in a login session of its
 /// own, as `run` enters the sandbox (the old tree's `sandboxCommand`).
 fn run0(user: &str, cwd: &Path) -> Vec<String> {
@@ -1519,6 +1707,53 @@ fn a_client_cancels_the_tasks_turn() {
             .count()
     };
     assert_eq!((sent("session/prompt"), sent("session/cancel")), (2, 1));
+}
+
+/// A client attached when the task's turn ends on an error: its prompts
+/// are refused while the agent hands back, and the run ends at a limit.
+#[test]
+fn a_client_while_the_agent_hands_back_after_an_error() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[
+                ("script.json", r#"[{"sleep": 1}, {"fail": "rate limited"}]"#),
+                ("later.json", r#"[{"say": "Handed back."}]"#),
+            ],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    // Refused while the turn runs, then while the agent
+                    // is to hand back.
+                    let refused = (2..100)
+                        .map(|id| client.request(id, "session/prompt", text_prompt(&sid, "Hi.")))
+                        .find(|answer| {
+                            std::thread::sleep(Duration::from_millis(100));
+                            !answer["error"]["message"]
+                                .as_str()
+                                .unwrap()
+                                .contains("a turn is running")
+                        })
+                        .unwrap();
+                    assert!(
+                        refused["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("the agent is to hand back"),
+                        "{refused}"
+                    );
+                    while client.recv().is_some() {}
+                },
+                Duration::from_secs(60),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 3, "budget");
+    assert_eq!(r.result["handed_back"], true, "{}", r.log);
+    assert_eq!(r.notices(), ["hand back"]);
 }
 
 /// A client that sends requests and reads none of the answers: the

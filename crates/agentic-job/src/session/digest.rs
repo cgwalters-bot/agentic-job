@@ -92,6 +92,14 @@ pub struct Digest {
     pub tasks: usize,
     /// The labels of the budget notices the harness sent, in order.
     pub notices: Vec<String>,
+    /// The first line of the agent's last message in the current turn,
+    /// as streamed so far (`last_message`). It is kept apart from `text`,
+    /// which another update flushes to the log midway through a message.
+    message: MessageLine,
+    /// The `messageId` of the message being streamed, where the agent
+    /// gives one: a message runs from one to the next, or else from one
+    /// tool call or prompt to the next, whatever updates come between.
+    message_id: Option<Value>,
 }
 
 /// On one line (so nothing an agent writes can start a line of the job
@@ -283,8 +291,14 @@ impl Digest {
                         out.push("⚠ cancelling the session".to_owned());
                     }
                     "session/prompt" => {
-                        if let Some(label) = notice_label(&msg["params"]) {
+                        let label = notice_label(&msg["params"]);
+                        if let Some(label) = label {
                             self.notice(label, &msg["params"], id, &mut out);
+                        }
+                        // A notice queued behind the turn starts none; the
+                        // hand-back does.
+                        if label.is_none_or(|l| l == super::budget::LABEL_HAND_BACK) {
+                            self.new_message();
                         }
                     }
                     _ => {}
@@ -410,11 +424,19 @@ impl Digest {
         }
         match kind {
             "agent_message_chunk" => {
+                let id = update.get("messageId").filter(|v| !v.is_null());
+                if id.is_some() && id != self.message_id.as_ref() {
+                    self.flush_text(out);
+                    self.message = MessageLine::default();
+                    self.message_id = id.cloned();
+                }
                 if let Some(t) = update["content"]["text"].as_str() {
                     self.text.push(t);
+                    self.message.push(t);
                 }
             }
             "tool_call" => {
+                self.new_message();
                 let id = update["toolCallId"].as_str().unwrap_or_default().to_owned();
                 // A repeated tool_call updates the one already seen.
                 let new = !self.index.contains_key(&id);
@@ -540,6 +562,20 @@ impl Digest {
         if !text.line.trim().is_empty() {
             out.push(cut(&format!("» {}", text.line)));
         }
+    }
+
+    /// The first line of the agent's last message in the current turn,
+    /// unless a tool call came after it: what the turn ended with.
+    pub fn last_message(&self) -> Option<&str> {
+        let line = self.message.line.trim();
+        (!line.is_empty()).then_some(line)
+    }
+
+    /// What the agent says next is a message of its own, and none yet is
+    /// the last.
+    fn new_message(&mut self) {
+        self.message = MessageLine::default();
+        self.message_id = None;
     }
 }
 
@@ -756,6 +792,7 @@ mod tests {
         assert_eq!(d.protocol_version, Some(1));
         assert_eq!(d.model.as_deref(), Some("m1"));
         assert_eq!(d.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(d.last_message(), Some("Done."));
         assert_eq!(d.cost_usd, Some(0.25));
         assert_eq!(d.usage, Some(json!({"inputTokens": 5, "outputTokens": 7})));
         assert_eq!((d.allowed, d.denied.len()), (1, 1));
@@ -774,6 +811,157 @@ mod tests {
                 ("bash".into(), "false", Some(1), Some(true)),
             ]
         );
+    }
+
+    /// What a turn ended with: the first line of its last message, unless
+    /// a tool call or another turn came after it; a notice starts no turn,
+    /// a hand-back does.
+    #[test]
+    fn last_message() {
+        let say = |text: &str| {
+            update(
+                json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
+            )
+        };
+        let prompt = |id: u64, meta: Value| {
+            (
+                Dir::Send,
+                json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": {"_meta": meta}}),
+            )
+        };
+        let tool = update(json!({"sessionUpdate": "tool_call", "toolCallId": "t", "title": "ls"}));
+        let usage = update(json!({"sessionUpdate": "usage_update", "used": 1, "size": 2}));
+        let end = (
+            Dir::Recv,
+            json!({"jsonrpc": "2.0", "id": 9, "result": {"stopReason": "end_turn"}}),
+        );
+        let notice = prompt(10, json!({"botHarness": {"notice": "60%"}}));
+        let hand_back = prompt(12, json!({"botHarness": {"notice": "hand back"}}));
+        let said = |id: &str, text: &str| {
+            update(
+                json!({"sessionUpdate": "agent_message_chunk", "messageId": id,
+                "content": {"type": "text", "text": text}}),
+            )
+        };
+        // (what, the messages, what the turn ended with)
+        type Case<'a> = (&'a str, Vec<(Dir, Value)>, Option<&'a str>);
+        let cases: [Case; 14] = [
+            (
+                "the last message, flushed by an update",
+                vec![
+                    say("Working."),
+                    tool.clone(),
+                    say("\nAPI Error: 429\nmore"),
+                    usage.clone(),
+                    end.clone(),
+                ],
+                Some("API Error: 429"),
+            ),
+            (
+                "a tool call after it",
+                vec![say("API Error: 429"), tool.clone(), end.clone()],
+                None,
+            ),
+            ("no message", vec![tool, end.clone()], None),
+            (
+                "a new turn",
+                vec![say("API Error: 429"), end.clone(), prompt(11, Value::Null)],
+                None,
+            ),
+            (
+                "a notice during the turn",
+                vec![say("API Error: 429"), notice, end.clone()],
+                Some("API Error: 429"),
+            ),
+            (
+                "the hand-back turn",
+                vec![say("API Error: 429"), end.clone(), hand_back],
+                None,
+            ),
+            (
+                "what follows an update in the same message",
+                vec![
+                    say("Done."),
+                    usage.clone(),
+                    say("\nAPI Error is handled"),
+                    end.clone(),
+                ],
+                Some("Done."),
+            ),
+            (
+                "a message of its own, by its id",
+                vec![
+                    said("a", "Working."),
+                    usage.clone(),
+                    said("b", "API Error: 429"),
+                    end.clone(),
+                ],
+                Some("API Error: 429"),
+            ),
+            (
+                "the same message, by its id",
+                vec![
+                    said("a", "Done."),
+                    usage.clone(),
+                    said("a", "\nAPI Error is handled"),
+                    end.clone(),
+                ],
+                Some("Done."),
+            ),
+            (
+                "a line split across chunks",
+                vec![say("API "), say("Error: 4"), say("29\nmore"), end.clone()],
+                Some("API Error: 429"),
+            ),
+            (
+                "a line split around an update",
+                vec![
+                    say("API "),
+                    usage.clone(),
+                    say("Error: 429"),
+                    usage.clone(),
+                    end.clone(),
+                ],
+                Some("API Error: 429"),
+            ),
+            (
+                "a line split around an update, by its id",
+                vec![
+                    said("a", "\nAPI "),
+                    usage.clone(),
+                    said("a", "Error: 429"),
+                    end.clone(),
+                ],
+                Some("API Error: 429"),
+            ),
+            (
+                "a chunk with no id, in the message with one",
+                vec![
+                    said("a", "API "),
+                    usage.clone(),
+                    say("Error: 429"),
+                    end.clone(),
+                ],
+                Some("API Error: 429"),
+            ),
+            (
+                "another id, midway through a line",
+                vec![
+                    said("a", "Working: "),
+                    usage,
+                    said("b", "API Error: 429"),
+                    end,
+                ],
+                Some("API Error: 429"),
+            ),
+        ];
+        for (name, msgs, want) in cases {
+            let msgs: Vec<_> = std::iter::once(prompt(9, Value::Null))
+                .chain(msgs)
+                .collect();
+            let (d, _) = lines(&msgs);
+            assert_eq!(d.last_message(), want, "{name}");
+        }
     }
 
     #[test]

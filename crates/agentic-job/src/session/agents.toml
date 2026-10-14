@@ -14,9 +14,13 @@
 # its own, and when Claude Code takes it up answers the running one with
 # end_turn, which would end the run as done. Its `_session/steering`
 # request is what would deliver one inside the turn.
+#
+# When Claude Code gives up on a model request (a 429 after its own
+# retries), the adapter may say "API Error: ..." and answer end_turn.
 [claude]
 command = ["claude-agent-acp"]
 model-env = "ANTHROPIC_MODEL"
+provider-error = "API Error:"
 env = { ANTHROPIC_MODEL = "opus" }
 
 # opencode speaks ACP natively; its model is a session config option. A

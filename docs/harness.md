@@ -125,7 +125,8 @@ use its own filesystem and terminal tools (the client advertises neither).
 Identify the inference API it speaks, how it takes a base URL and run
 token, and how it selects a model. Check which user, project, environment,
 profile and login settings can override those choices. Determine whether
-a mid-turn `session/prompt` steers the current turn or ends it, and test
+a mid-turn `session/prompt` steers the current turn or ends it, how it
+ends a turn whose model request the provider refused, and test
 cancellation followed by the hand-back prompt against the actual adapter.
 
 The implementation recipe is:
@@ -139,6 +140,8 @@ The implementation recipe is:
    environment nor a later change of model is checked. Leave `notices`
    false unless a mid-turn prompt is known to reach the next step without
    ending the running turn.
+   Set `provider-error` to what the adapter's last message starts with
+   if it answers a turn whose model request was refused as done.
    Registry `env` values go on the wrapped command line: never put a token
    there, or in `command`.
 2. In `run/agent.rs`, extend `Kind`, its name/parser list and its matches.
@@ -221,11 +224,24 @@ just as the timeout cancels it is treated the same way. The budget cannot
 refuse a reply in advance, because no one knows its cost before it
 comes; `max-requests` is the cap that acts before a request is made.
 
+A task's turn that ends on an error is not taken for a finished task.
+That is a turn the agent answers with an error, as opencode and Vibe
+answer one whose model request failed, or one it answers as done
+after saying it gave up on a refused request, as Claude Code says
+`API Error: ...` after its own retries (the entry's `provider-error`
+names the words). After a pause of a minute (no longer than the
+hand-back window), the agent is asked to hand back as near a limit.
+If it does, the run is stopped at a limit, exit state 3, with the
+error as the reason; if it doesn't, the run fails with the error. A
+limit the run reaches meanwhile stops it as any other time, and a bridge
+client's prompts meanwhile are refused.
+
 ## How a run ends
 
 The session's result becomes `run`'s exit state: 0 when the agent ended
 its turn, 1 when it failed, exited, could not be started or cancelled,
-3 when a request, task or spending limit stopped it, and 124 for the
+3 when a request, task or spending limit stopped it (or it handed back
+after a turn that ended on an error), and 124 for the
 timeout. [interface.md](interface.md#exit-states) has the whole table,
 with the states that are `run`'s own. `handed_back` in `summary.json`
 says whether a stopped agent handed back.

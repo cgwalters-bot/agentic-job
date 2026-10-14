@@ -292,7 +292,7 @@ fn last_task_text(tasks: usize) -> String {
     )
 }
 
-fn hand_back_text(used: &str, window: Duration) -> String {
+pub fn hand_back_text(used: &str, window: Duration) -> String {
     format!(
         "{NOTICE_PREFIX} This run has {used}, so your work was interrupted. Hand back now: \
          start nothing new and run no more builds or tests. Leave the working tree as the \

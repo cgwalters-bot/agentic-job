@@ -1218,7 +1218,9 @@ pins and the validation rules are unchanged.
 
 A run that reaches its timeout or a request, task or spending limit is
 interrupted to hand back what it has, and `run` ends with exit state 124
-or 3. By default the agent job then fails and nothing is applied. With
+or 3. So does, with 3, one whose agent handed back after a turn that
+ended on an error, such as a model request the provider kept refusing
+([harness.md](harness.md#limits)). By default the agent job then fails and nothing is applied. With
 `apply-partial: true`, a stopped run that handed back is checked like
 any other and applied as a draft whose title starts with `[partial:
 stopped at the timeout]` or `[partial: stopped at a limit]` and whose
@@ -1228,8 +1230,8 @@ refused just before).
 The agent job passes with a warning, and `summary.json` still says
 `stopped_early`. Those words are the workflow's own, chosen by the exit
 state, not text from the agent's machine. The exit state does not say
-which of the request, task and spending limits it was, so the marking
-does not either. `summary.json` does, and so does the commit's message
+which of the request, task and spending limits or the error it was, so
+the marking does not either. `summary.json` does, and so does the commit's message
 where the agent gave no reason of its own for stopping. A stopped run that handed
 back neither a pull request nor a comment has nothing to carry them,
 and the apply job fails rather than apply it unmarked.

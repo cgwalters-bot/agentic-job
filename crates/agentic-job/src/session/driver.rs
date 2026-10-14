@@ -8,6 +8,12 @@
 //! a limit, a `session/cancel` of the turn and one more prompt turn in
 //! which the agent hands back; and at the limit a last `session/cancel`.
 //!
+//! A task's turn that ends on an error while the agent runs (a model
+//! request the provider refused, usually, after the agent's own retries)
+//! is not the end of the task: after a pause, the agent gets the same
+//! turn to hand back in, and the run ends at a limit if it did, or as a
+//! failure naming the error if it didn't (`after_error`).
+//!
 //! With a bridge (`bridge`), the session does not end with the task's
 //! turn: it waits for its client's prompts, each a turn of its own under
 //! the same limits, until the client leaves or sends none for the idle
@@ -21,8 +27,8 @@
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitStatus;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -42,7 +48,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::agents::AgentSpec;
 use super::bridge::{Bridge, FromClient};
-use super::budget::{Budget, LABEL_HAND_BACK, Limits, Signal, Stop, Usage};
+use super::budget::{Budget, LABEL_HAND_BACK, Limits, Signal, Stop, Usage, hand_back_text};
 use super::clients::Clients;
 use super::digest::{self, Dir};
 use super::permission::{self, Policy, Request, pick_option};
@@ -68,6 +74,13 @@ const CLIENT_LEFT: &str = "the client left";
 const SESSION_ENDED: &str = "the session has ended";
 const NO_CANCEL_ANSWER: &str = "the agent did not answer the cancellation";
 const TURN_RUNNING: &str = "a turn is running: cancel it or wait for its answer";
+const REFUSED: &str = "the model provider refused the agent's request";
+const HANDING_BACK: &str = "the task's turn ended on an error: the agent is to hand back";
+/// How long the session waits after a turn that ended on an error before
+/// asking the agent to hand back: a rate limit that refused the request
+/// may have cleared by then. Never longer than the hand-back window, so
+/// a short run is not held up for it.
+const ERROR_PAUSE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -316,6 +329,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         limits.clone(),
         stop_tx.clone(),
         clients,
+        spec.provider_error.clone(),
     )?);
     let (argv, env) = spec.command(launch.wrapper(), model.as_deref());
     let task = Task {
@@ -325,6 +339,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         config_options: &config_options,
         prompt: &prompt,
         notices: spec.notices,
+        hand_back_window: Budget::new(limits.clone()).hand_back_window(),
     };
     let started = chrono::Utc::now();
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
@@ -350,6 +365,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
                 nudges: nudge_rx,
                 cancelling: Arc::new(AtomicBool::new(false)),
                 session_id,
+                after_error: Arc::default(),
                 conversation,
             };
             let (ended, exited) = drive(
@@ -393,6 +409,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         mut stop_reason,
         mut message,
         handed_back,
+        ..
     } = ended;
     let transcript = tap.finish();
     if stop_reason.is_none() {
@@ -453,6 +470,9 @@ struct Task<'a> {
     prompt: &'a str,
     /// The agent takes a prompt sent during a turn (`AgentSpec::notices`).
     notices: bool,
+    /// How long the agent gets to hand back after its turn ended on an
+    /// error: as long as near a limit.
+    hand_back_window: Duration,
 }
 
 /// Speaks ACP with a started agent, over its standard input and output,
@@ -474,6 +494,7 @@ async fn drive(
     let permission_cwd = task.cwd.to_owned();
     let permission_stop = signals.stop.clone();
     let permission_cancelling = signals.cancelling.clone();
+    let after = signals.after_error.clone();
     let connection = Client
         .builder()
         .name(CLIENT_NAME)
@@ -512,9 +533,18 @@ async fn drive(
             Ok(session(cx, tap, &task, signals).await)
         });
     let mut connection = std::pin::pin!(connection);
-    // An error is the transport's: usually the agent closed its streams.
-    let transport_failed =
-        |e: agent_client_protocol::Error| Ended::failure(format!("the agent failed: {e}"));
+    // The error a failed turn ended on, while the agent is to hand back
+    // after it: what the run fails with if the agent doesn't.
+    let pending = || after.lock().unwrap_or_else(|e| e.into_inner()).take();
+    // An error is the transport's: usually the agent closed its streams,
+    // after the error it was to hand back after, if any.
+    let transport_failed = |e: agent_client_protocol::Error| {
+        let failed = format!("the agent failed: {e}");
+        Ended::failure(match pending() {
+            Some(error) => format!("{error}; then {failed}"),
+            None => failed,
+        })
+    };
     // The agent exiting ends the session, whatever it was waiting for.
     let ended = tokio::select! {
         r = &mut connection => r.unwrap_or_else(transport_failed),
@@ -522,7 +552,9 @@ async fn drive(
         // answers its turn and exits has not failed.
         _ = agent.wait() => match tokio::time::timeout(EXIT_GRACE, &mut connection).await {
             Ok(r) => r.unwrap_or_else(transport_failed),
-            Err(_) => Ended::failure(AGENT_EXITED.to_owned()),
+            // One that exits while it is to hand back after an error
+            // failed with that error.
+            Err(_) => Ended::failure(pending().unwrap_or_else(|| AGENT_EXITED.to_owned())),
         },
     };
     // A failure is usually the agent having died, and its exit status and
@@ -576,6 +608,9 @@ struct Ended {
     stop_reason: Option<String>,
     message: Option<String>,
     handed_back: bool,
+    /// The agent answered its turn with an error, or said the provider
+    /// refused its request: it may still be able to hand back.
+    errored: bool,
 }
 
 impl Ended {
@@ -585,6 +620,7 @@ impl Ended {
             stop_reason: None,
             message: Some(message),
             handed_back: false,
+            errored: false,
         }
     }
 
@@ -611,6 +647,7 @@ impl Ended {
             stop_reason: None,
             message: Some(message),
             handed_back: false,
+            errored: false,
         }
     }
 
@@ -627,6 +664,7 @@ impl Ended {
             stop_reason: None,
             message: Some(format!("{msg}; {how}")),
             handed_back,
+            errored: false,
         }
     }
 }
@@ -640,6 +678,9 @@ struct Signals {
     cancelling: Arc<AtomicBool>,
     /// The agent's session, once it has one, for the bridge's client.
     session_id: watch::Sender<Option<String>>,
+    /// The error the task's turn ended on, while the agent is to hand
+    /// back after it (`after_error`).
+    after_error: Arc<Mutex<Option<String>>>,
     conversation: Option<Conversation>,
 }
 
@@ -714,6 +755,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         mut nudges,
         cancelling,
         session_id,
+        after_error: pending_error,
         mut conversation,
     } = signals;
     let sid = tokio::select! {
@@ -750,7 +792,18 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
             // client's.
             r = &mut response => {
                 cancelling.store(false, Ordering::Relaxed);
-                let ended = prompt_result(r);
+                let ended = prompt_result(r, tap);
+                // A turn the client cancelled is the client's to go on from.
+                if ended.errored && !client_cancelled {
+                    // The session ends with the hand-back: a client's
+                    // prompt meanwhile is refused, not left unanswered.
+                    if let Some(talk) = conversation.take() {
+                        tokio::spawn(refuse_prompts(talk));
+                    }
+                    let link = Link { cx: &cx, tap, sid: &sid, cancelling: &cancelling, notices: task.notices };
+                    *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = ended.message.clone();
+                    return after_error(&link, &mut stop, ended, task.hand_back_window).await;
+                }
                 let goes_on = ended.outcome == Outcome::Success
                     || (client_cancelled && ended.outcome == Outcome::Cancelled);
                 let Some(talk) = conversation.take().filter(|_| goes_on) else {
@@ -811,7 +864,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         stopped(&why).1
     )]);
     match cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await {
-        Some(r) => match prompt_result(r) {
+        Some(r) => match prompt_result(r, tap) {
             // It was done just then.
             ended if ended.outcome == Outcome::Success => return ended,
             ended if ended.outcome == Outcome::Cancelled => {}
@@ -869,7 +922,7 @@ async fn hand_back(
         _ = wait_stop(stop) => None,
     };
     let handed_back = match answer {
-        Some(r) => prompt_result(r).outcome == Outcome::Success,
+        Some(r) => prompt_result(r, tap).outcome == Outcome::Success,
         None => {
             tap.log(&["⚠ the agent didn't hand back in time".to_owned()]);
             let _ = cancel_turn(cx, sid, cancelling, response.as_mut()).await;
@@ -877,6 +930,67 @@ async fn hand_back(
         }
     };
     Ended::stopped(why, handed_back)
+}
+
+/// After the task's turn ended on an error (ERRORED), with the agent still
+/// running: ending the run there as done would pass off unfinished work as
+/// finished, so the agent is asked to hand back as near a limit, after a
+/// pause. A run whose agent did is stopped at a limit, with the error for
+/// the reason; one whose agent didn't (the provider still refuses) fails
+/// with the error. A limit the run reaches meanwhile stops it as ever.
+async fn after_error(
+    link: &Link<'_>,
+    stop: &mut watch::Receiver<Option<Stop>>,
+    errored: Ended,
+    window: Duration,
+) -> Ended {
+    let error = errored.message.clone().unwrap_or_default();
+    let pause = ERROR_PAUSE.min(window);
+    link.tap.log(&[digest::cut(&format!(
+        "⚠ {error}: asking the agent to hand back in {}s",
+        pause.as_secs()
+    ))]);
+    tokio::select! {
+        _ = tokio::time::sleep(pause) => {}
+        _ = wait_stop(stop) => {}
+    }
+    let limit = |stop: &watch::Receiver<Option<Stop>>| stop.borrow().clone();
+    // A limit reached meanwhile stops the run, which still says what
+    // ended the task's turn.
+    let limited = |why: &Stop| {
+        let ended = Ended::stopped(why, false);
+        Ended {
+            message: ended.message.map(|m| format!("{m}, after {error}")),
+            ..ended
+        }
+    };
+    if let Some(why) = limit(stop) {
+        link.tap.log(&[format!("⚠ {}", stopped(&why).1)]);
+        return limited(&why);
+    }
+    let why = Stop::Budget(format!("the agent's turn ended on an error ({error})"));
+    // Without the error's words, which an agent repeating them as it
+    // hands back would have taken for the error again.
+    let text = hand_back_text("had a model request fail", window);
+    let ended = hand_back(link, stop, &why, text, window).await;
+    if ended.handed_back {
+        return ended;
+    }
+    match limit(stop) {
+        Some(why) => limited(&why),
+        None => errored,
+    }
+}
+
+/// Answers each of the client's prompts with HANDING_BACK until it
+/// leaves, or the session hangs up on it; a cancel has no turn of its
+/// own to end.
+async fn refuse_prompts(mut talk: Conversation) {
+    while let Some(msg) = talk.from_client.recv().await {
+        if let FromClient::Prompt { answer, .. } = msg {
+            let _ = answer.send(Err(HANDING_BACK.to_owned()));
+        }
+    }
 }
 
 /// How a conversation ended.
@@ -986,7 +1100,7 @@ async fn converse(
                     let value = r.as_ref().map_err(|e| e.to_string()).and_then(|resp| {
                         serde_json::to_value(resp).map_err(|e| e.to_string())
                     });
-                    let ended = prompt_result(r);
+                    let ended = prompt_result(r, tap);
                     last_failed = (ended.outcome != Outcome::Success).then_some(ended);
                     reply(&mut answer, value);
                     break;
@@ -1032,7 +1146,7 @@ async fn converse(
                         // A turn that never answered neither finished nor
                         // stopped: it fails rather than passing as done.
                         let ended = match cancel_turn(cx, sid, cancelling, response.as_mut()).await {
-                            Some(r) => prompt_result(r),
+                            Some(r) => prompt_result(r, tap),
                             None => Ended::failure(format!("{CLIENT_LEFT}; {NO_CANCEL_ANSWER}")),
                         };
                         last_failed = (ended.outcome != Outcome::Success).then_some(ended);
@@ -1065,7 +1179,7 @@ where
     let (_, msg) = stopped(&why);
     tap.log(&[format!("⚠ {msg}")]);
     let answer = cancel_turn(cx, sid, cancelling, turn).await;
-    match answer.map(prompt_result) {
+    match answer.map(|r| prompt_result(r, tap)) {
         // The turn had ended before the cancel reached it: spending is
         // reported after the fact, so the reply that crossed the limit is
         // usually the last one, and what the agent finished stands.
@@ -1147,9 +1261,15 @@ async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, E
     Ok(sid)
 }
 
-fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>) -> Ended {
+/// How a turn ended, from its answer and from what the agent said last
+/// (TAP): an agent that gave up on a refused model request may say so and
+/// answer the turn as done.
+fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>, tap: &Tap) -> Ended {
     match r {
-        Err(e) => Ended::failure(format!("session/prompt failed: {e}")),
+        Err(e) => Ended {
+            errored: true,
+            ..Ended::failure(format!("session/prompt failed: {e}"))
+        },
         Ok(resp) => {
             let reason = serde_json::to_value(resp.stop_reason)
                 .ok()
@@ -1163,11 +1283,21 @@ fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>) -> End
             };
             let message = (outcome != Outcome::Success)
                 .then(|| format!("the agent stopped: {}", reason.as_deref().unwrap_or("?")));
-            Ended {
+            let ended = Ended {
                 outcome,
                 stop_reason: reason,
                 message,
                 handed_back: false,
+                errored: false,
+            };
+            match tap.refusal().filter(|_| outcome == Outcome::Success) {
+                Some(said) => Ended {
+                    outcome: Outcome::Failure,
+                    message: Some(format!("{REFUSED}: {said}")),
+                    errored: true,
+                    ..ended
+                },
+                None => ended,
             }
         }
     }

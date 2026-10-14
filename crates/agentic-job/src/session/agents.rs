@@ -44,6 +44,13 @@ pub struct AgentSpec {
     /// there as if the task were done.
     #[serde(default)]
     pub notices: bool,
+    /// What the agent's last message of a turn starts with when it gave up
+    /// on a model request the provider refused, for an agent that says so
+    /// in text and answers the turn as done (Claude Code's "API Error: ..."
+    /// with `end_turn`): the session takes that turn as one that failed.
+    /// One that answers such a turn with an error, as opencode and Vibe
+    /// do, needs none.
+    pub provider_error: Option<String>,
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -63,6 +70,14 @@ pub fn parse(text: &str, name: &str) -> Result<AgentSpec> {
         .ok_or_else(|| anyhow!("no agent '{name}' (known: {known})"))?;
     if spec.command.is_empty() {
         bail!("agent '{name}' has an empty command");
+    }
+    // An empty one would take every message for a refusal.
+    if spec
+        .provider_error
+        .as_deref()
+        .is_some_and(|p| p.trim().is_empty())
+    {
+        bail!("agent '{name}' has an empty provider-error");
     }
     for var in spec.env.keys().chain(&spec.model_env) {
         if !valid_env_name(var) {
@@ -192,7 +207,10 @@ command = ["opencode", "acp"]
             ("claude", false),
             ("vibe", false),
         ] {
-            assert_eq!(builtin(agent).unwrap().notices, want, "{agent}");
+            let spec = builtin(agent).unwrap();
+            assert_eq!(spec.notices, want, "{agent}");
+            // Only Claude Code answers a turn it gave up on as done.
+            assert_eq!(spec.provider_error.is_some(), agent == "claude", "{agent}");
         }
         assert!(!parse(REGISTRY, "opencode").unwrap().notices);
     }
@@ -242,6 +260,11 @@ command = ["opencode", "acp"]
                 "not a valid environment variable",
             ),
             ("[a]\ncmd = [\"x\"]", "a", "unknown field"),
+            (
+                "[a]\ncommand = [\"x\"]\nprovider-error = \" \"",
+                "a",
+                "empty provider-error",
+            ),
         ];
         for (text, name, want) in cases {
             let err = format!("{:#}", parse(text, name).unwrap_err());

@@ -53,6 +53,8 @@ pub const DEFAULT_AUTHOR: (&str, &str) = ("agent", "agent@localhost");
 
 const MAX_TITLE_CHARS: usize = 100;
 const MAX_REASON_CHARS: usize = 200;
+/// What a pull request made up for an agent that wrote no summary says.
+const NO_SUMMARY: &str = "Partial change: the agent did not say what it did or that it was done.";
 /// A subject longer than this is cut: it is one line of a mail header.
 const MAX_SUBJECT_CHARS: usize = 200;
 /// What `git status` may write: the names of the changed files.
@@ -290,6 +292,10 @@ pub fn default_pull_request(outcome: &Object, run_id: &str) -> PullRequest {
                 .unwrap_or_default();
             format!("\n\nPartial change: the run stopped early{why}.")
         }
+        // An agent that wrote no summary may have been cut off before it
+        // could (as by a provider's refusal it took for the end of its
+        // turn): its change is not passed off as finished.
+        _ if summary.is_empty() => format!("\n\n{NO_SUMMARY}"),
         _ => String::new(),
     };
     let body = if summary.is_empty() {
@@ -1219,7 +1225,16 @@ mod tests {
         let long = "x".repeat(300);
         // (the outcome, the title, the body)
         let cases = [
-            (json!({}), "Agent run 9", "Changes from agent run 9."),
+            (
+                json!({}),
+                "Agent run 9",
+                "Changes from agent run 9.\n\nPartial change: the agent did not say what it did or that it was done.",
+            ),
+            (
+                json!({"summary": " \n "}),
+                "Agent run 9",
+                "Changes from agent run 9.\n\nPartial change: the agent did not say what it did or that it was done.",
+            ),
             (json!({"summary": "  one\n\ntwo  "}), "one", "one\n\ntwo"),
             (
                 json!({"summary": "one", "stopped_early": "out of\ntime"}),
@@ -1239,7 +1254,7 @@ mod tests {
             (
                 json!({"summary": 5}),
                 "Agent run 9",
-                "Changes from agent run 9.",
+                "Changes from agent run 9.\n\nPartial change: the agent did not say what it did or that it was done.",
             ),
         ];
         for (outcome, title, body) in cases {

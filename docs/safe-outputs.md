@@ -400,7 +400,9 @@ rather than ending well with nothing handed back.
 
 For a `push_to_pull_request_branch` request without `message`, `run` fills
 that field from the outcome summary (or its default run description), the
-same fallback it uses for the patch's commit message. An explicit `message`
+same fallback it uses for the patch's commit message. Where the outcome
+has no summary, the default description says the change is partial: an
+agent that wrote none may have been cut off before it could. An explicit `message`
 is preserved, including an invalid value for the collector to refuse. This
 does not validate requests while the producer runs or replace the separate
 check job.

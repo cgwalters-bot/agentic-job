@@ -38,6 +38,7 @@
 //!  {"sleep": 1.5},
 //!  {"stop": "refusal"},
 //!  {"exit": 7},
+//!  {"fail": "message"},
 //!  {"finish": 0}]
 //! ```
 //!
@@ -46,7 +47,9 @@
 //! A `stop` ends the turn there with that stop reason, even after a
 //! cancel, as an agent whose last reply was complete when the cancel
 //! came; and an `exit` the
-//! process with that status, as an agent that crashed. A `finish` ends
+//! process with that status, as an agent that crashed. A `fail` has the
+//! turn, when it ends, answered with a JSON-RPC error of that message,
+//! as an agent whose model request failed. A `finish` ends
 //! the turn as done and then the process with that status, as an agent
 //! that doesn't wait for its client to hang up. As real agents do,
 //! it takes a `session/prompt` that arrives during a turn without
@@ -128,6 +131,7 @@ enum Step {
     Sleep(f64),
     Stop(String),
     Exit(i32),
+    Fail(String),
     Finish(i32),
 }
 
@@ -189,6 +193,8 @@ struct Conn {
     queued: Vec<Value>,
     /// The status to exit with once the turn is answered (`finish`).
     finish: Option<i32>,
+    /// The error the turn is answered with (a `fail` step).
+    fail: Option<String>,
 }
 
 impl Conn {
@@ -214,6 +220,7 @@ impl Conn {
             in_turn: false,
             queued: Vec::new(),
             finish: None,
+            fail: None,
         }
     }
 
@@ -345,7 +352,11 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                 for queued in std::mem::take(&mut conn.queued) {
                     conn.respond(&queued, json!({"stopReason": stop}));
                 }
-                conn.respond(&id, json!({"stopReason": stop}));
+                match conn.fail.take() {
+                    Some(message) => conn.send(json!({"jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32603, "message": message}})),
+                    None => conn.respond(&id, json!({"stopReason": stop})),
+                }
                 if let Some(status) = conn.finish {
                     std::process::exit(status);
                 }
@@ -380,6 +391,7 @@ fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<Strin
                         conn.finish = Some(*status);
                         return Ok(END_TURN.to_owned());
                     }
+                    Step::Fail(message) => conn.fail = Some(message.clone()),
                     Step::Exit(status) => {
                         eprintln!("{NAME}: exiting with status {status}, as scripted");
                         std::process::exit(*status);
@@ -486,7 +498,7 @@ fn play(
             return Ok(());
         }
         // Ends the turn or the process: `prompt` takes these itself.
-        Step::Stop(_) | Step::Exit(_) | Step::Finish(_) => return Ok(()),
+        Step::Stop(_) | Step::Exit(_) | Step::Fail(_) | Step::Finish(_) => return Ok(()),
         Step::Execute { title, command } => (title, "execute", json!({"command": fill(command)})),
         Step::Read { title, path, lines } => {
             (title, "read", json!({"path": fill(path), "lines": lines}))
@@ -575,6 +587,7 @@ fn play(
         | Step::Sleep(_)
         | Step::Stop(_)
         | Step::Exit(_)
+        | Step::Fail(_)
         | Step::Finish(_) => {
             unreachable!("handled above")
         }
@@ -626,12 +639,15 @@ mod tests {
         let bad = r#"[{"say": "x"}, {"execute": {"command": "true"}}]"#;
         assert!(parse_script(bad).is_err());
         assert_eq!(
-            parse_script(r#"[{"sleep": 0.5}, {"stop": "refusal"}, {"exit": 7}, {"finish": 0}]"#)
-                .unwrap(),
+            parse_script(
+                r#"[{"sleep": 0.5}, {"stop": "refusal"}, {"exit": 7}, {"fail": "x"}, {"finish": 0}]"#
+            )
+            .unwrap(),
             [
                 Step::Sleep(0.5),
                 Step::Stop("refusal".to_owned()),
                 Step::Exit(7),
+                Step::Fail("x".to_owned()),
                 Step::Finish(0)
             ]
         );

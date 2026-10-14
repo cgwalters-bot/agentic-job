@@ -417,7 +417,7 @@ jobs:
       - name: Mark what a partial run opens or posts
         if: ${{ fromJSON(inputs.policy).proposals-artifact == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}
         env:
-          STOPPED: ${{ fromJSON(inputs.agent).outputs.exit == '124' && 'its timeout' || 'a request, task or spending limit' }}
+          STOPPED: ${{ fromJSON(inputs.agent).outputs.exit == '124' && 'its timeout' || 'a request, task or spending limit, or an error that ended the agent''s turn' }}
         run: |
           jq -e 'all(.items[]; .type != "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
             { echo "::error::the run was stopped at $STOPPED: a partial change is not pushed to a pull request's branch"; exit 1; }

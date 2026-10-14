@@ -2,7 +2,9 @@
 //! checkout, and what `run`'s hand-back does for the same checkout, must
 //! be the same files with the same bytes, but for one thing docs/plan.md
 //! changes on purpose: the message of the patch's commit, which was the
-//! pull request's title alone and is now its title and body.
+//! pull request's title alone and is now its title and body. And a pull
+//! request made up for an agent that wrote no summary now says that it
+//! is partial.
 //!
 //! The old code is run as it is, from a checkout of the old tree at the
 //! commit the plan names (`OLD_TREE`), by `tests/corpus/handback-old.mjs`.
@@ -25,6 +27,10 @@ use serde_json::{Value, json};
 
 const OLD_TREE_VAR: &str = "OLD_TREE";
 const RUN_ID: &str = "42";
+/// What the new hand-back adds to the body of a pull request made up for
+/// an agent that wrote no summary, as it is written in `outputs.jsonl`.
+const NO_SUMMARY_JSON: &str =
+    r"\n\nPartial change: the agent did not say what it did or that it was done.";
 /// Both sides commit at this time and with no configuration but the
 /// checkout's, so that the same tree gives the same commit.
 const GIT_ENV: [(&str, &str); 4] = [
@@ -121,6 +127,8 @@ struct Case {
     /// use that for the commit either, so there the messages differ in
     /// more than the body.
     patch: bool,
+    /// Whether the new side's made-up pull request says it is partial.
+    no_summary: bool,
 }
 
 fn pull_requests() -> Value {
@@ -143,6 +151,7 @@ fn cases() -> Vec<Case> {
         outputs: pull_requests(),
         max_patch_bytes: 1 << 20,
         patch: true,
+        no_summary: false,
     };
     const EDIT: &str = "printf 'one\\n2\\nthree\\nfour\\n' > a.txt";
     const MANY: &str = "printf 'one\\n2\\nthree\\nfour\\n' > a.txt && git rm -q gone.txt && \
@@ -168,7 +177,10 @@ fn cases() -> Vec<Case> {
             "",
             json!({"summary": "Fix the parser.\nIt dropped the last line."}),
         ),
-        case("a change and no outcome", EDIT, "", json!({})),
+        Case {
+            no_summary: true,
+            ..case("a change and no outcome", EDIT, "", json!({}))
+        },
         case(
             "a change of a run that stopped early",
             EDIT,
@@ -351,7 +363,13 @@ fn the_old_hand_back_and_the_new_differ_only_in_the_commit_message() {
         for (file, old_content) in &old_files {
             let new_content = &new_files[file];
             if !file.ends_with(".patch") {
-                assert_eq!(new_content, old_content, "{name}: {file}");
+                let new_content = if case.no_summary && file == "outputs.jsonl" {
+                    assert!(new_content.contains(NO_SUMMARY_JSON), "{name}");
+                    new_content.replace(NO_SUMMARY_JSON, "")
+                } else {
+                    new_content.clone()
+                };
+                assert_eq!(&new_content, old_content, "{name}: {file}");
                 continue;
             }
             for (side, content, summary) in [

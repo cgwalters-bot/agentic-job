@@ -13,7 +13,8 @@ pub enum Exit {
     Success,
     /// The agent failed or cancelled; the outputs were refused; a probe failed.
     Failure,
-    /// `run`: a request, task or spending limit stopped the agent.
+    /// `run`: a request, task or spending limit stopped the agent, or it
+    /// handed back after a turn that ended on an error.
     Limit,
     /// `run`: the run never started (sandbox probe, proxy registration or
     /// clone failed), so it is safe to retry. `run` maps the errors of that
