@@ -169,7 +169,7 @@ jobs:
         timeout-minutes: 340
         uses: ./.agentic-job-source/run
         with:
-          github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
+          github-token: ${{ github.token }}
       # Your later steps: the runner's user, without root.
       - env:
           EXIT: ${{ steps.run.outputs.exit }}
@@ -906,20 +906,14 @@ for `contents`, `issues`, `pull-requests` and `actions` read only, and
 expires when the job ends. The agent can leak it, and that is accepted:
 whoever gets it can read what the agent could, until the job ends, and
 write nothing. The workflow passes no credential that can write to the
-agent job, unless a caller's `GH_READ_TOKEN` (below) can; `SAFE_OUTPUTS_PAT`
+agent job; `SAFE_OUTPUTS_PAT`
 is passed only to deterministic apply and cross-repository status jobs.
 
-To give the agent another token, store a read-only one as a secret and
-pass it explicitly as `GH_READ_TOKEN: ${{ secrets.NAME }}` under the
-call's `secrets:`; it replaces the job token. GitHub reserves the
-`GITHUB_` prefix for its own names. Before
-the agent starts, a classic personal access token is refused if it has
-any scope but `read:*` and `user:email`: GitHub reports a classic token's
-scopes, so this is checked. Fine-grained, App and job tokens name none,
-and nothing short of trying a write tells whether one can write. Giving
-`GH_READ_TOKEN` read permissions only is therefore the caller's job: use a
-fine-grained token with read access and nothing else, and an expiry. One
-that can write lets the agent write through GraphQL, below.
+There is no secret override for agent reads: a leaked credential must not
+outlive the job or carry broader permissions than the job grants.
+When upgrading callers that forwarded a read-token secret, remove that
+secret from the call; the reusable workflow no longer declares it. The job
+token cannot read private repositories outside its own repository.
 Set `github-reads: false` to give the agent no token at all.
 
 The runner writes the token to a file in the sandbox user's home that

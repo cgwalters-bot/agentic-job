@@ -231,15 +231,15 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   assert.deepEqual(Object.fromEntries(lines.map(line => line.match(/^([-\w]+): (\w+)$/).slice(1))), {
     contents: 'read', issues: 'read', 'pull-requests': 'read', actions: 'read', 'id-token': 'write',
   });
-  const line = "github-token: ${{ inputs.github-reads && (secrets.GH_READ_TOKEN || github.token) || '' }}";
+  const line = "github-token: ${{ inputs.github-reads && github.token || '' }}";
   assert.ok(agent.includes(line));
   // Actions expressions allow a hyphen in a property name; JavaScript does not.
   const expression = line.match(/\$\{\{ (.+) \}\}/)[1].replace('inputs.github-reads', "inputs['github-reads']");
-  for (const [reads, supplied, expected] of [
-    [true, '', 'job-token'], [true, 'read-token', 'read-token'], [false, 'read-token', ''], [false, '', ''],
+  for (const [reads, expected] of [
+    [true, 'job-token'], [false, ''],
   ]) {
-    assert.equal(Function('inputs', 'secrets', 'github', `return ${expression}`)(
-      { 'github-reads': reads }, { GH_READ_TOKEN: supplied }, { token: 'job-token' }), expected);
+    assert.equal(Function('inputs', 'github', `return ${expression}`)(
+      { 'github-reads': reads }, { token: 'job-token' }), expected);
   }
   assert.match(wrapper, /^      github-reads:\n[\s\S]*?type: boolean\n        default: true$/m);
   // So in the example whose agent job a caller owns, and in the pieces.
@@ -249,13 +249,13 @@ test('the agent job token reads and write credentials stay in deterministic jobs
     const named = [...source.split('\njobs:\n')[1].matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
     assert.ok(named.length > 0, file);
     for (const [, name, job] of named) {
-      assert.equal(job.includes('secrets.GH_READ_TOKEN'), ['agentic-job.yml', 'example-compose.yml'].includes(file) && name === 'agent', `${file} ${name}`);
       const holdsWrite = name === 'apply' || (file === 'agentic-job.yml' && name === 'policy') ||
         (file === 'policy.yml' && name === 'notify') || (file === 'apply.yml' && name === 'conclude');
       assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), holdsWrite, `${file} ${name}`);
     }
   }
   const owned = compose.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+  assert.match(owned, /^          github-token: \$\{\{ github.token \}\}$/m);
   const ownedPermissions = owned.split('    permissions:\n')[1].split('    outputs:\n')[0];
   assert.deepEqual(ownedPermissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean).sort(),
     ['actions: read', 'contents: read', 'id-token: write', 'issues: read', 'pull-requests: read']);
@@ -264,6 +264,7 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   const workflows = join(__dirname, '../.github/workflows');
   for (const file of readdirSync(workflows)) {
     const source = readFileSync(join(workflows, file), 'utf8');
+    assert.ok(!source.includes('GH_READ_TOKEN'), `${file} must not declare or use a long-lived read secret`);
     for (const [, name, job] of source.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)) {
       if (!/^    uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/m.test(job)) continue;
       const granted = job.split('    permissions:')[1]?.split(/\n    [^ ]/)[0] ?? '';

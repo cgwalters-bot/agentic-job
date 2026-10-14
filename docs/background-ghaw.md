@@ -262,10 +262,8 @@ test, not a runtime check, holds it to them. Its separate `id-token: write` perm
 is for trusted inference registration, and for a caller's own step that
 joins a network with it; the
 `ACTIONS_ID_TOKEN_REQUEST_*` variables must stay outside the sandbox.
-An optional override reaches the agent too and may leak (it is named
-`GH_READ_TOKEN`, since GitHub reserves the `GITHUB_` prefix);
-it must be read-only and should be short-lived. Authenticated reads should
-default on, with an input to turn them off.
+There is no secret override: a leaked read credential must expire with the
+job. Authenticated reads default on, with an input to turn them off.
 
 The exception is POST to `https://api.github.com/graphql` for `gh`
 reads; GitHub refuses mutations because the token is read-only.

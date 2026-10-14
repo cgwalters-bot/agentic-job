@@ -98,7 +98,7 @@ test('caller fixes capabilities and token boundary', () => {
   const target = workflow.split('\n  target:\n')[1].split('\n  run:\n')[0];
   assert.doesNotMatch(target, /secrets(?:[.:]|\[)/);
   const forwarded = workflow.split('\n  run:\n')[1].split('    secrets:\n')[1].split('    permissions:\n')[0];
-  const names = ['SAFE_OUTPUTS_PAT', 'GH_READ_TOKEN'];
+  const names = ['SAFE_OUTPUTS_PAT'];
   assert.deepEqual([...forwarded.matchAll(/^      ([-\w]+):/gm)].map(m => m[1]), names);
   for (const name of names) {
     assert.ok(workflow.includes(`      ${name}:\n        required: false`), name);

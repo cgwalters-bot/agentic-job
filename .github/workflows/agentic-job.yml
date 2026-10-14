@@ -257,8 +257,8 @@ on:
         default: ""
       github-reads:
         description: >-
-          Give the agent a read-only GitHub token as GH_TOKEN, for gh and the API: the secret GH_READ_TOKEN,
-          or else the agent job's own, which can only read. False gives it none
+          Give the agent job's own read-only GitHub token as GH_TOKEN, for gh and the API.
+          False gives it none
         type: boolean
         default: true
     secrets:
@@ -267,14 +267,6 @@ on:
       # the environment's same-name value takes precedence (docs/workflow.md).
       SAFE_OUTPUTS_PAT:
         description: Optional credential for applying safe outputs; defaults to the job token when empty
-        required: false
-      # Optional read-only token the agent gets as GH_TOKEN, in place of the
-      # agent job's own read-only token. The agent holds it and could leak
-      # it, so it must not be able to write: a classic token with any scope
-      # but reads is refused, other kinds are the caller's to make read-only
-      # (docs/workflow.md). Not GITHUB_*: GitHub reserves that prefix.
-      GH_READ_TOKEN:
-        description: Optional read-only GitHub token for the agent; defaults to the agent job's read-only token
         required: false
     outputs:
       session-endpoint:
@@ -439,7 +431,7 @@ jobs:
         timeout-minutes: 340
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
-          github-token: ${{ inputs.github-reads && (secrets.GH_READ_TOKEN || github.token) || '' }}
+          github-token: ${{ inputs.github-reads && github.token || '' }}
 
   check:
     needs: [policy, agent]

@@ -10,8 +10,6 @@ on:
     secrets:
       SAFE_OUTPUTS_PAT:
         required: false
-      GH_READ_TOKEN:
-        required: false
     outputs:
       review-head:
         description: Exact PR head resolved for the review profile
@@ -161,11 +159,9 @@ jobs:
     # Scripted CI passes no credential value. The explicit name is forwarded
     # even when its value is available only in apply's environment.
     # No write credential reaches target, the agent process or the nested
-    # checker; the agent gets only GH_READ_TOKEN, or else its job's
-    # read-only token.
+    # checker; the agent gets only its job's read-only token.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}
-      GH_READ_TOKEN: ${{ !inputs.scripted && secrets.GH_READ_TOKEN || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
       # use these writes; neither executes agent-produced code. Every push

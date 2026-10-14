@@ -19,11 +19,9 @@ run-name: compose ${{ inputs.item }}
 
 on:
   workflow_call:
-    # Forward only these declared credentials, never inherit.
+    # Forward only this declared credential, never inherit.
     secrets:
       SAFE_OUTPUTS_PAT:
-        required: false
-      GH_READ_TOKEN:
         required: false
     inputs:
       scripted:
@@ -148,8 +146,8 @@ jobs:
         timeout-minutes: 340
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
-          # Without the secret, the job's own read token.
-          github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
+          # The job's own read-only token expires when the job ends.
+          github-token: ${{ github.token }}
       # ---- Your later steps go here. They run as the runner's user outside ----
       # the sandbox, with no sudo, after the agent's outputs are uploaded;
       # nothing of the agent's machine is trusted by check or apply. Treat

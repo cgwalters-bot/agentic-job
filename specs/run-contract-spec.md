@@ -82,8 +82,8 @@ removes the protection with `hidepid=0` and `hidepid=1` in CI's hosted Ubuntu
 token, as `GH_TOKEN`, and it MUST NOT be able to write: the producer can leak
 it. The reusable workflow's agent job MUST request only `contents`, `issues`,
 `pull-requests` and `actions` read, plus `id-token: write` for inference
-registration, and pass that job token unless the caller supplies
-`GH_READ_TOKEN` or turns reads off. A supplied classic token naming any scope
+registration, and pass only that job token unless the caller turns reads off.
+The standalone run action's supplied classic token naming any scope
 but `read:*` and `user:email` MUST be refused before the agent starts; job,
 App and fine-grained tokens name no scopes and are the caller's to keep
 read-only. The launcher MUST pass only the run's token and drop inherited
@@ -183,7 +183,7 @@ Enforcement: [refusal.test.cjs](../workflow/refusal.test.cjs),
 ### 3.3 Apply
 
 **RC-009 — Token placement.** Check MUST remain read-only and receive no
-secrets. Only the agent job MAY consume `GH_READ_TOKEN` (RC-014), and only
+secrets. The agent job MUST use only its job token for reads (RC-014), and only
 apply MAY consume `SAFE_OUTPUTS_PAT`; its checkout and handler
 API steps MUST select that explicitly passed secret when nonempty, otherwise
 `github.token`, independently of the optional apply environment. Event status
