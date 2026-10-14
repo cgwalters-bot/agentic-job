@@ -53,16 +53,32 @@ for (const [name, env, data, ref, error] of [
     [`invalid item ${JSON.stringify(item)}`, { TARGET_ITEM: item }, undefined, undefined, /positive safe/]),
   ...['owner/repo/extra', 'owner/repo?x', 'owner/repo\n'].map(repo =>
     [`invalid repo ${JSON.stringify(repo)}`, { TARGET_REPO: repo }, undefined, undefined, /OWNER\/NAME/]),
+  ...['owner/tracker/extra', 'owner/tracker?x', ' owner/tracker'].map(repo =>
+    [`invalid item repo ${JSON.stringify(repo)}`, { ITEM_REPO: repo, APPLY_ENVIRONMENT: 'agent-apply' }, undefined, undefined, /item repository as OWNER\/NAME/]),
+  // A review or fix is of the target's pull request.
+  ...['review', 'fix'].map(profile => [`${profile} of another repository's item`,
+    { PROFILE: profile, ITEM_REPO: 'owner/tracker', APPLY_ENVIRONMENT: 'agent-apply' }, { number: 171, pull_request: {} }, undefined,
+    /takes a pull request of the target/]),
+  // Its status comment is another repository's, posted with the PAT.
+  ['an item of another repository without the apply environment', { ITEM_REPO: 'owner/tracker' }, undefined, undefined, /APPLY_ENVIRONMENT/],
 ]) {
   test(`refuse ${name}`, async () => {
     await assert.rejects(preflight(env, data, ref), error);
   });
 }
 
-test('dispatch exposes only task, repo, item and kind', () => {
+for (const profile of ['implement', 'triage', 'research']) {
+  test(`${profile} reads an item of another repository, and says where it is`, async () => {
+    const calls = await preflight({ PROFILE: profile, TARGET_REPO: 'owner/homegit', ITEM_REPO: 'owner/tracker', APPLY_ENVIRONMENT: 'agent-apply' });
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ owner: 'owner', repo: 'tracker', issue_number: 171 }]);
+    assert.match(calls.task, /\{"repository":"owner\/tracker","number":171,/);
+  });
+}
+
+test('dispatch exposes only task, repo, item, item-repo and kind', () => {
   const inputs = workflow.split('  workflow_dispatch:\n')[1].split('\npermissions:')[0];
   assert.deepEqual([...inputs.matchAll(/^      ([-\w]+):$/gm)].map(m => m[1]),
-    ['task', 'repo', 'item', 'kind']);
+    ['task', 'repo', 'item', 'item-repo', 'kind']);
 });
 
 test('caller fixes capabilities and token boundary', () => {
@@ -87,7 +103,7 @@ test('caller fixes capabilities and token boundary', () => {
     assert.equal(routed('fake-profile', kind), '', kind);
   }
   for (const line of ['allow: .github/agentic-job/dispatch.toml',
-    'comment-target: ${{ inputs.item }}', 'issue: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}',
+    'comment-target: ${{ inputs.item }}', 'issue: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}', 'item-repo: ${{ inputs.item-repo }}',
     'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', "notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}",
     'model: ${{ needs.target.outputs.agent != \'fake\' && vars.AGENT_MODEL || \'\' }}', 'inference-url: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_URL || \'\' }}',
     'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
@@ -242,7 +258,7 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
 test('CI runs do not share a dispatch or compose concurrency group, and a real dispatch keeps one per item', () => {
   // CI names a fixed item: without its run id, one queue entry's pending
   // call cancels another's and fails its e2e-dispatch-verify (#544).
-  assert.match(workflow, /^  group: dispatch-\$\{\{ inputs\.kind \}\}-\$\{\{ inputs\.repo \}\}-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$/m);
+  assert.match(workflow, /^  group: dispatch-\$\{\{ inputs\.kind \}\}-\$\{\{ inputs\.repo \}\}-\$\{\{ inputs\.item-repo \}\}-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$/m);
   const compose = fs.readFileSync(path.join(root, '.github/workflows/example-compose.yml'), 'utf8');
   assert.match(compose, /^  group: compose-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$/m);
   const ci = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');

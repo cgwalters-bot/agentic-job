@@ -4,11 +4,11 @@ const fs = require('node:fs');
 
 // A repository whose default branch holds this file, naming that
 // repository (`owner/repo`) on a line of its own, accepts branches of its
-// own that an agent's commit is pushed to, whether it is the target or
-// another's fork of it (#528 proposes the same file for a new pull
-// request's branch). The name is what a fork does not inherit: one made
-// or synced from a target that accepts holds the target's file, which
-// names the target.
+// own that an agent's commit is pushed to: a fix's, whether it is the
+// target or another's fork of it, and a new pull request's, in a target
+// the applying account owns and so has no fork of. The name is what a
+// fork does not inherit: one made or synced from a target that accepts
+// holds the target's file, which names the target.
 const OWNER_BRANCHES = '.github/agentic-job/accept-owner-branches';
 // More than a name or two is not an opt-in file.
 const OWNER_BRANCHES_MAX = 4096;
@@ -56,6 +56,18 @@ async function currentBase(repository, pull, github) {
     throw new Error('Invalid current base head');
   }
   return data.object.sha;
+}
+
+// Whether `name`'s default branch has OWNER_BRANCHES naming `name`, read
+// with apply's own token at push time.
+async function acceptsOwnerBranches(name, github) {
+  const [owner, repo] = name.split('/');
+  // Without a ref this reads the default branch.
+  return github.rest.repos.getContent({ owner, repo, path: OWNER_BRANCHES })
+    .then(({ data }) => data?.type === 'file' && data.encoding === 'base64' && typeof data.content === 'string' &&
+      data.size <= OWNER_BRANCHES_MAX &&
+      Buffer.from(data.content, 'base64').toString('utf8').split('\n').some(line => same(line.trim(), name)),
+    error => { if (error.status === 404) return false; throw error; });
 }
 
 // Where apply pushes a run's commit, read again with apply's own token
@@ -126,17 +138,11 @@ async function pushTarget(env, me, github) {
     throw new Error(`${what} is from ${name}:${pull.head.ref}, a protected branch or one rules apply to, which a push never goes to`);
   }
   if (own) return null;
-  // Without a ref this reads the default branch.
-  const accepts = await github.rest.repos.getContent({ owner: headOwner, repo: headRepo, path: OWNER_BRANCHES })
-    .then(({ data }) => data?.type === 'file' && data.encoding === 'base64' && typeof data.content === 'string' &&
-      data.size <= OWNER_BRANCHES_MAX &&
-      Buffer.from(data.content, 'base64').toString('utf8').split('\n').some(line => same(line.trim(), name)),
-    error => { if (error.status === 404) return false; throw error; });
-  if (!accepts) {
+  if (!await acceptsOwnerBranches(name, github)) {
     throw new Error(`${what} is from ${itself ? `a branch of ${name} itself` : `${name}, not ${me}'s fork with Actions turned off`}, ` +
       `whose CI would run the pushed commit with its secrets: add ${OWNER_BRANCHES} naming ${name} to its default branch to accept that`);
   }
   return { repo: name, base: env.REPLACEMENT === 'true' ? await currentBase(env.REPO, pull, github) : null };
 }
 
-module.exports = { resolvePush, currentBase, pushTarget, OWNER_BRANCHES };
+module.exports = { resolvePush, currentBase, pushTarget, acceptsOwnerBranches, OWNER_BRANCHES };

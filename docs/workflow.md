@@ -288,6 +288,7 @@ unknown input; drop it when bumping the pin. A caller that asks for
 `create_pull_request` also needs `apply-environment` with a
 `SAFE_OUTPUTS_PAT` of an account that does not own the output
 repository ([pull requests come from a fork](#pull-requests-come-from-a-fork)),
+unless that repository [accepts its owner's branches](#a-repository-the-applying-account-owns),
 and no longer needs `contents: write`, which only pushed the branch.
 
 `push_to_pull_request_branch` went the same way: only to a pull request
@@ -968,7 +969,8 @@ cannot open a pull request either ([below](#pull-requests-come-from-a-fork)).
 ### Pull requests come from a fork
 
 Apply never pushes a new pull request's branch to the output
-repository; only a fix may go to a branch of it, where the output
+repository, but for [one its applying account owns](#a-repository-the-applying-account-owns);
+only a fix may go to a branch of it, where the output
 repository accepts that
 ([pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
 Before the handlers run, it forks the output repository
@@ -1003,7 +1005,7 @@ before it pushes anything, and stops if it cannot or they stay on. Keep
 Actions off and no secrets on the bot account's forks all the same.
 
 So `create_pull_request` needs a user's token, of an account that does
-not own the output repository, that can fork it, push to the fork, turn
+not own the output repository (but see [below](#a-repository-the-applying-account-owns)), that can fork it, push to the fork, turn
 off the fork's Actions and open pull requests on it: a classic PAT of a
 bot account with `repo` scope, which the Actions setting needs even
 for a public repository. Give it the `workflow` scope too: the fork is
@@ -1033,14 +1035,40 @@ step has not been tried here ([what is left](plan.md#open-work)). Policy refuses
 it refuses `update_project`: the job token names
 nobody and has no account to fork into. Apply fails before it pushes
 anything when `GET /user` names nobody (an App's token), or when that
-user owns the output repository and so has no fork of it, or when what
+user owns the output repository and so has no fork of it (but see below), or when what
 the forge answers is not that user's own fork (the user's repository in
-the network can be its root, or the caller's repository). There is no
-mode that pushes a new pull request's branch to the output repository
-instead.
+the network can be its root, or the caller's repository).
 
-Every agent's pull request is then a fork's, and so is treated as one
-everywhere. This repository's CI skips the end-to-end jobs for it, as
+### A repository the applying account owns
+
+An account has no fork of its own repository, so apply refuses an output
+repository owned by the user `GET /user` names, unless the repository
+accepts its owner's branches: its default branch has the file
+`.github/agentic-job/accept-owner-branches` naming it (`owner/repo`) on a
+line of its own, the file a fix push [checks too](safe-outputs.md#pushing-to-a-pull-requests-branch).
+No bounds file lists such repositories; each one says so itself, in a
+commit to its default branch that an agent's patch cannot make, and a
+fork inherits a file naming its parent, not itself.
+
+Then a new pull request's branch is pushed to that repository itself and
+the pull request opened from it; another account's token still forks.
+That gives up what the fork is for: the repository's `push` and
+`pull_request` workflows run the agent's commit with its secrets, a write
+token and OIDC, and its Actions are not turned off. Add the file only to a
+repository whose workflows give a branch nothing an agent is not to have;
+where it is also the caller, keep its apply environment to the default
+branch, so that a branch's workflows cannot use its token.
+Apply refuses the pull request where the bounds exempt `.github` for it
+(`unprotected_files` with `dot_folders`), as a workflow file the agent
+wrote would then run on its own branch. Its pull requests are not a
+fork's: event and review callers there take them as the owner's
+same-repository pull requests, whatever their bounds say about `forks`. A
+fix pushed to one of them goes to the repository's branch under the same
+file.
+
+Every agent's pull request but one in an
+[owned repository](#a-repository-the-applying-account-owns) is then a
+fork's, and so is treated as one everywhere. This repository's CI skips the end-to-end jobs for it, as
 they need a write token and an OIDC token, and then fails its required
 `ci` check unless it changes only documentation: a maintainer runs them
 from a branch of this repository with the same commits before merging. The event callers and the review caller refuse a
@@ -1187,7 +1215,7 @@ fetches the target's base but never pushes it to the output repository;
 that would start its push workflows on unreviewed target code. The pull
 request's own branch still goes to the
 applying account's fork of `output-repo`, so that account must not own
-`output-repo`.
+`output-repo` unless that repository accepts it ([above](#a-repository-the-applying-account-owns)).
 
 Without a patch, apply does not check out a repository, configure git or
 fetch/advance a base branch. An analysis can therefore inspect a topic branch
@@ -1196,6 +1224,14 @@ that repository has no such branch. `comment-target` fixes the issue/PR number;
 the read-only check job refuses an explicit repository or item that differs,
 including PR-number aliases, existing-comment IDs and discussion replies.
 Omitting a destination in the request uses the caller's fixed destination.
+Where the item is an issue of another repository than `output-repo` (for
+a target with issues turned off), `item-repo` names it: `comment-target`
+and `issue` are then its numbers, comments and the status comment go
+there, and a pull request or new issue still to `output-repo`. Policy
+refuses an `item-repo` that is not public or not within the bounds'
+`repos`, since its issue text reaches the agent and the status comment
+is posted with the apply credential, and refuses it with `event`, `review`,
+`review-item` or `push-item`, whose items are the target's or the caller's.
 Cross-repository writes still require an apply token with access to that
 repository; no permissions or action pins are broadened.
 

@@ -25,7 +25,8 @@ In `dispatch.toml`, replace `repos` with your exact public repository name.
 Commit the files to your protected default branch and allow the pinned actions
 and reusable workflow in Actions settings. `implement` also needs
 `APPLY_ENVIRONMENT` ([below](#switch-to-a-real-agent)): apply opens its
-pull request only from a fork owned by the account whose PAT that is.
+pull request from a fork owned by the account whose PAT that is (or, for a
+target that account owns and that accepts it, from a branch of the target).
 
 Leave the other repository variables unset for this trial. Start with an existing issue:
 
@@ -89,9 +90,22 @@ with globs of the branches a fix may push to; see
 [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch).
 The scripted session is implement's.
 
+A target with issues turned off can take its item from another repository:
+`-f item-repo=OWNER/TRACKER` with an issue number there, for `implement`,
+`triage` and `research`. The issue's text, the status comment and a
+triage or research comment are that repository's; a pull request is the
+target's. Policy refuses an item repository the bounds' `repos` do not
+list, and it needs `APPLY_ENVIRONMENT` like any other repository.
+
+Apply refuses a target the applying account owns, as it has no fork of it,
+unless the target's default branch has the file
+[`.github/agentic-job/accept-owner-branches`](workflow.md#a-repository-the-applying-account-owns)
+naming it; its CI then runs the agent's branch with its secrets. A `fix`
+to such a pull request is pushed to its branch under the same file.
+
 Every run's result can be found from the issue it was dispatched for. A draft
 PR ends its body with `Refs OWNER/REPO#N`, which apply writes from the `repo`
-and `item` inputs, not from agent text; `Refs` closes nothing on merge. Its
+(or `item-repo`) and `item` inputs, not from agent text; `Refs` closes nothing on merge. Its
 title is the first line of the agent's summary, cut between words to 100
 characters. For non-review runs in the calling repository, notify and conclude
 upsert one status comment there, linking the current run and its result across
@@ -179,7 +193,8 @@ Use a classic PAT with `repo` and `workflow` scopes of a dedicated bot account t
 own the target and has write access to nothing but its own forks: such a PAT
 writes to every repository its account can, and still comments, opens issues
 and forks on any public repository, so the account is what bounds it. Apply
-pushes an `implement` branch only to that account's fork of the target, which
+pushes an `implement` branch only to that account's fork of the target
+(unless the target is the account's own and accepts its branches), which
 it makes if missing, and turns off Actions there before it pushes
 ([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
 Preflight names a missing `APPLY_ENVIRONMENT` too.

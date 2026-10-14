@@ -911,6 +911,7 @@ jobs:
           # e2e-full passes no SAFE_OUTPUTS_PAT: its apply posted with the job token.
           TOKEN_IS_PAT: 'false'
           OUTPUT_REPO: ${{ github.repository }}
+          ITEM_REPO: ${{ github.repository }}
           COMMENT_TARGET: "64"
           # e2e-full's, which its name is digested with.
           ARTIFACT_PREFIX: full-

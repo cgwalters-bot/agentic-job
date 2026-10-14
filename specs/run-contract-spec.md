@@ -258,14 +258,22 @@ apply's guard and not its handlers; and `AtMostOnce` and
 `NoFalseSkip` in the [TLA+ model](README.md).
 
 **RC-019 — Finding the result from the issue.** For a caller-named `issue`
-(a number of the output repository, checked by policy), apply MUST end a pull
+(a number of the output repository or of `item-repo`, checked by policy), apply MUST end a pull
 request's body with `Refs OWNER/NAME#N` in its own words, never a closing
 keyword nor agent text, before the guard names it. The pull request handler
 MUST have `auto_close_issue: false`, including for issue-triggered events.
 Apply MUST give the URL of
 what it made (the pull request, else the first comment or issue, an earlier
 attempt's before this one's) as the `result-url` output of `apply.yml`,
-`agentic-job.yml` and `dispatch.yml`, and in the run summary. Unless that
+`agentic-job.yml` and `dispatch.yml`, and in the run summary. The issue and a
+numeric `comment-target` are numbers of the output repository, or of the
+`item-repo` the caller names for a target that has no issues of its own:
+there the reference, the comments and the status comment MUST go to
+`item-repo`, and a pull request or a new issue still to the output
+repository; closing and labelling (RC-011) are not moved. Policy MUST refuse an `item-repo` that is not public or not
+within the bounds' `repos`, as its issue text reaches the agent and it is
+written to with apply's credential, and one given with `event`, `review`,
+`review-item` or `push-item`. Unless that
 result is a comment on the issue, it MUST leave the issue one comment linking
 the run and the result, named by run and call and looked for as RC-013 looks
 for a comment, so that a re-run does not post it again. Failing to post the link
@@ -283,7 +291,10 @@ post nothing for a run with any other output, and conclude's status MUST say
 such a run handed back no result.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request
 refers to the issue the caller named, and closes nothing`, `a pull request's
-handler pushes only to the fork, and there is none without one`, the `the result of
+handler pushes only to the fork, and there is none without one`, `issue
+actions keep checked repository and caps, not output-repo or event targets`
+(where a comment is posted), `a comment on
+an item in another repository is looked for there`, the `the result of
 ...` cases, `the issue is linked to what a run made once, by the token that
 posts`, the `a run that handed back ...` cases, `a run with no result says
 so once per run and call, by the token that posts`, `a run with no result
@@ -292,8 +303,10 @@ with no result is sanitized as the handlers sanitize a comment` and the
 `conclude says ...` cases; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary` and `the URL of what apply made is an output
 of dispatch, by way of the wrapper`; [proposals.test.cjs](../workflow/proposals.test.cjs),
-the issue cases of `the policy command is told when apply holds only the job
-token`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
+the issue and `item-repo` cases of `the policy command is told when apply holds only the job
+token`; [status.test.cjs](../workflow/status.test.cjs), `dispatch and event
+status use the same trusted helper, opt-in only`; [policy.rs](../crates/agentic-job/src/policy.rs), the `an item in ...`
+cases of `requests_against_the_bounds`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
 `titles_are_cut_between_words` and `made_up_pull_requests`.
 
 **RC-020 — Pushing to a pull request.** `push_to_pull_request_branch` MUST
@@ -387,7 +400,8 @@ MUST validate a full commit ID; apply MUST bind it to one of these trusted
 heads before reconstruction. Live forge application remains unverified locally.
 
 **RC-021 — Pull requests from a fork.** Apply MUST NOT push an agent's commit
-to a branch of the output repository. It MUST NOT push target base commits
+to a branch of the output repository, except as the last paragraph of this
+requirement allows. It MUST NOT push target base commits
 there either; its base must already contain the patch's base commit, or apply
 MUST stop and ask the operator to sync it independently.
 It MUST push a pull request's branch to
@@ -396,19 +410,33 @@ credential, making the fork when there is none, and open the pull request
 with that fork's owner and branch as its head, so that the output
 repository's CI runs the commit as a fork's: with a read-only token, no
 secrets and no OIDC token. Apply MUST fail before any push when that user
-cannot be named, when it owns the output repository, when what the forge
+cannot be named, when it owns the output repository (but for that paragraph), when what the forge
 answers is not that user's own fork and neither the caller's nor the output
 repository, when the fork has no branch git can reach, or when Actions
 cannot be turned off on the fork, as a push with a user's token would start
 its workflows with its secrets; without a fork,
-no pull request or push handler is configured. There
-is no same-repository mode. This repository's CI MUST give a fork's pull
+no pull request or push handler is configured. This repository's CI MUST give a fork's pull
 request nothing privileged: no `pull_request_target` or `workflow_run`
 trigger, no secret, and no job that writes or asks for an OIDC token runs
 for it; and its required `ci` check MUST NOT pass when the end-to-end jobs
 it skips are needed for what it changes.
+
+The one same-repository mode is for an output repository the user `GET /user`
+names owns, which has no fork of it. The repository itself opts in, with the
+file `.github/agentic-job/accept-owner-branches` naming it on a line of its
+own on its default branch, as RC-020 reads it, which apply MUST read through
+the API; no bounds file or caller input names it.
+Only when that file is there, the output is a new pull request and the
+policy does not exempt `.github` for it (a workflow file the agent wrote would
+run on its own branch), apply MUST push the branch to the output repository
+itself and open the pull request from it, forking nothing and leaving its
+Actions setting alone; the repository's `push` and `pull_request` workflows
+then run the agent's commit with its secrets, a write token and OIDC, which
+is the repository's to accept. Another account's token MUST still fork it.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request is
-opened from a fork the token owns, made if missing and reached by git`, `a
+opened from a fork the token owns, made if missing and reached by git`, `an
+owner's pull request is pushed in its own repository only where the
+repository accepts it`, `a
 pull request's handler pushes only to the fork, and there is none without
 one`, `the pull request is looked for from the branch gh-aw names in the fork,
 prefix normalized`, `a pull request without a fork to open it from stops the
@@ -582,8 +610,17 @@ These limitations are not additional guarantees:
   `workflow_run` still runs with its privileges, and its settings decide
   whether a fork's runs wait for approval. The fork is never deleted, its
   other branches are left as they are, and the credential that pushes to it
-  can push to every other repository its user owns.
-- Under RC-021 every agent's pull request is a fork's: this repository's
+  can push to every other repository its user owns. Its owner's-repository mode
+  and RC-019's `item-repo` have unit tests only: no live run has pushed a
+  branch to a repository its applying account owns, nor taken its item from
+  another repository. Nothing checks what that repository's workflows give
+  a branch, and apply does not delete the branch it pushed. There "the
+  fork" of RC-013 and RC-019 is the output repository itself. No test
+  covers the refusal of an `item-repo` that is not public, and, like
+  RC-018's other repositories, one given without an apply environment is
+  admitted and fails at apply (`dispatch.yml` refuses that before the run).
+- Under RC-021 every agent's pull request but one the applying account
+  opened in its own repository is a fork's: this repository's
   CI runs no end-to-end job for it (they run in the merge queue, or on
   the push to main once it is merged without one), and the event and review callers refuse it unless their
   bounds say `forks = true`.

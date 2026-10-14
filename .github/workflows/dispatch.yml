@@ -1,7 +1,7 @@
 # Copy this file and .github/agentic-job/dispatch.toml at the same paths.
 # Pin the reusable call to this source commit; see docs/dispatch.md.
 name: dispatch
-run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}
+run-name: ${{ inputs.kind }} ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}${{ inputs.item-repo && format(' for {0}', inputs.repo) || '' }}
 
 on:
   workflow_call:
@@ -31,6 +31,9 @@ on:
       item:
         type: string
         required: true
+      item-repo:
+        type: string
+        default: ""
       kind:
         type: string
         required: true
@@ -48,6 +51,12 @@ on:
         description: Positive issue number in the target repository (a pull request's for review and fix)
         type: string
         required: true
+      item-repo:
+        description: >-
+          The repository the item is an issue of, OWNER/NAME, when not the target (one with issues
+          turned off); the bounds must allow it. Empty for the target. Not for review and fix
+        type: string
+        default: ""
       kind:
         description: Fixed profile (review and fix take a pull request number; fix is off unless the bounds allow it)
         type: choice
@@ -61,7 +70,7 @@ permissions: {}
 # run id keeps two CI runs (merge queue entries, or a pull request and a
 # queue entry) from cancelling each other's call.
 concurrency:
-  group: dispatch-${{ inputs.kind }}-${{ inputs.repo }}-${{ inputs.item }}${{ inputs.scripted && format('-{0}', github.run_id) || '' }}
+  group: dispatch-${{ inputs.kind }}-${{ inputs.repo }}-${{ inputs.item-repo }}-${{ inputs.item }}${{ inputs.scripted && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -80,6 +89,7 @@ jobs:
         env:
           TARGET_REPO: ${{ inputs.repo }}
           TARGET_ITEM: ${{ inputs.item }}
+          ITEM_REPO: ${{ inputs.item-repo }}
           PROFILE: ${{ inputs.kind }}
           TASK: ${{ inputs.task }}
           AGENT: ${{ inputs.scripted && 'fake' || vars.AGENT || 'fake' }}
@@ -110,10 +120,21 @@ jobs:
                 !/^[1-9][0-9]*$/.test(item) || !Number.isSafeInteger(Number(item))) {
               throw new Error('Expected OWNER/NAME and a positive safe issue number');
             }
-            // Another repository is written to, a pull request opened from a
-            // fork, and a fix pushed to a pull request's branch, only with a
-            // user's token: the job token can do none of these.
-            if ((repo !== context.repo.owner + '/' + context.repo.repo || profile === 'implement' || profile === 'fix') &&
+            // The item may be an issue of another repository, for a target
+            // with issues turned off: its status comment, and a triage or
+            // research comment, go there; a pull request to the target.
+            // Policy holds that repository to the bounds' `repos`.
+            const itemRepo = process.env.ITEM_REPO || repo;
+            if (itemRepo.trim() !== itemRepo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(itemRepo)) {
+              throw new Error('Expected the item repository as OWNER/NAME');
+            }
+            const onPull = ['review', 'fix'].includes(profile);
+            if (onPull && itemRepo !== repo) throw new Error(`${profile} takes a pull request of the target, not an item of another repository`);
+            // Another repository is written to, and a pull request opened from
+            // a fork or a fix pushed to one, only with a user's token: the job
+            // token can do none of these.
+            const self = context.repo.owner + '/' + context.repo.repo;
+            if ((repo !== self || itemRepo !== self || profile === 'implement' || profile === 'fix') &&
                 !process.env.APPLY_ENVIRONMENT?.trim()) missing.push('APPLY_ENVIRONMENT');
             // A scripted run, as CI starts, is given none of the repository
             // variables, APPLY_ENVIRONMENT included: it stops here for implement
@@ -123,9 +144,8 @@ jobs:
                 missing.join(', '));
             }
             core.setOutput('agent', agent);
-            const [owner, name] = repo.split('/');
+            const [owner, name] = itemRepo.split('/');
             const { data } = await github.rest.issues.get({ owner, repo: name, issue_number: Number(item) });
-            const onPull = ['review', 'fix'].includes(profile);
             if (onPull !== Boolean(data.pull_request) || data.number !== Number(item)) {
               throw new Error(onPull ? `${profile} requires a pull request` : 'This profile requires an issue, not a pull request');
             }
@@ -141,7 +161,7 @@ jobs:
               : skills
               ? 'Use the implement skill. Implement proposes one draft pull request. Use noop, missing_tool or missing_data when needed.'
               : 'Implement proposes one draft pull request. Triage and research leave the tree clean and return one add_comment. Use noop, missing_tool or missing_data when needed.';
-            const text = JSON.stringify({ repository: repo, number: data.number, title: data.title, body: data.body })
+            const text = JSON.stringify({ repository: itemRepo, number: data.number, title: data.title, body: data.body })
               .replaceAll('<', '\\u003c').replaceAll('>', '\\u003e');
             const routing = profile === 'review'
               ? ' Set only type and body on add_comment; do not set item_number or other routing fields: the workflow fixes the target.'
@@ -166,8 +186,9 @@ jobs:
       # Agent/policy/check downscope to read. Apply and refusal reporting
       # use these writes; neither executes agent-produced code. Every push
       # is with the apply environment's token: a new pull request's branch
-      # goes to a fork, and a fix to a pull request's branch where that
-      # token may push and workflow/push.cjs allows. The job token pushes
+      # goes to a fork, or to a target the applying account owns that
+      # accepts it, and a fix to a pull request's branch where that token
+      # may push and workflow/push.cjs allows. The job token pushes
       # nothing.
       contents: read
       issues: write
@@ -175,7 +196,7 @@ jobs:
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # Only the runner, not the agent, registers with the proxy.
     with:
-      id: ${{ inputs.repo }}#${{ inputs.item }}
+      id: ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}
       repo: ${{ inputs.repo }}
       task: ${{ needs.target.outputs.task }}
       kind: ${{ (inputs.kind == 'implement' || inputs.kind == 'fix') && 'branch' || 'analysis' }}
@@ -202,6 +223,7 @@ jobs:
       inference-url: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_URL || '' }}
       inference-audience: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_AUDIENCE || '' }}
       output-repo: ${{ inputs.repo }}
+      item-repo: ${{ inputs.item-repo }}
       comment-target: ${{ inputs.item }}
       # A pull request says `Refs` to the item, and the item links to what
       # the run made when that is not a comment on it.

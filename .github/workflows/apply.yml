@@ -84,8 +84,11 @@ jobs:
       no-result-reason: ${{ steps.result.outputs.no-result-reason }}
     env:
       OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
-      # The issue the caller made the run for, a number policy checked.
+      # The issue the caller made the run for, a number policy checked, and
+      # the repository it and a comment's target are in: the output
+      # repository unless the caller put the item elsewhere (`item-repo`).
       ISSUE: ${{ fromJSON(inputs.policy).issue }}
+      ITEM_REPO: ${{ fromJSON(inputs.policy).item-repo || fromJSON(inputs.policy).output-repo || github.repository }}
       REPO: ${{ fromJSON(inputs.policy).repo }}
       BASE: ${{ fromJSON(inputs.policy).base }}
       REPORT: /tmp/gh-aw/report.json
@@ -157,8 +160,8 @@ jobs:
       - id: replacement
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # A push's pull request is checked with its `pushTarget`, too.
-        if: ${{ steps.replacement.outputs.enabled == 'true' || fromJSON(inputs.policy).push-item != '' }}
+        # The fork step checks where a patch goes with workflow/push.cjs.
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -185,12 +188,26 @@ jobs:
       # fork if there is none and answers with the existing one otherwise;
       # it is not synced, as the handler pushes the commit together with the
       # base it sits on. The job token names nobody and cannot fork (policy
-      # refuses it create_pull_request), and an owner of the output
-      # repository has no fork of it to push to. What the forge answers
+      # refuses it create_pull_request). What the forge answers
       # with is the user's repository in the output repository's network,
       # which can be the network's root or the caller's repository: it has
       # to be a fork, the user's, and neither of those, with Actions turned
       # off. This comes before anything is pushed.
+      #
+      # An owner of the output repository (the user `GET /user` names) has
+      # no fork of it to push to. A new pull request's branch is pushed to
+      # the repository itself instead, with its Actions left as they are,
+      # only where the repository says so: its `push` and `pull_request`
+      # workflows then run the agent's commit with its secrets, a write
+      # token and OIDC, which is what the fork prevents. It says so as for
+      # a push (`acceptsOwnerBranches` in workflow/push.cjs): the file
+      # OWNER_BRANCHES naming it on its default branch. The repository
+      # carries that, not each caller's bounds, as it is its secrets that
+      # are given up; a file, as only a commit to the default branch adds
+      # one (reviewed and protected as that branch is, and never an
+      # agent's: the patch may not touch `.github` here), where a topic is
+      # a setting any admin token flips unseen and custom properties are an
+      # organization's only.
       #
       # A push goes to the same fork, and only to the branch of a pull
       # request apply opened from it, where the pull request is from that
@@ -228,14 +245,30 @@ jobs:
               }
             }
             const [owner, repo] = process.env.OUTPUT_REPO.split('/');
+            const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8'));
             if (owner.toLowerCase() === me.toLowerCase()) {
-              throw new Error(`${me} owns ${process.env.OUTPUT_REPO} and has no fork of it to push to: apply as an account that does not own it`);
+              const refuse = why => {
+                throw new Error(`${me} owns ${process.env.OUTPUT_REPO} and has no fork of it to push to: ${why}`);
+              };
+              // A push to a branch of the repository itself returned above;
+              // what is left is one from `me`'s fork, which an owner has not.
+              if (push) refuse("a push goes only to a branch of the repository itself or of another's fork");
+              // A workflow file the agent wrote would run on its own branch.
+              if (config.create_pull_request?.unprotected_dot_folders?.includes('.github')) {
+                refuse('its branch is not pushed to the repository itself with .github exempted from protection');
+              }
+              const { acceptsOwnerBranches, OWNER_BRANCHES } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/push.cjs`);
+              if (!await acceptsOwnerBranches(process.env.OUTPUT_REPO, github)) {
+                refuse(`apply as an account that does not own it, or, for a new pull request, add ${OWNER_BRANCHES} naming ${process.env.OUTPUT_REPO} to its default branch`);
+              }
+              core.setOutput('repo', process.env.OUTPUT_REPO);
+              return;
             }
             // A push's pull request is checked before anything is forked:
             // open, from the branch the policy names, of a fork of `me`'s.
             let from = null, target = null;
             if (push) {
-              ({ target } = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch ?? {});
+              ({ target } = config.push_to_pull_request_branch ?? {});
               if (!/^[1-9][0-9]*$/.test(String(target))) throw new Error('a push is to be applied, and the policy names no pull request for it');
               const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: Number(target) });
               from = String(pull.head?.repo?.full_name);
@@ -346,7 +379,8 @@ jobs:
       # The collector's configuration with how to apply added: an unsigned
       # push keeps the author (a signed one is made through the API, as the
       # token's owner), a pull request that fails is not to become an
-      # issue, and the branch goes to the fork, which only it may name.
+      # issue, and the branch goes to the fork (or the owner's repository
+      # itself, as the fork step decided), which only it may name.
       # Without a fork there is no pull request to open or push to, and no
       # handler for either: one without its `head-repo` would push to the
       # output repository. Each input is one string of the result.
@@ -388,7 +422,7 @@ jobs:
         # names the fork alone.
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
-            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
+            --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
             | (select(has("create_pull_request")).create_pull_request) |=
                 ((.unprotected_dot_folders // [] | map(select(. == ".github"))) as $excludes | del(.unprotected_dot_folders)
@@ -401,7 +435,7 @@ jobs:
                  "head-repo": $fork, allowed_repos: [$fork]}
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push
               + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork], checkout_mapping: {($repo | ascii_downcase): "."}}
-            | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
+            | (select(has("add_comment")).add_comment) += {"target-repo": $item_repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
             | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
@@ -433,7 +467,7 @@ jobs:
       - name: Say which issue a pull request is for
         if: ${{ fromJSON(inputs.policy).issue != '' }}
         run: |
-          jq --arg refs "Refs $OUTPUT_REPO#$ISSUE" '(.items[] | select(.type == "create_pull_request") | .body) |= "\(. // "")\n\n\($refs)"' \
+          jq --arg refs "Refs $ITEM_REPO#$ISSUE" '(.items[] | select(.type == "create_pull_request") | .body) |= "\(. // "")\n\n\($refs)"' \
             "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/refs.json"
           mv "$RUNNER_TEMP/refs.json" "$GH_AW_TMP/agent_output.json"
       # A re-run of this job applies check's accepted outputs again, and
@@ -530,7 +564,8 @@ jobs:
               if (item.type === 'add_comment') {
                 const target = /^\d+$/.test(process.env.COMMENT_TARGET) ? process.env.COMMENT_TARGET : item.item_number;
                 if (/^\d+$/.test(String(target))) {
-                  const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: Number(target), per_page: 100 });
+                  const [itemOwner, itemRepo] = process.env.ITEM_REPO.split('/');
+                  const comments = await github.paginate(github.rest.issues.listComments, { owner: itemOwner, repo: itemRepo, issue_number: Number(target), per_page: 100 });
                   found = comments.find(marked);
                 }
               } else if (item.type === 'create_pull_request') {
@@ -850,14 +885,17 @@ jobs:
           EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
           OVER_BUDGET: ${{ fromJSON(inputs.agent).outputs.over-budget }}
           PR: ${{ needs.apply.outputs.pull-request }}
+          # The status comment is on the item: a pull request of another
+          # repository is named with it, or `#N` would link the item's own N.
+          PR_REPO: ${{ fromJSON(inputs.policy).item-repo != '' && (fromJSON(inputs.policy).output-repo || github.repository) || '' }}
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
           NO_RESULT_REASON: ${{ needs.apply.outputs.no-result-reason }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
         run: |
-          [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ ]]
+          [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ && ( -z "$PR_REPO" || "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ) ]]
           case "$RESULTS" in
-            success/success/success) text="✅ [$WORKFLOW]($RUN_URL) ended well${PR:+ and opened pull request #$PR}." reaction=rocket
+            success/success/success) text="✅ [$WORKFLOW]($RUN_URL) ended well${PR:+ and opened pull request $PR_REPO#$PR}." reaction=rocket
               if [ "$NO_RESULT" = true ]; then
                 text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back no result."
                 if [ -z "$REFUSAL" ] && [ -n "$NO_RESULT_REASON" ]; then

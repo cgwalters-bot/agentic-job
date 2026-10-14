@@ -204,6 +204,11 @@ pub struct Args {
     /// unless it is `--repo`, where the pull request is
     #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
     pub output_repo: Option<String>,
+    /// The repository the run's item (its issue and status comment) is
+    /// in, where that is not the output repository; it must be within
+    /// `repos`, as `--repo` must
+    #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
+    pub item_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -373,6 +378,8 @@ pub struct Request<'a> {
     /// Where apply applies the outputs; a push must name the run's own
     /// repository here.
     pub output_repo: Option<&'a str>,
+    /// Where the run's item is, when not in the output repository.
+    pub item_repo: Option<&'a str>,
 }
 
 /// What `policy.json` holds: the request, once it is within the bounds.
@@ -782,6 +789,7 @@ impl Bounds {
             job_token,
             pull_request,
             output_repo,
+            item_repo,
         } = *request;
         let mut errors = Vec::new();
 
@@ -795,6 +803,19 @@ impl Bounds {
         // Checked against the repository only if that is a name at all.
         if repo_ok && let Some(problem) = self.clone_url_problem(clone_url, repo) {
             errors.push(problem);
+        }
+        // Its issue's text joins the task and its status comment is posted
+        // with the apply credential: a repository the bounds let runs work
+        // on, not any one a caller names.
+        if let Some(item_repo) = item_repo
+            && (!REPO_RE.is_match(item_repo)
+                || dotted(item_repo)
+                || !glob_matches(&self.repos, item_repo))
+        {
+            errors.push(format!(
+                "item repo {item_repo:?} is not within the bounds ({})",
+                self.repos.join(", ")
+            ));
         }
         // An analysis run has no change to propose.
         let no_change = kind == Kind::Analysis;
@@ -1051,6 +1072,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         job_token: args.job_token,
         pull_request: args.pull_request.as_deref().zip(args.head.as_deref()),
         output_repo: args.output_repo.as_deref(),
+        item_repo: args.item_repo.as_deref(),
     };
     let compiled = bounds
         .compile(&request)
@@ -1210,6 +1232,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             job_token: false,
             pull_request: None,
             output_repo: None,
+            item_repo: None,
         }
     }
 
@@ -1396,6 +1419,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 job_token: false,
                 pull_request: None,
                 output_repo: None,
+                item_repo: None,
             });
             assert_eq!(result.is_ok(), allowed, "{base}, {outputs}: {result:?}");
         }
@@ -1811,6 +1835,38 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 },
                 Some("does not name"),
             ),
+            (
+                "an item in another repository the bounds allow",
+                Request {
+                    item_repo: Some("cgwalters-forge/tracker"),
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "an item in a repository the bounds do not allow",
+                Request {
+                    item_repo: Some("evil/tracker"),
+                    ..ok
+                },
+                Some("item repo \"evil/tracker\" is not within"),
+            ),
+            (
+                "an item in a repository of dots",
+                Request {
+                    item_repo: Some("cgwalters-forge/.."),
+                    ..ok
+                },
+                Some("item repo "),
+            ),
+            (
+                "an item in a malformed repository",
+                Request {
+                    item_repo: Some("cgwalters-forge/tracker/x"),
+                    ..ok
+                },
+                Some("item repo "),
+            ),
         ];
         let bounds = bounds();
         for (name, request, want) in cases {
@@ -1949,6 +2005,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             job_token: false,
             pull_request: None,
             output_repo: None,
+            item_repo: None,
         };
         let errors = bounds().compile(&request).unwrap_err();
         assert_eq!(errors.len(), 5, "{errors:?}");

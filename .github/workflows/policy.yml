@@ -184,6 +184,14 @@ on:
         description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a new pull request, the patch's base commit must already be in the output repository; comments need no checkout
         type: string
         default: ""
+      item-repo:
+        description: >-
+          The repository `comment-target` and `issue` are numbers of, OWNER/NAME, when that is not
+          the output repository (one with issues turned off): comments and the status comment go
+          there, a pull request or a new issue still to the output repository. It must be public and
+          within the bounds' `repos`. Empty for the output repository; not with `event`, `review-item` or `push-item`
+        type: string
+        default: ""
       apply-environment:
         description: >-
           An environment of the calling repository gating apply. Explicitly pass SAFE_OUTPUTS_PAT;
@@ -201,14 +209,14 @@ on:
         default: false
       comment-target:
         description: >-
-          The issue or pull request of the output repository an `add_comment` goes to, or `*` for
+          The issue or pull request of the output repository (or `item-repo`) an `add_comment` goes to, or `*` for
           the one each comment names. Empty for the issue or pull request that started an
           event-triggered run, and `*` where no event did
         type: string
         default: ""
       issue:
         description: >-
-          The issue or pull request of the output repository the run was made for, by number:
+          The issue or pull request of the output repository (or `item-repo`) the run was made for, by number:
           a pull request the run opens says `Refs` to it, and apply links it to what the run made
           when that is not a comment on it. Empty for none
         type: string
@@ -296,6 +304,9 @@ on:
       output-repo:
         description: The `output-repo` input
         value: ${{ jobs.policy.outputs.output-repo }}
+      item-repo:
+        description: The `item-repo` input
+        value: ${{ jobs.policy.outputs.item-repo }}
       review:
         description: The `review` input, `true` or `false`
         value: ${{ jobs.policy.outputs.review }}
@@ -339,8 +350,8 @@ on:
         description: The issue or pull request the notify job comments on, and conclude reports to
         value: ${{ jobs.notify.outputs.item || jobs.policy.outputs.item || jobs.policy.outputs.comment-target }}
       notify-repo:
-        description: The caller repository for event items, otherwise the fixed output repository
-        value: ${{ jobs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}
+        description: The caller repository for event items, otherwise the item's or else the fixed output repository
+        value: ${{ jobs.policy.outputs.item != '' && github.repository || inputs.item-repo || inputs.output-repo || github.repository }}
       notify-comment-id:
         description: The status comment the notify job posted, which apply.yml's conclude job edits
         value: ${{ jobs.notify.outputs.comment-id }}
@@ -392,6 +403,7 @@ jobs:
       runner: ${{ inputs.runner }}
       repo: ${{ inputs.repo }}
       output-repo: ${{ inputs.output-repo }}
+      item-repo: ${{ inputs.item-repo }}
       review: ${{ inputs.review }}
       expect-check-refusal: ${{ inputs.expect-check-refusal }}
       proposals-artifact: ${{ inputs.proposals-artifact }}
@@ -432,7 +444,7 @@ jobs:
       - name: Check that the repositories are public
         env:
           GH_TOKEN: ${{ github.token }}
-          REPOS: ${{ inputs.repo }} ${{ inputs.agent-config-repo }}
+          REPOS: ${{ inputs.repo }} ${{ inputs.agent-config-repo }} ${{ inputs.item-repo }}
         run: |
           set -f
           for repo in $REPOS; do
@@ -613,12 +625,26 @@ jobs:
           PUSH_HEAD: ${{ steps.push.outputs.head }}
           REPLACEMENT_BASE: ${{ steps.push.outputs.replacement-base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
+          ITEM_REPO: ${{ inputs.item-repo }}
+          EVENT: ${{ inputs.event }}
+          REVIEW_ITEM: ${{ inputs.review-item }}
+          REVIEW: ${{ inputs.review }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
+          # An event's item is in the calling repository, and a review's or
+          # a push's pull request in `repo`; another item's repository has
+          # to be one the bounds let runs work on.
+          if [ -n "$ITEM_REPO" ]; then
+            [ "$EVENT" != true ] || { echo "::error::item-repo is not for an event-triggered run, whose item is in $GITHUB_REPOSITORY"; exit 1; }
+            # A review without `review-item` takes its pull request from the
+            # event, in the calling repository, as its comment's target.
+            [ -z "$REVIEW_ITEM$PUSH_ITEM" ] && [ "$REVIEW" != true ] || { echo "::error::item-repo is not for a review or a push, whose pull request is in $REPO"; exit 1; }
+            set -- --item-repo "$ITEM_REPO"
+          fi
           base=$BASE target=${TARGET:-*}
           if [ -n "$PUSH_ITEM" ]; then
             base=$PUSH_BRANCH
-            set -- --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
+            set -- "$@" --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
           fi
           # Without an apply environment apply holds the job token: refuse
           # here, not after the agent ran, what that token cannot apply.
@@ -782,7 +808,7 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && (needs.activate.result == 'success' || (inputs.proposals-artifact != '' && needs.activate.result == 'skipped')) && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && (needs.policy.outputs.item != '' || (needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
     # Serialize lookup/create with conclude so simultaneous runs cannot create duplicates.
     concurrency:
-      group: agentic-job-status-${{ needs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}-${{ needs.policy.outputs.item || needs.policy.outputs.comment-target }}
+      group: agentic-job-status-${{ needs.policy.outputs.item != '' && github.repository || inputs.item-repo || inputs.output-repo || github.repository }}-${{ needs.policy.outputs.item || needs.policy.outputs.comment-target }}
       cancel-in-progress: false
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
@@ -846,7 +872,7 @@ jobs:
           ITEM: ${{ steps.target.outputs.item }}
           WHAT: ${{ steps.target.outputs.what }}
           TEXT: ⏳ [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) is running.
-          REPO: ${{ needs.policy.outputs.item != '' && github.repository || inputs.output-repo || github.repository }}
+          REPO: ${{ needs.policy.outputs.item != '' && github.repository || inputs.item-repo || inputs.output-repo || github.repository }}
           STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
         run: |
           node "$SOURCE_DIR/workflow/status.cjs" | tee -a "$GITHUB_OUTPUT"

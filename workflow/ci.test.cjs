@@ -23,6 +23,46 @@ const gates = {
     'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 
+test('the full-run CI harness skips its comment on the second apply attempt', async () => {
+  const section = block('e2e-dispatch-verify').split('      - name: "Run the full run\'s apply guard again"\n')[1].split(/\n {6}(?! )/)[0];
+  const source = section.split('          script: |\n')[1].split('\n')
+    .filter(line => line.startsWith(' '.repeat(12))).map(line => line.slice(12)).join('\n');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-rerun-'));
+  try {
+    // Use the harness's environment, not a separately maintained guard fixture.
+    const env = Object.fromEntries([...section.split('        with:\n')[0]
+      .matchAll(/^          ([A-Z_]+): (.+)$/gm)].map(([, key, value]) => [key,
+        value.replaceAll('${{ runner.temp }}', dir).replaceAll('${{ github.repository }}', 'owner/target').replace(/^["'](.*)["']$/, '$1')]));
+    env.GITHUB_RUN_ID = '123';
+    fs.mkdirSync(env.GH_AW_TMP, { recursive: true });
+    const file = path.join(env.GH_AW_TMP, 'agent_output.json');
+    const output = { items: [{ type: 'add_comment', body: 'result' }] };
+    let comments = [];
+    const github = { rest: { issues: { listComments: Symbol('listComments') } },
+      paginate: async (method, params) => {
+        assert.equal(method, github.rest.issues.listComments);
+        assert.deepEqual(params, { owner: 'owner', repo: 'target', issue_number: 64, per_page: 100 });
+        return comments;
+      } };
+    const summary = { addHeading() { return this; }, addList() { return this; }, async write() {} };
+    const core = { setOutput() {}, summary };
+    const run = new AsyncFunction('require', 'process', 'core', 'github', source);
+    fs.writeFileSync(file, JSON.stringify(output));
+    await run(require, { env }, core, github);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(env.GH_AW_TMP, 'skipped.json'))), []);
+    const posted = JSON.parse(fs.readFileSync(file)).items[0];
+    const name = posted.body.split('\n\n').at(-1);
+    comments = [{ user: { login: 'github-actions[bot]' }, body: `result\n\n<!-- ${name} -->`, html_url: 'https://example.test/comment' }];
+    fs.writeFileSync(file, JSON.stringify(output));
+    await run(require, { env }, core, github);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)).items, []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(env.GH_AW_TMP, 'skipped.json'))),
+      [{ type: 'add_comment', name, url: 'https://example.test/comment' }]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('PR CI tests the ingress checker with the same verified analyzers', () => {
   const ingress = fs.readFileSync(path.join(__dirname, '../.github/workflows/workflow-ingress.yml'), 'utf8');
   const install = source => source.split('      - name: Install verified static analyzers\n')[1].split(/\n {6}(?! )/)[0];

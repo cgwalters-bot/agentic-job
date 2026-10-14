@@ -214,7 +214,10 @@ naming that repository (`owner/repo`) on a line of its own. Write access
 given to the account is not that acceptance, nor is a file a fork inherited
 from the target it was made or synced from, which names the target. It is
 the head repository's own decision, not a caller's: only a commit to its
-default branch adds the file, which apply never pushes. Refusing `.github`
+default branch adds the file, which apply never pushes. The same file also
+lets the applying account open new pull requests from branches of a
+repository [it owns](workflow.md#a-repository-the-applying-account-owns),
+where those branches get the same workflows. Refusing `.github`
 keeps the agent from adding workflows there, not from changing the build
 scripts, tests and local actions the existing ones run. Add it only to a repository whose
 workflows give a branch nothing an agent is not to have; where that
@@ -336,7 +339,10 @@ caller bounds must both permit it. It applies to `create_pull_request` and
 `push_to_pull_request_branch`, including replacement series, only for the
 same listed repositories. A fix push still requires the open PR and head
 repository/branch checks described above, and is refused the exemption
-anywhere but apply's own fork. Workflow changes are pushed only to
+anywhere but apply's own fork. A repository
+[its applying account owns](workflow.md#a-repository-the-applying-account-owns), whose
+new pull request's branch is pushed to it and not to a fork, cannot have the `.github`
+exemption either: apply refuses the pull request. Workflow changes are pushed only to
 apply's fork, which has Actions turned off, and reach the repository as a
 fork pull request. Its `pull_request` CI gets no secrets and a read-only
 token, not the target repository's write credentials. Operators must configure
@@ -509,7 +515,8 @@ The configuration is the collector's with settings added:
 made through the API as the token's owner), `fallback_as_issue: false`,
 `preserve_branch_name: true`, `auto_close_issue: false` (no automatic closing
 keyword for the triggering issue), `target-repo`, `base_branch`,
-`branch_prefix`, `title_prefix`, and the applying account's fork as
+`branch_prefix`, `title_prefix`, and the applying account's fork (or the
+output repository, where [its owner applies](workflow.md#a-repository-the-applying-account-owns)) as
 `head-repo` and as the one entry of `allowed_repos`, which the handler
 requires of a `head-repo`; the agent cannot name it, since check refuses
 a request's `repo`. Without a fork there is no `create_pull_request`
