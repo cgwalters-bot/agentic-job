@@ -29,8 +29,8 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOptionCategory, SessionId,
-    SetSessionConfigOptionRequest, TextContent,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind,
+    SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Handled, Lines};
 use anyhow::{Context, Result, ensure};
@@ -1114,10 +1114,28 @@ async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, E
                 ))
             })?;
         let req = SetSessionConfigOptionRequest::new(sid.clone(), option.id.clone(), model);
-        cx.send_request(req)
+        let set = cx
+            .send_request(req)
             .block_task()
             .await
             .map_err(|e| fail(&format!("selecting model {model}"), e))?;
+        // An agent that takes the selection but runs another model (#562:
+        // Vibe reported, and told the model it was, its built-in default)
+        // would spend the run on a model the caller did not ask for.
+        let current = set
+            .config_options
+            .iter()
+            .find(|o| o.id == option.id)
+            .and_then(|o| match &o.kind {
+                SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
+                _ => None,
+            });
+        if current != Some(model) {
+            return Err(Ended::failure(format!(
+                "the agent runs {}, not the requested model {model}",
+                current.unwrap_or("an unreported model")
+            )));
+        }
     }
     for (id, value) in task.config_options {
         let req = SetSessionConfigOptionRequest::new(sid.clone(), id.clone(), value.as_str());

@@ -69,9 +69,6 @@ pub const OPENCODE_INSTRUCTIONS_FILE: &str = ".config/opencode/AGENTS.md";
 pub const OPENCODE_PROFILE_FILE: &str = ".config/opencode/opencode-runner.json";
 pub const VIBE_HOME: &str = ".config/agentic-job/vibe";
 pub const VIBE_CONFIG_FILE: &str = ".config/agentic-job/vibe/config.toml";
-/// A fixed alias avoids interpreting a caller's model as a Vibe profile or
-/// provider selection. It replaces Vibe's sole built-in model, not adds one.
-pub const VIBE_MODEL_ALIAS: &str = "mistral-medium-3.5";
 /// The run's read-only GitHub token, for `gh` and the GitHub API: the
 /// launcher and the fake agent give it to the agent as
 /// [`GITHUB_TOKEN_VAR`].
@@ -318,8 +315,13 @@ const VIBE_MODEL_KEYS: &[&str] = &[
 /// Aliases a model of the file may not have: Vibe deep-merges a model of
 /// its built-in's alias, inheriting its window and image support, and
 /// renames one of a former built-in's, so neither would be what the file
-/// says. The first is also the job's own, for the caller's model.
-const VIBE_RESERVED_ALIASES: &[&str] = &[VIBE_MODEL_ALIAS, "devstral-2"];
+/// says.
+const VIBE_RESERVED_ALIASES: &[&str] = &[VIBE_BUILTIN_ALIAS, VIBE_RENAMED_ALIAS];
+/// The alias of Vibe's sole built-in model, which its default and fallback
+/// paths select.
+const VIBE_BUILTIN_ALIAS: &str = "mistral-medium-3.5";
+/// A former built-in's alias, which Vibe renames to the built-in's.
+const VIBE_RENAMED_ALIAS: &str = "devstral-2";
 /// The output cap per model request of a model that sets no
 /// `max_output_tokens`: what Claude Code and opencode ask for by default,
 /// or a quarter of the model's declared window if that is less, so that a
@@ -338,12 +340,12 @@ const MAX_VIBE_OUTPUT_TOKENS: u64 = 65_536;
 /// session config option (`vibe/acp/agent.py`, `set_config_option`).
 const VIBE_MAX_TOKENS_OPTION: &str = "max_tokens";
 
-/// The definition of the caller's MODEL under [`VIBE_MODEL_ALIAS`].
-fn vibe_model(model: &str) -> Value {
-    // Model definitions deep-merge too. Do not inherit Medium 3.5's
-    // image capability or 256k window for an arbitrary broker model.
+/// The definition of the caller's MODEL under ALIAS.
+fn vibe_model(model: &str, alias: &str) -> Value {
+    // Model definitions deep-merge, by alias, with a built-in of the same
+    // alias. Do not inherit Medium 3.5's image capability or 256k window.
     json!({
-        "name": model, "alias": VIBE_MODEL_ALIAS, "provider": "mistral",
+        "name": model, "alias": alias, "provider": "mistral",
         "display_name": model, "temperature": 0.2,
         "thinking": "off", "thinking_levels": ["off"], "supports_images": false,
         "max_context_length": 32768, "auto_compact_threshold": 24576,
@@ -480,8 +482,20 @@ pub fn vibe(
     let active = match (model, named) {
         (_, Some(alias)) => alias,
         (Some(model), None) => {
-            models.push(vibe_model(model));
-            VIBE_MODEL_ALIAS.to_owned()
+            ensure!(
+                model != VIBE_RENAMED_ALIAS,
+                "agent.model {model:?} is a name Vibe renames to its built-in model's"
+            );
+            // Selected under its own name: Vibe reports the active model's
+            // alias over ACP and tells the model it is that, so under the
+            // built-in's alias every run reported, and the model claimed to
+            // be, Medium 3.5 (#562). It still replaces the built-in, which
+            // Vibe's default and fallback paths would otherwise select.
+            models.push(vibe_model(model, model));
+            if model != VIBE_BUILTIN_ALIAS {
+                models.push(vibe_model(model, VIBE_BUILTIN_ALIAS));
+            }
+            model.to_owned()
         }
         (None, None) => active.with_context(|| match source {
             Some(_) => format!(
@@ -1362,7 +1376,7 @@ mod tests {
             .unwrap();
             assert_eq!(got.files.len(), 1);
             assert_eq!(got.files[0].path, Kind::Vibe.token_file().unwrap());
-            assert_eq!(got.model.as_deref(), Some(VIBE_MODEL_ALIAS));
+            assert_eq!(got.model.as_deref(), Some("devstral-small-latest"));
             assert!(got.managed.is_none());
             let value: toml::Value =
                 toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
@@ -1378,10 +1392,17 @@ mod tests {
                 assert_eq!(provider["backend"].as_str(), Some("generic"));
                 assert_eq!(provider["browser_auth_base_url"].as_str(), Some(""));
             }
+            // Vibe selects, and reports, the model by its alias (#562).
             assert_eq!(
-                value["models"][0]["name"].as_str(),
+                value["active_model"].as_str(),
                 Some("devstral-small-latest")
             );
+            for key in ["name", "alias"] {
+                assert_eq!(
+                    value["models"][0][key].as_str(),
+                    Some("devstral-small-latest")
+                );
+            }
             // A quarter of the declared 32k window.
             assert_eq!(
                 value["models"][0]["max_output_tokens"].as_integer(),
@@ -1390,9 +1411,19 @@ mod tests {
             assert_eq!(got.options, [("max_tokens", "8192".to_owned())]);
             assert_eq!(value["experiments"]["enable"].as_bool(), Some(false));
         }
-        for model in [None, Some("")] {
+        for model in [None, Some(""), Some("devstral-2")] {
             assert!(vibe(&endpoint(Mode::Plain), &token(), model, None).is_err());
         }
+        // The built-in's own name needs no second entry.
+        let got = vibe(
+            &endpoint(Mode::Plain),
+            &token(),
+            Some("mistral-medium-3.5"),
+            None,
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
+        assert_eq!(value["models"].as_array().unwrap().len(), 1);
         // A repository may stand in for the model; without one, it is needed.
         for (repo, model, ok) in [
             (None, Some("m"), true),
@@ -1445,7 +1476,12 @@ provider = "llamacpp"
                 2,
                 VIBE_OUTPUT_TOKENS,
             ),
-            (Some("mistral-large-latest"), VIBE_MODEL_ALIAS, 3, 8192),
+            (
+                Some("mistral-large-latest"),
+                "mistral-large-latest",
+                4,
+                8192,
+            ),
         ];
         // An alias is matched before a name, as Vibe selects by alias.
         let crossed = "[[models]]\nname = \"a\"\nalias = \"b\"\nprovider = \"mistral\"\n\
@@ -1482,8 +1518,14 @@ provider = "llamacpp"
             // Each model in the file is capped, not just the active one.
             assert_eq!(models[0]["max_output_tokens"].as_integer(), Some(16384));
             assert_eq!(models[1]["max_output_tokens"].as_integer(), Some(32000));
-            if count == 3 {
-                assert_eq!(models[2]["name"].as_str(), model);
+            // The caller's model, under its own name and the built-in's.
+            if count == 4 {
+                for (m, alias) in [
+                    (&models[2], model),
+                    (&models[3], Some("mistral-medium-3.5")),
+                ] {
+                    assert_eq!((m["name"].as_str(), m["alias"].as_str()), (model, alias));
+                }
             }
             let providers = value["providers"].as_array().unwrap();
             assert_eq!(providers.len(), 2);

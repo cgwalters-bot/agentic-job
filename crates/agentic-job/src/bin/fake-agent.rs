@@ -80,6 +80,12 @@ const DEFAULT_MODEL: &str = "fake";
 /// A session config option it takes without listing it, as Vibe takes
 /// its `max_tokens`; it refuses any other but the model.
 const UNLISTED_OPTION: &str = "max_tokens";
+/// A model whose selection it accepts but keeps reporting its default,
+/// which the session must refuse (#562).
+const IGNORED_MODEL: &str = "ignored";
+/// A model whose selection it accepts with an answer naming no model,
+/// which the session must refuse too.
+const UNREPORTED_MODEL: &str = "unreported";
 /// How long a scripted request waits for the client's answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `fs` mode waits for each answer: an unanswered request hangs.
@@ -314,6 +320,11 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
             Some("session/set_config_option") => {
                 let value = msg["params"]["value"].as_str();
                 match (msg["params"]["configId"].as_str(), value) {
+                    (Some(MODEL_OPTION), Some(IGNORED_MODEL)) => {}
+                    (Some(MODEL_OPTION), Some(UNREPORTED_MODEL)) => {
+                        conn.respond(&id, json!({"configOptions": []}));
+                        continue;
+                    }
                     (Some(MODEL_OPTION), Some(value)) => model = value.to_owned(),
                     (Some(UNLISTED_OPTION), Some(_)) => {}
                     _ => {

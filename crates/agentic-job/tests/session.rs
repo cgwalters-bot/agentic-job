@@ -71,6 +71,8 @@ struct Setup<'a> {
     client: Option<(Play, Duration)>,
     /// Session config options set after the model.
     config_options: &'a [(&'a str, &'a str)],
+    /// The model the session selects.
+    model: Option<&'a str>,
 }
 
 /// What a test's client does on its end of the relay.
@@ -258,7 +260,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     let options = Options {
         name: "fake".to_owned(),
         agent: session::agents::parse(&registry, "fake").unwrap(),
-        model: None,
+        model: setup.model.map(str::to_owned),
         config_options: setup
             .config_options
             .iter()
@@ -466,6 +468,47 @@ fn scripted_session() {
         std::fs::read_to_string(r.path("out/agent-stderr.log")).unwrap(),
         ""
     );
+}
+
+/// The session runs only if the agent reports, after selecting it, the
+/// model it was asked for (#562).
+#[test]
+fn selected_model() {
+    for (model, refusal) in [
+        ("m1", None),
+        (
+            "ignored",
+            Some("the agent runs fake, not the requested model ignored"),
+        ),
+        (
+            "unreported",
+            Some("the agent runs an unreported model, not the requested model unreported"),
+        ),
+    ] {
+        let (status, result, prompted) = match refusal {
+            None => (0, "success", true),
+            Some(_) => (1, "failure", false),
+        };
+        let r = run(
+            &["demo"],
+            Setup {
+                timeout_s: 60,
+                model: Some(model),
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, status, result);
+        let sent = |method: &str| {
+            r.records
+                .iter()
+                .any(|x| x["dir"] == "send" && x["msg"]["method"] == method)
+        };
+        assert_eq!(sent("session/prompt"), prompted, "{model}");
+        if let Some(refusal) = refusal {
+            let message = r.result["message"].as_str().unwrap();
+            assert!(message.contains(refusal), "{message}");
+        }
+    }
 }
 
 /// The cost the agent reports goes over the budget: the session stops at

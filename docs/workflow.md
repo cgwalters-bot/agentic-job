@@ -687,6 +687,9 @@ and run token, and sharing is disabled. With this configuration, `model`
 is passed as supplied: use the configured provider/model name, such as
 `praxis/MODEL`. Without it, opencode uses the built-in `inference` provider:
 pass a bare model name (or `inference/MODEL`), not another provider's prefix.
+A run fails unless the agent reports the model it was given, so a
+`provider/model/variant` name, which opencode reports without its variant,
+is refused.
 
 Claude reads `CLAUDE.md` from a configuration repository; it does not use
 opencode's files. Its `model` input is optional in the reusable workflow

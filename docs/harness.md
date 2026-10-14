@@ -53,7 +53,10 @@ The launcher uses its library entrypoint with only the user configuration
 source and isolated Python imports: `.vibe/config.toml`, project profiles
 and checkout modules cannot redirect inference. Both built-in provider
 names are replaced with the broker's `/mistral/v1` chat-completions route;
-the caller's model replaces the built-in model under a fixed session alias.
+the caller's model is selected under its own name, which Vibe reports over
+ACP and tells the model it is, and also replaces the built-in model, which
+Vibe's default and fallback paths select. A model named `devstral-2`, which
+Vibe renames to the built-in's, is refused.
 Mid-turn notices are not supported. That broker model uses text-only tools
 and a conservative 32k context window with compaction at 24k, rather than
 inheriting Medium 3.5's capabilities.
@@ -130,8 +133,12 @@ The implementation recipe is:
 1. In `session/agents.toml`, add the ACP command and non-secret defaults.
    Use `model-env` if the adapter selects its model with an environment
    variable; otherwise the session uses ACP's `session/set_config_option`
-   with the `model` option. Leave `notices` false unless a mid-turn prompt
-   is known to reach the next step without ending the running turn.
+   with the `model` option, and fails the run unless the agent's answer
+   reports that exact value as current: so opencode's `provider/model/variant`,
+   reported without the variant, is refused. Neither a model from the
+   environment nor a later change of model is checked. Leave `notices`
+   false unless a mid-turn prompt is known to reach the next step without
+   ending the running turn.
    Registry `env` values go on the wrapped command line: never put a token
    there, or in `command`.
 2. In `run/agent.rs`, extend `Kind`, its name/parser list and its matches.

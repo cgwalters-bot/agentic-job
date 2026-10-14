@@ -6,9 +6,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-use agentic_job::run::agent::{self, VIBE_MODEL_ALIAS};
+use agentic_job::run::agent;
 use agentic_job::run::inference::{Endpoint, Mode, Token};
-use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy};
+use agentic_job::session::digest::Digest;
+use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy, Record};
 use serde_json::{Value, json};
 
 #[test]
@@ -157,8 +158,11 @@ init_harness_files_manager("user")
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 config = asyncio.run(build_default_orchestrator()).config
 model = config.get_active_model()
-assert len(config.models) == 1
-assert model.name == model.display_name == "broker-model"
+# Vibe reports the active model's alias; the built-in's runs it too, so
+# Vibe's default and fallback paths do.
+assert set(config.models) == {"broker-model", "mistral-medium-3.5"}
+assert config.models["mistral-medium-3.5"] == model.model_copy(update={"alias": "mistral-medium-3.5"})
+assert model.alias == model.name == model.display_name == "broker-model"
 assert model.provider == "mistral" and not model.supports_images
 assert model.max_context_length == 32768
 assert model.auto_compact_threshold == 24576
@@ -277,7 +281,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
         .block_on(session::run(Options {
             name: "vibe".into(),
             agent: spec,
-            model: Some(VIBE_MODEL_ALIAS.into()),
+            model: config.model.clone(),
             config_options: config
                 .options
                 .iter()
@@ -319,9 +323,21 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
         std::fs::read_to_string(work.join("result.txt")).unwrap(),
         "adapter control\n"
     );
-    assert!(
-        std::fs::read_to_string(out.join(session::ACP_LOG))
-            .unwrap()
-            .contains("session/request_permission")
-    );
+    let transcript = std::fs::read_to_string(out.join(session::ACP_LOG)).unwrap();
+    assert!(transcript.contains("session/request_permission"));
+    // The run's start line names the caller's model, not Vibe's built-in
+    // alias (#562); the requests carry it, as checked above.
+    let mut digest = Digest::new();
+    let start = transcript
+        .lines()
+        .flat_map(|line| {
+            let record: Record = serde_json::from_str(line).unwrap();
+            record
+                .msg
+                .map(|msg| digest.feed(record.ts, record.dir, &msg))
+                .unwrap_or_default()
+        })
+        .find(|line| line.starts_with("start: "))
+        .unwrap();
+    assert!(start.contains(", broker-model, in "), "{start}");
 }
