@@ -68,9 +68,8 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
         {
             let _ = write!(
                 text,
-                "except `{EXEMPTABLE_DOT_FOLDER}/`, which the caller exempts for this repository \
-                 (a change there, a workflow included, is merged only after a human reviews \
-                 the pull request); "
+                "except `{EXEMPTABLE_DOT_FOLDER}/`, which the caller exempts for this \
+                 repository; "
             );
         }
     }
@@ -415,6 +414,12 @@ mod tests {
             assert_eq!(
                 brief.contains("except `.github/`, which the caller exempts"),
                 !folders.is_empty()
+            );
+            // Who merges an exempted change is the repository's merge policy
+            // to say, not the brief's (#558).
+            assert!(
+                !brief.contains("merged only after a human reviews"),
+                "{brief}"
             );
         }
     }

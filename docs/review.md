@@ -172,7 +172,8 @@ the default branch as the standing task, never the head, and `workflow/review.cj
 "Merge policy" as the owner's statement:
 
 ```toml
-merge = "agent" # an approving review by the review job merges by default
+# an approving review by the review job merges by default
+merge = "agent"
 ```
 
 or `merge = "person"`, where a person approves every merge after the review.

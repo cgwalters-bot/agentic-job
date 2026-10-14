@@ -291,6 +291,26 @@ test('this repository\'s merge policy is one the review job reads', () => {
   assert.ok(set && ['agent', 'person'].includes(merge));
 });
 
+// The example the docs show must be one the parser accepts (#558).
+test('the merge policy example in docs/review.md parses', () => {
+  const docs = fs.readFileSync(path.join(__dirname, '../docs/review.md'), 'utf8');
+  const start = docs.indexOf('### Merge policy');
+  assert.ok(start !== -1, 'no Merge policy section in docs/review.md');
+  const example = [...docs.slice(start).matchAll(/```toml\n([\s\S]*?)```/g)]
+    .map(match => match[1]).find(block => block.includes('merge = '));
+  assert.ok(example, 'no toml example with merge = in the Merge policy section');
+  const want = example.match(/merge = "(agent|person)"/);
+  assert.ok(want, 'the Merge policy example sets neither agent nor person');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-docs-merge-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.github/agentic-job'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.github/agentic-job/merge.toml'), example);
+    assert.deepEqual(mergePolicy(dir), { merge: want[1], set: true });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('scripted review reports the checked-out SHA', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'review-script-'));
   try {
