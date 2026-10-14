@@ -12,3 +12,9 @@ updates:
     # waiting a week keeps it from being proposed here in that window.
     cooldown:
       default-days: 7
+    # One pull request per run for every action in every directory:
+    # each pull request costs its own CI (and any review) run, and one
+    # per action exceeds the account's limit on concurrent jobs.
+    groups:
+      github-actions:
+        patterns: ["*"]
