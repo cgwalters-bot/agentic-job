@@ -380,6 +380,10 @@ test('automatic and dispatched review prompts allow concern-specific experiments
     assert.match(prompt, /Report every finding you can see in this one pass, not only the first\./);
     assert.match(prompt, /Tag each finding with exactly one severity: blocker, important or nit; an\s+untagged finding is not allowed\./);
     assert.match(prompt, /A blocker makes the change wrong for its\s+main purpose, loses data, or opens a security hole with a concrete path/);
+    assert.match(prompt, /For supply-chain hardening, a blocker requires that the change newly runs\s+third-party code with a write credential in reach, including in apply, with a\s+PAT, in a write-permission pull_request_target job, or on the broker host\./);
+    assert.match(prompt, /Otherwise supply-chain findings are important at most and go under Follow-ups\./);
+    assert.match(prompt, /Supply-chain hardening is wanted over time as tracked follow-ups, not as a\s+gate on each change\./);
+    assert.match(prompt, /This ceiling covers trusting an ordinary upstream, not a\s+concrete path the change itself opens for code an attacker controls to alter a\s+published artifact or read a credential or private source; that is a blocker\./);
     assert.match(prompt, /VERDICT: CHANGES only when there is at\s+least one blocker, and VERDICT: APPROVE otherwise/);
     assert.match(prompt, /list\s+important findings and nits under a "Follow-ups" heading, each with its file\s+and line, for later pull requests\./);
     assert.match(prompt, /When there is a blocker, the fix may take\s+important findings and nits along\./);

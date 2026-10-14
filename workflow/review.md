@@ -42,6 +42,14 @@ untagged finding is not allowed. A blocker makes the change wrong for its
 main purpose, loses data, or opens a security hole with a concrete path you
 can state, such as what a weakened permission, gate, bound, pin, token
 placement or trigger now lets someone do. Anything less is important or a nit.
+For supply-chain hardening, a blocker requires that the change newly runs
+third-party code with a write credential in reach, including in apply, with a
+PAT, in a write-permission pull_request_target job, or on the broker host.
+Otherwise supply-chain findings are important at most and go under Follow-ups.
+Supply-chain hardening is wanted over time as tracked follow-ups, not as a
+gate on each change. This ceiling covers trusting an ordinary upstream, not a
+concrete path the change itself opens for code an attacker controls to alter a
+published artifact or read a credential or private source; that is a blocker.
 The comment's first line starts with VERDICT: CHANGES only when there is at
 least one blocker, and VERDICT: APPROVE otherwise, and may go on with a short
 reason. Keep that line to the one verdict: a first line that also names the
