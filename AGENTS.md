@@ -40,6 +40,7 @@ Observed wall times on one unprivileged runner are guidance, not CI guarantees:
 - `node --test safe-outputs/diagnostics.test.mjs`: under 1 second; useful for diagnostics changes, not a separate CI step.
 - `npx --yes markdownlint-cli2 '**/*.md'`: 4 seconds including tool download; CI uses markdownlint-cli2-action with the same glob and repository configuration.
 - `lychee --offline --include-fragments --no-progress "**/*.md"`: CI's relative-link/anchor check; requires lychee (local timing not measured).
+- `just workflow-lint OWNER/REPO@COMMIT`: the forge's shared actionlint, zizmor and runner-label check, as CI runs it when the `WORKFLOW_LINT` repository variable is set; needs just, cargo, network and docker (`CONTAINER=podman` otherwise). 5 seconds with images and crates cached.
 
 Run the narrow test covering a change first, then the applicable checks above.
 Passing the workspace suite does **not** prove the privileged integration paths:

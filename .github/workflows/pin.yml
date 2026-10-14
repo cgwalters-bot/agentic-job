@@ -63,7 +63,7 @@ jobs:
       # Exercise the caller's tokenless verification policy before publishing.
       - name: Verify the attested manifest without a token
         run: >-
-          GH_TOKEN= GITHUB_TOKEN= gh attestation verify dist/release.json
+          GH_TOKEN='' GITHUB_TOKEN='' gh attestation verify dist/release.json
           --bundle dist/provenance.jsonl --repo cgwalters-forge/agentic-job
           --cert-identity https://github.com/cgwalters-forge/agentic-job/.github/workflows/pin.yml@refs/heads/main
           --source-ref refs/heads/main --deny-self-hosted-runners

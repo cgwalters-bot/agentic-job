@@ -38,7 +38,8 @@ exemption is refused, including additional audit names on a local step.
 It goes on the line zizmor reports; a comment elsewhere does nothing.
 Actionlint has no inline-ignore syntax: fix real findings instead.
 PR configuration files cannot
-disable either analyzer. The trusted `workflow/actionlint.yaml` adds the
+disable either analyzer here. The base branch's `.github/actionlint.yaml`
+(CI's shared workflow check reads a pull request's own copy) adds the
 GitHub-hosted `ubuntu-26.04` label missing from actionlint's built-in list; it
 does not disable label checks. It also filters the pinned analyzer's unknown
 `job.workflow_repository`/`job.workflow_sha` fields in policy, check and apply,

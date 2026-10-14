@@ -178,6 +178,21 @@ jobs:
           sed 's/--hash=sha256:..../--hash=sha256:0000/' egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
           if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
           grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
+      # The forge's shared workflow check, once the WORKFLOW_LINT repository
+      # variable names it (Justfile). Before gh-aw's workflows are checked
+      # out below, where zizmor would find them. Read-only token, no secret.
+      # Its Justfile needs just 1.23 or later, newer than this image's apt
+      # package: the version and installer its own action pins, checksummed.
+      - name: Install just for the shared workflow check
+        if: ${{ vars.WORKFLOW_LINT != '' }}
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just@1.58.0
+      - name: Shared workflow check
+        if: ${{ vars.WORKFLOW_LINT != '' }}
+        env:
+          WORKFLOW_LINT: ${{ vars.WORKFLOW_LINT }}
+        run: just workflow-lint "$WORKFLOW_LINT"
       # validation.json is generated from gh-aw's compiled workflows, so a
       # change of the pin has to regenerate it. The commit is the one
       # safe-outputs-probe.yml takes gh-aw's setup action at.
@@ -431,6 +446,8 @@ jobs:
           sudo ss -xlnpH
           sudo ss -tlnpH
           id; sudo -n -l; sudo ls -la /etc/sudoers.d; cat /proc/self/cgroup; cat /sys/kernel/security/lsm; echo
+          # pgrep cannot match on the cgroup column.
+          # shellcheck disable=SC2009
           ps -eo pid,user,comm,cgroup --no-headers | grep -F "$(cut -d: -f3 /proc/self/cgroup)" || true
       # Setup takes root away from the runner's user, which the test below
       # runs as, and the test puts each protection back as root: a shell
@@ -441,7 +458,7 @@ jobs:
         run: |
           sudo systemd-run --unit=agentic-job-test-root --quiet \
             socat "UNIX-LISTEN:/run/agentic-job-test-root.sock,fork,unlink-early,mode=0660,user=root,group=$(id -gn)" EXEC:/bin/sh,stderr
-          for i in 1 2 3 4 5; do test -S /run/agentic-job-test-root.sock && break; sleep 1; done
+          for _ in 1 2 3 4 5; do test -S /run/agentic-job-test-root.sock && break; sleep 1; done
           test "$(printf 'id -u; exit\n' | socat -t 5 - UNIX-CONNECT:/run/agentic-job-test-root.sock)" = 0
       # Setup only warns when the threat feed cannot be fetched, and a pin
       # that names a commit no longer served would have every run warn:
@@ -510,6 +527,8 @@ jobs:
           agentic-job sandbox exec -- pwd > "$RUNNER_TEMP/sandbox-pwd.txt"
           read -r actual < "$RUNNER_TEMP/sandbox-pwd.txt"
           test "$actual" = "$SANDBOX_HOME"
+          # Expanded by the sandbox's shell, not this one.
+          # shellcheck disable=SC2016
           agentic-job sandbox exec -- sh -c 'echo "${HTTPS_PROXY:-none}"' > "$RUNNER_TEMP/sandbox-proxy.txt"
           read -r actual < "$RUNNER_TEMP/sandbox-proxy.txt"
           test "$actual" = none
@@ -1074,7 +1093,7 @@ jobs:
           persist-credentials: false
       - run: sudo node secure-host/apt.mjs
       - name: Install compiler and bpftool
-        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common linux-tools-$(uname -r)
+        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common "linux-tools-$(uname -r)"
         timeout-minutes: 5
       - run: node --test secure-host/world-write.test.mjs secure-host/world-write-cases.test.mjs
       - name: Writable before policy activation
@@ -1108,7 +1127,7 @@ jobs:
       - run: node --test .github/actions/confine-probe/probe.test.mjs
       - run: sudo node secure-host/apt.mjs
       - name: Install compiler and bpftool
-        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common linux-tools-$(uname -r)
+        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common "linux-tools-$(uname -r)"
         timeout-minutes: 5
       # Root's and world-writable, where setup's walk does not look (a
       # shared temporary directory): the access-time policy is all that

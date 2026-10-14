@@ -109,7 +109,7 @@ def check(repo, base, head):
                          "--strict-collection", "--no-progress", str(source)]]
             if name.startswith(".github/workflows/"):
                 commands.append([os.environ.get("ACTIONLINT", "actionlint"),
-                                 "-config-file", str(Path(__file__).resolve().with_name("actionlint.yaml")),
+                                 "-config-file", str(Path(__file__).resolve().parents[1] / ".github" / "actionlint.yaml"),
                                  "-shellcheck=", "-pyflakes=", str(source)])
             for command in commands:
                 result = subprocess.run(command, cwd=temp, capture_output=True)

@@ -32,6 +32,39 @@ test('PR CI tests the ingress checker with the same verified analyzers', () => {
   assert.match(ci, /python3 -m unittest discover -s workflow -p 'test_\*\.py' -v\n {8}env:\n {10}ZIZMOR: /);
 });
 
+test('the shared workflow check is off unless a repository variable names its commit', () => {
+  const lint = block('lint');
+  const step = lint.split('      - name: Shared workflow check\n')[1].split(/\n {6}(?! )/)[0];
+  assert.match(step, /^ {8}if: \$\{\{ vars\.WORKFLOW_LINT != '' \}\}\n {8}env:\n {10}WORKFLOW_LINT: \$\{\{ vars\.WORKFLOW_LINT \}\}\n/);
+  assert.match(step, /\n {8}run: just workflow-lint "\$WORKFLOW_LINT"$/);
+  // The shared Justfile calls cache_directory(), new in just 1.23.
+  const [, minor] = lint.match(/\n {8}if: \$\{\{ vars\.WORKFLOW_LINT != '' \}\}\n {8}uses: taiki-e\/install-action@[0-9a-f]{40} # v[\d.]+\n {8}with:\n {10}tool: just@1\.(\d+)\.\d+\n/);
+  assert.ok(Number(minor) >= 23, minor);
+  // zizmor scans the workspace: gh-aw's workflows are not there yet.
+  assert.ok(lint.indexOf('Shared workflow check') < lint.indexOf('repository: github/gh-aw'));
+  assert.doesNotMatch(lint, /: write|secrets\./);
+  // The recipe's first check, run as just runs it, with SOURCE as $1.
+  const justfile = fs.readFileSync(path.join(__dirname, '../Justfile'), 'utf8');
+  const guard = justfile.split('\nworkflow-lint source:\n')[1].split('\n').find(line => line.trim().startsWith('[['));
+  const commit = 'a'.repeat(40);
+  for (const [source, ok] of [
+    [`owner/repo@${commit}`, true],
+    [`my-org/my.repo_2@${commit}`, true],
+    ['owner/repo@main', false],
+    [`owner/repo@${commit.slice(1)}`, false],
+    [`owner/repo@${commit.toUpperCase()}`, false],
+    [`owner@${commit}`, false],
+    [`owner/sub/repo@${commit}`, false],
+    [`owner/..@${commit}`, false],
+    [`--upload-pack=x/y@${commit}`, false],
+    [`owner/repo@${commit}\n`, false],
+    ['', false],
+  ]) {
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', guard, 'workflow-lint', source], { encoding: 'utf8' });
+    assert.equal(result.status, ok ? 0 : 2, JSON.stringify(source));
+  }
+});
+
 test('required ingress check reports on every PR and vets merge groups with base code', () => {
   const ingress = fs.readFileSync(path.join(__dirname, '../.github/workflows/workflow-ingress.yml'), 'utf8');
   const on = ingress.split('\non:\n')[1].split('\npermissions:')[0];

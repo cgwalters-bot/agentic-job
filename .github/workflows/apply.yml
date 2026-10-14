@@ -809,8 +809,9 @@ jobs:
           fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json")
-          [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; } ||
-            { echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1; }
+          if [ "$OUTCOME" != success ] || { [ "$asked" != 0 ] && [ "$opened" != true ]; }; then
+            echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1
+          fi
 
   # How an opted-in run ended, for whoever started it: the status
   # comment `notify` posted is edited to say so, or a reaction says it
