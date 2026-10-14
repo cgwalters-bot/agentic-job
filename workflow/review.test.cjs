@@ -165,6 +165,11 @@ test('the review status maps each run to one state, only for the one open pull r
     ['apply failed', { apply: 'failure' }, [147], notPosted],
     ['apply skipped', { apply: 'skipped', url: '' }, [147], notPosted],
     ['no comment posted', { url: '' }, [147], notPosted],
+    ['submitted as the review, apply skipped', { apply: 'skipped', url: '', review: 'https://github.com/o/r/pull/147#pullrequestreview-1' }, [147],
+      { state: 'success', description: 'The review approved this commit' }],
+    ['changes submitted as the review', { verdict: 'CHANGES', apply: 'skipped', url: '', review: 'https://x/1' }, [147],
+      { state: 'failure', description: 'The review asked for changes' }],
+    ['submitted, check failed', { check: 'failure', review: 'https://x/1' }, [147], notPosted],
     ['no open pull request', {}, [], { skip: `No review status on ${head}: its open pull requests are none, not only #147` }],
     ['two open pull requests', {}, [147, 148], { skip: `No review status on ${head}: its open pull requests are 147, 148, not only #147` }],
     ['another pull request', {}, [148], { skip: `No review status on ${head}: its open pull requests are 148, not only #147` }],
@@ -406,9 +411,9 @@ test('caller and write job retain the trusted-source boundary', () => {
   // status (the status), the identity token only in the agent job.
   const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'apply', 'status']);
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'submit', 'apply', 'status']);
   for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: [],
-    refusal: ['pull-requests'], apply: ['pull-requests'], status: ['pull-requests', 'statuses'] })) {
+    refusal: ['pull-requests'], submit: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);
     if (name !== 'apply') assert.doesNotMatch(jobs[name], /secrets/, name);
@@ -424,6 +429,19 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(jobs.status, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
   assert.match(jobs.status, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
   assert.match(jobs.status, /await reportStatus\(process.env, github, core\)/);
+  assert.match(jobs.status, /REVIEW_URL: \$\{\{ needs.submit.outputs.review-url \}\}/);
+  // The verdict is posted once: as the review, or else as apply's comment.
+  // The review's body is check's accepted upload, from the pinned source's
+  // code, and only a checked verdict is submitted.
+  assert.match(jobs.apply, /if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.submit.outputs.review-url == '' \}\}/);
+  assert.match(jobs.submit, /vars.AGENT_REAL_REVIEWS == 'true'/);
+  assert.match(jobs.submit, /needs.check.result == 'success' && needs.check.outputs.artifact-id != ''/);
+  assert.match(jobs.submit, /artifact-ids: \$\{\{ needs.check.outputs.artifact-id \}\}/);
+  assert.match(jobs.submit, /repository: \$\{\{ needs.policy.outputs.source-repository \}\}\s+ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  assert.match(jobs.submit, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
+  assert.match(jobs.submit, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
+  assert.match(jobs.submit, /AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}/);
+  assert.doesNotMatch(jobs.submit, /secrets|safe-outputs-artifact-id|pull_request\.head|needs\.policy\.outputs\.ref\b/);
   assert.match(jobs.status, /if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.agent.result != 'cancelled' \}\}/);
   assert.match(jobs.status, /runs-on: ubuntu-26.04/);
   // Automatic reviews only for the owner, members and collaborators;

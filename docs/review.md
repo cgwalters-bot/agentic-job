@@ -102,13 +102,12 @@ status says
 `The review did not post; see the workflow run` and links to that run.
 The `status` job then sets the commit
 status `review` on the reviewed head: `success` only for a checked APPROVE
-whose comment was posted, `failure` for CHANGES, a noop or a run that did not
-get that far. The status job
-holds `statuses: write`, `pull-requests: write` and `contents: read` (to
+that was posted, as the review or the comment, `failure` for CHANGES, a noop
+or a run that did not get that far. The status job
+holds `statuses: write`, `pull-requests: read` and `contents: read` (to
 check out `workflow/review.cjs` from the policy call's pinned source, never
 the head), and reads no agent text: the verdict is one of two words check.yml
-set, mapped by `reviewStatus`. With real reviews enabled it also reads the
-applied comment as inert review-body data.
+set, mapped by `reviewStatus`.
 
 A status belongs to the commit, and the pull request's title and body reach
 the agent, so anyone could open a second pull request at someone else's head
@@ -129,13 +128,26 @@ and a head no run finished leaves a required `review` expected.
 ## Real reviews and the poll contract
 
 Set repository variable `AGENT_REAL_REVIEWS=true` to opt in; unset is off.
-The status job uses its own `GITHUB_TOKEN`, never `SAFE_OUTPUTS_PAT`, to submit
-an `APPROVED` or `CHANGES_REQUESTED` review after check and apply succeed.
+The verdict is then posted once, as the review, instead of as a comment as
+well (#583). The `submit` job, after check and before apply, uses its own
+`GITHUB_TOKEN` (`pull-requests: write`), never `SAFE_OUTPUTS_PAT`, to submit
+an `APPROVED` or `CHANGES_REQUESTED` review, and apply then posts no comment.
+When nothing is submitted (a noop, a run stopped at a limit, a head that moved
+or a failed submission, which also leaves the run red), apply posts the comment
+as it does with the variable off, and that comment is what sets the status.
+A re-run of failed jobs posts nothing twice: `submit` submits nothing where
+this run already has an applied comment, and reuses an identical review at
+the same head. A re-run of all jobs that reaches other findings submits a new
+review, the latest; one after a run whose comment was posted posts comments.
 Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
 Actions to create and approve pull requests**. The reviewer is
 `github-actions[bot]`, distinct from the bot account opening the PR. PRs opened
 by that Actions identity cannot use this approval path. An approval's or change
-request's body is the applied comment, unchanged, with `VERDICT:` still its first line. Inline findings remain
+request's body is the request check accepted, read from check's upload in the
+same run rather than back from the forge, sanitized once by gh-aw's collector
+in check (apply's handler sanitizes a comment again), with `VERDICT:` still its first line
+and gh-aw's run marker (`<!-- gh-aw-agentic-workflow: ... run: URL -->`) after
+it, as its handler ends a comment. Inline findings remain
 file/line citations in the body; no inline review comments are generated.
 
 The review is bound to `commit_id`, and a head that already changed is skipped.
@@ -148,7 +160,11 @@ list here. The deterministic guards stay: keep `ci` and the base branch's
 CHANGES is submitted as usual.
 
 Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
-comment text or the `review` status. For `github-actions[bot]`, select the latest
+comment text or the `review` status. A submitted verdict has no comment
+beside it, so a poller that still matches `VERDICT:` in comments finds none:
+move such a poller (tracker's `reviewText`, for its fix task) to reviews
+before setting the variable, or before a caller that has it set follows a
+commit with this behaviour. For `github-actions[bot]`, select the latest
 non-pending, non-comment review by submission time (ID breaks ties). Only
 `APPROVED` with `commit_id` equal to the current head is approval;
 `CHANGES_REQUESTED` triggers the existing fix dispatch and its body supplies
@@ -253,7 +269,7 @@ needs these repository or organization variables, and no secret:
 | `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
-rather than `github-actions[bot]`; real reviews always use the status job's
+rather than `github-actions[bot]`; real reviews always use the submit job's
 token. Here the agent job's identity token names
 this repository's own `review.yml` as its `job_workflow_ref`, so the broker
 needs the `any_workflow` entry narrowed to this repository, and the tailnet's
@@ -306,8 +322,9 @@ copy is no longer read. The broker entry for it is the
 ## Tests
 
 `node --test workflow/real-review.test.cjs` covers opt-in submission, both
-review states, unchanged bodies and exact commits, stale heads, failed runs,
-protected paths and renames, bounded pagination and invalid comment targets.
+review states, the checked body with its run marker at the exact commit, stale
+heads, stopped or failed runs and noops, outputs that do not match the
+verdict, and re-runs and lost responses that must not post twice.
 The tests use fake APIs; actual forge writes are left to real workflow runs.
 
 `node --test workflow/review.test.cjs` covers the merge policy file and
@@ -329,7 +346,7 @@ write, and neither file admits the other's events; `tests/policy.rs` checks
 that both allow only the analysis outputs. CI's `e2e-review` runs the
 policy, agent, check and apply path with the scripted agent and no inference,
 through `agentic-job.yml`; `review.yml` itself, its tailnet join and its
-status job's API calls run only on real pull requests. Real-model review quality is not
+submit and status jobs' API calls run only on real pull requests. Real-model review quality is not
 asserted.
 
 The opt-in captured-request regression uses a real opencode runtime and a

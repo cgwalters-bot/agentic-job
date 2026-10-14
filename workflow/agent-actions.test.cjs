@@ -343,7 +343,7 @@ test('review.yml joins the tailnet once, in its agent job, before secure-host', 
   assert.doesNotMatch(head, joins);
   const jobs = Object.fromEntries(body.split(/^(?=  [-\w]+:\n)/m)
     .map(text => [text.match(/^  ([-\w]+):\n/)[1], text]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'apply', 'status']);
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'submit', 'apply', 'status']);
   for (const [name, text] of Object.entries(jobs)) {
     if (name !== 'agent') assert.doesNotMatch(text, joins, name);
   }

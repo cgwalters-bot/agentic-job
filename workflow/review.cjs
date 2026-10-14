@@ -141,7 +141,8 @@ function checkOutputs(output, number) {
 // The commit status `review` for one finished run, from its jobs' results
 // and the open pull requests at the reviewed head, or `skip` with why it
 // sets none. It reads no agent text: the verdict is one of two words
-// check set, and success needs a checked APPROVE whose comment was posted.
+// check set, and success needs a checked APPROVE that was posted, as the
+// submitted review or else apply's comment.
 // A status belongs to the commit, so it is set only when the triggering
 // pull request is the one open there (docs/review.md).
 function reviewStatus(run, open) {
@@ -152,8 +153,8 @@ function reviewStatus(run, open) {
   if (open.length !== 1 || open[0] !== Number(run.pull)) {
     return { skip: `No review status on ${run.head}: its open pull requests are ${open.join(', ') || 'none'}, not only #${run.pull}` };
   }
-  const checked = run.check === 'success';
-  if (!checked || run.apply !== 'success' || !run.url) {
+  const posted = run.review || (run.apply === 'success' && run.url);
+  if (run.check !== 'success' || !posted) {
     return { state: 'failure', description: 'The review did not post; see the workflow run' };
   }
   if (run.verdict === 'APPROVE') {
@@ -167,7 +168,7 @@ function reviewStatus(run, open) {
 
 async function reportStatus(env, github, core) {
   const run = { pull: env.PULL, head: env.HEAD_SHA, check: env.CHECK_RESULT,
-    verdict: env.VERDICT, apply: env.APPLY_RESULT, url: env.RESULT_URL };
+    verdict: env.VERDICT, apply: env.APPLY_RESULT, url: env.RESULT_URL, review: env.REVIEW_URL };
   // Validate before the head goes into any request.
   reviewStatus(run, [Number(run.pull)]);
   const [owner, repo] = env.GITHUB_REPOSITORY.split('/');
@@ -182,39 +183,79 @@ async function reportStatus(env, github, core) {
   return status;
 }
 
-// This job runs only base-revision code.
-async function submitReview(env, github, core) {
-  if (env.REAL_REVIEWS !== 'true') return;
-  const run = { pull: env.PULL, head: env.HEAD_SHA, check: env.CHECK_RESULT,
-    verdict: env.VERDICT, apply: env.APPLY_RESULT, url: env.RESULT_URL };
+// With real reviews on, the verdict is posted once, as the pull request's
+// review, and apply posts no comment (#583). The body is check's accepted
+// output, read from check's upload in this run, so what is submitted is
+// exactly what check and the collector's sanitizing passed, never text read
+// back from the forge. Nothing submitted (off, a noop, a run stopped at a
+// limit, a moved head, a failed submission) leaves the comment to apply as
+// before. This job runs only base-revision code.
+async function submitReview(env, output, github, core) {
+  if (env.REAL_REVIEWS !== 'true') return '';
+  const run = { pull: env.PULL, head: env.HEAD_SHA, verdict: env.VERDICT };
   reviewStatus(run, [Number(run.pull)]); // Validate the target before API calls.
-  if (run.check !== 'success' || run.apply !== 'success' || !run.url ||
-      !['APPROVE', 'CHANGES'].includes(run.verdict)) return;
+  // apply-partial is false for a review (checkRequest): a run stopped at a
+  // limit is not applied, so it is not submitted either.
+  if (env.CHECK_RESULT !== 'success' || env.AGENT_EXIT !== '0' ||
+      !['APPROVE', 'CHANGES'].includes(run.verdict)) return '';
+  if (checkOutputs(output, run.pull) !== run.verdict) {
+    throw new Error('Checked output does not match the checked verdict');
+  }
   const [owner, repo] = env.GITHUB_REPOSITORY.split('/');
   const target = { owner, repo, pull_number: Number(run.pull) };
   const { data: pull } = await github.rest.pulls.get(target);
   if (pull.state !== 'open' || pull.head.sha !== run.head) {
     core.notice('No review submitted: the reviewed head is no longer current');
-    return;
+    return '';
   }
-  const prefix = `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#issuecomment-`;
-  const id = run.url.startsWith(prefix) ? run.url.slice(prefix.length) : '';
-  if (!/^[1-9][0-9]*$/.test(id) || !Number.isSafeInteger(Number(id))) {
-    throw new Error('Review body must come from the applied comment on this pull request');
+  if (!/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? '')) throw new Error('Review submission requires this run\'s ID');
+  // The run marker gh-aw's handler ends a comment with (generate_footer.cjs).
+  // agent-board's poll (board-forge/src/poll.rs, cited_run) needs exactly
+  // one, with its run URL, to tie the review to this run.
+  const runUrl = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
+  const marker = `<!-- gh-aw-agentic-workflow: review, id: ${env.GITHUB_RUN_ID}, workflow_id: agentic-job, run: ${runUrl} -->`;
+  const body = `${output.items[0].body}\n\n${marker}`;
+  const event = run.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES';
+  // A re-run of failed jobs after a failed submission, whose verdict apply
+  // then posted as the comment, must not post it again as the review. Apply
+  // names each comment it posts by run, last in the body (its
+  // `agentic-job-applied` name, which check refuses in agent output). Only a
+  // comment by the job token's bot or someone with write access counts, as
+  // with the PAT: a commenter quoting the name must not turn the review back
+  // into a comment.
+  const comments = await github.paginate(github.rest.issues.listComments,
+    { owner, repo, issue_number: Number(run.pull), per_page: 100 });
+  if (comments.some(c => (c.user?.login === 'github-actions[bot]' ||
+      ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(c.author_association)) &&
+      [...String(c.body).matchAll(/<!-- agentic-job-applied: (\d+)\/\d+\/[0-9a-f]{16} -->/g)].at(-1)?.[1] === env.GITHUB_RUN_ID)) {
+    core.notice('No review submitted: an earlier attempt of this run posted the verdict as a comment');
+    return '';
   }
-  const { data: comment } = await github.rest.issues.getComment({ owner, repo, comment_id: Number(id) });
-  if (comment.issue_url !== `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/issues/${run.pull}` ||
-      checkOutputs({ items: [{ type: 'add_comment', body: comment.body }] }, run.pull) !== run.verdict) {
-    throw new Error('Applied comment does not match the checked review');
-  }
+  // Nor is a review submitted twice: after a re-run, or a submission whose
+  // response was lost. Only the same review counts, at this head with this
+  // verdict and body; a re-run of all jobs that reached another verdict
+  // submits its own, which pollers take as the latest.
+  const earlier = async () => (await github.paginate(github.rest.pulls.listReviews, { ...target, per_page: 100 }))
+    .find(r => r.user?.login === 'github-actions[bot]' && r.commit_id === run.head &&
+      r.state === (event === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED') && r.body === body)?.html_url;
+  const found = await earlier();
+  if (found) return found;
   // commit_id prevents a racing push from making this an approval of new code;
   // stale-review dismissal in the branch ruleset is also required. An APPROVE
   // is submitted whatever files the pull request changes, the workflows and
   // this review's own files included (#540): whether it suffices to merge is
   // the merge policy and GitHub's code-owner rule (docs/review.md), and the
   // required ci and workflow-ingress checks stay its deterministic guard.
-  await github.rest.pulls.createReview({ ...target, commit_id: run.head,
-    event: run.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES', body: comment.body });
+  let data;
+  try {
+    ({ data } = await github.rest.pulls.createReview({ ...target, commit_id: run.head, event, body }));
+  } catch (error) {
+    // Posted all the same, the review is not to be posted again as the comment.
+    const posted = await earlier().catch(() => undefined);
+    if (posted) return posted;
+    throw error;
+  }
+  return data.html_url || `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#pullrequestreview-${data.id}`;
 }
 
 async function resolveDispatch(env, github) {
