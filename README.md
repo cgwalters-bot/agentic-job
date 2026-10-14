@@ -80,6 +80,8 @@ jobs:
 That is the shape, not the whole call: a caller also grants the job its
 permissions, and a real agent needs an inference proxy the runner can
 reach. [docs/workflow.md](docs/workflow.md) has the whole call.
+`COMMIT` may also be a released version's tag, such as `v0.1.0`, which
+Dependabot can then upgrade: see [versions to pin](docs/workflow.md#things-a-caller-should-know).
 
 The workflow is four pieces, and a caller whose agent job needs steps of
 its own, such as joining the inference proxy's network, calls three of

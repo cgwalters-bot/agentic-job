@@ -13,9 +13,9 @@ request, including one from someone with commits already merged here
 `/review`, which keeps the role check
 ([`review-command.toml`](../workflow/review-command.toml)). Bots
 are refused unless listed, so a bot's pull request gets no `review` status:
-none is listed today, and this repository has no Dependabot or Renovate
-configuration. A repository that adds one must list the bot in `bots` or not
-require `review`, or its pull requests wait on an expected status forever. The
+none is listed today. This repository's Dependabot pull requests are
+therefore reviewed only when someone with write access comments `/review`,
+and where `review` is a required status they wait for that comment. The
 workflow, the bounds and the
 [standing task](../workflow/review.md) come from the trusted caller, never the
 head. On `pull_request_target`, policy and task files are read at

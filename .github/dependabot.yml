@@ -1,0 +1,14 @@
+# Proposes upgrades of the actions this repository's workflows pin by
+# commit. Its pull requests are reviewed and merged like any other; see
+# docs/review.md for how review treats them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" is .github/workflows; the composite actions are listed by path.
+    directories: [/, /prepare, /run, /secure-host]
+    schedule:
+      interval: daily
+    # A hijacked action release is usually found and pulled within days;
+    # waiting a week keeps it from being proposed here in that window.
+    cooldown:
+      default-days: 7

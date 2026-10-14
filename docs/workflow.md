@@ -1579,9 +1579,56 @@ Uploads are staged in a draft release and published only when complete;
 rerunning repairs an interrupted draft. Repeated builds of the same source
 leave the first published release intact.
 
-A release with a version is still made by hand: raise the workspace's
-version, merge, and run the `release` workflow on main with that tag.
-Versioned releases remain separate from automatic prebuilt selection.
+**Versions to pin.** A version is released by hand: raise the
+workspace's version in `Cargo.toml`, merge, and run the `release`
+workflow on main with that version (`0.1.0`, no `v`). It refuses a run
+off main, a version that is not `MAJOR.MINOR.PATCH`, not the workspace's
+or not newer than every `v` tag (`just release-check`), and a run whose
+`v` tags changed while it built. It then tags main's commit `vVERSION`
+and publishes the binaries with notes listing the pull requests merged
+since the previous version.
+Selecting the binary is unchanged: the tag's commit fetches its
+source-addressed release like any other commit.
+
+A caller pins the version's tag in place of a commit, for the reusable
+workflows and the actions alike:
+
+```yaml
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@v0.1.0
+```
+
+and has Dependabot propose newer versions, daily:
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    cooldown: # a hijacked release is usually pulled within its first week
+      default-days: 7
+    groups: # every piece on one version, in one pull request
+      agentic-job:
+        patterns: ["cgwalters-forge/agentic-job*"]
+```
+
+A tag can be moved or deleted by anyone who can push tags unless the
+repository turns on immutable releases
+(a repository setting, which the workflow cannot set). With them on, a
+published release's tag and files cannot change, and a caller pinning
+the tag gets what was released. Without them, a commit is the only pin
+that cannot move. The run's own check that it is on main is against
+mistakes: anyone who can push a branch can dispatch a copy without it,
+and its job token can create a `v` tag. A tag ruleset would not stop
+that while this workflow tags with the job token, since the ruleset
+would have to let GitHub Actions through.
+
+Should publishing fail after the tag is made, delete the tag (and any
+draft release on it) before running the workflow again. Callers keep
+every piece of the workflow on one version, as on one commit, which is
+what the `groups` entry above is for.
 
 **Inputs a caller forwards.** The bounds file holds `repo`, `base`,
 `kind`, `outputs` and `max-outputs`, and nothing holds any other input.

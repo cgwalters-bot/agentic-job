@@ -23,7 +23,7 @@
 "ci.yml" = "This repository's CI: tests this revision's source, secure-host and reusable workflow, naming them by local path, and the host hardening itself."
 "build.yml" = "Builds this revision's binaries, for CI, release and pinning."
 "pin.yml" = "Publishes the release pin for a pushed main revision."
-"release.yml" = "Publishes released binaries for a pushed tag."
+"release.yml" = "Publishes a version of main by hand: tags its commit and releases its binaries."
 "safe-outputs-probe.yml" = "Drives gh-aw's collector and handlers on a recorded artifact, by hand, with no agent and no untrusted step."
 "specs.yml" = "Model-checks this repository's specifications with a read-only token."
 "workflow-ingress.yml" = "Runs the base branch's analyzers on proposed workflow files as data."
