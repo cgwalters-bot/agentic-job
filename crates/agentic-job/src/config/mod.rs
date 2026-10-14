@@ -394,6 +394,103 @@ pub struct Setup {
     pub npm: Vec<String>,
     /// Run as the sandbox user, never as root: for toolchains.
     pub script: Option<PathBuf>,
+    /// Trusted caller-selected tools, installed before network lockdown.
+    pub tools: Option<Tools>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Tools {
+    pub repository: String,
+    pub revision: String,
+    pub recipe: String,
+}
+
+impl Tools {
+    fn validate(&self) -> Result<()> {
+        // A moving ref would let a later repository compromise replace host
+        // setup code without a caller configuration change.
+        ensure!(
+            self.revision.len() == 40 && self.revision.bytes().all(|b| b.is_ascii_hexdigit()),
+            "setup.tools.revision must be a full 40-digit commit pin"
+        );
+        ensure!(
+            self.repository.starts_with("https://")
+                && self.repository.len() > "https://".len()
+                && !self.repository.contains(char::is_whitespace)
+                && !self.repository.contains(['\0', '@', '?', '#']),
+            "setup.tools.repository must be a public HTTPS clone URL without credentials"
+        );
+        ensure!(
+            !self.recipe.is_empty()
+                && self.recipe.len() <= 64
+                && self
+                    .recipe
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                && !self.recipe.starts_with('-'),
+            "setup.tools.recipe must be one just recipe name"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tools_tests {
+    use super::*;
+
+    #[test]
+    fn tools_are_opt_in_and_reject_unpinned_or_option_like_settings() {
+        assert!(Config::parse("").unwrap().setup.tools.is_none());
+        for (repository, revision, recipe, accepted) in [
+            (
+                "https://example.org/tools.git",
+                "a".repeat(40),
+                "install-tools",
+                true,
+            ),
+            (
+                "https://example.org/tools.git",
+                "main".into(),
+                "install-tools",
+                false,
+            ),
+            (
+                "https://example.org/tools.git",
+                "g".repeat(40),
+                "install-tools",
+                false,
+            ),
+            (
+                "https://token@example.org/tools.git",
+                "a".repeat(40),
+                "install-tools",
+                false,
+            ),
+            ("file:///tmp/tools", "a".repeat(40), "install-tools", false),
+            (
+                "https://example.org/tools.git",
+                "a".repeat(40),
+                "--evaluate",
+                false,
+            ),
+            (
+                "https://example.org/tools.git",
+                "a".repeat(40),
+                "install tools",
+                false,
+            ),
+        ] {
+            let text = format!(
+                "[setup.tools]\nrepository = {repository:?}\nrevision = {revision:?}\nrecipe = {recipe:?}\n"
+            );
+            let config = Config::parse(&text).unwrap();
+            assert_eq!(config.setup.validate().is_ok(), accepted, "{text}");
+        }
+        assert!(
+            Config::parse("[setup.tools]\nrepository = 'https://example.org/tools.git'").is_err()
+        );
+    }
 }
 
 impl Setup {
@@ -401,6 +498,9 @@ impl Setup {
     /// read as an option; and an agent program without an exact version
     /// is whatever the registry serves that day.
     fn validate(&self) -> Result<()> {
+        if let Some(tools) = &self.tools {
+            tools.validate()?;
+        }
         let plain = |name: &str| {
             !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace)
         };

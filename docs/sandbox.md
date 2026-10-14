@@ -69,6 +69,8 @@ order, it:
   the open network; npm versions must be exact;
 - denies the sandbox user sudo, every polkit action, cron, at and
   lingering;
+- if configured, runs the caller-pinned `setup.tools` installer as that
+  user, without runner credentials, before network lockdown;
 - starts the egress proxy and loads the network rules (below);
 - refuses a host where the world-write policy is not loaded (secure-host
   loads it first: [secure-host.md](secure-host.md#access-time-world-write-policy));

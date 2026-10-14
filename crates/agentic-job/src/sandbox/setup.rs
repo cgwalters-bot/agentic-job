@@ -35,6 +35,8 @@ use crate::run::agent::{self, Kind};
 use crate::run::inference::Endpoint;
 use crate::session::bridge::{self, Listen};
 
+mod tools;
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// The run's configuration (TOML); copied to /etc/agentic-job/
@@ -416,6 +418,9 @@ fn setup(args: &Args) -> Result<Exit> {
             config.sandbox.lock_runner.then_some(runner.name.as_str()),
         )
     })?;
+    if let Some(tools) = &config.setup.tools {
+        timed_setup("caller-tools", || tools::install(tools, &sandbox))?;
+    }
     // The proxy first, since the rules name its uid; and both after the
     // installs, which root does on the open network.
     let proxy_uid = config

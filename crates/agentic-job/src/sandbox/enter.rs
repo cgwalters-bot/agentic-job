@@ -84,7 +84,19 @@ impl Entry {
         } else {
             BTreeMap::new()
         };
-        Ok(Self::for_user(user, &config.sandbox, proxy, Root::detect()))
+        let mut entry = Self::for_user(user, &config.sandbox, proxy, Root::detect());
+        if config.setup.tools.is_some() {
+            entry.prepend_tools_path();
+        }
+        Ok(entry)
+    }
+
+    fn prepend_tools_path(&mut self) {
+        let path = self.env.get("PATH").cloned().unwrap_or_default();
+        self.env.insert(
+            "PATH".to_owned(),
+            format!("{}/.local/bin:{path}", self.user.home.display()),
+        );
     }
 
     /// The fixed variables, then the egress proxy's, then the
@@ -571,6 +583,18 @@ mod tests {
             home: "/home/agent".into(),
         };
         Entry::for_user(user, &sandbox, BTreeMap::new(), Root::Sudo)
+    }
+
+    #[test]
+    fn tools_path_preserves_the_callers_path_without_changing_root_path() {
+        let mut entry = entry(&[("PATH", "/opt/bin:/usr/bin")]);
+        assert_eq!(entry.env["PATH"], "/opt/bin:/usr/bin");
+        entry.prepend_tools_path();
+        assert_eq!(
+            entry.env["PATH"],
+            "/home/agent/.local/bin:/opt/bin:/usr/bin"
+        );
+        assert!(!host::root_path().contains(".local"));
     }
 
     fn strings(items: &[&str]) -> Vec<String> {

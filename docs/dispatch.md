@@ -230,6 +230,46 @@ toolchain the distribution lacks needs a `setup` script of the caller's
 (the reusable workflow's input; the shipped dispatch caller passes none),
 which runs as the sandbox user, never as root.
 
+For an agenthome tools manifest, opt in through that same caller-owned
+configuration on the default branch, not through dispatcher workflow inputs:
+
+```toml
+[setup.tools]
+repository = "https://HOST/OWNER/AGENTHOME.git"
+revision = "FULL_40_DIGIT_COMMIT_SHA"
+recipe = "install-tools"
+```
+
+Absent this table, nothing is fetched or run. All three fields are required;
+the revision must be a full commit hash, not a branch or tag. This prevents
+a moving ref from replacing setup code without a caller configuration change.
+The caller must review that commit and its manifest: pinning does not make
+its code or dependencies trustworthy. The agenthome `install-tools` interface
+is a Justfile recipe using Node, installing into `$HOME/.local/bin` and
+`$HOME/.local/share/agenthome`; its manifest detects existing tools and pins
+release checksums and direct package versions. Transitive PyPI dependencies
+remain resolver-trusted.
+
+This code and its dependencies have pre-lockdown network access, including
+metadata services and the tailnet, and are outside the filesystem view.
+Treat them as trusted host setup, not as untrusted task code.
+
+The runner image or `setup.packages` must provide Git, just, Node, curl,
+tar and unzip. After package installation and privilege denial, setup fetches
+the pinned repository and runs the recipe as the sandbox user with a clean
+environment, outside the sandbox command entry and before network rules.
+It can fetch PyPI and GitHub releases without changing sandbox egress policy.
+Each Git phase has a 120-second timeout; the recipe has 600 seconds, with a
+10-second forced-kill grace. Any failure stops setup before agent inference.
+Installer transcripts are discarded to bound memory and prevent workflow-command
+injection; setup logs phase starts and the failing exit status instead.
+The checkout stays in `$HOME/.agenthome-tools`; the sandbox PATH prepends
+`$HOME/.local/bin` when this table is present (including before a later
+`setup.script`). Neither host/root PATH nor other runs change. A setup script
+still runs later inside the hardened sandbox; it is not a second pre-lockdown
+hook. Real installations and privileged ordering need fresh-runner CI; local
+tests do not exercise host hardening.
+
 **Rust.** The shipped configuration gives this repository Ubuntu 26.04's
 `cargo` (1.93.1, pulling in `rustc` and `gcc` as its linker), which is
 newer than its `rust-version` of 1.88. That is preferred to rustup:
