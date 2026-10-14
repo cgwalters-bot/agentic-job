@@ -29,7 +29,7 @@ runs:
       run: |
         [[ "$BINARY" =~ ^[1-9][0-9]*$ && "$POLICY" =~ ^[1-9][0-9]*$ ]] ||
           { echo '::error::prepare requires binary and policy upload IDs from policy'; exit 1; }
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         artifact-ids: ${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}
         path: ${{ inputs.job-dir }}
