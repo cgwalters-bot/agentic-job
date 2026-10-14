@@ -324,8 +324,9 @@ remain refused: add a script without its executable bit and run it with
 its interpreter. Check refusals appear as run annotations and, when a
 comment target is available, in the run's conclusion comment.
 
-The exemption does not reach protected file names or git's own files
-inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`). Organization and
+The exemption does not reach protected file names, git's own files
+inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`) or the review's
+[merge policy](review.md#merge-policy), `.github/agentic-job/merge.toml`. Organization and
 caller bounds must both permit it. It applies to `create_pull_request` and
 `push_to_pull_request_branch`, including replacement series, only for the
 same listed repositories. A fix push still requires the open PR and head

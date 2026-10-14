@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch } = require('./review.cjs');
+const { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, reviewStatus, reportStatus, resolveDispatch } = require('./review.cjs');
 
 const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
   item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
@@ -208,6 +208,89 @@ test('task comes from a bounded regular base file, not a symlink or escape', () 
   }
 });
 
+test('merge policy comes from one strict base file, person by default', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-merge-'));
+  const file = path.join(dir, '.github/agentic-job/merge.toml');
+  try {
+    assert.deepEqual(mergePolicy(dir), { merge: 'person', set: false });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    for (const [text, want] of [
+      ['merge = "agent"\n', 'agent'],
+      ['# The owner\'s decision.\n\nmerge = "person"  \n', 'person'],
+      ['merge = "agent"', 'agent'],
+      ['# Windows lines.\r\nmerge = "agent"\r\n', 'agent'],
+      ['\ufeffmerge = "agent"\n', /may hold only/],
+      ['', /exactly once/],
+      ['# nothing\n', /exactly once/],
+      ['merge = "agent"\nmerge = "agent"\n', /exactly once/],
+      ['merge = "anyone"\n', /may hold only/],
+      ['merge = \'agent\'\n', /may hold only/],
+      ['merge = "agent" # inline\n', /may hold only/],
+      ['merge="agent"\n', /may hold only/],
+      ['[review]\nmerge = "agent"\n', /may hold only/],
+      ['merge = "agent"\nmerge = "person"\n', /exactly once/],
+      ['x'.repeat(4097), /at most 4 KiB/],
+    ]) {
+      fs.writeFileSync(file, text);
+      if (typeof want === 'string') assert.deepEqual(mergePolicy(dir), { merge: want, set: true }, text);
+      else assert.throws(() => mergePolicy(dir), want, text);
+    }
+    fs.rmSync(file);
+    fs.writeFileSync(path.join(dir, 'other.toml'), 'merge = "agent"\n');
+    fs.symlinkSync('../../other.toml', file);
+    assert.throws(() => mergePolicy(dir), /without symlinks/);
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    assert.throws(() => mergePolicy(dir), /regular file/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // The statement says whose it is, for each value, and asks for the owned
+  // paths and any change to who decides.
+  const agent = { merge: 'agent', set: true };
+  const person = { merge: 'person', set: true };
+  const unset = { merge: 'person', set: false };
+  assert.match(mergeStatement(agent), /## Merge policy\n\nThe repository owner set this in \.github\/agentic-job\/merge\.toml on the default branch/);
+  assert.match(mergeStatement(agent), /merge = "agent": an approving review from this job merges/);
+  assert.match(mergeStatement(person), /The repository owner set this[\s\S]*merge = "person": the repository expects a person/);
+  assert.match(mergeStatement(unset), /The default branch has no \.github\/agentic-job\/merge\.toml, so the default holds[\s\S]*merge = "person"/);
+  assert.doesNotMatch(mergeStatement(unset), /owner set this/);
+  for (const policy of [person, unset]) assert.match(mergeStatement(policy), /Review as hard as if your approval merged\./);
+  for (const policy of [agent, person, unset]) {
+    assert.match(mergeStatement(policy), /it is a fact, not a question for this review/);
+    assert.match(mergeStatement(policy), /"Needs the owner's review: " and those paths/);
+    assert.match(mergeStatement(policy), /review those paths as hard as any\s+other/);
+    assert.match(mergeStatement(policy), /changes the merge policy file or a CODEOWNERS file/);
+  }
+});
+
+test('the task command appends the base merge policy to the task', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-task-merge-'));
+  const env = { ...process.env, EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop',
+    MAX_OUTPUTS: '1', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
+    OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
+  const task = () => execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'task', 'task.md'],
+    { cwd: dir, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    fs.writeFileSync(path.join(dir, 'task.md'), 'Trusted base task\n');
+    assert.equal(task(), 'Trusted base task\n' + mergeStatement({ merge: 'person', set: false }));
+    fs.mkdirSync(path.join(dir, '.github/agentic-job'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.github/agentic-job/merge.toml'), 'merge = "agent"\n');
+    assert.equal(task(), 'Trusted base task\n' + mergeStatement({ merge: 'agent', set: true }));
+    // A malformed policy fails the run instead of being guessed at.
+    fs.writeFileSync(path.join(dir, '.github/agentic-job/merge.toml'), 'merge = "always"\n');
+    assert.throws(task, /may hold only/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The owner's value is theirs to change; a file the review job would refuse is not.
+test('this repository\'s merge policy is one the review job reads', () => {
+  const { merge, set } = mergePolicy(path.join(__dirname, '..'));
+  assert.ok(set && ['agent', 'person'].includes(merge));
+});
+
 test('scripted review reports the checked-out SHA', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'review-script-'));
   try {
@@ -264,11 +347,12 @@ test('automatic and dispatched review prompts allow concern-specific experiments
     assert.doesNotMatch(prompt, /VERDICT: CHANGES when there is\s+something actionable/);
     assert.doesNotMatch(prompt, /Do not build|Run relevant tests|what you verified or could not verify/);
   }
-  // Only review.yml submits approvals, and by the operator's decision (#540)
-  // for every file: its reviewer reviews harder rather than defer to a person.
-  assert.match(standing, /this review is\s+the merge gate for every change here, including workflows, bounds and the\s+review's own files/);
-  assert.match(standing, /do not ask for changes\s+merely because no person stands behind a change/);
-  assert.match(standing, /Ask for a person only when\s+you find a concrete risk you cannot bound, and say which\./);
+  // Whether its approval merges is the owner's merge policy (#556), stated
+  // after the task, not prose the reviewer weighs.
+  assert.match(standing, /Whether your approval merges is the\s+repository owner's decision, stated under "Merge policy"/);
+  assert.match(standing, /Without that section, a\s+person approves every merge after you\./);
+  assert.match(standing, /Ask for a person only when you find a\s+concrete risk you cannot bound, and say which\./);
+  assert.doesNotMatch(standing, /merge gate for every change here/);
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   assert.match(caller, /review-task: workflow\/review.md/);
   const agent = caller.split('\n  agent:')[1].split('\n  check:')[0];

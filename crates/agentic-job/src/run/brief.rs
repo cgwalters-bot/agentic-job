@@ -22,8 +22,9 @@ const KIB: usize = 1 << 10;
 const ALWAYS_PROTECTED: &str = "any file or directory whose name starts with `.git`, in any \
                                 directory (`.gitignore`, `.gitattributes`, `.gitkeep`, \
                                 and the top-level `.github/` unless exempted above), \
-                                `CODEOWNERS`, and the configuration of hooks, shells, editors \
-                                and CI systems (`.husky/`, `lefthook.yml`, `.envrc`, \
+                                `CODEOWNERS`, the merge policy \
+                                `.github/agentic-job/merge.toml`, and the configuration \
+                                of hooks, shells, editors and CI systems (`.husky/`, `lefthook.yml`, `.envrc`, \
                                 `.vscode/`, `.pre-commit-config.yaml`, `.travis.yml`)";
 
 /// What `check` refuses of a change's files whatever their names.
@@ -383,6 +384,7 @@ mod tests {
                 "adds an executable, adds, changes or deletes a symbolic link",
                 "digits and `_.+@=,-`",
                 "`CODEOWNERS`",
+                "`.github/agentic-job/merge.toml`",
                 "more than 20 files",
                 "leave that part out and say so in your",
                 "if it is all the task asks for, make it anyway",

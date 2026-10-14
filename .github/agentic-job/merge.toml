@@ -1,0 +1,7 @@
+# The repository owner's merge policy, read by review.yml's policy job from
+# the base branch and stated to the reviewer as fact (docs/review.md#merge-policy).
+# "agent": an approving review by the review job merges by default.
+# "person": a person approves every merge. Paths with a code owner wait for
+# that owner either way where the ruleset requires code-owner review.
+# Check refuses agent patches to this file.
+merge = "agent"

@@ -134,13 +134,10 @@ file/line citations in the body; no inline review comments are generated.
 The review is bound to `commit_id`, and a head that already changed is skipped.
 An APPROVE is submitted whatever files the pull request changes, including
 workflows, bounds and the review's own workflow, script and instructions.
-By the operator's decision (#540), the adversarial review is the merge gate for
-this harness's own changes; no gate-file list holds them for a person. The
-deterministic guards stay: keep `ci` and the base branch's
-[workflow-ingress check](workflow-ingress.md) required in the ruleset. The
-consequence is that a change weakening the review can merge on that review's
-approval, so the reviewer is told to argue against such changes and to ask for
-a person when it finds a risk it cannot bound.
+Whether that approval is enough to merge is the repository's
+[merge policy](#merge-policy) and GitHub's code-owner rule, not a gate-file
+list here. The deterministic guards stay: keep `ci` and the base branch's
+[workflow-ingress check](workflow-ingress.md) required in the ruleset.
 CHANGES is submitted as usual.
 
 Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
@@ -163,6 +160,59 @@ request; the review requirement gates queue entry. Repository settings cannot
 be changed by this PR. Enabling repository auto-merge and requesting queue
 entry at PR creation belong to the opening controller; this workflow never
 merges or enables auto-merge itself.
+
+### Merge policy
+
+Whether the review job's approval merges a pull request by default is the
+repository owner's decision, kept in the repository rather than in prose the
+reviewer weighs: reviewers at older pins kept arguing whether a person should
+be required, and refused changes the owner had accepted (#556). The policy
+job reads `.github/agentic-job/merge.toml` from the same trusted checkout of
+the default branch as the standing task, never the head, and `workflow/review.cjs` appends it to the task under
+"Merge policy" as the owner's statement:
+
+```toml
+merge = "agent" # an approving review by the review job merges by default
+```
+
+or `merge = "person"`, where a person approves every merge after the review.
+The file holds that one line among comments and blank lines; anything else,
+a symbolic link or more than 4 KiB fails the policy job. Without the file the
+policy is `person`, and the reviewer is told it is the default, not the
+owner's choice. The statement changes what the reviewer is told, not what
+GitHub enforces: an APPROVE is submitted under either policy, and the
+ruleset's required approvals decide what it merges. So the reviewer is told
+to review as hard under `person` too.
+
+Paths that still need the owner are listed in CODEOWNERS (`.github/`, the root
+or `docs/`), and the owner turns on **Require review from Code Owners** in the
+ruleset. The review job's approval is not a code owner's, so with that rule
+those paths wait for the owner whatever the model says; without it, CODEOWNERS
+only requests reviewers and holds nothing. The reviewer is asked to name the
+changed paths that have a code owner after its verdict line ("Needs the
+owner's review: …"), so the pull request says why it waits, and to list
+there any change to the policy file or to a CODEOWNERS file, which changes
+who decides even before CODEOWNERS covers it; that line is the
+model's reading and informs, while GitHub's rule is what holds the merge. The
+reviewer cannot see the ruleset, so it is told to review those paths as hard
+as any other. Only the owner can add CODEOWNERS, since check refuses an
+agent's patch to it. Start it with the policy file and CODEOWNERS itself, so
+changing who decides takes the owner:
+
+```text
+# Paths that need the repository owner's review whatever the merge policy
+# (docs/review.md#merge-policy). Nothing parses this comment.
+/.github/agentic-job/merge.toml @OWNER
+/.github/CODEOWNERS @OWNER
+```
+
+Check refuses an agent's patch to either file, `.github/` exemption or not
+([safe outputs](safe-outputs.md)), so no implement or fix run can change the
+policy or drop the owner's review. The code that states the policy
+(`workflow/review.cjs`, `workflow/review.md`, `review.yml`) is reviewed like
+any other change to the harness; an owner who wants it held for a person
+lists it in CODEOWNERS too. Dispatched reviews
+(`dispatch.yml`'s `review` profile) are not given a merge policy.
 
 ### Compatibility status
 
@@ -234,7 +284,9 @@ jobs:
 copies [`workflow/review.toml`](../workflow/review.toml),
 [`workflow/review-command.toml`](../workflow/review-command.toml) (both with
 its own `repos` and `bases`) and [`workflow/review.md`](../workflow/review.md)
-to the same paths, and sets the variables above. It needs no copy of
+to the same paths, and sets the variables above. Its own
+`.github/agentic-job/merge.toml` and CODEOWNERS, if any, are its
+[merge policy](#merge-policy); without them it is `person`. It needs no copy of
 `hosted.toml`: without `AGENT_CONFIG` the policy job reads the one in
 this repository at `COMMIT`, so a reviewed pin also pins the runner
 hardening, and a caller on another image names its own file instead. A
@@ -249,7 +301,8 @@ review states, unchanged bodies and exact commits, stale heads, failed runs,
 protected paths and renames, bounded pagination and invalid comment targets.
 The tests use fake APIs; actual forge writes are left to real workflow runs.
 
-`node --test workflow/review.test.cjs` covers admission, request bounds,
+`node --test workflow/review.test.cjs` covers the merge policy file and
+the statement the task gets from it, admission, request bounds,
 the verdict grammar, hostile outputs, the status for each combination of
 check, verdict, apply and open pull requests at the head (`reviewStatus` and
 `reportStatus` against a fake API) and, by reading `review.yml`, which job

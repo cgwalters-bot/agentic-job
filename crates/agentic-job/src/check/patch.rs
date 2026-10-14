@@ -46,6 +46,14 @@ static PROTECTED_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a valid pattern")
 });
 
+/// The repository owner's merge policy, which the review workflow reads
+/// from the base (`workflow/review.cjs`). An agent able to change it could
+/// give its own reviews merge authority, as one able to change CODEOWNERS
+/// could drop the owner's review of a path; so, like CODEOWNERS, it is
+/// refused whether or not the policy exempts `.github/`, and so is a
+/// directory at its path, which would fail every review's policy job.
+pub const MERGE_POLICY_PATH: &str = ".github/agentic-job/merge.toml";
+
 /// The paths a change may touch: relative, of plain characters (no
 /// spaces, quotes or control characters). `.` and `..` are refused apart.
 static PLAIN_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -135,7 +143,11 @@ fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
     };
     if !PLAIN_PATH_RE.is_match(path) || dotted {
         Some("not a plain relative path")
-    } else if PROTECTED_PATH_RE.is_match(inside) {
+    } else if PROTECTED_PATH_RE.is_match(inside)
+        || path
+            .strip_prefix(MERGE_POLICY_PATH)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    {
         Some("protected path")
     } else {
         None
@@ -673,6 +685,10 @@ mod tests {
                 (".github-other/check.yml", false),
                 (".agents/config.json", false),
                 (".github/CODEOWNERS", false),
+                (".github/agentic-job/merge.toml", false),
+                (".github/agentic-job/merge.toml/x", false),
+                (".github/agentic-job/merge.toml.bak", enabled),
+                (".github/agentic-job/allow.toml", enabled),
                 (".github/.git/config", false),
                 (".github/package.json", false),
                 (".github/.husky/pre-commit", false),

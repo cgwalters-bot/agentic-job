@@ -1076,6 +1076,7 @@ mod tests {
                 (".github/workflows/test.yml", true),
                 (".github/agentic-job/allow.toml", true),
                 (".github/CODEOWNERS", false),
+                (".github/agentic-job/merge.toml", false),
                 (".github/.git/config", false),
                 (".husky/hook", false),
             ] {

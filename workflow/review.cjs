@@ -39,6 +39,66 @@ function taskFile(root, name) {
   return task;
 }
 
+// The repository owner's merge policy, read from the same trusted checkout
+// of the default branch as the task (policy.yml), never the head. It used to live only in prose (the task and
+// operator notes), so reviewers at older pins kept arguing whether a
+// person should be required (#556). One line, `merge = "agent"` or
+// `merge = "person"`, among blank lines and comments; anything else fails
+// the run rather than guess. No file is `person`, which `set` tells apart
+// from the owner's choice. Check refuses a patch to this file, as to
+// CODEOWNERS (src/check/patch.rs), so no agent can propose its own merge
+// authority.
+const MERGE_POLICY_FILE = '.github/agentic-job/merge.toml';
+const MERGE_POLICY_MAX_BYTES = 4096;
+
+function mergePolicy(root) {
+  const file = path.join(root, MERGE_POLICY_FILE);
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { merge: 'person', set: false };
+    throw error;
+  }
+  if (fs.realpathSync(file) !== file || !stat.isFile() || stat.size > MERGE_POLICY_MAX_BYTES) {
+    throw new Error(`${MERGE_POLICY_FILE} must be a regular file without symlinks, at most 4 KiB`);
+  }
+  const values = [];
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    const value = /^merge = "(agent|person)"\s*$/.exec(line)?.[1];
+    if (!value) throw new Error(`${MERGE_POLICY_FILE} may hold only merge = "agent" or merge = "person"`);
+    values.push(value);
+  }
+  if (values.length !== 1) throw new Error(`${MERGE_POLICY_FILE} must set merge exactly once`);
+  return { merge: values[0], set: true };
+}
+
+// What the reviewer is told, as a fact rather than a question for it to
+// weigh. Either way it reviews as hard: an APPROVE is submitted whatever
+// the policy, and only the ruleset decides what that approval merges. Code
+// owners' paths wait for their owner where the ruleset requires it; the
+// verdict names them so the pull request says why it waits, and names any
+// change to who decides, which a person's pull request can still propose.
+function mergeStatement({ merge, set }) {
+  const source = set
+    ? `The repository owner set this in ${MERGE_POLICY_FILE} on the default branch`
+    : `The default branch has no ${MERGE_POLICY_FILE}, so the default holds`;
+  const who = merge === 'agent'
+    ? 'merge = "agent": an approving review from this job merges the pull request by default, ' +
+      'so no person approves after you. Do not ask for changes because no person stands behind ' +
+      'a change; review it harder instead, naming the worst merged outcome and what stops it.'
+    : 'merge = "person": the repository expects a person to approve every merge after you. ' +
+      'Review as hard as if your approval merged.';
+  return `\n\n## Merge policy\n\n${source}; it is a fact, not a question for this review: ${who}\n` +
+    'Where the ruleset requires code-owner review, paths that the base\'s CODEOWNERS file ' +
+    '(in .github/, the root or docs/, the first GitHub finds) assigns an owner also wait for that ' +
+    'owner, whatever your verdict; you cannot see the ruleset, so review those paths as hard as any ' +
+    'other. If the pull request changes any, or changes the merge policy file or a CODEOWNERS file, ' +
+    'which changes who decides, add a line after the verdict line: "Needs the owner\'s review: " ' +
+    'and those paths.\n';
+}
+
 function checkRequest(env) {
   if (env.EVENT !== 'true' || env.KIND !== 'analysis' || env.OUTPUTS !== 'add_comment,noop' ||
       env.MAX_OUTPUTS !== '1' || env.NOTIFY !== 'none' || env.TARGET ||
@@ -150,9 +210,9 @@ async function submitReview(env, github, core) {
   // commit_id prevents a racing push from making this an approval of new code;
   // stale-review dismissal in the branch ruleset is also required. An APPROVE
   // is submitted whatever files the pull request changes, the workflows and
-  // this review's own files included: by the operator's decision (#540) the
-  // adversarial review is the merge gate for the harness's own changes, and
-  // the required ci and workflow-ingress checks stay its deterministic guard.
+  // this review's own files included (#540): whether it suffices to merge is
+  // the merge policy and GitHub's code-owner rule (docs/review.md), and the
+  // required ci and workflow-ingress checks stay its deterministic guard.
   await github.rest.pulls.createReview({ ...target, commit_id: run.head,
     event: run.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES', body: comment.body });
 }
@@ -184,7 +244,7 @@ if (require.main === module) {
   const [command, file, number] = process.argv.slice(2);
   if (command === 'task') {
     checkRequest(process.env);
-    process.stdout.write(taskFile(process.cwd(), file));
+    process.stdout.write(taskFile(process.cwd(), file) + mergeStatement(mergePolicy(process.cwd())));
   } else if (command === 'check') {
     checkOutputs(JSON.parse(fs.readFileSync(file, 'utf8')), number);
   } else if (command === 'refusal') {
@@ -196,4 +256,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { admit, taskFile, checkRequest, checkOutputs, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };
+module.exports = { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };
