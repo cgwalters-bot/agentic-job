@@ -138,9 +138,14 @@ test('documented proposals caller matches the CI trial and shipped bounds', () =
   const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   const producer = ci.split('\n  proposals:\n')[1].split('\n  e2e-proposals:\n')[0];
   const caller = ci.split('\n  e2e-proposals:\n')[1].split('\n  e2e-full:\n')[0];
-  // Compare the executable producer verbatim, including its action pin.
-  assert.equal(snippet.split('    steps:\n')[1].split('  apply:\n')[0],
-    producer.split('    steps:\n')[1].trimEnd() + '\n');
+  // Compare the executable producer verbatim but for action versions: a
+  // Dependabot bump changes ci.yml, not the documentation it is shown in.
+  // The documented steps must still pin a full commit, as callers copy them.
+  const anyRef = steps => steps.replace(/^( *(?:- )?uses: [^@\s]+)@\S+(?: +#.*)?$/gm, '$1@REF');
+  const documented = snippet.split('    steps:\n')[1].split('  apply:\n')[0];
+  for (const [, ref] of documented.matchAll(/uses: \S+?@(.*)$/gm)) assert.match(ref, /^[0-9a-f]{40} # v\S+$/);
+  assert.equal(anyRef(documented), anyRef(producer.split('    steps:\n')[1].trimEnd() + '\n'));
+  assert.notEqual(anyRef('- uses: actions/upload-artifact@x # v1'), anyRef('- uses: actions/download-artifact@x # v1'));
   for (const block of [snippet.split('  apply:\n')[1], caller]) {
     assert.match(block, /contents: read\n      issues: write[^\n]*\n      pull-requests: read[^\n]*\n      actions: read[^\n]*\n      id-token: write/);
     assert.match(block, /allow: \.github\/agentic-job\/allow.toml/);
