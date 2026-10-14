@@ -362,6 +362,8 @@ pub struct Agent {
     /// task that does not use them gets no instructions it did not ask
     /// for.
     pub skills: bool,
+    /// Include the redacted session in the run summary. Off by default.
+    pub render_session: bool,
 }
 
 /// What stops a run. Zero means not set. `session::Limits::from_config`

@@ -39,6 +39,33 @@ When the session ends it kills every process of the sandbox user. What
 
 ## Agents
 
+### Reading a session in the summary
+
+Set `render-session = true` in `[agent]` in the repository-owned sandbox
+configuration to include the session in the run summary. It is off by default;
+there is no dispatcher input. The trusted runner renders its redacted ACP copy,
+not files written by the sandbox user. User and assistant text is prose;
+reasoning and tools are collapsed separately. Tools show arguments, measured
+duration, reported status and exit code when available, and at most 8192 bytes
+of output with an omitted-byte count. Transcript punctuation is encoded to
+prevent HTML or Markdown injection, including closing a generated details block.
+Joined text is redacted again so secrets split across streamed chunks stay hidden.
+
+`session.md` in the `agent-run` artifact contains the complete rendered session
+(tool outputs are still bounded). The summary reserves space for accounting
+and stays below GitHub's 1 MiB limit: assistant prose is retained first, then
+head and tail blocks. If assistant prose alone exceeds the limit, each message
+is abbreviated; the artifact keeps it. Usage updates are labelled agent-reported
+and potentially cumulative, not invented per-turn costs.
+
+Claude currently runs through `claude-agent-acp`, not native stream-json.
+This renderer uses that recorded protocol. Native stream-json ingestion,
+subagent-turn nesting (not exposed as separate turns by the current adapter),
+and agent-specific opencode/vibe fidelity remain follow-ups. No sandbox transcript
+collection or additional permissions are introduced.
+
+### Agent adapters
+
 To the session, an agent is an entry of `session/agents.toml`, built into
 the binary: its command, how it is told the model, and whether it takes
 notices. This is not a caller-extensible registry for `run`: `run` also

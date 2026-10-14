@@ -43,6 +43,7 @@ pub mod inference;
 pub mod launch;
 pub mod log;
 pub mod probe;
+mod session_markdown;
 pub mod summary;
 pub mod upload;
 
@@ -710,19 +711,20 @@ impl Plan {
             egress_denied: egress::denied_in(&access_log),
             redactions: session.redactor.count(),
         };
-        let summary = summary::summarize(&summary::Inputs {
+        let mut summary = summary::summarize(&summary::Inputs {
             records: &records,
             result: result.as_ref(),
             measured: &measured,
             outcome: &outcome,
             usage: settled.usage.as_ref(),
         });
-        let write = |name: &str, content: String| {
-            let path = staging.run().join(name);
-            std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))
-        };
-        write(summary::SUMMARY_FILE, format!("{summary}\n"))?;
-        write(summary::MARKDOWN_FILE, summary::markdown(&summary))?;
+        session_markdown::write(
+            staging,
+            &records,
+            &session.redactor,
+            self.agent.render_session,
+            &mut summary,
+        )?;
 
         staging.check(
             Gate {
@@ -736,7 +738,7 @@ impl Plan {
             "The agent {} ended: {}. Redacted {} string(s).",
             self.kind.as_str(),
             summary["result"].as_str().unwrap_or_default(),
-            measured.redactions
+            session.redactor.count()
         );
         Ok(())
     }
