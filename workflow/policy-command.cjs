@@ -1,8 +1,17 @@
 // Keep CLI diagnostics visible on the run page without interpreting their text
 // as workflow commands. This runs only on the read-only policy machine.
 const { spawnSync } = require('node:child_process');
+const { resolveContext } = require('./context.cjs');
 
 function run(command, args) {
+  if (args[0] === 'policy' && process.env.CONTEXT_REPOS) {
+    try {
+      args = [...args, '--context', JSON.stringify(resolveContext(process.env.CONTEXT_REPOS))];
+    } catch (error) {
+      process.stderr.write(`policy: context admission failed: ${JSON.stringify(error.message).replaceAll('##[', '# #[')}\n`);
+      return 1;
+    }
+  }
   const result = spawnSync(command, args, { stdio: ['inherit', 'inherit', 'pipe'],
     encoding: 'utf8', maxBuffer: 1024 * 1024 });
   // The legacy runner parser searches for ##[ anywhere, even after a prefix.

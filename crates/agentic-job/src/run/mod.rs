@@ -465,7 +465,18 @@ impl Plan {
         if let Some(head) = &self.review_head {
             clone::review_head(sandbox, &self.policy, &mut checkout, head)?;
         }
-        let prompt = self.prompt(&checkout)?;
+        let context = clone::context(sandbox, &self.policy)?;
+        let cwd = session_cwd(
+            self.kind,
+            self.review_head.is_some(),
+            &base_dir,
+            &checkout.dir,
+        );
+        let prompt = format!(
+            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{context}{}",
+            cwd.display(),
+            self.prompt(&checkout)?
+        );
         shared.go_on()?;
         let run = self
             .endpoint
@@ -523,12 +534,7 @@ impl Plan {
             probe::require(sandbox, run.token(), file, given)?;
         }
         Ok(Prepared {
-            cwd: session_cwd(
-                self.kind,
-                self.review_head.is_some(),
-                &base_dir,
-                &checkout.dir,
-            ),
+            cwd,
             checkout,
             model: configuration.model,
             options: configuration.options,
@@ -707,6 +713,30 @@ impl Plan {
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
             .unwrap_or_else(|| json!({}));
         let measured = summary::Measured {
+            context: self
+                .policy
+                .context
+                .iter()
+                .map(|item| {
+                    let path = self
+                        .sandbox
+                        .home
+                        .join(clone::WORK_DIR)
+                        .join("context")
+                        .join(&item.repo);
+                    // Reported, not enforced: an edited reference copy
+                    // misleads only the agent, and nothing applies it.
+                    let clean = path
+                        .to_str()
+                        .and_then(|dir| clone::context_clean(&runner, dir, &item.commit));
+                    json!({
+                        "repo": item.repo,
+                        "commit": item.commit,
+                        "path": path,
+                        "clean": clean,
+                    })
+                })
+                .collect(),
             meta: self.meta.clone(),
             repo: self.policy.repo.clone(),
             base: self.policy.base.clone(),

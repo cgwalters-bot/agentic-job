@@ -157,6 +157,9 @@ static COMMIT_RE: LazyLock<Regex> =
 /// and one that does is refused with a reason like any other.
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Resolved context repositories as a JSON array (empty by default)
+    #[arg(long, default_value = "[]", allow_hyphen_values = true)]
+    pub context: String,
     /// The caller's bounds file
     #[arg(long, value_name = "FILE")]
     pub allow: PathBuf,
@@ -386,6 +389,8 @@ pub struct Request<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<ContextRepo>,
     pub repo: String,
     /// What `run` clones.
     pub clone_url: String,
@@ -397,6 +402,50 @@ pub struct Policy {
     /// The configuration gh-aw's collector reads (its `config.json`), and
     /// the rules `check` applies to a patch.
     pub safe_outputs: SafeOutputs,
+}
+
+/// Reference context admitted before the agent starts. The workflow resolves
+/// refs and confirms visibility; the policy checks names, pins and caller bounds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRepo {
+    pub repo: String,
+    pub clone_url: String,
+    pub commit: String,
+    /// Verified by the read-only policy workflow, never a dispatch input.
+    pub public: bool,
+}
+
+pub const MAX_CONTEXT_REPOS: usize = 8;
+
+pub fn check_context(context: &[ContextRepo]) -> Result<()> {
+    ensure!(
+        context.len() <= MAX_CONTEXT_REPOS,
+        "at most {MAX_CONTEXT_REPOS} context repositories"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for item in context {
+        ensure!(
+            REPO_RE.is_match(&item.repo)
+                && item
+                    .repo
+                    .split('/')
+                    .all(|part| !part.starts_with(['.', '-'])),
+            "invalid context repository {:?}",
+            item.repo
+        );
+        ensure!(
+            COMMIT_RE.is_match(&item.commit),
+            "context commit must be a full lowercase SHA"
+        );
+        ensure!(
+            seen.insert(item.repo.to_ascii_lowercase()),
+            "duplicate context repository {:?}",
+            item.repo
+        );
+        crate::run::clone::check_url(&item.clone_url)?;
+    }
+    Ok(())
 }
 
 /// gh-aw's safe-outputs configuration: a table per output type allowed.
@@ -554,6 +603,11 @@ impl Policy {
     /// that have a configuration here, and only draft pull requests with
     /// the dot-folders protected.
     fn validate(&self) -> Result<()> {
+        check_context(&self.context)?;
+        ensure!(
+            self.context.is_empty() || self.repo.rsplit('/').next() != Some("context"),
+            "target name conflicts with the context directory"
+        );
         for output in self.safe_outputs.others.keys() {
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str())
@@ -1028,6 +1082,7 @@ impl Bounds {
                 .collect(),
         };
         Ok(Policy {
+            context: Vec::new(),
             repo: repo.to_owned(),
             clone_url: clone_url.to_owned(),
             base: base.to_owned(),
@@ -1062,6 +1117,35 @@ fn validate_dot_folders(names: &[String], field: &str) -> Result<()> {
 pub fn run(args: &Args) -> Result<Exit> {
     let bounds = Bounds::load(&args.allow)?;
     let org_bounds = args.org_allow.as_deref().map(Bounds::load).transpose()?;
+    // A dispatcher must not turn context into a way to read outside the caller's
+    // authority. Both bounds files admit every URL and repository, independently.
+    ensure!(args.context.len() <= 16384, "context input exceeds 16 KiB");
+    let context: Vec<ContextRepo> =
+        serde_json::from_str(&args.context).context("parsing context")?;
+    check_context(&context)?;
+    ensure!(
+        context.is_empty() || args.repo.rsplit('/').next() != Some("context"),
+        "target name conflicts with the context directory"
+    );
+    for item in &context {
+        for bound in std::iter::once(&bounds).chain(org_bounds.iter()) {
+            ensure!(
+                item.public
+                    || bound
+                        .repos
+                        .iter()
+                        .any(|pattern| glob(pattern).is_ok_and(|regex| regex.is_match(&item.repo))),
+                "context repository {:?} is outside caller bounds",
+                item.repo
+            );
+            ensure!(
+                bound
+                    .clone_url_problem(&item.clone_url, &item.repo)
+                    .is_none(),
+                "context clone URL is outside caller bounds"
+            );
+        }
+    }
     let request = Request {
         repo: &args.repo,
         clone_url: &args.clone_url,
@@ -1083,7 +1167,8 @@ pub fn run(args: &Args) -> Result<Exit> {
             None => Ok(policy),
         });
     match compiled {
-        Ok(policy) => {
+        Ok(mut policy) => {
+            policy.context = context;
             let json = serde_json::to_string_pretty(&policy).context("writing the policy")?;
             println!("{json}");
             Ok(Exit::Success)

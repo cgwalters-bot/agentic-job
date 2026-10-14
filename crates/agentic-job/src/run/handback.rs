@@ -1049,6 +1049,7 @@ mod tests {
 
     fn policy(kind: Kind, outputs: Value) -> Policy {
         Policy {
+            context: Vec::new(),
             repo: "o/r".into(),
             clone_url: "https://example.invalid/o/r".into(),
             base: "main".into(),

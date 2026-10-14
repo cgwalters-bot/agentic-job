@@ -116,6 +116,7 @@ impl Job {
     /// the bounds are that command's, and `run` clones what it is given.
     fn policy(&self, clone_url: &str) -> String {
         let policy = Policy {
+            context: Vec::new(),
             repo: format!("local/{}", self.name),
             clone_url: clone_url.to_owned(),
             base: "main".to_owned(),

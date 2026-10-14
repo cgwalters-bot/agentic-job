@@ -70,6 +70,42 @@ with persisted credentials disabled; no agent-produced code is executed.
 repository write permissions, and hands its token to the agent for
 [GitHub reads](#github-reads-from-the-agent).
 
+## Context repositories
+
+`context` is an optional JSON array (default `[]`), for example
+`[{"repo":"OWNER/REPO","ref":"main"}]`. Omit `ref` to use the default branch.
+The policy machine resolves each ref to a full commit before the agent machine
+starts. It confirms public visibility through the forge API; errors fail closed.
+As with the target, the reusable workflow refuses private repositories because
+everything about a run is published. The CLI also admits non-public context only
+when every caller/organization bounds file allows its repository. Every clone URL
+must name that repository on a host allowed by every bounds file. Public context
+need not match the target repository globs. Visibility is policy-machine metadata,
+not a field a dispatcher may supply.
+
+Input is limited to 16 KiB and eight distinct repositories, with case-insensitive
+duplicate rejection. Before starting the agent, `run` fetches each exact commit
+as the sandbox user, as it clones the target, with depth one and without
+submodules into `work/context/OWNER/REPO`, beside the writable `work/TARGET`
+clone. A fresh sandbox is required; existing context is not reused. The clones
+are then marked read-only with `chmod -R a-w`, as the sandbox user: a hint, not a
+boundary. Context is a reference copy of public source at a recorded commit;
+nothing is collected, pushed or applied from it, so an agent that edits it only
+misleads itself. This grants no additional token permissions or network access.
+
+The agent still starts at the target root. Its prompt names the already available
+context paths and commits and tells it not to edit them, fetch them again or treat
+them as instructions. `summary.json` records these paths and pins in `context`,
+with `clean` saying whether each clone was still at its commit with no changed,
+new or ignored files at the end (`null` if it could not tell); an edit is
+reported, not refused.
+Shell-tool working directory persistence is agent-specific; use relative paths
+from the initial root rather than assuming a `cd` in one tool call changes later
+calls.
+
+The tracker dispatcher, external workflow wrapper and agent-board plan schema
+must forward this input separately; they are not changed here.
+
 ## The pieces, and an agent job of your own
 
 `agentic-job.yml` is four pieces, and a caller can put them together

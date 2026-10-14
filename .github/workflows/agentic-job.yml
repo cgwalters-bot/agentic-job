@@ -108,6 +108,10 @@ on:
         description: The model, as the agent names it (empty for the agent's own default)
         type: string
         default: ""
+      context:
+        description: 'Public reference repositories on an allowed host: JSON array of {"repo":"OWNER/REPO","ref":"optional branch, tag or SHA"}, at most 8'
+        type: string
+        default: '[]'
       agent-config-repo:
         description: A public repository, OWNER/NAME, holding the agent's configuration
         type: string
@@ -341,6 +345,7 @@ jobs:
       agent: ${{ inputs.agent }}
       fake-profile: ${{ inputs.fake-profile }}
       model: ${{ inputs.model }}
+      context: ${{ inputs.context }}
       agent-config-repo: ${{ inputs.agent-config-repo }}
       agent-config-ref: ${{ inputs.agent-config-ref }}
       agent-config-path: ${{ inputs.agent-config-path }}

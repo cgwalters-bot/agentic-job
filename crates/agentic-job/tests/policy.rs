@@ -8,6 +8,56 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
+#[test]
+fn context_admission() {
+    let context = serde_json::json!({
+        "repo": "other/reference", "clone_url": "https://github.com/other/reference",
+        "commit": "a".repeat(40), "public": true,
+    });
+    let mut private = context.clone();
+    private["public"] = false.into();
+    let mut bad_host = context.clone();
+    bad_host["clone_url"] = "https://other.test/other/reference".into();
+    let mut bad_path = context.clone();
+    bad_path["repo"] = "owner/..".into();
+    let mut bad_commit = context.clone();
+    bad_commit["commit"] = "main".into();
+    let mut admitted_private = private.clone();
+    admitted_private["repo"] = REQUEST[0].1.into();
+    admitted_private["clone_url"] = REQUEST[1].1.into();
+    let mut uppercase = context.clone();
+    uppercase["repo"] = "OTHER/REFERENCE".into();
+    for (items, accepted) in [
+        (serde_json::json!([]), true),
+        (serde_json::json!([context]), true),
+        (serde_json::json!([context, context]), false),
+        (serde_json::json!(vec![context.clone(); 9]), false),
+        (serde_json::json!([private]), false),
+        (serde_json::json!([admitted_private]), true),
+        (serde_json::json!([context, uppercase]), false),
+        (serde_json::json!([bad_host]), false),
+        (serde_json::json!([bad_path]), false),
+        (serde_json::json!([bad_commit]), false),
+    ] {
+        let output = Command::new(BIN)
+            .arg("policy")
+            .arg("--allow")
+            .arg(data("allow.toml"))
+            .args(REQUEST.iter().flat_map(|(flag, value)| [*flag, *value]))
+            .arg("--context")
+            .arg(items.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.is_empty(), !accepted);
+    }
+}
+
 /// A request within the bounds of `data/policy/allow.toml`, as pairs of a
 /// flag and its value.
 const REQUEST: &[(&str, &str)] = &[

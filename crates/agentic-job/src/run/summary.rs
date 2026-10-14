@@ -39,6 +39,7 @@ pub const META_FIELDS: &[&str] = &["run_id", "run_attempt", "run_url", "item", "
 /// What `run` measured or was configured with.
 #[derive(Debug, Clone)]
 pub struct Measured {
+    pub context: Vec<Value>,
     /// The `--meta` file.
     pub meta: Value,
     pub repo: String,
@@ -235,6 +236,7 @@ pub fn summarize(inputs: &Inputs) -> Value {
         s.insert((*key).into(), measured.meta[*key].clone());
     }
     s.insert("repo".into(), json!(measured.repo));
+    s.insert("context".into(), json!(measured.context));
     s.insert("base".into(), json!(measured.base));
     s.insert("workflow".into(), json!(measured.workflow));
     s.insert("agent".into(), json!(measured.agent));
@@ -465,6 +467,22 @@ pub fn markdown(s: &Value) -> String {
             format!("The agent's logs in {} could not be read.", log_dir()),
         ]);
     }
+    if let Some(context) = s["context"].as_array().filter(|items| !items.is_empty()) {
+        out.extend([String::new(), "Reference context:".to_owned()]);
+        for item in context {
+            let state = match item["clean"].as_bool() {
+                Some(true) => "",
+                Some(false) => " (edited during the run)",
+                None => " (state unknown)",
+            };
+            out.push(format!(
+                "- {} at {}: {}{state}",
+                code(&item["repo"]),
+                code(&item["commit"]),
+                code(&item["path"])
+            ));
+        }
+    }
     if let Some(error) = s["patch"]["error"].as_str() {
         out.extend([
             String::new(),
@@ -586,6 +604,7 @@ mod tests {
 
     fn measured() -> Measured {
         Measured {
+            context: Vec::new(),
             meta: json!({
                 "run_id": 1, "run_attempt": 1, "run_url": "https://example.com/1",
                 "item": "PVTI_x", "cores": 4, "not_copied": "x",
@@ -777,6 +796,28 @@ Redacted 1 string(s).
         assert_eq!(s["turns"], Value::Null);
         assert_eq!(s["limits"], Value::Null);
         assert_eq!(s["handed_back"], false);
+    }
+
+    #[test]
+    fn context_pins_and_paths_reach_both_summaries() {
+        let mut measured = measured();
+        measured.context = vec![
+            json!({"repo": "owner/reference", "commit": "a".repeat(40), "path": "/home/agent/work/context/owner/reference", "clean": true}),
+            json!({"repo": "owner/edited", "commit": "b".repeat(40), "path": "/home/agent/work/context/owner/edited", "clean": false}),
+        ];
+        let s = summarize(&Inputs {
+            records: &initialize(),
+            result: None,
+            measured: &measured,
+            outcome: &json!({}),
+            usage: None,
+        });
+        assert_eq!(s["context"], json!(measured.context));
+        let md = markdown(&s);
+        assert!(md.contains("Reference context:"));
+        assert!(md.contains("`/home/agent/work/context/owner/reference`\n"));
+        assert!(md.contains("`/home/agent/work/context/owner/edited` (edited during the run)"));
+        assert!(md.contains(&format!("`{}`", "a".repeat(40))));
     }
 
     #[test]
