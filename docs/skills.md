@@ -8,7 +8,7 @@ in this repository, and every supported agent gets the same text.
 
 | Skill or subagent | Source | What it does |
 | --- | --- | --- |
-| `implement` | [`skills/implement/SKILL.md`](../skills/implement/SKILL.md) | Make the change, run the checks, then review it with `diff-reviewer` and fix its blockers, at most three passes |
+| `implement` | [`skills/implement/SKILL.md`](../skills/implement/SKILL.md) | Make the change, run the checks, then review the whole diff with `diff-reviewer`; only blockers trigger a second pass, on the fix delta |
 | `review` | [`workflow/review.md`](../workflow/review.md), the review caller's standing task, with a header | Review a pull request read-only and return one verdict comment |
 | `diff-reviewer` (subagent) | [`skills/agents/diff-reviewer.md`](../skills/agents/diff-reviewer.md) | Argue against an uncommitted change and tag each finding blocker, important or nit |
 
@@ -67,7 +67,9 @@ a locked install, or a maintainer's exemption, first.
 
 A skill is instructions, not a control. The run's bounds, `check` and
 the [review](review.md) are what stand between the agent and a merge;
-the self-review is the agent's diligence. A target repository's
+the self-review is the agent's diligence, capped at two passes and stopped
+on no blockers. Important findings and nits go in the description as
+follow-ups; the review job remains the merge gate. A target repository's
 `.claude/agents/diff-reviewer.md` would replace Claude Code's user
 subagent of that name (project subagents win there, user skills win over
 project ones), which can make a self-review weaker but cannot change

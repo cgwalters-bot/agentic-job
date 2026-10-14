@@ -1698,6 +1698,32 @@ provider = "llamacpp"
     }
 
     #[test]
+    fn implement_review_is_bounded_and_delta_only() {
+        let skill = IMPLEMENT_SKILL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for rule in [
+            "whole diff against the commit you started from",
+            "Save the reviewed state",
+            "Stop on no blockers",
+            "Only if the first pass found a blocker",
+            "only the delta since the first pass",
+            "at most two passes",
+            "report any remaining blockers",
+            "list important findings and nits as follow-ups",
+            "review job remains the merge gate",
+        ] {
+            assert!(skill.contains(rule), "missing review rule: {rule}");
+        }
+        let reviewer = DIFF_REVIEWER
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(reviewer.contains("Do not expand that delta to the whole diff"));
+    }
+
+    #[test]
     fn github_tokens() {
         let file = |content: Option<&str>| HomeFile {
             path: GITHUB_TOKEN_FILE,

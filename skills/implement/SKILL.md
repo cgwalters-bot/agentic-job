@@ -12,10 +12,13 @@ description: Make one change a task asks for, check it, and review it adversaria
 3. Run the narrowest test covering the change, then the checks the
    repository and the task permit. Fix what fails.
 4. Review the change: start the `diff-reviewer` subagent. Give it the
-   commit you started from and the repository, not your reasoning. Fix
-   every blocker, run the checks again and start a new review. Important
-   findings and nits may be fixed or listed in the description. Stop when
-   a pass finds no blocker or after three passes.
+   repository and the whole diff against the commit you started from,
+   new files included, not your reasoning. Save the reviewed state. Stop
+   on no blockers; list important findings and nits as follow-ups in the
+   description. Only if the first pass found a blocker, fix blockers and
+   run the checks again, then give the reviewer only the delta since the
+   first pass. Stop after at most two passes; report any remaining blockers.
+   The review job remains the merge gate.
 5. Hand back as the task's brief says. The description says briefly what
    changed and why, how it was verified, what was left undone, and, in one
    line, how many review passes ran and what the last left open.
