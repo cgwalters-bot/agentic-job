@@ -149,6 +149,10 @@ pub struct Options {
     pub agent: AgentSpec,
     /// The model (default: the agent's own).
     pub model: Option<String>,
+    /// Session config options set after the model, by id and value: an
+    /// agent may take one it does not list in `session/new`, as Vibe does
+    /// its `max_tokens`. One the agent refuses fails the session.
+    pub config_options: Vec<(String, String)>,
     /// The agent's working directory.
     pub cwd: PathBuf,
     /// The task.
@@ -263,6 +267,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         name,
         agent: spec,
         model,
+        config_options,
         cwd,
         prompt,
         out,
@@ -317,6 +322,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         cwd: &cwd,
         model: model.as_deref(),
         model_by_env: spec.model_env.is_some(),
+        config_options: &config_options,
         prompt: &prompt,
         notices: spec.notices,
     };
@@ -443,6 +449,7 @@ struct Task<'a> {
     model: Option<&'a str>,
     /// The model went into the agent's environment.
     model_by_env: bool,
+    config_options: &'a [(String, String)],
     prompt: &'a str,
     /// The agent takes a prompt sent during a turn (`AgentSpec::notices`).
     notices: bool,
@@ -1111,6 +1118,13 @@ async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, E
             .block_task()
             .await
             .map_err(|e| fail(&format!("selecting model {model}"), e))?;
+    }
+    for (id, value) in task.config_options {
+        let req = SetSessionConfigOptionRequest::new(sid.clone(), id.clone(), value.as_str());
+        cx.send_request(req)
+            .block_task()
+            .await
+            .map_err(|e| fail(&format!("setting {id} to {value}"), e))?;
     }
     Ok(sid)
 }

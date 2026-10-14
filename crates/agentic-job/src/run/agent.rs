@@ -270,6 +270,8 @@ pub struct Configuration {
     /// The model the session asks for, where the configuration decides
     /// its full name.
     pub model: Option<String>,
+    /// Session config options the session sets after the model, by id.
+    pub options: Vec<(&'static str, String)>,
 }
 
 /// What a configuration repository gave.
@@ -318,6 +320,23 @@ const VIBE_MODEL_KEYS: &[&str] = &[
 /// renames one of a former built-in's, so neither would be what the file
 /// says. The first is also the job's own, for the caller's model.
 const VIBE_RESERVED_ALIASES: &[&str] = &[VIBE_MODEL_ALIAS, "devstral-2"];
+/// The output cap per model request of a model that sets no
+/// `max_output_tokens`: what Claude Code and opencode ask for by default,
+/// or a quarter of the model's declared window if that is less, so that a
+/// server that refuses a prompt and reply over the window takes requests
+/// up to about compaction's threshold. Uncapped, one GLM response on the
+/// broker ran to 249,691 tokens, and the next was cut off at the broker's
+/// body limit (#559).
+const VIBE_OUTPUT_TOKENS: u64 = 32_000;
+/// The most a configuration repository's model may set. At roughly 200
+/// bytes of chat-completions stream a token, this keeps one response
+/// under the 16 MiB body limit of the broker's Mistral route (#559).
+const MAX_VIBE_OUTPUT_TOKENS: u64 = 65_536;
+/// The pinned Vibe's legacy ACP loop, which the launcher runs, does not
+/// send a model's `max_output_tokens` (only its unified harness does): it
+/// sends the session's `max_tokens`, which it takes as this undeclared
+/// session config option (`vibe/acp/agent.py`, `set_config_option`).
+const VIBE_MAX_TOKENS_OPTION: &str = "max_tokens";
 
 /// The definition of the caller's MODEL under [`VIBE_MODEL_ALIAS`].
 fn vibe_model(model: &str) -> Value {
@@ -403,6 +422,14 @@ fn vibe_source(text: &str) -> Result<(Vec<Value>, Option<String>)> {
             "the configuration repository's {SOURCE_VIBE_CONFIG}: the model {name:?} must use the \
              provider \"mistral\" or \"llamacpp\", which are the inference proxy's"
         );
+        if let Some(cap) = model.get("max_output_tokens") {
+            ensure!(
+                cap.as_u64()
+                    .is_some_and(|cap| (1..=MAX_VIBE_OUTPUT_TOKENS).contains(&cap)),
+                "the configuration repository's {SOURCE_VIBE_CONFIG}: the model {name:?} sets \
+                 max_output_tokens to {cap}, not a number from 1 to {MAX_VIBE_OUTPUT_TOKENS}"
+            );
+        }
     }
     let active = match file.remove("active_model") {
         None => None,
@@ -464,6 +491,21 @@ pub fn vibe(
             None => "agent.model is not set: vibe needs a Mistral model name".to_owned(),
         })?,
     };
+    // Every model gets a cap, a repository's own where it sets one, so the
+    // file says what the session asks of the legacy loop for the active one.
+    for model in &mut models {
+        let window = model.get("max_context_length").and_then(Value::as_u64);
+        let cap = window.map_or(VIBE_OUTPUT_TOKENS, |w| (w / 4).clamp(1, VIBE_OUTPUT_TOKENS));
+        if let Some(model) = model.as_object_mut() {
+            model.entry("max_output_tokens").or_insert(json!(cap));
+        }
+    }
+    let cap = models
+        .iter()
+        .find(|m| vibe_alias(m) == Some(&active))
+        .and_then(|m| m.get("max_output_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(VIBE_OUTPUT_TOKENS);
     let provider = |name: &str| {
         json!({
             "name": name, "api_base": format!("{}/mistral/v1", endpoint.url),
@@ -490,6 +532,7 @@ pub fn vibe(
         }],
         managed: None,
         model: Some(active),
+        options: vec![(VIBE_MAX_TOKENS_OPTION, cap.to_string())],
     })
 }
 
@@ -558,6 +601,7 @@ pub fn claude(endpoint: &Endpoint, token: &Token, source: &Source) -> Configurat
             pretty(&claude_managed_settings(endpoint)),
         )),
         model: None,
+        options: Vec::new(),
     }
 }
 
@@ -751,6 +795,7 @@ pub fn opencode(
         ],
         managed: None,
         model,
+        options: Vec::new(),
     })
 }
 
@@ -1337,6 +1382,12 @@ mod tests {
                 value["models"][0]["name"].as_str(),
                 Some("devstral-small-latest")
             );
+            // A quarter of the declared 32k window.
+            assert_eq!(
+                value["models"][0]["max_output_tokens"].as_integer(),
+                Some(8192)
+            );
+            assert_eq!(got.options, [("max_tokens", "8192".to_owned())]);
             assert_eq!(value["experiments"]["enable"].as_bool(), Some(false));
         }
         for model in [None, Some("")] {
@@ -1370,6 +1421,7 @@ name = "zai-glm-5-3"
 alias = "glm"
 provider = "mistral"
 max_context_length = 131072
+max_output_tokens = 16384
 [[models]]
 name = "devstral-small-latest"
 provider = "llamacpp"
@@ -1380,22 +1432,46 @@ provider = "llamacpp"
     /// wins over the file's choice.
     #[test]
     fn vibe_with_a_repository() {
+        // The active model's cap is the file's, the default, or the job's
+        // own model's.
         let cases = [
-            (None, "glm", 2),
-            (Some(""), "glm", 2),
-            (Some("glm"), "glm", 2),
-            (Some("zai-glm-5-3"), "glm", 2),
-            (Some("devstral-small-latest"), "devstral-small-latest", 2),
-            (Some("mistral-large-latest"), VIBE_MODEL_ALIAS, 3),
+            (None, "glm", 2, 16384),
+            (Some(""), "glm", 2, 16384),
+            (Some("glm"), "glm", 2, 16384),
+            (Some("zai-glm-5-3"), "glm", 2, 16384),
+            (
+                Some("devstral-small-latest"),
+                "devstral-small-latest",
+                2,
+                VIBE_OUTPUT_TOKENS,
+            ),
+            (Some("mistral-large-latest"), VIBE_MODEL_ALIAS, 3, 8192),
         ];
         // An alias is matched before a name, as Vibe selects by alias.
         let crossed = "[[models]]\nname = \"a\"\nalias = \"b\"\nprovider = \"mistral\"\n\
                        [[models]]\nname = \"b\"\nalias = \"c\"\nprovider = \"mistral\"\n";
         let got = vibe(&endpoint(Mode::Plain), &token(), Some("b"), Some(crossed)).unwrap();
         assert_eq!(got.model.as_deref(), Some("b"));
-        for (model, active, count) in cases {
+        // A model without a cap gets the default, or a quarter of the
+        // window it declares if that is less.
+        for (extra, cap) in [
+            ("", "32000"),
+            ("max_context_length = 262144", "32000"),
+            ("max_context_length = 16384", "4096"),
+            ("max_context_length = 3", "1"),
+            (
+                "max_context_length = 16384\nmax_output_tokens = 9000",
+                "9000",
+            ),
+        ] {
+            let text = format!("[[models]]\nname = \"m\"\nprovider = \"mistral\"\n{extra}");
+            let got = vibe(&endpoint(Mode::Plain), &token(), Some("m"), Some(&text)).unwrap();
+            assert_eq!(got.options, [("max_tokens", cap.to_owned())], "{extra}");
+        }
+        for (model, active, count, cap) in cases {
             let got = vibe(&endpoint(Mode::Plain), &token(), model, Some(VIBE_SOURCE)).unwrap();
             assert_eq!(got.model.as_deref(), Some(active), "{model:?}");
+            assert_eq!(got.options, [("max_tokens", cap.to_string())]);
             let value: toml::Value =
                 toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
             assert_eq!(value["active_model"].as_str(), Some(active));
@@ -1403,6 +1479,9 @@ provider = "llamacpp"
             let models = value["models"].as_array().unwrap();
             assert_eq!(models.len(), count, "{model:?}");
             assert_eq!(models[0]["max_context_length"].as_integer(), Some(131072));
+            // Each model in the file is capped, not just the active one.
+            assert_eq!(models[0]["max_output_tokens"].as_integer(), Some(16384));
+            assert_eq!(models[1]["max_output_tokens"].as_integer(), Some(32000));
             if count == 3 {
                 assert_eq!(models[2]["name"].as_str(), model);
             }
@@ -1452,6 +1531,26 @@ provider = "llamacpp"
                 None,
                 "provider",
             ),
+            (
+                "[[models]]\nname = \"m\"\nprovider = \"mistral\"\nmax_output_tokens = 0",
+                Some("m"),
+                "max_output_tokens to 0, not",
+            ),
+            (
+                "[[models]]\nname = \"m\"\nprovider = \"mistral\"\nmax_output_tokens = 65537",
+                Some("m"),
+                "max_output_tokens to 65537, not",
+            ),
+            (
+                "[[models]]\nname = \"m\"\nprovider = \"mistral\"\nmax_output_tokens = -1",
+                Some("m"),
+                "max_output_tokens to -1, not",
+            ),
+            (
+                "[[models]]\nname = \"m\"\nprovider = \"mistral\"\nmax_output_tokens = \"8192\"",
+                Some("m"),
+                "max_output_tokens to \"8192\", not",
+            ),
             ("active_model = 1", None, "must be a string"),
             ("active_model = \"x\"\n", None, "not the alias"),
             (&models(0), None, "no active_model"),
@@ -1482,6 +1581,11 @@ provider = "llamacpp"
             .map(|i| format!("[[models]]\nname = \"m{i}\"\nprovider = \"mistral\"\n"))
             .collect();
         assert!(vibe(&endpoint(Mode::Plain), &token(), Some("m0"), Some(&most)).is_ok());
+        let largest = format!(
+            "[[models]]\nname = \"m\"\nprovider = \"mistral\"\nmax_output_tokens = {MAX_VIBE_OUTPUT_TOKENS}"
+        );
+        let got = vibe(&endpoint(Mode::Plain), &token(), Some("m"), Some(&largest)).unwrap();
+        assert_eq!(got.options, [("max_tokens", "65536".to_owned())]);
     }
 
     /// The `name` and `description` of the frontmatter TEXT starts with,

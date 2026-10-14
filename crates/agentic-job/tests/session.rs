@@ -69,6 +69,8 @@ struct Setup<'a> {
     /// A client at a relay on loopback, played by this function on its
     /// end of the connection, and how long the session waits for it.
     client: Option<(Play, Duration)>,
+    /// Session config options set after the model.
+    config_options: &'a [(&'a str, &'a str)],
 }
 
 /// What a test's client does on its end of the relay.
@@ -257,6 +259,11 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         name: "fake".to_owned(),
         agent: session::agents::parse(&registry, "fake").unwrap(),
         model: None,
+        config_options: setup
+            .config_options
+            .iter()
+            .map(|(id, value)| ((*id).to_owned(), (*value).to_owned()))
+            .collect(),
         cwd: path("work"),
         prompt: "Do the fake task.\n".to_owned(),
         out: path("out"),
@@ -359,6 +366,7 @@ fn scripted_session() {
             timeout_s: 60,
             budget_aic: Some(100.0),
             permissions: Some(POLICY),
+            config_options: &[("max_tokens", "8192")],
             ..Setup::default()
         },
     );
@@ -404,6 +412,19 @@ fn scripted_session() {
         .find(|x| x["dir"] == "send" && x["msg"]["method"] == "initialize")
         .unwrap();
     assert_eq!(init["msg"]["params"]["clientInfo"]["name"], "agentic-job");
+    // A session option is set before the prompt, and is not the model.
+    let set = |x: &Value| x["dir"] == "send" && x["msg"]["method"] == "session/set_config_option";
+    let option = r.records.iter().position(set).unwrap();
+    assert_eq!(
+        r.records[option]["msg"]["params"],
+        json!({"sessionId": "fake-session", "configId": "max_tokens", "value": "8192"})
+    );
+    let prompt = r
+        .records
+        .iter()
+        .position(|x| x["dir"] == "send" && x["msg"]["method"] == "session/prompt")
+        .unwrap();
+    assert!(option < prompt);
     // What the summary is made of.
     let digest = r.digest();
     assert_eq!(digest.stop_reason.as_deref(), Some("end_turn"));
@@ -627,6 +648,7 @@ fn a_cap_nothing_counts_is_refused() {
         name: "fake".to_owned(),
         agent: session::agents::builtin("fake").unwrap(),
         model: None,
+        config_options: Vec::new(),
         cwd: dir.path().to_owned(),
         prompt: String::new(),
         out: dir.path().join("out"),
@@ -662,6 +684,7 @@ fn agent_failures() {
         script: &'static str,
         /// A program to run in place of the fake agent.
         agent: Option<&'static str>,
+        config_options: &'static [(&'static str, &'static str)],
         result: &'static str,
         message: &'static [&'static str],
     }
@@ -670,6 +693,7 @@ fn agent_failures() {
             name: "the agent ends its turn with something other than done",
             script: r#"[{"say": "No."}, {"stop": "refusal"}]"#,
             agent: None,
+            config_options: &[],
             result: "failure",
             message: &["the agent stopped: refusal"],
         },
@@ -677,6 +701,7 @@ fn agent_failures() {
             name: "the agent reports a cancel nobody asked for",
             script: r#"[{"stop": "cancelled"}]"#,
             agent: None,
+            config_options: &[],
             result: "cancelled",
             message: &["the agent stopped: cancelled"],
         },
@@ -684,6 +709,7 @@ fn agent_failures() {
             name: "the agent exits in the middle of its turn",
             script: r#"[{"say": "Going."}, {"exit": 7}, {"say": "Not reached."}]"#,
             agent: None,
+            config_options: &[],
             result: "failure",
             // Its status and what it last wrote to standard error.
             message: &["the agent exited", "exit status: 7", "as scripted"],
@@ -692,8 +718,17 @@ fn agent_failures() {
             name: "the agent cannot be started",
             script: "[]",
             agent: Some("/nonexistent/agent"),
+            config_options: &[],
             result: "failure",
             message: &["the agent could not be started", "/nonexistent/agent"],
+        },
+        Case {
+            name: "the agent refuses a session option",
+            script: r#"[{"say": "Not reached."}]"#,
+            agent: None,
+            config_options: &[("max_tokens", "8192"), ("nope", "1")],
+            result: "failure",
+            message: &["setting nope to 1 failed", "no such option"],
         },
     ];
     for c in cases {
@@ -704,6 +739,7 @@ fn agent_failures() {
                 files: &[("script.json", c.script)],
                 timeout_s: 60,
                 agent: c.agent.map(str::to_owned),
+                config_options: c.config_options,
                 ..Setup::default()
             },
         );
@@ -1288,6 +1324,7 @@ fn an_unreachable_relay_is_refused() {
         name: "fake".to_owned(),
         agent: session::agents::builtin("fake").unwrap(),
         model: None,
+        config_options: Vec::new(),
         cwd: dir.path().to_owned(),
         prompt: "Do the fake task.\n".to_owned(),
         out: dir.path().join("out"),

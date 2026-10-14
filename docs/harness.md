@@ -58,6 +58,20 @@ Mid-turn notices are not supported. That broker model uses text-only tools
 and a conservative 32k context window with compaction at 24k, rather than
 inheriting Medium 3.5's capabilities.
 
+Each model's reply is capped by its `max_output_tokens`, at most 65,536.
+A model without one gets 32,000, or a quarter of its declared window if
+that is less: 8,192 for the job's own model. Uncapped, one response ran
+past the broker's body limit. The legacy runtime ignores the model's
+`max_output_tokens`, so the session also sends the active model's cap as
+Vibe's undeclared `max_tokens` session config option, which that runtime
+sends with every model request. That runtime does not fail a reply cut
+off at the cap; how a model recovers from one has not been tested.
+Vibe 2.26.1 does not retry a model stream that ends without a finish
+reason, and retries a dropped connection only before the first chunk. Only
+its terminal interface retries those, and no setting enables that for ACP.
+Over ACP the failure is a generic internal error, which the session cannot
+tell from others to resend the turn. Such a run fails: a known limitation.
+
 A configuration repository (`agent-config-repo`, `agent-config-path`) may
 instead declare the models, in its `config.toml`. Only its `[[models]]`
 (at most 32) and `active_model`, the alias of one of them, are taken; each
@@ -82,7 +96,7 @@ connectors and update checks are disabled. Instructions are pointed out
 in the task rather than automatically loaded from the project.
 
 The credentialless hosted adapter test uses generated configuration and
-a loopback model to verify ACP model selection, a permission-requested
+a loopback model to verify ACP model selection, the output cap, a permission-requested
 file write, cancellation followed by hand-back, and hostile project config
 and import canaries. Run it with
 `AGENTIC_JOB_TEST_VIBE_PYTHON=/path/to/venv/bin/python3 cargo test --locked --test vibe -- --nocapture`

@@ -161,6 +161,8 @@ struct Prepared {
     cwd: PathBuf,
     /// The model the session asks the agent for.
     model: Option<String>,
+    /// The session config options it sets after the model.
+    options: Vec<(&'static str, String)>,
     prompt: String,
     /// The job's identity token for the relay, where it asks for one.
     relay_token: Option<String>,
@@ -549,6 +551,7 @@ impl Plan {
             ),
             checkout,
             model: configuration.model,
+            options: configuration.options,
             prompt,
             relay_token,
         })
@@ -598,6 +601,11 @@ impl Plan {
             name: self.kind.as_str().to_owned(),
             agent: spec,
             model: prepared.model,
+            config_options: prepared
+                .options
+                .into_iter()
+                .map(|(id, value)| (id.to_owned(), value))
+                .collect(),
             cwd: prepared.cwd,
             prompt: prepared.prompt,
             out: self.work.join(HARNESS_DIR),

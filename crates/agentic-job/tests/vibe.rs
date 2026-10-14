@@ -42,16 +42,18 @@ api_base = "https://evil.example/v1"
 name = "zai-glm-5-3"
 alias = "glm"
 provider = "mistral"
+max_output_tokens = 4096
 [[models]]
 name = "devstral-small-latest"
 provider = "llamacpp"
 "#;
-    for (model, active, name) in [
-        (None, "glm", "zai-glm-5-3"),
+    for (model, active, name, cap) in [
+        (None, "glm", "zai-glm-5-3", 4096),
         (
             Some("devstral-small-latest"),
             "devstral-small-latest",
             "devstral-small-latest",
+            32000,
         ),
     ] {
         let home = tempfile::tempdir().unwrap();
@@ -68,6 +70,7 @@ provider = "llamacpp"
         )
         .unwrap();
         assert_eq!(config.model.as_deref(), Some(active));
+        assert_eq!(config.options, [("max_tokens", cap.to_string())]);
         let path = home.path().join(config.files[0].path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, config.files[0].content.as_ref().unwrap()).unwrap();
@@ -82,6 +85,7 @@ from vibe.core.config.default_orchestrator import build_default_orchestrator
 config = asyncio.run(build_default_orchestrator()).config
 model = config.get_active_model()
 assert model.alias == "{active}" and model.name == "{name}", model
+assert model.max_output_tokens == {cap}, model
 assert not config.enable_telemetry
 # Vibe keeps its built-in model beside the file's; all are on the broker.
 assert set(config.models) == {{"glm", "devstral-small-latest", "mistral-medium-3.5"}}
@@ -158,6 +162,7 @@ assert model.name == model.display_name == "broker-model"
 assert model.provider == "mistral" and not model.supports_images
 assert model.max_context_length == 32768
 assert model.auto_compact_threshold == 24576
+assert model.max_output_tokens == 8192
 assert model.temperature == 0.2 and model.thinking_levels == ["off"]
 assert model.input_price == model.output_price == model.cached_input_price == 0
 assert {p.name for p in config.providers} == {"mistral", "llamacpp"}
@@ -222,6 +227,8 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
             reader.read_exact(&mut body).unwrap();
             let body: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["model"], "broker-model");
+            // The legacy loop sends the session's cap, not the model's.
+            assert_eq!(body["max_tokens"], 8192, "{body}");
             if handback && requests.len() == 1 {
                 // Cancel a live model request, then accept the harness's
                 // hand-back prompt through the same ACP session.
@@ -271,6 +278,11 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
             name: "vibe".into(),
             agent: spec,
             model: Some(VIBE_MODEL_ALIAS.into()),
+            config_options: config
+                .options
+                .iter()
+                .map(|(id, value)| ((*id).to_owned(), value.clone()))
+                .collect(),
             cwd: work.clone(),
             prompt: "Write the requested file and stop.".into(),
             out: out.clone(),

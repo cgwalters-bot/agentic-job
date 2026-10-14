@@ -77,6 +77,9 @@ const NAME: &str = "fake-agent";
 const SESSION: &str = "fake-session";
 const MODEL_OPTION: &str = "model";
 const DEFAULT_MODEL: &str = "fake";
+/// A session config option it takes without listing it, as Vibe takes
+/// its `max_tokens`; it refuses any other but the model.
+const UNLISTED_OPTION: &str = "max_tokens";
 /// How long a scripted request waits for the client's answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `fs` mode waits for each answer: an unanswered request hangs.
@@ -281,6 +284,7 @@ fn model_options(current: &str) -> Value {
 /// exiting after the prompt turn would race the client's cancel.
 fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
     let mut cwd = PathBuf::from(".");
+    let mut model = DEFAULT_MODEL.to_owned();
     let mut turns = 0;
     loop {
         let Some(msg) = conn.recv(None) else {
@@ -308,8 +312,17 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                 );
             }
             Some("session/set_config_option") => {
-                let value = msg["params"]["value"].as_str().unwrap_or(DEFAULT_MODEL);
-                conn.respond(&id, json!({"configOptions": model_options(value)}));
+                let value = msg["params"]["value"].as_str();
+                match (msg["params"]["configId"].as_str(), value) {
+                    (Some(MODEL_OPTION), Some(value)) => model = value.to_owned(),
+                    (Some(UNLISTED_OPTION), Some(_)) => {}
+                    _ => {
+                        conn.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602,
+                            "message": format!("{NAME} has no such option: {}", msg["params"])}}));
+                        continue;
+                    }
+                }
+                conn.respond(&id, json!({"configOptions": model_options(&model)}));
             }
             Some("session/prompt") => {
                 conn.cancelled = false;
