@@ -441,6 +441,9 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(jobs.submit, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
   assert.match(jobs.submit, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
   assert.match(jobs.submit, /AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}/);
+  // The footer's job link is the agent job's own ID, from Actions.
+  assert.match(jobs.submit, /AGENT_JOB: \$\{\{ needs.agent.outputs.job \}\}/);
+  assert.match(jobs.agent, /\n {6}job: \$\{\{ job.check_run_id \}\}\n/);
   assert.doesNotMatch(jobs.submit, /secrets|safe-outputs-artifact-id|pull_request\.head|needs\.policy\.outputs\.ref\b/);
   assert.match(jobs.status, /if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.agent.result != 'cancelled' \}\}/);
   assert.match(jobs.status, /runs-on: ubuntu-26.04/);

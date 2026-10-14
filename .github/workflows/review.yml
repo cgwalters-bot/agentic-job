@@ -145,6 +145,8 @@ jobs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      # This job's ID, for the review's footer to link (#592).
+      job: ${{ job.check_run_id }}
     steps:
       # The base commit the policy job decided, never the head.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -241,6 +243,7 @@ jobs:
           CHECK_RESULT: ${{ needs.check.result }}
           VERDICT: ${{ needs.check.outputs.verdict }}
           AGENT_EXIT: ${{ needs.agent.outputs.exit }}
+          AGENT_JOB: ${{ needs.agent.outputs.job }}
           REAL_REVIEWS: ${{ vars.AGENT_REAL_REVIEWS }}
         with:
           result-encoding: string
