@@ -14,11 +14,58 @@ when nothing is refused and 1 when something is, including a workflow
 file it cannot read or parse. It exits 2 when the exemptions file or the
 directory cannot be read (see [interface.md](interface.md)).
 
-This first slice is the command and its rules. Running it as a
-required check from the base branch, as the
-[ingress check](workflow-ingress.md) runs, and the guidance for
-callers come later. Until then it holds no file to anything unless a
-repository runs it itself.
+## Requiring the check
+
+The reusable `workflows-check.yml` prevents a proposal from replacing its
+checker or exempting itself. It checks out the caller's target base for
+policy, and builds a trusted checker selected by the repository variable
+`WORKFLOWS_CHECK_SOURCE` (`OWNER/REPO@` followed by a full 40-hex commit).
+Set this variable to a reviewed revision of the checker repository containing
+this workflow and its Justfile recipe. It is not a dispatch input. An absent
+or malformed value fails closed; repositories opt in by installing the caller.
+The pinned checker source is never taken from the proposal. Updating the pin
+is a maintainer operation, independent of proposed workflow changes.
+
+Install a caller like this, substituting the reviewed reusable workflow pin:
+
+```yaml
+name: workflow-shape
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+jobs:
+  workflows:
+    permissions:
+      contents: read
+    uses: OWNER/REPO/.github/workflows/workflows-check.yml@FULL_COMMIT
+```
+
+Do not add path filters: the required status must report even when no workflow
+changes. Require the resulting `workflows / check` status in the branch ruleset
+(confirm the exact displayed name on the first run), including for the merge
+queue. Retain the ingress check as well: shape checking does not replace its
+analysis. Ruleset configuration and the repository variable require maintainer
+setup outside a patch. This repository adopts the caller through
+`workflows-check-required.yml`. A relative reusable call resolves at the merge
+group commit, so the trusted PR check refuses changes to either gate file.
+Gate upgrades require a maintainer rollout with a ruleset bypass; do not
+bypass a failed PR check to enqueue an unreviewed gate change. Callers should
+use the names shown above so the same protection covers their caller file.
+The initial installation likewise requires maintainer review before enabling
+the required status. A separately managed ruleset-required workflow can further
+protect caller selection; repository workflows cannot police their own deletion
+on a queue run when required checks have been bypassed.
+
+Only Git blobs from the proposal are materialized in a temporary directory;
+no proposal build files, local actions or hooks execute. Exemptions come only
+from the target base commit. Fetch/build/check share a 15-minute job limit;
+workflow count, individual size and exemption size retain the CLI bounds.
+The reusable workflow is for these two events only, not `pull_request` or
+manual dispatch. Use `just workflows-check-test` to test this boundary locally.
 
 ## What each job must be
 

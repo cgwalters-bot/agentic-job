@@ -1,0 +1,43 @@
+# No workflow inputs: the checker source is repository-owned configuration.
+name: workflows-check
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted caller base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          persist-credentials: false
+          path: caller
+      - name: Select trusted checker
+        env:
+          SOURCE: ${{ vars.WORKFLOWS_CHECK_SOURCE }}
+        run: |
+          [[ "$SOURCE" =~ ^([A-Za-z0-9-]+/[A-Za-z0-9_][A-Za-z0-9._-]*)@([0-9a-f]{40})$ ]]
+          printf 'CHECKER_REPOSITORY=%s\nCHECKER_COMMIT=%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" >> "$GITHUB_ENV"
+      - name: Checkout configured checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.CHECKER_REPOSITORY }}
+          ref: ${{ env.CHECKER_COMMIT }}
+          persist-credentials: false
+          path: checker
+      - name: Install just
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just@1.58.0
+      - name: Check proposed workflow blobs
+        working-directory: checker
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: just workflows-check-proposal ../caller

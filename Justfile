@@ -3,6 +3,17 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
 
+# Build only the configured trusted checkout; fetch proposed objects as data.
+workflows-check-proposal repository:
+    [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ ]]
+    node workflow/workflows-fetch.mjs "$1"
+    cargo build --locked --bin agentic-job
+    node workflow/workflows-check.mjs "$1" "$PWD/target/debug/agentic-job"
+
+workflows-check-test:
+    cargo build --locked --bin agentic-job
+    node --test workflow/workflows-check.test.mjs
+
 # Refuses VERSION unless it may be released from this checkout (its tags
 # included); prints the previous version tag. See src/bin/release-check.rs.
 release-check version:

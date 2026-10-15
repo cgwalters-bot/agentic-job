@@ -8,6 +8,8 @@
 # where a caller names cgwalters-forge/agentic-job/...@COMMIT; or are the
 # reusable workflow's own jobs; or build, release and test the binaries.
 [exempt]
+"workflows-check.yml" = "Read-only trusted checker; proposed workflow blobs are data, never executed."
+"workflows-check-required.yml" = "Calls the base revision's local reusable workflow shape check."
 "agentic-job.yml" = "The reusable workflow itself: its agent job runs secure-host from the policy-selected source checkout, and policy, check and apply run no untrusted step."
 "apply.yml" = "Part of the reusable workflow: the apply job, the only one with a write token, runs no untrusted step."
 "check.yml" = "Part of the reusable workflow: reads the agent's outputs as data, with a read-only token."

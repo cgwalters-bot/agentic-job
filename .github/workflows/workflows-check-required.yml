@@ -1,0 +1,13 @@
+name: workflow-shape
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Only trusted checker code executes; proposed blobs are data.
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+jobs:
+  workflows:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflows-check.yml
