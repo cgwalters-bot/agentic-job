@@ -777,11 +777,63 @@ jobs:
       budget: '100'
       artifact-prefix: analysis-refused-
 
-  # Outputs that notify people, bounded to the one listed login: an
-  # assignment on the scratch issue, and a review request on the scratch
-  # pull request when one is open (people.sh). e2e-verify checks and undoes both.
-  e2e-people:
+  # A write-capable fixture job, never the agent's token. Each run owns its
+  # branch and PR; cleanup must not close another merge-group run's fixture.
+  # Like e2e-verify it checks nothing out: a merge group's proposed code
+  # must not run beside a token that can write refs.
+  e2e-scratch:
     needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # create only this run's scratch branch
+      pull-requests: write # create this run's scratch PR
+    outputs:
+      pr: ${{ steps.scratch.outputs.pr }}
+      branch: ${{ steps.scratch.outputs.branch }}
+      login: ${{ steps.scratch.outputs.login }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: e2e-scratch/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - id: scratch
+        name: Open this run's scratch pull request
+        run: |
+          set -o pipefail
+          root="repos/$GH_REPO"
+          base=$(gh api "$root" --jq .default_branch)
+          # The login is the default branch's people bounds, never caller
+          # input or a proposed file: both outputs allow the same one account.
+          allowed=$(gh api "$root/contents/.github/agentic-job/people.toml?ref=$base" --jq .content | base64 -d |
+            grep -oP 'allowed\s*=\s*\["\K[\w-]+(?="\])')
+          test "$(wc -l <<< "$allowed")" = 2
+          login=$(sort -u <<< "$allowed")
+          [[ $login =~ ^[A-Za-z0-9-]+$ ]]
+          # The agent reads its branch and login from this file on its base.
+          parent=$(gh api "$root/git/ref/heads/$base" --jq .object.sha)
+          tree=$(gh api "$root/git/commits/$parent" --jq .tree.sha)
+          fixture=$(jq -nc --arg repo "$GH_REPO" --arg branch "$BRANCH" --arg login "$login" '{$repo, $branch, $login}')
+          tree=$(jq -n --arg base "$tree" --arg content "$fixture" \
+            '{base_tree: $base, tree: [{path: "e2e-people.json", mode: "100644", type: "blob", content: $content}]}' |
+            gh api "$root/git/trees" --input - --jq .sha)
+          head=$(jq -n --arg message "CI scratch fixture $BRANCH" --arg tree "$tree" --arg parent "$parent" \
+            '{$message, $tree, parents: [$parent]}' | gh api "$root/git/commits" --input - --jq .sha)
+          gh api "$root/git/refs" -f "ref=refs/heads/$BRANCH" -f "sha=$head" > /dev/null
+          # Never sweep old scratch PRs: another merge-group run may still be
+          # using one. A ready PR, so that it can take a review request; if it
+          # cannot be opened, roll back only the branch just created.
+          if ! pr=$(gh api "$root/pulls" -f "title=CI scratch fixture $BRANCH" -f "head=$BRANCH" -f "base=$base" \
+            -f 'body=Run-owned fixture; closed by the run that opened it.' --jq .number); then
+            gh api -X DELETE "$root/git/refs/heads/$BRANCH"
+            exit 1
+          fi
+          printf 'pr=%s\nbranch=%s\nlogin=%s\n' "$pr" "$BRANCH" "$login" >> "$GITHUB_OUTPUT"
+
+  # Both people outputs target the run-owned PR, not the shared scratch issue.
+  e2e-people:
+    needs: [changes, e2e-scratch]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -794,8 +846,9 @@ jobs:
       id: e2e-people-${{ github.run_id }}
       build-binary: true
       repo: ${{ github.repository }}
+      base: ${{ needs.e2e-scratch.outputs.branch }}
       kind: analysis
-      task: Assign the listed user on the scratch issue and request their review on the scratch pull request.
+      task: Assign the listed user and request their review on this run's scratch pull request.
       outputs: add_reviewer,assign_to_user
       max-outputs: '2'
       notify: none
@@ -981,16 +1034,20 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
-    runs-on: ubuntu-24.04
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      issues: write # delete the comments, and unassign e2e-people's assignee
-      pull-requests: write # delete the comments and the reaction on the pull request this run is for, and e2e-people's review request
-      actions: read # when this run started, for e2e-people's events
+      contents: write # delete only this run's scratch branch
+      issues: write # delete this run's comments
+      pull-requests: write # delete this run's comments and close its scratch PR
+      actions: read # download this run's applied artifacts
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      PEOPLE_PR: ${{ needs.e2e-scratch.outputs.pr }}
+      PEOPLE_BRANCH: ${{ needs.e2e-scratch.outputs.branch }}
+      PEOPLE_LOGIN: ${{ needs.e2e-scratch.outputs.login }}
       ISSUE: "64"
       # What gh-aw's handlers end each comment of this run with.
       RUN: actions/runs/${{ github.run_id }}
@@ -1086,32 +1143,18 @@ jobs:
           for item in "$ISSUE" 65; do
             gh api --paginate "repos/$GH_REPO/issues/$item/comments" | jq -se --arg run "$RUN" 'any(.[][]; ((.body | contains($run)) and (.body | contains("This misdirected analysis must be refused.")))) | not'
           done
-      # Runs share the issue and login: another run's cleanup may already
-      # have undone this run's request, and GitHub records no new event for
-      # one already in place. So either counts.
-      - name: The listed user was assigned, and asked to review where a scratch pull request is open
+      - name: The listed user was assigned and asked to review this run's scratch pull request
         env:
           RESULT: ${{ needs.e2e-people.result }}
           PEOPLE: ${{ needs.e2e-people.outputs.applied-artifact-id }}
-          LOGIN: cgwalters-bot
-          TITLE: "Scratch pull request for CI's end-to-end runs"
         run: |
           test "$RESULT" = success
           test -n "$PEOPLE"
-          since=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)
-          made() {
-            gh api --paginate "repos/$GH_REPO/issues/$1/events" |
-              jq -se --arg event "$2" --arg key "$3" --arg login "$LOGIN" --arg since "$since" \
-                'any(.[][]; .event == $event and .[$key].login == $login and .actor.login == "github-actions[bot]" and .created_at >= $since)' ||
-              gh api "$4" --jq "$5" | jq -e --arg login "$LOGIN" 'index($login) != null'
-          }
-          made "$ISSUE" assigned assignee "repos/$GH_REPO/issues/$ISSUE" '[.assignees[].login]'
-          pr=$(gh api "repos/$GH_REPO/pulls?state=open&per_page=100" --jq '[.[] | select(.title == env.TITLE)][0].number // empty')
-          if [ -z "$pr" ]; then
-            echo "No open pull request titled \"$TITLE\": add_reviewer was not exercised." | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            made "$pr" review_requested requested_reviewer "repos/$GH_REPO/pulls/$pr/requested_reviewers" '[.users[].login]'
-          fi
+          [[ $PEOPLE_PR =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GH_REPO/pulls/$PEOPLE_PR" |
+            jq -e --arg repo "$GH_REPO" --arg branch "$PEOPLE_BRANCH" --arg login "$PEOPLE_LOGIN" \
+              '.head.ref == $branch and .head.repo.full_name == $repo and .state == "open" and
+               any(.assignees[]; .login == $login) and any(.requested_reviewers[]; .login == $login)'
       - name: The comments are on the scratch issue, and the run stopped at a limit says so
         env:
           NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"
@@ -1142,29 +1185,18 @@ jobs:
             gh api --paginate "repos/$GH_REPO/issues/$issue/comments" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$RUN\"))).id" |
               xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
           done
-      # The assignment and review request e2e-people made, so that the next
-      # run's check finds its own and not this one's.
-      - name: Undo the assignment and the review request
+      - name: Close only this run's scratch pull request and delete its branch
         if: ${{ always() }}
-        env:
-          LOGIN: cgwalters-bot
-          TITLE: "Scratch pull request for CI's end-to-end runs"
         run: |
-          gh api -X DELETE "repos/$GH_REPO/issues/$ISSUE/assignees" -f "assignees[]=$LOGIN" > /dev/null
-          pr=$(gh api "repos/$GH_REPO/pulls?state=open&per_page=100" --jq '[.[] | select(.title == env.TITLE)][0].number // empty')
-          if [ -n "$pr" ]; then
-            gh api -X DELETE "repos/$GH_REPO/pulls/$pr/requested_reviewers" -f "reviewers[]=$LOGIN" > /dev/null
-          fi
-      # The eyes reaction notify put on the pull request, so that the next
-      # run's check finds its own and not this one's.
-      - name: Remove the reaction
-        if: ${{ always() && github.event_name == 'pull_request' }}
-        env:
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -o pipefail
-          gh api "repos/$GH_REPO/issues/$PR/reactions" --jq '.[] | select(.content == "eyes" and .user.login == "github-actions[bot]").id' |
-            xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/$PR/reactions/{}"
+          # No number means e2e-scratch opened none: never look for a replacement.
+          test -n "$PEOPLE_PR" || exit 0
+          [[ $PEOPLE_PR =~ ^[1-9][0-9]*$ && $PEOPLE_BRANCH =~ ^e2e-scratch/$GITHUB_RUN_ID-[1-9][0-9]*$ ]]
+          gh api "repos/$GH_REPO/pulls/$PEOPLE_PR" |
+            jq -e --arg repo "$GH_REPO" --arg branch "$PEOPLE_BRANCH" '.head.ref == $branch and .head.repo.full_name == $repo' > /dev/null
+          gh api -X PATCH "repos/$GH_REPO/pulls/$PEOPLE_PR" -f state=closed > /dev/null
+          gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$PEOPLE_BRANCH"
+      # GitHub coalesces a bot's eyes reaction across runs. Leave it in place:
+      # removing it here could invalidate a concurrent run's assertion.
 
   # The ruleset requires ci, not standalone workflow results. Keep the
   # privileged enforcement proof in that dependency chain, including queues.
@@ -1253,7 +1285,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1272,7 +1304,7 @@ jobs:
           FORK_E2E: ${{ needs.changes.outputs.fork-e2e }}
         run: >-
           jq -e --arg full "$FULL" --arg host "$HOST" --arg e2e "$E2E" --arg review "$REVIEW" --arg fork_e2e "$FORK_E2E"
-          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (($full == "false" and .key != "changes") or ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
+          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (($full == "false" and .key != "changes") or ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
 
   # Only this sentinel is required in the ruleset. Always report a failure
   # if the aggregate did not succeed (a skipped required check can pass).

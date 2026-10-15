@@ -3,7 +3,8 @@
 # anyone else (docs/safe-outputs.md).
 hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
-bases = ["main"]
+# Read-only analysis of the run-owned fixture, with no patch/contents output.
+bases = ["e2e-scratch/*"]
 max_outputs = 2
 max_patch_bytes = 1048576
 max_patch_files = 1

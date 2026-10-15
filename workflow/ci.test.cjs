@@ -19,7 +19,7 @@ const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9
 const gates = {
   full: ['lint', 'rust', 'vibe', 'corpus', 'static'],
   host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'confined'],
-  e2e: ['proposals', 'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
+  e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 

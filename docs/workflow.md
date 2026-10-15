@@ -550,6 +550,18 @@ already-posted verdict still names its old SHA, and cancelling CI can leave
 scratch branches/comments if its cleanup does not finish. No cancellation is
 merge authorization or rollback.
 
+The people E2E creates a scratch PR on `e2e-scratch/<run-id>-<attempt>`.
+Both assignment and review request target that PR, and verification and cleanup
+use its returned number, checking its head repository and branch before acting.
+The fixture job alone creates branches/PRs; the scripted agent still has only a
+read token. That job and the verifier hold write tokens, so their fixture code is
+inline in `ci.yml` and they check out nothing from the proposed tree. The login comes from the repository's people bounds, not caller input.
+Cleanup never sweeps other scratch PRs. Shared issue comments are filtered by
+run URL; the analysis body assertion checks only the invariant text because
+concurrent analyses may replace the same island. The shared eyes reaction is
+not deleted: GitHub coalesces it across runs, so deleting it would race another
+run's assertion. Live concurrent merge-group execution remains a forge CI check.
+
 For a recent successful same-repository PR run,
 [37870929248](https://github.com/cgwalters-forge/agentic-job/actions/runs/37870929248),
 the sum of each caller's non-skipped job durations was:
