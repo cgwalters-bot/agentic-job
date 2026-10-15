@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from policy import Policy, WriteRule, glob_regex, normalize_host
+from policy import MAX_ALLOWED_DOMAINS, Policy, WriteRule, glob_regex, normalize_host
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -72,6 +72,49 @@ class PolicyTest(unittest.TestCase):
     def test_connect(self):
         self.assertTrue(self.policy.connect("github.com").allowed)
         self.assertFalse(self.policy.connect("x.evil.example").allowed)
+
+    def load_text(self, text):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml") as f:
+            f.write(text)
+            f.flush()
+            return Policy.load(f.name)
+
+    def test_allowlist(self):
+        policy = self.load_text('[egress]\nmode = "allowlist"\nallow = ["Example.COM."]\n')
+        policy.denylist = frozenset({"evil.example.com"})
+        policy.writes = self.policy.writes
+        for host, allowed in [
+            ("example.com", True), ("A.Example.COM.:443", True),
+            ("notexample.com", False), ("example.com.attacker.test", False),
+            ("other.test", False), ("evil.example.com", False),
+            ("sub.evil.example.com", False), ("192.0.2.1", False),
+            ("[2001:db8::1]:443", False), ("::1", False),
+        ]:
+            with self.subTest(host=host):
+                self.assertEqual(policy.connect(host).allowed, allowed)
+                for method in ("GET", "HEAD", "OPTIONS"):
+                    self.assertEqual(policy.request(method=method, host=host, path="/").allowed, allowed)
+        for extra in ({"host_header": "other.test"}, {"sni": "other.test"}, {"has_body": True}):
+            self.assertFalse(policy.request(method="GET", host="example.com", path="/", **extra).allowed)
+        self.assertFalse(policy.request(method="POST", host="api.github.com", path="/graphql").allowed)
+        policy.allowlist = frozenset({"api.github.com"})
+        self.assertTrue(policy.request(method="POST", host="api.github.com", path="/graphql").allowed)
+        self.assertFalse(policy.request(method="DELETE", host="api.github.com", path="/graphql").allowed)
+
+    def test_allowlist_config(self):
+        for text in ('', '[egress]\nmode = "reads-anywhere"'):
+            self.assertTrue(self.load_text(text).connect("other.test").allowed)
+        self.assertFalse(self.load_text('[egress]\nmode = "allowlist"').connect("example.com").allowed)
+        for value in ['"example.com"', '["*.example.com"]', '["https://example.com"]',
+                      '["example.com:443"]', '["192.0.2.1"]', '["::1"]', '[1]',
+                      '["localhost"]', '["-bad.example"]', '["a..example"]',
+                      repr(["a.example"] * (MAX_ALLOWED_DOMAINS + 1))]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.load_text('[egress]\nmode = "allowlist"\nallow = ' + value)
+        for text in ('[egress]\nmode = "typo"', '[egress]\nallow = []',
+                     '[egress]\nmode = "allowlist"\nextra = true', 'egress = []'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.load_text(text)
 
     def test_reasons(self):
         self.assertEqual(self.policy.request(method="GET", host="a.org", path="/").reason, "read")

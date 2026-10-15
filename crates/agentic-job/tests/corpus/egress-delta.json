@@ -35,6 +35,222 @@
         "            (\"PATCH\", \"api.github.com\", \"/repos/a/b/issues/1\", {}, False),",
         "            (\"PUT\", \"api.github.com\", \"/graphql\", {}, False),"
       ]
+    },
+    {
+      "old": [
+        "",
+        "from policy import Policy, WriteRule, glob_regex, normalize_host",
+        ""
+      ],
+      "new": [
+        "",
+        "from policy import MAX_ALLOWED_DOMAINS, Policy, WriteRule, glob_regex, normalize_host",
+        ""
+      ]
+    },
+    {
+      "old": [
+        "",
+        "    def test_reasons(self):"
+      ],
+      "new": [
+        "",
+        "    def load_text(self, text):",
+        "        with tempfile.NamedTemporaryFile(\"w\", suffix=\".toml\") as f:",
+        "            f.write(text)",
+        "            f.flush()",
+        "            return Policy.load(f.name)",
+        "",
+        "    def test_allowlist(self):",
+        "        policy = self.load_text('[egress]\\nmode = \"allowlist\"\\nallow = [\"Example.COM.\"]\\n')",
+        "        policy.denylist = frozenset({\"evil.example.com\"})",
+        "        policy.writes = self.policy.writes",
+        "        for host, allowed in [",
+        "            (\"example.com\", True), (\"A.Example.COM.:443\", True),",
+        "            (\"notexample.com\", False), (\"example.com.attacker.test\", False),",
+        "            (\"other.test\", False), (\"evil.example.com\", False),",
+        "            (\"sub.evil.example.com\", False), (\"192.0.2.1\", False),",
+        "            (\"[2001:db8::1]:443\", False), (\"::1\", False),",
+        "        ]:",
+        "            with self.subTest(host=host):",
+        "                self.assertEqual(policy.connect(host).allowed, allowed)",
+        "                for method in (\"GET\", \"HEAD\", \"OPTIONS\"):",
+        "                    self.assertEqual(policy.request(method=method, host=host, path=\"/\").allowed, allowed)",
+        "        for extra in ({\"host_header\": \"other.test\"}, {\"sni\": \"other.test\"}, {\"has_body\": True}):",
+        "            self.assertFalse(policy.request(method=\"GET\", host=\"example.com\", path=\"/\", **extra).allowed)",
+        "        self.assertFalse(policy.request(method=\"POST\", host=\"api.github.com\", path=\"/graphql\").allowed)",
+        "        policy.allowlist = frozenset({\"api.github.com\"})",
+        "        self.assertTrue(policy.request(method=\"POST\", host=\"api.github.com\", path=\"/graphql\").allowed)",
+        "        self.assertFalse(policy.request(method=\"DELETE\", host=\"api.github.com\", path=\"/graphql\").allowed)",
+        "",
+        "    def test_allowlist_config(self):",
+        "        for text in ('', '[egress]\\nmode = \"reads-anywhere\"'):",
+        "            self.assertTrue(self.load_text(text).connect(\"other.test\").allowed)",
+        "        self.assertFalse(self.load_text('[egress]\\nmode = \"allowlist\"').connect(\"example.com\").allowed)",
+        "        for value in ['\"example.com\"', '[\"*.example.com\"]', '[\"https://example.com\"]',",
+        "                      '[\"example.com:443\"]', '[\"192.0.2.1\"]', '[\"::1\"]', '[1]',",
+        "                      '[\"localhost\"]', '[\"-bad.example\"]', '[\"a..example\"]',",
+        "                      repr([\"a.example\"] * (MAX_ALLOWED_DOMAINS + 1))]:",
+        "            with self.subTest(value=value), self.assertRaises(ValueError):",
+        "                self.load_text('[egress]\\nmode = \"allowlist\"\\nallow = ' + value)",
+        "        for text in ('[egress]\\nmode = \"typo\"', '[egress]\\nallow = []',",
+        "                     '[egress]\\nmode = \"allowlist\"\\nextra = true', 'egress = []'):",
+        "            with self.subTest(text=text), self.assertRaises(ValueError):",
+        "                self.load_text(text)",
+        "",
+        "    def test_reasons(self):"
+      ]
+    }
+  ],
+  "policy.py": [
+    {
+      "old": [
+        "",
+        "Reads are open: GET, HEAD and OPTIONS without a body go to any host not on",
+        "the threat feed. Anything else (POST, PUT, PATCH, DELETE, a WebSocket, a",
+        "read with a body) is a write, allowed only to the endpoints in policy.toml."
+      ],
+      "new": [
+        "",
+        "Reads default to open: GET, HEAD and OPTIONS without a body go to any host not on",
+        "the threat feed. The optional [egress] allowlist gates all destinations.",
+        "Anything else (POST, PUT, PATCH, DELETE, a WebSocket, a",
+        "read with a body) is a write, allowed only to the endpoints in policy.toml."
+      ]
+    },
+    {
+      "old": [
+        "",
+        "import re"
+      ],
+      "new": [
+        "",
+        "import ipaddress",
+        "import re"
+      ]
+    },
+    {
+      "old": [
+        "WRITE_METHODS = frozenset({\"POST\", \"PUT\", \"PATCH\", \"DELETE\", WEBSOCKET})",
+        ""
+      ],
+      "new": [
+        "WRITE_METHODS = frozenset({\"POST\", \"PUT\", \"PATCH\", \"DELETE\", WEBSOCKET})",
+        "MAX_ALLOWED_DOMAINS = 256",
+        "",
+        "",
+        "def parse_allowlist(data: dict) -> frozenset | None:",
+        "    \"\"\"An explicit mode avoids silently ignoring a caller's intended restriction.\"\"\"",
+        "    if not isinstance(data, dict) or set(data) - {\"mode\", \"allow\"}:",
+        "        raise ValueError(\"[egress] accepts only mode and allow\")",
+        "    mode = data.get(\"mode\", \"reads-anywhere\")",
+        "    if mode not in (\"reads-anywhere\", \"allowlist\"):",
+        "        raise ValueError(\"[egress] mode must be reads-anywhere or allowlist\")",
+        "    if mode == \"reads-anywhere\":",
+        "        if \"allow\" in data:",
+        "            raise ValueError(\"[egress] allow requires mode = allowlist\")",
+        "        return None",
+        "    domains = data.get(\"allow\", [])",
+        "    if not isinstance(domains, list) or len(domains) > MAX_ALLOWED_DOMAINS:",
+        "        raise ValueError(f\"[egress] allow must be a list of at most {MAX_ALLOWED_DOMAINS} domains\")",
+        "    result = set()",
+        "    for domain in domains:",
+        "        if not isinstance(domain, str) or len(domain) > 253:",
+        "            raise ValueError(\"[egress] allow entries must be DNS domain names\")",
+        "        domain = domain.lower().rstrip(\".\")",
+        "        labels = domain.split(\".\")",
+        "        if len(labels) < 2 or any(not re.fullmatch(r\"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\", label)",
+        "                                  for label in labels):",
+        "            raise ValueError(\"[egress] allow entries must be DNS domain names, not URLs or wildcards\")",
+        "        try:",
+        "            ipaddress.ip_address(domain)",
+        "        except ValueError:",
+        "            pass",
+        "        else:",
+        "            raise ValueError(\"[egress] allow does not accept IP literals\")",
+        "        result.add(domain)",
+        "    return frozenset(result)",
+        ""
+      ]
+    },
+    {
+      "old": [
+        "class Policy:",
+        "    def __init__(self, writes=(), denylist=frozenset()):",
+        "        self.writes = tuple(writes)",
+        "        self.denylist = frozenset(denylist)",
+        ""
+      ],
+      "new": [
+        "class Policy:",
+        "    def __init__(self, writes=(), denylist=frozenset(), allowlist=None):",
+        "        self.writes = tuple(writes)",
+        "        self.denylist = frozenset(denylist)",
+        "        self.allowlist = allowlist",
+        ""
+      ]
+    },
+    {
+      "old": [
+        "            data = tomllib.load(f)",
+        "        unknown = set(data) - {\"write\"}",
+        "        if unknown:"
+      ],
+      "new": [
+        "            data = tomllib.load(f)",
+        "        unknown = set(data) - {\"write\", \"egress\"}",
+        "        if unknown:"
+      ]
+    },
+    {
+      "old": [
+        "        denylist = read_denylist(Path(denylist_file)) if denylist_file else frozenset()",
+        "        return cls(writes, denylist)",
+        ""
+      ],
+      "new": [
+        "        denylist = read_denylist(Path(denylist_file)) if denylist_file else frozenset()",
+        "        return cls(writes, denylist, parse_allowlist(data.get(\"egress\", {})))",
+        "",
+        "    def domain_allowed(self, host: str) -> bool:",
+        "        if self.allowlist is None:",
+        "            return True",
+        "        host = normalize_host(host)",
+        "        try:",
+        "            ipaddress.ip_address(host)",
+        "        except ValueError:",
+        "            pass",
+        "        else:",
+        "            return False",
+        "        # Label boundaries prevent notexample.com from matching example.com.",
+        "        # Apply to writes too: otherwise a write rule bypasses CONNECT's gate.",
+        "        return any(host == domain or host.endswith(\".\" + domain) for domain in self.allowlist)",
+        ""
+      ]
+    },
+    {
+      "old": [
+        "            return Decision(False, \"host is on the threat feed\")",
+        "        return Decision(True, \"tunnel\")"
+      ],
+      "new": [
+        "            return Decision(False, \"host is on the threat feed\")",
+        "        if not self.domain_allowed(host):",
+        "            return Decision(False, \"host is not in the domain allowlist\")",
+        "        return Decision(True, \"tunnel\")"
+      ]
+    },
+    {
+      "old": [
+        "            return Decision(False, \"host is on the threat feed\")",
+        "        if host_header and normalize_host(host_header) != host:"
+      ],
+      "new": [
+        "            return Decision(False, \"host is on the threat feed\")",
+        "        if not self.domain_allowed(host):",
+        "            return Decision(False, \"host is not in the domain allowlist\")",
+        "        if host_header and normalize_host(host_header) != host:"
+      ]
     }
   ]
 }

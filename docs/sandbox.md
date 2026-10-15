@@ -286,6 +286,42 @@ that is not HTTP. A refusal is a 403 with the reason in
 host, path and decision, never headers, bodies or query strings; `run`
 copies the part written during the run into the transcript.
 
+### Opt-in domain allowlist
+
+An attacker can leak data in a GET URL to their own server even without a
+request body. Write rules alone do not stop that threat. To restrict destinations,
+add this table to the proxy policy file selected by `egress.policy` in the host
+configuration (or the action's `egress-policy` input):
+
+```toml
+[egress]
+mode = "allowlist"
+allow = ["example.com", "packages.example.org"]
+```
+
+This is the **proxy policy file**, not the host configuration's `[egress]`
+table. Keep the `[[write]]` rules needed by the caller in that same file;
+selecting a file replaces, rather than extends, the shipped policy. Select it
+from trusted caller configuration, never dispatcher-controlled workflow inputs
+or agent-produced files.
+
+The gate applies to CONNECT and every HTTP request, including destinations of
+redirects and writes. A write still needs its write rule; the threat feed and
+Host/TLS-name checks still apply. Entries match the named domain and all its
+subdomains on label boundaries, ignoring case and a trailing dot. Use ASCII
+DNS names (punycode for international names), not URLs, ports, wildcards or IP
+literals. IP-literal destinations are refused in this mode. At most 256 entries
+of at most 253 characters are accepted; an empty list denies every destination.
+There are no implicit hosts or ecosystem bundles.
+
+Omitting the table, or setting `mode = "reads-anywhere"` without `allow`, keeps
+the public-only default unchanged. This is not private-repository enablement:
+allowed domains can still receive data in URLs, and allowing a shared hosting
+domain or attacker-controlled subdomain delegates that risk to its owner.
+Logs, runner exposure, direct endpoints and read-token routing need separate
+review before private data is admitted. Network address restrictions remain
+unchanged; this adds no access to private addresses.
+
 ## What is tested
 
 `sandbox check` probes all of this as the sandbox user, each probe with

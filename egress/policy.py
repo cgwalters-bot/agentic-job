@@ -1,7 +1,8 @@
 """The egress policy for runner-sandbox (scripts/egress-proxy.mjs).
 
-Reads are open: GET, HEAD and OPTIONS without a body go to any host not on
-the threat feed. Anything else (POST, PUT, PATCH, DELETE, a WebSocket, a
+Reads default to open: GET, HEAD and OPTIONS without a body go to any host not on
+the threat feed. The optional [egress] allowlist gates all destinations.
+Anything else (POST, PUT, PATCH, DELETE, a WebSocket, a
 read with a body) is a write, allowed only to the endpoints in policy.toml.
 The host is the one the connection really goes to; a Host header or TLS
 SNI naming another host (domain fronting) is refused. This module is plain
@@ -9,6 +10,7 @@ Python, so it is tested without mitmproxy (test_policy.py); addon.py
 applies it to the proxy's flows.
 """
 
+import ipaddress
 import re
 import tomllib
 from dataclasses import dataclass
@@ -19,6 +21,40 @@ READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # frames go both ways, so it is a write.
 WEBSOCKET = "WEBSOCKET"
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE", WEBSOCKET})
+MAX_ALLOWED_DOMAINS = 256
+
+
+def parse_allowlist(data: dict) -> frozenset | None:
+    """An explicit mode avoids silently ignoring a caller's intended restriction."""
+    if not isinstance(data, dict) or set(data) - {"mode", "allow"}:
+        raise ValueError("[egress] accepts only mode and allow")
+    mode = data.get("mode", "reads-anywhere")
+    if mode not in ("reads-anywhere", "allowlist"):
+        raise ValueError("[egress] mode must be reads-anywhere or allowlist")
+    if mode == "reads-anywhere":
+        if "allow" in data:
+            raise ValueError("[egress] allow requires mode = allowlist")
+        return None
+    domains = data.get("allow", [])
+    if not isinstance(domains, list) or len(domains) > MAX_ALLOWED_DOMAINS:
+        raise ValueError(f"[egress] allow must be a list of at most {MAX_ALLOWED_DOMAINS} domains")
+    result = set()
+    for domain in domains:
+        if not isinstance(domain, str) or len(domain) > 253:
+            raise ValueError("[egress] allow entries must be DNS domain names")
+        domain = domain.lower().rstrip(".")
+        labels = domain.split(".")
+        if len(labels) < 2 or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                  for label in labels):
+            raise ValueError("[egress] allow entries must be DNS domain names, not URLs or wildcards")
+        try:
+            ipaddress.ip_address(domain)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("[egress] allow does not accept IP literals")
+        result.add(domain)
+    return frozenset(result)
 
 
 @dataclass(frozen=True)
@@ -80,20 +116,35 @@ class WriteRule:
 
 
 class Policy:
-    def __init__(self, writes=(), denylist=frozenset()):
+    def __init__(self, writes=(), denylist=frozenset(), allowlist=None):
         self.writes = tuple(writes)
         self.denylist = frozenset(denylist)
+        self.allowlist = allowlist
 
     @classmethod
     def load(cls, policy_file: str, denylist_file: str = "") -> "Policy":
         with open(policy_file, "rb") as f:
             data = tomllib.load(f)
-        unknown = set(data) - {"write"}
+        unknown = set(data) - {"write", "egress"}
         if unknown:
             raise ValueError(f"{policy_file}: unknown tables {sorted(unknown)}")
         writes = [WriteRule.parse(e) for e in data.get("write", [])]
         denylist = read_denylist(Path(denylist_file)) if denylist_file else frozenset()
-        return cls(writes, denylist)
+        return cls(writes, denylist, parse_allowlist(data.get("egress", {})))
+
+    def domain_allowed(self, host: str) -> bool:
+        if self.allowlist is None:
+            return True
+        host = normalize_host(host)
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            return False
+        # Label boundaries prevent notexample.com from matching example.com.
+        # Apply to writes too: otherwise a write rule bypasses CONNECT's gate.
+        return any(host == domain or host.endswith("." + domain) for domain in self.allowlist)
 
     def denylisted(self, host: str) -> bool:
         """Whether HOST or a domain it is under is on the threat feed."""
@@ -105,6 +156,8 @@ class Policy:
         request by request."""
         if self.denylisted(host):
             return Decision(False, "host is on the threat feed")
+        if not self.domain_allowed(host):
+            return Decision(False, "host is not in the domain allowlist")
         return Decision(True, "tunnel")
 
     def request(self, *, method: str, host: str, path: str, host_header: str | None = None,
@@ -114,6 +167,8 @@ class Policy:
         method = WEBSOCKET if websocket else method.upper()
         if self.denylisted(host):
             return Decision(False, "host is on the threat feed")
+        if not self.domain_allowed(host):
+            return Decision(False, "host is not in the domain allowlist")
         if host_header and normalize_host(host_header) != host:
             return Decision(False, "the Host header names another host")
         if sni and normalize_host(sni) != host:

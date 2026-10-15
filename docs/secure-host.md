@@ -661,7 +661,7 @@ file says, and the file's own default where it says nothing.
 | `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables. Default: [the action's own](../secure-host/hosted.toml), for GitHub's hosted `ubuntu-26.04`. Another image listens on other sockets: `sandbox check` names each one left |
 | `lock` | `false` keeps the runner's sudo: the host is hardened for the sandbox user only, and every later step has root. Default `true` |
 | `egress` | `false` starts no proxy and leaves the sandbox user's network open but for the metadata service and the tailnet. Default `true` |
-| `egress-policy` | The proxy's write rules, a file, in place of [the binary's](../egress/policy.toml). An allowlist of hosts is not there yet ([agentic-job#116](https://github.com/cgwalters-forge/agentic-job/issues/116)) |
+| `egress-policy` | A proxy policy file replacing [the binary's](../egress/policy.toml): write rules and an optional [domain allowlist](sandbox.md#opt-in-domain-allowlist). Select from trusted caller configuration |
 | `stop-services` | systemd units to stop, in place of the file's list |
 | `sandbox-user` | The second user's name. Default `runner-sandbox` |
 | `runner-user` | The user the job's steps run as. Default: the one that runs the step |
