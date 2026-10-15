@@ -95,7 +95,7 @@ const IDENTITY_VARS: [(&str, bool); 4] = [
 /// `From:` or `Date:`, which `git am` takes over the first), a sign-off
 /// in the configured author's name, another sender, recipients, an
 /// attachment, a numbered or renamed subject, threading, a base.
-const FORMAT_PATCH: &[&str] = &[
+pub(crate) const FORMAT_PATCH: &[&str] = &[
     "format-patch",
     "--stdout",
     "--no-renames",
@@ -989,6 +989,25 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
             return Ok(change);
         }
         if let Some(content) = content {
+            // Shell command substitution removes final newlines. Repair only
+            // that transport loss; the unchanged strict checker still parses
+            // every mail and bounds the normalized JSON before accepting it.
+            let mut content = content;
+            if let Ok(mut series) =
+                serde_json::from_slice::<crate::check::replacement::Replacement>(&content)
+            {
+                let mut repaired = false;
+                for mail in &mut series.commits {
+                    if !mail.ends_with('\n') {
+                        mail.push('\n');
+                        repaired = true;
+                    }
+                }
+                if repaired {
+                    eprintln!("warning: restored missing final newline in replacement mail");
+                    content = serde_json::to_vec(&series)?;
+                }
+            }
             // Check refuses it again on another machine; this only names a
             // malformed series in the agent job, not after check.
             if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch
@@ -2056,15 +2075,18 @@ mod tests {
     /// What `$(git format-patch ...)` leaves: the mail without its final
     /// newline, which `git am` calls corrupt at apply.
     #[test]
-    fn a_replacement_mail_without_its_final_newline_is_refused_at_capture() {
+    fn a_replacement_mail_without_its_final_newline_is_normalized_at_capture() {
         let (home, policy, mail) = replacement_home();
         let series =
             json!({"base_commit": home.checkout.base_commit, "commits": [mail.trim_end()]});
         std::fs::write(home.path("out/replacement.json"), series.to_string()).unwrap();
         let change = home.collect(&policy, &config::Commit::default());
-        let why = change.dropped.unwrap();
-        assert!(why.contains("does not end with a newline"), "{why}");
-        assert!(!home.path("safe-outputs/replacement.json").exists());
+        assert!(change.dropped.is_none());
+        let captured: crate::check::replacement::Replacement = serde_json::from_slice(
+            &std::fs::read(home.path("safe-outputs/replacement.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(captured.commits[0], mail);
     }
 
     #[test]

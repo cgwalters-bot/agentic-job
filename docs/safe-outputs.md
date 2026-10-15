@@ -237,8 +237,18 @@ file forbids replacement. The ordinary one-commit push remains unchanged.
 The same head repository and branch checks apply; no write token
 is given to the producer or checker, and a partial run cannot replace history.
 
-The producer writes `out/replacement.json` under its home, alongside its
-`push_to_pull_request_branch` request. An external proposals artifact names
+The producer runs `agentic-job handback replace --base BASE_SHA [RANGE]`
+in its checkout, alongside its `push_to_pull_request_branch` request.
+The range defaults to `BASE_SHA..HEAD`. The command generates the mails
+itself, preserving final newlines, and tests the series with `git am` in
+an independent scratch repository before atomically writing
+`out/replacement.json` under its home. A failed validation leaves any
+existing handback untouched. Do not construct the mails or JSON by hand:
+shell command substitution strips final newlines and can corrupt a patch.
+Capture repairs missing final newlines with a warning; check still refuses
+unrepaired mails as a backstop. This helper grants no additional authority:
+the existing policy and independent check/apply limits remain unchanged.
+An external proposals artifact names
 the file `replacement.json`. Its strict JSON shape is:
 
 ```json

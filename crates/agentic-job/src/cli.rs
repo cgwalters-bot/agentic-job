@@ -19,6 +19,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Build and locally validate outputs before handing them back
+    #[command(subcommand)]
+    Handback(crate::handback::Command),
     /// Inspect downloaded run artifacts without executing or applying them
     Audit(audit::Args),
     /// Check one run's request against the caller's bounds and print policy.json
@@ -53,6 +56,7 @@ pub enum Command {
 impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
+            Self::Handback(command) => command.run(),
             Self::Audit(args) => audit::run(args),
             Self::Policy(args) => policy::run(args),
             Self::Sandbox(command) => command.run(),
