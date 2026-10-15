@@ -10,6 +10,13 @@ URL and a token for this run. The proxy checks the token, adds the real
 credential, forwards the request and counts what the run uses; when the
 run is ended its token admits nothing more.
 
+Today the only proxy that speaks this protocol is
+[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker),
+which its operator runs and which the agent's runner has to reach; how to
+run one is in its README. There is no mode that takes a provider API key
+([not built](#not-built)). The [README](../README.md#inference) sums up what
+a broker has to provide.
+
 `tests/inference.rs` exercises registration with a mock proxy. Real-agent
 deployment evidence is reported in the [README](../README.md#what-is-real-today).
 This page describes the client protocol, not the broker's current deployment.
@@ -38,7 +45,10 @@ is refused, and so is a key that belongs to another mode:
 The reusable workflow passes `github-oidc` unless its caller names
 another ([workflow.md](workflow.md#what-a-caller-provides)).
 
-The first two speak praxis-credential-broker's run API. `run` clones
+The first two speak praxis-credential-broker's run API; which jobs may
+register is the broker's
+[run-token policy](https://github.com/cgwalters-bot/praxis-credential-broker/blob/main/run-token-policy.yaml),
+whose default audience is `praxis-credential-broker`. `run` clones
 the target first and registers second, so a clone that fails leaves no
 registration behind. It expects 201 with a `token` and a `usage`
 record. A try that gets no answer, a 429 or a 5xx is repeated, four
@@ -141,7 +151,7 @@ callers must choose one explicitly.
 
 ## Not built
 
-A proxy the job starts itself, as a container beside it on loopback,
-for a repository that has only a provider API key. gh-aw works this
-way. Nothing here starts one; `token-file` is how a token made for such
+There is no API-key mode: a repository that has only a provider API key
+cannot run a real agent today. gh-aw serves that case with a proxy the
+job starts itself, as a container beside it on loopback. Nothing here starts one; `token-file` is how a token made for such
 a proxy would be given to `run`.

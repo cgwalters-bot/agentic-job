@@ -204,6 +204,129 @@ fn documented_proposals_request_fits_shipped_and_small_bounds() {
     }
 }
 
+/// The README's "Try it" caller and bounds, as the policy job would take
+/// them: its request fits its bounds, and its configuration, read from
+/// this source as `config` names it, composes with the scripted agent's
+/// inputs, while the default request cap is refused without a broker.
+#[test]
+fn readme_caller_fits_its_bounds_and_configuration() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    let section = readme
+        .split("## Try it\n")
+        .nth(1)
+        .unwrap()
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let block = |fence: &str| {
+        section
+            .split(fence)
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap()
+    };
+    let caller = block("```yaml\n");
+    let input = |name: &str| {
+        caller
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{name}: ")))
+            .unwrap_or_else(|| panic!("no input {name}"))
+            .trim_matches('"')
+    };
+    // The reusable workflow: an input's default, and the permissions its
+    // agent job asks for, which GitHub refuses the whole call without.
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/agentic-job.yml")).unwrap();
+    let default = |name: &str| {
+        workflow
+            .split(&format!("\n      {name}:\n"))
+            .nth(1)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("default: "))
+            .unwrap()
+            .trim_matches('"')
+            .to_owned()
+    };
+    let permissions = |text: &str| -> Vec<String> {
+        let mut found: Vec<String> = text
+            .split("permissions:\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .take_while(|line| line.trim().starts_with('#') || line.trim().contains(": "))
+            .filter(|line| !line.trim().starts_with('#'))
+            .map(|line| line.trim().to_owned())
+            .collect();
+        found.sort();
+        found
+    };
+    let agent_job = workflow.split("\n  agent:\n").nth(1).unwrap();
+    assert_eq!(permissions(caller), permissions(agent_job));
+    assert!(!input("apply-environment").is_empty());
+    let temp = tempfile::tempdir().unwrap();
+    let allow = temp.path().join("allow.toml");
+    std::fs::write(
+        &allow,
+        block("```toml\n").replace("OWNER/REPO", "bootc-dev/bootc"),
+    )
+    .unwrap();
+    // `max-outputs` and `base` are left at the workflow's defaults.
+    let output = policy(
+        &allow,
+        &[
+            ("--outputs", input("outputs")),
+            ("--base", &default("base")),
+            ("--max-outputs", &default("max-outputs")),
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = input("config")
+        .strip_prefix(".agentic-job-source/")
+        .expect("config is read from the pinned source");
+    let compose = |max_requests: &str| {
+        Command::new(BIN)
+            .arg("config")
+            .arg("--from")
+            .arg(root.join(config))
+            .args(["--repo", "bootc-dev/bootc"])
+            .args(["--string", &format!("agent.name={}", input("agent"))])
+            .args(["--integer", &format!("limits.max-requests={max_requests}")])
+            // The workflow's defaults for the inputs the caller leaves out;
+            // without `inference-url` it passes no registration.
+            .args([
+                "--integer",
+                &format!("limits.timeout-minutes={}", default("timeout")),
+            ])
+            .args([
+                "--integer",
+                &format!("limits.max-tasks={}", default("max-tasks")),
+            ])
+            .args(["--integer", &format!("limits.budget={}", default("budget"))])
+            .output()
+            .unwrap()
+    };
+    let output = compose(input("max-requests"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The workflow's default cap, as docs/workflow.md says: refused by the
+    // policy job, naming the configuration keys.
+    let output = compose(&default("max-requests"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("limits.max-requests"), "{stderr}");
+}
+
 #[test]
 fn a_request_outside_the_bounds_prints_no_policy() {
     // The change to the request, and a part of the reason.

@@ -38,24 +38,25 @@ include author validation and reporting failures without losing results.
 [Apply checks (#17)](https://github.com/cgwalters-forge/agentic-job/issues/17)
 need review against the base, file-list and rename checks already implemented.
 [Setup performance (#108)](https://github.com/cgwalters-forge/agentic-job/issues/108)
-still tracks feed-pin maintenance and source-attested releases; the host-wide
-walk is gone, replaced by the access-time world-write policy.
+still tracks feed-pin maintenance; source-attested releases exist, and the
+host-wide walk is gone, replaced by the access-time world-write policy.
 
-The agent reads GitHub with a read-only token
-([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)).
+Done from the gh-aw gaps: the agent reads GitHub with a read-only token
+([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), a label
+starts a run and is consumed
+([#117](https://github.com/cgwalters-forge/agentic-job/issues/117)), and the
+offline audit and cost summary exist
+([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)).
 The remaining gh-aw gaps have separate issues: more output
 types and bounds ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)),
 threat detection ([#114](https://github.com/cgwalters-forge/agentic-job/issues/114)),
 private repositories ([#115](https://github.com/cgwalters-forge/agentic-job/issues/115)),
 egress allowlists ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)),
-consumed label commands ([#117](https://github.com/cgwalters-forge/agentic-job/issues/117)),
 workflow-integrated run guards and organization bounds
 ([#118](https://github.com/cgwalters-forge/agentic-job/issues/118)), memory
 ([#119](https://github.com/cgwalters-forge/agentic-job/issues/119)), MCP integrations
 ([#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), staged mode and
-maintenance ([#121](https://github.com/cgwalters-forge/agentic-job/issues/121)),
-and remaining observability work
-([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)).
+maintenance ([#121](https://github.com/cgwalters-forge/agentic-job/issues/121)).
 Per-author or per-window limits on admitted runs need a fresh design under
 [#118](https://github.com/cgwalters-forge/agentic-job/issues/118): the unwired
 `cooldown`/`max-runs-per-user` history protocol was removed with the pull
@@ -63,7 +64,6 @@ request review ([#466](https://github.com/cgwalters-forge/agentic-job/issues/466
 Until then [review](review.md) starts automatic reviews only for the owner,
 members, collaborators and bots the repository lists by id, and the
 broker's shared cap bounds spending.
-The offline audit command is already implemented.
 
 [`workflows check`](workflows-check.md) exists as a command
 ([#508](https://github.com/cgwalters-forge/agentic-job/issues/508)); running

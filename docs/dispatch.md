@@ -176,7 +176,7 @@ changes what the broker has to admit
 with passwordless sudo initially and systemd 257+, Node and apt-get or dnf;
 see [runner requirements](workflow.md#what-a-caller-provides).
 
-Configure the broker to verify GitHub identity tokens with the chosen audience
+Configure the [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker) to verify GitHub identity tokens with the chosen audience
 and admit the caller repository. Confirm registration and per-run budgets
 before real tasks. No model API key goes on the runner. Narrowing broker
 admission to a specific caller remains optional hardening tracked in

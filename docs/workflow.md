@@ -361,8 +361,10 @@ Read this before relying on it.
   agent configuration and analysis runs (the [retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).
   Those inputs have since been removed; see
   [Migrating from the Tailscale inputs](#migrating-from-the-tailscale-inputs).
-  No real agent has yet run on hosted runners with the composed form's
-  caller-owned network join.
+  A caller-owned network join has run a real agent on hosted
+  `ubuntu-26.04` only in this repository's [`review.yml`](review.md#configuration),
+  which composes the pieces itself and joins this deployment's tailnet
+  (opencode, [run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)); no other caller has.
 - This repository's CI opens no pull request: apply opens one only from
   a fork, which takes a PAT that CI does not hold. `apply.test.cjs` runs
   the fork step, the handlers' configuration and the guard against a
@@ -394,8 +396,8 @@ Read this before relying on it.
   but its resolved value is not confirmed by the cited evidence).
 - Not yet verified: a `merge_group` run. No merge queue is configured
   yet, so CI has only run the pull request and push paths.
-- Not tried at all: a network join in the composed caller's own agent job,
-  and applying a `create_issue`:
+- Not tried at all: a network join in a composed caller other than
+  `review.yml`, and applying a `create_issue`:
   that type is checked through gh-aw's collector and `check` in CI
   (the `corpus` job), and its handler has not run from this workflow.
 
@@ -616,14 +618,19 @@ and the apply environment token described below, not the job token.
 ## A caller
 
 [`.github/workflows/example.yml`](../.github/workflows/example.yml) is a
-complete one, for the scripted agent, started by hand. Copy it and
-`.github/agentic-job/allow.toml` and `.github/agentic-job/hosted.toml` to
-the same paths. Replace `uses: ./.github/workflows/agentic-job.yml` with
+complete one, for the scripted agent, started by hand; the
+[README](../README.md#try-it) has the same caller written for another
+repository. Copy it and `.github/agentic-job/allow.toml` to the same paths.
+Either copy `.github/agentic-job/hosted.toml` too, or set `config` to
+`.agentic-job-source/.github/agentic-job/hosted.toml`, which the workflow
+reads from its own source at the pinned commit, so the pin covers the
+hardening and there is no copy to keep. Replace `uses: ./.github/workflows/agentic-job.yml` with
 `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
 using a reviewed commit. Replace the example's `repo` default and the
 bounds file's `repos` with your public repository; the allowed base is
 `main`. Keep the permissions. Commit to your default branch, enable
-Actions and permit the referenced actions/workflow and branch writes.
+Actions and permit the referenced actions and workflow. No branch of your
+repository is written: the pull request comes from a fork.
 The example applies with the `SAFE_OUTPUTS_PAT` of an `agent-apply`
 environment: it asks for a pull request, which apply opens only from a
 fork owned by the account whose token that is
@@ -666,7 +673,12 @@ is built from that same commit, so the pin covers both. Never pass
 ### Real agent checklist
 
 Before replacing `agent: fake`, ask the inference and network operator for
-the following. Hosted Ubuntu alone cannot reach a private proxy.
+the following. The proxy is a
+[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker);
+nothing else speaks the run API that the default `github-oidc` and
+`plain` registrations use, and there is no API-key mode
+([what it must provide](../README.md#inference)). Hosted Ubuntu alone
+cannot reach a private proxy.
 
 - **Proxy URL and audience:** set repository variables `INFERENCE_URL` and
   `INFERENCE_AUDIENCE`, and pass them as `inference-url` and
@@ -767,6 +779,14 @@ and the packages are written over this file by `agentic-job config`,
 which takes each as the value of one key and never reads it as TOML.
 It also adds the file's `[setup.repo-packages]` list for the target
 repository ([a target's toolchain](dispatch.md#giving-runs-a-toolchain)).
+There is no workflow input for the egress proxy's write rules: `[egress]
+policy` in this file names a file that replaces
+[the binary's](../egress/policy.toml). `sandbox setup` reads that path on
+the agent machine, as root, from the job's workspace, which is the calling
+repository checked out at the policy job's commit; give a path in that
+repository, relative to its root. Without a rule there, any request but
+`GET`, `HEAD` or `OPTIONS` from the sandbox user (a test suite that posts,
+a publish, a login) gets `403 refused by the egress proxy`.
 
 **Runners.** `agent-runner` is the machine the agent works on: thrown
 away after the job, with passwordless sudo for the runner's user,
@@ -798,7 +818,9 @@ fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 
 **Limits that fit the agent.** The workflow's defaults are for a real
 agent behind a proxy. A cap on model requests that nothing counts is
-refused by `run`, after the machine is set up: a run without an
+refused by the policy job's `agentic-job config`, before an agent machine
+starts; the message names the configuration keys `limits.max-requests` and
+`limits.uncapped`, which the input `max-requests` sets. A run without an
 inference proxy, the scripted agent's for one, passes `max-requests:
 "0"` and keeps `budget`.
 
@@ -810,7 +832,7 @@ identity token, for the audience `inference-audience`, which the agent's
 user cannot obtain. `plain` sends the run's name and no proof, and
 `token-file` reads a token from `inference-token-file` on the runner;
 both have to be chosen by name. The proxy speaks
-praxis-credential-broker's run API. A proxy on a private network is
+[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)'s run API. A proxy on a private network is
 reached by joining it in a step of your own agent job. When the inference URL is an HTTP(S) IPv4 literal in
 100.64.0.0/10, `agentic-job config` defaults `[egress] direct` to that URL
 so that the run token never crosses the egress proxy. An explicit `direct`

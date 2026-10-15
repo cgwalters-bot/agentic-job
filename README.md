@@ -46,22 +46,32 @@ root-owned helper stays, for what the sandbox itself needs.
 [docs/sandbox-check.md](docs/sandbox-check.md) lists what is probed and
 what is not.
 
-**An agent run with no credentials in reach.** The reusable workflow
-runs Claude Code or opencode in that sandbox on a task you give it. The
-agent has no forge token and no model key. It reaches the model through
-a proxy on another machine, which holds the key; when a run registers
-with the CI system's identity token, the proxy also caps what that run
-can spend ([docs/inference.md](docs/inference.md) covers the weaker
-modes). The agent cannot push, comment or open anything. It leaves a
-file of requests ("open a pull request with this patch", "comment on
-this issue"), which a second job checks on a clean machine and a third
-applies. The jobs that hold a write token, which are apply and, for runs
-started by an event, the ones that post the run's status, run nothing
-the agent wrote.
+**An agent run with no write credential in reach.** The reusable
+workflow runs Claude Code, opencode or Vibe in that sandbox on a task
+you give it. The agent holds no model key and no token that can write
+to the forge. It reaches the model through a credential broker on
+another machine, which holds the key and caps what the run can spend
+([inference, below](#inference)). The agent cannot push, comment or
+open anything. It leaves a file of requests ("open a pull request with
+this patch", "comment on this issue"), which a second job checks on a
+clean machine and a third applies. The jobs that hold a write token,
+which are apply and, for runs started by an event, the ones that post
+the run's status, run nothing the agent wrote.
 
-Apply's optional `SAFE_OUTPUTS_PAT` is gh-aw's `safe-outputs.github-token`
-for [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
-see [token setup and limits](docs/workflow.md#the-apply-job-and-its-token).
+### Which tokens reach what
+
+| Where | What it holds |
+| --- | --- |
+| The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the broker's run token for this one run. Not the identity-token request credential, not a model key, not `SAFE_OUTPUTS_PAT` |
+| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| `policy`, `check` | the job token with `contents: read`; no secret |
+| `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
+| `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
+
+`SAFE_OUTPUTS_PAT` is gh-aw's `safe-outputs.github-token` for
+[cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs).
+A pull request needs it: apply opens one from a fork of the account
+the token belongs to.
 
 ```yaml
 jobs:
@@ -78,10 +88,16 @@ jobs:
 ```
 
 That is the shape, not the whole call: a caller also grants the job its
-permissions, and a real agent needs an inference proxy the runner can
-reach. [docs/workflow.md](docs/workflow.md) has the whole call.
-`COMMIT` may also be a released version's tag, such as `v0.1.0`, which
+permissions, and a real agent needs an inference broker the runner can
+reach. [Try it](#try-it) has a whole caller.
+`COMMIT` may also be a released version's tag, such as `v0.3.0`, which
 Dependabot can then upgrade: see [versions to pin](docs/workflow.md#things-a-caller-should-know).
+The docs describe main: a tag lacks what was merged after it (after
+`v0.3.0`: `item-repo`, pull requests from a branch of a repository the
+applying account owns, and failing a run that ends without its required
+output). The [releases page](https://github.com/cgwalters-forge/agentic-job/releases)
+also lists a `build-DIGEST` release per source; those carry prebuilt
+binaries for commit pins and are not versions.
 
 The workflow is four pieces, and a caller whose agent job needs steps of
 its own, such as joining the inference proxy's network, calls three of
@@ -93,48 +109,195 @@ a pull request, a schedule. The workflow decides who may trigger it
 before anything untrusted runs, and hands the agent the event's text
 fenced off as data. See [docs/events.md](docs/events.md).
 
+## Sandbox execution and runner deprivileging
+
+`secure-host` does two separate things, and they protect different steps.
+
+- **Runner deprivileging** applies to every step after `secure-host`
+  (unless its `lock` input is `false`): the
+  runner's user loses `sudo`, polkit and the root-equivalent daemons
+  (Docker first), so no later step, action or post step can become root
+  and undo the setup. It does **not** take the job's tokens or network
+  away from those steps: they still run as the user that holds them, and
+  reach every host but, with `deny-runner-metadata`, the cloud metadata
+  service ([secure-host.md](docs/secure-host.md#what-a-later-step-can-count-on-and-what-it-cannot)).
+- **Sandbox execution** applies only to what runs through
+  `agentic-job sandbox exec`, as the agent does: a second user with no
+  file, variable or token of the job's, whose HTTP and HTTPS go through
+  the egress proxy.
+
+What each part guarantees today, and what it does not:
+
+| Part | Guarantees | Does not |
+| --- | --- | --- |
+| [World-write policy](docs/secure-host.md#access-time-world-write-policy) (BPF, loaded with bpftool, always on) | no user, root included, changes a world-writable file or non-sticky world-writable directory on the root filesystem that it does not own; probed after setup | cover other filesystems, or a writable mapping made before it loaded. A refused write is a plain `EACCES` that names nothing, also for rootless Podman creating in such a directory of its storage |
+| [Egress proxy](docs/sandbox.md#network) (the sandbox user only) | the sandbox user's HTTP(S) leaves only through it, but for the broker's tailnet address in `egress.direct`; reads of hosts on its threat feed are refused; a request other than `GET`, `HEAD` or `OPTIONS` passes only where [`egress/policy.toml`](egress/policy.toml) has a rule, else `403 refused by the egress proxy` | limit reads: any other host may be read, so data can leave in a URL; stop DNS lookups through the hosted runner's resolver; filter the runner's user |
+| [`secure-host`](docs/secure-host.md) | the deprivileging above, the sandbox user, the network rules, and a final [probe](docs/sandbox-check.md) that fails the job when one does not hold | protect from steps before it, which have root; separate later steps from the job's tokens; act as a container or VM boundary: a kernel flaw or local IPC that answers any user crosses it |
+
+**Supported hosts:** Ubuntu 26.04 and RHEL 10 (with its minor
+releases), as `/etc/os-release`'s `ID` and `VERSION_ID` say. On any other
+host, derivatives such as Fedora or CentOS Stream included, the action's
+first step fails with `secure-host: requires Ubuntu 26.04 or RHEL 10;
+cannot establish a supported host from /etc/os-release`, before it
+changes anything. The machine must be thrown away after the job:
+`sandbox setup` refuses one it has set up before. CI proves the policy
+and probes on hosted Ubuntu 26.04; on RHEL 10 the world-write policy's
+runtime is unverified.
+
+## Inference
+
+A real agent needs, today, a
+[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)
+that the agent's runner can reach. There is no mode yet that takes a
+provider API key. The scripted agent (`agent: fake`) needs no broker.
+(`inference-register: token-file` hands `run` a token for some other
+proxy, but nothing then counts or ends the run, and nothing here makes
+such a token.)
+
+What the broker has to provide ([docs/inference.md](docs/inference.md)):
+
+- its root URL, given as `inference-url`, serving the Anthropic API at
+  `/anthropic` (Claude Code), the OpenAI Responses API at `/v1`
+  (opencode) and Mistral at `/mistral/v1` (Vibe);
+- the run API: `POST /v1/runs` with the job's GitHub identity token for
+  the audience `inference-audience` (the broker's default is
+  `praxis-credential-broker`) answering 201 with a run token, then
+  `GET` and `DELETE /v1/runs/self`;
+- an admission entry in its
+  [run-token policy](https://github.com/cgwalters-bot/praxis-credential-broker/blob/main/run-token-policy.yaml):
+  `called_workflows` naming `agentic-job.yml` at the commit the caller
+  pins and the calling repository's numeric id, or, for an agent job of
+  the caller's own, `any_workflow` for that repository
+  ([which workflows a broker admits](docs/inference.md#which-workflows-a-broker-admits)).
+
+The sandbox user reaches the broker directly only at an IPv4 address in
+100.64.0.0/10, that is on a tailnet. A host name, or a public `https://`
+broker, goes through the egress proxy, whose write rules refuse the
+agent's requests to it with a 403. The runner joins that network in a
+privileged step before `secure-host`; GitHub's hosted runners cannot
+reach a private broker without one.
+
 ## Try it
 
-[`example.yml`](.github/workflows/example.yml) is a complete caller with
-a scripted agent, so it needs no model. The scripted agent tries the
-things it must not be able to do and changes one file, and the change
-comes back as a draft pull request from a fork owned by the bot account
-whose PAT an `agent-apply` environment holds: apply never pushes a new
-pull request's branch to the repository itself, unless that account owns
-it and the repository [accepts that](docs/workflow.md#a-repository-the-applying-account-owns).
-The scripted agent ignores the task text. The [dispatch trial](docs/dispatch.md)
-includes editable sessions for patches, comments and reviews without a model.
+This caller runs the scripted agent, which needs no model and no broker.
+It ignores the task, tries the things it must not be able to do, changes
+one file, and the change comes back as a draft pull request from a fork
+owned by the bot account below. [`example.yml`](.github/workflows/example.yml)
+is the same caller as this repository runs it. The
+[dispatch trial](docs/dispatch.md) adds editable sessions for patches,
+comments and reviews, still without a model.
 
-To run it in a public repository of your own, copy three files to the
-same paths: `.github/workflows/example.yml`,
-[`.github/agentic-job/allow.toml`](.github/agentic-job/allow.toml) and
-[`.github/agentic-job/hosted.toml`](.github/agentic-job/hosted.toml).
-Then make three edits:
+`.github/workflows/agent.yml`, in a public repository of your own:
 
-- in `example.yml`, change `uses: ./.github/workflows/agentic-job.yml`
-  to `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
-  with a commit you have read;
-- in `example.yml`, set the default of the `repo` input to your
-  repository;
-- in `allow.toml`, set `repos` to your repository.
+```yaml
+name: agent
+on:
+  workflow_dispatch:
+    inputs:
+      task: { type: string, required: true }
+permissions: {}
+concurrency:
+  group: agent-${{ github.workflow }}
+jobs:
+  run:
+    # A full commit you have read, or a version tag (see above).
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+    with:
+      id: ${{ github.run_id }}
+      task: ${{ inputs.task }}
+      repo: ${{ github.repository }}
+      outputs: create_pull_request,noop
+      allow: .github/agentic-job/allow.toml
+      # The hardening for hosted ubuntu-26.04, read from agentic-job at
+      # COMMIT: no copy to keep, and the pin covers it.
+      config: .agentic-job-source/.github/agentic-job/hosted.toml
+      apply-environment: agent-apply
+      agent: fake
+      # Nothing counts model requests without a broker, and a cap that
+      # nothing counts is refused.
+      max-requests: "0"
+```
 
-Create an `agent-apply` environment limited to your default branch, and
-store in it as `SAFE_OUTPUTS_PAT` a classic PAT with `repo` and `workflow`
-scopes of a dedicated bot
-account that does not own the repository and has write access to nothing
-else ([pull requests come from a fork](docs/workflow.md#pull-requests-come-from-a-fork)).
+`.github/agentic-job/allow.toml`, with your repository in `repos` and
+your default branch in `bases`:
 
-Recent main commits normally have a prebuilt binary, published automatically
-from their source without a pin PR. If you start before that build finishes,
-the run prints a notice and builds locally (about two minutes). Downloads
-are verified against a source-matching attested manifest; see
-[where the binary comes from](docs/workflow.md#things-a-caller-should-know).
+```toml
+hosts = ["github.com"]
+repos = ["OWNER/REPO"]
+bases = ["main"]
+max_outputs = 3
+max_patch_bytes = 1048576
+max_patch_files = 50
 
-Commit them to your default branch and start it:
+[outputs]
+create_pull_request = { max = 1 }
+noop = { max = 1 }
+missing_tool = { max = 1 }
+```
+
+What else it needs, all generic:
+
+- **Accounts.** Yours, owning the repository, and a dedicated bot account
+  that does not own it, belongs to no organization and has write access
+  to nothing but its own forks.
+- **Secret.** `SAFE_OUTPUTS_PAT`: a classic PAT of the bot account with
+  the `repo` and `workflow` scopes, stored in an environment named
+  `agent-apply` that is limited to your default branch
+  ([pull requests come from a fork](docs/workflow.md#pull-requests-come-from-a-fork)).
+  Your own PAT is refused in apply, after the agent has run, since its
+  account owns the repository and has no fork of it (unless the repository
+  [accepts that](docs/workflow.md#a-repository-the-applying-account-owns)); an empty secret
+  fails there too.
+- **Settings.** Actions enabled, and, if the repository restricts which
+  actions run, `cgwalters-forge/agentic-job` and the actions it pins
+  allowed. The pull request comes from a fork, so its CI runs as an outside
+  contributor's would, waiting for approval where the repository asks
+  for it.
+
+Commit both files to your default branch and start it:
 
 ```sh
-gh workflow run example.yml -f task='say hello'
+gh workflow run agent.yml -f task='say hello'
 ```
+
+Recent main commits normally have a prebuilt binary, published automatically
+from their source. If you start before that build finishes, the run prints
+a notice and builds locally (about two minutes). Downloads are verified
+against a source-matching attested manifest; see
+[where the binary comes from](docs/workflow.md#things-a-caller-should-know).
+
+**A real agent** replaces `agent: fake` with `claude`, `opencode` or
+`vibe`, drops `max-requests: "0"` (the default caps at 150 requests), and
+adds:
+
+```yaml
+      inference-url: ${{ vars.INFERENCE_URL }}
+      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      agent-runner: ${{ vars.AGENT_RUNNER }}
+```
+
+with three repository variables: `INFERENCE_URL` and
+`INFERENCE_AUDIENCE` from the broker's operator ([inference](#inference)),
+and `AGENT_RUNNER`, a runner label as JSON. The broker's admission entry
+and the network route to it are the deployment's, not agentic-job's. In
+this project's own deployment the broker is on a tailnet, and the route is
+either a disposable self-hosted runner on it or a hosted `ubuntu-26.04`
+job that joins it with `cgwalters-forge/actions/tailscale` before
+`secure-host`, in the [composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)
+([`review.yml` does this](docs/review.md#configuration)). Another
+deployment brings its own. agentic-job provisions no runners: a
+self-hosted one must take one job and then be thrown away, with
+passwordless `sudo`, systemd 257 or later, Node, and `apt-get` or `dnf`
+([runners](docs/workflow.md#what-a-caller-provides)). The
+[real agent checklist](docs/workflow.md#real-agent-checklist) has the rest.
 
 ## Why not GitHub Agentic Workflows
 
@@ -202,7 +365,11 @@ and [37588497422](https://github.com/cgwalters-bot/agentic-job-trial/actions/run
 opened pull requests [#1](https://github.com/cgwalters-bot/agentic-job-trial/pull/1)
 and [#2](https://github.com/cgwalters-bot/agentic-job-trial/pull/2) there
 ([deployment record, #59](https://github.com/cgwalters-forge/agentic-job/issues/59)).
-No caller exists in the operator's runner repository,
+Those runs predate pull requests from a fork: their branches were pushed
+to the trial repository itself, a path apply no longer takes. The fork path
+has run live once, from `cgwalters-forge/tracker`
+([what has run](docs/workflow.md#what-has-run-and-what-has-not)); the
+caller in [Try it](#try-it), from a fresh repository, has not. No caller exists in the operator's runner repository,
 `bootc-dev/cgwalters-devspace-sandbox`, yet.
 
 Claude Code and opencode have also run through the reusable workflow on
@@ -212,12 +379,43 @@ Those inputs have since been removed; see
 [Migrating from the Tailscale inputs](docs/workflow.md#migrating-from-the-tailscale-inputs).
 For a private network join today, use the caller's own step in the
 [composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own).
-No real agent has yet run on hosted runners with that caller-owned join.
+This repository's `review.yml` does that with opencode on hosted
+`ubuntu-26.04` ([run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)); no other caller has.
 
 Not supported: private target repositories and most of gh-aw's catalogue.
 Pull requests from forks
 do not get the end-to-end jobs that write. The sandbox setup takes two
 to five minutes on a hosted runner. Nobody but its authors has used it.
+
+## Known gaps
+
+Behaviour that does not match what a new user would expect, each with
+the issue that tracks it, where one is filed.
+
+- Steps after `secure-host` lose root but keep the job's tokens and an open
+  network; the agent job still needs `id-token: write` ([#503](https://github.com/cgwalters-forge/agentic-job/issues/503)).
+- The egress proxy has no read allowlist: any host may be read ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)).
+- Names resolve for the sandbox user on hosted runners, so data can leave
+  through DNS ([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).
+- The world-write policy has no recorded runtime evidence on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
+- Inference needs a praxis-credential-broker; there is no API-key mode
+  (no issue yet).
+- `review.yml` always joins this project's tailnet, with no input to
+  replace the join, so another organization cannot call it as it is
+  (no issue yet).
+- A broker admits an agent job of the caller's own only by repository,
+  any workflow of it ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).
+- A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
+  after the agent has run (no issue yet).
+- `hosted.toml`'s commit author, `agentic-job@users.noreply.github.com`,
+  is the no-reply address of an unregistered GitHub login (no issue yet).
+- The refusal of `max-requests` without a broker names the TOML keys
+  `limits.max-requests` and `limits.uncapped`, not the workflow input
+  (no issue yet).
+- A push to a stale fork with a PAT lacking the `workflow` scope is
+  untried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
+- A run at a version tag may still compile the binary ([#606](https://github.com/cgwalters-forge/agentic-job/issues/606)),
+  and setup takes minutes ([#188](https://github.com/cgwalters-forge/agentic-job/issues/188)).
 
 ## Where to read more
 
@@ -229,7 +427,7 @@ to five minutes on a hosted runner. Nobody but its authors has used it.
   and applied.
 - [specs/run-contract-spec.md](specs/run-contract-spec.md): the run contract
   and its enforcement evidence.
-- [docs/inference.md](docs/inference.md): the proxy, and what it needs.
+- [docs/inference.md](docs/inference.md): the broker, and what it needs.
 - [docs/events.md](docs/events.md): starting runs from events.
 - [docs/dispatch.md](docs/dispatch.md): fixed operator dispatch profiles and setup.
 - [docs/skills.md](docs/skills.md): the skills and subagents a run installs

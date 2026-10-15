@@ -166,6 +166,12 @@ container user other than the one mapped to the sandbox user; in a rootful
 one, an object not owned by root. Sticky directories such as `/tmp` are
 unaffected. The test runs no Podman.
 
+A step refused by the policy sees an ordinary `EACCES` ("Permission
+denied") that names neither the policy nor the owner, and the policy logs
+nothing. A write that fails although the mode bits allow it, to a
+world-writable path on the root filesystem that the writer does not own,
+is most likely this policy.
+
 ### What the final probe proves
 
 `sandbox check` proves the policy itself and reads no denial log. Setup plants
@@ -370,11 +376,12 @@ unprivileged thing. This is the first slice of that design, and it is opt-in:
 After it, no later step has root:
 
 - `lock` (the default) takes sudo, polkit and the daemons of root-equivalent
-  groups, `docker` first of all, and keeps the setuid inventory as before.
+  groups, `docker` first of all. The setuid inventory went with the walk
+  ([above](#what-went-with-the-walk)); the privileged-binary allowlist stays.
 - The world-write policy refuses writes to another user's world-writable files on
-  the root filesystem when they happen. That includes files the walk leaves
-  alone: it skips the shared temporary directories, so a root-owned mode-0666
-  file in `/var/tmp` stays writable without the policy.
+  the root filesystem when they happen, in the shared temporary directories
+  too: a root-owned mode-0666 file in `/var/tmp` is writable without the
+  policy, and the `confined` probe below writes one.
 - `deny-runner-metadata` refuses the cloud metadata service to the runner's
   user and its subordinate uids: at `169.254.169.254` through the same
   nftables rule that refuses the sandbox user, and at EC2's IPv6 address

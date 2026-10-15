@@ -258,10 +258,19 @@ not designed.
 
 ## Configuration
 
-The workflow is set up like tracker's production caller: the agent job runs on
-`vars.AGENT_RUNNER` (default `ubuntu-26.04`) and joins the inference proxy's
-tailnet with `cgwalters-forge/actions/tailscale` before `secure-host`. It
-needs these repository or organization variables, and no secret:
+The workflow is set up for this project's own deployment, like tracker's
+production caller: the agent job runs on `vars.AGENT_RUNNER` (default
+`ubuntu-26.04`) and joins the inference broker's tailnet with
+`cgwalters-forge/actions/tailscale` before `secure-host`. That join is the
+deployment's, not part of agentic-job: the action picks the deployment's
+OAuth client and tags by organization, and there is no input to replace or
+skip it, so outside that deployment the join fails or reaches no broker
+and no review runs. It stays here until this deployment-specific caller
+moves to `cgwalters-forge/actions`. Another deployment copies the jobs of
+`review.yml` into a caller of its own, with its own network step in place
+of the join, as in the [composed form](workflow.md#the-pieces-and-an-agent-job-of-your-own);
+that route has not been run. It needs these repository or organization
+variables, and no secret:
 
 | Variable | |
 | --- | --- |
@@ -283,7 +292,9 @@ federated identity has to admit it too
 
 ## Another repository
 
-Another repository (agent-board next) calls this workflow at a pinned commit:
+Another repository of the same deployment, one whose agent job the
+tailnet join [above](#configuration) admits (agent-board next), calls this
+workflow at a pinned commit:
 
 ```yaml
 name: review

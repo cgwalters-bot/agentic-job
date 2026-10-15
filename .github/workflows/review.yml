@@ -12,6 +12,9 @@
 # privileged step: joining the inference proxy's tailnet. So its identity
 # token's `job_workflow_ref` names this file, and the broker and the
 # tailnet's federated identity have to admit it (docs/inference.md).
+# The join is this project's own deployment's, with no input to replace
+# it, until this deployment-specific caller moves out of this repository
+# (docs/review.md#configuration).
 #
 # Another repository calls this file at a pinned commit from the same
 # events, with its own copies of the bounds and the task.
