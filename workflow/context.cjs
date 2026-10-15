@@ -30,7 +30,7 @@ function resolveContext(text, read = api) {
     // Everything about this run is published. Bounds admission alone must not
     // accidentally publish private source through the prompt or transcript.
     if (repo.private !== false || repo.visibility !== 'public') {
-      throw new Error('Context repository cannot be confirmed public');
+      throw new Error('Context repository cannot be confirmed public; private runs are refused because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source');
     }
     const ref = item.ref ?? repo.default_branch;
     if (typeof ref !== 'string' || !ref || ref.length > 200) throw new Error('Missing default branch');

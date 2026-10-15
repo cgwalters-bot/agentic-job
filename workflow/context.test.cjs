@@ -44,8 +44,10 @@ test('malformed, excessive or duplicate input is refused', () => {
 });
 
 test('visibility and commit lookup fail closed', () => {
-  for (const metadata of [{}, { private: true, visibility: 'private' }, { private: false, visibility: 'internal' }]) {
-    assert.throws(() => resolveContext('[{"repo":"owner/repo"}]', () => metadata), /public/);
+  for (const metadata of [{}, { private: true, visibility: 'private' }, { private: false, visibility: 'internal' },
+    { private: true, visibility: 'public' }, { visibility: 'public' }, { private: false }]) {
+    assert.throws(() => resolveContext('[{"repo":"owner/repo"}]', () => metadata),
+      /private runs are refused.*docs\/private-repositories\.md/);
   }
   assert.throws(() => resolveContext('[{"repo":"owner/repo"}]', path => path.includes('/commits/')
     ? { sha: 'main' } : { private: false, visibility: 'public', default_branch: 'main' }), /commit/);

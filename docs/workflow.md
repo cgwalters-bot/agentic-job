@@ -120,7 +120,8 @@ repository write permissions, and hands its token to the agent for
 The policy machine resolves each ref to a full commit before the agent machine
 starts. It confirms public visibility through the forge API; errors fail closed.
 As with the target, the reusable workflow refuses private repositories because
-everything about a run is published. The CLI also admits non-public context only
+run evidence can disclose source (see [private repositories](private-repositories.md)).
+The CLI also admits non-public context only
 when every caller/organization bounds file allows its repository. Every clone URL
 must name that repository on a host allowed by every bounds file. Public context
 need not match the target repository globs. Visibility is policy-machine metadata,

@@ -454,7 +454,7 @@ jobs:
           for repo in $REPOS; do
             [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::not a repository name: $repo"; exit 1; }
             gh api "repos/$repo" --jq '.private == false and .visibility == "public"' | grep -qx true ||
-              { echo "::error::$repo cannot be confirmed to be public, and everything about a run is published"; exit 1; }
+              { echo "::error::$repo cannot be confirmed to be public; private runs are refused because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"; exit 1; }
           done
       # Which repository and commit this file is running from. Without
       # them the checkout below would quietly take the caller's.

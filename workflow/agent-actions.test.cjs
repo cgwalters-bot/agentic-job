@@ -138,6 +138,24 @@ test('public visibility refusal blocks publication and repository names are data
   assert.ok(run.indexOf('Check again that') < run.indexOf('uses: actions/upload-artifact'));
 });
 
+test('admission and upload gates refuse unknown visibility with private-run guidance', () => {
+  const admission = policy.split('- name: Check that the repositories are public\n')[1]
+    .split('        run: |\n')[1].split('\n      #')[0].replace(/^ {10}/gm, '');
+  for (const script of [admission, step(run, 'Check again that the repositories are public')]) {
+    assert.match(script, /\.private == false and \.visibility == "public"/);
+    for (const [answer, apiExit, expected] of [
+      ['true', 0, 0], ['false', 0, 1], ['null', 0, 1], ['', 0, 1], ['true', 1, 1],
+    ]) {
+      const result = shell('gh() { printf "%s\\n" "$ANSWER"; return "$API_EXIT"; };\n' + script,
+        { REPO: 'owner/repo', REPOS: 'owner/repo owner/config owner/item',
+          ANSWER: answer, API_EXIT: String(apiExit) });
+      assert.equal(result.status, expected, result.stdout + result.stderr);
+      if (expected !== 0) assert.match(result.stdout, /private runs are refused.*docs\/private-repositories\.md/);
+    }
+  }
+  assert.ok(policy.indexOf('Check that the repositories are public') < policy.indexOf('name: This workflow'));
+});
+
 // The wrapper's agent job and the example's caller-owned one are the same
 // steps: the caller's repository, the actions of policy's own commit,
 // then prepare, secure-host and run, in that order.
