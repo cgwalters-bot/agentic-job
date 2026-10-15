@@ -132,6 +132,8 @@ pub struct Args {
 struct Plan {
     kind: Kind,
     agent: config::Agent,
+    /// The model of the child agent the main one may start, if any.
+    child: Option<String>,
     limits: Limits,
     endpoint: Option<Endpoint>,
     /// Who may attach to the session, for a conversation.
@@ -322,6 +324,7 @@ impl Plan {
             endpoint,
             limits,
             host,
+            child,
         } = config.check()?;
         if limits.max_requests.is_none() && limits.budget_aic.is_none() {
             eprintln!(
@@ -400,6 +403,7 @@ impl Plan {
             meta,
             run_id,
             agent: config.agent,
+            child,
         })
     }
 
@@ -472,8 +476,17 @@ impl Plan {
             &base_dir,
             &checkout.dir,
         );
+        // The task says what to do with it; this says where it is.
+        let child = self.child.as_ref().map_or_else(String::new, |model| {
+            format!(
+                "This run can start a second agent, vibe with the model {model}, and drive it \
+                 over ACP: see `{} {} --help`.\n\n",
+                self.exe,
+                crate::acp_drive::COMMAND
+            )
+        });
         let prompt = format!(
-            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{context}{}",
+            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{child}{context}{}",
             cwd.display(),
             self.prompt(&checkout)?
         );
@@ -525,13 +538,23 @@ impl Plan {
         configuration
             .files
             .extend(home_files(self.kind, &self.agent, github.as_deref())?);
+        let child = self.child.as_deref().and_then(|model| {
+            let endpoint = self.endpoint.as_ref()?;
+            Some((endpoint, run.as_deref()?.token(), Some(model)))
+        });
+        let has_child = child.is_some();
+        configuration.files.push(agent::child(child)?);
         agent::install(sandbox, &configuration)?;
         if let (Some(run), Some(file)) = (&run, self.kind.token_file()) {
             let given = match self.endpoint.as_ref().map(|endpoint| &endpoint.mode) {
                 Some(inference::Mode::TokenFile { path }) => Some(path.as_path()),
                 _ => None,
             };
-            probe::require(sandbox, run.token(), file, given)?;
+            let mut files = vec![file];
+            if has_child {
+                files.push(agent::CHILD_VIBE_CONFIG_FILE);
+            }
+            probe::require(sandbox, run.token(), &files, given)?;
         }
         Ok(Prepared {
             cwd,
@@ -686,8 +709,30 @@ impl Plan {
             &self.sandbox.home,
             self.kind.log_dir(),
             since,
-            &transcript,
+            &transcript.join(agent_log::TRANSCRIPT_NAME),
         )?;
+        // The child agent's ACP transcript and standard error, as
+        // `acp-drive` wrote them, and its own logs: the sandbox user's
+        // files, read as the agent's are.
+        let child_logs = if self.child.is_some() {
+            let mut taken = Vec::new();
+            for (dir, name) in [
+                (crate::acp_drive::DIR, agent_log::CHILD_SESSION_NAME),
+                (agent::CHILD_VIBE_LOG_DIR, agent_log::CHILD_LOGS_NAME),
+            ] {
+                let to = transcript.join(name);
+                taken.push(agent_log::collect(
+                    &runner,
+                    &self.sandbox.home,
+                    dir,
+                    since,
+                    &to,
+                )?);
+            }
+            Value::Array(taken)
+        } else {
+            Value::Null
+        };
         // What the agent reached, and what it was refused.
         let access_log = transcript.join(egress::TRANSCRIPT_NAME);
         if !egress::collect(
@@ -765,6 +810,7 @@ impl Plan {
             patch: change.patch,
             egress_denied: egress::denied_in(&access_log),
             agent_logs,
+            child_logs,
             redactions: session.redactor.count(),
         };
         let mut summary = summary::summarize(&summary::Inputs {

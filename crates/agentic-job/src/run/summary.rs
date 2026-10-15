@@ -63,6 +63,9 @@ pub struct Measured {
     /// What of the agent's own logs the transcript has
     /// (`agent_log::collect`), or null.
     pub agent_logs: Value,
+    /// The same of the child agent's session and logs, for a run that
+    /// has one, or null.
+    pub child_logs: Value,
     pub redactions: usize,
 }
 
@@ -272,6 +275,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
     }
     s.insert("egress_denied".into(), json!(measured.egress_denied));
     s.insert("agent_logs".into(), measured.agent_logs.clone());
+    if !measured.child_logs.is_null() {
+        s.insert("child_logs".into(), measured.child_logs.clone());
+    }
     s.insert("redactions".into(), json!(measured.redactions));
     // The model the agent says the session runs, else the one asked for.
     let model = digest.model.clone().or_else(|| measured.model.clone());
@@ -623,6 +629,7 @@ mod tests {
             patch: json!({"base": "abc", "bytes": 10}),
             egress_denied: Vec::new(),
             agent_logs: json!({"dir": "~/logs", "files": 1, "omitted_files": 0, "truncated": false}),
+            child_logs: Value::Null,
             redactions: 2,
         }
     }
@@ -910,6 +917,8 @@ Redacted 1 string(s).
             assert_eq!(s["workflow"], "branch");
             assert_eq!(s["patch"]["bytes"], 10);
             assert!(s.get("not_copied").is_none());
+            // Only a run with a child agent says what of it was taken.
+            assert!(s.get("child_logs").is_none());
         }
     }
 

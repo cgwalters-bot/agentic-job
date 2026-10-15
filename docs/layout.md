@@ -30,6 +30,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `sandbox/host.rs`, `sandbox/local.rs` | Host users, programs and reachable listeners |
 | `session/` | ACP transport, permissions, limits, transcript and digest |
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
+| `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |
 
 The supervisor runs as the runner's user. Its file operations in the
 sandbox run as the sandbox user. After setup, privileged operations go

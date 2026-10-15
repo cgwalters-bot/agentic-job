@@ -21,7 +21,8 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::agent::{
-    CLAUDE_ENV_FILE, CLAUDE_QUIET, GITHUB_TOKEN_FILE, GITHUB_TOKEN_VAR, Kind, OPENCODE_PROFILE_FILE,
+    CHILD_VIBE_HOME, CLAUDE_ENV_FILE, CLAUDE_QUIET, GITHUB_TOKEN_FILE, GITHUB_TOKEN_VAR, Kind,
+    OPENCODE_PROFILE_FILE, VIBE_HOME,
 };
 use crate::exit::Exit;
 use crate::session::agents;
@@ -29,6 +30,10 @@ use crate::session::process::is_inherited_setting;
 
 /// The subcommand, as the session's command line names it.
 pub const COMMAND: &str = "launch-agent";
+/// Its flag for the run's child agent.
+const CHILD: &str = "--child";
+/// Where Vibe keeps its configuration, logs and sessions.
+const VIBE_HOME_VAR: &str = "VIBE_HOME";
 /// The one setting of an agent that comes from the session's command
 /// line: the model, which the registry passes Claude Code this way.
 const KEPT: &[&str] = &["ANTHROPIC_MODEL"];
@@ -73,6 +78,10 @@ const GITHUB_TOKEN_VARS: &[&str] = &[
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Become the run's child agent, which `acp-drive` starts, with its
+    /// own configuration
+    #[arg(long)]
+    pub child: bool,
     /// The agent to become: claude or opencode
     pub agent: String,
     /// Arguments passed on to the agent's program
@@ -181,16 +190,28 @@ fn environment(
             }
         }
         Kind::Vibe => {
-            env.insert(
-                "VIBE_HOME".into(),
-                home.join(super::agent::VIBE_HOME).into(),
-            );
+            env.insert(VIBE_HOME_VAR.into(), home.join(VIBE_HOME).into());
         }
         Kind::Fake => {}
     }
     if let Some(token) = github_token(home, &read)? {
         env.insert(GITHUB_TOKEN_VAR.into(), token.into());
     }
+    Ok(env)
+}
+
+/// The environment of the run's child agent KIND, as [`environment`]
+/// but with a configuration of its own: only Vibe's home can be moved,
+/// so only Vibe can be one.
+fn child_environment(
+    kind: Kind,
+    inherited: impl Iterator<Item = (OsString, OsString)>,
+    home: &Path,
+    read: impl Fn(&Path) -> std::io::Result<String>,
+) -> Result<BTreeMap<OsString, OsString>> {
+    ensure!(kind == Kind::Vibe, "only vibe can be a child agent");
+    let mut env = environment(kind, inherited, home, read)?;
+    env.insert(VIBE_HOME_VAR.into(), home.join(CHILD_VIBE_HOME).into());
     Ok(env)
 }
 
@@ -201,9 +222,12 @@ pub fn run(args: &Args) -> Result<Exit> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let env = environment(kind, std::env::vars_os(), &home, |path| {
-        std::fs::read_to_string(path)
-    })?;
+    let read = |path: &Path| std::fs::read_to_string(path);
+    let env = if args.child {
+        child_environment(kind, std::env::vars_os(), &home, read)?
+    } else {
+        environment(kind, std::env::vars_os(), &home, read)?
+    };
     let (first, rest) = program.split_first().context("the agent has no program")?;
     let err = Command::new(first)
         .args(rest)
@@ -218,6 +242,14 @@ pub fn run(args: &Args) -> Result<Exit> {
 /// path EXE, which the sandbox user must be able to run.
 pub fn command(exe: &str, kind: Kind) -> Vec<String> {
     [exe, COMMAND, kind.as_str()].map(str::to_owned).to_vec()
+}
+
+/// What `acp-drive` starts the run's child agent KIND with: as
+/// [`command`], with the child's configuration.
+pub fn child_command(exe: &str, kind: Kind) -> Vec<String> {
+    [exe, COMMAND, CHILD, kind.as_str()]
+        .map(str::to_owned)
+        .to_vec()
 }
 
 #[cfg(test)]
@@ -463,6 +495,33 @@ mod tests {
                 ("KEEP_ME", "kept"),
                 ("VIBE_HOME", "/home/agent/.config/agentic-job/vibe"),
             ])
+        );
+        // The child's: the same, but its own home, and only Vibe's.
+        let child = child_environment(
+            Kind::Vibe,
+            inherited(&[("VIBE_HOME", "/evil"), ("KEEP_ME", "kept")]),
+            Path::new(HOME),
+            missing,
+        )
+        .unwrap();
+        assert_eq!(
+            strings(&child),
+            BTreeMap::from([
+                ("KEEP_ME", "kept"),
+                ("VIBE_HOME", "/home/agent/.config/agentic-job/child-vibe"),
+            ])
+        );
+        for kind in [Kind::Claude, Kind::Opencode, Kind::Fake] {
+            assert!(child_environment(kind, inherited(&[]), Path::new(HOME), missing).is_err());
+        }
+        assert_eq!(
+            child_command("/usr/local/bin/agentic-job", Kind::Vibe),
+            [
+                "/usr/local/bin/agentic-job",
+                "launch-agent",
+                "--child",
+                "vibe"
+            ]
         );
         let argv = program(Kind::Vibe).unwrap();
         assert_eq!(

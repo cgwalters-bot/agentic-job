@@ -67,11 +67,15 @@ fn private(sandbox: &Sandbox, what: &str, path: &str, mode: &str) -> Result<Prob
 }
 
 /// Whether a search for the token, which exited with CODE and listed
-/// FOUND, shows it to be in FILE and nowhere else. grep's own status says
+/// FOUND, shows it to be in FILES and nowhere else. grep's own status says
 /// nothing: it is an error for every file it could not read. But a
 /// search that timeout(1) cut short found nothing only so far.
-fn only_in(code: Option<i32>, found: &[&str], file: &str) -> bool {
-    code != Some(TIMEOUT_EXIT) && found == [file]
+fn only_in(code: Option<i32>, found: &[&str], files: &[&str]) -> bool {
+    let mut found = found.to_vec();
+    let mut files = files.to_vec();
+    found.sort_unstable();
+    files.sort_unstable();
+    code != Some(TIMEOUT_EXIT) && found == files
 }
 
 /// Whether HAYSTACK holds NEEDLE.
@@ -81,41 +85,46 @@ fn holds(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// Probes where the run token is. TOKEN_FILE is the agent's file that
-/// should hold it, under the sandbox user's home; GIVEN is the runner's
-/// own file the token came from, if it came from one.
+/// Probes where the run token is. TOKEN_FILES are the files that should
+/// hold it, under the sandbox user's home: the agent's, and its child
+/// agent's if the run has one; GIVEN is the runner's own file the token
+/// came from, if it came from one.
 pub fn token(
     sandbox: &Sandbox,
     token: &Token,
-    token_file: &str,
+    token_files: &[&str],
     given: Option<&Path>,
 ) -> Result<Vec<Probe>> {
-    let file = sandbox.home.join(token_file);
-    let dir = file.parent().context("the token's file has no directory")?;
-    let (file, dir, home) = (utf8(&file)?, utf8(dir)?, utf8(&sandbox.home)?);
     let needle = format!("{}\n", token.expose());
     let user = &sandbox.user;
+    let home = utf8(&sandbox.home)?;
     let mut probes = Vec::new();
-    let mut probe = |what: String, passed: bool| probes.push(Probe { what, passed });
+    let mut files = Vec::new();
+    for token_file in token_files {
+        let file = sandbox.home.join(token_file);
+        let dir = file.parent().context("the token's file has no directory")?;
+        let (file, dir) = (utf8(&file)?.to_owned(), utf8(dir)?.to_owned());
 
-    // The control: a search that cannot find the token where it is
-    // proves nothing by not finding it elsewhere.
-    let found = sandbox.run(
-        &["grep", "-qsF", "-f", "-", "--", file],
-        needle.as_bytes(),
-        MAX_OUTPUT,
-    )?;
-    probe(
-        format!("{user}'s {file} holds the run token (control)"),
-        found.success(),
-    );
-    for (what, path, mode) in [
-        (file, file, PRIVATE_FILE_MODE),
-        ("its directory", dir, PRIVATE_DIR_MODE),
-    ] {
-        let private = private(sandbox, what, path, mode)?;
-        probe(private.what, private.passed);
+        // The control: a search that cannot find the token where it is
+        // proves nothing by not finding it elsewhere.
+        let found = sandbox.run(
+            &["grep", "-qsF", "-f", "-", "--", &file],
+            needle.as_bytes(),
+            MAX_OUTPUT,
+        )?;
+        probes.push(Probe {
+            what: format!("{user}'s {file} holds the run token (control)"),
+            passed: found.success(),
+        });
+        for (what, path, mode) in [
+            (file.as_str(), file.as_str(), PRIVATE_FILE_MODE),
+            ("its directory", dir.as_str(), PRIVATE_DIR_MODE),
+        ] {
+            probes.push(private(sandbox, what, path, mode)?);
+        }
+        files.push(file);
     }
+    let mut probe = |what: String, passed: bool| probes.push(Probe { what, passed });
 
     let search = [
         &[
@@ -147,7 +156,11 @@ pub fn token(
                 found.join(", ")
             }
         ),
-        only_in(code, &found, file),
+        only_in(
+            code,
+            &found,
+            &files.iter().map(String::as_str).collect::<Vec<_>>(),
+        ),
     );
 
     let processes = sandbox.run(&["sh", "-c", PROCESSES_SCRIPT], b"", MAX_PROCESSES_BYTES)?;
@@ -170,10 +183,10 @@ pub fn token(
 pub fn require(
     sandbox: &Sandbox,
     token: &Token,
-    token_file: &str,
+    token_files: &[&str],
     given: Option<&Path>,
 ) -> Result<()> {
-    let probes = self::token(sandbox, token, token_file, given)?;
+    let probes = self::token(sandbox, token, token_files, given)?;
     ensure!(
         report(&probes),
         "the run token is not only where it belongs: see the failed probes above"
@@ -207,6 +220,7 @@ mod tests {
     #[test]
     fn a_search_shows_the_token_only_where_it_finished() {
         const FILE: &str = "/home/agent/.config/x.json";
+        const CHILD: &str = "/home/agent/.config/child.toml";
         // (the search's exit status, what it listed, the verdict)
         let cases: [(Option<i32>, &[&str], bool); 7] = [
             (Some(0), &[FILE], true),
@@ -219,7 +233,18 @@ mod tests {
             (Some(0), &["/tmp/copy"], false),
         ];
         for (code, found, want) in cases {
-            assert_eq!(only_in(code, found, FILE), want, "{code:?} {found:?}");
+            assert_eq!(only_in(code, found, &[FILE]), want, "{code:?} {found:?}");
+        }
+        // With a child agent, both of its files and no other.
+        let cases: [(&[&str], bool); 5] = [
+            (&[CHILD, FILE], true),
+            (&[FILE, CHILD], true),
+            (&[FILE], false),
+            (&[CHILD], false),
+            (&[FILE, CHILD, "/tmp/copy"], false),
+        ];
+        for (found, want) in cases {
+            assert_eq!(only_in(Some(0), found, &[FILE, CHILD]), want, "{found:?}");
         }
     }
 

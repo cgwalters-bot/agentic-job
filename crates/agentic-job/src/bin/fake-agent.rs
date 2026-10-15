@@ -36,6 +36,8 @@
 //!  {"write": {"title": "Write", "path": "{cwd}/x", "content": "..."}},
 //!  {"cost": {"usd": 0.01}},
 //!  {"task": "Review the change"},
+//!  "compact",
+//!  {"context": {"used": 24000, "size": 32768}},
 //!  {"sleep": 1.5},
 //!  {"stop": "refusal"},
 //!  {"exit": 7},
@@ -44,7 +46,9 @@
 //! ```
 //!
 //! A `task` is a subagent's tool call as opencode reports one, done at
-//! once. A `sleep` (seconds) ends early when the client cancels the turn.
+//! once. A `compact` is a compaction of its context as Vibe 2.26.1
+//! reports one, and a `context` a `usage_update` of the context's size.
+//! A `sleep` (seconds) ends early when the client cancels the turn.
 //! A `stop` ends the turn there with that stop reason, even after a
 //! cancel, as an agent whose last reply was complete when the cancel
 //! came; and an `exit` the
@@ -131,6 +135,11 @@ enum Step {
         usd: f64,
     },
     Task(String),
+    Compact,
+    Context {
+        used: u64,
+        size: u64,
+    },
     Sleep(f64),
     Stop(String),
     Exit(i32),
@@ -510,6 +519,19 @@ fn play(
             );
             return Ok(());
         }
+        Step::Compact => {
+            conn.update(json!({"sessionUpdate": "tool_call", "toolCallId": id,
+                "title": "Compacting context", "kind": "think", "status": "in_progress"}));
+            conn.update(
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": id,
+                "title": "Context compacted", "kind": "think", "status": "completed"}),
+            );
+            return Ok(());
+        }
+        Step::Context { used, size } => {
+            conn.update(json!({"sessionUpdate": "usage_update", "used": used, "size": size}));
+            return Ok(());
+        }
         Step::Sleep(secs) => {
             let end = Instant::now() + Duration::try_from_secs_f64(*secs)?;
             while !conn.cancelled {
@@ -608,6 +630,8 @@ fn play(
         Step::Say(_)
         | Step::Cost { .. }
         | Step::Task(_)
+        | Step::Compact
+        | Step::Context { .. }
         | Step::Sleep(_)
         | Step::Stop(_)
         | Step::Exit(_)

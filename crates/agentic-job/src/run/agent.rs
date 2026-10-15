@@ -71,6 +71,11 @@ pub const OPENCODE_PROFILE_FILE: &str = ".config/opencode/opencode-runner.json";
 pub const VIBE_HOME: &str = ".config/agentic-job/vibe";
 pub const VIBE_CONFIG_FILE: &str = ".config/agentic-job/vibe/config.toml";
 pub const VIBE_LOG_DIR: &str = ".config/agentic-job/vibe/logs";
+/// The run's child agent's Vibe (`[child-agent]`, `acp-drive`): a home of
+/// its own, so that its model and logs are not the main agent's.
+pub const CHILD_VIBE_HOME: &str = ".config/agentic-job/child-vibe";
+pub const CHILD_VIBE_CONFIG_FILE: &str = ".config/agentic-job/child-vibe/config.toml";
+pub const CHILD_VIBE_LOG_DIR: &str = ".config/agentic-job/child-vibe/logs";
 /// Where the fake agent's `demo` writes a log, as a real agent would.
 pub const FAKE_LOG_DIR: &str = ".local/state/fake-agent/log";
 /// The run's read-only GitHub token, for `gh` and the GitHub API: the
@@ -1096,6 +1101,26 @@ pub fn generate(
     })
 }
 
+/// The configuration of the run's child agent: Vibe, as the main agent
+/// would be configured with MODEL, on the same proxy and run token, in a
+/// home of its own. Without one (`None`), it removes the file an earlier
+/// run left, so that `acp-drive` finds no child to start.
+pub fn child(inference: Option<(&Endpoint, &Token, Option<&str>)>) -> Result<HomeFile> {
+    let content = inference
+        .map(|(endpoint, token, model)| -> Result<String> {
+            let configuration = vibe(endpoint, token, model, None)
+                .map_err(|err| anyhow::anyhow!("child-agent: {err:#}"))?;
+            let file = configuration.files.into_iter().next();
+            file.and_then(|file| file.content)
+                .context("child-agent: no configuration")
+        })
+        .transpose()?;
+    Ok(HomeFile {
+        path: CHILD_VIBE_CONFIG_FILE,
+        content,
+    })
+}
+
 /// The skills and subagents of KIND, installed when ON and removed when
 /// not, so that none an earlier run left is read. Vibe receives only the
 /// configuration repository's skills, not these harness-specific procedures.
@@ -1567,6 +1592,23 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(check(Kind::Vibe, &agent).is_ok(), ok, "{repo:?} {model:?}");
+        }
+    }
+
+    /// The child gets the main agent's Vibe configuration for its model,
+    /// in its own file; a run without one removes an earlier run's.
+    #[test]
+    fn child_configuration() {
+        let endpoint = endpoint(Mode::Plain);
+        let got = child(Some((&endpoint, &token(), Some("zai-glm-5-3")))).unwrap();
+        assert_eq!(got.path, CHILD_VIBE_CONFIG_FILE);
+        let main = vibe(&endpoint, &token(), Some("zai-glm-5-3"), None).unwrap();
+        assert_eq!(got.content, main.files[0].content);
+        assert!(got.content.unwrap().contains(TOKEN));
+        assert_eq!(child(None).unwrap().content, None);
+        for model in [None, Some("devstral-2")] {
+            let err = child(Some((&endpoint, &token(), model))).unwrap_err();
+            assert!(err.to_string().starts_with("child-agent:"), "{err}");
         }
     }
 

@@ -29,7 +29,7 @@ const HOLD_SETTLE: Duration = Duration::from_secs(3);
 
 /// The probes that failed.
 fn failed(sandbox: &Sandbox, token: &Token, given: Option<&Path>) -> Vec<String> {
-    probe::token(sandbox, token, CLAUDE_ENV_FILE, given)
+    probe::token(sandbox, token, &[CLAUDE_ENV_FILE], given)
         .unwrap()
         .into_iter()
         .filter(|probe| !probe.passed)
@@ -102,9 +102,9 @@ fn each_probe_fails_when_what_it_names_is_broken() {
     }
 
     // What `run` makes of the probes: it goes on only if all passed.
-    probe::require(&sandbox, &token, CLAUDE_ENV_FILE, None).unwrap();
+    probe::require(&sandbox, &token, &[CLAUDE_ENV_FILE], None).unwrap();
     sh(r#"chmod 0644 "$1""#);
-    let err = probe::require(&sandbox, &token, CLAUDE_ENV_FILE, None).unwrap_err();
+    let err = probe::require(&sandbox, &token, &[CLAUDE_ENV_FILE], None).unwrap_err();
     sh(r#"chmod 0600 "$1""#);
     assert!(
         err.to_string().contains("not only where it belongs"),

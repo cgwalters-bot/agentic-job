@@ -6,6 +6,7 @@
 //! implemented by filling in its module, so two commands being written at
 //! once touch different files. docs/layout.md has the map.
 
+pub mod acp_drive;
 pub mod audit;
 pub mod check;
 pub mod cli;

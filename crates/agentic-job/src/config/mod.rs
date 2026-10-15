@@ -27,6 +27,9 @@ pub struct Config {
     pub egress: Egress,
     pub inference: Inference,
     pub agent: Agent,
+    /// A second agent the main one may start and drive (`acp-drive`).
+    #[serde(rename = "child-agent")]
+    pub child_agent: ChildAgent,
     pub limits: Limits,
     pub setup: Setup,
     pub commit: Commit,
@@ -378,6 +381,17 @@ impl Default for Agent {
             render_session: true,
         }
     }
+}
+
+/// The run's child agent: one the main agent may start over ACP with
+/// `agentic-job acp-drive`, to drive it turn by turn and watch how it
+/// works. Off unless `name` is set; only `vibe` can be one.
+/// `Config::check` holds it to the run's request cap.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ChildAgent {
+    pub name: String,
+    pub model: Option<String>,
 }
 
 /// What stops a run. Zero means not set. `session::Limits::from_config`

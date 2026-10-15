@@ -292,6 +292,72 @@ The check only decides the reminder; the hand-back is still collected and
 checked as before. A run with a bridge client is not reminded: the
 client sees what the agent left.
 
+## A second agent
+
+A run can let its agent start a second agent, the child, and drive it
+over ACP turn by turn: to watch, for one, what a model does after its
+context is compacted. Only Vibe can be the child. It is off unless the
+repository-owned configuration names one:
+
+```toml
+[child-agent]
+name = "vibe"
+model = "zai-glm-5-3"
+```
+
+`run` then writes the child a Vibe configuration of its own,
+`~/.config/agentic-job/child-vibe/config.toml`, as it would write the
+main agent's for that model: the same proxy route and run token, so the
+token probes expect it in that file and the agent's, and nowhere else.
+Its model is a built-in definition (a 32k window, compacted at 24k); the
+main agent may edit that file, which gives it nothing it does not have
+with its own token. The task is told the path of `acp-drive`.
+
+The configuration is refused without `limits.max-requests`. The budget
+reads only the cost the main agent reports, but the proxy counts every
+request made with the run's token, so the request cap covers both
+agents: a run capped by its budget alone could spend without bound
+through the child. The timeout covers both too, since the session kills
+every process of the sandbox user when it ends.
+
+The main agent uses it through bash; each command prints JSON:
+
+- `agentic-job acp-drive start --agent vibe [--model M] [--cwd DIR]`
+  starts a daemon, as the sandbox user, that starts Vibe through
+  `launch-agent --child`, opens a session and holds its standard
+  streams. It prints the session and the model Vibe reports.
+- `prompt TEXT [--timeout S]` sends a turn and prints its stop reason,
+  or the error it was answered with. With `--timeout` it stops waiting
+  (exit 124) and the turn goes on.
+- `events [--since N]` prints the events from the Nth on: the prompt,
+  messages, thinking, tool calls and their results, permission answers,
+  compactions, the end of each turn and the child's exit. An event never
+  changes once printed; a message still streaming is cut where it stood
+  and goes on in the next.
+- `cancel` cancels the running turn; `status` prints the session's
+  state; `stop` kills the child and ends the daemon.
+
+Vibe 2.26.1 reports a compaction as a tool call titled "Compacting
+context", then "Context compacted"; those are `compaction` events. A
+compaction it does not report is inferred, `"inferred": true`, when the
+context it reports in a `usage_update` falls below half the last one.
+The child's permission requests are answered by the main agent's policy.
+
+The daemon talks to its commands over a socket in
+`~/.local/state/agentic-job/acp-drive`, private to the sandbox user, and
+writes there every ACP message (`acp.jsonl`), the child's standard
+error and its own log. It holds nothing the main agent does not and is
+not a boundary: the sandbox and the proxy's count are. After the
+session `run` reads that directory and the child's Vibe logs as the
+sandbox user, as it reads the agent's own logs, into
+`child-session.txt` and `child-logs.txt` of the transcript, redacted
+with it; `child_logs` in `summary.json` says what was taken. As there,
+the last 4 MiB of each file is kept.
+
+`tests/acp_drive.rs` drives the scripted agent through a prompt, a
+cancel, reported and inferred compactions and a crash. Driving a real
+Vibe this way has not been tested.
+
 ## How a run ends
 
 The session's result becomes `run`'s exit state: 0 when the agent ended

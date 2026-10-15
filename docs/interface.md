@@ -21,6 +21,7 @@ builds that source. `build-binary: true` forces a build.
 | `check --policy FILE --outputs DIR --collected FILE [--report FILE]` | anyone | Checks handed-back outputs and patch against the policy. |
 | `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
 | `workflows check [--root DIR] [--exemptions FILE]` | anyone | Refuses workflow files whose jobs neither run secure-host nor call the reusable workflow, and the other shapes in [workflows-check.md](workflows-check.md). Exit 1 names each file, job and step. |
+| `acp-drive start\|prompt\|events\|cancel\|status\|stop` | a run's agent | Starts the run's child agent and drives it over ACP ([harness.md](harness.md#a-second-agent)). |
 | `audit DIR [--json]` | anyone | Inspects downloaded artifacts offline. Findings do not cause a refusal exit code. See [workflow.md](workflow.md#auditing-downloaded-artifacts). |
 
 Internal commands are hidden: `launch-agent`
@@ -69,6 +70,7 @@ holds no secret.
 | `[setup]` | `packages`, `npm`, and a `script` for toolchains; optional `tools` for a caller-pinned installer ([toolchains](dispatch.md#giving-runs-a-toolchain)); `repo-packages` only in a file given to `agentic-job config`, which adds the `--repo` entry to `packages` |
 | `[inference]` | `url`; `register`, one of `github-oidc`, `plain` and `token-file`, with no default; `audience`; `token-file`; `anthropic-url` and `openai-url` |
 | `[agent]` | `name`, `model`, and `config-repo`, `config-ref`, `config-path` for a public repository holding its configuration; `skills` to install the built-in [skills](skills.md) |
+| `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped` |
 | `[commit]` | `author` and `trailers` of the hand-back's commit |
 

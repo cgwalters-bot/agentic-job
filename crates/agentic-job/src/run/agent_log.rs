@@ -17,6 +17,10 @@ use super::enter::Runner;
 
 /// The transcript's file of the agent's logs.
 pub const TRANSCRIPT_NAME: &str = "agent-logs.txt";
+/// The transcript's files of the run's child agent (`acp-drive`): its
+/// ACP transcript and standard error, and its own logs.
+pub const CHILD_SESSION_NAME: &str = "child-session.txt";
+pub const CHILD_LOGS_NAME: &str = "child-logs.txt";
 /// The most log files taken, the newest.
 const MAX_FILES: usize = 16;
 /// The most of one file taken, its end.
@@ -69,7 +73,7 @@ fn parse_listing(listing: &[u8], since: f64) -> (Vec<Listed>, usize) {
 }
 
 /// Writes the logs in DIR (under HOME) written since SINCE to the
-/// transcript directory TRANSCRIPT, as RUNNER reads them, and says for
+/// transcript's file TO, as RUNNER reads them, and says for
 /// the summary what was taken: a directory that is not there is said to
 /// be missing, not an error, as is one that could not be read.
 pub fn collect(
@@ -77,7 +81,7 @@ pub fn collect(
     home: &Path,
     dir: &str,
     since: f64,
-    transcript: &Path,
+    to: &Path,
 ) -> Result<Value> {
     let shown = format!("~/{dir}");
     let path = home.join(dir);
@@ -166,8 +170,7 @@ pub fn collect(
     let taken = sections.len();
     if taken > 0 {
         sections.reverse();
-        let to = transcript.join(TRANSCRIPT_NAME);
-        std::fs::write(&to, sections.concat())
+        std::fs::write(to, sections.concat())
             .with_context(|| format!("writing {}", to.display()))?;
     }
     Ok(json!({
@@ -220,7 +223,14 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/deeper.log"), "not taken\n").unwrap();
 
-        let got = collect(&Unconfined, home.path(), "logs", 0.0, transcript.path()).unwrap();
+        let got = collect(
+            &Unconfined,
+            home.path(),
+            "logs",
+            0.0,
+            &transcript.path().join(TRANSCRIPT_NAME),
+        )
+        .unwrap();
         assert_eq!(
             got,
             json!({"dir": "~/logs", "files": 2, "omitted_files": 0, "truncated": true})
@@ -236,7 +246,14 @@ mod tests {
         assert!(!text.contains("not taken"));
 
         // Only what was written since the session started.
-        let later = collect(&Unconfined, home.path(), "logs", 4e9, transcript.path()).unwrap();
+        let later = collect(
+            &Unconfined,
+            home.path(),
+            "logs",
+            4e9,
+            &transcript.path().join(TRANSCRIPT_NAME),
+        )
+        .unwrap();
         assert_eq!(later["files"], 0);
     }
 
@@ -256,7 +273,14 @@ mod tests {
             let when = start + std::time::Duration::from_secs(u64::try_from(i).unwrap());
             file.set_modified(when).unwrap();
         }
-        let got = collect(&Unconfined, home.path(), "logs", 0.0, transcript.path()).unwrap();
+        let got = collect(
+            &Unconfined,
+            home.path(),
+            "logs",
+            0.0,
+            &transcript.path().join(TRANSCRIPT_NAME),
+        )
+        .unwrap();
         let kept = MAX_TOTAL_BYTES / MAX_FILE_BYTES;
         assert_eq!(got["files"], kept);
         assert_eq!(got["omitted_files"], count - kept);
@@ -277,7 +301,14 @@ mod tests {
         let transcript = tempfile::tempdir().unwrap();
         symlink(home.path(), home.path().join("linked")).unwrap();
         for dir in ["absent", "linked"] {
-            let got = collect(&Unconfined, home.path(), dir, 0.0, transcript.path()).unwrap();
+            let got = collect(
+                &Unconfined,
+                home.path(),
+                dir,
+                0.0,
+                &transcript.path().join(TRANSCRIPT_NAME),
+            )
+            .unwrap();
             assert_eq!(got, json!({"dir": format!("~/{dir}"), "missing": true}));
         }
         assert!(!transcript.path().join(TRANSCRIPT_NAME).exists());

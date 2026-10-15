@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::compose;
 use crate::exit::Exit;
-use crate::{audit, check, event, policy, run, sandbox, workflows};
+use crate::{acp_drive, audit, check, event, policy, run, sandbox, workflows};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentic-job", version, about, propagate_version = true)]
@@ -39,6 +39,9 @@ pub enum Command {
     /// Check a repository's workflow files for the job shape that keeps untrusted steps sandboxed
     #[command(subcommand)]
     Workflows(workflows::Command),
+    /// Start a second agent over ACP and drive it, as a run's agent: see docs/harness.md
+    #[command(name = acp_drive::COMMAND, subcommand)]
+    AcpDrive(acp_drive::Command),
     /// Become the agent, as the sandbox user: what `run` has the session start
     #[command(name = run::launch::COMMAND, hide = true)]
     LaunchAgent(run::launch::Args),
@@ -59,6 +62,7 @@ impl Command {
             Self::Event(args) => event::run(args),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),
+            Self::AcpDrive(command) => command.run(),
             Self::LaunchAgent(args) => run::launch::run(args),
             Self::Helper(op) => sandbox::helper::run(op),
         }
@@ -217,6 +221,38 @@ mod tests {
             &["helper", "enter", "--", "true"],
             &["helper", "egress-log"],
             &["helper", "reap", "--uid", "1"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["agentic-job"].iter().chain(bad)).is_err(),
+                "{bad:?} parsed"
+            );
+        }
+    }
+
+    /// Not in the plan's table: what a run's agent drives a child with.
+    #[test]
+    fn the_driver_parses() {
+        let lines: &[&[&str]] = &[
+            &["start", "--agent", "vibe"],
+            &["start", "--agent", "vibe", "--model", "m", "--cwd", "/w"],
+            &["prompt", "--timeout", "100", "What is your task?"],
+            &["prompt", "--", "--help"],
+            &["events"],
+            &["events", "--since", "12"],
+            &["cancel"],
+            &["stop"],
+            &["status"],
+        ];
+        for args in lines {
+            Cli::try_parse_from(["agentic-job", "acp-drive"].iter().chain(*args))
+                .unwrap_or_else(|err| panic!("{args:?}: {err}"));
+        }
+        for bad in [
+            &["acp-drive"][..],
+            &["acp-drive", "start"],
+            &["acp-drive", "prompt"],
+            &["acp-drive", "prompt", "--timeout", "0", "x"],
+            &["acp-drive", "events", "--since", "-1"],
         ] {
             assert!(
                 Cli::try_parse_from(["agentic-job"].iter().chain(bad)).is_err(),

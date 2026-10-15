@@ -14,7 +14,7 @@
 //! there) or on the run (the task, `--meta`, the policy) stays with the
 //! command that meets it.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use super::{Config, Limits as LimitsTable};
 use crate::run::agent::{self, Kind};
@@ -43,6 +43,8 @@ pub struct Checked {
     /// `None` for a run with no inference proxy.
     pub endpoint: Option<Endpoint>,
     pub limits: Limits,
+    /// The model of the run's child agent, Vibe, if it has one.
+    pub child: Option<String>,
 }
 
 /// The limits, with the proxy's part in them checked: a cap on model
@@ -93,6 +95,48 @@ impl Config {
         Ok(())
     }
 
+    /// The run's child agent, if `[child-agent]` names one: Vibe, with a
+    /// model, behind the run's proxy, which it can reach, and under a cap
+    /// on model requests. The cap is the bound: the session's budget reads
+    /// only the cost the main agent reports, while the proxy counts every
+    /// request made with the run's token, the child's too, so a run
+    /// capped only by its budget could spend without bound through the
+    /// child.
+    fn check_child(
+        &self,
+        endpoint: Option<&Endpoint>,
+        direct: &[Direct],
+        limits: &Limits,
+    ) -> Result<Option<String>> {
+        let child = &self.child_agent;
+        let model = child.model.as_deref().filter(|m| !m.is_empty());
+        if child.name.is_empty() {
+            ensure!(
+                model.is_none(),
+                "child-agent.model means nothing without child-agent.name"
+            );
+            return Ok(None);
+        }
+        ensure!(
+            child.name == Kind::Vibe.as_str(),
+            "child-agent.name: {:?} cannot be a child agent, only \"vibe\"",
+            child.name
+        );
+        let model =
+            model.context("child-agent.model is not set: vibe needs a Mistral model name")?;
+        let endpoint = endpoint.context(
+            "child-agent needs inference: set [inference] url and register (workflow inputs \
+             inference-url and inference-register)",
+        )?;
+        self.check_reachable(Kind::Vibe, endpoint, direct)?;
+        ensure!(
+            limits.max_requests.is_some(),
+            "child-agent needs limits.max-requests: the budget reads only the cost the main agent \
+             reports, and the proxy's count of requests is what covers the child's"
+        );
+        Ok(Some(model.to_owned()))
+    }
+
     /// The tables that say how the machine is set up, checked.
     pub fn check_host(&self) -> Result<Host> {
         self.sandbox.validate()?;
@@ -136,6 +180,7 @@ impl Config {
                 "vibe needs limits.max-requests: its model has no authoritative local price"
             );
         }
+        let child = self.check_child(endpoint.as_ref(), &host.direct, &limits)?;
         handback::author(&self.commit)?;
         handback::check_trailers(&self.commit.trailers)?;
         Ok(Checked {
@@ -143,6 +188,7 @@ impl Config {
             kind,
             endpoint,
             limits,
+            child,
         })
     }
 }
@@ -158,6 +204,8 @@ mod tests {
     const PROXY: &str = "[inference]\nurl = \"http://100.64.0.1:18080\"\n";
     const OIDC: &str = "register = \"github-oidc\"\naudience = \"proxy\"\n";
     const DIRECT: &str = "[egress]\ndirect = [\"http://100.64.0.1:18080\"]\n";
+    const CHILD: &str = "[child-agent]\nname = \"vibe\"\nmodel = \"glm\"\n";
+    const REQUESTS: &str = "[limits]\ntimeout-minutes = 10\nmax-requests = 50\n";
 
     fn direct(url: &str) -> String {
         format!("[egress]\ndirect = [{url:?}]\n")
@@ -205,7 +253,13 @@ mod tests {
         let text = format!(
             "[agent]\nname = \"opencode\"\nmodel = \"m\"\nskills = true\n{PROXY}{OIDC}{CAPPED}{DIRECT}"
         );
-        assert_eq!(checked(&text).unwrap().kind, Kind::Opencode);
+        let opencode = checked(&text).unwrap();
+        assert_eq!((opencode.kind, opencode.child), (Kind::Opencode, None));
+
+        let text = format!(
+            "[agent]\nname = \"opencode\"\nmodel = \"m\"\n{CHILD}{PROXY}{OIDC}{REQUESTS}{DIRECT}"
+        );
+        assert_eq!(checked(&text).unwrap().child.as_deref(), Some("glm"));
     }
 
     /// One row for each table a command used to check by itself: the
@@ -322,6 +376,35 @@ model = \"m\"
 {CAPPED}{DIRECT}"
                 ),
                 "add \"https://100.64.0.2:443\" to egress.direct",
+            ),
+            (
+                format!("{FAKE}{CAPPED}[child-agent]\nmodel = \"glm\"\n"),
+                "child-agent.model means nothing without child-agent.name",
+            ),
+            (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}{REQUESTS}{DIRECT}[child-agent]\nname = \"opencode\"\nmodel = \"m\"\n"
+                ),
+                "cannot be a child agent, only \"vibe\"",
+            ),
+            (
+                format!("{CLAUDE}{PROXY}{OIDC}{REQUESTS}{DIRECT}[child-agent]\nname = \"vibe\"\n"),
+                "child-agent.model is not set",
+            ),
+            (
+                format!("{FAKE}{CAPPED}{CHILD}"),
+                "child-agent needs inference",
+            ),
+            (
+                format!("{CLAUDE}{PROXY}{OIDC}{CAPPED}{DIRECT}{CHILD}"),
+                "child-agent needs limits.max-requests",
+            ),
+            (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}[limits]\ntimeout-minutes = 10\nuncapped = true\n\
+                     {DIRECT}{CHILD}"
+                ),
+                "child-agent needs limits.max-requests",
             ),
             (
                 format!("{FAKE}{CAPPED}[commit]\nauthor = \"nobody\"\n"),
