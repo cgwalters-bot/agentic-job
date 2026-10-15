@@ -153,6 +153,7 @@ test('agent-board proposals pass the pinned collector and bounded project check'
 });
 
 test('checked issue actions preserve the actual handler payload', async () => {
+  for (const labelType of ['add_labels', 'remove_labels']) {
   const repo = 'owner/source';
   const prefix = 'r'.repeat(64);
   for (const [name, labels, max, blocked, ok] of [
@@ -172,7 +173,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      const type = labels ? 'add_labels' : 'close_issue';
+       const type = labels ? labelType : 'close_issue';
       const item = labels
         ? { type, repo, item_number: 7, labels }
         : { type, repo, issue_number: 7, ...(name === 'close with body' ? { body: 'Do not silently discard this comment.' } : {}) };
@@ -208,6 +209,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
         github: { rest: { issues: {
           get: async () => ({ data: entity }),
           addLabels: async payload => { calls.push(payload); return { data: payload.labels.map(name => ({ name })) }; },
+          removeLabel: async payload => { calls.push(payload); return { data: [] }; },
           update: async payload => { calls.push(payload); return { data: { ...entity, state: 'closed' } }; },
           createComment: async () => { assert.fail('closure must not post a comment'); },
         } } },
@@ -217,8 +219,10 @@ test('checked issue actions preserve the actual handler payload', async () => {
         const handler = await require(join(js, `${type}.cjs`)).main(config[type]);
         const result = await handler(verdict.items[0], {});
         assert.equal(result.success, true, `${name}: ${JSON.stringify(result)}`);
-        assert.deepEqual(calls, [{ owner: 'owner', repo: 'source', issue_number: 7,
-          ...(labels ? { labels } : { state: 'closed', state_reason: 'completed' }) }], name);
+        const target = { owner: 'owner', repo: 'source', issue_number: 7 };
+        assert.deepEqual(calls, labels && type === 'remove_labels'
+          ? labels.map(name => ({ ...target, name }))
+          : [{ ...target, ...(labels ? { labels } : { state: 'closed', state_reason: 'completed' }) }], name);
         if (!labels) {
           // Defense in depth: even if a body reaches apply, the workflow's
           // explicit configuration must suppress the handler's comment path.
@@ -234,6 +238,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
+  }
   }
 });
 

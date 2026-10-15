@@ -212,11 +212,11 @@ Enforcement: [apply.test.cjs](../workflow/apply.test.cjs),
 `issue actions keep checked repository and caps, not output-repo or event targets`.
 
 **RC-012 — Issue payload bounds.** Check MUST require explicit repository and
-positive integer targets for `close_issue` and `add_labels`, and refuse target
+positive integer targets for `close_issue`, `add_labels` and `remove_labels`, and refuse target
 aliases. Closing MUST reject `body`; issue creation MUST reject relationships
 to other issues. Labels MUST fit the policy's case-insensitive allow/block
 bounds. Added labels MUST also fit the per-request count and the 1–64-character
-ASCII subset documented in [safe outputs](../docs/safe-outputs.md#closing-issues-and-adding-labels),
+ASCII subset documented in [safe outputs](../docs/safe-outputs.md#closing-issues-and-changing-labels),
 rather than be silently filtered or changed.
 Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
 `bounded_issue_actions`, `issue_action_payloads_are_not_silently_changed`,

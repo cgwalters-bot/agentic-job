@@ -68,7 +68,7 @@ gh-aw's own compiled workflows, and CI fails when the file is not what
 the pinned commit gives.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
-`close_issue`, `add_labels`, `update_project`, `push_to_pull_request_branch`,
+`close_issue`, `add_labels`, `remove_labels`, `update_project`, `push_to_pull_request_branch`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -104,13 +104,13 @@ Apply also guards the handler's GraphQL client: it refuses implicit field
 creation and field IDs not read back with an exact allowlisted name. This stops
 the handler's normalization from writing an unlisted field or creating schema.
 
-### Closing issues and adding labels
+### Closing issues and changing labels
 
 These operations are bounded to the run's exact `repo`, admitted by the caller's
 repository bounds, and their per-type `max` and the total `max_outputs`. They do
 not use `output-repo` or fall back to the triggering event's issue. Requests must
 include that explicit `repo` and a positive integer `issue_number` for
-`close_issue`, or `item_number` for `add_labels` (issues or pull requests).
+`close_issue`, or `item_number` for `add_labels` and `remove_labels` (issues or pull requests).
 Temporary IDs, target aliases and duplicate relationships are refused.
 
 ```toml
@@ -120,6 +120,11 @@ max = 2
 [outputs.add_labels]
 max = 3
 allowed = ["triage", "documentation"]
+blocked = ["release"]
+
+[outputs.remove_labels]
+max = 2
+allowed = ["triage", "in-progress"]
 blocked = ["release"]
 ```
 
@@ -131,10 +136,20 @@ with no leading/trailing whitespace or leading `-`. Unicode and other punctuatio
 are refused rather than sanitized. `max` bounds both requests and labels within
 each request; requests exceeding either limit are refused, not partially applied.
 The handler does not create missing labels. Create the labels first.
+`remove_labels` is off unless listed in bounds. Its explicit `allowed` list
+stops an agent from removing authorization or automation labels outside the
+caller's policy. It uses the same name restrictions, case-insensitive exact
+allow/block matching, repository scope and request/label caps as `add_labels`.
+It requires a nonempty `labels` array of strings; an empty allowlist permits
+no removals. Apply removes each checked label separately; an absent label is
+a no-op. Reapplying a request is therefore safe. No label definitions are deleted.
+The pinned handler records other API errors as `failedLabels` but can report
+success after partial removal; callers should inspect the apply log when a
+label transition matters, rather than treating job success as atomic completion.
 For example, `{"type":"close_issue","repo":"OWNER/REPO","issue_number":7}`
 closes issue 7 without a comment. `body` is refused; use a separately bounded
 `add_comment` request to post a comment.
-Both operations need issue-write access in apply (PR labels can instead use
+These operations need issue-write access in apply (PR labels can instead use
 pull-request write access). No producer or check token gains write access.
 
 ### Pushing to a pull request's branch

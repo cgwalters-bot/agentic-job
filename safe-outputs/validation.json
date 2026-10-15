@@ -200,6 +200,22 @@
       }
     }
   },
+  "remove_labels": {
+    "defaultMax": 5,
+    "fields": {
+      "item_number": {
+        "issueNumberOrTemporaryId": true
+      },
+      "labels": {
+        "required": true,
+        "type": "array"
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
   "update_project": {
     "defaultMax": 10,
     "fields": {

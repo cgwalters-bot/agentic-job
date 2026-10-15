@@ -410,7 +410,7 @@ fn redirections_to(
             _ => problems.push("an update_project requires a nonempty fields object".to_owned()),
         }
     }
-    if matches!(output, "close_issue" | "add_labels") {
+    if matches!(output, "close_issue" | "add_labels" | "remove_labels") {
         if !item
             .get("repo")
             .and_then(Value::as_str)
@@ -453,17 +453,25 @@ fn redirections_to(
             problems.push(format!("a {output} with unsupported target field {alias}"));
         }
     }
-    if matches!(output, CREATE_ISSUE | "add_labels")
+    if output == "remove_labels"
+        && !item
+            .get("labels")
+            .and_then(Value::as_array)
+            .is_some_and(|labels| !labels.is_empty())
+    {
+        problems.push("a remove_labels requires a nonempty labels array".to_owned());
+    }
+    if matches!(output, CREATE_ISSUE | "add_labels" | "remove_labels")
         && let Some(limit) = policy.safe_outputs.others.get(output)
         && (limit.allowed.is_some() || !limit.blocked.is_empty())
         && let Some(labels) = item.get("labels")
     {
         match labels.as_array() {
             Some(labels) => {
-                // The pinned add_labels handler uses max for both requests and
+                // The pinned label handlers use max for both requests and
                 // labels per request. Refuse rather than silently drop labels.
-                if output == "add_labels" && labels.len() > limit.max as usize {
-                    problems.push("an add_labels exceeding the per-request label limit".to_owned());
+                if output != CREATE_ISSUE && labels.len() > limit.max as usize {
+                    problems.push(format!("a {output} exceeding the per-request label limit"));
                 }
                 for label in labels {
                     let permitted = label.as_str().is_some_and(|label| {
@@ -471,7 +479,7 @@ fn redirections_to(
                             // A conservative fixed-point subset of gh-aw's
                             // sanitizer: no Unicode hardening, mention escaping,
                             // punctuation removal or UTF-16 truncation can alter it.
-                            && (output != "add_labels"
+                            && (output == CREATE_ISSUE
                                 || (!label.is_empty()
                                     && label.len() <= 64
                                     && !label.starts_with('-')
@@ -1289,13 +1297,14 @@ mod tests {
         for (output, number_key) in [
             ("close_issue", "issue_number"),
             ("add_labels", "item_number"),
+            ("remove_labels", "item_number"),
         ] {
             let mut policy = policy();
             policy.safe_outputs.others.insert(
                 output.to_owned(),
                 crate::policy::OutputLimit {
                     max: 1,
-                    allowed: (output == "add_labels").then(|| vec!["triage".to_owned()]),
+                    allowed: (output != "close_issue").then(|| vec!["triage".to_owned()]),
                     ..Default::default()
                 },
             );
@@ -1320,12 +1329,32 @@ mod tests {
                     "{output} {key}: {item}"
                 );
             }
-            if output == "add_labels" {
+            if output != "close_issue" {
                 for labels in [json!(["release"]), json!([{"name": "triage"}])] {
                     let mut item = plain.clone();
                     item["labels"] = labels;
                     assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
                 }
+            }
+            if output == "remove_labels" {
+                for labels in [
+                    None,
+                    Some(Value::Null),
+                    Some(json!("triage")),
+                    Some(json!([])),
+                ] {
+                    let mut item = plain.clone();
+                    item.as_object_mut().unwrap().remove("labels");
+                    if let Some(labels) = labels {
+                        item["labels"] = labels;
+                    }
+                    assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+                }
+                let limit = policy.safe_outputs.others.get_mut(output).unwrap();
+                limit.allowed = Some(vec![]);
+                assert!(!redirections(plain.as_object().unwrap(), &policy).is_empty());
+                policy.safe_outputs.others.get_mut(output).unwrap().allowed =
+                    Some(vec!["triage".to_owned()]);
             }
             let dir = tempfile::tempdir().unwrap();
             let out = dir.path().join("out");
@@ -1349,34 +1378,36 @@ mod tests {
 
     #[test]
     fn issue_action_payloads_are_not_silently_changed() {
-        for (labels, max, ok) in [
-            (vec!["triage", "docs"], 2, true),
-            (vec!["triage", "docs"], 1, false),
-            (vec!["release&"], 1, false),
-            (vec!["release\u{200b}"], 1, false),
-            (vec!["ｒｅｌｅａｓｅ"], 1, false),
-            (vec!["@release"], 1, false),
-            (vec!["-release"], 1, false),
-            (vec![""], 1, false),
-            (vec!["triage "], 1, false),
-            (vec!["area/docs: needs_triage"], 1, true),
-        ] {
-            let mut policy = policy();
-            policy.safe_outputs.others.insert(
-                "add_labels".to_owned(),
-                crate::policy::OutputLimit {
-                    max,
-                    allowed: Some(labels.iter().map(|label| (*label).to_owned()).collect()),
-                    blocked: vec!["release".to_owned()],
-                    ..crate::policy::OutputLimit::default()
-                },
-            );
-            let item = json!({"type": "add_labels", "repo": policy.repo, "item_number": 7, "labels": labels});
-            assert_eq!(
-                redirections(item.as_object().unwrap(), &policy).is_empty(),
-                ok,
-                "{item}"
-            );
+        for output in ["add_labels", "remove_labels"] {
+            for (labels, max, ok) in [
+                (vec!["triage", "docs"], 2, true),
+                (vec!["triage", "docs"], 1, false),
+                (vec!["release&"], 1, false),
+                (vec!["release\u{200b}"], 1, false),
+                (vec!["ｒｅｌｅａｓｅ"], 1, false),
+                (vec!["@release"], 1, false),
+                (vec!["-release"], 1, false),
+                (vec![""], 1, false),
+                (vec!["triage "], 1, false),
+                (vec!["area/docs: needs_triage"], 1, true),
+            ] {
+                let mut policy = policy();
+                policy.safe_outputs.others.insert(
+                    output.to_owned(),
+                    crate::policy::OutputLimit {
+                        max,
+                        allowed: Some(labels.iter().map(|label| (*label).to_owned()).collect()),
+                        blocked: vec!["release".to_owned()],
+                        ..crate::policy::OutputLimit::default()
+                    },
+                );
+                let item = json!({"type": output, "repo": policy.repo, "item_number": 7, "labels": labels});
+                assert_eq!(
+                    redirections(item.as_object().unwrap(), &policy).is_empty(),
+                    ok,
+                    "{item}"
+                );
+            }
         }
         let policy = policy();
         for body in [json!("comment"), json!(""), Value::Null] {

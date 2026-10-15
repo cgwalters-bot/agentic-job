@@ -628,7 +628,7 @@ The artifact name selects untrusted data only; it does not select the policy,
 binary or handler code. Upload just the hand-back files, not a checkout.
 For patch proposals the existing branch, base and patch guards still apply.
 `exit` is empty because no agent ran. Issue closure and label additions use the
-[bounded issue actions](safe-outputs.md#closing-issues-and-adding-labels).
+[bounded issue actions](safe-outputs.md#closing-issues-and-changing-labels).
 Project updates use [named project and field bounds](safe-outputs.md#updating-project-fields)
 and the apply environment token described below, not the job token.
 

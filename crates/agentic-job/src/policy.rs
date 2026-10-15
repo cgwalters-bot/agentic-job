@@ -36,6 +36,7 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "create_issue",
     "close_issue",
     "add_labels",
+    "remove_labels",
     "update_project",
     PUSH_TO_PULL_REQUEST_BRANCH,
     "noop",
@@ -346,13 +347,13 @@ impl OutputLimit {
             glob(pattern).with_context(|| format!("outputs.{output}: the glob {pattern:?}"))?;
         }
         ensure!(
-            matches!(output, "create_issue" | "add_labels")
+            matches!(output, "create_issue" | "add_labels" | "remove_labels")
                 || (self.allowed.is_none() && self.blocked.is_empty()),
-            "outputs.{output}: label limits are supported only for create_issue and add_labels"
+            "outputs.{output}: label limits are supported only for create_issue, add_labels and remove_labels"
         );
         ensure!(
-            output != "add_labels" || self.allowed.is_some(),
-            "outputs.add_labels requires an explicit allowed label list"
+            !matches!(output, "add_labels" | "remove_labels") || self.allowed.is_some(),
+            "outputs.{output} requires an explicit allowed label list"
         );
         for label in self.allowed.iter().flatten().chain(&self.blocked) {
             ensure!(
@@ -1636,12 +1637,12 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     #[test]
     fn issue_actions_compile_with_label_bounds() {
         let mut bounds = bounds();
-        for output in ["close_issue", "add_labels"] {
+        for output in ["close_issue", "add_labels", "remove_labels"] {
             bounds.outputs.insert(
                 output.to_owned(),
                 OutputLimit {
                     max: 2,
-                    allowed: (output == "add_labels").then(|| vec!["triage".to_owned()]),
+                    allowed: (output != "close_issue").then(|| vec!["triage".to_owned()]),
                     ..Default::default()
                 },
             );
@@ -1654,6 +1655,12 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 .unwrap();
             policy.validate().unwrap();
             assert_eq!(policy.safe_outputs.max_of(output), Some(2));
+            if output != "close_issue" {
+                bounds.outputs.get_mut(output).unwrap().allowed = None;
+                assert!(bounds.validate().is_err());
+                bounds.outputs.get_mut(output).unwrap().allowed = Some(vec![]);
+                bounds.validate().unwrap();
+            }
         }
         bounds.outputs.get_mut("add_labels").unwrap().allowed = None;
         assert!(bounds.validate().is_err());
