@@ -486,6 +486,30 @@ fn redirections_to(
     {
         problems.push("a remove_labels requires a nonempty labels array".to_owned());
     }
+    if output == "create_check_run" {
+        // An agent-chosen success could satisfy a required check by that name.
+        if item.get("conclusion").and_then(Value::as_str) == Some("success") {
+            problems.push("a create_check_run that concludes success".to_owned());
+        }
+        // The handler posts on this pull request's head, in the calling
+        // repository; without one it would take the apply job's own commit.
+        if !item
+            .get("pull_request_number")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
+        {
+            problems.push(
+                "a create_check_run requires a positive integer pull_request_number".to_owned(),
+            );
+        }
+        for alias in ["pr_number", "pull_number", "pr", "item_number", "target"] {
+            if item.contains_key(alias) {
+                problems.push(format!(
+                    "a create_check_run with unsupported target field {alias}"
+                ));
+            }
+        }
+    }
     if matches!(output, CREATE_ISSUE | "add_labels" | "remove_labels")
         && let Some(limit) = policy.safe_outputs.others.get(output)
         && (limit.allowed.is_some() || !limit.blocked.is_empty())
@@ -619,6 +643,31 @@ fn target_key(output: &str) -> Option<&'static str> {
         "update_pull_request" | MARK_READY => Some("pull_request_number"),
         _ => None,
     }
+}
+
+/// A check run named otherwise than the policy pins, in the agent's own
+/// lines. The handler names the run from its configuration, the bounds'
+/// pin, and gh-aw's collector drops a `name` its rules do not list, so
+/// another name would not be posted; it is refused rather than seem
+/// honoured. The pin, not this, is what keeps the name.
+fn check_run_names(lines: &[u8], policy: &Policy) -> Vec<String> {
+    let pinned = policy
+        .safe_outputs
+        .others
+        .get("create_check_run")
+        .and_then(|limit| limit.name.as_deref());
+    String::from_utf8_lossy(lines)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Map<String, Value>>(line).ok())
+        .filter(|item| item_type(item).replace('-', "_") == "create_check_run")
+        .filter_map(|item| {
+            item.get("name")
+                .filter(|name| name.as_str().is_none() || name.as_str() != pinned)
+                .map(|name| {
+                    format!("a create_check_run with name {name}, which is not the policy's")
+                })
+        })
+        .collect()
 }
 
 fn is_handback_file(name: &str) -> bool {
@@ -756,6 +805,9 @@ fn check_outputs_to(
             .iter()
             .flat_map(|item| redirections_to(item, policy, comment)),
     );
+    if let Some(lines) = contents.get(OUTPUTS_FILE) {
+        errors.extend(check_run_names(lines, policy));
+    }
     errors.extend(
         items
             .iter()
@@ -1699,6 +1751,85 @@ mod tests {
             }
             policy.safe_outputs.others.remove(output);
             assert!(!redirections(plain.as_object().unwrap(), &policy).is_empty());
+        }
+    }
+
+    #[test]
+    fn check_runs_keep_the_pinned_name_and_no_success() {
+        let mut policy = policy();
+        policy.safe_outputs.others.insert(
+            "create_check_run".to_owned(),
+            crate::policy::OutputLimit {
+                max: 1,
+                name: Some("agent verdict".to_owned()),
+                ..Default::default()
+            },
+        );
+        let plain = json!({"type": "create_check_run", "conclusion": "neutral",
+            "title": "t", "summary": "s", "pull_request_number": 7});
+        for (key, value, ok) in [
+            ("conclusion", json!("neutral"), true),
+            ("conclusion", json!("failure"), true),
+            ("conclusion", json!("success"), false),
+            ("pull_request_number", json!(0), false),
+            ("pull_request_number", json!("7"), false),
+            ("pull_request_number", Value::Null, false),
+            ("pr_number", json!(8), false),
+            ("target", json!("*"), false),
+            ("repo", json!("other/repo"), false),
+        ] {
+            let mut item = plain.clone();
+            item[key] = value;
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{key}: {item}"
+            );
+        }
+        let mut item = plain.clone();
+        item.as_object_mut().unwrap().remove("pull_request_number");
+        assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join(OUTPUTS_FILE), format!("{plain}\n")).unwrap();
+        let collected = dir.path().join("collected.json");
+        for count in [1, 2] {
+            std::fs::write(
+                &collected,
+                json!({"items": vec![plain.clone(); count], "errors": []}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                check_outputs(&out, &collected, &policy).unwrap().ok,
+                count == 1,
+                "{count}"
+            );
+        }
+        // The collector drops `name`, so it is looked for in the agent's lines.
+        std::fs::write(
+            &collected,
+            json!({"items": [plain], "errors": []}).to_string(),
+        )
+        .unwrap();
+        for (name, ok) in [
+            (json!("agent verdict"), true),
+            (json!("Agent Verdict"), false),
+            (json!("required-ci"), false),
+            (json!(["agent verdict"]), false),
+            (Value::Null, false),
+        ] {
+            for kind in ["create_check_run", "create-check-run"] {
+                let mut item = plain.clone();
+                item["type"] = json!(kind);
+                item["name"] = name.clone();
+                std::fs::write(out.join(OUTPUTS_FILE), format!("{item}\n")).unwrap();
+                assert_eq!(
+                    check_outputs(&out, &collected, &policy).unwrap().ok,
+                    ok,
+                    "{item}"
+                );
+            }
         }
     }
 

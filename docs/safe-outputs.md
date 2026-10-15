@@ -69,7 +69,7 @@ the pinned commit gives.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
-`mark_pull_request_as_ready_for_review`, `update_project`, `push_to_pull_request_branch`,
+`mark_pull_request_as_ready_for_review`, `create_check_run`, `update_project`, `push_to_pull_request_branch`,
 `add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`,
 `noop`, `missing_tool` and `missing_data`.
 
@@ -245,6 +245,34 @@ A re-run of apply finds that comment by its hidden name and posts it only once.
 makes issue 6 a sub-issue of issue 5; the handler skips a sub-issue that already
 has a parent. Apply needs pull-request write access for the first and issue
 write access for the second.
+
+### Posting a check run
+
+An agent-chosen `success` could satisfy a required check, so `create_check_run`
+is off unless listed in bounds, and its bounds pin the check run's name:
+
+```toml
+[outputs.create_check_run]
+max = 1
+name = "agent verdict"
+```
+
+The name is 1–64 characters, without control characters or surrounding
+whitespace. gh-aw's handler takes it from apply's configuration, never from
+the request; check refuses a request that names another one, and the
+`success` conclusion. Other conclusions remain the agent's, and GitHub counts
+`neutral` and `skipped` as passing a required check: pin a name no ruleset or
+branch protection requires. When two bounds files both allow the type, their
+names must be the same.
+
+A request must give a positive integer `pull_request_number`, and no alias for
+it; for example `{"type":"create_check_run","pull_request_number":7,"conclusion":"neutral","title":"Verdict","summary":"..."}`.
+The handler posts on that pull request's current head in the calling
+repository, so apply refuses a run whose `repo` is another repository.
+Which pull request in it is the agent's choice. GitHub lets only an app
+create check runs: apply needs `checks: write` for the job token, and fails
+with `SAFE_OUTPUTS_PAT` set to a user's token. If the pinned name is the
+calling workflow's name, the handler appends "(Result)" to it.
 
 ### Pushing to a pull request's branch
 

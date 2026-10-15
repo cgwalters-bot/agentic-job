@@ -235,6 +235,17 @@ nonempty `allowed` list names exactly, at most `max` per request.
 Enforcement: tests `person_actions_name_only_allowed_logins` and
 `person_actions_require_allowed_logins`.
 
+**RC-024 — Check run bounds.** Bounds MUST pin a `create_check_run` name, and
+apply MUST name the run from it. Check MUST refuse another name, the `success`
+conclusion, and a target other than a positive integer `pull_request_number`.
+Apply MUST refuse the type when the run's repository is not the calling one.
+Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
+`check_runs_keep_the_pinned_name_and_no_success`,
+[policy.rs](../crates/agentic-job/src/policy.rs) test
+`check_runs_take_their_name_from_the_bounds`, and
+[apply.test.cjs](../workflow/apply.test.cjs)
+`a check run keeps its pinned name and posts only in the run repository`.
+
 **RC-013 — Re-run application.** A re-run of apply MUST NOT post an accepted
 comment, issue or pull request that an earlier attempt of the same run posted,
 and MUST apply the comments and issues it did not. Apply names each by run

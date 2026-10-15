@@ -1,0 +1,14 @@
+# Bounds of CI's end-to-end check run (ci.yml's e2e-check-run): one
+# neutral check run on the head of the pull request the run is for, from
+# its branch or its merge group's. The name is pinned here, and no
+# required check has it, so no conclusion the agent may choose can
+# satisfy one.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["**"]
+max_outputs = 1
+max_patch_bytes = 1048576
+max_patch_files = 1
+
+[outputs]
+create_check_run = { max = 1, name = "agentic-job e2e check run" }

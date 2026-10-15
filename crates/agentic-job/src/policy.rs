@@ -72,6 +72,7 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "assign_to_user",
     "close_pull_request",
     "link_sub_issue",
+    "create_check_run",
     "update_project",
     PUSH_TO_PULL_REQUEST_BRANCH,
     "noop",
@@ -105,6 +106,10 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
 /// A run hands back one patch, so at most one pull request, or one push.
 const MAX_PULL_REQUESTS: u32 = 1;
 const MAX_REPLACEMENT_COMMITS: u32 = 50;
+
+/// The longest check run name bounds may pin: room for a readable name,
+/// none for a page of text in the forge's checks list.
+const MAX_CHECK_RUN_NAME: usize = 64;
 
 /// `--outputs all`: every type the bounds list.
 const ALL_OUTPUTS: &str = "all";
@@ -339,6 +344,11 @@ pub struct OutputLimit {
     /// admits that many individually checked, nonempty commit patches.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub replacement_max_commits: u32,
+    /// The one name a check run gets, from the bounds and never the agent:
+    /// gh-aw's handler takes it from its configuration. Required for
+    /// `create_check_run`, and only for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -441,6 +451,19 @@ impl OutputLimit {
             ensure!(
                 !label.is_empty() && label == label.trim() && !label.chars().any(char::is_control),
                 "outputs.{output}: invalid label {label:?}"
+            );
+        }
+        ensure!(
+            (output == "create_check_run") == self.name.is_some(),
+            "outputs.{output}: `name` is required for create_check_run, and only for it"
+        );
+        if let Some(name) = &self.name {
+            ensure!(
+                !name.is_empty()
+                    && name.len() <= MAX_CHECK_RUN_NAME
+                    && name == name.trim()
+                    && !name.chars().any(char::is_control),
+                "outputs.{output}: invalid check run name {name:?}"
             );
         }
         Ok(())
@@ -1128,6 +1151,10 @@ impl Bounds {
                 .map_or_else(Vec::new, |bound| bound.fields.clone()),
             branches: Vec::new(),
             replacement_max_commits: 0,
+            name: self
+                .outputs
+                .get(output)
+                .and_then(|bound| bound.name.clone()),
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -1288,6 +1315,9 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
                 .projects
                 .retain(|project| bound.projects.contains(project));
             limit.fields.retain(|field| bound.fields.contains(field));
+            if limit.name != bound.name {
+                limit.name = None;
+            }
             true
         } else {
             false
@@ -1325,6 +1355,16 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
                 "{output} has no common fields in both bounds files"
             )]);
         }
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get("create_check_run")
+        .is_some_and(|limit| limit.name.is_none())
+    {
+        return Err(vec![
+            "create_check_run has different check run names in the two bounds files".to_owned(),
+        ]);
     }
     policy.safe_outputs.create_pull_request = match (
         policy.safe_outputs.create_pull_request,
@@ -1909,6 +1949,68 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             );
             assert!(intersect(compiled(&["octocat"]), compiled(&["hubot"])).is_err());
         }
+    }
+
+    #[test]
+    fn check_runs_take_their_name_from_the_bounds() {
+        let accepts = |output: &str, text: &str| {
+            toml::from_str::<OutputLimit>(text).is_ok_and(|limit| limit.validate(output).is_ok())
+        };
+        for (output, text, ok) in [
+            ("create_check_run", "max = 1\nname = 'agent verdict'", true),
+            (
+                "create_check_run",
+                "max = 1\nname = 'agent/verdict (draft)'",
+                true,
+            ),
+            ("create_check_run", "max = 1", false),
+            ("create_check_run", "max = 1\nname = ''", false),
+            ("create_check_run", "max = 1\nname = ' agent'", false),
+            ("create_check_run", "max = 1\nname = \"a\\nb\"", false),
+            (
+                "create_check_run",
+                &format!("max = 1\nname = '{}'", "a".repeat(65)),
+                false,
+            ),
+            ("add_comment", "max = 1\nname = 'agent verdict'", false),
+        ] {
+            assert_eq!(accepts(output, text), ok, "{output}: {text}");
+        }
+
+        let configured = |name: &str| {
+            let mut bounds = bounds();
+            bounds.outputs.insert(
+                "create_check_run".to_owned(),
+                OutputLimit {
+                    max: 2,
+                    name: Some(name.to_owned()),
+                    ..OutputLimit::default()
+                },
+            );
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs: "create_check_run",
+                    ..request()
+                })
+                .unwrap()
+        };
+        let policy = configured("agent verdict");
+        policy.validate().unwrap();
+        // gh-aw's handler takes a missing `max` for one and a missing
+        // `name` for the workflow's: both are always written.
+        let config = serde_json::to_value(&policy.safe_outputs).unwrap();
+        assert_eq!(
+            config["create_check_run"],
+            serde_json::json!({"max": 2, "name": "agent verdict"})
+        );
+        assert_eq!(
+            intersect(policy.clone(), configured("agent verdict"))
+                .unwrap()
+                .safe_outputs,
+            policy.safe_outputs
+        );
+        assert!(intersect(policy, configured("required-ci")).is_err());
     }
 
     #[test]

@@ -362,6 +362,65 @@ test('checked reviewer and assignee requests name exactly the allowed logins', a
   }
 });
 
+test('a checked check run is posted with the pinned name on the pull request head', async () => {
+  const repo = 'owner/source';
+  const item = { type: 'create_check_run', conclusion: 'neutral', title: 'Verdict', summary: 'Looked.', pull_request_number: 7 };
+  for (const [name, line, ok] of [
+    ['neutral', item, true],
+    ['the pinned name', { ...item, name: 'agent verdict' }, true],
+    ['another name', { ...item, name: 'required-ci' }, false],
+    ['success', { ...item, conclusion: 'success' }, false],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'handler-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.create_check_run]\nmax = 1\nname = "agent verdict"\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'create_check_run',
+        '--max-outputs', '1'], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      if (!ok) continue;
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), GITHUB_REPOSITORY: repo, REPO: repo, OUTPUT_REPO: repo,
+        ITEM_REPO: repo, BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const calls = [];
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, startGroup() {}, endGroup() {} },
+        // The apply job's own commit, which the check run must not take.
+        context: { repo: { owner: 'owner', repo: 'source' }, payload: {}, eventName: 'workflow_dispatch', sha: 'a'.repeat(40) },
+        github: { rest: {
+          pulls: { get: async ({ pull_number }) => ({ data: { number: pull_number, head: { sha: 'b'.repeat(40) } } }) },
+          checks: { create: async payload => { calls.push(payload); return { data: { id: 1, html_url: 'https://example.invalid/1' } }; } },
+        } },
+      });
+      const config = JSON.parse(readFileSync(file('handler-config.json')));
+      const handler = await require(join(js, 'create_check_run.cjs')).main(config.create_check_run);
+      const result = await handler(verdict.items[0], {});
+      assert.equal(result.success, true, `${name}: ${JSON.stringify(result)}`);
+      assert.equal(calls.length, 1, name);
+      assert.deepEqual({ ...calls[0], completed_at: undefined, output: undefined }, {
+        owner: 'owner', repo: 'source', name: 'agent verdict', head_sha: 'b'.repeat(40), status: 'completed',
+        conclusion: 'neutral', completed_at: undefined, output: undefined,
+      }, name);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});
+
 // gh-aw's `safe-outputs.urls`, as the step NAME of a workflow sets it.
 function urlPolicy(file, name) {
   const text = readFileSync(join(root, '.github/workflows', file), 'utf8');

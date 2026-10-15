@@ -485,6 +485,29 @@ test("check: updates change only the fields the bounds list, through the collect
   assert.equal(newCheck(handback({ lines: [{ ...ready, repo: 'other/repo' }], base: null }), readyPolicy).ok, false);
 });
 
+test("check: a check run keeps its pinned name and no success, through the collector and the check", () => {
+  const bounds = join(scratch(), 'allow.toml');
+  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[outputs]\n',
+    '[outputs]\ncreate_check_run = { max = 1, name = "agent verdict" }\n'));
+  const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
+    '--base', BASE, '--kind', 'analysis', '--outputs', 'create_check_run', '--max-outputs', '1');
+  assert.equal(result.status, 0, result.stderr);
+  const policy = JSON.parse(result.stdout);
+  const item = { type: 'create_check_run', conclusion: 'neutral', title: 'Verdict', summary: 'Looked.', pull_request_number: 7 };
+  for (const [name, lines, ok] of [
+    ['accepted', [item], true],
+    ['the pinned name', [{ ...item, name: 'agent verdict' }], true],
+    ['a wrong name', [{ ...item, name: 'required-ci' }], false],
+    ['success', [{ ...item, conclusion: 'success' }], false],
+    ['no pull request', [{ ...item, pull_request_number: undefined }], false],
+    ['an alias', [{ ...item, pull_request_number: undefined, pr_number: 7 }], false],
+    ['over count', [item, item], false],
+  ]) {
+    const verdict = newCheck(handback({ lines, base: null }), policy);
+    assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)}`);
+  }
+});
+
 test("check: the hand-backs of two real runs of the old tree", async () => {
   for (const [name, change] of [
     ["create-pull-request", { repo: OWN_REPO, outputs: "create_pull_request,noop,missing_tool" }],

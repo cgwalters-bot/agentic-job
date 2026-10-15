@@ -252,7 +252,7 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   assert.match(aggregate, /needs: \[.*e2e-dispatch-verify.*\]/);
   // A fork's pull request is no reason to pass a skipped job: it fails ci.
   assert.doesNotMatch(aggregate, /\$fork\b/);
-  assert.match(aggregate, /'\$fork_e2e == "false" and all\(/);
+  assert.match(aggregate, /FILTER: >-\n +\$fork_e2e == "false" and all\(/);
 });
 
 test('CI runs do not share a dispatch or compose concurrency group, and a real dispatch keeps one per item', () => {

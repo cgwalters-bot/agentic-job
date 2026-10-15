@@ -874,7 +874,9 @@ keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `issues: write` (comments, issues and
 issue updates, assignees and `link_sub_issue`) and `pull-requests: write`
 (pull request updates, mark-ready, reviewers and `close_pull_request`) for
-the job's own token. Nothing needs
+the job's own token. `create_check_run`
+needs `checks: write` for the job token in either case: a user's token
+cannot [create check runs](safe-outputs.md#posting-a-check-run). Nothing needs
 `contents: write`: a new pull request's branch, and a push to it, go to a
 fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 

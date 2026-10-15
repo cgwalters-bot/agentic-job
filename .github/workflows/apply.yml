@@ -424,7 +424,17 @@ jobs:
         # bounds' `fields` where the pinned handlers honor them; they do
         # not for an issue's title and status, or a request's `draft` and
         # `update_branch`, so check refuses every field the bounds leave out.
+        #
+        # The check run handler names the run from `name`, which the bounds
+        # pinned, and with `target: "*"` posts on the head of the pull
+        # request check held to one number. It posts in the calling
+        # repository whatever `target-repo` says, so a run whose `repo` is
+        # another one would put a check run where nothing bounded it.
         run: |
+          if jq -e 'has("create_check_run")' "$GH_AW_TMP/config.json" > /dev/null && [[ "${REPO,,}" != "${GITHUB_REPOSITORY,,}" ]]; then
+            echo "::error::create_check_run posts in the calling repository, $GITHUB_REPOSITORY, not the run's repository $REPO"
+            exit 1
+          fi
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
@@ -454,6 +464,7 @@ jobs:
             | (select(has("close_pull_request")).close_pull_request) += {"target-repo": $action_repo, target: "*"}
             | (select(has("link_sub_issue")).link_sub_issue) += {"target-repo": $action_repo, target: "*"}
             | (select(has("update_project")).update_project) += {"target-repo": $action_repo}
+            | (select(has("create_check_run")).create_check_run) += {target: "*"}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"
       # The first line of what a partial run opens or posts says so too,

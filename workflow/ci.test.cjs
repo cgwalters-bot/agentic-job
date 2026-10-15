@@ -20,7 +20,7 @@ const gates = {
   full: ['lint', 'rust', 'vibe', 'corpus', 'static'],
   host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'confined'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
-    'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
+    'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 
 test('the full-run CI harness skips its comment on the second apply attempt', async () => {
@@ -143,6 +143,9 @@ test('the aggregate accepts a skip only under a gate that said false', () => {
   const required = block('required-checks');
   const command = required.slice(required.indexOf('        run: >-\n'))
     .replace('        run: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
+  // The jq filter is folded into the step's environment, as GitHub does.
+  const filter = required.slice(required.indexOf('          FILTER: >-\n'), required.indexOf('        run: >-\n'))
+    .replace('          FILTER: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
   // Every job but the sentinels and the push-only one is aggregated, under exactly one gate.
   const all = ci.split('\njobs:\n')[1].match(/^  [a-z][a-z0-9-]*(?=:\n)/gm).map(name => name.trim())
     .filter(name => !['required-checks', 'ci', 'secure-host-published'].includes(name));
@@ -156,7 +159,7 @@ test('the aggregate accepts a skip only under a gate that said false', () => {
   const skip = (...keys) => ({ ...success, ...Object.fromEntries(keys.map(key => [key, { result: 'skipped' }])) });
   const outputs = { FULL: 'true', HOST: 'true', E2E: 'true', REVIEW: 'true', FORK_E2E: 'false' };
   const run = (needs, change = {}) => spawnSync('bash', ['-c', command], {
-    env: { ...process.env, ...outputs, ...change, NEEDS: JSON.stringify(needs) }, encoding: 'utf8',
+    env: { ...process.env, ...outputs, ...change, FILTER: filter, NEEDS: JSON.stringify(needs) }, encoding: 'utf8',
   }).status;
   const queuedPush = { FULL: 'false', HOST: 'false', E2E: 'false', REVIEW: '' };
   const queuedPr = { HOST: 'false', E2E: 'false', REVIEW: 'false' };
@@ -352,7 +355,7 @@ test('queue detection fails closed and sentinel rejects non-success', async () =
 });
 
 test('E2E callers, concurrency and apt safeguards remain wired', () => {
-  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review', 'e2e-scratch', 'e2e-items', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
+  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-check-run', 'e2e-review', 'e2e-scratch', 'e2e-items', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
     const block = ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z-]*:\n/)[0];
     assert.match(block, /needs:.*changes/);
     assert.match(block, /if:.*needs\.changes\.outputs\.e2e == 'true'/);
@@ -454,12 +457,18 @@ test('the workflow classifies real Git paths without executing PR scripts', () =
 // `run` refuses to upload a fake agent's run whose redaction replaced
 // nothing, and the write-capable E2E jobs run only in a merge group when a
 // queue is enabled: a scenario without the canary would fail first there.
+// The whole command, since a shortened token is not secret-shaped (#641).
 test('every scripted E2E session prints the secret-shaped string run must redact', () => {
-  const setups = [...ci.matchAll(/^      setup: (\.github\/agentic-job\/e2e\/[\w-]+\.sh)$/gm)].map(([, file]) => file);
-  assert.ok(setups.length >= 8, setups.join(' '));
+  const canary = "printf 'fake secret: gh%s_%s\\n' p FAKEREDACTIONCANARY0123456789abcdef";
+  const dir = path.join(__dirname, '../.github/agentic-job/e2e');
+  const setups = fs.readdirSync(dir).filter(name => name.endsWith('.sh'));
+  for (const [, file] of ci.matchAll(/^      setup: \.github\/agentic-job\/e2e\/([\w-]+\.sh)$/gm)) {
+    assert.ok(setups.includes(file), file);
+  }
+  assert.ok(setups.length >= 9, setups.join(' '));
   for (const file of setups) {
-    const setup = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const setup = fs.readFileSync(path.join(dir, file), 'utf8');
     const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
-    assert.ok(fixture.some(step => step.execute?.command.includes("printf 'fake secret: gh%s_%s\\n' p FAKEREDACTIONCANARY")), file);
+    assert.ok(fixture.some(step => step.execute?.command === canary), file);
   }
 });

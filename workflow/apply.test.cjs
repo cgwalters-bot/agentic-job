@@ -102,18 +102,18 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
     /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
     'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items',
   ]);
   for (const [, name, caller] of callers) {
     assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
     assert.doesNotMatch(caller, /^      apply-environment:/m, name);
   }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-compose', 'e2e-review']) {
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-compose', 'e2e-review']) {
     const caller = callers.find(([, jobName]) => jobName === name)[2];
     assert.match(caller, /^      contents: read$/m, name);
     assert.doesNotMatch(caller, /^      contents: write$/m, name);
   }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people']) {
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run']) {
     const caller = callers.find(([, jobName]) => jobName === name)[2];
     assert.match(caller, /^      build-binary: true$/m, name);
     const reusable = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
@@ -172,6 +172,27 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     assert.deepEqual(config.mark_pull_request_as_ready_for_review, {
       max: 1, 'target-repo': 'owner/source', target: '*',
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a check run keeps its pinned name and posts only in the run repository', () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ create_check_run: { max: 1, name: 'agent verdict' } }));
+    const run = repository => command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
+      GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), GITHUB_REPOSITORY: repository, REPO: 'Owner/Source',
+      OUTPUT_REPO: 'owner/source', ITEM_REPO: 'owner/source', BASE: 'main', BRANCH_PREFIX: '',
+      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+    });
+    const result = run('owner/source');
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+    assert.deepEqual(config.create_check_run, { max: 1, name: 'agent verdict', target: '*' });
+    const elsewhere = run('owner/caller');
+    assert.notEqual(elsewhere.status, 0);
+    assert.match(elsewhere.stdout, /posts in the calling repository/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
