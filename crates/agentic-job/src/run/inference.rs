@@ -54,7 +54,8 @@ const MAX_DETAIL_CHARS: usize = 200;
 /// How often the run's request count is fetched while the agent runs:
 /// several subagents at once make a request every few seconds between them.
 pub const COUNT_INTERVAL: Duration = Duration::from_secs(5);
-/// How many counts in a row may be missing before the job's log says so.
+/// After this many failed polls the request cap must no longer trust the
+/// last count. Each poll has HTTP_TIMEOUT plus COUNT_INTERVAL as its bound.
 const MISSED_COUNTS_BEFORE_WARNING: u32 = 6;
 /// The answer of a proxy that has the run API but no policy for it.
 const NOT_CONFIGURED: &str = "run registration is not configured";
@@ -726,7 +727,8 @@ impl Run {
     /// Keeps a channel at the number of model requests the proxy has
     /// answered for the run, subagents' included: what the session's cap
     /// on them reads, since ACP reports none. A count that cannot be
-    /// fetched leaves the last one. `None` for a run nothing counts.
+    /// fetched leaves the last one for five polls, then publishes `None`
+    /// so a configured request cap stops the session. No cap, no stop.
     pub fn count(
         self: &Arc<Self>,
         every: Duration,
@@ -746,16 +748,16 @@ impl Run {
                         count.send_replace(Some(n));
                         missed = 0;
                     }
-                    None => missed += 1,
+                    None => missed = missed.saturating_add(1),
                 }
                 // Said once per outage: the cap is reading a count that
                 // no longer moves.
                 if missed == MISSED_COUNTS_BEFORE_WARNING {
                     eprintln!(
                         "warning: the inference proxy has given no count of this run's model \
-                         requests {missed} times in a row: the cap on them still reads {:?}",
-                        *count.borrow()
+                         requests {missed} times in a row: a request-capped session must stop"
                     );
+                    count.send_replace(None);
                 }
                 if !matches!(
                     stopped.recv_timeout(every),

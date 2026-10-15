@@ -62,7 +62,13 @@ The token stays in memory and goes into one file of the sandbox user's
 ([layout.md](layout.md#run)). While the agent works `run` reads `GET
 /v1/runs/self` every five seconds; the record's `requests` plus
 `unmetered` is the count the request cap reads. A count that cannot be
-fetched leaves the last one, with a warning after six in a row.
+fetched leaves the last one for five failed polls. After six consecutive
+failures the count becomes unavailable and a session with `max-requests`
+stops; a session without that optional cap continues. Each poll takes at
+most 30 seconds followed by a five-second wait, so an outage is detected
+within 210 seconds of the last successful poll (plus scheduling delay).
+This prevents missing accounting from silently disabling the request cap;
+it is not a broker-side hard spending limit.
 
 Whatever way the run ends, `run` then sends `DELETE /v1/runs/self`,
 with the same retries. A 401 means the proxy no longer knows the token,

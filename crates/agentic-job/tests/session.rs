@@ -295,7 +295,9 @@ async fn count_requests(file: PathBuf, count: watch::Sender<Option<u64>>) {
         let read = std::fs::read_to_string(&file)
             .ok()
             .and_then(|text| text.trim().parse().ok());
-        if count.send(read).is_err() {
+        // The fake agent creates the file after startup; until then the
+        // registered count remains zero, as during a short broker outage.
+        if read.is_some() && count.send(read).is_err() {
             return;
         }
         tokio::time::sleep(REQUESTS_POLL).await;
@@ -334,7 +336,8 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         registry.push_str(&format!("provider-error = {}\n", json!(prefix)));
     }
     let log = Captured::default();
-    let (count, requests) = watch::channel(None);
+    // As in run's registration, accounting starts at a known count.
+    let (count, requests) = watch::channel(Some(0));
     let (bridge, client) = setup
         .client
         .map(|(client, idle)| bridge_and_client(client, idle, setup.refused_first))

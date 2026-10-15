@@ -221,6 +221,13 @@ impl Budget {
     /// The next thing to do about USAGE, if anything: one signal a call,
     /// each sent once.
     pub fn check(&mut self, u: &Usage) -> Option<Signal> {
+        // A missing count must not turn an explicitly requested spending
+        // bound into an uncapped run. The producer tolerates short outages.
+        if self.limits.max_requests.is_some() && u.requests.is_none() {
+            return Some(Signal::Stop(Stop::Budget(
+                "model request count is unavailable".to_owned(),
+            )));
+        }
         let shares = self.shares(u);
         // The most used one; the time, if they are level.
         let top = shares.iter().max_by_key(|s| s.percent)?;
@@ -471,8 +478,16 @@ mod tests {
                 )],
             },
             Case {
-                name: "requests nobody counts have no share",
+                name: "a request cap fails closed when accounting is unavailable",
                 limits: limits(Some(100), None),
+                steps: vec![(
+                    usage(10, None, 0),
+                    "stop: Budget(\"model request count is unavailable\")",
+                )],
+            },
+            Case {
+                name: "without a request cap accounting is optional",
+                limits: limits(None, None),
                 steps: vec![(usage(10, None, 0), "-")],
             },
             Case {

@@ -200,7 +200,9 @@ pub struct Options {
     pub limits: Limits,
     /// The run's count of model requests, kept current by whoever serves
     /// the inference (ACP doesn't report them, and it has subagents'
-    /// too); `None` in it while nothing is known. `Limits::max_requests`
+    /// too); `None` means accounting is unavailable and stops a session
+    /// with a request cap. Initialize it with a known count for capped runs.
+    /// `Limits::max_requests`
     /// needs one: a cap with nothing to count is refused.
     pub requests: Option<watch::Receiver<Option<u64>>>,
     pub launch: Launch,

@@ -367,7 +367,8 @@ fn a_given_token_has_no_run() {
 
 /// The session's cap on model requests reads this channel: it follows
 /// the proxy's count while the run is counted, keeps the last count when
-/// the proxy cannot be asked, and stops when the counter is dropped.
+/// the proxy briefly cannot be asked, invalidates a stale count, and stops
+/// when the counter is dropped.
 #[test]
 fn the_request_count_follows_the_proxy() {
     let proxy = Proxy::start();
@@ -389,10 +390,9 @@ fn the_request_count_follows_the_proxy() {
     wait_for(Some(2));
     proxy.serve_requests(40);
     wait_for(Some(42));
-    // A proxy that forgot the run gives no count: the last one stays.
+    // A proxy that forgot the run must not leave a trusted count forever.
     proxy.restart();
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(*count.borrow(), Some(42));
+    wait_for(None);
     drop(counter);
     std::thread::sleep(Duration::from_millis(100));
     let polls = proxy.seen().len();
