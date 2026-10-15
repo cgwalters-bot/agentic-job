@@ -244,7 +244,7 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   assert.match(cleanup, /needs: \[.*e2e-dispatch-verify\]/);
   assert.match(cleanup, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
   assert.doesNotMatch(cleanup, /uses: actions\/checkout@|dispatch-verify\.cjs|github.sha|\.dispatch-verifier/);
-  for (const name of ['Delete the comments', "Close only this run's scratch pull request and delete its branch"]) {
+  for (const name of ['Delete the comments', 'Close only the scratch pull request of this run and delete its branch']) {
     assert.ok(cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() `) ||
       cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() }}`), name);
   }

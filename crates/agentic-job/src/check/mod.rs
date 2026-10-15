@@ -412,7 +412,13 @@ fn redirections_to(
             _ => problems.push("an update_project requires a nonempty fields object".to_owned()),
         }
     }
-    if let Some(key) = target_key(output) {
+    let single_target = target_key(output);
+    let targets: &[&str] = match output {
+        "close_pull_request" => &["pull_request_number"],
+        "link_sub_issue" => &["parent_issue_number", "sub_issue_number"],
+        _ => single_target.as_slice(),
+    };
+    if !targets.is_empty() {
         if !item
             .get("repo")
             .and_then(Value::as_str)
@@ -422,12 +428,14 @@ fn redirections_to(
         }
         // Do not let handler fallback to event context, aliases or temporary
         // IDs choose an item. Repository scope remains the compiled run's repo.
-        if !item
-            .get(key)
-            .and_then(Value::as_u64)
-            .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
-        {
-            problems.push(format!("a {output} requires a positive integer {key}"));
+        for key in targets {
+            if !item
+                .get(*key)
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
+            {
+                problems.push(format!("a {output} requires a positive integer {key}"));
+            }
         }
         for alias in [
             "item_number",
@@ -439,7 +447,7 @@ fn redirections_to(
             "target",
             "duplicate_of",
         ] {
-            if alias != key && item.contains_key(alias) {
+            if !targets.contains(&alias) && item.contains_key(alias) {
                 problems.push(format!("a {output} with unsupported target field {alias}"));
             }
         }
@@ -2139,5 +2147,123 @@ mod tests {
             markdown.contains("- refused: create_pull_request needs exactly one patch"),
             "{markdown}"
         );
+    }
+
+    #[test]
+    fn bounded_close_and_link_actions() {
+        for (output, number_keys) in [
+            ("close_issue", &["issue_number"][..]),
+            ("add_labels", &["item_number"]),
+            ("remove_labels", &["item_number"]),
+            ("close_pull_request", &["pull_request_number"]),
+            (
+                "link_sub_issue",
+                &["parent_issue_number", "sub_issue_number"],
+            ),
+        ] {
+            let labels = output.ends_with("_labels");
+            let mut policy = policy();
+            policy.safe_outputs.others.insert(
+                output.to_owned(),
+                crate::policy::OutputLimit {
+                    max: 1,
+                    allowed: labels.then(|| vec!["triage".to_owned()]),
+                    ..Default::default()
+                },
+            );
+            let mut plain = json!({"type": output, "repo": policy.repo});
+            if labels {
+                plain["labels"] = json!(["triage"]);
+            }
+            if output == "close_pull_request" {
+                // Posted on the pull request as it is closed.
+                plain["body"] = json!("Superseded.");
+            }
+            for (n, key) in number_keys.iter().enumerate() {
+                plain[*key] = json!(7 + n);
+            }
+            let mut cases = vec![
+                ("repo", json!(policy.repo.to_uppercase()), true),
+                ("repo", json!("other/repo"), false),
+                ("repo", Value::Null, false),
+                ("target", json!("*"), false),
+                ("duplicate_of", json!("other/repo#8"), false),
+            ];
+            for key in number_keys {
+                cases.extend([
+                    (*key, json!(9), true),
+                    (*key, json!(0), false),
+                    (*key, json!("9"), false),
+                    (*key, json!("aw_parent1"), false),
+                    (*key, Value::Null, false),
+                ]);
+            }
+            for alias in [
+                "item_number",
+                "issue_number",
+                "pr_number",
+                "pull_request_number",
+            ] {
+                if !number_keys.contains(&alias) {
+                    cases.push((alias, json!(8), false));
+                }
+            }
+            for (key, value, ok) in cases {
+                let mut item = plain.clone();
+                item[key] = value;
+                assert_eq!(
+                    redirections(item.as_object().unwrap(), &policy).is_empty(),
+                    ok,
+                    "{output} {key}: {item}"
+                );
+            }
+            let mut item = plain.clone();
+            item.as_object_mut().unwrap().remove("repo");
+            assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+            if labels {
+                for labels in [json!(["release"]), json!([{"name": "triage"}])] {
+                    let mut item = plain.clone();
+                    item["labels"] = labels;
+                    assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+                }
+            }
+            if output == "remove_labels" {
+                for labels in [
+                    None,
+                    Some(Value::Null),
+                    Some(json!("triage")),
+                    Some(json!([])),
+                ] {
+                    let mut item = plain.clone();
+                    item.as_object_mut().unwrap().remove("labels");
+                    if let Some(labels) = labels {
+                        item["labels"] = labels;
+                    }
+                    assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+                }
+                let limit = policy.safe_outputs.others.get_mut(output).unwrap();
+                limit.allowed = Some(vec![]);
+                assert!(!redirections(plain.as_object().unwrap(), &policy).is_empty());
+                policy.safe_outputs.others.get_mut(output).unwrap().allowed =
+                    Some(vec!["triage".to_owned()]);
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("out");
+            std::fs::create_dir(&out).unwrap();
+            std::fs::write(out.join(OUTPUTS_FILE), format!("{plain}\n")).unwrap();
+            let collected = dir.path().join("collected.json");
+            for count in [1, 2] {
+                std::fs::write(
+                    &collected,
+                    json!({"items": vec![plain.clone(); count], "errors": []}).to_string(),
+                )
+                .unwrap();
+                assert_eq!(
+                    check_outputs(&out, &collected, &policy).unwrap().ok,
+                    count == 1,
+                    "{output}: {count}"
+                );
+            }
+        }
     }
 }

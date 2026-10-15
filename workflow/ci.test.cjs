@@ -20,7 +20,7 @@ const gates = {
   full: ['lint', 'rust', 'vibe', 'corpus', 'static'],
   host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'confined'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
-    'e2e-people', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
+    'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 
 test('the full-run CI harness skips its comment on the second apply attempt', async () => {
@@ -352,7 +352,7 @@ test('queue detection fails closed and sentinel rejects non-success', async () =
 });
 
 test('E2E callers, concurrency and apt safeguards remain wired', () => {
-  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
+  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review', 'e2e-scratch', 'e2e-items', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
     const block = ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z-]*:\n/)[0];
     assert.match(block, /needs:.*changes/);
     assert.match(block, /if:.*needs\.changes\.outputs\.e2e == 'true'/);
@@ -448,5 +448,18 @@ test('the workflow classifies real Git paths without executing PR scripts', () =
     assert.match(ci, /\$fork_e2e == "false"/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// `run` refuses to upload a fake agent's run whose redaction replaced
+// nothing, and the write-capable E2E jobs run only in a merge group when a
+// queue is enabled: a scenario without the canary would fail first there.
+test('every scripted E2E session prints the secret-shaped string run must redact', () => {
+  const setups = [...ci.matchAll(/^      setup: (\.github\/agentic-job\/e2e\/[\w-]+\.sh)$/gm)].map(([, file]) => file);
+  assert.ok(setups.length >= 8, setups.join(' '));
+  for (const file of setups) {
+    const setup = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
+    assert.ok(fixture.some(step => step.execute?.command.includes("printf 'fake secret: gh%s_%s\\n' p FAKEREDACTIONCANARY")), file);
   }
 });

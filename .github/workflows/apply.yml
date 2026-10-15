@@ -451,6 +451,8 @@ jobs:
             | (select(has("mark_pull_request_as_ready_for_review")).mark_pull_request_as_ready_for_review) += {"target-repo": $action_repo, target: "*"}
             | (select(has("add_reviewer")).add_reviewer) += {"target-repo": $action_repo, target: "*"}
             | (select(has("assign_to_user")).assign_to_user) += {"target-repo": $action_repo, target: "*", issue_intent: false, unassign_first: false}
+            | (select(has("close_pull_request")).close_pull_request) += {"target-repo": $action_repo, target: "*"}
+            | (select(has("link_sub_issue")).link_sub_issue) += {"target-repo": $action_repo, target: "*"}
             | (select(has("update_project")).update_project) += {"target-repo": $action_repo}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"
@@ -497,7 +499,9 @@ jobs:
       # with a PAT that names nobody, nothing counts), only the last
       # name in a body, and check refuses requests holding the name: neither
       # the agent nor a commenter can make a request look applied, not even
-      # with text the handlers decode into a name. Closing an issue (without
+      # with text the handlers decode into a name. A pull request's closing
+      # comment is looked for the same way, and the pull request closed if it
+      # is still open. Closing an issue (without
       # a comment: `allow_body` is false), adding labels and
       # setting a project field are the same done twice and are left alone.
       - name: Leave out what an earlier attempt applied
@@ -564,7 +568,7 @@ jobs:
                 }
                 continue;
               }
-              if (!['add_comment', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
+              if (!['add_comment', 'close_pull_request', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
               // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
               const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '').update('\0').update(JSON.stringify(item));
               if (item.type === 'create_pull_request') hash.update('\0').update(patch());
@@ -579,6 +583,19 @@ jobs:
                   const [itemOwner, itemRepo] = process.env.ITEM_REPO.split('/');
                   const comments = await github.paginate(github.rest.issues.listComments, { owner: itemOwner, repo: itemRepo, issue_number: Number(target), per_page: 100 });
                   found = comments.find(marked);
+                }
+              } else if (item.type === 'close_pull_request') {
+                // Its handler comments again on a pull request already closed.
+                const [prOwner, prRepo] = process.env.REPO.split('/');
+                const pull = { owner: prOwner, repo: prRepo, pull_number: item.pull_request_number };
+                const comments = await github.paginate(github.rest.issues.listComments, { owner: prOwner, repo: prRepo, issue_number: item.pull_request_number, per_page: 100 });
+                found = comments.find(marked);
+                // The handler comments before it closes, so an attempt can
+                // stop between the two: close what is still open, as the
+                // handler would (its configuration has no filters), without
+                // a second comment.
+                if (found && (await github.rest.pulls.get(pull)).data.state !== 'closed') {
+                  await github.rest.pulls.update({ ...pull, state: 'closed' });
                 }
               } else if (item.type === 'create_pull_request') {
                 // The branch is this run's, checked above; the handler names it so, in the fork.

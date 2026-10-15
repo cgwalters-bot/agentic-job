@@ -102,7 +102,7 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
     /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
     'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-dispatch', 'e2e-compose', 'e2e-review',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items',
   ]);
   for (const [, name, caller] of callers) {
     assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
@@ -130,6 +130,8 @@ test('issue actions keep checked repository and caps, not output-repo or event t
       add_labels: { max: 3, allowed: ['triage'], blocked: ['release'] },
       add_reviewer: { max: 1, allowed: ['octocat'] },
       assign_to_user: { max: 1, allowed: ['octocat'] },
+      close_pull_request: { max: 1 },
+      link_sub_issue: { max: 2 },
       add_comment: { max: 1 },
       update_issue: { max: 1, fields: ['title'] },
       update_pull_request: { max: 1, fields: ['body', 'draft'] },
@@ -155,6 +157,8 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     assert.deepEqual(config.assign_to_user, {
       max: 1, allowed: ['octocat'], 'target-repo': 'owner/source', target: '*', issue_intent: false, unassign_first: false,
     });
+    assert.deepEqual(config.close_pull_request, { max: 1, 'target-repo': 'owner/source', target: '*' });
+    assert.deepEqual(config.link_sub_issue, { max: 2, 'target-repo': 'owner/source', target: '*' });
     // A comment goes to the item, which may be in another repository than the outputs.
     assert.deepEqual(config.add_comment, { max: 1, 'target-repo': 'owner/tracker', target: '99' });
     // Updates name their item explicitly; check refuses the fields the handlers would not.
@@ -711,7 +715,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Runs the guard against a forge holding `posted`, by whoever posted it,
 // with the job token or, with `pat`, a PAT that /user names as `me`.
-async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false, itemRepo = 'owner/repo' } = {}) {
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false, itemRepo = 'owner/repo', commentRepo = itemRepo, open = [] } = {}) {
   const dir = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
@@ -730,15 +734,19 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
         users: { getAuthenticated: async () => { if (me === null) throw new Error('403'); return { data: { login: me } }; } },
         issues: { listComments: params => {
           queries.push(['comments', params.issue_number]);
-          assert.equal(`${params.owner}/${params.repo}`, itemRepo, 'a comment is looked for on the item');
+          assert.equal(`${params.owner}/${params.repo}`, commentRepo, 'a comment is looked for on the item');
           return posted.filter(p => p.on === params.issue_number);
         } },
-        pulls: { list: params => { queries.push(['pulls', params.head]); return posted.filter(p => p.head === params.head); } },
+        pulls: { list: params => { queries.push(['pulls', params.head]); return posted.filter(p => p.head === params.head); },
+          get: async params => { queries.push(['pull', params.pull_number]);
+            return { data: { state: open.includes(params.pull_number) ? 'open' : 'closed' } }; },
+          update: async params => { assert.equal(`${params.owner}/${params.repo}`, 'owner/source');
+            queries.push(['update', params.pull_number, params.state]); return { data: {} }; } },
         search: { issuesAndPullRequests: async params => { queries.push(['search', params.q]);
           return { data: { items: posted.filter(p => p.issue && params.q.includes(p.body.match(/<!-- (.*) -->/)?.[1])) } }; } },
       },
     };
-    const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', ITEM_REPO: itemRepo, GITHUB_RUN_ID: run,
+    const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', ITEM_REPO: itemRepo, REPO: 'owner/source', GITHUB_RUN_ID: run,
       COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork, TREE: checkedTree,
       GITHUB_WORKSPACE: '/workspace', BASE: 'agent-run-7', REPLACEMENT_HEAD: 'replacement-head' };
     const exec = { getExecOutput: async (program, args) => {
@@ -955,6 +963,26 @@ test('a re-run after a half-applied attempt applies only what was not', async ()
   const { kept, skipped } = await leaveOutApplied(items, posted);
   assert.deepEqual(skipped.map(item => item.name), [nameIn(first[0])]);
   assert.deepEqual(kept, first.slice(1));
+});
+
+test('a closing comment an earlier attempt posted is found on the pull request it closed', async () => {
+  const close = { type: 'close_pull_request', repo: 'owner/source', pull_request_number: 12, body: 'Superseded.' };
+  const first = (await leaveOutApplied([close], [], { commentRepo: 'owner/source' })).kept[0];
+  // The handler appends its footer before the request hook hides the name.
+  const posted = [{ on: 12, user: actions, body: sent(`${first.body}\n\n> footer`), html_url: 'https://forge/pull/12#c' }];
+  const { kept, skipped, queries } = await leaveOutApplied([close], posted, { commentRepo: 'owner/source' });
+  assert.deepEqual(queries, [['comments', 12], ['pull', 12]]);
+  assert.deepEqual(kept, []);
+  assert.deepEqual(skipped.map(item => item.url), ['https://forge/pull/12#c']);
+  // The comment posted and the close failed: close it, and comment no more.
+  const half = await leaveOutApplied([close], posted, { commentRepo: 'owner/source', open: [12] });
+  assert.deepEqual(half.queries, [['comments', 12], ['pull', 12], ['update', 12, 'closed']]);
+  assert.deepEqual(half.kept, []);
+  assert.deepEqual(half.skipped.map(item => item.url), ['https://forge/pull/12#c']);
+  // Without the comment, the handler does both.
+  const none = await leaveOutApplied([close], [], { commentRepo: 'owner/source', open: [12] });
+  assert.deepEqual(none.queries, [['comments', 12]]);
+  assert.equal(none.kept.length, 1);
 });
 
 test('a comment is looked for where it goes, and not where none can be found', async () => {

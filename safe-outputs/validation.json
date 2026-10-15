@@ -395,6 +395,42 @@
       }
     }
   },
+  "close_pull_request": {
+    "defaultMax": 1,
+    "fields": {
+      "body": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "pull_request_number": {
+        "optionalPositiveInteger": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
+  "link_sub_issue": {
+    "defaultMax": 5,
+    "fields": {
+      "parent_issue_number": {
+        "required": true,
+        "issueNumberOrTemporaryId": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "sub_issue_number": {
+        "required": true,
+        "issueNumberOrTemporaryId": true
+      }
+    },
+    "customValidation": "parentAndSubDifferent"
+  },
   "update_project": {
     "defaultMax": 10,
     "fields": {

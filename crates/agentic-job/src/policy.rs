@@ -70,6 +70,8 @@ pub const OUTPUT_TYPES: &[&str] = &[
     MARK_READY,
     "add_reviewer",
     "assign_to_user",
+    "close_pull_request",
+    "link_sub_issue",
     "update_project",
     PUSH_TO_PULL_REQUEST_BRANCH,
     "noop",
@@ -1793,12 +1795,19 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     #[test]
     fn issue_actions_compile_with_label_bounds() {
         let mut bounds = bounds();
-        for output in ["close_issue", "add_labels", "remove_labels"] {
+        for output in [
+            "close_issue",
+            "add_labels",
+            "remove_labels",
+            "close_pull_request",
+            "link_sub_issue",
+        ] {
+            let labels = output.ends_with("_labels");
             bounds.outputs.insert(
                 output.to_owned(),
                 OutputLimit {
                     max: 2,
-                    allowed: (output != "close_issue").then(|| vec!["triage".to_owned()]),
+                    allowed: labels.then(|| vec!["triage".to_owned()]),
                     ..Default::default()
                 },
             );
@@ -1811,7 +1820,16 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 .unwrap();
             policy.validate().unwrap();
             assert_eq!(policy.safe_outputs.max_of(output), Some(2));
-            if output != "close_issue" {
+            // gh-aw's handlers take a missing `max` for their own default.
+            let json = serde_json::to_value(&policy.safe_outputs).unwrap();
+            assert_eq!(json[output]["max"], 2, "{json}");
+            if !labels {
+                // Label limits are only for the label outputs.
+                bounds.outputs.get_mut(output).unwrap().allowed = Some(vec![]);
+                assert!(bounds.validate().is_err());
+                bounds.outputs.get_mut(output).unwrap().allowed = None;
+            }
+            if labels {
                 bounds.outputs.get_mut(output).unwrap().allowed = None;
                 assert!(bounds.validate().is_err());
                 bounds.outputs.get_mut(output).unwrap().allowed = Some(vec![]);

@@ -435,3 +435,84 @@ test('build output in code survives gh-aw\'s URL filtering, a secret in it does 
     }
   }
 });
+
+test('checked pull request closures and sub-issue links reach only the named items', async () => {
+  const repo = 'owner/source';
+  const close = { type: 'close_pull_request', repo, pull_request_number: 7, body: 'Superseded by #8.' };
+  const link = { type: 'link_sub_issue', repo, parent_issue_number: 5, sub_issue_number: 6 };
+  for (const [name, item, ok] of [
+    ['close', close, true],
+    ['close in another repository', { ...close, repo: 'owner/other' }, false],
+    ['close the triggering pull request', { ...close, pull_request_number: undefined }, false],
+    ['close by alias', { ...close, pull_request_number: undefined, pr_number: 7 }, false],
+    ['link', link, true],
+    ['link in another repository', { ...link, repo: 'owner/other' }, false],
+    ['link a temporary ID', { ...link, sub_issue_number: 'aw_sub1' }, false],
+    // The collector drops a field link_sub_issue's rule lacks, before check.
+    ['link with a parent alias', { ...link, item_number: 9 }, true],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'handler-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${item.type}]\nmax = 1\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', item.type,
+        '--max-outputs', '1'], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(item) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      assert.equal(checked.status, ok ? 0 : 1, name);
+      if (!ok) continue;
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), REPO: repo, OUTPUT_REPO: 'owner/other', ITEM_REPO: 'owner/other',
+        BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const calls = [];
+      const issue = number => ({ number, title: 'test', state: 'open', labels: [], node_id: `I_${number}`, html_url: `https://example.invalid/${number}` });
+      // Started from pull request 9, which neither request names.
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, startGroup() {}, endGroup() {} },
+        context: { repo: { owner: 'owner', repo: 'source' }, eventName: 'pull_request',
+          payload: { pull_request: { number: 9 }, issue: { number: 9 } } },
+        github: {
+          rest: {
+            issues: {
+              get: async ({ issue_number }) => ({ data: issue(issue_number) }),
+              createComment: async payload => { calls.push(['comment', payload.owner, payload.repo, payload.issue_number, payload.body]); return { data: { id: 1, html_url: 'u' } }; },
+            },
+            pulls: {
+              get: async ({ pull_number }) => ({ data: issue(pull_number) }),
+              update: async payload => { calls.push(['close', payload.owner, payload.repo, payload.pull_number, payload.state]); return { data: { ...issue(payload.pull_number), state: 'closed' } }; },
+            },
+          },
+          graphql: async (query, variables) => {
+            if (/addSubIssue/.test(query)) calls.push(['link', variables]);
+            return { repository: { issue: { parent: null } }, addSubIssue: { issue: { id: 'I_5' }, subIssue: { id: 'I_6' } } };
+          },
+        },
+      });
+      const config = JSON.parse(readFileSync(file('handler-config.json')));
+      const handler = await require(join(js, `${item.type}.cjs`)).main(config[item.type]);
+      const result = await handler(verdict.items[0], {});
+      assert.equal(result.success, true, `${name}: ${JSON.stringify(result)}`);
+      if (item.type === 'close_pull_request') {
+        assert.deepEqual(calls.map(call => call.slice(0, 4)), [['comment', 'owner', 'source', 7], ['close', 'owner', 'source', 7]], name);
+        assert.match(calls[0][4], /^Superseded by #8\./);
+      } else {
+        assert.deepEqual(calls, [['link', { parentId: 'I_5', subIssueId: 'I_6' }]], name);
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});

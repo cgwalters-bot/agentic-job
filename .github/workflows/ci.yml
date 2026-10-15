@@ -799,7 +799,7 @@ jobs:
       BRANCH: e2e-scratch/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - id: scratch
-        name: Open this run's scratch pull request
+        name: Open the scratch pull request of this run
         run: |
           set -o pipefail
           root="repos/$GH_REPO"
@@ -848,7 +848,7 @@ jobs:
       repo: ${{ github.repository }}
       base: ${{ needs.e2e-scratch.outputs.branch }}
       kind: analysis
-      task: Assign the listed user and request their review on this run's scratch pull request.
+      task: Assign the listed user and request their review on the scratch pull request of this run.
       outputs: add_reviewer,assign_to_user
       max-outputs: '2'
       notify: none
@@ -934,6 +934,79 @@ jobs:
       max-requests: '0'
       budget: '100'
       artifact-prefix: review-
+
+  # Scratch items for e2e-items: a sub-issue to link under the scratch
+  # issue, and a draft pull request to close, from a branch of this run
+  # whose one commit names the sub-issue and is e2e-items' base.
+  # Pull requests and issues the job token opens start no workflow.
+  # e2e-verify closes and removes all three. Not e2e-scratch's pull
+  # request: e2e-people needs that one open while e2e-items closes this.
+  e2e-items-scratch:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # the scratch branch
+      issues: write # the scratch sub-issue
+      pull-requests: write # the scratch pull request
+    outputs:
+      branch: ${{ steps.open.outputs.branch }}
+      pull-request: ${{ steps.open.outputs.pull-request }}
+      sub-issue: ${{ steps.open.outputs.sub-issue }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: e2e-items/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Open the scratch sub-issue and pull request
+        id: open
+        run: |
+          set -o pipefail
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          sub=$(gh api "repos/$GH_REPO/issues" -f title="Scratch sub-issue of end-to-end run $GITHUB_RUN_ID" -f body='Linked and closed by the run that opened it.' --jq .number)
+          echo "sub-issue=$sub" >> "$GITHUB_OUTPUT"
+          main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          base=$(gh api "repos/$GH_REPO/git/commits/$main" --jq .tree.sha)
+          # The forge opens no pull request without a change, so add a file;
+          # the data API writes it without a checkout.
+          tree=$(jq -n --arg base "$base" --arg content "Scratch file of end-to-end run $GITHUB_RUN_ID." \
+            '{base_tree: $base, tree: [{path: "e2e-scratch.txt", mode: "100644", type: "blob", content: $content}]}' |
+            gh api "repos/$GH_REPO/git/trees" --input - --jq .sha)
+          commit=$(gh api "repos/$GH_REPO/git/commits" -f message="e2e scratch: link #$sub under #64" -f tree="$tree" -f "parents[]=$main" --jq .sha)
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$commit" > /dev/null
+          pr=$(gh api "repos/$GH_REPO/pulls" -f title="Scratch pull request of end-to-end run $GITHUB_RUN_ID" -f head="$BRANCH" -f base=main -F draft=true -f body='Closed by the run that opened it.' --jq .number)
+          echo "pull-request=$pr" >> "$GITHUB_OUTPUT"
+
+  # close_pull_request and link_sub_issue with the job token, on the items
+  # e2e-items-scratch opened; the agent finds them from its base.
+  e2e-items:
+    needs: [changes, e2e-items-scratch]
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: write # link_sub_issue
+      pull-requests: write # close_pull_request, and its comment
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the agent job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-items-${{ github.run_id }}
+      build-binary: true
+      repo: ${{ github.repository }}
+      base: ${{ needs.e2e-items-scratch.outputs.branch }}
+      kind: analysis
+      task: Close the scratch pull request and link the scratch sub-issue.
+      outputs: close_pull_request,link_sub_issue
+      max-outputs: '2'
+      allow: .github/agentic-job/items.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/items.sh
+      timeout: '5'
+      max-requests: '0'
+      budget: '100'
+      artifact-prefix: items-
 
   # Proposed verifier code may read dispatch results, and the full run's
   # apply guard the forge, but never gets cleanup's write token. Cleanup
@@ -1034,13 +1107,13 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      contents: write # delete only this run's scratch branch
-      issues: write # delete this run's comments
-      pull-requests: write # delete this run's comments and close its scratch PR
+      contents: write # delete only this run's scratch branches
+      issues: write # delete this run's comments, and unlink and close its scratch sub-issue
+      pull-requests: write # delete this run's comments and close its scratch PRs
       actions: read # download this run's applied artifacts
     env:
       GH_TOKEN: ${{ github.token }}
@@ -1143,18 +1216,18 @@ jobs:
           for item in "$ISSUE" 65; do
             gh api --paginate "repos/$GH_REPO/issues/$item/comments" | jq -se --arg run "$RUN" 'any(.[][]; ((.body | contains($run)) and (.body | contains("This misdirected analysis must be refused.")))) | not'
           done
-      - name: The listed user was assigned and asked to review this run's scratch pull request
+      - name: The listed user was assigned and asked to review the scratch pull request of this run
         env:
           RESULT: ${{ needs.e2e-people.result }}
           PEOPLE: ${{ needs.e2e-people.outputs.applied-artifact-id }}
+          # One line: ingress's ignore check refuses quotes spanning lines.
+          FILTER: .head.ref == $branch and .head.repo.full_name == $repo and .state == "open" and any(.assignees[]; .login == $login) and any(.requested_reviewers[]; .login == $login)
         run: |
           test "$RESULT" = success
           test -n "$PEOPLE"
           [[ $PEOPLE_PR =~ ^[1-9][0-9]*$ ]]
           gh api "repos/$GH_REPO/pulls/$PEOPLE_PR" |
-            jq -e --arg repo "$GH_REPO" --arg branch "$PEOPLE_BRANCH" --arg login "$PEOPLE_LOGIN" \
-              '.head.ref == $branch and .head.repo.full_name == $repo and .state == "open" and
-               any(.assignees[]; .login == $login) and any(.requested_reviewers[]; .login == $login)'
+            jq -e --arg repo "$GH_REPO" --arg branch "$PEOPLE_BRANCH" --arg login "$PEOPLE_LOGIN" "$FILTER"
       - name: The comments are on the scratch issue, and the run stopped at a limit says so
         env:
           NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"
@@ -1169,6 +1242,17 @@ jobs:
         run: |
           gh api "repos/$GH_REPO/issues?state=all&sort=created&direction=desc&per_page=50" \
             --jq "[.[] | select(.pull_request == null and .user.login == \"github-actions[bot]\" and ((.body // \"\") | contains(\"$RUN\"))).html_url]" | tee /dev/stderr | jq -e '. == []'
+      - name: The scratch pull request was closed with its comment, and the sub-issue linked
+        env:
+          RESULT: ${{ needs.e2e-items.result }}
+          PR: ${{ needs.e2e-items-scratch.outputs.pull-request }}
+          SUB: ${{ needs.e2e-items-scratch.outputs.sub-issue }}
+        run: |
+          set -o pipefail
+          test "$RESULT" = success
+          test "$(gh api "repos/$GH_REPO/pulls/$PR" --jq .state)" = closed
+          gh api --paginate "repos/$GH_REPO/issues/$PR/comments" | jq -se --arg run "$RUN" '[ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run)) and (.body | startswith("Closed by the scripted agent of an end-to-end run."))) ] | length == 1'
+          gh api graphql -F number="$SUB" -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { parent { number } } } }' --jq .data.repository.issue.parent.number | grep -qx "$ISSUE"
       # Whatever happened before: these ask the forge what this run left
       # and need no artifact, and each is tried whatever became of the one
       # before it. A comment that cannot be deleted fails the job, so that
@@ -1185,7 +1269,44 @@ jobs:
             gh api --paginate "repos/$GH_REPO/issues/$issue/comments" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$RUN\"))).id" |
               xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
           done
-      - name: Close only this run's scratch pull request and delete its branch
+      # Whatever became of e2e-items: each part is tried, and one that
+      # fails fails the job. A link left under the scratch issue would count
+      # toward the forge's limit on its sub-issues.
+      - name: Remove the scratch items
+        if: ${{ always() && needs.e2e-items-scratch.result != 'skipped' }}
+        env:
+          BRANCH: ${{ needs.e2e-items-scratch.outputs.branch }}
+          PR: ${{ needs.e2e-items-scratch.outputs.pull-request }}
+          SUB: ${{ needs.e2e-items-scratch.outputs.sub-issue }}
+        run: |
+          failed=0
+          # Each listing succeeds empty when the item is gone, so only one
+          # that succeeds without it confirms absence; a failed one fails.
+          if [ -n "$SUB" ]; then
+            if subs=$(gh api "repos/$GH_REPO/issues/$ISSUE/sub_issues?per_page=100" --paginate --jq '.[].number'); then
+              if grep -qx "$SUB" <<< "$subs"; then
+                id=$(gh api "repos/$GH_REPO/issues/$SUB" --jq .id) &&
+                  gh api -X DELETE "repos/$GH_REPO/issues/$ISSUE/sub_issue" -F sub_issue_id="$id" > /dev/null || failed=1
+              fi
+            else
+              failed=1
+            fi
+            gh api -X PATCH "repos/$GH_REPO/issues/$SUB" -f state=closed > /dev/null || failed=1
+          fi
+          if [ -n "$PR" ]; then
+            gh api -X PATCH "repos/$GH_REPO/pulls/$PR" -f state=closed > /dev/null || failed=1
+          fi
+          if [ -n "$BRANCH" ]; then
+            if refs=$(gh api "repos/$GH_REPO/git/matching-refs/heads/$BRANCH" --jq '.[].ref'); then
+              if grep -qxF "refs/heads/$BRANCH" <<< "$refs"; then
+                gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$BRANCH" || failed=1
+              fi
+            else
+              failed=1
+            fi
+          fi
+          exit "$failed"
+      - name: Close only the scratch pull request of this run and delete its branch
         if: ${{ always() }}
         run: |
           # No number means e2e-scratch opened none: never look for a replacement.
@@ -1285,7 +1406,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1304,7 +1425,7 @@ jobs:
           FORK_E2E: ${{ needs.changes.outputs.fork-e2e }}
         run: >-
           jq -e --arg full "$FULL" --arg host "$HOST" --arg e2e "$E2E" --arg review "$REVIEW" --arg fork_e2e "$FORK_E2E"
-          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (($full == "false" and .key != "changes") or ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
+          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (($full == "false" and .key != "changes") or ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
 
   # Only this sentinel is required in the ruleset. Always report a failure
   # if the aggregate did not succeed (a skipped required check can pass).

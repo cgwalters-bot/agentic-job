@@ -670,6 +670,8 @@ For patch proposals the existing branch, base and patch guards still apply.
 `exit` is empty because no agent ran. Issue closure and label additions use the
 [bounded issue actions](safe-outputs.md#closing-issues-and-changing-labels);
 issue and pull request edits, the [listed fields](safe-outputs.md#updating-issues-and-pull-requests).
+Pull request closure and sub-issue links use the
+[same scope](safe-outputs.md#closing-pull-requests-and-linking-sub-issues).
 Project updates use [named project and field bounds](safe-outputs.md#updating-project-fields)
 and the apply environment token described below, not the job token.
 
@@ -870,8 +872,9 @@ that. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `issues: write` (comments, issues and
-issue updates and assignees) and `pull-requests: write` (pull request updates,
-mark-ready and reviewers) for the job's own token. Nothing needs
+issue updates, assignees and `link_sub_issue`) and `pull-requests: write`
+(pull request updates, mark-ready, reviewers and `close_pull_request`) for
+the job's own token. Nothing needs
 `contents: write`: a new pull request's branch, and a push to it, go to a
 fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 

@@ -70,7 +70,7 @@ the pinned commit gives.
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
 `mark_pull_request_as_ready_for_review`, `update_project`, `push_to_pull_request_branch`,
-`add_reviewer`, `assign_to_user`,
+`add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -220,6 +220,31 @@ current assignees. The pinned `add_reviewer` handler requests Copilot's
 review bot for the login `copilot`; list it only to allow that. `add_reviewer` needs pull-request write access in
 apply, and `assign_to_user` issue write access; the listed users must already
 be able to review or be assigned. No producer or check token gains write access.
+
+### Closing pull requests and linking sub-issues
+
+`close_pull_request` and `link_sub_issue` are off unless listed in bounds, and
+have the same repository scope and caps as the issue operations above: an
+explicit `repo` that is the run's, and positive integers, never temporary IDs,
+target aliases or the triggering event's item. Without these rules an agent
+could close or link items in another repository the apply token reaches, or
+let the handler pick the pull request or issue the run was started from.
+
+```toml
+[outputs.close_pull_request]
+max = 1
+
+[outputs.link_sub_issue]
+max = 2
+```
+
+`{"type":"close_pull_request","repo":"OWNER/REPO","pull_request_number":7,"body":"Superseded by #8."}`
+posts `body` on pull request 7 and closes it; gh-aw's collector requires the body.
+A re-run of apply finds that comment by its hidden name and posts it only once.
+`{"type":"link_sub_issue","repo":"OWNER/REPO","parent_issue_number":5,"sub_issue_number":6}`
+makes issue 6 a sub-issue of issue 5; the handler skips a sub-issue that already
+has a parent. Apply needs pull-request write access for the first and issue
+write access for the second.
 
 ### Pushing to a pull request's branch
 
