@@ -1170,7 +1170,9 @@ mod tests {
                 json!({"base_commit": BASE, "commits": [mail("package.json"), mail("src/a.rs")]}),
                 json!({"base_commit": BASE, "commits": [mail("src/a.rs") + &mail("src/b.rs")]}),
                 json!({"base_commit": BASE, "commits": [mail("src/a.rs")], "bundle": "ignored?"}),
-                json!({"base_commit": BASE, "commits": [mail("src/a.rs").lines().filter(|line| !line.starts_with("Date:")).collect::<Vec<_>>().join("\n")]}),
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs").lines().filter(|line| !line.starts_with("Date:")).collect::<Vec<_>>().join("\n") + "\n"]}),
+                // `git am` calls a mail without its final newline corrupt.
+                json!({"base_commit": BASE, "commits": [mail("src/a.rs").trim_end()]}),
             ] {
                 let verdict = proposal(invalid.clone()).check_against(&policy);
                 assert!(!verdict.ok, "{invalid}");

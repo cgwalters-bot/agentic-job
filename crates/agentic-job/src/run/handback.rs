@@ -989,6 +989,15 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
             return Ok(change);
         }
         if let Some(content) = content {
+            // Check refuses it again on another machine; this only names a
+            // malformed series in the agent job, not after check.
+            if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch
+                && let Err(error) =
+                    crate::check::replacement::check(&content, push, policy.max_patch_bytes)
+            {
+                change.drop_patch(base, format!("replacement.json: {error:#}"));
+                return Ok(change);
+            }
             create_dir(request.safe_outputs)?;
             write(
                 &request
@@ -1991,8 +2000,9 @@ mod tests {
         assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
     }
 
-    #[test]
-    fn a_replacement_preserves_the_series_and_checkout() {
+    /// A home whose checkout has one commit over its base, the policy that
+    /// allows replacing the branch with it, and that commit's mail.
+    fn replacement_home() -> (Home, Policy, String) {
         let home = Home::new();
         let mut policy = crate::policy::tests::push_policy();
         policy.repo = "o/r".into();
@@ -2008,19 +2018,25 @@ mod tests {
             &home.checkout.dir,
             "echo two >> a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.invalid commit -qm 'parser: Keep the last line'",
         );
-        let head = sh(&home.checkout.dir, "git rev-parse HEAD");
         let mail = sh(
             &home.checkout.dir,
             "git format-patch --stdout --no-signature --no-renames -1 HEAD",
         );
-        let series =
-            json!({"base_commit": home.checkout.base_commit, "commits": [mail]}).to_string();
-        std::fs::write(home.path("out/replacement.json"), &series).unwrap();
         std::fs::write(
             home.path(AGENT_OUTPUTS),
             "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Replace the series\"}\n",
         )
         .unwrap();
+        (home, policy, mail)
+    }
+
+    #[test]
+    fn a_replacement_preserves_the_series_and_checkout() {
+        let (home, policy, mail) = replacement_home();
+        let head = sh(&home.checkout.dir, "git rev-parse HEAD");
+        let series =
+            json!({"base_commit": home.checkout.base_commit, "commits": [mail]}).to_string();
+        std::fs::write(home.path("out/replacement.json"), &series).unwrap();
         let change = home.collect(&policy, &config::Commit::default());
         assert_eq!(change.dropped, None);
         assert_eq!(sh(&home.checkout.dir, "git rev-parse HEAD"), head);
@@ -2035,6 +2051,20 @@ mod tests {
             verdict.patch.unwrap().commit_files,
             Some(vec![vec!["a.txt".into()]])
         );
+    }
+
+    /// What `$(git format-patch ...)` leaves: the mail without its final
+    /// newline, which `git am` calls corrupt at apply.
+    #[test]
+    fn a_replacement_mail_without_its_final_newline_is_refused_at_capture() {
+        let (home, policy, mail) = replacement_home();
+        let series =
+            json!({"base_commit": home.checkout.base_commit, "commits": [mail.trim_end()]});
+        std::fs::write(home.path("out/replacement.json"), series.to_string()).unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        let why = change.dropped.unwrap();
+        assert!(why.contains("does not end with a newline"), "{why}");
+        assert!(!home.path("safe-outputs/replacement.json").exists());
     }
 
     #[test]

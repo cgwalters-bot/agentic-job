@@ -561,6 +561,12 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
     {
         reader.problem("a carriage return inside a line");
     }
+    // `git format-patch` ends every line with a newline, and `git am` calls
+    // a last line without one corrupt. Refuse it here, not after check: a
+    // shell's `$(git format-patch ...)` drops it, and so did a producer.
+    if !patch.is_empty() && !patch.ends_with('\n') {
+        reader.problem("the patch does not end with a newline, as git format-patch writes it");
+    }
     match lines.next() {
         Some(first) if MAIL_START_RE.is_match(first) => {}
         first => reader.problem(format!(
@@ -1145,6 +1151,11 @@ mod tests {
                 "a carriage return in a line",
                 head() + &edit("a.rs").replace("{ 1 }", "{ 1\rdiff --git a/x b/x }"),
                 "a carriage return inside a line",
+            ),
+            (
+                "a last context line without its newline",
+                head() + &edit("a.rs").replace("@@ -1 +1 @@", "@@ -1,2 +1,2 @@") + " last",
+                "does not end with a newline",
             ),
         ];
         for (name, patch, want) in cases {

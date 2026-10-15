@@ -673,6 +673,33 @@ fn what_git_writes_is_read_as_git_means_it() {
     }
 }
 
+/// A shell's `$(git format-patch ...)` drops the final newline. When the last
+/// hunk ends in a context line at the end of the file, `git am` calls what is
+/// left corrupt, so check must refuse it rather than pass it on to apply.
+#[test]
+fn a_patch_without_its_final_newline_is_refused_as_git_am_refuses_it() {
+    let origin = Origin::new();
+    let (patch, _) = origin.patch(0, &case("an edit", EDIT, Accepted));
+    let cut = patch.strip_suffix(b"\n").unwrap();
+    assert!(
+        cut.ends_with(b"\n five"),
+        "{}",
+        String::from_utf8_lossy(cut)
+    );
+    let trial = Trial::new(&origin, 0);
+    assert!(matches!(trial.am(&patch), Am::Applied(_)));
+    assert!(matches!(trial.am(cut), Am::Refused));
+    let reading = origin.read(cut);
+    assert!(
+        reading
+            .problems
+            .iter()
+            .any(|problem| problem.contains("does not end with a newline")),
+        "{:#?}",
+        reading.problems
+    );
+}
+
 /// xorshift64: all the randomness a repeatable corpus needs.
 struct Rng(u64);
 
