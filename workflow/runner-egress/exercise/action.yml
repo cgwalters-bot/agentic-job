@@ -1,0 +1,7 @@
+name: Exercise JavaScript main and post traffic
+description: Fetch public repository metadata without credentials in both phases
+runs:
+  using: node24
+  main: request.mjs
+  post: request.mjs
+  post-if: always()
