@@ -3,6 +3,13 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
 
+# Privileged integration proof: only on a fresh disposable supported host.
+world-write-evidence out:
+    node secure-host/world-write-evidence.mjs "$1"
+
+world-write-test:
+    node --test secure-host/world-write.test.mjs secure-host/world-write-cases.test.mjs secure-host/world-write-evidence.test.mjs
+
 # Refuses VERSION unless it may be released from this checkout (its tags
 # included); prints the previous version tag. See src/bin/release-check.rs.
 release-check version:

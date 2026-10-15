@@ -1092,20 +1092,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo node secure-host/apt.mjs
-      - name: Install compiler and bpftool
-        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common "linux-tools-$(uname -r)"
-        timeout-minutes: 5
-      - run: node --test secure-host/world-write.test.mjs secure-host/world-write-cases.test.mjs
-      - name: Writable before policy activation
-        run: sudo node secure-host/world-write-host.mjs before
-      # As the release build compiles it (binary.mjs), not on the host that loads it.
-      - name: Compile the policy object
-        run: node secure-host/binary.mjs object --out "$RUNNER_TEMP/world-write"
-      - name: Load, attach, pin, scope and prove the policy
-        run: sudo node secure-host/world-write.mjs "$RUNNER_TEMP/world-write/world_write.bpf.o"
-      - name: Denials and sticky, owner, tmpfs and overlay controls after loader exits
-        run: sudo node secure-host/world-write-host.mjs after
+      - name: Install recipe runner
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just@1.58.0
+      - run: just world-write-test
+      - name: Publish bounded enforcement and object evidence
+        run: just world-write-evidence "$RUNNER_TEMP/world-write"
 
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file and the

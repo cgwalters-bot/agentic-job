@@ -94,6 +94,64 @@ The same workflow is called by CI and feeds its ruleset-required `ci` sentinel,
 including merge-queue runs. Enforcement failure cannot be treated as a skipped
 optional job; the check runs for all changes, including the world-write paths.
 
+### Acceptance evidence and remaining host work
+
+Rechecked the [backlog audit](https://github.com/cgwalters-forge/tracker/issues/596#issuecomment-6183133751)
+against current main `4a215268aeec5ccfcc31cfb2c0f4625bf5922caf`.
+The [Ubuntu 26.04 acceptance log](https://github.com/cgwalters-forge/agentic-job/actions/runs/38676447258/job/116231086917)
+shows writable-before baselines, four pinned tracing links, a denied foreign
+write and successful owner write after the loader exits. Step timestamps give
+about 3 seconds for packages, 4 for compilation, less than 1 for loading and
+1 for the after-controls; these are rounded observations, not performance bounds.
+The image had `linux-tools-common` and `linux-tools-7.0.0-1017-azure` already
+installed. This log predates the summary/provenance reporting below.
+
+Both [CI's world-write job](../.github/workflows/ci.yml) and the
+[reusable acceptance workflow](../.github/workflows/world-write.yml) now invoke
+`just world-write-evidence "$RUNNER_TEMP/world-write"`. Their step summaries
+publish the checkout commit, source/header/build-helper SHA-256 values, actual
+compiler command and version, object SHA-256, OS/kernel, installed package
+versions, controls and per-stage elapsed times. PASS is printed only after all
+commands succeed; a command failure publishes incomplete acceptance and fails
+the job. Each command has a five-minute outer limit (probe commands additionally
+have their existing two-minute limits), within the ten-minute job limit. Read
+the new run's summary before claiming this reporting path passed on a host.
+This adds evidence, not another policy switch or weaker mode; the map still
+starts disabled and setup still refuses failed activation.
+
+#### RHEL 10 follow-up issue: obtain a disposable runner and publish acceptance
+
+RHEL 10 remains admitted by the action but **runtime-unverified**, not certified
+by the Ubuntu result. This organization has no RHEL self-hosted runner. The
+follow-up issue needs an operator-provisioned fresh RHEL 10 VM with root/sudo,
+Node 22, Git, just, kernel BTF and mount/BPF privileges; do not use a persistent
+workload host or a container. From the reviewed checkout, run:
+
+```sh
+just world-write-test
+export GITHUB_STEP_SUMMARY="$(mktemp)"
+just world-write-evidence "$(mktemp -d)"
+```
+
+In Actions use its existing `GITHUB_STEP_SUMMARY` instead of replacing it, a
+ten-minute job limit, read-only contents permission, checkout with
+`persist-credentials: false`, and no secrets. The recipe installs `clang`,
+`bpftool` and `util-linux` using `dnf`; failure is fatal. Attach the summary
+and full log, including kernel, package versions, object provenance and
+timings. Require all baseline, active-link, denied-write and owner/sticky/tmpfs/
+overlay controls to pass. Destroy the VM even after failure: partial pins and
+fixtures are intentionally not a recoverable setup. Only then record RHEL
+support evidence here. Filing this follow-up requires a forge write outside
+the permitted hand-back outputs of the evidence implementation run.
+
+For issue #136, the bpftool replacement is implemented; closure should wait for
+this change's Ubuntu summary and an explicitly tracked RHEL follow-up, not an
+Aya revival. Re-scope #21 to residual DNS/resolved and upstream-stub detection,
+RHEL local-service inventory, WireServer controls, socket activation, existing
+user acceptance, UDP/system-bus probes, run0 version admission and plain-mode
+OIDC controls. Re-test those against current main rather than carrying forward
+the old chmod walk or treating BPF evidence as proof of network isolation.
+
 The concrete threat is an unprivileged process modifying another user's
 globally writable host files or non-sticky directories. The policy uses
 only modify-return programs on `security_*` wrappers, independently of the
