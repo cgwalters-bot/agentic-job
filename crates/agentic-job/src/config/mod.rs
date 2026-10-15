@@ -357,8 +357,8 @@ pub struct Agent {
     pub config_ref: Option<String>,
     /// The directory of it the configuration is in (default: its root).
     pub config_path: Option<PathBuf>,
-    /// Installs this binary's skills and subagents where the agent reads
-    /// them (`run::agent::skills`), for a task that names one. Off: a
+    /// Installs source skills and, for Claude/opencode, this binary's
+    /// skills and subagents where the agent reads them, for a task that names one. Off: a
     /// task that does not use them gets no instructions it did not ask
     /// for.
     pub skills: bool,

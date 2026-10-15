@@ -36,6 +36,7 @@
 //! define exactly one provider (its address and key are replaced), an
 //! `AGENTS.md` and an optional profile; Claude Code its instructions;
 //! Vibe only the models and the active model of its `config.toml`.
+//! With skills enabled, the root `skills/` tree is also installed.
 //! Nothing else in that repository is used: opencode would also merge
 //! other configuration files and run plugins, tools and commands found
 //! beside its configuration, none of which the provider check covers.
@@ -868,11 +869,10 @@ fn source_request(agent: &config::Agent) -> Result<Option<(&str, Option<&str>, &
 /// What can be said of the `[agent]` table before anything is fetched or
 /// registered.
 pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
-    // Refused rather than ignored: a task that says "use the implement
-    // skill" to an agent without it would run with no procedure at all.
+    // The scripted agent cannot discover or execute skills.
     ensure!(
-        !agent.skills || matches!(kind, Kind::Claude | Kind::Opencode),
-        "agent.skills is supported only for claude and opencode, not {}",
+        !agent.skills || kind != Kind::Fake,
+        "agent.skills is not supported for {}",
         kind.as_str()
     );
     match (kind, source_request(agent)?) {
@@ -894,6 +894,15 @@ pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
 /// Clones the caller's configuration repository as the sandbox user and
 /// reads from it the files KIND takes, as that user.
 pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Result<Source> {
+    // These directories belong to the runner. Replacing the tree also removes
+    // skills deleted at the source or left by an earlier opt-in run.
+    if let Some(dir) = skill_dir(kind) {
+        sandbox.checked(
+            &["rm", "-rf", "--", utf8(&sandbox.home.join(dir))?],
+            b"",
+            MAX_COMMAND_OUTPUT,
+        )?;
+    }
     let Some((url, branch, path)) = source_request(agent)? else {
         return Ok(Source::default());
     };
@@ -901,6 +910,9 @@ pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Res
     let checkout_text = utf8(&checkout)?;
     sandbox.checked(&["rm", "-rf", "--", checkout_text], b"", MAX_COMMAND_OUTPUT)?;
     git_clone(sandbox, url, branch, "1", checkout_text)?;
+    if agent.skills {
+        install_source_skills(sandbox, kind, checkout_text)?;
+    }
     let read = |name: &str| -> Result<Option<String>> {
         let file = checkout.join(path).join(name);
         let out = sandbox.run(
@@ -921,7 +933,11 @@ pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Res
             .with_context(|| format!("{name} of the configuration repository is not UTF-8"))
     };
     let need = |name: &str| -> Result<Option<String>> {
-        read(name)?.map(Some).with_context(|| {
+        let content = read(name)?;
+        if agent.skills {
+            return Ok(content);
+        }
+        content.map(Some).with_context(|| {
             format!(
                 "the configuration repository {url} has no {}",
                 path.join(name).display()
@@ -945,6 +961,103 @@ pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Res
     };
     eprintln!("Agent configuration from {url}");
     Ok(source)
+}
+
+/// All destinations are runner-owned directories read by the respective
+/// harness. Vibe 2.26.1 uses `$VIBE_HOME/skills` (harness_files/_paths.py).
+fn skill_dir(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Claude => Some(".claude/skills"),
+        Kind::Opencode => Some(".config/opencode/skills"),
+        Kind::Vibe => Some(".config/agentic-job/vibe/skills"),
+        Kind::Fake => None,
+    }
+}
+
+const MAX_SKILL_FILES: usize = 64;
+
+/// Refuse traversal, links, submodules and executables before mapping repository
+/// paths into the harness home. Read blobs, not checkout files, so a checkout
+/// symlink cannot redirect a read. Both the listing and total contents are bounded.
+fn skill_paths(listing: &[u8]) -> Result<Vec<&str>> {
+    let listing = std::str::from_utf8(listing).context("skills tree is not UTF-8")?;
+    let mut paths = Vec::new();
+    for entry in listing.split('\0').filter(|s| !s.is_empty()) {
+        let (metadata, path) = entry
+            .split_once('\t')
+            .context("invalid skills tree entry")?;
+        ensure!(
+            metadata.starts_with("100644 blob "),
+            "skill must be a non-executable regular file: {path}"
+        );
+        let relative = path
+            .strip_prefix("skills/")
+            .context("invalid skill prefix")?;
+        ensure!(
+            relative.len() <= 256
+                && relative.split('/').count() >= 2
+                && relative.split('/').all(|part| !part.is_empty()
+                    && !part.starts_with('.')
+                    && !part.starts_with('-')
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))),
+            "invalid skill path: {path}"
+        );
+        paths.push(path);
+        ensure!(
+            paths.len() <= MAX_SKILL_FILES,
+            "too many skill files (maximum {MAX_SKILL_FILES})"
+        );
+    }
+    Ok(paths)
+}
+
+fn install_source_skills(sandbox: &Sandbox, kind: Kind, checkout: &str) -> Result<()> {
+    for (path, content) in source_skills(sandbox, kind, checkout)? {
+        sandbox.checked(
+            &["sh", "-c", WRITE_SCRIPT, "sh", &path],
+            &content,
+            MAX_COMMAND_OUTPUT,
+        )?;
+    }
+    Ok(())
+}
+
+fn source_skills(
+    runner: &impl super::enter::Runner,
+    kind: Kind,
+    checkout: &str,
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let dir = skill_dir(kind).context("agent has no skills directory")?;
+    let listing = runner.run(
+        &[
+            "git", "-C", checkout, "ls-tree", "-r", "-z", "HEAD", "--", "skills/",
+        ],
+        b"",
+        MAX_SOURCE_BYTES,
+    )?;
+    ensure!(listing.success(), "listing skills: {}", listing.error());
+    let paths = skill_paths(&listing.stdout)?;
+    let mut files = Vec::new();
+    let mut total = 0;
+    for path in paths {
+        let output = runner.run(
+            &["git", "-C", checkout, "show", &format!("HEAD:{path}")],
+            b"",
+            MAX_SOURCE_BYTES,
+        )?;
+        ensure!(output.success(), "reading skill {path}: {}", output.error());
+        let content = output.stdout;
+        total += content.len();
+        ensure!(
+            total <= MAX_SOURCE_BYTES,
+            "skills exceed {MAX_SOURCE_BYTES} bytes"
+        );
+        std::str::from_utf8(&content).context("skill file is not UTF-8")?;
+        files.push((format!("{dir}/{}", &path["skills/".len()..]), content));
+    }
+    Ok(files)
 }
 
 /// The run's configuration of KIND.
@@ -984,8 +1097,8 @@ pub fn generate(
 }
 
 /// The skills and subagents of KIND, installed when ON and removed when
-/// not, so that none an earlier run left is read. Vibe and the scripted
-/// agent have none ([`check`] refuses `skills` for them).
+/// not, so that none an earlier run left is read. Vibe receives only the
+/// configuration repository's skills, not these harness-specific procedures.
 pub fn skills(kind: Kind, on: bool) -> Vec<HomeFile> {
     let files = match kind {
         Kind::Claude => CLAUDE_SKILLS,
@@ -1712,6 +1825,121 @@ provider = "llamacpp"
         for kind in [Kind::Vibe, Kind::Fake] {
             assert_eq!(skills(kind, true), []);
         }
+    }
+
+    #[test]
+    fn source_skill_paths_are_bounded_regular_files() {
+        let entry = |mode: &str, path: &str| format!("{mode} blob abc\t{path}\0");
+        assert_eq!(
+            skill_paths(entry("100644", "skills/ast-explore/SKILL.md").as_bytes()).unwrap(),
+            ["skills/ast-explore/SKILL.md"]
+        );
+        for (mode, path) in [
+            ("120000", "skills/a/SKILL.md"),
+            ("100755", "skills/a/script"),
+            ("160000", "skills/a/submodule"),
+            ("100644", "skills/../config"),
+            ("100644", "skills/a/.hidden"),
+            ("100644", "skills/a/-option"),
+            ("100644", "skills/a/a\nb"),
+            ("100644", "skills/a//b"),
+            ("100644", "skills/SKILL.md"),
+            ("100644", "config/a/SKILL.md"),
+        ] {
+            assert!(
+                skill_paths(entry(mode, path).as_bytes()).is_err(),
+                "{mode} {path}"
+            );
+        }
+        for count in [MAX_SKILL_FILES, MAX_SKILL_FILES + 1] {
+            let listing = (0..count)
+                .map(|i| entry("100644", &format!("skills/a/file{i}")))
+                .collect::<String>();
+            assert_eq!(
+                skill_paths(listing.as_bytes()).is_ok(),
+                count == MAX_SKILL_FILES
+            );
+        }
+        assert!(skill_paths(b"\xff").is_err());
+        assert!(skill_paths(b"malformed\0").is_err());
+    }
+
+    #[test]
+    fn source_skills_use_git_blobs_for_every_harness() {
+        use super::super::enter::Unconfined;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(root.join("skills/ast-explore")).unwrap();
+        let content =
+            "---\nname: ast-explore\ndescription: Explore code\n---\nUse the outline first.\n";
+        std::fs::write(root.join("skills/ast-explore/SKILL.md"), content).unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        // A checkout mutation cannot redirect reads away from committed blobs.
+        std::fs::remove_file(root.join("skills/ast-explore/SKILL.md")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("skills/ast-explore/SKILL.md"))
+            .unwrap();
+        for (kind, dir) in [
+            (Kind::Claude, ".claude/skills"),
+            (Kind::Opencode, ".config/opencode/skills"),
+            (Kind::Vibe, ".config/agentic-job/vibe/skills"),
+        ] {
+            let files = source_skills(&Unconfined, kind, root.to_str().unwrap()).unwrap();
+            assert_eq!(
+                files,
+                [(
+                    format!("{dir}/ast-explore/SKILL.md"),
+                    content.as_bytes().to_vec()
+                )]
+            );
+        }
+        // The aggregate, not just each individual read, has a size limit.
+        std::fs::remove_file(root.join("skills/ast-explore/SKILL.md")).unwrap();
+        std::fs::write(
+            root.join("skills/ast-explore/SKILL.md"),
+            vec![b'a'; MAX_SOURCE_BYTES],
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/ast-explore/extra.md"), "extra").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "oversize",
+        ]);
+        assert!(
+            source_skills(&Unconfined, Kind::Vibe, root.to_str().unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("skills exceed")
+        );
     }
 
     #[test]

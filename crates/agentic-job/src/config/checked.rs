@@ -226,11 +226,7 @@ mod tests {
             ),
             (
                 format!("{FAKE}skills = true\n{CAPPED}"),
-                "agent.skills is supported only for claude and opencode, not fake",
-            ),
-            (
-                format!("[agent]\nname = \"vibe\"\nmodel = \"m\"\nskills = true\n{CAPPED}"),
-                "agent.skills is supported only for claude and opencode, not vibe",
+                "agent.skills is not supported for fake",
             ),
             (
                 format!("{FAKE}config-ref = \"main\"\n{CAPPED}"),

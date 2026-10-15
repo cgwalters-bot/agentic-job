@@ -4,7 +4,7 @@ A run can give its agent procedures as [Agent Skills](https://agentskills.io/)
 (a `SKILL.md` with a `name` and a `description`) and the subagents they
 use, so that a task names the procedure ("Use the implement skill")
 instead of spelling it out in every caller's prompt. The text lives once,
-in this repository, and every supported agent gets the same text.
+in this repository or the configured agent configuration repository.
 
 | Skill or subagent | Source | What it does |
 | --- | --- | --- |
@@ -15,11 +15,34 @@ in this repository, and every supported agent gets the same text.
 ## Turning it on
 
 It is off by default. `[agent] skills = true` in the run's configuration,
-or the workflow input `agent-skills: true`, installs them; a run of the same agent without
-it removes those files if an earlier run left them in the sandbox user's
-home. A run of the other agent leaves them, and does not read them. It is
-refused for `vibe` and `fake`: a task that names a skill the agent does
-not have would run with no procedure at all.
+or the workflow input `agent-skills: true`, installs them. Claude and
+opencode get the embedded procedures above; all three real harnesses,
+including Vibe, also get the root `skills/` tree from `[agent] config-repo`.
+`fake` refuses the option because it cannot use skills.
+
+The runner owns the current harness's user skills directory: each run
+replaces that tree, including when the option is off or no configuration
+repository is named. Other harnesses' directories are left alone. Embedded
+Claude/opencode procedures win over source files at the same paths.
+
+To use agenthome's skills, set `agent.config-repo` (or the caller's
+`AGENT_CONFIG_REPO` repository variable) to the configuration repository
+that owns them, enable skills, and name the skill in the task, for example
+"Use the ast-explore skill to investigate this issue." No repository names
+are built into the installer. Sources and refs belong in repository-owned
+configuration, not dispatcher-controlled task inputs. With skills enabled,
+per-agent configuration files may be absent, allowing a skills-only source;
+the normal generated configuration and explicit model then apply.
+
+Skills are always read from the source repository's root `skills/`, not
+`config-path` (which still selects per-agent configuration). The installer
+accepts at most 64 non-executable regular files, at most 1 MiB combined,
+with UTF-8 contents and bounded, simple relative paths under skill directories.
+It reads committed Git blobs rather than following checkout links. These
+checks prevent a source tree from redirecting file reads or destination
+paths; they do not make skill instructions trustworthy. Do not put secrets
+or arbitrary configuration in that tree. Tool installation is separate:
+this does not execute agenthome's `install-tools` step or skill scripts.
 
 The [dispatch caller](dispatch.md) turns it on for `implement` with
 `claude` or `opencode`, and its task then names the skill ("Use the
@@ -36,6 +59,13 @@ into that user's home:
 | --- | --- | --- | --- |
 | `claude` | `~/.claude/skills/NAME/SKILL.md` | `~/.claude/agents/NAME.md` | The [skills](https://code.claude.com/docs/en/skills) and [subagents](https://code.claude.com/docs/en/sub-agents) documentation; `@agentclientprotocol/claude-agent-acp@0.88.0` starts the SDK with the `user` setting source |
 | `opencode` | `~/.config/opencode/skills/NAME/SKILL.md` | `~/.config/opencode/agents/NAME.md` | opencode v1.18.35's `src/skill/index.ts`, `src/config/paths.ts` and `src/config/agent.ts` |
+| `vibe` | `$VIBE_HOME/skills/NAME/SKILL.md` (`~/.config/agentic-job/vibe/skills/`) | Not installed | Vibe 2.26.1's `vibe/core/config/harness_files/_paths.py` and `vibe/core/skills/manager.py` |
+
+Vibe gets source skills only, not the embedded `implement`/`review` procedures
+or `diff-reviewer` subagent. A task must name a skill actually present in
+its configured source. The dispatch caller still uses the embedded implement
+procedure only for Claude/opencode; enabling Vibe source skills is explicit
+in the run configuration.
 
 The launcher turns off opencode's project configuration and external
 skills (`~/.claude/skills`, `~/.agents/skills`), so its global
@@ -83,6 +113,6 @@ that decides whether a published release is this source's: changing
 them, the review caller's task included, needs a new release before a
 caller that does not build the binary can use that commit.
 
-Not yet: skills for fix, triage and research, Vibe, and a caller's
-configuration repository adding or overriding skills
+Not yet: skills for fix, triage and research, embedded procedures/subagents
+for Vibe, and a caller's configuration overriding embedded procedures
 ([#542](https://github.com/cgwalters-forge/agentic-job/issues/542)).
