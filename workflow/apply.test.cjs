@@ -437,7 +437,7 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   assert.match(notify, /^ {6}item: \$\{\{ steps.target.outputs.item \}\}$/m);
   assert.match(policy, /notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \|\| jobs.policy.outputs.item \|\| jobs.policy.outputs.comment-target \}\}/);
   const conclude = workflow.split('\n  conclude:\n')[1];
-  assert.match(conclude, /- name: Edit the status comment\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true' \}\}/);
+   assert.match(conclude, /- name: Edit the status comment\n {8}if: .*needs\.apply\.outputs\.missing-data == 'true'/);
   assert.doesNotMatch(conclude, /Post the refusal to the comment target/);
   // Reactions alone: a notify that failed before it found its target left
   // no id, and conclude reacts to nothing rather than failing.
@@ -1379,9 +1379,18 @@ test('missing-data alone passes the guard and leaves its reason in the summary',
   assert.deepEqual(guarded.skipped, []);
   const notice = await result({ items: guarded.kept });
   assert.equal(notice.outputs['no-result'], 'true');
+  assert.equal(notice.outputs['missing-data'], 'true');
   assert.equal(notice.created.length, 0);
   assert.match(notice.summary[1], /ended with no result: it handed back only missing_data/);
   assert.match(notice.summary[1], /> workflow: needs workflow edits/);
+  const ended = command(__dirname, 'bash', ['-euo', 'pipefail', '-c', step('Every output was applied')],
+    { PROJECT_REFUSED: '', MISSING_DATA: notice.outputs['missing-data'] });
+  assert.equal(ended.status, 1, ended.stdout + ended.stderr);
+  assert.match(ended.stdout, /required data was missing/);
+  // A diagnostic alongside an actual result must not turn success into failure.
+  assert.equal((await result({ items: [item], pr: opened })).outputs['missing-data'], undefined);
+  assert.equal((await result({ items: [item, { type: 'close_issue', item_number: 3 }] })).outputs['missing-data'], undefined);
+  assert.equal((await result({ items: [item, { type: 'noop', message: 'blocked' }] })).outputs['missing-data'], 'true');
 });
 
 test('the pinned comment handler posts a guarded review verdict, without a no-result notice', { skip: !process.env.GH_AW_JS }, async () => {
@@ -1490,6 +1499,7 @@ for (const [name, change, , said] of [
     const { outputs, summary, created } = await result(change);
     assert.equal(outputs['result-url'], '');
     assert.equal(outputs['no-result'], 'true');
+    assert.equal(outputs['missing-data'], String(change.items.some(item => item.type === 'missing_data')));
     assert.deepEqual(summary, ['No result', said]);
     assert.equal(JSON.parse(outputs['no-result-reason']), said.split('Its reason:\n\n')[1]);
     assert.doesNotMatch(outputs['no-result-reason'], /[\r\n]/);

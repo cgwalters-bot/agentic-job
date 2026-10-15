@@ -1375,11 +1375,14 @@ A run whose checked outputs are only `noop`, `missing_tool` or
 result" with the agent's reason, passed through gh-aw's sanitizer as the
 handlers run it (mentions, HTML comments and URLs off its allowlist
 neutralized, cut at 1000 characters) and quoted line by line. With
-`notify: comment`, the status comment says the run handed back no result;
-the agent's reason stays in the linked run's summary. Reviews stay silent.
-The job stays green: every piece worked, and an
-agent that declines has answered; failing it would invite re-runs that change
-nothing, and a job has no neutral conclusion. An agent's `stopped_early` is
+`notify: comment`, the status comment includes the quoted reason.
+When these outputs include `missing_data`, apply fails: the task is incomplete,
+and a job has no neutral conclusion. Conclude posts or updates the item's
+bounded status comment with the reason and run link even with `notify: none`
+or `notify: reaction`. Without a fixed numeric item, only the summary is available;
+cross-repository status still requires the caller's `SAFE_OUTPUTS_PAT`.
+Ordinary noops and missing-tool declines stay green and respect notification settings.
+An agent's `stopped_early` is
 not seen here: a run that hands back nothing at all has no checked outputs,
 and check and apply are skipped.
 

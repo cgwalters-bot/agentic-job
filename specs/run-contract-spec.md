@@ -282,13 +282,13 @@ MUST be cut at a word boundary within its limit. When there is no such URL and
 every checked output is `noop`, `missing_tool` or `missing_data`, apply MUST
 say "No result" in the run summary with the agent's reason, passed through
 gh-aw's sanitizer with the handlers' URL policy, cut at 1000 characters and
-quoted line by line, and, whatever `notify` says, unless the run is a review,
-leave a numeric `comment-target` one comment linking the run, named as the
-link above and found only where a comment of its poster ends with that name.
-That comment MUST quote the reason only when the caller's bounds allow
-`add_comment`, and otherwise hold only the workflow's own text. Apply MUST
-post nothing for a run with any other output, and conclude's status MUST say
-such a run handed back no result.
+quoted line by line. If those outputs include `missing_data`, apply MUST fail
+and conclude MUST use the bounded status-comment path to report the reason and
+run link to the fixed numeric notification item, regardless of `notify`.
+Cross-repository status still requires the caller's status credential; no fixed
+item means only a summary. Ordinary noops and missing-tool declines stay green
+and respect notification settings. Apply MUST post no separate result notice;
+conclude's status includes the sanitized reason when reporting no result.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request
 refers to the issue the caller named, and closes nothing`, `a pull request's
 handler pushes only to the fork, and there is none without one`, `issue

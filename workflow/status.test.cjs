@@ -169,7 +169,7 @@ test('status CLI selects the credential only for cross-repository comments and r
   }
 });
 
-test('conclude carries the encoded reason only for a successful no-result run', () => {
+test('conclude carries the encoded reason for a decline or missing-data failure', () => {
   const workflow = readFileSync(`${__dirname}/../.github/workflows/apply.yml`, 'utf8');
   assert.match(workflow, /no-result-reason: \$\{\{ steps\.result\.outputs\.no-result-reason \}\}/);
   assert.match(workflow, /NO_RESULT_REASON: \$\{\{ needs\.apply\.outputs\.no-result-reason \}\}/);
@@ -177,20 +177,22 @@ test('conclude carries the encoded reason only for a successful no-result run', 
   const source = workflow.split('- name: How the run ended\n')[1]
     .split('        run: |\n')[1].split('\n      #')[0].split('\n').map(line => line.slice(10)).join('\n');
   const reason = '> ask `@maintainer`\n> text=injected\n> $(exit 9)\n> "quoted" \\ path';
-  for (const [results, quiet, refusal, included] of [
+  for (const [results, quiet, refusal, included, missing = ''] of [
     ['success/success/success', 'true', '', true],
     ['success/success/success', '', '', false],
     ['success/success/failure', 'true', '', false],
     ['success/skipped/skipped', 'true', '', false],
     ['cancelled/skipped/skipped', 'true', '', false],
     ['success/success/success', 'true', 'refused', false],
+    ['success/success/failure', 'true', '', true, 'true'],
+    ['success/success/failure', 'true', 'refused', false, 'true'],
   ]) {
     const dir = mkdtempSync(join(tmpdir(), 'conclude-'));
     try {
       const output = join(dir, 'output');
       writeFileSync(output, '');
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', source], {
-        env: { ...process.env, RESULTS: results, EXIT: '0', PR: '', NO_RESULT: quiet,
+        env: { ...process.env, RESULTS: results, EXIT: '0', PR: '', NO_RESULT: quiet, MISSING_DATA: missing,
           NO_RESULT_REASON: JSON.stringify(reason), REFUSAL: refusal, RESULT_URL: '',
           WORKFLOW: 'test', RUN_URL: 'https://example.invalid/run', GITHUB_OUTPUT: output }, encoding: 'utf8',
       });
@@ -200,6 +202,10 @@ test('conclude carries the encoded reason only for a successful no-result run', 
         return [line.slice(0, at), line.slice(at + 1)];
       }));
       assert.deepEqual(Object.keys(fields).sort(), included ? ['no-result-reason', 'reaction', 'text'] : ['reaction', 'text']);
+      if (missing && !refusal) {
+        assert.match(fields.text, /handed back no result because required data was missing/);
+        assert.equal(fields.reaction, 'confused');
+      }
       const calls = [];
       upsert({ ...env, TEXT: fields.text, NO_RESULT_REASON: fields['no-result-reason'] },
         (...args) => { calls.push(args); return args[0] === 'GET' ? [] : { id: 42 }; });
@@ -208,6 +214,30 @@ test('conclude carries the encoded reason only for a successful no-result run', 
       rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+test('missing-data failures reach the bounded status path even with notify none', () => {
+  const workflow = readFileSync(`${__dirname}/../.github/workflows/apply.yml`, 'utf8');
+  const conclude = workflow.split('\n  conclude:\n')[1];
+  const expressions = [conclude.match(/^    if: \$\{\{ (.*) \}\}$/m)[1],
+    conclude.split('- name: Edit the status comment\n')[1].match(/if: \$\{\{ (.*) \}\}/)[1]];
+  for (const notify of ['none', 'reaction', 'comment']) {
+    for (const notified of ['false', 'true']) {
+      for (const missing of ['true', 'false']) {
+        for (const item of ['453', '', '*']) {
+          const policy = { notify, notified, 'notify-item': item };
+          const evaluated = expressions.map(expression => new Function('policy', 'missing',
+            `return ${expression.replaceAll('always()', 'true').replaceAll('fromJSON(inputs.policy)', 'policy')
+              .replaceAll('needs.apply.outputs.missing-data', 'missing').replaceAll('policy.notify-item', 'policy["notify-item"]')}`)(policy, missing));
+          assert.deepEqual(evaluated, [notify !== 'none' && notified === 'true' || missing === 'true',
+            notify === 'comment' && notified === 'true' || missing === 'true' && item === '453']);
+        }
+      }
+    }
+  }
+  assert.match(conclude, /ITEM: \$\{\{ fromJSON\(inputs.policy\).notify-item \}\}/);
+  assert.match(conclude, /REPO: \$\{\{ fromJSON\(inputs.policy\).notify-repo \}\}/);
+  assert.match(conclude, /node .*workflow\/status.cjs/);
 });
 
 test('non-event target selection accepts only numeric targets, with or without an event file', () => {

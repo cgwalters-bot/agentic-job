@@ -81,6 +81,7 @@ jobs:
       result-url: ${{ steps.result.outputs.result-url }}
       # `true` when the run handed back only noop, missing_tool or missing_data, for conclude.
       no-result: ${{ steps.result.outputs.no-result }}
+      missing-data: ${{ steps.result.outputs.missing-data }}
       no-result-reason: ${{ steps.result.outputs.no-result-reason }}
     env:
       OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
@@ -774,7 +775,7 @@ jobs:
           if-no-files-found: error
       # Export the result for conclude's single status comment. No-result
       # reasons are agent text: sanitize and quote them before exporting.
-      # A decline stays green: the pieces worked, and rerunning changes nothing.
+      # Missing data is an incomplete task, not a successful decline.
       - name: Say where what the run made is
         id: result
         if: ${{ !cancelled() && steps.apply.outcome != 'skipped' }}
@@ -799,6 +800,7 @@ jobs:
               const { items } = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
               if (!items.every(item => quiet.includes(item.type))) return;
               core.setOutput('no-result', 'true');
+              core.setOutput('missing-data', String(items.some(item => item.type === 'missing_data')));
               // gh-aw's scripts log through a global `core`, as setupGlobals sets it for the handlers.
               global.core = core;
               const { sanitizeContent } = require(`${process.env.RUNNER_TEMP}/gh-aw/actions/sanitize_content.cjs`);
@@ -826,8 +828,10 @@ jobs:
           TREE: ${{ steps.trial.outputs.tree }}
           FORK: ${{ steps.fork.outputs.repo }}
           REPLACEMENT_HEAD: ${{ steps.trial.outputs.head }}
+          MISSING_DATA: ${{ steps.result.outputs.missing-data }}
         run: |
           [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
+          [ "${MISSING_DATA:-}" != true ] || { echo "::error::the run handed back no result because required data was missing; see the run summary"; exit 1; }
           # gh-aw counts a push its handler skipped as no failure: the
           # branch itself, in the fork, has to hold the commit, on the head
           # it was for.
@@ -855,7 +859,7 @@ jobs:
   # number are numbers.
   conclude:
     needs: apply
-    if: ${{ always() && fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true' }}
+    if: ${{ always() && ((fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true') || needs.apply.outputs.missing-data == 'true') }}
     concurrency:
       group: agentic-job-status-${{ fromJSON(inputs.policy).notify-repo }}-${{ fromJSON(inputs.policy).notify-item }}
       cancel-in-progress: false
@@ -890,6 +894,7 @@ jobs:
           PR_REPO: ${{ fromJSON(inputs.policy).item-repo != '' && (fromJSON(inputs.policy).output-repo || github.repository) || '' }}
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
           NO_RESULT_REASON: ${{ needs.apply.outputs.no-result-reason }}
+          MISSING_DATA: ${{ needs.apply.outputs.missing-data }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
         run: |
@@ -906,6 +911,12 @@ jobs:
             *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
             *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
           esac
+          if [ "${MISSING_DATA:-}" = true ]; then
+            text="❌ [$WORKFLOW]($RUN_URL) handed back no result because required data was missing." reaction=confused
+            if [ -z "$REFUSAL" ] && [ -n "$NO_RESULT_REASON" ]; then
+              printf '%s\n' "no-result-reason=$NO_RESULT_REASON" >> "$GITHUB_OUTPUT"
+            fi
+          fi
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
@@ -922,7 +933,7 @@ jobs:
           path: .agentic-job-source
           persist-credentials: false
       - name: Edit the status comment
-        if: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true' }}
+        if: ${{ (fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') || (needs.apply.outputs.missing-data == 'true' && fromJSON(inputs.policy).notify-item != '' && fromJSON(inputs.policy).notify-item != '*') }}
         continue-on-error: true
         env:
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}

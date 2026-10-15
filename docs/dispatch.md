@@ -113,9 +113,12 @@ runs and retries. Cross-repository targets receive no job-token notification.
 The result's URL is the
 `result-url` output of `dispatch.yml` (and of `agentic-job.yml` and
 `apply.yml`) and is in the run summary. A run that hands back only `noop`,
-`missing_tool` or `missing_data` has no result: conclude says so in the status
-comment, and the run stays green. The agent's sanitized reason stays in the
-run summary. Reviews have no status comment.
+`missing_tool` or `missing_data` has no result. If these include `missing_data`,
+apply fails and conclude posts the sanitized reason and run link in the bounded
+status comment even with notifications off (cross-repository items need the
+caller's `SAFE_OUTPUTS_PAT`). Otherwise the run stays green and status remains
+opt-in. The run summary also holds the reason. Reviews normally have no status
+comment, except for missing-data failures.
 
 Runs of one kind for one item run one at a time, and only one waits: a
 dispatch made while another for the same kind and item is pending cancels the
