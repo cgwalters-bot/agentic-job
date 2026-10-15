@@ -1028,6 +1028,18 @@ mod tests {
     }
 
     #[test]
+    fn batched_pull_request_closing_references_are_preserved() {
+        let body = "Batch sibling work\n\nCloses #64\nCloses #65\nCloses owner/tracker#66";
+        let mut handback = Handback::pull_request();
+        handback.items[0]["body"] = json!(body);
+        let verdict = handback.check();
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.items.len(), 1);
+        assert_eq!(verdict.items[0]["body"], body);
+        assert!(verdict.patch.is_some());
+    }
+
+    #[test]
     fn what_is_accepted() {
         let cases = [
             ("a pull request", Handback::pull_request(), 1, true),

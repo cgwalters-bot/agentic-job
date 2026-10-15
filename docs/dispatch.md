@@ -120,6 +120,21 @@ caller's `SAFE_OUTPUTS_PAT`). Otherwise the run stays green and status remains
 opt-in. The run summary also holds the reason. Reviews normally have no status
 comment, except for missing-data failures.
 
+For a batched implement run, put the primary issue in `item` and name the
+small sibling issues and their requested work explicitly in `task`. The
+primary item routes admission, status and the generated `Refs` line; it is
+not an allowlist of issues the PR may address. No extra input is needed:
+`create_pull_request` bounds count requests, not issue references in their
+bodies. One PR may therefore retain several agent-supplied `Closes #N`
+lines (use repository-qualified references for issues outside the target).
+Check accepts those lines and apply preserves them before appending `Refs`;
+the generated `Refs` line does not narrow the batch. Review covers the whole
+PR diff, including the sibling work, rather than only the primary item.
+The batch still shares one run's existing output, patch and budget limits;
+this does not authorize extra comments or issue actions. Closing references
+are agent-authored text, not trusted evidence of scope or permission, and
+take effect only when the draft PR is merged.
+
 Runs of one kind for one item run one at a time, and only one waits: a
 dispatch made while another for the same kind and item is pending cancels the
 pending one. To run several of one kind on one item, start each after the

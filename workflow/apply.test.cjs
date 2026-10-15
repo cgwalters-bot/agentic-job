@@ -1328,7 +1328,7 @@ function refs(items, issue = '64', itemRepo = 'owner/repo') {
   }
 }
 
-test('a pull request refers to the issue the caller named, and closes nothing', () => {
+test('the generated reference names the caller issue without closing it', () => {
   const [opened, commented] = refs([pull, comment()]);
   assert.equal(opened.body, 'change\n\nRefs owner/repo#64');
   assert.deepEqual(commented, comment());
@@ -1341,6 +1341,14 @@ test('a pull request refers to the issue the caller named, and closes nothing', 
   assert.ok(steps.indexOf('Say which issue a pull request is for') < steps.indexOf('Leave out what an earlier attempt applied'));
   assert.match(workflow.split('- name: Say which issue a pull request is for\n')[1].split('\n')[0],
     /if: \$\{\{ fromJSON\(inputs\.policy\)\.issue != '' \}\}/);
+});
+
+test('a batched pull request preserves closing references for all its issues', () => {
+  for (const itemRepo of ['owner/repo', 'owner/tracker']) {
+    const body = 'Batch sibling work\n\nCloses #64\nCloses #65\nCloses owner/tracker#66';
+    const [opened] = refs([{ ...pull, body }], '64', itemRepo);
+    assert.equal(opened.body, `${body}\n\nRefs ${itemRepo}#64`);
+  }
 });
 
 // gh-aw's sanitizer, as far as these tests go: it neutralizes a mention and cuts at its limit.
