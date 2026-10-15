@@ -523,6 +523,69 @@ fn redirections_to(
             None => problems.push(format!("a {output} whose labels are not an array")),
         }
     }
+    if let Some((key, people)) = match output {
+        "add_reviewer" => Some(("pull_request_number", "reviewers")),
+        "assign_to_user" => Some(("issue_number", "assignees")),
+        _ => None,
+    } {
+        // Whoever is named is notified. The handlers silently drop a login
+        // outside `allowed`, and fall back to the triggering item without a
+        // number, so check refuses instead; `policy` requires the list.
+        if !item
+            .get("repo")
+            .and_then(Value::as_str)
+            .is_some_and(|repo| repo.eq_ignore_ascii_case(&policy.repo))
+        {
+            problems.push(format!("a {output} requires the policy's explicit repo"));
+        }
+        if !item
+            .get(key)
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
+        {
+            problems.push(format!("a {output} requires a positive integer {key}"));
+        }
+        // Other targets, and other ways to name people: teams and the
+        // singular `assignee` have no bounds here.
+        for alias in [
+            "item_number",
+            "issue_number",
+            "pull_request_number",
+            "pr_number",
+            "pull_number",
+            "pr",
+            "target",
+            "team_reviewers",
+            "assignee",
+        ] {
+            if alias != key && item.contains_key(alias) {
+                problems.push(format!("a {output} with unsupported field {alias}"));
+            }
+        }
+        let limit = policy.safe_outputs.others.get(output);
+        match item.get(people).and_then(Value::as_array) {
+            Some(logins) if !logins.is_empty() => {
+                // The handlers use max for both requests and logins per
+                // request, and would drop the rest.
+                if limit.is_none_or(|limit| logins.len() > limit.max as usize) {
+                    problems.push(format!("a {output} exceeding the per-request login limit"));
+                }
+                for login in logins {
+                    // Exactly as listed: the handlers compare logins so.
+                    if !login.as_str().is_some_and(|login| {
+                        limit
+                            .and_then(|limit| limit.allowed.as_ref())
+                            .is_some_and(|allowed| allowed.iter().any(|allowed| allowed == login))
+                    }) {
+                        problems.push(format!(
+                            "a {output} naming {login}, which the policy does not allow"
+                        ));
+                    }
+                }
+            }
+            _ => problems.push(format!("a {output} requires a nonempty {people} array")),
+        }
+    }
     if output == "close_issue" && item.contains_key("body") {
         problems.push("a close_issue with body; closure does not post comments".to_owned());
     }
@@ -1556,6 +1619,64 @@ mod tests {
         for output in ["update_issue", "update_pull_request", MARK_READY] {
             let item = json!({"type": output, "repo": policy().repo, "title": "t", "reason": "r"});
             assert!(!redirections(item.as_object().unwrap(), &policy()).is_empty());
+        }
+    }
+
+    #[test]
+    fn person_actions_name_only_allowed_logins() {
+        for (output, number_key, people, alias) in [
+            (
+                "add_reviewer",
+                "pull_request_number",
+                "reviewers",
+                "team_reviewers",
+            ),
+            ("assign_to_user", "issue_number", "assignees", "assignee"),
+        ] {
+            let mut policy = policy();
+            policy.safe_outputs.others.insert(
+                output.to_owned(),
+                crate::policy::OutputLimit {
+                    max: 2,
+                    allowed: Some(vec!["octocat".to_owned(), "hubot".to_owned()]),
+                    ..Default::default()
+                },
+            );
+            let mut plain = json!({"type": output, "repo": policy.repo});
+            plain[number_key] = json!(7);
+            plain[people] = json!(["octocat"]);
+            for (key, value, ok) in [
+                (number_key, json!(7), true),
+                (people, json!(["octocat", "hubot"]), true),
+                (people, json!(["octocat", "hubot", "octocat"]), false),
+                (people, json!(["mallory"]), false),
+                (people, json!(["octocat", "mallory"]), false),
+                (people, json!(["OctoCat"]), false),
+                (people, json!(["@octocat"]), false),
+                (people, json!([{"login": "octocat"}]), false),
+                (people, json!([]), false),
+                (people, json!("octocat"), false),
+                (people, Value::Null, false),
+                (number_key, json!(0), false),
+                (number_key, json!("7"), false),
+                (number_key, Value::Null, false),
+                ("repo", json!("other/repo"), false),
+                ("repo", Value::Null, false),
+                ("target", json!("*"), false),
+                ("item_number", json!(7), false),
+                ("pr_number", json!(8), false),
+                (alias, json!(["mallory"]), false),
+            ] {
+                let mut item = plain.clone();
+                item[key] = value;
+                assert_eq!(
+                    redirections(item.as_object().unwrap(), &policy).is_empty(),
+                    ok,
+                    "{output} {key}: {item}"
+                );
+            }
+            policy.safe_outputs.others.remove(output);
+            assert!(!redirections(plain.as_object().unwrap(), &policy).is_empty());
         }
     }
 

@@ -70,6 +70,7 @@ the pinned commit gives.
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
 `mark_pull_request_as_ready_for_review`, `update_project`, `push_to_pull_request_branch`,
+`add_reviewer`, `assign_to_user`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -190,6 +191,35 @@ branch with the apply credential, which needs push access to it.
 
 Apply needs `issues: write` for `update_issue`, and `pull-requests: write`
 for the other two. No producer or check token gains write access.
+
+### Requesting reviewers and assigning users
+
+Both notify whoever they name, so an agent could otherwise page anyone with
+access to the repository. Each is off unless listed in bounds, and then needs
+a nonempty `allowed` list of logins; a bounds file without one is refused.
+
+```toml
+[outputs.add_reviewer]
+max = 1
+allowed = ["octocat"]
+
+[outputs.assign_to_user]
+max = 1
+allowed = ["octocat", "hubot"]
+```
+
+A request names the run's exact `repo` and a positive integer
+`pull_request_number` (`add_reviewer`) or `issue_number` (`assign_to_user`),
+with a nonempty `reviewers` or `assignees` array. `check` refuses the whole
+hand-back if a login is not in `allowed` exactly as written (the pinned
+handlers compare logins case-sensitively and would otherwise drop it
+silently), or if a request names more logins than `max`. Target aliases,
+`team_reviewers` and the singular `assignee` are refused. GitHub also
+accepts a pull request's number as `issue_number`. Apply does not unassign
+current assignees. The pinned `add_reviewer` handler requests Copilot's
+review bot for the login `copilot`; list it only to allow that. `add_reviewer` needs pull-request write access in
+apply, and `assign_to_user` issue write access; the listed users must already
+be able to review or be assigned. No producer or check token gains write access.
 
 ### Pushing to a pull request's branch
 

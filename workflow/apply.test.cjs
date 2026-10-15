@@ -102,18 +102,18 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
     /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
     'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-dispatch', 'e2e-compose', 'e2e-review',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-dispatch', 'e2e-compose', 'e2e-review',
   ]);
   for (const [, name, caller] of callers) {
     assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
     assert.doesNotMatch(caller, /^      apply-environment:/m, name);
   }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-compose', 'e2e-review']) {
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-compose', 'e2e-review']) {
     const caller = callers.find(([, jobName]) => jobName === name)[2];
     assert.match(caller, /^      contents: read$/m, name);
     assert.doesNotMatch(caller, /^      contents: write$/m, name);
   }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused']) {
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people']) {
     const caller = callers.find(([, jobName]) => jobName === name)[2];
     assert.match(caller, /^      build-binary: true$/m, name);
     const reusable = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
@@ -128,6 +128,8 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     writeFileSync(join(root, 'config.json'), JSON.stringify({
       close_issue: { max: 2 },
       add_labels: { max: 3, allowed: ['triage'], blocked: ['release'] },
+      add_reviewer: { max: 1, allowed: ['octocat'] },
+      assign_to_user: { max: 1, allowed: ['octocat'] },
       add_comment: { max: 1 },
       update_issue: { max: 1, fields: ['title'] },
       update_pull_request: { max: 1, fields: ['body', 'draft'] },
@@ -146,6 +148,12 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     assert.deepEqual(config.add_labels, {
       max: 3, allowed: ['triage'], blocked: ['release'],
       'target-repo': 'owner/source', target: '*', issue_intent: false, create_if_missing: false,
+    });
+    assert.deepEqual(config.add_reviewer, {
+      max: 1, allowed: ['octocat'], 'target-repo': 'owner/source', target: '*',
+    });
+    assert.deepEqual(config.assign_to_user, {
+      max: 1, allowed: ['octocat'], 'target-repo': 'owner/source', target: '*', issue_intent: false, unassign_first: false,
     });
     // A comment goes to the item, which may be in another repository than the outputs.
     assert.deepEqual(config.add_comment, { max: 1, 'target-repo': 'owner/tracker', target: '99' });

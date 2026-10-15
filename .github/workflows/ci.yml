@@ -777,6 +777,37 @@ jobs:
       budget: '100'
       artifact-prefix: analysis-refused-
 
+  # Outputs that notify people, bounded to the one listed login: an
+  # assignment on the scratch issue, and a review request on the scratch
+  # pull request when one is open (people.sh). e2e-verify checks and undoes both.
+  e2e-people:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: write # assign_to_user
+      pull-requests: write # add_reviewer
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the agent job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-people-${{ github.run_id }}
+      build-binary: true
+      repo: ${{ github.repository }}
+      kind: analysis
+      task: Assign the listed user on the scratch issue and request their review on the scratch pull request.
+      outputs: add_reviewer,assign_to_user
+      max-outputs: '2'
+      notify: none
+      allow: .github/agentic-job/people.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/people.sh
+      timeout: '5'
+      max-requests: '0'
+      budget: '100'
+      artifact-prefix: people-
+
   # Exercise the shipped caller, not a separately maintained imitation.
   # Not implement: it opens a pull request only with an apply environment's
   # PAT, which CI does not hold. Not triage: it takes the same path as
@@ -950,12 +981,13 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      issues: write # delete the comments
-      pull-requests: write # delete the comments and the reaction on the pull request this run is for
+      issues: write # delete the comments, and unassign e2e-people's assignee
+      pull-requests: write # delete the comments and the reaction on the pull request this run is for, and e2e-people's review request
+      actions: read # when this run started, for e2e-people's events
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -1047,13 +1079,39 @@ jobs:
           gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" | jq -se --arg run "$RUN" '[ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run)) and (.body | contains("A comment from the scripted agent of an event-triggered run."))) ] | length == 1'
       # Its apply succeeded only if the update did. Another run's analysis
       # may have replaced the section since, so the run is not looked for.
-      - name: The topic-branch analysis updated the scratch issue's body
+      - name: "The topic-branch analysis updated the scratch issue's body"
         run: gh api "repos/$GH_REPO/issues/$ISSUE" --jq .body | grep -F 'A body section from the scripted agent of a topic-branch analysis.'
       - name: The refused comment was not posted on either item
         run: |
           for item in "$ISSUE" 65; do
             gh api --paginate "repos/$GH_REPO/issues/$item/comments" | jq -se --arg run "$RUN" 'any(.[][]; ((.body | contains($run)) and (.body | contains("This misdirected analysis must be refused.")))) | not'
           done
+      # Runs share the issue and login: another run's cleanup may already
+      # have undone this run's request, and GitHub records no new event for
+      # one already in place. So either counts.
+      - name: The listed user was assigned, and asked to review where a scratch pull request is open
+        env:
+          RESULT: ${{ needs.e2e-people.result }}
+          PEOPLE: ${{ needs.e2e-people.outputs.applied-artifact-id }}
+          LOGIN: cgwalters-bot
+          TITLE: "Scratch pull request for CI's end-to-end runs"
+        run: |
+          test "$RESULT" = success
+          test -n "$PEOPLE"
+          since=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)
+          made() {
+            gh api --paginate "repos/$GH_REPO/issues/$1/events" |
+              jq -se --arg event "$2" --arg key "$3" --arg login "$LOGIN" --arg since "$since" \
+                'any(.[][]; .event == $event and .[$key].login == $login and .actor.login == "github-actions[bot]" and .created_at >= $since)' ||
+              gh api "$4" --jq "$5" | jq -e --arg login "$LOGIN" 'index($login) != null'
+          }
+          made "$ISSUE" assigned assignee "repos/$GH_REPO/issues/$ISSUE" '[.assignees[].login]'
+          pr=$(gh api "repos/$GH_REPO/pulls?state=open&per_page=100" --jq '[.[] | select(.title == env.TITLE)][0].number // empty')
+          if [ -z "$pr" ]; then
+            echo "No open pull request titled \"$TITLE\": add_reviewer was not exercised." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            made "$pr" review_requested requested_reviewer "repos/$GH_REPO/pulls/$pr/requested_reviewers" '[.users[].login]'
+          fi
       - name: The comments are on the scratch issue, and the run stopped at a limit says so
         env:
           NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"
@@ -1084,6 +1142,19 @@ jobs:
             gh api --paginate "repos/$GH_REPO/issues/$issue/comments" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$RUN\"))).id" |
               xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
           done
+      # The assignment and review request e2e-people made, so that the next
+      # run's check finds its own and not this one's.
+      - name: Undo the assignment and the review request
+        if: ${{ always() }}
+        env:
+          LOGIN: cgwalters-bot
+          TITLE: "Scratch pull request for CI's end-to-end runs"
+        run: |
+          gh api -X DELETE "repos/$GH_REPO/issues/$ISSUE/assignees" -f "assignees[]=$LOGIN" > /dev/null
+          pr=$(gh api "repos/$GH_REPO/pulls?state=open&per_page=100" --jq '[.[] | select(.title == env.TITLE)][0].number // empty')
+          if [ -n "$pr" ]; then
+            gh api -X DELETE "repos/$GH_REPO/pulls/$pr/requested_reviewers" -f "reviewers[]=$LOGIN" > /dev/null
+          fi
       # The eyes reaction notify put on the pull request, so that the next
       # run's check finds its own and not this one's.
       - name: Remove the reaction
@@ -1182,7 +1253,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1201,11 +1272,7 @@ jobs:
           FORK_E2E: ${{ needs.changes.outputs.fork-e2e }}
         run: >-
           jq -e --arg full "$FULL" --arg host "$HOST" --arg e2e "$E2E" --arg review "$REVIEW" --arg fork_e2e "$FORK_E2E"
-          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
-          ($full == "false" and .key != "changes") or
-          ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or
-          ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
-          (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
+          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (($full == "false" and .key != "changes") or ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or (.key == "e2e-review" and $review != "true"))))' <<<"$NEEDS"
 
   # Only this sentinel is required in the ruleset. Always report a failure
   # if the aggregate did not succeed (a skipped required check can pass).

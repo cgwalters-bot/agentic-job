@@ -858,8 +858,8 @@ that. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `issues: write` (comments, issues and
-issue updates) and `pull-requests: write` (pull request updates and
-mark-ready) for the job's own token. Nothing needs
+issue updates and assignees) and `pull-requests: write` (pull request updates,
+mark-ready and reviewers) for the job's own token. Nothing needs
 `contents: write`: a new pull request's branch, and a push to it, go to a
 fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 

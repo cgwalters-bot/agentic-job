@@ -1,0 +1,13 @@
+# CI's bounds for the scripted run that requests a reviewer and assigns a
+# user: only the one account that may be both, so a run cannot notify
+# anyone else (docs/safe-outputs.md).
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["main"]
+max_outputs = 2
+max_patch_bytes = 1048576
+max_patch_files = 1
+
+[outputs]
+add_reviewer = { max = 1, allowed = ["cgwalters-bot"] }
+assign_to_user = { max = 1, allowed = ["cgwalters-bot"] }

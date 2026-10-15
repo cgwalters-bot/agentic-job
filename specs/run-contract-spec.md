@@ -228,6 +228,11 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
 `issue_action_payloads_are_not_silently_changed`,
 `issue_labels_are_checked_not_silently_filtered` and
 `an_issue_that_links_other_issues_is_refused`.
+`add_reviewer` and `assign_to_user` MUST likewise name an explicit repository
+and pull request or issue number, and only logins the policy's required,
+nonempty `allowed` list names exactly, at most `max` per request.
+Enforcement: tests `person_actions_name_only_allowed_logins` and
+`person_actions_require_allowed_logins`.
 
 **RC-013 — Re-run application.** A re-run of apply MUST NOT post an accepted
 comment, issue or pull request that an earlier attempt of the same run posted,

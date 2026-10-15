@@ -330,6 +330,71 @@
       }
     }
   },
+  "add_reviewer": {
+    "defaultMax": 3,
+    "fields": {
+      "pull_request_number": {
+        "issueOrPRNumber": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "reviewers": {
+        "type": "array",
+        "itemType": "string",
+        "itemSanitize": true,
+        "itemMaxLength": 39
+      },
+      "team_reviewers": {
+        "type": "array",
+        "itemType": "string",
+        "itemSanitize": true,
+        "itemMaxLength": 100
+      }
+    },
+    "customValidation": "requiresOneOf:reviewers,team_reviewers"
+  },
+  "assign_to_user": {
+    "defaultMax": 1,
+    "fields": {
+      "assignee": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 39
+      },
+      "assignees": {
+        "type": "[]string",
+        "sanitize": true,
+        "maxLength": 39
+      },
+      "confidence": {
+        "type": "string",
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+        ],
+        "x-strip-on-error": true
+      },
+      "issue_number": {
+        "issueOrPRNumber": true
+      },
+      "rationale": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 280,
+        "x-strip-on-error": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "suggest": {
+        "type": "boolean"
+      }
+    }
+  },
   "update_project": {
     "defaultMax": 10,
     "fields": {

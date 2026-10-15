@@ -449,6 +449,8 @@ jobs:
             | (select(has("update_pull_request")).update_pull_request) |= . + {"target-repo": $action_repo, target: "*",
                 allow_title: any(.fields[]; . == "title"), allow_body: any(.fields[]; . == "body"), update_branch: false}
             | (select(has("mark_pull_request_as_ready_for_review")).mark_pull_request_as_ready_for_review) += {"target-repo": $action_repo, target: "*"}
+            | (select(has("add_reviewer")).add_reviewer) += {"target-repo": $action_repo, target: "*"}
+            | (select(has("assign_to_user")).assign_to_user) += {"target-repo": $action_repo, target: "*", issue_intent: false, unassign_first: false}
             | (select(has("update_project")).update_project) += {"target-repo": $action_repo}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"

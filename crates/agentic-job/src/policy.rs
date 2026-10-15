@@ -68,6 +68,8 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "update_issue",
     "update_pull_request",
     MARK_READY,
+    "add_reviewer",
+    "assign_to_user",
     "update_project",
     PUSH_TO_PULL_REQUEST_BRANCH,
     "noop",
@@ -165,6 +167,15 @@ pub const DEFAULT_PROTECTED_FILES: &[&str] = &[
     "CLAUDE.md",
     "AGENTS.md",
 ];
+
+/// The output types that name people: `allowed` lists the logins they may
+/// name, exactly as written, since the handlers compare them so.
+pub const PERSON_OUTPUTS: &[&str] = &["add_reviewer", "assign_to_user"];
+
+/// A GitHub login, at most 39 characters with no leading, trailing or
+/// doubled hyphen: what gh-aw's collector and handlers leave unchanged.
+static LOGIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9](?:-?[A-Za-z0-9])*$").expect("a valid pattern"));
 
 static REPO_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").expect("a valid pattern"));
@@ -302,7 +313,8 @@ pub struct OutputLimit {
     pub max: u32,
     /// Labels an issue may name. Absent preserves the existing unrestricted
     /// behavior; an empty list permits no labels. Enforced by `check`, not
-    /// by the handler's silent filtering.
+    /// by the handler's silent filtering. For [`PERSON_OUTPUTS`], the
+    /// logins a request may name instead, required and nonempty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed: Option<Vec<String>>,
     /// Labels an issue may never name, even if also allowed.
@@ -395,6 +407,24 @@ impl OutputLimit {
         );
         for pattern in &self.branches {
             glob(pattern).with_context(|| format!("outputs.{output}: the glob {pattern:?}"))?;
+        }
+        if PERSON_OUTPUTS.contains(&output) {
+            // Each named login is notified, and the handlers take an empty
+            // or absent list for "anyone": so a nonempty list is required.
+            ensure!(
+                self.allowed
+                    .as_ref()
+                    .is_some_and(|logins| !logins.is_empty())
+                    && self.blocked.is_empty(),
+                "outputs.{output} requires a nonempty allowed list of logins, and no blocked list"
+            );
+            for login in self.allowed.iter().flatten() {
+                ensure!(
+                    login.len() <= 39 && LOGIN_RE.is_match(login),
+                    "outputs.{output}: invalid login {login:?}"
+                );
+            }
+            return Ok(());
         }
         ensure!(
             matches!(output, "create_issue" | "add_labels" | "remove_labels")
@@ -1261,6 +1291,17 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             false
         }
     });
+    if let Some(output) = PERSON_OUTPUTS.iter().find(|output| {
+        policy
+            .safe_outputs
+            .others
+            .get(**output)
+            .is_some_and(|limit| limit.allowed.as_ref().is_none_or(Vec::is_empty))
+    }) {
+        return Err(vec![format!(
+            "{output} has no login allowed by both bounds files"
+        )]);
+    }
     if policy
         .safe_outputs
         .others
@@ -1779,6 +1820,77 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         }
         bounds.outputs.get_mut("add_labels").unwrap().allowed = None;
         assert!(bounds.validate().is_err());
+    }
+
+    #[test]
+    fn person_actions_require_allowed_logins() {
+        let logins = |logins: &[&str]| Some(logins.iter().map(|l| (*l).to_owned()).collect());
+        for output in PERSON_OUTPUTS {
+            for (allowed, blocked, ok) in [
+                (logins(&["octocat", "hubot-2"]), vec![], true),
+                (logins(&["a"]), vec![], true),
+                (logins(&[&"a".repeat(39)]), vec![], true),
+                (logins(&[&"a".repeat(40)]), vec![], false),
+                (None, vec![], false),
+                (logins(&[]), vec![], false),
+                (logins(&["octocat"]), vec!["hubot".to_owned()], false),
+                (logins(&["@octocat"]), vec![], false),
+                (logins(&["-octocat"]), vec![], false),
+                (logins(&["octocat-"]), vec![], false),
+                (logins(&["octo--cat"]), vec![], false),
+                (logins(&["octo cat"]), vec![], false),
+                (logins(&["octocat[bot]"]), vec![], false),
+            ] {
+                let mut bounds = bounds();
+                bounds.outputs.insert(
+                    (*output).to_owned(),
+                    OutputLimit {
+                        max: 2,
+                        allowed: allowed.clone(),
+                        blocked,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(bounds.validate().is_ok(), ok, "{output} {allowed:?}");
+                if ok {
+                    let policy = bounds
+                        .compile(&Request {
+                            outputs: output,
+                            ..request()
+                        })
+                        .unwrap();
+                    policy.validate().unwrap();
+                    assert_eq!(policy.safe_outputs.max_of(output), Some(2));
+                    assert_eq!(policy.safe_outputs.others[*output].allowed, allowed);
+                }
+            }
+            // A second bounds file narrows the logins; none in common is
+            // refused rather than left to the handlers' "anyone".
+            let compiled = |allowed: &[&str]| {
+                let mut bounds = bounds();
+                bounds.outputs.insert(
+                    (*output).to_owned(),
+                    OutputLimit {
+                        max: 1,
+                        allowed: logins(allowed),
+                        ..Default::default()
+                    },
+                );
+                bounds
+                    .compile(&Request {
+                        outputs: output,
+                        ..request()
+                    })
+                    .unwrap()
+            };
+            let policy =
+                intersect(compiled(&["octocat", "hubot"]), compiled(&["OCTOCAT"])).unwrap();
+            assert_eq!(
+                policy.safe_outputs.others[*output].allowed,
+                logins(&["octocat"])
+            );
+            assert!(intersect(compiled(&["octocat"]), compiled(&["hubot"])).is_err());
+        }
     }
 
     #[test]
