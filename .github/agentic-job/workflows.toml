@@ -8,6 +8,7 @@
 # where a caller names cgwalters-forge/agentic-job/...@COMMIT; or are the
 # reusable workflow's own jobs; or build, release and test the binaries.
 [exempt]
+"feed.yml" = "Opt-in maintenance on trusted default-branch code only; downloads domain data without executing it, with a dedicated publishing token restricted to the final step."
 "agentic-job.yml" = "The reusable workflow itself: its agent job runs secure-host from the policy-selected source checkout, and policy, check and apply run no untrusted step."
 "apply.yml" = "Part of the reusable workflow: the apply job, the only one with a write token, runs no untrusted step."
 "check.yml" = "Part of the reusable workflow: reads the agent's outputs as data, with a read-only token."

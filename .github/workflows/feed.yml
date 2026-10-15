@@ -1,0 +1,33 @@
+name: threat-feed pin
+
+on:
+  schedule:
+    - cron: '17 */8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: threat-feed-pin
+
+jobs:
+  refresh:
+    permissions:
+      contents: read
+    # Off by default. Only repository configuration can enable credentialed proposals.
+    if: ${{ vars.THREAT_FEED_REFRESH == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just@1.58.0
+      - run: just test-feed-refresh
+      - run: just refresh-feed
+      - run: just publish-feed-refresh
+        env:
+          GH_TOKEN: ${{ secrets.THREAT_FEED_PAT }}

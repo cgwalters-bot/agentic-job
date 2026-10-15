@@ -1641,8 +1641,7 @@ curl -fsSL "https://raw.githubusercontent.com/hagezi/dns-blocklists/$commit/wild
 ```
 
 The feed changes more than once a day upstream, so a run blocks what
-was known when the pin was last moved, and nothing moves it by itself
-yet. Should the pinned commit stop being served, every run would go
+was known when the pin was last moved. Should the pinned commit stop being served, every run would go
 without a feed and only warn: CI's `sandbox` jobs require the feed to
 load, so the next pull request here would show it.
 
@@ -1651,10 +1650,35 @@ The fetch retries transient curl failures up to three times, with a
 window is not a total wall-clock cap: the last attempt can finish after
 it. A successful fetch still has to pass the pinned checksum check.
 
-The retry and requirements-file regression tests address only part of
-[#108](https://github.com/cgwalters-forge/agentic-job/issues/108). That
-issue remains the tracking item for automated feed-pin maintenance and a
-CI embedded-source scan that handles `concat!` and multiline macros. The
+Stale pins miss newly listed malware and phishing hosts. To propose updates
+every eight hours, enable the repository variable `THREAT_FEED_REFRESH=true`
+and provide `THREAT_FEED_PAT`, a dedicated token restricted to this repository
+with contents and pull-request write permissions. This is off by default:
+the organization's job token may not be allowed to open pull requests.
+The `threat-feed pin` workflow runs only trusted default-branch code, with a
+read-only job token; only its publishing step receives the dedicated token.
+Do not grant it workflow or administration access. No untrusted feed text is
+executed or included in a commit message. The job proposes a draft, never
+merges it, and leaves an existing feed proposal untouched. Normal PR checks
+and human review remain required. It refuses to publish when the first 100
+open PRs do not establish that no proposal exists.
+If pushing succeeds but creating the PR fails, an operator must open the
+draft from the existing maintenance branch or delete that orphan before
+retrying the same pin. The job never force-pushes to recover from a failure.
+
+`just refresh-feed` performs the same update locally without credentials or
+forge writes; `just test-feed-refresh` checks its validation. The updater
+reads the upstream repository and file from the runtime constants, resolves
+one commit and hashes the exact bytes fetched at it. Fetches have 60-second
+timeouts, no redirects and size caps (256 KiB metadata, 16 MiB feed); malformed
+commits, empty feeds and unexpected domain-list formats fail without changing
+the source. A fresh proposal is not a freshness guarantee: pins remain stale
+until reviewed and merged, and the feed is supplementary hardening, not an
+exfiltration boundary.
+
+The retry and requirements-file regression tests already address part of
+[#108](https://github.com/cgwalters-forge/agentic-job/issues/108). That issue
+still tracks a CI embedded-source scan that handles `concat!` and multiline macros. The
 world-write walk it also tracked is gone, replaced by the access-time
 policy ([secure-host.md](secure-host.md#access-time-world-write-policy)).
 Source-attested prebuilt releases now replace manual release pins;

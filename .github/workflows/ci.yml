@@ -149,7 +149,7 @@ jobs:
           failIfEmpty: false
           fail: true
       # Source-addressed release selection and fail-closed verification tests.
-      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs
+      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs secure-host/refresh-feed.test.mjs
       # The pin's digest is of Cargo.lock, Cargo.toml, crates, egress, skills,
       # workflow/review.md and binary.mjs:
       # a file the build includes from anywhere else would not be in it.

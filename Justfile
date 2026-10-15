@@ -3,6 +3,15 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
 
+test-feed-refresh:
+    node --test secure-host/refresh-feed.test.mjs
+
+refresh-feed:
+    node secure-host/refresh-feed.mjs update
+
+publish-feed-refresh:
+    node secure-host/refresh-feed.mjs publish
+
 # Pinned collector and mocked forge handlers; no forge writes.
 test-safe-output-handlers:
     node --test crates/agentic-job/tests/corpus/handlers.test.mjs

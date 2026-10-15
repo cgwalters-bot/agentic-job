@@ -93,9 +93,9 @@ const DENYLIST_FILE: &str = "wildcard/tif.medium-onlydomains.txt";
 /// of the file there: what root fetches before the network rules load is
 /// what a pull request here named, not whatever the branch holds that
 /// day. A file that is not that one stops the setup.
-const DENYLIST_COMMIT: &str = "c4cea861852d108931445dd9867f09a324fe2a40";
+const DENYLIST_COMMIT: &str = "8f5373998c13aa4699d57762f727ae294c78d8f4";
 
-const DENYLIST_SHA256: &str = "f24fd0b07a8ba5bc83a2842be5e08501a14ae1d2272089fdf17c8f6e306e29f6";
+const DENYLIST_SHA256: &str = "7d2782affed6465d3e3c34bbae68f5ea86ec385b46f95f76eb8ec387670a8db3";
 
 /// Where the feed is fetched to, beside where it goes once it is checked.
 const DENYLIST_FETCHED: &str = "/opt/egress-proxy/denylist.txt.fetched";
