@@ -196,6 +196,7 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}

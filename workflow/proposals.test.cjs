@@ -119,7 +119,8 @@ test('wrapper passes trusted checker inputs directly and exports all checker out
   for (const input of ['binary-artifact-id', 'policy-artifact-id', 'comment-target']) {
     assert.ok(checker.includes(`\${{ fromJSON(inputs.policy).${input} }}`), input);
   }
-  for (const output of ['artifact-id', 'refusal', 'has-patch']) {
+  assert.ok(checker.includes('value: ${{ jobs.detect.outputs.artifact-id }}'));
+  for (const output of ['refusal', 'has-patch']) {
     assert.ok(checker.includes(`value: \${{ jobs.check.outputs.${output} }}`));
   }
   assert.match(checker, /permissions:\n  contents: read/);

@@ -30,6 +30,8 @@ pub enum Command {
     Run(run::Args),
     /// Check handed-back outputs and patch against the policy
     Check(check::Args),
+    /// Inspect checked proposals with a bounded model request before apply
+    Detect(crate::detect::Args),
     /// Decide whether the event that started the workflow may start a run, and write its task
     Event(event::Args),
     /// Write a run's configuration from a file and settings given one at a time
@@ -53,6 +55,7 @@ impl Command {
             Self::Sandbox(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::Check(args) => check::run(args),
+            Self::Detect(args) => crate::detect::run(args),
             Self::Event(args) => event::run(args),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),

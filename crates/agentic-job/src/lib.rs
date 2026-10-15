@@ -20,4 +20,5 @@ pub mod sandbox;
 pub mod session;
 pub mod workflows;
 
+pub mod detect;
 mod workflow_commands;

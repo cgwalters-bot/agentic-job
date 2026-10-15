@@ -453,6 +453,8 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && (inputs.proposals-artifact != '' || needs.agent.outputs.safe-outputs-artifact-id != '') }}
     permissions:
       contents: read
+      # Only check.yml's separate detector job uses OIDC, not the checker.
+      id-token: write
     # No secrets cross this read-only boundary; trusted IDs come directly
     # from policy, and only the proposals' from the agent job.
     uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.

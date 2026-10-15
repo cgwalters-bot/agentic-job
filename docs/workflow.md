@@ -43,9 +43,35 @@ separate jobs on separate machines. The apply job's additional checks are
 3. **check**, on a machine the agent never touched. gh-aw's collector
    validates and sanitizes the producer's requests, then `agentic-job check`
    holds them and the patch to the policy.
-4. **apply**, on a machine of its own, uses a write credential.
+4. **detect**, inside the check workflow on a separate read-only machine,
+   optionally inspects accepted proposals before releasing their artifact ID.
+5. **apply**, on a machine of its own, uses a write credential.
    It runs gh-aw's handlers on the checked outputs:
-   a branch and a draft pull request, comments.
+    a branch and a draft pull request, comments.
+
+## Optional threat detection
+
+Set the caller repository variable `AGENTIC_JOB_DETECT_MODEL` to a model served
+by the configured inference proxy to enable detection. An empty or absent
+variable disables it (the default); dispatch inputs cannot change this setting.
+The concrete threats are prompt-injected output instructions, secret leaks and
+malicious patches that pass structural checks. Detection supplements, never
+replaces, deterministic validation, and is not proof that a proposal is safe.
+
+The separate detect job has `contents: read` and `id-token: write`, no write
+credential or agent tools. It registers its own run through the same inference
+proxy using the policy's configuration (`github-oidc` or `plain`, not
+`token-file`). That proxy must be reachable from the hosted detector runner.
+It sends the task, checked outputs and patches as untrusted evidence to one
+OpenAI-compatible chat-completions request, capped at 2 MiB of evidence, 256
+output tokens and 120 seconds. There are no retries or tool continuations.
+Any threat, malformed/truncated verdict, unavailable model, registration or
+cleanup error blocks release of the checked artifact and therefore apply.
+Expected deterministic refusals do not run detection. The ordinary apply
+conclusion/status path is unchanged. Composed callers must use check.yml's
+returned artifact ID, not discover the internal pre-detection upload by name.
+Composed callers must grant the check workflow `id-token: write` in addition
+to `contents: read`; the deterministic check job itself retains only read access.
 
 `activate`, `notify` and `conclude` also inherit the caller's permissions
 and can remove labels, post reactions and create or edit status comments.
@@ -134,7 +160,7 @@ agent. The pieces are:
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
 | the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token |
-| [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, on a machine the agent never touched | `contents: read`, no secrets |
+| [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
 Every setting is an input of `policy.yml` (the same inputs as
@@ -233,6 +259,7 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
+      id-token: write
     uses: cgwalters-forge/agentic-job/.github/workflows/check.yml@COMMIT
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}

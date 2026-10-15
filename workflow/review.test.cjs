@@ -412,11 +412,11 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit|pull_request.head|refs\/pull/);
   // Which job holds which token: writes only in apply (the comment) and
-  // status (the status), the identity token only in the agent job.
+  // status (the status), the identity token in agent and check's detector.
   const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
   assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'submit', 'apply', 'status']);
-  for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: [],
+  for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: ['id-token'],
     refusal: ['pull-requests'], submit: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);

@@ -10,6 +10,34 @@ const { OWNER_BRANCHES } = require('./push.cjs');
 const workflow = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
 const wrapper = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
 
+test('check releases only the detector-gated artifact, with opt-in caller configuration', () => {
+  const check = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  assert.match(check, /value: \$\{\{ jobs.detect.outputs.artifact-id \}\}/);
+  const detect = check.split('\n  detect:\n')[1].split('\n  check:\n')[0];
+  assert.match(detect, /needs: check/);
+  assert.match(detect, /contents: read\n      id-token: write/);
+  assert.doesNotMatch(detect, /secrets\.|continue-on-error|always\(\)/);
+  assert.match(detect, /if: \$\{\{ vars.AGENTIC_JOB_DETECT_MODEL != '' \}\}/);
+  assert.ok(detect.indexOf('"$JOB_DIR/agentic-job" detect') < detect.indexOf('- id: release'));
+  assert.match(detect, /artifact-ids: \$\{\{ needs.check.outputs.artifact-id \}\}/);
+  assert.match(check.split('\n  check:\n')[1], /permissions:\n      contents: read\n/);
+  assert.match(workflow, /fromJSON\(inputs.check\).result == 'success'/);
+});
+
+test('every shipped check caller grants the detector OIDC permission', () => {
+  const { readdirSync } = require('node:fs');
+  const dir = join(__dirname, '../.github/workflows');
+  let count = 0;
+  for (const file of readdirSync(dir).filter(file => file.endsWith('.yml'))) {
+    for (const job of readFileSync(join(dir, file), 'utf8').split(/\n  (?=[\w-]+:\n)/)) {
+      if (!/uses: .*\/workflows\/check\.yml/.test(job)) continue;
+      count++;
+      assert.match(job, /permissions:\n      contents: read\n(?:      #[^\n]*\n)*      id-token: write/, file);
+    }
+  }
+  assert.equal(count, 3);
+});
+
 function step(name) {
   const section = workflow.split(`- name: ${name}\n`)[1];
   assert.ok(section, name);
