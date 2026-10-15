@@ -39,6 +39,28 @@ class IngressTests(unittest.TestCase):
         self.assertFalse(local_step_ignores(
             'name: "multiline\n' + prefix + cases[0][0] + '\nend"\n'))
 
+    def test_local_workflow_ignore_syntax(self):
+        cases = [
+            ("./.github/workflows/local.yml", True),
+            ("'./.github/workflows/local.yml'", True),
+            ('"./.github/workflows/local.yml"', True),
+            ("remote/repo/.github/workflows/local.yml@main", False),
+            ("./.github/workflows/../local.yml", False),
+            ("./.github/workflows/sub/local.yml", False),
+            ("./.github/workflows/local..yml", False),
+            ("./local.yml", False),
+            ("./.github/workflows/local.yaml", False),
+        ]
+        for path, expected in cases:
+            with self.subTest(path=path):
+                text = f"jobs:\n  test:\n    uses: {path} # zizmor: ignore[self-repository]"
+                self.assertEqual(local_step_ignores(text), {3} if expected else set())
+        for directive in ("ignore[unpinned-uses]", "ignore[self-repository, unpinned-uses]",
+                          "ignore [self-repository]", "ignore[self-repository] # zizmor: ignore[other]"):
+            with self.subTest(directive=directive):
+                self.assertFalse(local_step_ignores(
+                    f"jobs:\n  test:\n    uses: ./.github/workflows/local.yml # zizmor: {directive}"))
+
     def test_repository_baseline(self):
         """Once a maintainer lands exemptions, ordinary edits pass ingress."""
         root = Path(__file__).resolve().parent.parent
@@ -75,6 +97,8 @@ class IngressTests(unittest.TestCase):
             "- run: echo ok", "- run: echo $SOURCE\n        env:\n          SOURCE: ${{ job.workflow_repository }}")
         local = good.replace("- run: echo ok", "- name: Local\n        uses: ./local # zizmor: ignore[self-repository] reviewed")
         scalar_ignore = good.replace("- run: echo ok", "- name: |\n          uses: ./local # zizmor: ignore[self-repository]\n        run: echo ok")
+        local_workflow = ("name: test\non: push\npermissions: {}\njobs:\n  test:\n"
+                          "    uses: ./.github/workflows/local.yml # zizmor: ignore[self-repository]\n")
         # (path, head content, expected[, base content if it differs])
         cases = [
             (".github/workflows/test.yml", good, True),
@@ -89,7 +113,11 @@ class IngressTests(unittest.TestCase):
             (".github/workflows/test.yml", local.replace("./local", "'./local'"), True, good),
             (".github/workflows/test.yml", local.replace("./local", '"./local"'), True, good),
             (".github/workflows/test.yml", local.replace("./local", "remote/action@" + "a" * 40), False, good),
-            (".github/workflows/test.yml", "name: test\non: push\npermissions: {}\njobs:\n  test:\n    uses: ./.github/workflows/local.yml # zizmor: ignore[self-repository]\n", False, good),
+            (".github/workflows/test.yml", local_workflow, True, good),
+            (".github/workflows/test.yml", local_workflow.replace("./.github/workflows/local.yml", "remote/repo/.github/workflows/local.yml@" + "a" * 40), False, good),
+            (".github/workflows/test.yml", local_workflow.replace("/local.yml", "/../local.yml"), False, good),
+            (".github/workflows/test.yml", local_workflow.replace("self-repository", "unpinned-uses"), False, good),
+            (".github/workflows/test.yml", local_workflow.replace("ignore[", "ignore ["), False, good),
             (".github/workflows/test.yml", local.replace("./local", "actions/checkout@v4"), False, good),
             (".github/workflows/test.yml", local.replace("self-repository", "self-repository, unpinned-uses"), False, good),
             (".github/workflows/test.yml", local + "# zizmor: ignore[unpinned-uses]\n", False, good),

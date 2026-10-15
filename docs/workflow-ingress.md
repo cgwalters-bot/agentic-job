@@ -26,8 +26,11 @@ grandfathering is involved.
 An inline `# zizmor: ignore[...]` comment can silence unrelated findings, so
 added or changed ignores in the diff against the merge-base fail, with one
 exception: exactly `# zizmor: ignore[self-repository]` on a step's `uses:` line
-whose literal path begins with `./`. This permits local actions, not remote
-actions or job-level reusable workflows; their code still needs human review.
+whose literal path begins with `./`, or a job's `uses:` line naming
+`./.github/workflows/<name>.yml`. The workflow filename must start with an ASCII
+letter, digit, underscore or hyphen, contain only those characters and dots,
+and contain no `..`. Neither form permits remote references; both run code
+from this repository that still needs human review.
 The checker accepts block-style steps with `- uses:` or `- name:`/`- id:` followed
 by `uses:`, with a plain single-line name/id, an unquoted or single-/double-quoted
 local path and an optional reason after the directive. The exception requires

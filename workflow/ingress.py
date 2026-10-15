@@ -14,6 +14,11 @@ IGNORE = re.compile(r"zizmor\s*:\s*ignore", re.IGNORECASE)
 LOCAL_IGNORE = re.compile(
     r"(?:- )?uses: (?:\./[^\s#'\"]+|'\./[^'\r\n]+'|\"\./[^\"\r\n]+\")"
     r" +# zizmor: ignore\[self-repository\](?: +[^\r\n]*)?")
+LOCAL_WORKFLOW_IGNORE = re.compile(
+    r"uses: (?:\./\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.yml"
+    r"|'\./\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.yml'"
+    r'|"\./\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.yml")'
+    r" +# zizmor: ignore\[self-repository\](?: +[^\r\n]*)?")
 
 
 def local_step_ignores(text):
@@ -39,8 +44,8 @@ def local_step_ignores(text):
         while parents and parents[-1][0] >= indent:
             parents.pop()
         path = [value for _, value in parents]
-        # Only steps, never a job's reusable-workflow uses. Keeping every other
-        # line as an opaque parent also excludes comments inside block scalars.
+        # Keeping every other line as an opaque parent also excludes comments
+        # inside block scalars.
         if (not stripped.startswith("- ") and path and
                 indent == parents[-1][0] + 2 and re.fullmatch(
                     r"- (?:name|id): [^\s|>'\"!&][^\r\n]*", path[-1])):
@@ -48,7 +53,13 @@ def local_step_ignores(text):
         step = (len(path) == 3 and path[0] == "jobs:" and
                 re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*:", path[1]) and
                 path[2] == "steps:") or path == ["runs:", "steps:"]
-        if step and LOCAL_IGNORE.fullmatch(stripped) and len(IGNORE.findall(line)) == 1:
+        job = (len(path) == 2 and path[0] == "jobs:" and
+               re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*:", path[1]))
+        # Workflow calls stay in this repository, just like local action steps.
+        # A single filename (and no '..') cannot escape the workflow directory.
+        local_job = (job and LOCAL_WORKFLOW_IGNORE.fullmatch(stripped) and
+                     ".." not in stripped.split(" #", 1)[0])
+        if (step and LOCAL_IGNORE.fullmatch(stripped) or local_job) and len(IGNORE.findall(line)) == 1:
             allowed.add(number)
         parents.append((indent, stripped))
     return allowed
@@ -86,8 +97,8 @@ def check(repo, base, head):
             source = Path(temp) / Path(name).name
             source.write_bytes(git(repo, "cat-file", "blob", oid.decode()))
             print(f"Checking {name!r}", flush=True)
-            # A PR must not silence unrelated findings. Local action steps are
-            # the sole exception; their code still needs human review.
+            # A PR must not silence unrelated findings. Local action steps and
+            # local workflow calls still need human review of their code.
             allowed = local_step_ignores(source.read_bytes().decode(errors="replace"))
             patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--text", "--no-renames",
                          "-U0", ancestor, head, "--", name).decode(errors="replace")
@@ -103,7 +114,7 @@ def check(repo, base, head):
                 elif line.startswith(" "):
                     new_line += 1
             if refused:
-                print(f"New or changed zizmor ignore in {name!r}: only self-repository on a local action step is allowed.")
+                print(f"New or changed zizmor ignore in {name!r}: only self-repository on a local action step or local workflow call is allowed.")
                 failed = True
             commands = [[os.environ.get("ZIZMOR", "zizmor"), "--offline", "--no-config",
                          "--strict-collection", "--no-progress", str(source)]]
