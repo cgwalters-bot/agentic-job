@@ -344,7 +344,7 @@ impl Register {
 
 /// Which agent, and where its configuration comes from. Step 6a.
 /// `run::agent` reads it.
-#[derive(Debug, Default, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Agent {
     /// An entry of the session's registry: `claude`, `opencode` or `fake`.
@@ -362,8 +362,22 @@ pub struct Agent {
     /// task that does not use them gets no instructions it did not ask
     /// for.
     pub skills: bool,
-    /// Include the redacted session in the run summary. Off by default.
+    /// Include the redacted session in the run summary. On by default.
     pub render_session: bool,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            model: None,
+            config_repo: None,
+            config_ref: None,
+            config_path: None,
+            skills: false,
+            render_session: true,
+        }
+    }
 }
 
 /// What stops a run. Zero means not set. `session::Limits::from_config`

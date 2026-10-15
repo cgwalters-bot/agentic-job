@@ -41,9 +41,10 @@ When the session ends it kills every process of the sandbox user. What
 
 ### Reading a session in the summary
 
-Set `render-session = true` in `[agent]` in the repository-owned sandbox
-configuration to include the session in the run summary. It is off by default;
-there is no dispatcher input. The trusted runner renders its redacted ACP copy,
+The session is included in the run summary by default. Set
+`render-session = false` in `[agent]` in the repository-owned sandbox
+configuration to opt out; there is no dispatcher input.
+The trusted runner renders its redacted ACP copy,
 not files written by the sandbox user. User and assistant text is prose;
 reasoning and tools are collapsed separately. Tools show arguments, measured
 duration, reported status and exit code when available, and at most 8192 bytes
@@ -57,6 +58,14 @@ and stays below GitHub's 1 MiB limit: assistant prose is retained first, then
 head and tail blocks. If assistant prose alone exceeds the limit, each message
 is abbreviated; the artifact keeps it. Usage updates are labelled agent-reported
 and potentially cumulative, not invented per-turn costs.
+
+To replay a long real run in the renderer regression test, download its
+`*-agent-transcript` artifact and extract `acp.jsonl`, then run
+`SESSION_TRANSCRIPT=/absolute/path/acp.jsonl cargo test --locked --lib real_long_session_summary_and_artifact -- --ignored --nocapture`.
+The test checks the full artifact and summary, then forces a smaller preview
+budget to check prose retention. The ordinary suite separately covers overflow
+of the 1 MiB limit with 150 tool calls. Real transcripts stay external, like
+the corpus inputs, rather than committing whole task conversations.
 
 Claude currently runs through `claude-agent-acp`, not native stream-json.
 This renderer uses that recorded protocol. Native stream-json ingestion,

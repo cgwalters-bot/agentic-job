@@ -58,6 +58,12 @@ clean machine and a third applies. The jobs that hold a write token,
 which are apply and, for runs started by an event, the ones that post
 the run's status, run nothing the agent wrote.
 
+Run summaries include the redacted session by default, with tools and reasoning
+collapsed. Set `render-session = false` in `[agent]` in the repository-owned
+sandbox configuration to opt out. Long sessions keep assistant prose first in
+the bounded summary; `session.md` in the `agent-run` artifact keeps the full
+rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summary).
+
 ### Which tokens reach what
 
 | Where | What it holds |

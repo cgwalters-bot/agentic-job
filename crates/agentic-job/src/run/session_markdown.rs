@@ -434,15 +434,89 @@ mod tests {
     }
 
     #[test]
-    fn defaults_off_and_can_be_enabled_in_owned_configuration() {
+    fn defaults_on_and_can_be_disabled_in_owned_configuration() {
+        assert!(crate::config::Agent::default().render_session);
+        let config: crate::config::Config = toml::from_str("").unwrap();
+        assert!(config.agent.render_session);
         for (text, enabled) in [
-            ("", false),
+            ("", true),
             ("render-session = true", true),
             ("render-session = false", false),
         ] {
             let agent: crate::config::Agent = toml::from_str(text).unwrap();
             assert_eq!(agent.render_session, enabled);
         }
+    }
+
+    // Replay an actual, already redacted ACP artifact, not generated tool calls.
+    // Download a recent long run's agent-transcript artifact, extract acp.jsonl,
+    // and set SESSION_TRANSCRIPT to its path. Kept external like corpus inputs:
+    // whole real transcripts can exceed the patch budget and contain task data.
+    #[test]
+    #[ignore = "requires a downloaded real ACP transcript in SESSION_TRANSCRIPT"]
+    fn real_long_session_summary_and_artifact() {
+        let path = std::env::var("SESSION_TRANSCRIPT").expect("set SESSION_TRANSCRIPT");
+        let transcript = std::fs::read_to_string(path).unwrap();
+        let records: Vec<Record> = transcript
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            records
+                .iter()
+                .filter(|r| r
+                    .msg
+                    .as_ref()
+                    .is_some_and(|m| m["params"]["update"]["sessionUpdate"] == "tool_call"))
+                .count()
+                >= 40,
+            "use a long real session"
+        );
+        let redactor = Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap());
+        let session = render(&records, &redactor);
+        eprintln!(
+            "real session: {} records, {} rendered bytes",
+            records.len(),
+            session.full.len()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let staging = Staging::create(dir.path()).unwrap();
+        let mut accounting = json!({});
+        write(&staging, &records, &redactor, true, &mut accounting).unwrap();
+        let markdown = std::fs::read_to_string(staging.run().join("summary.md")).unwrap();
+        assert!(markdown.len() <= SUMMARY_BYTES);
+        assert_eq!(
+            std::fs::read_to_string(staging.run().join("session.md")).unwrap(),
+            session.full
+        );
+        // Exercise overflow even when the real run happens to fit the full cap.
+        let budget = session.full.len().min(SUMMARY_BYTES) / 2;
+        let preview = session.preview(budget);
+        assert!(preview.len() <= budget);
+        assert!(preview.contains(NOTICE.trim()));
+        for block in session.blocks.iter().filter(|b| b.assistant) {
+            assert!(preview.contains(&block.markdown), "assistant prose lost");
+        }
+        assert_eq!(
+            preview.matches("<details>").count(),
+            preview.matches("</details>").count()
+        );
+        staging
+            .check(
+                super::super::upload::Gate {
+                    ended: true,
+                    fake_agent: false,
+                },
+                &redactor,
+            )
+            .unwrap();
+        staging
+            .publish(dir.path(), &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("run/session.md")).unwrap(),
+            session.full
+        );
     }
 
     #[test]
@@ -487,8 +561,8 @@ mod tests {
             0.0,
             json!({"sessionUpdate":"agent_message_chunk","content":{"text":"first"}}),
         )];
-        for i in 0..10 {
-            records.push(record(i as f64, json!({"sessionUpdate":"tool_call","toolCallId":i.to_string(),"title":"Terminal","content":[{"text":"x".repeat(8192)}]})));
+        for i in 0..150 {
+            records.push(record(i as f64, json!({"sessionUpdate":"tool_call","toolCallId":i.to_string(),"title":format!("Terminal {i}"),"content":[{"text":"x".repeat(8192)}]})));
             records.push(record(i as f64, json!({"sessionUpdate":"agent_message_chunk","content":{"text":format!("assistant {i}")}})));
         }
         let s = render(&records, &redactor);
@@ -496,13 +570,17 @@ mod tests {
             s.full
                 .contains("unknown duration, in progress, exit unknown")
         );
-        let preview = s.preview(20000);
-        assert!(preview.len() <= 20000);
+        assert!(s.full.len() > 1 << 20);
+        let preview = s.preview(SUMMARY_BYTES);
+        assert!(preview.len() <= SUMMARY_BYTES);
         assert!(preview.contains("first"));
-        for i in 0..10 {
+        for i in 0..150 {
             assert!(preview.contains(&format!("assistant {i}")));
         }
-        assert_eq!(preview.matches("<details>").count(), 2);
+        assert!(preview.matches("<details>").count() < 150);
+        assert!(preview.contains("Terminal 0 —"));
+        assert!(preview.contains("Terminal 149 —"));
+        assert!(preview.contains("session.md"));
         assert_eq!(
             preview.matches("<details>").count(),
             preview.matches("</details>").count()
@@ -582,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_summaries_pass_the_gate_and_publish_only_opted_in_sessions() {
+    fn staged_summaries_pass_the_gate_and_respect_session_setting() {
         for enabled in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let staging = Staging::create(dir.path()).unwrap();
