@@ -40,7 +40,9 @@ Capture is capped at 10,000 packets, 480 seconds and 4 MiB of field output;
 each packet is truncated to 4,096 bytes. Socket ownership is sampled with
 `ss` every 500 ms, with a separate 4 MiB cap. Reaching a size cap stops capture;
 the JSON records why collection stopped. Tool failures fail the post step after
-publishing diagnostic JSON. The job has a ten-minute bound.
+publishing diagnostic JSON, including the failed command, exit status/signal
+and the last 4,096 characters of stderr (JSON-quoted). Successful captures do
+not retain stderr. The job has a ten-minute bound.
 
 Each destination records `address`, `port`, `transport`, `ip_protocol`, `dns_names`,
 `tls_sni` and `processes` (PID and executable name, **not a proven opener**).

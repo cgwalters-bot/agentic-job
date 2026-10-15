@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/runner-egress.yml'
       - 'workflow/runner-egress/**'
+      - 'docs/secure-host.md'
+      - 'Justfile'
 
 permissions:
   contents: read

@@ -113,7 +113,7 @@ test('post writes real JSON, invokes uploader, and propagates upload failures', 
   }
 });
 
-test('collector acknowledges snapshot and bounds output without retaining stderr or payload', async () => {
+test('collector acknowledges snapshot and bounds output and failure diagnostics', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'runner-egress-'));
   const children = [];
   try {
@@ -122,14 +122,16 @@ test('collector acknowledges snapshot and bounds output without retaining stderr
     writeFileSync(join(dir, 'sudo'), `#!${process.execPath}
       const args = process.argv.slice(2);
       if (args.includes('ss')) {
-        if (process.env.TEST_FAILURE === 'ss') process.exit(1);
+        if (process.env.TEST_FAILURE === 'ss') { process.stderr.write('ss unavailable'); process.exit(1); }
         process.stdout.write(${JSON.stringify(fixture.ss)});
       } else if (args.includes('kill')) {
-        process.kill(Number(args.at(-1)), 'SIGINT');
+        process.kill(Number(args.at(-1)), 'SIGTERM');
       } else {
         process.stderr.write('Capturing on any\\nSECRET STDERR\\n');
         process.stdout.write(process.env.TEST_CAP === 'yes' ? 'x'.repeat(5 * 1024 * 1024) : ${JSON.stringify(text)});
-        if (process.env.TEST_FAILURE === 'capture') process.exit(2);
+        if (process.env.TEST_FAILURE === 'capture') {
+          process.stderr.write('x'.repeat(8192) + '\\ninvalid capture option ::error::' + String.fromCharCode(96).repeat(3)); process.exit(2);
+        }
         setInterval(() => {}, 1000);
       }`, { mode: 0o700 });
     for (const mode of ['snapshot', 'capped', 'ss', 'capture']) {
@@ -161,12 +163,61 @@ test('collector acknowledges snapshot and bounds output without retaining stderr
       assert.equal(status.reason, { snapshot: 'final post snapshot', capped: 'metadata size limit',
         ss: 'socket sampling failed', capture: 'capture failed' }[mode]);
       assert.equal(Boolean(status.collection_error), ['ss', 'capture'].includes(mode));
+      if (mode === 'capture') {
+        assert.match(status.collection_error, /sudo -n timeout --foreground --signal=TERM/);
+        assert.match(status.collection_error, /exit 2, signal none/);
+        assert.match(status.collection_error, /invalid capture option/);
+        assert.ok(status.collection_error.length < 6000);
+        assert.doesNotMatch(status.collection_error, /\n/);
+        assert.doesNotMatch(status.collection_error, /::|`/);
+        assert.match(status.collection_error, /\\u003a\\u003aerror/);
+      }
+      if (mode === 'ss') assert.match(status.collection_error, /sudo -n ss -Hntup: exit 1.*ss unavailable/);
       assert.ok(readFileSync(trace).length <= MAX_BYTES);
       assert.doesNotMatch(readFileSync(trace, 'utf8'), /SECRET/);
       if (mode === 'snapshot') assert.ok(readFileSync(`${trace}.sockets`, 'utf8').includes('Runner.Worker'));
     }
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('snapshot stops a real timeout group with TERM without kill-after escalation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runner-egress-'));
+  let child;
+  try {
+    // Exercise GNU timeout and real process-group signalling without privileges
+    // or packet capture. The capture stand-in ignores INT, but accepts TERM.
+    writeFileSync(join(dir, 'sudo'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o700 });
+    writeFileSync(join(dir, 'tshark'), `#!${process.execPath}
+      process.on('SIGINT', () => {});
+      process.stderr.write('Capturing on any\\n');
+      setInterval(() => {}, 1000);`, { mode: 0o700 });
+    const trace = join(dir, 'trace');
+    child = spawn(process.execPath, [new URL('./observe.mjs', import.meta.url).pathname, trace], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, stdio: 'ignore',
+    });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    for (let i = 0; i < 100 && !existsSync(`${trace}.ready`); i++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(existsSync(`${trace}.ready`));
+    writeFileSync(`${trace}.stop`, '');
+    let timer;
+    try {
+      await Promise.race([exited, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Snapshot did not stop capture')), 4000);
+      })]);
+    } finally {
+      clearTimeout(timer);
+    }
+    const status = JSON.parse(readFileSync(`${trace}.status`));
+    assert.equal(status.reason, 'final post snapshot');
+    assert.equal(status.collection_error, null);
+    assert.notEqual(status.capture_exit, 137);
+  } finally {
+    if (child?.exitCode === null) child.kill();
     rmSync(dir, { recursive: true, force: true });
   }
 });
