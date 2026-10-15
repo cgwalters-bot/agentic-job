@@ -185,7 +185,9 @@ runs:
     # The last thing in the job that has root, unless `lock` is off.
     - name: Secure the host
       shell: bash
-      run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
+      env:
+        ACTION: ${{ github.action_path }}
+      run: node "$ACTION/../workflow/setup-timing.mjs" --run setup
     # A session run's (`[session] listen`): where its operator connects,
     # which setup served on the runner's tailnet name. Outputs and the
     # summary resolve when the job ends; setup's log line is live. Only
@@ -214,4 +216,6 @@ runs:
     - name: Prove it
       if: ${{ inputs.check != 'false' }}
       shell: bash
-      run: agentic-job sandbox check --record
+      env:
+        ACTION: ${{ github.action_path }}
+      run: node "$ACTION/../workflow/setup-timing.mjs" --run probes

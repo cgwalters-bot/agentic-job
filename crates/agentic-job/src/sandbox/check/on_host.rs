@@ -318,14 +318,12 @@ impl Checker<'_> {
         }
         let checker_pid = std::process::id().to_string();
         let decoy_pid = decoy.pid().to_string();
-        for (name, prefix) in entries {
+        // The entry paths share only read-only proc probes. Keep each path's
+        // control and refusal together, so there is only one Podman startup
+        // at a time; the decoy lives until all results have been collected.
+        let results = super::concurrently(&entries, |(_, prefix)| -> Result<_> {
+            let prefix = *prefix;
             let control = self.sandbox_succeeds(&[prefix, &["sh", "-c", PROC_SELF]].concat())?;
-            self.report.expect(
-                Want::Succeed,
-                &format!("proc-control-sandbox-{name}"),
-                format!("{user} lists and reads its own process via {name} (control)"),
-                control,
-            );
             let got = self.sandbox_succeeds(
                 &[
                     prefix,
@@ -341,6 +339,16 @@ impl Checker<'_> {
                 ]
                 .concat(),
             )?;
+            Ok((control, got))
+        });
+        for ((name, _), result) in entries.iter().zip(results) {
+            let (control, got) = result?;
+            self.report.expect(
+                Want::Succeed,
+                &format!("proc-control-sandbox-{name}"),
+                format!("{user} lists and reads its own process via {name} (control)"),
+                control,
+            );
             self.report.expect(
                 Want::Fail,
                 "proc-other-users",

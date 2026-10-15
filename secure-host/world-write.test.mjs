@@ -115,8 +115,11 @@ test("the action always loads the policy, before setup takes root away", () => {
   const step = action.split("    - name: Load the world-write policy\n")[1].split("\n    - ")[0];
   assert.doesNotMatch(step, /\bif:/);
   assert.match(step, /sudo node "\$ACTION\/world-write.mjs"/);
-  assert.ok(action.indexOf('sudo node "$ACTION/world-write.mjs"') <
-    action.indexOf("sudo agentic-job sandbox setup"));
+  const setup = action.indexOf('node "$ACTION/../workflow/setup-timing.mjs" --run setup');
+  assert.ok(setup >= 0, "the action must invoke setup through the timing wrapper");
+  assert.ok(action.indexOf('sudo node "$ACTION/world-write.mjs"') < setup);
+  const timing = readFileSync(new URL("../workflow/setup-timing.mjs", import.meta.url), "utf8");
+  assert.match(timing, /\['sudo', \['agentic-job', 'sandbox', 'setup', '--config'/);
 });
 
 test("the agent job's prepare installs the object beside the binary secure-host is given", () => {

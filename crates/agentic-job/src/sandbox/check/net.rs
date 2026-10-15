@@ -70,6 +70,21 @@ const QUAD100: &[&str] = &["100.100.100.100", "fd7a:115c:a1e0::53"];
 
 const QUAD100_PORTS: &[u16] = &[53, 80, 8080];
 
+fn metadata_attempts(user: &str, metadata: &[&str]) -> [Attempt; 2] {
+    [
+        Attempt::control(
+            "metadata-control",
+            "the instance metadata service",
+            metadata,
+        ),
+        Attempt::refused(
+            "metadata",
+            format!("{user} can't reach the instance metadata service"),
+            metadata,
+        ),
+    ]
+}
+
 impl Checker<'_> {
     /// The network as the sandbox user has it, on the host and from a
     /// rootless container: no cloud metadata service, and then what the
@@ -108,20 +123,18 @@ impl Checker<'_> {
             self.report.note(&format!(
                 "{runner} is refused the instance metadata service as well, so the probes of it have no control"
             ));
-        } else {
-            self.control_or_note(
-                "metadata-control",
-                "the instance metadata service",
-                &metadata,
+            let got = self.sandbox_succeeds(&metadata)?;
+            self.report.expect(
+                Want::Fail,
+                "metadata",
+                format!("{user} can't reach the instance metadata service"),
+                got,
             );
+        } else {
+            // Independent, read-only requests. The runner's control need
+            // not consume its timeout before the sandbox makes its attempt.
+            self.attempts(&metadata_attempts(&user, &metadata))?;
         }
-        let got = self.sandbox_succeeds(&metadata)?;
-        self.report.expect(
-            Want::Fail,
-            "metadata",
-            format!("{user} can't reach the instance metadata service"),
-            got,
-        );
         if !self.has_podman() {
             self.report
                 .note("no podman on this host, so no container to probe from");

@@ -17,6 +17,12 @@ world-write-test:
 test-binary:
     node --test secure-host/binary.test.mjs
 
+# Unprivileged regression tests for setup, its probe batching and summaries.
+setup-tests:
+    cargo test --locked --lib sandbox::setup::tests
+    cargo test --locked --lib sandbox::check::
+    node --test workflow/setup-timing.test.mjs secure-host/apt.test.mjs
+
 # Refuses VERSION unless it may be released from this checkout (its tags
 # included); prints the previous version tag. See src/bin/release-check.rs.
 release-check version:

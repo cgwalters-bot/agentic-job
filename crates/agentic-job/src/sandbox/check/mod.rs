@@ -519,9 +519,9 @@ fn started(code: Option<i32>) -> bool {
     code.is_none_or(|code| !NOT_STARTED.contains(&code))
 }
 
-/// `make` for each of `attempts`, the results in their order: those
-/// from a container one at a time after all the others, which are made
-/// a few at a time ([`AttemptKind::RefusedInContainer`]).
+/// Independent host attempts and a single lane of container attempts
+/// overlap, within the same total bound. Podman startups remain serial;
+/// results (including errors) remain in the original report order.
 fn in_order<R: Send>(
     attempts: &[Attempt],
     make: impl Fn(&Attempt) -> Result<R> + Sync,
@@ -530,14 +530,34 @@ fn in_order<R: Send>(
         .iter()
         .filter(|attempt| attempt.kind != AttemptKind::RefusedInContainer)
         .collect();
-    let mut made = concurrently(&together, |attempt| make(attempt)).into_iter();
+    let containers: Vec<&Attempt> = attempts
+        .iter()
+        .filter(|attempt| attempt.kind == AttemptKind::RefusedInContainer)
+        .collect();
+    let (made, container_results) = std::thread::scope(|scope| {
+        let make = &make;
+        let lane = scope.spawn(|| {
+            containers
+                .iter()
+                .map(|attempt| make(attempt))
+                .collect::<Vec<_>>()
+        });
+        let host_limit = CONCURRENT_PROBES - usize::from(!containers.is_empty());
+        let made = concurrently_bounded(&together, host_limit, |attempt| make(attempt));
+        let container_results = lane
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (made, container_results)
+    });
+    let (mut made, mut container_results) = (made.into_iter(), container_results.into_iter());
     attempts
         .iter()
-        .map(|attempt| match attempt.kind {
-            AttemptKind::RefusedInContainer => make(attempt),
-            _ => made
-                .next()
-                .context("an attempt of the batch was not made")?,
+        .map(|attempt| {
+            let result = match attempt.kind {
+                AttemptKind::RefusedInContainer => container_results.next(),
+                _ => made.next(),
+            };
+            result.context("an attempt of the batch was not made")?
         })
         .collect()
 }
@@ -556,7 +576,7 @@ enum AttemptKind {
     Control,
     /// The sandbox user tries, and must not manage.
     Refused,
-    /// The same from a rootless container, made after the others and one
+    /// The same from a rootless container, made beside the host attempts but one
     /// at a time: podman's start (its storage lock, its pause process) is
     /// what starts made together could fail at. A container that never
     /// started, or whose command did not, is an `Err` rather than a
@@ -604,9 +624,17 @@ impl Attempt {
 /// `run` for each of `items`, at most [`CONCURRENT_PROBES`] at a time,
 /// with the results in the order of the items.
 fn concurrently<T: Sync, R: Send>(items: &[T], run: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    concurrently_bounded(items, CONCURRENT_PROBES, run)
+}
+
+fn concurrently_bounded<T: Sync, R: Send>(
+    items: &[T],
+    limit: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     let run = &run;
     items
-        .chunks(CONCURRENT_PROBES)
+        .chunks(limit)
         .flat_map(|chunk| {
             std::thread::scope(|scope| {
                 let started: Vec<_> = chunk
@@ -816,16 +844,46 @@ mod tests {
             .unwrap();
             let ids: Vec<&str> = attempts.iter().map(|a| a.id.as_str()).collect();
             assert_eq!(results, ids);
-            // Every container after all the others: they are not made
-            // beside them.
             let made = made.into_inner().unwrap();
-            let first = made.iter().position(|&kind| kind == RefusedInContainer);
-            assert!(
-                first.is_none_or(|first| made[first..].iter().all(|&k| k == RefusedInContainer)),
-                "{made:?}"
-            );
             assert_eq!(made.len(), attempts.len());
         }
+    }
+
+    #[test]
+    fn container_lane_overlaps_host_attempts_but_never_itself() {
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        };
+        let (host_tx, host_rx) = mpsc::channel();
+        let (container_tx, container_rx) = mpsc::channel();
+        let (host_rx, container_rx) = (Mutex::new(host_rx), Mutex::new(container_rx));
+        let limit = std::time::Duration::from_secs(5);
+        let containers = AtomicUsize::new(0);
+        let attempts = [
+            Attempt::control("host", "host", &[]),
+            Attempt::refused_in_container("first", "first", &[]),
+            Attempt::refused_in_container("second", "second", &[]),
+        ];
+        let results = in_order(&attempts, |attempt| {
+            if attempt.kind == AttemptKind::RefusedInContainer {
+                assert_eq!(containers.fetch_add(1, Ordering::SeqCst), 0);
+            }
+            if attempt.id == "host" {
+                host_tx.send(()).unwrap();
+                container_rx.lock().unwrap().recv_timeout(limit).unwrap();
+            } else if attempt.id == "first" {
+                container_tx.send(()).unwrap();
+                host_rx.lock().unwrap().recv_timeout(limit).unwrap();
+            }
+            if attempt.kind == AttemptKind::RefusedInContainer {
+                assert_eq!(containers.fetch_sub(1, Ordering::SeqCst), 1);
+            }
+            Ok(attempt.id.clone())
+        })
+        .unwrap();
+        assert_eq!(results, ["host", "first", "second"]);
     }
 
     #[test]

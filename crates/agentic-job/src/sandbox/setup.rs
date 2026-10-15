@@ -702,15 +702,35 @@ fn create_user(config: &Config, runner: &User, existing: Option<User>) -> Result
         return Ok(user);
     }
     let name = &config.sandbox.user;
+    let mut useradd = useradd_command(config);
+    timed_setup("create-user-useradd", || {
+        host::run(&mut useradd).map(|_| ())
+    })?;
+    let user = timed_setup("create-user-lookup", || {
+        User::lookup(name)?.with_context(|| format!("useradd made no user {name}"))
+    })?;
+    ensure_distinct(&user, runner)?;
+    Ok(user)
+}
+
+fn useradd_command(config: &Config) -> Command {
     let mut useradd = Command::new("useradd");
-    useradd.args(["--create-home", "--user-group", "--shell", "/bin/bash"]);
+    // This is a fresh, password-locked job account, not a recycled login.
+    // Resetting lastlog/faillog can extend sparse per-UID databases; neither
+    // database participates in sandbox authorization. Keep home creation,
+    // the private group and ordinary (not system) subordinate-ID allocation.
+    useradd.args([
+        "--no-log-init",
+        "--create-home",
+        "--user-group",
+        "--shell",
+        "/bin/bash",
+    ]);
     if !config.sandbox.groups.is_empty() {
         useradd.arg("--groups").arg(config.sandbox.groups.join(","));
     }
-    host::run(useradd.args(["--", name.as_str()]))?;
-    let user = User::lookup(name)?.with_context(|| format!("useradd made no user {name}"))?;
-    ensure_distinct(&user, runner)?;
-    Ok(user)
+    useradd.args(["--", config.sandbox.user.as_str()]);
+    useradd
 }
 
 /// The subordinate uid ranges of `user`, each as `START-END`. Containers
@@ -1287,8 +1307,7 @@ impl PackageManager {
         command
     }
 
-    /// Run before every attempt but dnf's first: a half-fetched index is
-    /// not used again, and apt's may be older than the image.
+    /// Only after a failed install: try the image's existing index first.
     fn refresh(self) -> Command {
         let (program, args): (&str, &[&str]) = match self {
             Self::Dnf => ("dnf", &["clean", "expire-cache"]),
@@ -1298,6 +1317,36 @@ impl PackageManager {
         command.args(args);
         command
     }
+
+    fn refresh_before(self, attempt: u32) -> bool {
+        attempt > 1
+    }
+
+    fn needed(self, package: &str) -> bool {
+        self.needed_with(package, |package| {
+            Command::new("dpkg-query")
+                .args(["--show", "--showformat=${Status}", "--", package])
+                .output()
+                .is_ok_and(|out| out.status.success() && out.stdout == b"install ok installed")
+        })
+    }
+
+    fn needed_with(self, package: &str, installed: impl FnOnce(&str) -> bool) -> bool {
+        if self != Self::Apt || !plain_deb_name(package) {
+            return true;
+        }
+        // Query package state, not PATH: a runner's private toolchain is
+        // not necessarily usable by the sandbox. Version/release requests,
+        // local .debs and apt patterns go to apt unchanged.
+        !installed(package)
+    }
+}
+
+fn plain_deb_name(package: &str) -> bool {
+    !package.is_empty()
+        && package
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"+.-:".contains(&c))
 }
 
 fn install_packages(packages: &[String]) -> Result<()> {
@@ -1306,13 +1355,21 @@ fn install_packages(packages: &[String]) -> Result<()> {
     }
     let manager = PackageManager::detect()
         .context("setup.packages: this host has neither dnf nor apt-get")?;
+    let packages: Vec<String> = packages
+        .iter()
+        .filter(|package| manager.needed(package))
+        .cloned()
+        .collect();
+    if packages.is_empty() {
+        return Ok(());
+    }
     for attempt in 1..=INSTALL_ATTEMPTS {
-        if attempt > 1 || manager == PackageManager::Apt {
+        if manager.refresh_before(attempt) {
             let _ = host::output(&mut manager.refresh());
         }
         // Its output is the job log's: what was installed, or why not.
         if manager
-            .install(packages)
+            .install(&packages)
             .status()
             .is_ok_and(|status| status.success())
         {
@@ -1617,6 +1674,54 @@ mod tests {
                 "--",
                 "just",
                 "gcc"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_missing_plain_deb_packages_need_installation() {
+        for manager in [PackageManager::Apt, PackageManager::Dnf] {
+            for (package, installed, needed) in [
+                ("nftables", true, false),
+                ("python3-venv", false, true),
+                ("libfoo1:amd64", true, false),
+                ("tool=1.2", true, true),
+                ("tool/stable", true, true),
+                ("./tool.deb", true, true),
+                ("tool*", true, true),
+                ("?installed", true, true),
+            ] {
+                assert_eq!(
+                    manager.needed_with(package, |_| installed),
+                    manager == PackageManager::Dnf || needed,
+                    "{manager:?}: {package}"
+                );
+            }
+            assert!(!manager.refresh_before(1));
+            assert!(manager.refresh_before(2));
+        }
+    }
+
+    #[test]
+    fn job_user_keeps_home_groups_and_subordinate_ids_without_login_logs() {
+        let config = Config::parse("[sandbox]\nuser = 'job-user'\ngroups = ['kvm']").unwrap();
+        let command = useradd_command(&config);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--no-log-init",
+                "--create-home",
+                "--user-group",
+                "--shell",
+                "/bin/bash",
+                "--groups",
+                "kvm",
+                "--",
+                "job-user",
             ]
         );
     }

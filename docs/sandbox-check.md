@@ -48,10 +48,11 @@ caller job that runs repository code as the runner's user before `run`
 (as in the [secure-host example](secure-host.md), `make check`) should
 give secure-host `check: false`, so that `run` probes after that code.
 
-The refusals of the network probes and their controls are made eight
+The refusals of the network probes and their controls are made at most eight
 at a time: each costs about a second of entering the sandbox, and they
 wait on rules that reject rather than on each other. Those from a
-rootless container come after the others, one at a time, since a
+rootless container run in one serial lane beside at most seven host
+attempts, since a
 container that failed to start beside another would read as a refusal
 that holds. A refusal that succeeds fails the check as it did when they
 ran one by one. Each of these refusals first prints a line to its

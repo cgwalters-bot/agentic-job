@@ -343,6 +343,44 @@ the difference. These are not timings for the whole `secure-host` step:
 binary acquisition, loading the world-write policy and the final probes are
 separate.
 
+The action also writes `Secure-host setup: ...` and `Secure-host probes: ...`
+lines to the job summary, including exit status and setup's stage times.
+`create-user-useradd` and `create-user-lookup` subdivide `create-user`; do not
+add them to that parent's time. Summaries are diagnostic only: all probes
+and their success requirements still run.
+
+Package setup installs only missing Debian packages when the configuration
+names plain packages. It checks dpkg's installed state, not the runner's PATH
+(a private toolchain may be inaccessible to the sandbox). Explicit versions,
+apt patterns and local package paths still go to apt. It tries the image's
+index first, refreshing only after an installation failure, and continues to
+use `--no-install-recommends`. This is dependency provisioning, not an image
+security update; use an up-to-date, disposable image. The configuration still
+owns the package list; put target-specific toolchains in `setup.repo-packages`
+rather than installing every toolchain for every task.
+
+For the fresh password-locked job account, `useradd --no-log-init` avoids
+resetting the UID-indexed lastlog/faillog databases; home creation, groups and
+subordinate IDs are unchanged. Shadow's
+[`useradd` implementation](https://github.com/shadow-maint/shadow/blob/4.19.0/src/useradd.c)
+does those resets in addition to account and home creation. The existing
+whole-stage timings do not distinguish their cost from skeleton copying,
+account-file writes or NSS lookup; the two new substages narrow that down on CI.
+
+Read-only proc checks through independent entry paths run together. Batched
+network probes overlap the host requests with a single serial container lane,
+with at most eight attempts total. Podman startups remain serialized, report
+order is preserved and an entry/container failure still fails the check.
+
+The hosted dispatch baselines from tracker runs
+[38729631206](https://github.com/cgwalters-forge/tracker/actions/runs/38729631206)
+and [38730060845](https://github.com/cgwalters-forge/tracker/actions/runs/38730060845)
+are respectively: secure-host 142/213 seconds, packages 63.609/90.386 seconds,
+create-user 22.281/65.207 seconds, final probes 37.2/38.5 seconds. The first
+installed 366 new packages (116 MB), including the distro npm dependency tree.
+After numbers must come from this change's hosted CI summaries; no sandbox
+benchmark establishes a hosted speedup or the under-one-minute goal.
+
 ### Job start to the agent, before and after the walk went
 
 Before, from main at `4e803cb`
