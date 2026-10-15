@@ -7,6 +7,12 @@ set positional-arguments := true
 test-safe-output-handlers:
     node --test crates/agentic-job/tests/corpus/handlers.test.mjs
 
+runner-egress-test:
+    node --test workflow/runner-egress/parse.test.mjs
+
+runner-egress-fixture:
+    node -e 'require("node:fs").writeFileSync(process.env.RUNNER_TEMP + "/runner-egress-fixture.txt", "Outbound observation fixture\n")'
+
 # Privileged integration proof: only on a fresh disposable supported host.
 world-write-evidence out:
     node secure-host/world-write-evidence.mjs "$1"

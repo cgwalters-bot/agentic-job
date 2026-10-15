@@ -1,0 +1,7 @@
+name: Observe outbound runner destinations
+description: Bounded metadata observation, not an egress policy
+runs:
+  using: node24
+  main: main.mjs
+  post: post.mjs
+  post-if: always()

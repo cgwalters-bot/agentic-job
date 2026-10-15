@@ -20,6 +20,34 @@ kernel features or runtime enforcement; the setup checks and probes still
 have to pass. It applies to the composite action, not direct CLI invocation.
 Container image distributions are independent of the supported host systems.
 
+## Runner outbound observation (opt-in)
+
+The [observation workflow](../.github/workflows/runner-egress.yml) gathers
+outbound numeric IP/port destinations on a fresh hosted Ubuntu 26.04 runner.
+Enable the repository-owned Actions variable `RUNNER_EGRESS_TRACE=true` to
+run it on relevant pull requests or by manual dispatch; it is off by default.
+There are no dispatcher-controlled configuration inputs or extra permissions.
+This is measurement, not a security control: it does not stop exfiltration or
+change secure-host rules. It informs the later host-wide egress rules slice,
+whose threat is untrusted steps bypassing the proxy to exfiltrate directly.
+
+tcpdump observes all outbound IP traffic, including background services, after
+an anonymous checkout (public repositories only). It prints metadata only (no payload decoding,
+DNS resolution, tokens or raw packet upload), capped at 10,000 packets and
+480 seconds in a ten-minute job. A final JavaScript post step publishes unique
+destinations in the job summary/log after the artifact action has run. IPs are
+not stable service identities or an allowlist; source review and repeated
+observations are needed before designing rules. The fixture upload exercises
+the runtime artifact endpoint without granting a repository write token.
+
+Known gaps for the rules slice: startup/checkout precede the
+trace; caps can end it early; DNS names, process attribution, cache operations
+and other unexercised paths are not established by this probe. Coverage ends
+at the final JavaScript post step: **the runner's completion traffic after the
+last step is not observed**. A green probe is not proof of whole-job coverage.
+The observed list must be added in a fix round after this PR's hosted CI runs;
+no observed endpoints are claimed from local unit tests.
+
 ## Access-time world-write policy
 
 The action always loads `crates/agentic-job/bpf/world_write.bpf.c` through its

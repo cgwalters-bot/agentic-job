@@ -1,0 +1,42 @@
+name: runner outbound observation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/runner-egress.yml'
+      - 'workflow/runner-egress/**'
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    if: vars.RUNNER_EGRESS_TRACE == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      # No checkout action post: the observer must own the final post step.
+      # Anonymous fetch is intentional; this probe supports public repositories.
+      - name: Fetch probe source without registering a post step
+        env:
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "$SOURCE_URL"
+          git fetch --depth=1 origin "$SOURCE_REVISION"
+          git checkout --detach FETCH_HEAD
+      # Registered first, so its post runs after later actions' post steps.
+      # Runner completion traffic after this final JavaScript post is NOT observed.
+      - uses: ./workflow/runner-egress # zizmor: ignore[self-repository] Exercise the probe from the explicitly fetched revision without a checkout post step.
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just@1.58.0
+      - run: just runner-egress-test
+      - run: just runner-egress-fixture
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runner-egress-fixture
+          path: ${{ runner.temp }}/runner-egress-fixture.txt
+          retention-days: 1

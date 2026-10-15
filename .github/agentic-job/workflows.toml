@@ -27,4 +27,5 @@
 "safe-outputs-probe.yml" = "Drives gh-aw's collector and handlers on a recorded artifact, by hand, with no agent and no untrusted step."
 "specs.yml" = "Model-checks this repository's specifications with a read-only token."
 "workflow-ingress.yml" = "Runs the base branch's analyzers on proposed workflow files as data."
+"runner-egress.yml" = "Observes a hosted runner's own outbound destinations, so it must run without secure-host's egress rules; opt-in by repository variable, with a read-only token and only this revision's probe and tests."
 "world-write.yml" = "Called from CI: tests the world-write BPF loader on its own, on a hosted runner, with a read-only token."
