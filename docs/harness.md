@@ -37,6 +37,13 @@ to: the [sandbox](sandbox.md) is the boundary.
 When the session ends it kills every process of the sandbox user. What
 `run` leaves under `--out` is in [layout.md](layout.md#run).
 
+A run that allows outputs gets one reminder if it ends without a hand-back,
+then fails if none is left. A fix can leave a change for the pull request's
+branch, a replacement series, or a `noop` or `missing_data` request with a
+reason. An unfinished rebase or unmerged index prevents completion even if
+a request exists; the reminder names that state. These checks run under the
+session's existing limits and do not replace output validation.
+
 ## Agents
 
 ### Reading a session in the summary

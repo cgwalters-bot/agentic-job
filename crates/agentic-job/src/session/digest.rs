@@ -974,19 +974,21 @@ mod tests {
     /// nor the last thing the agent said (#607).
     #[test]
     fn vibe_thinking_is_no_message() {
-        let thinking = json!({"sessionUpdate": "agent_message_chunk", "messageId": "m",
+        for kind in ["agent_message_chunk", "agent_thought_chunk"] {
+            let thinking = json!({"sessionUpdate": kind, "messageId": "m",
             "content": {"type": "text", "text": "{'type': 'thinking', 'thinking': [{'type': 'text', 'text': 'Hmm'}], 'closed': True}"}});
-        let (d, out) = lines(&[
-            update(thinking.clone()),
-            update(
-                json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"type": "text", "text": "Done."}}),
-            ),
-        ]);
-        assert_eq!(out, ["» Done."]);
-        assert_eq!(d.last_message(), Some("Done."));
-        let (d, out) = lines(&[update(thinking)]);
-        assert!(out.is_empty(), "{out:?}");
-        assert_eq!(d.last_message(), None);
+            let (d, out) = lines(&[
+                update(thinking.clone()),
+                update(
+                    json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"type": "text", "text": "Done."}}),
+                ),
+            ]);
+            assert_eq!(out, ["» Done."]);
+            assert_eq!(d.last_message(), Some("Done."));
+            let (d, out) = lines(&[update(thinking)]);
+            assert!(out.is_empty(), "{out:?}");
+            assert_eq!(d.last_message(), None);
+        }
     }
 
     #[test]

@@ -370,7 +370,9 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         log: Box::new(log.clone()),
         output: setup.output.map(|name| {
             let file = path(name);
-            Arc::new(move |_: &std::sync::atomic::AtomicBool| file.exists()) as session::OutputCheck
+            Arc::new(move |_: &std::sync::atomic::AtomicBool| {
+                (!file.exists()).then(|| "No output was left.".to_owned())
+            }) as session::OutputCheck
         }),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1376,6 +1378,22 @@ fn a_turn_that_ends_without_the_required_output() {
         assert_eq!(r.result["reminded"], reminded, "{name}");
         assert_eq!(r.notices(), c.notices, "{name}");
         if reminded {
+            assert!(
+                r.records.iter().any(|record| {
+                    record["dir"] == "send"
+                        && record["msg"]["method"] == "session/prompt"
+                        && record["msg"]["params"]["prompt"]
+                            .as_array()
+                            .is_some_and(|blocks| {
+                                blocks.iter().any(|block| {
+                                    block["text"]
+                                        .as_str()
+                                        .is_some_and(|text| text.contains("No output was left."))
+                                })
+                            })
+                }),
+                "{name}: the reminder omitted the output check's reason"
+            );
             assert!(
                 r.log
                     .contains("without its required output: reminding it once"),

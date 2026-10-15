@@ -25,7 +25,7 @@ const MAX_DEPTH: usize = 8;
 pub fn chunk(update: &Value) -> Option<(&str, Cow<'_, str>)> {
     let kind = update["sessionUpdate"].as_str()?;
     let text = update["content"]["text"].as_str().unwrap_or_default();
-    if kind == MESSAGE
+    if matches!(kind, MESSAGE | THOUGHT)
         && let Some(thought) = thinking(text)
     {
         return Some((THOUGHT, Cow::Owned(thought)));
@@ -40,14 +40,23 @@ fn thinking(text: &str) -> Option<String> {
         return None;
     }
     let mut parser = Parser { rest: text };
-    let value = parser.value(0)?;
-    if !parser.rest.trim_start().is_empty() {
-        return None;
+    let mut out = String::new();
+    // Some recorded updates contain several adjacent reprs, not just one.
+    // Read the whole update or leave it alone; never hide a prose suffix.
+    while !parser.rest.trim_start().is_empty() {
+        out.push_str(&thought(parser.value(0)?)?);
     }
+    Some(out)
+}
+
+fn thought(value: Literal) -> Option<String> {
     let Literal::Dict(fields) = value else {
         return None;
     };
     let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    if !matches!(field("type"), Some(Literal::Str(kind)) if kind == "thinking") {
+        return None;
+    }
     let Some(Literal::List(parts)) = field("thinking") else {
         return None;
     };
@@ -180,6 +189,10 @@ impl Parser<'_> {
                         'n' => '\n',
                         'r' => '\r',
                         't' => '\t',
+                        'a' => '\u{7}',
+                        'b' => '\u{8}',
+                        'f' => '\u{c}',
+                        'v' => '\u{b}',
                         'x' => hex(2)?,
                         'u' => hex(4)?,
                         'U' => hex(8)?,
@@ -202,6 +215,11 @@ mod tests {
     #[test]
     fn thinking_chunks() {
         let cases = [
+            // Chunks printed by run 38803603793, including adjacent reprs.
+            (
+                "{'type': 'thinking', 'thinking': [{'type': 'text', 'text': 'Both'}], 'closed': True}{'type': 'thinking', 'thinking': [{'type': 'text', 'text': ' conflicts are'}], 'closed': True}",
+                Some("Both conflicts are"),
+            ),
             (
                 r"{'type': 'thinking', 'thinking': [{'type': 'text', 'text': 'Let'}], 'closed': True}",
                 Some("Let"),
@@ -213,6 +231,10 @@ mod tests {
             (
                 "{'type': 'thinking', 'thinking': [], 'closed': None, 'n': -1.5}",
                 Some(""),
+            ),
+            (
+                r"{'type': 'thinking', 'thinking': [{'type': 'text', 'text': '\a\b\f\v'}], 'closed': True}",
+                Some("\u{7}\u{8}\u{c}\u{b}"),
             ),
             // Not that shape: a message that only starts like one, one
             // with more after it, and one that is no literal.
@@ -246,7 +268,7 @@ mod tests {
         assert_eq!(chunk(&message("Done.")), Some((MESSAGE, "Done.".into())));
         assert_eq!(
             chunk(&json!({"sessionUpdate": THOUGHT, "content": {"text": thought}})),
-            Some((THOUGHT, thought.into()))
+            Some((THOUGHT, Cow::Owned("Hmm".to_owned())))
         );
         assert_eq!(chunk(&json!({"sessionUpdate": "plan"})), None);
     }

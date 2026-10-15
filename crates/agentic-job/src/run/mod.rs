@@ -594,7 +594,7 @@ impl Plan {
                     sandbox: &sandbox,
                     stopped,
                 };
-                handback::has_output(&runner, &sandbox.home, &checkout, &policy)
+                handback::output_missing(&runner, &sandbox.home, &checkout, &policy)
             }) as session::OutputCheck
         });
         let options = Options {

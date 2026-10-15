@@ -802,7 +802,23 @@ pub fn requires_output(policy: &Policy) -> bool {
 /// its limit as none (`check` would refuse it).
 pub fn has_output(runner: &dyn Runner, home: &Path, checkout: &Checkout, policy: &Policy) -> bool {
     let requests = read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
-    if requests.is_some_and(|bytes| !bytes.trim_ascii().is_empty()) {
+    if requests.is_some_and(|bytes| {
+        if policy.safe_outputs.push_to_pull_request_branch.is_none() {
+            return !bytes.trim_ascii().is_empty();
+        }
+        bytes.split(|b| *b == b'\n').any(|line| {
+            let Ok(item) = serde_json::from_slice::<serde_json::Value>(line) else {
+                return false;
+            };
+            let field = match item["type"].as_str() {
+                Some("noop") => "message",
+                Some("missing_data") => "reason",
+                // A push request alone cannot carry a change.
+                _ => return false,
+            };
+            item[field].as_str().is_some_and(|s| !s.trim().is_empty())
+        })
+    }) {
         return true;
     }
     let replacement = home.join(REPLACEMENT_PATH);
@@ -837,6 +853,57 @@ pub fn has_output(runner: &dyn Runner, home: &Path, checkout: &Checkout, policy:
         (Some(status), Some(head)) => !status.is_empty() || head != checkout.base_commit,
         _ => true,
     }
+}
+
+/// A fix must not silently succeed with work stranded in a rebase or an
+/// unmerged index, even if it also wrote a request. This is a completion
+/// check, not output admission: `check` still validates every proposal.
+pub fn output_missing(
+    runner: &dyn Runner,
+    home: &Path,
+    checkout: &Checkout,
+    policy: &Policy,
+) -> Option<String> {
+    if policy.safe_outputs.push_to_pull_request_branch.is_some() {
+        let unreadable = || Some("The fix checkout could not be inspected.".to_owned());
+        let Ok(dir) = clone::utf8(&checkout.dir) else {
+            return unreadable();
+        };
+        let author = (DEFAULT_AUTHOR.0.to_owned(), DEFAULT_AUTHOR.1.to_owned());
+        let git = Git::new(runner, dir, &author);
+        for name in ["rebase-merge", "rebase-apply"] {
+            let Some(path) = git.run(&["rev-parse", "--git-path", name], b"") else {
+                return unreadable();
+            };
+            if path.0 != 0 {
+                return unreadable();
+            }
+            let path = String::from_utf8_lossy(&path.1);
+            let path = checkout.dir.join(path.trim());
+            let Ok(path) = clone::utf8(&path) else {
+                return unreadable();
+            };
+            if runner
+                .run(&["test", "-e", path], b"", MAX_GIT_OUTPUT)
+                .is_ok_and(|out| out.success())
+            {
+                return Some(
+                    "A rebase is still in progress. Finish or abort it before handing back.".into(),
+                );
+            }
+        }
+        match git.limited(&["ls-files", "--unmerged", "-z"], 1) {
+            Some(out) if out.is_empty() => {}
+            Some(_) => {
+                return Some(
+                    "The working tree has unresolved conflicts. Resolve them before handing back."
+                        .into(),
+                );
+            }
+            None => return unreadable(),
+        }
+    }
+    (!has_output(runner, home, checkout, policy)).then(|| "No hand-back was left.".to_owned())
 }
 
 /// Collects what the agent left: its outcome into the run's results, and
@@ -1672,6 +1739,73 @@ mod tests {
                 counts,
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn fix_completion() {
+        let policy = crate::policy::tests::push_policy();
+        assert!(requires_output(&policy));
+        let cases = [
+            ("nothing", "true", Some("No hand-back")),
+            ("edit", "echo two >> a.txt", None),
+            (
+                "push alone",
+                "echo '{\"type\":\"push_to_pull_request_branch\"}' > ../../out/safe-outputs.jsonl",
+                Some("No hand-back"),
+            ),
+            (
+                "noop",
+                "echo '{\"type\":\"noop\",\"message\":\"Already fixed\"}' > ../../out/safe-outputs.jsonl",
+                None,
+            ),
+            (
+                "empty noop",
+                "echo '{\"type\":\"noop\",\"message\":\" \"}' > ../../out/safe-outputs.jsonl",
+                Some("No hand-back"),
+            ),
+            (
+                "missing data",
+                "echo '{\"type\":\"missing_data\",\"reason\":\"Need the failing log\"}' > ../../out/safe-outputs.jsonl",
+                None,
+            ),
+            (
+                "merge rebase",
+                "mkdir .git/rebase-merge; echo two >> a.txt",
+                Some("rebase is still in progress"),
+            ),
+            (
+                "apply rebase",
+                "mkdir .git/rebase-apply",
+                Some("rebase is still in progress"),
+            ),
+            (
+                "noop during rebase",
+                "mkdir .git/rebase-merge; echo '{\"type\":\"noop\",\"message\":\"Done\"}' > ../../out/safe-outputs.jsonl",
+                Some("rebase is still in progress"),
+            ),
+            (
+                "conflicts",
+                "export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid; git checkout -qb other; echo other > a.txt; git commit -qam other; git checkout -q -; echo ours > a.txt; git commit -qam ours; git merge other >/dev/null 2>&1 || true",
+                Some("unresolved conflicts"),
+            ),
+            (
+                "unreadable",
+                "rm -rf .git/objects",
+                Some("could not be inspected"),
+            ),
+        ];
+        for (case, script, expected) in cases {
+            let home = Home::new();
+            sh(&home.checkout.dir, script);
+            let reason = output_missing(&Unconfined, home.dir.path(), &home.checkout, &policy);
+            match expected {
+                Some(text) => assert!(
+                    reason.as_deref().is_some_and(|r| r.contains(text)),
+                    "{case}: {reason:?}"
+                ),
+                None => assert_eq!(reason, None, "{case}"),
+            }
         }
     }
 

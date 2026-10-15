@@ -383,26 +383,28 @@ mod tests {
     /// is reasoning in plain text, apart from the message after it.
     #[test]
     fn vibe_thinking_is_reasoning() {
-        let thinking = |text: &str| {
-            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m",
-                "content": {"text": format!("{{'type': 'thinking', 'thinking': [{{'type': 'text', 'text': '{text}'}}], 'closed': True}}")}})
-        };
-        let records = vec![
-            record(0.0, thinking("Let")),
-            record(0.1, thinking(" me look.")),
-            record(
-                0.2,
-                json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"text": "Looked."}}),
-            ),
-        ];
-        let s = render(
-            &records,
-            &Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap()),
-        );
-        assert!(s.full.contains("Reasoning</summary>"), "{}", s.full);
-        assert!(s.full.contains("Let me look&#46;"), "{}", s.full);
-        assert!(s.full.contains("Looked&#46;"), "{}", s.full);
-        assert!(!s.full.contains("closed"), "{}", s.full);
+        for kind in ["agent_message_chunk", "agent_thought_chunk"] {
+            let thinking = |text: &str| {
+                json!({"sessionUpdate": kind, "messageId": "m",
+                    "content": {"text": format!("{{'type': 'thinking', 'thinking': [{{'type': 'text', 'text': '{text}'}}], 'closed': True}}{{'type': 'thinking', 'thinking': [], 'closed': True}}")}})
+            };
+            let records = vec![
+                record(0.0, thinking("Let")),
+                record(0.1, thinking(" me look.")),
+                record(
+                    0.2,
+                    json!({"sessionUpdate": "agent_message_chunk", "messageId": "m", "content": {"text": "Looked."}}),
+                ),
+            ];
+            let s = render(
+                &records,
+                &Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap()),
+            );
+            assert!(s.full.contains("Reasoning</summary>"), "{}", s.full);
+            assert!(s.full.contains("Let me look&#46;"), "{}", s.full);
+            assert!(s.full.contains("Looked&#46;"), "{}", s.full);
+            assert!(!s.full.contains("closed"), "{}", s.full);
+        }
     }
 
     #[test]

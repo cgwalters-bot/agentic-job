@@ -96,11 +96,11 @@ const REMINDER: &str = "You ended your turn without the output this run requires
 const NO_OUTPUT: &str = "the agent ended its turn without the output the run requires, even \
                          after a reminder";
 
-/// Whether the agent has left the output its run requires. It runs
+/// Why the agent has not left the output its run requires; `None` when done. It runs
 /// commands (as the sandbox user), so it is called off the runtime, and
 /// starts none once its flag is set: the session sets it when it stops
 /// waiting for the check, before it stops what the sandbox user runs.
-pub type OutputCheck = Arc<dyn Fn(&AtomicBool) -> bool + Send + Sync>;
+pub type OutputCheck = Arc<dyn Fn(&AtomicBool) -> Option<String> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1042,7 +1042,7 @@ async fn after_error(
 async fn has_output(
     check: &OutputCheck,
     stop: &mut watch::Receiver<Option<Stop>>,
-) -> Result<bool, Ended> {
+) -> Result<Option<String>, Ended> {
     /// Sets its flag when dropped: however the wait ends, the session
     /// returning or its future dropped on a signal, the check goes no
     /// further than the command it is in, which the reaping then kills.
@@ -1055,7 +1055,7 @@ async fn has_output(
     let abandon = Abandon(Arc::default());
     let (check, stopped) = (check.clone(), abandon.0.clone());
     tokio::select! {
-        found = tokio::task::spawn_blocking(move || check(&stopped)) => Ok(found.unwrap_or(false)),
+        found = tokio::task::spawn_blocking(move || check(&stopped)) => Ok(found.unwrap_or_else(|_| Some("The output check failed.".into()))),
         why = wait_stop(stop) => Err(match why {
             Some(why) => Ended::stopped(&why, false),
             None => Ended::failure(LOST_STOP_SIGNAL.to_owned()),
@@ -1074,11 +1074,11 @@ async fn remind(
     check: &OutputCheck,
     ended: Ended,
 ) -> Ended {
-    match has_output(check, stop).await {
-        Ok(true) => return ended,
-        Ok(false) => {}
+    let reason = match has_output(check, stop).await {
+        Ok(None) => return ended,
+        Ok(Some(reason)) => reason,
         Err(stopped) => return stopped,
-    }
+    };
     let Link {
         cx,
         tap,
@@ -1089,7 +1089,7 @@ async fn remind(
     tap.log(&[
         "⚠ the agent ended its turn without its required output: reminding it once".to_owned(),
     ]);
-    let request = notice_prompt(sid, LABEL_REMINDER, REMINDER.to_owned());
+    let request = notice_prompt(sid, LABEL_REMINDER, format!("{REMINDER}\n{reason}"));
     let mut response = std::pin::pin!(cx.send_request(request).block_task());
     let answer = loop {
         tokio::select! {
@@ -1128,8 +1128,8 @@ async fn remind(
         return reminded;
     }
     match has_output(check, stop).await {
-        Ok(true) => reminded,
-        Ok(false) => Ended {
+        Ok(None) => reminded,
+        Ok(Some(_)) => Ended {
             reminded: true,
             stop_reason: reminded.stop_reason,
             ..Ended::failure(NO_OUTPUT.to_owned())
