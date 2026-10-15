@@ -420,7 +420,10 @@ jobs:
         # repository's checkout is the workspace. From a caller in another
         # repository it would otherwise look for that checkout itself, and
         # refuse the output repository as not in `allowed_repos`, which
-        # names the fork alone.
+        # names the fork alone. An update's `allow_*` settings repeat the
+        # bounds' `fields` where the pinned handlers honor them; they do
+        # not for an issue's title and status, or a request's `draft` and
+        # `update_branch`, so check refuses every field the bounds leave out.
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
@@ -441,6 +444,11 @@ jobs:
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
             | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
             | (select(has("remove_labels")).remove_labels) += {"target-repo": $action_repo, target: "*"}
+            | (select(has("update_issue")).update_issue) |= . + {"target-repo": $action_repo, target: "*",
+                allow_body: any(.fields[]; . == "body")}
+            | (select(has("update_pull_request")).update_pull_request) |= . + {"target-repo": $action_repo, target: "*",
+                allow_title: any(.fields[]; . == "title"), allow_body: any(.fields[]; . == "body"), update_branch: false}
+            | (select(has("mark_pull_request_as_ready_for_review")).mark_pull_request_as_ready_for_review) += {"target-repo": $action_repo, target: "*"}
             | (select(has("update_project")).update_project) += {"target-repo": $action_repo}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"

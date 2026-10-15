@@ -242,6 +242,63 @@ test('checked issue actions preserve the actual handler payload', async () => {
   }
 });
 
+test('checked updates reach the pinned handlers with only the listed fields', async () => {
+  const repo = 'owner/source';
+  for (const [type, fields, item, api] of [
+    ['update_issue', ['body'], { issue_number: 7, operation: 'replace', body: 'New body.' }, 'issues'],
+    ['update_pull_request', ['title'], { pull_request_number: 7, title: 'New title' }, 'pulls'],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'handler-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${type}]\nmax = 1\nfields = ${JSON.stringify(fields)}\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', type,
+        '--max-outputs', '1'], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type, repo, ...item }) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${type}: ${collected.stderr}`);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, true, `${type}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), REPO: repo, OUTPUT_REPO: 'owner/other', ITEM_REPO: 'owner/other',
+        BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const calls = [];
+      const entity = { number: 7, title: 'old', body: 'Old body.', state: 'open', draft: true, labels: [], html_url: 'https://example.invalid/7' };
+      const forge = { get: async () => ({ data: entity }), update: async payload => { calls.push(payload); return { data: { ...entity, ...payload } }; } };
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, startGroup() {}, endGroup() {} },
+        context: { repo: { owner: 'owner', repo: 'source' }, payload: {}, eventName: 'workflow_dispatch', runId: 1, serverUrl: 'https://github.com' },
+        github: { rest: { issues: forge, pulls: forge } },
+      });
+      // What apply's runner and step give the handlers' execution provenance.
+      Object.assign(process.env, { GITHUB_REPOSITORY: repo, GITHUB_REPOSITORY_ID: '1', GITHUB_RUN_ID: '1',
+        GITHUB_RUN_ATTEMPT: '1', GITHUB_JOB: 'apply', GH_AW_WORKFLOW_ID: 'agentic-job', GH_AW_JOB_CHECK_RUN_ID: '1' });
+      const config = JSON.parse(readFileSync(file('handler-config.json')));
+      const handler = await require(join(js, `${type}.cjs`)).main(config[type]);
+      const result = await handler(verdict.items[0], {});
+      assert.equal(result.success, true, `${type}: ${JSON.stringify(result)}`);
+      // The checked item's one field, against the checked number in the run's repository.
+      assert.equal(calls.length, 1, `${type}: ${JSON.stringify(calls)}`);
+      const { owner, repo: name, ...changed } = calls[0];
+      assert.deepEqual({ owner, repo: name }, { owner: 'owner', repo: 'source' }, api);
+      assert.deepEqual(Object.keys(changed).sort(), [api === 'issues' ? 'issue_number' : 'pull_number', fields[0]].sort(), type);
+      assert.ok(changed[fields[0]].startsWith(item[fields[0]]), `${type}: ${changed[fields[0]]}`);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});
+
 // gh-aw's `safe-outputs.urls`, as the step NAME of a workflow sets it.
 function urlPolicy(file, name) {
   const text = readFileSync(join(root, '.github/workflows', file), 'utf8');

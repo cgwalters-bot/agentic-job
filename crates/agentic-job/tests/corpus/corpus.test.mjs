@@ -440,6 +440,51 @@ test("check: bounded issue actions, through the collector and the check", () => 
   }
 });
 
+test("check: updates change only the fields the bounds list, through the collector and the check", () => {
+  const bounds = join(scratch(), 'allow.toml');
+  const fields = { update_issue: ['body'], update_pull_request: ['title'] };
+  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[outputs]\n', '[outputs]\n' +
+    Object.entries(fields).map(([type, list]) => `${type} = { max = 1, fields = ${JSON.stringify(list)} }\n`).join('')));
+  const policyFor = (outputs) => {
+    const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
+      '--base', BASE, '--kind', 'analysis', '--outputs', outputs, '--max-outputs', '2');
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const policy = policyFor('update_issue,update_pull_request');
+  const issue = { type: 'update_issue', repo: REPO, issue_number: 7, body: 'b' };
+  const pull = { type: 'update_pull_request', repo: REPO, pull_request_number: 7, title: 't' };
+  for (const [name, item, ok] of [
+    ['an issue body', issue, true],
+    ['an issue body section', { ...issue, operation: 'replace-island' }, true],
+    ['a pull request title', pull, true],
+    ['another repository', { ...issue, repo: 'other/repo' }, false],
+    ['no number', { ...issue, issue_number: undefined }, false],
+    ['a target alias', { ...pull, pull_request_number: undefined, pr_number: 7 }, false],
+    ['an unlisted issue title', { ...issue, title: 't' }, false],
+    ['an unlisted issue status', { ...issue, status: 'closed' }, false],
+    ['issue labels, which no bounds list', { ...issue, labels: ['triage'] }, false],
+    ['issue assignees, which no bounds list', { ...issue, assignees: ['someone'] }, false],
+    ['an unlisted pull request body', { ...pull, body: 'b' }, false],
+    ['a pull request out of draft', { ...pull, draft: false }, false],
+    ['a pull request branch update', { ...pull, update_branch: true }, false],
+  ]) {
+    const verdict = newCheck(handback({ lines: [item], base: null }), policy);
+    assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)}`);
+  }
+  // Marking ready is refused unless the bounds list it, as no shipped file does.
+  const ready = { type: 'mark_pull_request_as_ready_for_review', repo: REPO, pull_request_number: 7, reason: 'r' };
+  assert.equal(newCheck(handback({ lines: [ready], base: null }), policy).ok, false);
+  const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
+    '--base', BASE, '--kind', 'analysis', '--outputs', ready.type, '--max-outputs', '1');
+  assert.equal(result.status, 1, result.stdout);
+  writeFileSync(bounds, readFileSync(bounds, 'utf8').replace('[outputs]\n', `[outputs]\n${ready.type} = { max = 1 }\n`));
+  const readyPolicy = policyFor(ready.type);
+  assert.equal(newCheck(handback({ lines: [ready], base: null }), readyPolicy).ok, true);
+  assert.equal(newCheck(handback({ lines: [{ ...ready, pull_request_number: undefined }], base: null }), readyPolicy).ok, false);
+  assert.equal(newCheck(handback({ lines: [{ ...ready, repo: 'other/repo' }], base: null }), readyPolicy).ok, false);
+});
+
 test("check: the hand-backs of two real runs of the old tree", async () => {
   for (const [name, change] of [
     ["create-pull-request", { repo: OWN_REPO, outputs: "create_pull_request,noop,missing_tool" }],

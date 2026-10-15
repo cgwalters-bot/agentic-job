@@ -3,9 +3,12 @@ hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
 # `*` matches only one path segment; `**` also admits topic-branch slashes.
 bases = ["**"]
-max_outputs = 1
+max_outputs = 2
 max_patch_bytes = 1048576
 max_patch_files = 1
 
 [outputs]
 add_comment = { max = 1 }
+# Bodies, not titles or status (e2e-analysis). Unlike add_comment's
+# comment-target, nothing pins which issue: any in `repos` may be edited.
+update_issue = { max = 1, fields = ["body"] }

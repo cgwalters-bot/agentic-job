@@ -26,6 +26,34 @@ pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
 /// branch: one commit on top of the head the run started from.
 pub const PUSH_TO_PULL_REQUEST_BRANCH: &str = "push_to_pull_request_branch";
 
+/// The output type that takes a pull request out of draft. Off unless a
+/// bounds file lists it: apply opens every pull request as a draft, and
+/// this, like `draft: false` in an update, would undo that.
+pub const MARK_READY: &str = "mark_pull_request_as_ready_for_review";
+
+/// The fields an update may change, of those gh-aw's rules let a request
+/// hold; bounds list which in `fields`, and `check` refuses any other key.
+/// The handlers cannot be relied on for this: `update_issue` ignores
+/// `allow_title` and `allow_status`, and the request's `draft` and
+/// `update_branch` override `update_pull_request`'s configuration. Left
+/// out: an issue's `labels` (they replace all labels, past `add_labels`'s
+/// bounds), `assignees` and `milestone`, which nothing here bounds.
+pub const UPDATE_FIELDS: &[(&str, &[&str])] = &[
+    ("update_issue", &["title", "body", "status"]),
+    (
+        "update_pull_request",
+        &["title", "body", "draft", "update_branch"],
+    ),
+];
+
+/// The fields an update type may list, if `output` is one.
+pub fn update_fields(output: &str) -> Option<&'static [&'static str]> {
+    UPDATE_FIELDS
+        .iter()
+        .find(|(name, _)| *name == output)
+        .map(|(_, fields)| *fields)
+}
+
 /// The output types a bounds file may list. Each is one that gh-aw's
 /// collector validates with the configuration written here; another type
 /// needs settings of its own, so it is added here with them and not by a
@@ -37,6 +65,9 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "close_issue",
     "add_labels",
     "remove_labels",
+    "update_issue",
+    "update_pull_request",
+    MARK_READY,
     "update_project",
     PUSH_TO_PULL_REQUEST_BRANCH,
     "noop",
@@ -280,6 +311,8 @@ pub struct OutputLimit {
     /// Exact GitHub Projects v2 URLs and field names admitted for updates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// For `update_issue` and `update_pull_request`, which of
+    /// [`UPDATE_FIELDS`] a request may change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
     /// Globs of the pull request branches a push may go to. In place of
@@ -306,9 +339,26 @@ impl OutputLimit {
             "outputs.{output}: replacement_max_commits is supported only for a push, at most 50"
         );
         ensure!(
-            output == "update_project" || (self.projects.is_empty() && self.fields.is_empty()),
-            "outputs.{output}: projects and fields are supported only for update_project"
+            output == "update_project" || self.projects.is_empty(),
+            "outputs.{output}: projects are supported only for update_project"
         );
+        ensure!(
+            output == "update_project" || update_fields(output).is_some() || self.fields.is_empty(),
+            "outputs.{output}: fields are supported only for update_project, update_issue and update_pull_request"
+        );
+        if let Some(known) = update_fields(output) {
+            ensure!(
+                !self.fields.is_empty(),
+                "outputs.{output} requires an explicit nonempty fields list"
+            );
+            for field in &self.fields {
+                ensure!(
+                    known.contains(&field.as_str()),
+                    "outputs.{output}: unsupported field {field:?}, not one of {}",
+                    known.join(", ")
+                );
+            }
+        }
         if output == "update_project" {
             ensure!(
                 !self.projects.is_empty() && !self.fields.is_empty(),
@@ -1221,6 +1271,18 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             "update_project has no common named projects or fields in both bounds files".to_owned(),
         ]);
     }
+    for (output, _) in UPDATE_FIELDS {
+        if policy
+            .safe_outputs
+            .others
+            .get(*output)
+            .is_some_and(|limit| limit.fields.is_empty())
+        {
+            return Err(vec![format!(
+                "{output} has no common fields in both bounds files"
+            )]);
+        }
+    }
     policy.safe_outputs.create_pull_request = match (
         policy.safe_outputs.create_pull_request,
         other.safe_outputs.create_pull_request,
@@ -1494,6 +1556,8 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             ("topic/nested/branch", "add_comment", true),
             ("bot/../main", "add_comment", false),
             ("bot/w2-37863744105", "create_pull_request", false),
+            ("topic/nested/branch", "add_comment,update_issue", true),
+            ("main", MARK_READY, false),
         ] {
             let result = bounds.compile(&Request {
                 repo: "cgwalters-forge/agentic-job",
@@ -1631,6 +1695,57 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 ..OutputLimit::default()
             };
             assert!(limit.validate("create_issue").is_err(), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn updates_compile_with_their_fields_and_a_max() {
+        for (output, fields) in [
+            ("update_issue", vec!["body"]),
+            ("update_pull_request", vec!["title", "draft"]),
+            (MARK_READY, vec![]),
+        ] {
+            let mut bounds = bounds();
+            bounds.outputs.insert(
+                output.to_owned(),
+                OutputLimit {
+                    max: 2,
+                    fields: fields.iter().map(|field| (*field).to_owned()).collect(),
+                    ..Default::default()
+                },
+            );
+            bounds.validate().unwrap();
+            let policy = bounds
+                .compile(&Request {
+                    outputs: output,
+                    ..request()
+                })
+                .unwrap();
+            policy.validate().unwrap();
+            // gh-aw's handlers take a missing max for 10 or more.
+            let json = serde_json::to_value(&policy.safe_outputs).unwrap();
+            assert_eq!(json[output]["max"], 2, "{json}");
+            assert_eq!(policy.safe_outputs.others[output].fields, fields);
+            // Organization bounds narrow the fields; none in common is refused.
+            if !fields.is_empty() {
+                let mut org = bounds.clone();
+                org.outputs.get_mut(output).unwrap().fields = vec!["title".to_owned()];
+                let other = org
+                    .compile(&Request {
+                        outputs: output,
+                        ..request()
+                    })
+                    .unwrap();
+                let common = intersect(policy.clone(), other);
+                assert_eq!(
+                    common.is_ok(),
+                    fields.contains(&"title"),
+                    "{output}: {common:?}"
+                );
+                if let Ok(common) = common {
+                    assert_eq!(common.safe_outputs.others[output].fields, ["title"]);
+                }
+            }
         }
     }
 
@@ -2755,6 +2870,35 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 "no room for a patch",
                 with("max_patch_bytes = 8388608", "max_patch_bytes = 10"),
                 "max_patch_bytes",
+            ),
+            (
+                "an update without fields",
+                with("noop = ", "update_issue = { max = 1 }\nnoop = "),
+                "explicit nonempty fields",
+            ),
+            (
+                "an issue's labels as an update field",
+                with(
+                    "noop = ",
+                    "update_issue = { max = 1, fields = [\"labels\"] }\nnoop = ",
+                ),
+                "unsupported field \"labels\"",
+            ),
+            (
+                "a pull request's base as an update field",
+                with(
+                    "noop = ",
+                    "update_pull_request = { max = 1, fields = [\"base\"] }\nnoop = ",
+                ),
+                "unsupported field \"base\"",
+            ),
+            (
+                "fields for mark-ready",
+                with(
+                    "noop = ",
+                    "mark_pull_request_as_ready_for_review = { max = 1, fields = [\"draft\"] }\nnoop = ",
+                ),
+                "fields are supported only",
             ),
         ];
         for (name, text, want) in cases {

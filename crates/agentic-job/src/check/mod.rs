@@ -27,7 +27,9 @@ use serde_json::{Map, Value};
 pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
+use crate::policy::{
+    CREATE_PULL_REQUEST, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, Policy, update_fields,
+};
 use crate::redact;
 
 /// The requests the agent wrote, one JSON object to a line.
@@ -410,7 +412,7 @@ fn redirections_to(
             _ => problems.push("an update_project requires a nonempty fields object".to_owned()),
         }
     }
-    if matches!(output, "close_issue" | "add_labels" | "remove_labels") {
+    if let Some(key) = target_key(output) {
         if !item
             .get("repo")
             .and_then(Value::as_str)
@@ -420,11 +422,6 @@ fn redirections_to(
         }
         // Do not let handler fallback to event context, aliases or temporary
         // IDs choose an item. Repository scope remains the compiled run's repo.
-        let key = if output == "close_issue" {
-            "issue_number"
-        } else {
-            "item_number"
-        };
         if !item
             .get(key)
             .and_then(Value::as_u64)
@@ -433,6 +430,8 @@ fn redirections_to(
             problems.push(format!("a {output} requires a positive integer {key}"));
         }
         for alias in [
+            "item_number",
+            "issue_number",
             "pr_number",
             "pull_number",
             "pull_request_number",
@@ -440,17 +439,35 @@ fn redirections_to(
             "target",
             "duplicate_of",
         ] {
-            if item.contains_key(alias) {
+            if alias != key && item.contains_key(alias) {
                 problems.push(format!("a {output} with unsupported target field {alias}"));
             }
         }
-        let alias = if output == "close_issue" {
-            "item_number"
-        } else {
-            "issue_number"
-        };
-        if item.contains_key(alias) {
-            problems.push(format!("a {output} with unsupported target field {alias}"));
+    }
+    if let Some(known) = update_fields(output).or((output == MARK_READY).then_some(&[][..])) {
+        // Every key is named: gh-aw's handlers act on fields their
+        // configuration says to leave alone (`UPDATE_FIELDS`), so the
+        // policy's list, not the handler's, decides. `draft` and
+        // `update_branch` are refused like any field the bounds leave out,
+        // so a pull request stays a draft unless the bounds say otherwise.
+        let listed = policy
+            .safe_outputs
+            .others
+            .get(output)
+            .map_or(&[][..], |limit| &limit.fields[..]);
+        let allowed = |key: &str| known.contains(&key) && listed.iter().any(|field| field == key);
+        for key in item.keys().map(String::as_str) {
+            let permitted = matches!(key, "type" | "repo")
+                || Some(key) == target_key(output)
+                || (output == MARK_READY && key == "reason")
+                // How a body is combined with the current one.
+                || (key == "operation" && allowed("body"))
+                || allowed(key);
+            if !permitted {
+                problems.push(format!(
+                    "a {output} with {key}, which the policy does not let it change"
+                ));
+            }
         }
     }
     if output == "remove_labels"
@@ -520,6 +537,17 @@ fn redirections_to(
         );
     }
     problems
+}
+
+/// The field naming the one item an output acts on, for those that must
+/// name it explicitly.
+fn target_key(output: &str) -> Option<&'static str> {
+    match output {
+        "close_issue" | "update_issue" => Some("issue_number"),
+        "add_labels" | "remove_labels" => Some("item_number"),
+        "update_pull_request" | MARK_READY => Some("pull_request_number"),
+        _ => None,
+    }
 }
 
 fn is_handback_file(name: &str) -> bool {
@@ -1294,21 +1322,31 @@ mod tests {
 
     #[test]
     fn bounded_issue_actions() {
-        for (output, number_key) in [
-            ("close_issue", "issue_number"),
-            ("add_labels", "item_number"),
-            ("remove_labels", "item_number"),
+        for (output, number_key, field) in [
+            ("close_issue", "issue_number", "labels"),
+            ("add_labels", "item_number", "labels"),
+            ("remove_labels", "item_number", "labels"),
+            ("update_issue", "issue_number", "body"),
+            ("update_pull_request", "pull_request_number", "title"),
+            (MARK_READY, "pull_request_number", "reason"),
         ] {
             let mut policy = policy();
+            let labels = matches!(output, "add_labels" | "remove_labels");
             policy.safe_outputs.others.insert(
                 output.to_owned(),
                 crate::policy::OutputLimit {
                     max: 1,
-                    allowed: (output != "close_issue").then(|| vec!["triage".to_owned()]),
+                    allowed: labels.then(|| vec!["triage".to_owned()]),
+                    fields: update_fields(output).map_or_else(Vec::new, |_| vec![field.to_owned()]),
                     ..Default::default()
                 },
             );
-            let mut plain = json!({"type": output, "repo": policy.repo, "labels": ["triage"]});
+            let mut plain = json!({"type": output, "repo": policy.repo});
+            plain[field] = if field == "labels" {
+                json!(["triage"])
+            } else {
+                json!("text")
+            };
             plain[number_key] = json!(7);
             for (key, value, ok) in [
                 (number_key, json!(7), true),
@@ -1319,6 +1357,7 @@ mod tests {
                 ("repo", Value::Null, false),
                 ("target", json!("*"), false),
                 ("pr_number", json!(8), false),
+                ("item_number", json!(7), number_key == "item_number"),
                 ("duplicate_of", json!("other/repo#8"), false),
             ] {
                 let mut item = plain.clone();
@@ -1329,7 +1368,7 @@ mod tests {
                     "{output} {key}: {item}"
                 );
             }
-            if output != "close_issue" {
+            if labels {
                 for labels in [json!(["release"]), json!([{"name": "triage"}])] {
                     let mut item = plain.clone();
                     item["labels"] = labels;
@@ -1373,6 +1412,150 @@ mod tests {
                     "{output}: {count}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn updates_change_only_the_fields_the_policy_lists() {
+        for (output, listed, item, ok) in [
+            ("update_issue", &["body"][..], json!({"body": "b"}), true),
+            (
+                "update_issue",
+                &["body"],
+                json!({"body": "b", "operation": "replace-island"}),
+                true,
+            ),
+            ("update_issue", &["body"], json!({"title": "t"}), false),
+            (
+                "update_issue",
+                &["body"],
+                json!({"status": "closed"}),
+                false,
+            ),
+            (
+                "update_issue",
+                &["title", "status"],
+                json!({"title": "t", "status": "closed"}),
+                true,
+            ),
+            (
+                "update_issue",
+                &["title"],
+                json!({"title": "t", "operation": "append"}),
+                false,
+            ),
+            // Not listable: they would pass label and assignee bounds by.
+            (
+                "update_issue",
+                &["body"],
+                json!({"body": "b", "labels": ["x"]}),
+                false,
+            ),
+            (
+                "update_issue",
+                &["body"],
+                json!({"body": "b", "assignees": ["x"]}),
+                false,
+            ),
+            (
+                "update_issue",
+                &["body"],
+                json!({"body": "b", "milestone": 1}),
+                false,
+            ),
+            (
+                "update_pull_request",
+                &["title", "body"],
+                json!({"title": "t", "body": "b"}),
+                true,
+            ),
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"body": "b"}),
+                false,
+            ),
+            // Out of draft only where the bounds list `draft`.
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"title": "t", "draft": false}),
+                false,
+            ),
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"title": "t", "draft": true}),
+                false,
+            ),
+            (
+                "update_pull_request",
+                &["title", "draft"],
+                json!({"draft": false}),
+                true,
+            ),
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"title": "t", "update_branch": true}),
+                false,
+            ),
+            (
+                "update_pull_request",
+                &["update_branch"],
+                json!({"update_branch": true}),
+                true,
+            ),
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"title": "t", "state": "closed"}),
+                false,
+            ),
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"title": "t", "base": "other"}),
+                false,
+            ),
+            (
+                "update_pull_request",
+                &["title"],
+                json!({"title": "t", "pr": 7}),
+                false,
+            ),
+            (MARK_READY, &[], json!({"reason": "r"}), true),
+            (MARK_READY, &[], json!({"reason": "r", "body": "b"}), false),
+            (
+                MARK_READY,
+                &[],
+                json!({"reason": "r", "draft": false}),
+                false,
+            ),
+        ] {
+            let mut policy = policy();
+            policy.safe_outputs.others.insert(
+                output.to_owned(),
+                crate::policy::OutputLimit {
+                    max: 1,
+                    fields: listed.iter().map(|field| (*field).to_owned()).collect(),
+                    ..Default::default()
+                },
+            );
+            let mut item = item.clone();
+            item["type"] = json!(output);
+            item["repo"] = json!(policy.repo);
+            item[target_key(output).unwrap()] = json!(7);
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{listed:?}: {item}"
+            );
+        }
+        // A type the policy does not list allows nothing, mark-ready included.
+        for output in ["update_issue", "update_pull_request", MARK_READY] {
+            let item = json!({"type": output, "repo": policy().repo, "title": "t", "reason": "r"});
+            assert!(!redirections(item.as_object().unwrap(), &policy()).is_empty());
         }
     }
 

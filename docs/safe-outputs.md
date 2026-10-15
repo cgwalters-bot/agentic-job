@@ -68,7 +68,8 @@ gh-aw's own compiled workflows, and CI fails when the file is not what
 the pinned commit gives.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
-`close_issue`, `add_labels`, `remove_labels`, `update_project`, `push_to_pull_request_branch`,
+`close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
+`mark_pull_request_as_ready_for_review`, `update_project`, `push_to_pull_request_branch`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -151,6 +152,44 @@ closes issue 7 without a comment. `body` is refused; use a separately bounded
 `add_comment` request to post a comment.
 These operations need issue-write access in apply (PR labels can instead use
 pull-request write access). No producer or check token gains write access.
+
+### Updating issues and pull requests
+
+`update_issue` and `update_pull_request` change only the fields their bounds
+list, and `check` refuses a request holding any other key. The pinned handlers
+cannot be relied on for this: `update_issue` ignores `allow_title` and
+`allow_status`, and a request's `draft` and `update_branch` override
+`update_pull_request`'s configuration.
+
+```toml
+[outputs.update_issue]
+max = 1
+fields = ["body"]          # of "title", "body", "status"
+
+[outputs.update_pull_request]
+max = 1
+fields = ["title", "body"] # of "title", "body", "draft", "update_branch"
+```
+
+`fields` must be explicit and nonempty; organization bounds narrow it. A listed
+`body` also admits `operation` (`append`, `prepend`, `replace` or
+`replace-island`, which keeps one section a re-run replaces). An issue's
+`labels`, `assignees` and `milestone` cannot be listed: labels would replace
+every label past `add_labels`'s bounds, and nothing bounds the others.
+Requests name the run's exact `repo` and a positive integer `issue_number`, or
+`pull_request_number`; aliases and temporary IDs are refused, as above. GitHub
+numbers issues and pull requests together, so an `update_issue` can edit a pull
+request's title, body or state through the issues API.
+
+Apply opens every pull request as a draft. Taking one out of draft, with
+`draft: false` or `mark_pull_request_as_ready_for_review`, is refused unless
+the bounds list `draft` or that type; no shipped bounds file does. Mark-ready
+requests take only `repo`, `pull_request_number` and the `reason` the handler
+posts as a comment. `update_branch` merges the base into the pull request's
+branch with the apply credential, which needs push access to it.
+
+Apply needs `issues: write` for `update_issue`, and `pull-requests: write`
+for the other two. No producer or check token gains write access.
 
 ### Pushing to a pull request's branch
 

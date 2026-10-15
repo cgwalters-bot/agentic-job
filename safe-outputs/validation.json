@@ -216,6 +216,120 @@
       }
     }
   },
+  "update_issue": {
+    "defaultMax": 1,
+    "fields": {
+      "assignees": {
+        "type": "array",
+        "itemType": "string",
+        "itemSanitize": true,
+        "itemMaxLength": 39
+      },
+      "body": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "issue_number": {
+        "issueOrPRNumber": true
+      },
+      "labels": {
+        "type": "array"
+      },
+      "milestone": {
+        "optionalPositiveInteger": true,
+        "allowNull": true
+      },
+      "operation": {
+        "type": "string",
+        "enum": [
+          "replace",
+          "append",
+          "prepend",
+          "replace-island"
+        ]
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "open",
+          "closed"
+        ]
+      },
+      "title": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 128
+      }
+    },
+    "customValidation": "requiresOneOf:status,title,body,labels,assignees,milestone"
+  },
+  "update_pull_request": {
+    "defaultMax": 1,
+    "fields": {
+      "body": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "draft": {
+        "type": "boolean"
+      },
+      "operation": {
+        "type": "string",
+        "enum": [
+          "replace",
+          "append",
+          "prepend",
+          "replace-island"
+        ]
+      },
+      "pr": {
+        "issueOrPRNumber": true
+      },
+      "pr_number": {
+        "issueOrPRNumber": true
+      },
+      "pull_request_number": {
+        "issueOrPRNumber": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "title": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 256
+      },
+      "update_branch": {
+        "type": "boolean"
+      }
+    },
+    "customValidation": "requiresOneOf:title,body,update_branch"
+  },
+  "mark_pull_request_as_ready_for_review": {
+    "defaultMax": 1,
+    "fields": {
+      "pull_request_number": {
+        "issueOrPRNumber": true
+      },
+      "reason": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
   "update_project": {
     "defaultMax": 10,
     "fields": {

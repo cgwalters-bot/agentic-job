@@ -129,6 +129,9 @@ test('issue actions keep checked repository and caps, not output-repo or event t
       close_issue: { max: 2 },
       add_labels: { max: 3, allowed: ['triage'], blocked: ['release'] },
       add_comment: { max: 1 },
+      update_issue: { max: 1, fields: ['title'] },
+      update_pull_request: { max: 1, fields: ['body', 'draft'] },
+      mark_pull_request_as_ready_for_review: { max: 1 },
     }));
     const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
       GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source',
@@ -146,6 +149,17 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     });
     // A comment goes to the item, which may be in another repository than the outputs.
     assert.deepEqual(config.add_comment, { max: 1, 'target-repo': 'owner/tracker', target: '99' });
+    // Updates name their item explicitly; check refuses the fields the handlers would not.
+    assert.deepEqual(config.update_issue, {
+      max: 1, fields: ['title'], 'target-repo': 'owner/source', target: '*', allow_body: false,
+    });
+    assert.deepEqual(config.update_pull_request, {
+      max: 1, fields: ['body', 'draft'], 'target-repo': 'owner/source', target: '*',
+      allow_title: false, allow_body: true, update_branch: false,
+    });
+    assert.deepEqual(config.mark_pull_request_as_ready_for_review, {
+      max: 1, 'target-repo': 'owner/source', target: '*',
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

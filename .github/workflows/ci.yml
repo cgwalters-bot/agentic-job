@@ -709,7 +709,9 @@ jobs:
       budget: "100"
       artifact-prefix: event-
 
-  # An analysis of the topic branch writes only to the named scratch issue.
+  # An analysis of the topic branch comments on the named scratch issue and
+  # updates a section of its body; the bounds admit body updates only, but
+  # to any issue of this repository (workflow/analysis.toml).
   # No contents write permission: apply must not checkout/fetch/push a base.
   e2e-analysis:
     needs: changes
@@ -728,15 +730,15 @@ jobs:
       repo: ${{ github.repository }}
       base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}
       kind: analysis
-      task: Analyze the checked out topic branch and comment on the named scratch issue.
-      outputs: add_comment
-      max-outputs: '1'
+      task: Analyze the checked out topic branch, comment on the named scratch issue and update its body.
+      outputs: add_comment,update_issue
+      max-outputs: '2'
       comment-target: '64'
       notify: none
       allow: workflow/analysis.toml
       config: .github/agentic-job/hosted.toml
       agent: fake
-      setup: .github/agentic-job/e2e/event.sh
+      setup: .github/agentic-job/e2e/analysis.sh
       timeout: '5'
       max-requests: '0'
       budget: '100'
@@ -1043,6 +1045,10 @@ jobs:
           test "$REFUSED_EXIT" = 0
           test -z "$REFUSED_APPLIED"
           gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" | jq -se --arg run "$RUN" '[ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run)) and (.body | contains("A comment from the scripted agent of an event-triggered run."))) ] | length == 1'
+      # Its apply succeeded only if the update did. Another run's analysis
+      # may have replaced the section since, so the run is not looked for.
+      - name: The topic-branch analysis updated the scratch issue's body
+        run: gh api "repos/$GH_REPO/issues/$ISSUE" --jq .body | grep -F 'A body section from the scripted agent of a topic-branch analysis.'
       - name: The refused comment was not posted on either item
         run: |
           for item in "$ISSUE" 65; do

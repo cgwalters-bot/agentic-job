@@ -217,9 +217,15 @@ aliases. Closing MUST reject `body`; issue creation MUST reject relationships
 to other issues. Labels MUST fit the policy's case-insensitive allow/block
 bounds. Added labels MUST also fit the per-request count and the 1–64-character
 ASCII subset documented in [safe outputs](../docs/safe-outputs.md#closing-issues-and-changing-labels),
-rather than be silently filtered or changed.
+rather than be silently filtered or changed. `update_issue`,
+`update_pull_request` and `mark_pull_request_as_ready_for_review` MUST name
+the repository and number the same way, and hold no key but their target, the
+fields the policy lists for the type (with `operation` for a listed body) and
+mark-ready's `reason`; so a pull request leaves draft only where bounds list
+`draft` or mark-ready.
 Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
-`bounded_issue_actions`, `issue_action_payloads_are_not_silently_changed`,
+`bounded_issue_actions`, `updates_change_only_the_fields_the_policy_lists`,
+`issue_action_payloads_are_not_silently_changed`,
 `issue_labels_are_checked_not_silently_filtered` and
 `an_issue_that_links_other_issues_is_refused`.
 

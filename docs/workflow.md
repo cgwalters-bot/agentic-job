@@ -656,7 +656,8 @@ The artifact name selects untrusted data only; it does not select the policy,
 binary or handler code. Upload just the hand-back files, not a checkout.
 For patch proposals the existing branch, base and patch guards still apply.
 `exit` is empty because no agent ran. Issue closure and label additions use the
-[bounded issue actions](safe-outputs.md#closing-issues-and-changing-labels).
+[bounded issue actions](safe-outputs.md#closing-issues-and-changing-labels);
+issue and pull request edits, the [listed fields](safe-outputs.md#updating-issues-and-pull-requests).
 Project updates use [named project and field bounds](safe-outputs.md#updating-project-fields)
 and the apply environment token described below, not the job token.
 
@@ -856,8 +857,9 @@ GitHub refuses the whole call when any of them is missing, even with
 that. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
-nothing more, and without it add `issues: write` (comments and issues)
-and `pull-requests: write` for the job's own token. Nothing needs
+nothing more, and without it add `issues: write` (comments, issues and
+issue updates) and `pull-requests: write` (pull request updates and
+mark-ready) for the job's own token. Nothing needs
 `contents: write`: a new pull request's branch, and a push to it, go to a
 fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 
