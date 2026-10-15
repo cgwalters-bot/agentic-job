@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { BUILT_FROM, NAMES, OBJECT, REPOSITORY, TARGET, checked, digest, fetchRelease, readPin } from "./binary.mjs";
+import "./tagged.test.mjs";
 
 function tree() {
   const root = mkdtempSync(join(tmpdir(), "source-"));

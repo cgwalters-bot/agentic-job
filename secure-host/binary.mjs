@@ -46,7 +46,7 @@ export const REPOSITORY = "cgwalters-forge/agentic-job";
 // decides what a release holds: a release published before that changed
 // lacks a file this one requires, and must not be taken for this source.
 // `skills` and `workflow/review.md` are the agents' skills, built in.
-export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.mjs"];
+export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.mjs", "secure-host/tagged.mjs"];
 
 // The scripted agent too: a run with `agent: fake` needs it.
 export const NAMES = ["agentic-job", "fake-agent"];
@@ -185,7 +185,11 @@ async function get({ out, build: asked }) {
   if (!out) throw new Error("get: --out DIR is required");
   const source = digest();
   mkdirSync(out, { recursive: true });
-  const fetched = !asked && await fetchRelease(source, out);
+  const { fetchTagged } = await import("./tagged.mjs");
+  const tagged = !asked && await fetchTagged({ repository: process.env.WORKFLOW_REPOSITORY,
+    ref: process.env.WORKFLOW_IDENTITY ? JSON.parse(process.env.WORKFLOW_IDENTITY).workflow_ref : undefined,
+    commit: process.env.WORKFLOW_SHA, source, out, fetchFile: download, verify: run });
+  const fetched = tagged || (!asked && await fetchRelease(source, out));
   if (!fetched) {
     const why = asked
       ? "A build was requested"
@@ -193,7 +197,7 @@ async function get({ out, build: asked }) {
     console.log(`::notice::${why}; building from this source, about two minutes`);
     build(out);
   }
-  console.log(fetched ? `fetched build-${source} by its attested checksums` : "built from this source");
+  console.log(tagged ? "fetched tagged release by its attested checksums" : fetched ? `fetched build-${source} by its attested checksums` : "built from this source");
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `fetched=${fetched}\nsource=${source}\n`);
 }
 
@@ -202,7 +206,7 @@ function pin({ dist, release, repository }) {
   if (!dist || !release) throw new Error("pin: --dist DIR and --release TAG are required");
   const sums = NAMES.map((name) => [name, sha256(readFileSync(join(dist, `${name}-${TARGET}`)))]);
   sums.push([OBJECT, sha256(readFileSync(join(dist, OBJECT)))]);
-  const pinned = { repository: repository || REPOSITORY, release, target: TARGET, source: digest(), sha256: Object.fromEntries(sums) };
+  const pinned = { repository: repository || REPOSITORY, release, target: TARGET, source: digest(), commit: process.env.GITHUB_SHA, sha256: Object.fromEntries(sums) };
   console.log(JSON.stringify(pinned, null, 2));
 }
 

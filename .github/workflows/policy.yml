@@ -479,6 +479,11 @@ jobs:
       - name: Get the binary
         env:
           BUILD: ${{ inputs.build-binary }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          # Read the new ref field at runtime: pinned actionlint's job schema
+          # predates it. Do not broaden the unknown-property lint suppression.
+          WORKFLOW_IDENTITY: ${{ toJSON(job) }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           [ "$BUILD" != true ] || set -- --build
           node "$SOURCE_DIR/secure-host/binary.mjs" get --out "$JOB_DIR/bin" "$@"

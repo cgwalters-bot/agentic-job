@@ -1,5 +1,22 @@
 # Running it on GitHub
 
+Pin the reusable workflow to a published `vMAJOR.MINOR.PATCH` tag to use
+that release's static Linux binaries. Policy resolves the tag to its own
+workflow commit, verifies that the release manifest is attested by
+`release.yml` on main at that commit, and checks the manifest's commit, source
+digest and SHA-256 checksums before handing the binaries to the other jobs by
+artifact ID. A release editor who replaces assets and checksums cannot forge
+that attestation. Missing assets or mismatches stop the run; they do not fall
+back to a build. Use a new release for this path: older releases lack the
+attested, commit-bound manifest and policy object. Release publishing uploads
+all assets to a draft before publication locks an immutable release.
+
+Branch and full-commit pins retain the source-addressed, attested download/build
+path; `build-binary: true` still forces a build. No caller ref selects a release.
+Tagged downloads avoid the roughly 1.5-minute per-run compile described in
+issue #606; actual savings depend on download and runner setup time, not measured
+by the local tests.
+
 [`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml)
 is one agent run as a workflow another repository calls. It is a thin
 wrapper: the `agentic-job` binary decides what a run may ask for, runs

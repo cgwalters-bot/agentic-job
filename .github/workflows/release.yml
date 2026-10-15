@@ -24,7 +24,7 @@ env:
 
 jobs:
   version:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       tag: ${{ steps.check.outputs.tag }}
@@ -63,11 +63,51 @@ jobs:
       cache: false
       release: ${{ needs.version.outputs.tag }}
 
+  # Signs the manifest, so that a caller pinning the tag takes the binaries
+  # by checksums this workflow on main made for the tag's commit, not by
+  # whatever a release editor uploads. Its own job: the publish job runs the
+  # binary, which must not see the OIDC request credential.
+  attest:
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agentic-job
+          path: dist
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attest
+        with:
+          subject-path: dist/release.json
+      - name: Stage the verification bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          mkdir provenance
+          cp "$BUNDLE" provenance/provenance.jsonl
+      # Exercise the caller's tokenless verification policy before publishing.
+      - name: Verify the attested manifest without a token
+        run: >-
+          GH_TOKEN='' GITHUB_TOKEN='' gh attestation verify dist/release.json
+          --bundle provenance/provenance.jsonl --repo "$GITHUB_REPOSITORY"
+          --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main"
+          --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provenance
+          path: provenance/
+          if-no-files-found: error
+
   # The only job with a write token, and it builds nothing: it publishes
   # the files the build job made.
   publish:
-    needs: [version, build]
-    runs-on: ubuntu-24.04
+    needs: [version, build, attest]
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -79,6 +119,9 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentic-job
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: provenance
       - name: The checksums match and the version is the tag's
         run: |
           sha256sum --check "agentic-job-$TARGET.sha256" "fake-agent-$TARGET.sha256"
@@ -110,7 +153,9 @@ jobs:
         run: |
           start=()
           [ -z "$PREVIOUS" ] || start=(--notes-start-tag "$PREVIOUS")
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "$TAG" --generate-notes "${start[@]}" \
             "agentic-job-$TARGET" "agentic-job-$TARGET.sha256" \
-            "fake-agent-$TARGET" "fake-agent-$TARGET.sha256"
+            "fake-agent-$TARGET" "fake-agent-$TARGET.sha256" release.json provenance.jsonl world_write.bpf.o
+          # Immutability locks assets at publication, not while still a draft.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
