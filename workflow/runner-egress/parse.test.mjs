@@ -234,6 +234,10 @@ test('workflow is opt-in, observer registers first, and requested network paths 
   assert.match(workflow, /uses: \.\/workflow\/runner-egress\/exercise/);
   assert.match(workflow, /TRACE_UPLOAD_SCRIPT:.*\/dist\/upload\/index\.js/);
   assert.match(workflow, /fail-on-cache-miss: true/);
+  const cachePins = [...workflow.matchAll(/uses: actions\/cache\/(?:save|restore)@([0-9a-f]{40}) # v6\.1\.0/g)];
+  assert.equal(cachePins.length, 2);
+  assert.equal(cachePins[0][1], cachePins[1][1]);
+  assert.equal(workflow.match(/key: runner-egress-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/g).length, 2);
   assert.match(workflow, /contents: read/);
   assert.doesNotMatch(workflow, /secrets\.|id-token:|contents: write|secure-host@/);
 });

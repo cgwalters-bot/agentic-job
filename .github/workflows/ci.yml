@@ -723,6 +723,8 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-analysis-${{ github.run_id }}
+      # Test this checkout, not a published release that may lack fake-agent.
+      build-binary: true
       repo: ${{ github.repository }}
       base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}
       kind: analysis
@@ -754,6 +756,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-analysis-refused-${{ github.run_id }}
+      build-binary: true
       expect-check-refusal: true
       repo: ${{ github.repository }}
       base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}

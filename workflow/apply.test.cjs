@@ -113,6 +113,13 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
     assert.match(caller, /^      contents: read$/m, name);
     assert.doesNotMatch(caller, /^      contents: write$/m, name);
   }
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused']) {
+    const caller = callers.find(([, jobName]) => jobName === name)[2];
+    assert.match(caller, /^      build-binary: true$/m, name);
+    const reusable = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+    assert.match(reusable, /^      build-binary:\n/m);
+    assert.doesNotMatch(caller, /^      build:/m, name);
+  }
 });
 
 test('issue actions keep checked repository and caps, not output-repo or event targets', () => {

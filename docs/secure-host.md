@@ -56,8 +56,11 @@ Missing names and missed sockets stay empty, rather than being inferred from
 an IP's current reverse lookup or the currently running step.
 
 The workflow uploads and downloads a fixture, then explicitly saves and
-restores a run-unique cache entry (never restoring another run's data). A local
-JavaScript action fetches public repository metadata in its main and post
+restores a run-unique cache entry (never restoring another run's data). The
+cache actions use v6.1.0's Node 24 runtime on the hosted runner; `path`,
+`key` and `fail-on-cache-miss` keep their existing meanings. This does not
+grant cache access to the sandbox or change the reusable workflow's policy.
+A local JavaScript action fetches public repository metadata in its main and post
 steps, without credentials. The observer registers first, so its post runs
 last. That post stops collection, writes the versioned JSON report, adds a
 bounded preview to the job summary, and invokes the already downloaded,
@@ -81,6 +84,12 @@ Coverage ends at the final JavaScript post snapshot, before the JSON upload:
 A green probe is not proof of whole-job coverage.
 The observed list must be added in a fix round after this PR's hosted CI runs;
 no observed endpoints are claimed from local unit tests.
+
+The merge-queue failure during the v6 update was unrelated to cache: both
+analysis policy jobs received HTTP 404 for a published `fake-agent` asset.
+Those CI callers now set `build-binary: true` to test this checkout without relying
+on release completeness. Release downloads still fail closed when a manifest
+exists but an asset is missing; repairing that published release is separate.
 
 ## Access-time world-write policy
 
