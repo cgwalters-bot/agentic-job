@@ -106,7 +106,8 @@ to such a pull request is pushed to its branch under the same file.
 Every run's result can be found from the issue it was dispatched for. A draft
 PR gets a `Closes #N` line for an issue in the output repository, or
 `Refs OWNER/REPO#N` for an item elsewhere. Apply derives the line from the
-repository and item in policy and appends it only if absent; cross-repository
+repository and item in policy (its `issue` input, which a copy of
+`dispatch.yml` has to keep) and appends it only if absent; cross-repository
 references close nothing on merge. Fix runs leave existing PR bodies alone. Its
 title is the first line of the agent's summary, cut between words to 100
 characters. For non-review runs in the calling repository, notify and conclude

@@ -1501,7 +1501,10 @@ request, or else of the first comment or issue apply made or found made, also
 in the run summary. With `issue` set to a number of the output repository, a
 new pull request gets `Closes #N` unless that line is already present;
 an item in another repository gets `Refs OWNER/NAME#N` instead. Existing batch
-references are preserved, and fix runs leave the PR body alone. When notifications are
+references are preserved, and fix runs leave the PR body alone. Without
+`issue` a pull request links nothing, and apply warns that it does: a
+caller that composes `policy.yml` itself, as a wrapper of `dispatch.yml`
+might, has to pass its item as `issue`, not only as `comment-target`. When notifications are
 enabled, conclude puts the result link in the item's single status comment.
 A link that cannot be posted fails no run.
 A run whose checked outputs are only `noop`, `missing_tool` or

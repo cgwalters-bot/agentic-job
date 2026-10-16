@@ -547,9 +547,18 @@ jobs:
       # Before the guard, so the name it digests is the same on a re-run.
       # Only a real patch application can open a PR and has the trusted helper
       # checkout; comment-only and staged runs must not require that checkout.
+      # Only the caller names the issue: a pull request is not linked to its
+      # comment target, which may be a tracking issue merging must not close.
+      # A caller composing policy.yml itself that leaves `issue` out has its
+      # pull requests link nothing, so say so where the run is looked at.
       - name: Say which issue a pull request is for
-        if: ${{ fromJSON(inputs.policy).issue != '' && fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         run: |
+          if [ -z "$ISSUE" ]; then
+            jq -e 'all(.items[]; .type != "create_pull_request")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+              echo "::warning::the pull request names no issue: the caller passed policy.yml no \`issue\`"
+            exit 0
+          fi
           node "$GITHUB_WORKSPACE/apply-source/workflow/issue-reference.cjs"
       # A re-run of this job applies check's accepted outputs again, and
       # gh-aw's handlers would post each comment, issue and pull request

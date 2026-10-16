@@ -1596,7 +1596,7 @@ test('the generated reference links an implementation to the caller issue', () =
   const steps = workflow.split('\n      - name: ').map(text => text.split('\n')[0]);
   assert.ok(steps.indexOf('Say which issue a pull request is for') < steps.indexOf('Leave out what an earlier attempt applied'));
   assert.match(workflow.split('- name: Say which issue a pull request is for\n')[1].split('\n')[0],
-    /if: \$\{\{ fromJSON\(inputs\.policy\)\.issue != '' && fromJSON\(inputs\.check\)\.outputs.has-patch == 'true' && fromJSON\(inputs\.policy\)\.apply-staged != 'true' \}\}/);
+    /if: \$\{\{ fromJSON\(inputs\.check\)\.outputs.has-patch == 'true' && fromJSON\(inputs\.policy\)\.apply-staged != 'true' \}\}/);
 });
 
 test('a batched pull request preserves closing references for all its issues', () => {
@@ -1635,6 +1635,96 @@ test('examples and comments cannot suppress the generated closing reference', ()
   // Partial work remains a draft; merging it still closes the primary issue.
   const body = '**Partial work.** Not all work is done.';
   assert.equal(refs([{ ...pull, body }])[0].body, `${body}\n\nCloses #64`);
+});
+
+// A step's `if`, as Actions evaluates the few forms apply's steps use.
+function runs(name, contexts) {
+  const condition = workflow.split(`- name: ${name}\n`)[1].split('\n')[0].match(/^ +if: \$\{\{ (.*) \}\}$/)?.[1];
+  if (!condition) return true;
+  const js = condition.replace(/fromJSON\(inputs\.(policy|check|agent)\)/g, '$1')
+    .replace(/\.([a-z]+(?:-[a-z]+)+)/g, "['$1']").replace(/format\('\{0\}', ([^)]*)\)/g, 'String($1)');
+  return Function('policy', 'check', 'agent', `return ${js}`)(contexts.policy, contexts.check, contexts.agent);
+}
+
+// The value the shipped dispatch caller gives a policy.yml input, and that
+// it reaches apply as the call's policy output.
+function dispatchedInput(key, value) {
+  const dispatch = readFileSync(join(__dirname, '../.github/workflows/dispatch.yml'), 'utf8');
+  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+  assert.match(dispatch, new RegExp(`^      ${key}: \\$\\{\\{ inputs\\.item \\}\\}$`, 'm'));
+  assert.match(wrapper, new RegExp(`^      ${key}: \\$\\{\\{ inputs\\.${key} \\}\\}$`, 'm'));
+  assert.match(policy, new RegExp(`^      ${key}: \\$\\{\\{ steps\\.request\\.outputs\\.${key} \\}\\}$`, 'm'));
+  assert.match(workflow, new RegExp(`^      ${key.toUpperCase()}: \\$\\{\\{ fromJSON\\(inputs\\.policy\\)\\.${key} \\}\\}$`, 'm'));
+  return value;
+}
+
+// An implement run's hand-back, through each step of apply that touches a
+// pull request's body, to what the handlers send: issue #877, where a caller
+// without `issue` had every pull request link nothing.
+async function applyImplement(body, { issue = dispatchedInput('issue', '64'), exit = '0' } = {}) {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    mkdirSync(join(root, 'apply-source/workflow'), { recursive: true });
+    writeFileSync(join(root, 'apply-source/workflow/issue-reference.cjs'), readFileSync(join(__dirname, 'issue-reference.cjs')));
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ create_pull_request: { max: 1, ready_when_complete: true } }));
+    writeFileSync(join(root, 'report.json'), JSON.stringify({ ok: true, patch: { file: 'aw-agent-run-7.patch' } }));
+    writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [{ ...pull, body }], errors: [] }));
+    const contexts = { policy: { issue, 'apply-staged': '', 'proposals-artifact': '' },
+      check: { outputs: { 'has-patch': 'true' } }, agent: { outputs: { exit } } };
+    const env = { GH_AW_TMP: root, REPORT: join(root, 'report.json'), GITHUB_OUTPUT: join(root, 'output'), GITHUB_ENV: join(root, 'env'),
+      GITHUB_WORKSPACE: root, RUNNER_TEMP: root, REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo', ITEM_REPO: 'owner/repo', ISSUE: issue };
+    const logs = [];
+    for (const [name, extra] of [
+      ['Decide whether the work is complete', { EXIT: exit }],
+      ["Write the handlers' configuration", { BASE: 'main', BRANCH_PREFIX: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '64',
+        PULL_REQUEST: stepEnv("Write the handlers' configuration", 'PULL_REQUEST'), PUSH: '{}', FORK: 'bot/repo' }],
+      ['Mark what a partial run opens or posts', { STOPPED: 'a limit' }],
+      ['Say which issue a pull request is for', {}],
+    ]) {
+      if (!runs(name, contexts)) continue;
+      const result = command(root, 'bash', ['-e', '-o', 'pipefail', '-c', step(name)], { ...env, ...extra });
+      assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+      logs.push(result.stdout);
+    }
+    const { items } = JSON.parse(readFileSync(join(root, 'agent_output.json'), 'utf8'));
+    assert.ok(runs('Leave out what an earlier attempt applied', contexts));
+    assert.ok(runs("Apply the outputs with gh-aw's handlers", contexts));
+    const { kept } = await leaveOutApplied(items, []);
+    assert.equal(kept.length, 1);
+    return { sent: sent(kept[0].body), logs: logs.join('') };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// What a reader sees of a sent body: the hidden name after it is not text.
+const visible = body => body.replace(/\n\n<!-- agentic-job-applied: [^>]* -->$/, '');
+
+test("an implement run's pull request ends with its item's closing line, through apply's steps to the handlers", async () => {
+  assert.match(visible((await applyImplement('Done.')).sent), /^Done\.\n\nCloses #64$/);
+  // A batched run's sibling lines (#657) stay, and the item's still comes last.
+  const batch = 'Batch sibling work\n\nCloses #65\nCloses owner/tracker#66';
+  assert.equal(visible((await applyImplement(batch)).sent), `${batch}\n\nCloses #64`);
+  // Partial work says so first, and still closes its item.
+  const partial = visible((await applyImplement('Half.', { exit: '3' })).sent);
+  assert.match(partial, /^\*\*Partial work\.\*\* [^\n]*\n\nHalf\.\n\nCloses #64$/);
+});
+
+test('a pull request of a caller that passes no issue links nothing, and the run says so', async () => {
+  const { sent: body, logs } = await applyImplement('Done.', { issue: '' });
+  assert.equal(visible(body), 'Done.');
+  assert.match(logs, /^::warning::the pull request names no issue: the caller passed policy\.yml no `issue`$/m);
+  // Only a pull request is meant: a comment-only hand-back has nothing to link.
+  const root = mkdtempSync(join(homedir(), 'refs-test-'));
+  try {
+    writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [comment()], errors: [] }));
+    const result = command(root, 'bash', ['-e', '-o', 'pipefail', '-c', step('Say which issue a pull request is for')],
+      { GH_AW_TMP: root, ISSUE: '' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // gh-aw's sanitizer, as far as these tests go: it neutralizes a mention and cuts at its limit.
