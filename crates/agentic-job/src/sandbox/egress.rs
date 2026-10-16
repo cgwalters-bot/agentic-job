@@ -1,19 +1,21 @@
-//! The egress proxy: mitmproxy, with the addon and policy of `egress/` at
-//! the top of this repository, installed and started by `sandbox setup`.
+//! The egress proxy, installed and started by `sandbox setup`: mitmproxy,
+//! with the addon and policy of `egress/` at the top of this repository,
+//! or with `egress.rust-proxy` this binary's own ([`super::proxy`]),
+//! which applies the same policy and writes the same log.
 //!
-//! It is the one piece that is not Rust. The policy needs the method and
-//! path of every request, so the proxy has to end TLS, and a proxy that
-//! ends TLS is security-critical code that is not written again here.
-//! This module is the old tree's `egress-proxy.mjs start`: the proxy
-//! runs as a system user of its own, in a transient service with no
-//! capabilities and a read-only system, so the sandbox user can neither
-//! signal it, read its certificate authority's key, nor change its
-//! policy; and the network rules keep that user off everything private.
+//! The policy needs the method and path of every request, so the proxy
+//! has to end TLS. This module is the old tree's `egress-proxy.mjs
+//! start`: the proxy runs as a system user of its own, in a transient
+//! service with no capabilities and a read-only system, so the sandbox
+//! user can neither signal it, read its certificate authority's key, nor
+//! change its policy; and the network rules keep that user off
+//! everything private.
 //!
-//! Setup therefore needs Python, a package index and the threat feed's
-//! host on the network. What it takes from them is pinned here: every
-//! package by the hashes of `egress/requirements.txt`, and the feed by a
-//! commit and a checksum. docs/workflow.md says how each pin is moved.
+//! With mitmproxy, setup therefore needs Python, a package index and the
+//! threat feed's host on the network; with the Rust proxy, the feed's
+//! host alone. What it takes from them is pinned here: every package by
+//! the hashes of `egress/requirements.txt`, and the feed by a commit and
+//! a checksum. docs/workflow.md says how each pin is moved.
 
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -24,6 +26,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 
 use super::host::{self, User};
+use super::proxy::policy::ECOSYSTEMS;
+use super::setup::SELF_COPY;
 use crate::config::Egress;
 
 /// The addon and what it needs, as they are in `egress/`: the binary
@@ -33,9 +37,6 @@ const ADDON: &str = include_str!("../../../../egress/addon.py");
 const POLICY_PY: &str = include_str!("../../../../egress/policy.py");
 
 const POLICY_TOML: &str = include_str!("../../../../egress/policy.toml");
-
-/// gh-aw's ecosystem identifiers, which policy.py reads beside itself.
-const ECOSYSTEMS: &str = include_str!("../../../../egress/ecosystem_domains.json");
 
 /// mitmproxy and everything it depends on, each at one version and with
 /// the hashes of its files: generated from `egress/requirements.in`.
@@ -65,8 +66,10 @@ const STATE_DIR: &str = "/var/lib/egress-proxy";
 pub const ACCESS_LOG: &str = "/var/log/egress-proxy/access.jsonl";
 
 /// mitmproxy writes its authority into its configuration directory on
-/// first start.
+/// first start, and so does the Rust proxy (`proxy::tls::CA_CERT`).
 const CA_GENERATED: &str = "/var/lib/egress-proxy/mitmproxy-ca-cert.pem";
+
+const RUST_CA_GENERATED: &str = "/var/lib/egress-proxy/ca-cert.pem";
 
 /// What the sandbox user trusts: the authority alone, and the system
 /// bundle plus the authority for everything that replaces the bundle.
@@ -171,6 +174,28 @@ fn mitmdump_args(denylist: bool) -> Vec<String> {
     .collect()
 }
 
+/// The Rust proxy's command line: the binary's root-owned copy, which
+/// setup installs before it starts the proxy, with mitmdump's settings.
+fn rust_proxy_args(denylist: bool) -> Vec<String> {
+    let mut args = vec![
+        SELF_COPY.to_owned(),
+        "sandbox".to_owned(),
+        "egress-proxy".to_owned(),
+        "--listen".to_owned(),
+        SocketAddr::from((PROXY_HOST, PROXY_PORT)).to_string(),
+        "--policy".to_owned(),
+        format!("{POLICY_DIR}/policy.toml"),
+        "--log".to_owned(),
+        ACCESS_LOG.to_owned(),
+        "--state-dir".to_owned(),
+        STATE_DIR.to_owned(),
+    ];
+    if denylist {
+        args.extend(["--denylist".to_owned(), DENYLIST.to_owned()]);
+    }
+    args
+}
+
 fn write(path: &str, content: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::write(path, content).with_context(|| format!("writing {path}"))?;
@@ -185,10 +210,10 @@ fn make_dir(path: &str) -> Result<()> {
         .with_context(|| format!("setting the mode of {path}"))
 }
 
-/// The proxy's user, the virtual environment with the pinned mitmproxy,
-/// and root's copy of the addon and the policy. `policy` replaces the
-/// write rules that come with the binary.
-fn install(policy: Option<&Path>) -> Result<()> {
+/// The proxy's user, and root's copy of the policy; for mitmproxy also
+/// the virtual environment with it pinned, and the addon. `policy`
+/// replaces the write rules that come with the binary.
+fn install(policy: Option<&Path>, rust: bool) -> Result<()> {
     if User::lookup(EGRESS_USER)?.is_none() {
         host::run(Command::new("useradd").args([
             "--system",
@@ -199,6 +224,16 @@ fn install(policy: Option<&Path>) -> Result<()> {
             "/sbin/nologin",
             EGRESS_USER,
         ]))?;
+    }
+    make_dir(POLICY_DIR)?;
+    let rules = match policy {
+        Some(path) => fs::read_to_string(path)
+            .with_context(|| format!("reading egress.policy {}", path.display()))?,
+        None => POLICY_TOML.to_owned(),
+    };
+    if rust {
+        // The binary carries the rest, gh-aw's identifiers included.
+        return write(&format!("{POLICY_DIR}/policy.toml"), &rules);
     }
     host::run(Command::new("python3").args(["-m", "venv", INSTALL_DIR])).context(
         "making the egress proxy's Python environment (is python3's venv module installed?)",
@@ -220,12 +255,6 @@ fn install(policy: Option<&Path>) -> Result<()> {
         &requirements,
     ]))
     .context("installing mitmproxy by the hashes of egress/requirements.txt")?;
-    make_dir(POLICY_DIR)?;
-    let rules = match policy {
-        Some(path) => fs::read_to_string(path)
-            .with_context(|| format!("reading egress.policy {}", path.display()))?,
-        None => POLICY_TOML.to_owned(),
-    };
     for (name, content) in [
         ("addon.py", ADDON),
         ("policy.py", POLICY_PY),
@@ -378,11 +407,11 @@ fn listening() -> bool {
     TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).is_ok()
 }
 
-/// Waits until the proxy listens and has written its authority.
-fn wait_started() -> Result<()> {
+/// Waits until the proxy listens and has written its authority to CA.
+fn wait_started(ca: &str) -> Result<()> {
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
-        if Path::new(CA_GENERATED).exists() && listening() {
+        if Path::new(ca).exists() && listening() {
             return Ok(());
         }
         if !host::succeeds(Command::new("systemctl").args(["is-active", "--quiet", UNIT])) {
@@ -397,17 +426,17 @@ fn wait_started() -> Result<()> {
     bail!("{UNIT} didn't start listening on {}", proxy_url())
 }
 
-/// Publishes the authority's certificate, alone and after the system
-/// bundle.
-fn publish_ca() -> Result<()> {
+/// Publishes the authority's certificate, which the proxy wrote to
+/// GENERATED, alone and after the system bundle.
+fn publish_ca(generated: &str) -> Result<()> {
     let system = SYSTEM_BUNDLES
         .iter()
         .find(|path| Path::new(path).exists())
         .with_context(|| format!("no system CA bundle ({})", SYSTEM_BUNDLES.join(", ")))?;
-    let ca = fs::read_to_string(CA_GENERATED).with_context(|| format!("reading {CA_GENERATED}"))?;
+    let ca = fs::read_to_string(generated).with_context(|| format!("reading {generated}"))?;
     ensure!(
         ca.contains(CERTIFICATE_MARKER),
-        "{CA_GENERATED} holds no certificate"
+        "{generated} holds no certificate"
     );
     let bundle = fs::read_to_string(system).with_context(|| format!("reading {system}"))?;
     make_dir(PUBLIC_DIR)?;
@@ -418,8 +447,14 @@ fn publish_ca() -> Result<()> {
 /// Installs and starts the proxy; returns its uid, which the network
 /// rules name.
 pub fn start(egress: &Egress) -> Result<u32> {
-    install(egress.policy.as_deref())?;
+    let rust = egress.rust_proxy;
+    install(egress.policy.as_deref(), rust)?;
     let denylist = fetch_denylist()?;
+    let (args, ca) = if rust {
+        (rust_proxy_args(denylist), RUST_CA_GENERATED)
+    } else {
+        (mitmdump_args(denylist), CA_GENERATED)
+    };
     let mut run = Command::new("systemd-run");
     run.arg(format!("--unit={UNIT}"))
         .args(["--service-type=exec", "--collect"])
@@ -429,13 +464,14 @@ pub fn start(egress: &Egress) -> Result<u32> {
                 .map(|property| format!("--property={property}")),
         )
         .arg("--")
-        .args(mitmdump_args(denylist));
+        .args(args);
     host::run(&mut run).context("starting the egress proxy")?;
-    wait_started()?;
-    publish_ca()?;
+    wait_started(ca)?;
+    publish_ca(ca)?;
     let user = User::lookup(EGRESS_USER)?.with_context(|| format!("no user {EGRESS_USER}"))?;
     println!(
-        "Egress proxy listening on {} as {EGRESS_USER}; its certificate authority is {CA_CERT}",
+        "Egress proxy ({}) listening on {} as {EGRESS_USER}; its certificate authority is {CA_CERT}",
+        if rust { "Rust" } else { "mitmproxy" },
         proxy_url()
     );
     Ok(user.uid)
@@ -546,6 +582,28 @@ mod tests {
                     --set egress_log=/var/log/egress-proxy/access.jsonl";
         assert_eq!(mitmdump_args(true).join(" "), want);
         assert!(mitmdump_args(false).contains(&"egress_denylist=".to_owned()));
+    }
+
+    /// The Rust proxy takes mitmdump's settings, from the binary's copy
+    /// that only root may change, and writes its authority where setup
+    /// waits for it.
+    #[test]
+    fn rust_proxy_command_line() {
+        let want = "/usr/local/libexec/agentic-job sandbox egress-proxy --listen 127.0.0.1:3128 \
+                    --policy /opt/egress-proxy/policy/policy.toml \
+                    --log /var/log/egress-proxy/access.jsonl --state-dir /var/lib/egress-proxy \
+                    --denylist /opt/egress-proxy/denylist.txt";
+        assert_eq!(rust_proxy_args(true).join(" "), want);
+        assert!(!rust_proxy_args(false).contains(&"--denylist".to_owned()));
+        assert_eq!(
+            Path::new(STATE_DIR).join(crate::sandbox::proxy::tls::CA_CERT),
+            Path::new(RUST_CA_GENERATED)
+        );
+        let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(
+            std::iter::once("agentic-job")
+                .chain(rust_proxy_args(true)[1..].iter().map(String::as_str)),
+        );
+        assert!(parsed.is_ok(), "{parsed:?}");
     }
 
     #[test]

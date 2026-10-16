@@ -279,25 +279,33 @@ text stays in `/etc/agentic-job/rules.nft`.
 The design follows a suggestion cgwalters made for the gh-aw fork
 ([comment](https://github.com/cgwalters-forge/gh-aw/issues/1#issuecomment-5958830932)).
 
-## The egress proxy stays mitmproxy
+## The egress proxy
 
-The proxy is the one piece that is not Rust. The policy needs the
-method and path of every request, so the proxy has to end TLS, and a
-proxy that ends TLS is security-critical code that should not be
-written again here. Asked about a new one in Rust, cgwalters said:
-"That doesn't sound like a good idea". One that did not end TLS could
-only allow by host name, and would lose the rule that reads are open
-and writes are not.
+The policy needs the method and path of every request, so the proxy has
+to end TLS. One that did not could only allow by host name, and would
+lose the rule that reads are open and writes are not.
 
-So [mitmproxy](https://mitmproxy.org), pinned in
+By default [mitmproxy](https://mitmproxy.org), pinned in
 `egress/requirements.txt`, runs the addon and policy of `egress/`,
-which the binary carries. Setup installs it into a Python environment
-and starts it on `127.0.0.1:3128` as the user `egress-proxy`, in a
+which the binary carries; setup installs it into a Python environment.
+With `[egress] rust-proxy = true` in the host configuration the binary
+runs its own proxy instead (`sandbox egress-proxy`,
+`crates/agentic-job/src/sandbox/proxy/`), on hyper and rustls, with the
+same policy ported from `policy.py`, the same refusals and the same
+access log, and setup needs no Python or package index. It is off while
+both ship ([#885](https://github.com/cgwalters-forge/agentic-job/issues/885)):
+CI's baseline sandbox shard runs the probes against it, the others
+against mitmproxy. It speaks HTTP/1.1 to both sides, where mitmproxy
+also speaks HTTP/2: a client offered only HTTP/1.1 uses it.
+
+Either starts on `127.0.0.1:3128` as the user `egress-proxy`, in a
 transient unit with no capabilities and a read-only system. The key of
 its certificate authority stays in that user's state directory; the
 certificate is published in `/etc/egress-proxy`, and the sandbox user's
 environment points `HTTPS_PROXY` and the bundle variables of `git`,
-`cargo`, `curl`, Node and Python at both.
+`cargo`, `curl`, Node and Python at both. The Rust proxy checks the
+servers it connects to against Mozilla's roots, as mitmproxy does with
+certifi's.
 
 A `GET`, `HEAD` or `OPTIONS` without a body may go to any host that is
 not on a threat feed. Anything else, a WebSocket and a read with a body

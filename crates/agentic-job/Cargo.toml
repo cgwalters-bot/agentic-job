@@ -14,6 +14,14 @@ workspace = true
 [dependencies]
 agent-client-protocol.workspace = true
 anyhow.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 chrono.workspace = true
 clap.workspace = true
 flate2.workspace = true

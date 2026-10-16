@@ -307,6 +307,11 @@ pub struct Egress {
     /// The write rules, in place of the ones that come with the binary
     /// (`egress/policy.toml`).
     pub policy: Option<PathBuf>,
+    /// Whether the proxy is this binary's own (`sandbox egress-proxy`)
+    /// rather than mitmproxy: the same policy, and no Python or package
+    /// index at setup. Off while both ship, until the Rust one has run
+    /// the probes as long as mitmproxy has.
+    pub rust_proxy: bool,
 }
 
 impl Default for Egress {
@@ -315,6 +320,7 @@ impl Default for Egress {
             proxy: true,
             direct: Vec::new(),
             policy: None,
+            rust_proxy: false,
         }
     }
 }
@@ -706,6 +712,27 @@ mod tests {
         assert_eq!(config.limits.timeout_minutes, 75);
         assert_eq!(config.setup.packages, ["just"]);
         assert_eq!(config.commit.trailers, ["Generated-by: AI"]);
+    }
+
+    /// The egress proxy is mitmproxy unless the host configuration
+    /// names the Rust one.
+    #[test]
+    fn the_rust_proxy_is_opt_in() {
+        assert!(!Config::default().egress.rust_proxy);
+        for (text, want) in [
+            ("", false),
+            ("[egress]\nproxy = true\n", false),
+            ("[egress]\nrust-proxy = true\n", true),
+            ("[egress]\nrust-proxy = false\n", false),
+        ] {
+            assert_eq!(
+                Config::parse(text).unwrap().egress.rust_proxy,
+                want,
+                "{text}"
+            );
+        }
+        assert!(Config::parse("[egress]\nrust_proxy = true\n").is_err());
+        assert!(Config::parse("[egress]\nrust-proxy = \"yes\"\n").is_err());
     }
 
     #[test]

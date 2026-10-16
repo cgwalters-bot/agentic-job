@@ -460,11 +460,15 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
         filesystem-view: [true]
+        rust-proxy: [false]
         include:
           # One fresh host without the view, the default, proves the layers
           # the view masks (the world-write policy among them) on their own.
+          # Its egress probes run against the Rust proxy (egress.rust-proxy),
+          # the others' against mitmproxy, while both ship.
           - shard: baseline
             filesystem-view: false
+            rust-proxy: true
     env:
       CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
     steps:
@@ -513,14 +517,16 @@ jobs:
       # Setup only warns when the threat feed cannot be fetched, and a pin
       # that names a commit no longer served would have every run warn:
       # here the feed has to load.
-      - name: Setup timing (filesystem view = ${{ matrix.filesystem-view }})
+      - name: Setup timing (filesystem view = ${{ matrix.filesystem-view }}, Rust proxy = ${{ matrix.rust-proxy }})
         shell: bash
         env:
           FILESYSTEM_VIEW: ${{ matrix.filesystem-view }}
+          RUST_PROXY: ${{ matrix.rust-proxy }}
         run: |
-          target/debug/agentic-job config --host --from "$CONFIG" --boolean "sandbox.filesystem-view=$FILESYSTEM_VIEW" > "$RUNNER_TEMP/sandbox-ci.toml"
+          target/debug/agentic-job config --host --from "$CONFIG" --boolean "sandbox.filesystem-view=$FILESYSTEM_VIEW" --boolean "egress.rust-proxy=$RUST_PROXY" > "$RUNNER_TEMP/sandbox-ci.toml"
           sudo target/debug/agentic-job sandbox setup --config "$RUNNER_TEMP/sandbox-ci.toml" 2>&1 | tee "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Threat feed:' "$RUNNER_TEMP/sandbox-setup.log"
+          if [ "$RUST_PROXY" = true ]; then grep -F 'Egress proxy (Rust)' "$RUNNER_TEMP/sandbox-setup.log"; fi
           node workflow/setup-timing.mjs "$RUNNER_TEMP/sandbox-setup.log" "$FILESYSTEM_VIEW"
       # From here on this job's user has no sudo: root is the test's
       # service, or the helper.

@@ -1,0 +1,902 @@
+//! The egress proxy in Rust: `sandbox egress-proxy`, which `sandbox
+//! setup` starts in place of mitmproxy when `egress.rust-proxy` is set
+//! (off by default while both ship; docs/sandbox.md).
+//!
+//! It does what `egress/addon.py` has mitmproxy do. It listens for proxy
+//! requests: a plain HTTP request in absolute form, or a CONNECT, which
+//! it refuses unless [`policy::Policy::connect`] allows the host. In an
+//! allowed tunnel it ends TLS with a certificate its own authority signs
+//! for the name the client asked for ([`tls`]), or reads plain HTTP; and
+//! anything that is not HTTP/1.1 there fails to parse and ends the
+//! connection, as mitmproxy's does with raw TCP off, so no other
+//! protocol passes unseen. Every request is then decided by
+//! [`policy::Policy::request`] against the host the connection goes to,
+//! which is the CONNECT's or the URL's, never the Host header's.
+//!
+//! A refusal is a 403 with the reason in `X-Egress-Denied`. An allowed
+//! request is sent on to the real server, over TLS checked against
+//! Mozilla's roots when the client's was; the proxy connects only once a
+//! request is allowed, and the response streams back unread. The access
+//! log is `addon.py`'s, line for line: method, host, port, path without
+//! the query string, decision, never headers or bodies.
+
+pub mod policy;
+pub mod tls;
+
+use std::convert::Infallible;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::body::{Body as _, Incoming};
+use hyper::client::conn::http1::SendRequest;
+use hyper::header::{self, HeaderMap, HeaderValue};
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode, Uri, Version};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use rustls::ClientConfig;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::timeout;
+
+use crate::exit::Exit;
+use policy::{Decision, Policy};
+use tls::Authority;
+
+/// On every refusal, so clients and checks can tell it from the server's.
+pub const DENIED_HEADER: &str = "X-Egress-Denied";
+
+/// Longest path kept in the log, in characters.
+const MAX_LOGGED_PATH: usize = 200;
+
+/// Connections from the sandbox user served at once; more wait to be
+/// accepted. Each holds a few file descriptors and, in a tunnel, one to
+/// the server.
+const MAX_CONNECTIONS: usize = 1024;
+
+/// How long a client has to send a request's headers, or its first byte
+/// in a tunnel.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a TLS handshake, or a connection to a server, may take.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a server has to answer an allowed request with its
+/// response's headers, and how long an upgraded connection may pass
+/// nothing either way: past them it is closed, so that a peer that stalls
+/// does not keep one of [`MAX_CONNECTIONS`] for ever. Generous, for a
+/// server that answers only once it has a large upload, or a long
+/// completion.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+const UPGRADED_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// The first byte of a TLS record that carries a handshake: what a
+/// client sends first in a tunnel when it speaks TLS.
+const TLS_HANDSHAKE: u8 = 0x16;
+
+const HTTP_PORT: u16 = 80;
+
+const HTTPS_PORT: u16 = 443;
+
+const SCHEME_HTTP: &str = "http";
+
+const SCHEME_HTTPS: &str = "https";
+
+/// The access log's decisions.
+const ALLOW: &str = "allow";
+
+const DENY: &str = "deny";
+
+/// Headers addressed to the proxy, which the server never sees: a
+/// credential for the proxy must not reach every host the client asks.
+const PROXY_HEADERS: &[&str] = &["proxy-connection", "proxy-authorization"];
+
+/// The protocol a WebSocket is upgraded to, in `Upgrade`.
+const WEBSOCKET: &str = "websocket";
+
+type Body = BoxBody<Bytes, hyper::Error>;
+
+#[derive(Debug, clap::Args)]
+pub struct Args {
+    /// The address to listen on
+    #[arg(long)]
+    pub listen: SocketAddr,
+    /// policy.toml: the write rules and the optional domain allowlist
+    #[arg(long)]
+    pub policy: PathBuf,
+    /// The threat feed: domains refused, one per line
+    #[arg(long)]
+    pub denylist: Option<PathBuf>,
+    /// The access log, appended as JSON lines
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+    /// The proxy's own directory, where its authority's key is kept
+    #[arg(long)]
+    pub state_dir: PathBuf,
+}
+
+pub fn run(args: &Args) -> Result<Exit> {
+    let policy = Policy::load(&args.policy, args.denylist.as_deref())?;
+    let authority = Authority::load_or_create(&args.state_dir)?;
+    let log = args
+        .log
+        .as_ref()
+        .map(|path| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("opening {}", path.display()))
+        })
+        .transpose()?;
+    let proxy = Arc::new(Proxy::new(
+        policy,
+        authority,
+        tls::client_config(tls::mozilla_roots())?,
+        log,
+    ));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?;
+    runtime.block_on(async {
+        let listener = TcpListener::bind(args.listen)
+            .await
+            .with_context(|| format!("listening on {}", args.listen))?;
+        proxy.serve(listener).await
+    })?;
+    Ok(Exit::Success)
+}
+
+/// Where the requests of one client connection go: the CONNECT's host
+/// and port, or the URL's.
+#[derive(Debug, Clone)]
+struct Target {
+    scheme: &'static str,
+    host: String,
+    port: u16,
+    /// The TLS server name the client asked for, in a tunnel.
+    sni: Option<String>,
+    /// The client connection's place among [`MAX_CONNECTIONS`], held
+    /// by whatever outlives hyper's serving it: a tunnel, an upgrade.
+    slot: Slot,
+}
+
+type Slot = Arc<OwnedSemaphorePermit>;
+
+/// One access log line, as `addon.py` writes it.
+struct Entry<'a> {
+    decision: &'a str,
+    reason: &'a str,
+    method: &'a str,
+    scheme: &'a str,
+    host: &'a str,
+    port: u16,
+    path: &'a str,
+    status: Option<u16>,
+    error: Option<&'a str>,
+}
+
+/// S as Python's `json.dumps` writes it: escaped as JSON, and anything
+/// not ASCII as `\uXXXX`.
+fn py_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in serde_json::Value::from(s).to_string().chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
+impl Entry<'_> {
+    /// The line, keys in `addon.py`'s order and with `json.dumps`'s
+    /// separators, so that the two proxies' logs read alike.
+    fn line(&self, time: &str) -> String {
+        let string = |value: &str| py_json_string(value);
+        let path: String = self
+            .path
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(MAX_LOGGED_PATH)
+            .collect();
+        format!(
+            "{{\"time\": {}, \"decision\": {}, \"reason\": {}, \"method\": {}, \"scheme\": {}, \
+             \"host\": {}, \"port\": {}, \"path\": {}, \"status\": {}, \"error\": {}}}",
+            string(time),
+            string(self.decision),
+            string(self.reason),
+            string(self.method),
+            string(self.scheme),
+            string(self.host),
+            self.port,
+            string(&path),
+            self.status
+                .map_or("null".to_owned(), |status| status.to_string()),
+            self.error.map_or("null".to_owned(), string),
+        )
+    }
+}
+
+fn full(text: String) -> Body {
+    Full::new(Bytes::from(text))
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+fn empty() -> Body {
+    Empty::new().map_err(|never| match never {}).boxed()
+}
+
+fn text_response(status: StatusCode, text: String) -> Response<Body> {
+    let mut response = Response::new(full(text));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+}
+
+/// Whether HEADERS announce a body.
+fn has_body_headers(headers: &HeaderMap) -> bool {
+    let length = headers
+        .get(header::CONTENT_LENGTH)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).trim().to_owned())
+        .unwrap_or_default();
+    !(length.is_empty() || length == "0") || headers.contains_key(header::TRANSFER_ENCODING)
+}
+
+/// Whether HEADERS' `Upgrade` names a WebSocket and nothing else: in a
+/// request, what the policy takes for a WebSocket; in a 101, what the
+/// server switched to. An offer of several protocols is not one, so a
+/// server cannot pick another of them for a WebSocket's write rule.
+fn only_websocket(headers: &HeaderMap) -> bool {
+    let mut protocols = headers
+        .get_all(header::UPGRADE)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(|protocol| {
+            String::from_utf8_lossy(protocol)
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|protocol| !protocol.is_empty());
+    protocols
+        .next()
+        .is_some_and(|protocol| protocol == WEBSOCKET)
+        && protocols.next().is_none()
+}
+
+/// A stream that gives BYTE before what INNER gives: the byte the proxy
+/// read to tell TLS from plain HTTP in a tunnel.
+struct Prefixed<S> {
+    byte: Option<u8>,
+    inner: S,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if buf.remaining() > 0
+            && let Some(byte) = self.byte.take()
+        {
+            buf.put_slice(&[byte]);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// A stream that notes in LAST when a byte last went through it.
+struct Watched<S> {
+    inner: S,
+    last: Arc<Mutex<tokio::time::Instant>>,
+}
+
+impl<S> Watched<S> {
+    fn touch(&self) {
+        *lock(&self.last) = tokio::time::Instant::now();
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Watched<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.touch();
+        }
+        poll
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Watched<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let poll = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if matches!(poll, Poll::Ready(Ok(written)) if written > 0) {
+            self.touch();
+        }
+        poll
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Passes bytes both ways between A and B until both have ended, or
+/// neither has moved a byte for IDLE.
+async fn bridge<A, B>(a: A, b: B, idle: Duration)
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let last = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let mut a = Watched {
+        inner: a,
+        last: last.clone(),
+    };
+    let mut b = Watched {
+        inner: b,
+        last: last.clone(),
+    };
+    let copy = tokio::io::copy_bidirectional(&mut a, &mut b);
+    tokio::pin!(copy);
+    loop {
+        let deadline = *lock(&last) + idle;
+        tokio::select! {
+            _ = &mut copy => return,
+            () = tokio::time::sleep_until(deadline) => {
+                if lock(&last).elapsed() >= idle {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// A client connection's connection to its server, kept for its next
+/// request: in a tunnel every request goes to the same place.
+type Upstream = Arc<tokio::sync::Mutex<Option<SendRequest<Body>>>>;
+
+struct Proxy {
+    policy: Policy,
+    authority: Authority,
+    upstream_tls: Arc<ClientConfig>,
+    log: Option<Mutex<File>>,
+    /// [`MAX_CONNECTIONS`], [`RESPONSE_TIMEOUT`] and
+    /// [`UPGRADED_IDLE_TIMEOUT`], which the tests make smaller.
+    max_connections: usize,
+    response_timeout: Duration,
+    idle_timeout: Duration,
+    /// The tests' names under `.test` (RFC 6761, never resolved), each
+    /// with its subdomains, and the loopback port each stands for; any
+    /// other name is loopback's closed port 1, never DNS.
+    #[cfg(test)]
+    origins: Vec<(String, u16)>,
+}
+
+impl Proxy {
+    fn new(
+        policy: Policy,
+        authority: Authority,
+        upstream_tls: Arc<ClientConfig>,
+        log: Option<File>,
+    ) -> Self {
+        Self {
+            policy,
+            authority,
+            upstream_tls,
+            log: log.map(Mutex::new),
+            max_connections: MAX_CONNECTIONS,
+            response_timeout: RESPONSE_TIMEOUT,
+            idle_timeout: UPGRADED_IDLE_TIMEOUT,
+            #[cfg(test)]
+            origins: Vec::new(),
+        }
+    }
+
+    async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+        let slots = Arc::new(Semaphore::new(self.max_connections));
+        loop {
+            let slot = Arc::new(slots.clone().acquire_owned().await?);
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(err) => {
+                    // Out of file descriptors, say: the next may work.
+                    eprintln!("egress proxy: accepting a connection: {err}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let proxy = self.clone();
+            tokio::spawn(proxy.client(stream, slot));
+        }
+    }
+
+    fn record(&self, entry: &Entry<'_>) {
+        let Some(log) = &self.log else {
+            return;
+        };
+        let time = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let line = format!("{}\n", entry.line(&time));
+        let mut file = lock(log);
+        if let Err(err) = file.write_all(line.as_bytes()) {
+            eprintln!("egress proxy: writing the access log: {err}");
+        }
+    }
+
+    fn denied(&self, entry: Entry<'_>) -> Response<Body> {
+        let reason = entry.reason;
+        self.record(&Entry {
+            decision: DENY,
+            status: Some(StatusCode::FORBIDDEN.as_u16()),
+            ..entry
+        });
+        let mut response = text_response(
+            StatusCode::FORBIDDEN,
+            format!("refused by the egress proxy: {reason}\n"),
+        );
+        // Every reason is the policy's own text or a rule's name, which a
+        // header can hold; one that could not is still a refusal.
+        let value =
+            HeaderValue::from_str(reason).unwrap_or_else(|_| HeaderValue::from_static("refused"));
+        response.headers_mut().insert(DENIED_HEADER, value);
+        response
+    }
+
+    /// One connection from the sandbox user: proxy requests.
+    async fn client(self: Arc<Self>, stream: TcpStream, slot: Slot) {
+        let proxy = self.clone();
+        let service = service_fn(move |request| {
+            let (proxy, slot) = (proxy.clone(), slot.clone());
+            async move { Ok::<_, Infallible>(proxy.outer(request, slot).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades()
+            .await;
+    }
+
+    async fn outer(self: Arc<Self>, request: Request<Incoming>, slot: Slot) -> Response<Body> {
+        if request.method() == Method::CONNECT {
+            return self.connect(request, slot);
+        }
+        let uri = request.uri();
+        let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
+            return text_response(
+                StatusCode::BAD_REQUEST,
+                "the egress proxy takes proxy requests: a URL with its host, or CONNECT\n"
+                    .to_owned(),
+            );
+        };
+        let scheme = match scheme {
+            SCHEME_HTTP => SCHEME_HTTP,
+            SCHEME_HTTPS => SCHEME_HTTPS,
+            _ => {
+                return text_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("the egress proxy does not speak {scheme}\n"),
+                );
+            }
+        };
+        let default_port = if scheme == SCHEME_HTTPS {
+            HTTPS_PORT
+        } else {
+            HTTP_PORT
+        };
+        let target = Target {
+            scheme,
+            host: bare_host(host),
+            port: uri.port_u16().unwrap_or(default_port),
+            sni: None,
+            slot,
+        };
+        self.forward(request, &target, None).await
+    }
+
+    fn connect(self: Arc<Self>, request: Request<Incoming>, slot: Slot) -> Response<Body> {
+        let Some(authority) = request.uri().authority() else {
+            return text_response(
+                StatusCode::BAD_REQUEST,
+                "CONNECT needs a host and a port\n".to_owned(),
+            );
+        };
+        let host = bare_host(authority.host());
+        let port = authority.port_u16().unwrap_or(HTTPS_PORT);
+        let decision = self.policy.connect(&host);
+        if !decision.allowed {
+            return self.denied(Entry {
+                decision: DENY,
+                reason: &decision.reason,
+                method: Method::CONNECT.as_str(),
+                // mitmproxy's, for a CONNECT.
+                scheme: "",
+                host: &host,
+                port,
+                path: "",
+                status: None,
+                error: None,
+            });
+        }
+        tokio::spawn(async move {
+            if let Ok(upgraded) = hyper::upgrade::on(request).await {
+                self.tunnel(TokioIo::new(upgraded), host, port, slot).await;
+            }
+        });
+        Response::new(empty())
+    }
+
+    /// What goes through an allowed CONNECT: TLS, which the proxy ends,
+    /// or plain HTTP.
+    async fn tunnel<S>(self: Arc<Self>, mut stream: S, host: String, port: u16, slot: Slot)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut first = [0; 1];
+        match timeout(HEADER_READ_TIMEOUT, stream.read(&mut first)).await {
+            Ok(Ok(1)) => {}
+            _ => return,
+        }
+        let stream = Prefixed {
+            byte: Some(first[0]),
+            inner: stream,
+        };
+        if first[0] != TLS_HANDSHAKE {
+            let target = Target {
+                scheme: SCHEME_HTTP,
+                host,
+                port,
+                sni: None,
+                slot,
+            };
+            return self.inner(stream, target).await;
+        }
+        let acceptor =
+            tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+        let Ok(Ok(start)) = timeout(HANDSHAKE_TIMEOUT, acceptor).await else {
+            return;
+        };
+        let sni = start.client_hello().server_name().map(str::to_owned);
+        let config = match self
+            .authority
+            .server_config(sni.as_deref().unwrap_or(&host))
+        {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("egress proxy: {err:#}");
+                return;
+            }
+        };
+        let Ok(Ok(tls)) = timeout(HANDSHAKE_TIMEOUT, start.into_stream(config)).await else {
+            return;
+        };
+        let target = Target {
+            scheme: SCHEME_HTTPS,
+            host,
+            port,
+            sni,
+            slot,
+        };
+        self.inner(tls, target).await;
+    }
+
+    /// The requests in a tunnel, each to TARGET.
+    async fn inner<S>(self: Arc<Self>, stream: S, target: Target)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let target = Arc::new(target);
+        let upstream = Upstream::default();
+        let proxy = self.clone();
+        let service = service_fn(move |request| {
+            let (proxy, target, upstream) = (proxy.clone(), target.clone(), upstream.clone());
+            async move { Ok::<_, Infallible>(proxy.forward(request, &target, Some(&upstream)).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades()
+            .await;
+    }
+
+    /// Decides REQUEST to TARGET, and sends it on if it is allowed.
+    async fn forward(
+        &self,
+        request: Request<Incoming>,
+        target: &Target,
+        upstream: Option<&Upstream>,
+    ) -> Response<Body> {
+        let method = request.method().as_str().to_owned();
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", |path| path.as_str())
+            .to_owned();
+        let headers = request.headers();
+        let hosts: Vec<String> = headers
+            .get_all(header::HOST)
+            .iter()
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+            .collect();
+        let websocket = only_websocket(headers);
+        let has_body = has_body_headers(headers) || !request.body().is_end_stream();
+        let decision = if hosts.len() > 1 {
+            // Which one a server reads is its own choice: the one the
+            // policy did not check would be a way to front.
+            Decision::deny(policy::OTHER_HOST)
+        } else {
+            self.policy.request(&policy::Request {
+                method: &method,
+                host: &target.host,
+                path: &path,
+                host_header: hosts.first().map(String::as_str),
+                sni: target.sni.as_deref(),
+                has_body,
+                websocket,
+            })
+        };
+        let entry = Entry {
+            decision: ALLOW,
+            reason: &decision.reason,
+            method: &method,
+            scheme: target.scheme,
+            host: &target.host,
+            port: target.port,
+            path: &path,
+            status: None,
+            error: None,
+        };
+        if !decision.allowed {
+            return self.denied(entry);
+        }
+        match self.send(request, target, upstream, websocket).await {
+            Ok(response) => {
+                self.record(&Entry {
+                    status: Some(response.status().as_u16()),
+                    ..entry
+                });
+                response
+            }
+            Err(err) => {
+                let error = format!("{err:#}");
+                self.record(&Entry {
+                    error: Some(&error),
+                    ..entry
+                });
+                text_response(StatusCode::BAD_GATEWAY, format!("egress proxy: {error}\n"))
+            }
+        }
+    }
+
+    /// Sends the allowed REQUEST to TARGET, on UPSTREAM's connection if
+    /// it has one that is still open. Only a WEBSOCKET, which the policy
+    /// took for a write, may be upgraded.
+    async fn send(
+        &self,
+        mut request: Request<Incoming>,
+        target: &Target,
+        upstream: Option<&Upstream>,
+        websocket: bool,
+    ) -> Result<Response<Body>> {
+        let upgrade = websocket.then(|| hyper::upgrade::on(&mut request));
+        let (mut parts, body) = request.into_parts();
+        let origin_form = parts
+            .uri
+            .path_and_query()
+            .map_or("/", |path| path.as_str())
+            .parse::<Uri>()
+            .context("the request's path")?;
+        parts.uri = origin_form;
+        parts.version = Version::HTTP_11;
+        for name in PROXY_HEADERS {
+            parts.headers.remove(*name);
+        }
+        if !parts.headers.contains_key(header::HOST) {
+            let default = if target.scheme == SCHEME_HTTPS {
+                HTTPS_PORT
+            } else {
+                HTTP_PORT
+            };
+            let host = if target.host.contains(':') {
+                format!("[{}]", target.host)
+            } else {
+                target.host.clone()
+            };
+            let host = if target.port == default {
+                host
+            } else {
+                format!("{host}:{}", target.port)
+            };
+            parts
+                .headers
+                .insert(header::HOST, HeaderValue::from_str(&host)?);
+        }
+        let request = Request::from_parts(parts, body.boxed());
+
+        let kept = match upstream {
+            Some(upstream) => upstream.lock().await.take(),
+            None => None,
+        };
+        let mut sender = match kept {
+            Some(mut sender) => match sender.ready().await {
+                Ok(()) => sender,
+                Err(_) => self.open(target).await?,
+            },
+            None => self.open(target).await?,
+        };
+        let mut response = timeout(self.response_timeout, sender.send_request(request))
+            .await
+            .map_err(|_| anyhow!("timed out waiting for the response"))
+            .and_then(|response| response.map_err(anyhow::Error::from))
+            .with_context(|| format!("sending the request to {}", target.host))?;
+        if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+            // Any other protocol (h2c, say) would pass both ways unread,
+            // a read's request turned into a channel for writes: refused,
+            // as mitmproxy without raw TCP refuses it.
+            let Some(client) = upgrade else {
+                bail!("the server switched protocols for a request that is not a WebSocket");
+            };
+            if !only_websocket(response.headers()) {
+                bail!("the server switched to a protocol other than the WebSocket asked for");
+            }
+            // A WebSocket, which needed a write rule: the connection is
+            // the client's alone now, both ways, unread.
+            let server = hyper::upgrade::on(&mut response);
+            let (slot, idle) = (target.slot.clone(), self.idle_timeout);
+            tokio::spawn(async move {
+                if let (Ok(client), Ok(server)) = tokio::join!(client, server) {
+                    bridge(TokioIo::new(client), TokioIo::new(server), idle).await;
+                }
+                drop(slot);
+            });
+        } else if let Some(upstream) = upstream {
+            *upstream.lock().await = Some(sender);
+        }
+        Ok(response.map(BodyExt::boxed))
+    }
+
+    /// A new connection to TARGET's server.
+    async fn open(&self, target: &Target) -> Result<SendRequest<Body>> {
+        let addrs = self.resolve(&target.host, target.port).await?;
+        let mut last = None;
+        let mut stream = None;
+        for addr in addrs {
+            match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+                Ok(Ok(connected)) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Ok(Err(err)) => last = Some(anyhow!(err)),
+                Err(_) => last = Some(anyhow!("timed out")),
+            }
+        }
+        let Some(stream) = stream else {
+            let err = last.unwrap_or_else(|| anyhow!("no address"));
+            return Err(err.context(format!("connecting to {}:{}", target.host, target.port)));
+        };
+        let _ = stream.set_nodelay(true);
+        if target.scheme == SCHEME_HTTPS {
+            let connector = tokio_rustls::TlsConnector::from(self.upstream_tls.clone());
+            let name = tls::server_name(&target.host)?;
+            let tls = timeout(HANDSHAKE_TIMEOUT, connector.connect(name, stream))
+                .await
+                .map_err(|_| anyhow!("timed out"))
+                .and_then(|tls| tls.map_err(anyhow::Error::from))
+                .with_context(|| format!("TLS with {}", target.host))?;
+            handshake(tls).await
+        } else {
+            handshake(stream).await
+        }
+    }
+
+    async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        #[cfg(test)]
+        if !self.origins.is_empty() {
+            let port = self
+                .origins
+                .iter()
+                .find(|(name, _)| host == name || host.ends_with(&format!(".{name}")))
+                .map_or(1, |(_, port)| *port);
+            return Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))]);
+        }
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .with_context(|| format!("resolving {host}"))?
+            .collect();
+        if addrs.is_empty() {
+            bail!("{host} has no address");
+        }
+        Ok(addrs)
+    }
+}
+
+async fn handshake<S>(stream: S) -> Result<SendRequest<Body>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .context("starting HTTP with the server")?;
+    tokio::spawn(connection.with_upgrades());
+    Ok(sender)
+}
+
+/// HOST without the brackets of an IPv6 address, as mitmproxy logs it.
+fn bare_host(host: &str) -> String {
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests;

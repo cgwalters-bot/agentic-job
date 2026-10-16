@@ -17,6 +17,7 @@ pub mod helper;
 pub mod host;
 pub mod local;
 pub mod network;
+pub mod proxy;
 pub mod root;
 pub(crate) mod session;
 pub mod setup;
@@ -40,6 +41,9 @@ pub enum Command {
     /// Print the network rules setup would load; CI compares them with the old tree's
     #[command(hide = true)]
     NftRules(NftRulesArgs),
+    /// Run the egress proxy; `setup` starts it as its own user with `egress.rust-proxy`
+    #[command(hide = true)]
+    EgressProxy(proxy::Args),
 }
 
 #[derive(Debug, clap::Args)]
@@ -66,6 +70,7 @@ impl Command {
             Self::Exec(args) => exec::run(args),
             Self::Timed(args) => timed::run(args),
             Self::ProbeLocal => local::run(),
+            Self::EgressProxy(args) => proxy::run(args),
             Self::NftRules(args) => {
                 let direct = args
                     .direct

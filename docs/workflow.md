@@ -1719,10 +1719,10 @@ package manager.
 
 **The egress proxy's pins.** `sandbox setup` runs as root and takes two
 things from the network before the rules load, each pinned in this
-repository. mitmproxy and all it depends on are installed with `pip
---require-hashes --only-binary :all:` from `egress/requirements.txt`,
-which names each at one version with the hashes of its files: pip
-installs no file that is not one of those, and builds nothing. That
+repository (the first not with `[egress] rust-proxy`). mitmproxy and
+all it depends on are installed with `pip --require-hashes
+--only-binary :all:` from `egress/requirements.txt`, which names each
+at one version with the hashes of its files: pip installs no file that is not one of those, and builds nothing. That
 file is generated from `egress/requirements.in`, whose first lines give
 the command. The threat feed is fetched at one commit of its repository
 and must have the SHA-256 written beside it (`DENYLIST_COMMIT` and

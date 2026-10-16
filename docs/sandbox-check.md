@@ -260,7 +260,8 @@ as the walk it replaced was ([agentic-job#108](https://github.com/cgwalters-forg
 
 `sandbox setup` loads nftables rules keyed on the sandbox user's uid and
 its subordinate uids, and by default starts the egress proxy: mitmproxy
-with the addon and policy of `egress/`, as its own user. The rules are
+with the addon and policy of `egress/`, or with `[egress] rust-proxy`
+the binary's own, as its own user. The rules are
 the old tree's except for resolver-scoped proxy DNS; a corpus test generates
 both and compares them with that intentional difference. With `[egress]
 proxy = false` only the first three rows
@@ -432,7 +433,8 @@ For the network it loads other rules in place of setup's: none; the
 rules of a host with no proxy; and rules that name another uid as the
 proxy's. The policy itself (what is a read, which writes have a rule,
 the threat feed) is tested by `egress/test_policy.py`, which came with
-it and runs in CI's `lint` job.
+it and runs in CI's `lint` job, and the Rust proxy's port of it by the
+same cases in `sandbox/proxy/policy.rs`.
 
 What the hosted runner cannot show:
 
