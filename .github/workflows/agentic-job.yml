@@ -223,6 +223,13 @@ on:
         description: Show what apply would do in its summary and applied.json (`staged` true) without writing anything
         type: boolean
         default: false
+      require-safe-outputs-pat:
+        description: >-
+          Refuse the run before the agent unless SAFE_OUTPUTS_PAT is nonempty, a user's with the repo
+          scope that can read the output repository and does not own it; read in a job of its own in
+          `apply-environment`, which then gates the run before the agent too
+        type: boolean
+        default: false
       expect-check-refusal:
         description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
         type: boolean
@@ -374,6 +381,7 @@ jobs:
       apply-environment: ${{ inputs.apply-environment }}
       apply-partial: ${{ inputs.apply-partial }}
       apply-staged: ${{ inputs.apply-staged }}
+      require-safe-outputs-pat: ${{ inputs.require-safe-outputs-pat }}
       expect-check-refusal: ${{ inputs.expect-check-refusal }}
       comment-target: ${{ inputs.comment-target }}
       issue: ${{ inputs.issue }}

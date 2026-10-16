@@ -1,12 +1,15 @@
 # The first piece of an agent run: the request against the caller's
 # bounds, before a machine is spent on the agent. Its jobs hold no write
 # token but activate's and notify's, which act on the event that started
-# the run and on nothing the agent wrote.
+# the run and on nothing the agent wrote, and apply-token's, which only
+# reads with it.
 #
 #   policy    the bounds, the binary, the configuration and the task;
 #             contents: read
 #   activate  consumes a command label (event-triggered runs)
 #   notify    an eyes reaction and a status comment (event-triggered runs)
+#   apply-token
+#             SAFE_OUTPUTS_PAT checked, with `require-safe-outputs-pat`
 #
 # The caller's own agent job comes next (prepare, the caller's steps,
 # secure-host, run), then check.yml and apply.yml, each given this call's
@@ -211,6 +214,13 @@ on:
         description: Show what apply would do in its summary and applied.json (`staged` true) without writing anything
         type: boolean
         default: false
+      require-safe-outputs-pat:
+        description: >-
+          Refuse the run before the agent unless SAFE_OUTPUTS_PAT is nonempty, a user's with the repo
+          scope that can read the output repository and does not own it; read in a job of its own in
+          `apply-environment`, which then gates the run before the agent too
+        type: boolean
+        default: false
       expect-check-refusal:
         description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
         type: boolean
@@ -261,7 +271,7 @@ on:
         default: ""
     secrets:
       SAFE_OUTPUTS_PAT:
-        description: Optional apply credential for opted-in cross-repository status comments only
+        description: Optional apply credential, for opted-in cross-repository status comments and `require-safe-outputs-pat`
         required: false
     # The whole set goes to check.yml and apply.yml as `toJSON(needs.policy.outputs)`,
     # so that what they check and apply is what this call decided, and the
@@ -811,6 +821,40 @@ jobs:
             const decision = JSON.parse(fs.readFileSync('.agentic-job/event.json', 'utf8'));
             await activate(decision, github, context.repo);
 
+  # With `require-safe-outputs-pat`, a wrong SAFE_OUTPUTS_PAT fails the
+  # call here, before the agent runs, rather than in apply after it: see
+  # workflow/apply-token.cjs. Not a security control, as apply checks the
+  # token again: it saves an agent session. It enters the apply environment,
+  # as an environment's secret reaches only a job that names it, and the
+  # token goes to the pinned helper alone and never to the agent's machine.
+  apply-token:
+    needs: policy
+    if: ${{ inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 5
+    environment: ${{ inputs.apply-environment }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: apply-token-source
+          persist-credentials: false
+          sparse-checkout: workflow
+      - name: Check SAFE_OUTPUTS_PAT
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
+          OUTPUT_REPO: ${{ inputs.output-repo || github.repository }}
+        with:
+          # The job token only for an empty PAT, which the check refuses before any request.
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const { checkApplyToken } = require('./apply-token-source/workflow/apply-token.cjs');
+            core.info(`SAFE_OUTPUTS_PAT is ${await checkApplyToken(process.env, github)}'s`);
+
   # For an event-triggered run: an eyes reaction on what started it, and a
   # comment that says a run started, which `conclude` edits when the run
   # ends, so that whoever started it sees that it did and how it went.
@@ -823,8 +867,9 @@ jobs:
   # agent, check, apply and conclude with nothing said. conclude reports
   # how the run ended on the policy's item if this found none.
   notify:
-    needs: [policy, activate]
-    if: ${{ !cancelled() && needs.policy.result == 'success' && (needs.activate.result == 'success' || (inputs.proposals-artifact != '' && needs.activate.result == 'skipped')) && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && (needs.policy.outputs.item != '' || (needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
+    # Not after a refused SAFE_OUTPUTS_PAT, as nothing would conclude the comment.
+    needs: [policy, activate, apply-token]
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.apply-token.result != 'failure' && (needs.activate.result == 'success' || (inputs.proposals-artifact != '' && needs.activate.result == 'skipped')) && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && (needs.policy.outputs.item != '' || (needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
     # Serialize lookup/create with conclude so simultaneous runs cannot create duplicates.
     concurrency:
       group: agentic-job-status-${{ needs.policy.outputs.item != '' && github.repository || inputs.item-repo || inputs.output-repo || github.repository }}-${{ needs.policy.outputs.item || needs.policy.outputs.comment-target }}

@@ -70,7 +70,7 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 | --- | --- |
 | The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the broker's run token for this one run. Not the identity-token request credential, not a model key, not `SAFE_OUTPUTS_PAT` |
 | The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
-| `policy`, `check` | the job token with `contents: read`; no secret |
+| `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
 
@@ -261,7 +261,8 @@ What else it needs, all generic:
   Your own PAT is refused in apply, after the agent has run, since its
   account owns the repository and has no fork of it (unless the repository
   [accepts that](docs/workflow.md#a-repository-the-applying-account-owns)); an empty secret
-  fails there too.
+  fails there too. Set `require-safe-outputs-pat: true` to have both
+  refused before the agent runs.
 - **Settings.** Actions enabled, and, if the repository restricts which
   actions run, `cgwalters-forge/agentic-job` and the actions it pins
   allowed. The pull request comes from a fork, so its CI runs as an outside
@@ -411,7 +412,8 @@ the issue that tracks it, where one is filed.
 - A broker admits an agent job of the caller's own only by repository,
   any workflow of it ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
-  after the agent has run (no issue yet).
+  after the agent has run, unless the call sets `require-safe-outputs-pat`
+  ([checking the token first](docs/workflow.md#checking-the-token-before-the-agent)).
 - `hosted.toml`'s commit author, `agentic-job@users.noreply.github.com`,
   is the no-reply address of an unregistered GitHub login (no issue yet).
 - The refusal of `max-requests` without a broker names the TOML keys

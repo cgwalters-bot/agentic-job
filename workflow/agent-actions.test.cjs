@@ -268,7 +268,7 @@ test('the agent job token reads and write credentials stay in deterministic jobs
     assert.ok(named.length > 0, file);
     for (const [, name, job] of named) {
       const holdsWrite = name === 'apply' || (file === 'agentic-job.yml' && name === 'policy') ||
-        (file === 'policy.yml' && name === 'notify') || (file === 'apply.yml' && name === 'conclude');
+        (file === 'policy.yml' && ['notify', 'apply-token'].includes(name)) || (file === 'apply.yml' && name === 'conclude');
       assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), holdsWrite, `${file} ${name}`);
     }
   }

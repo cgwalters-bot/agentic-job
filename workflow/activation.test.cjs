@@ -38,7 +38,7 @@ test('activation gates execution and consumes each admitted label application', 
 test('workflow refuses discussions before routing and gates agent and notification on activation', () => {
   const workflow = fs.readFileSync('.github/workflows/policy.yml', 'utf8');
   assert.ok(workflow.indexOf('const decision = admit(') < workflow.indexOf('base=$BASE target='));
-  assert.match(workflow, /notify:\n    needs: \[policy, activate\]/);
+  assert.match(workflow, /notify:\n(    #[^\n]*\n)*    needs: \[policy, activate, apply-token\]/);
   assert.match(workflow, /await activate\(decision, github, context.repo\)/);
   assert.match(workflow, /ref: \$\{\{ job.workflow_sha \}\}\n          path: activation-source/);
   // An agent job needs the whole policy call, which ends after activate

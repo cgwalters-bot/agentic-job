@@ -1084,12 +1084,33 @@ Output destinations are caller-fixed, are not bounded by that list, and cannot b
 dynamically selected by the agent. gh-aw's wildcard `target-repo: "*"` has no
 equivalent here.
 For environment-based storage, our secret lives in a caller environment restricted
-to the protected default branch, entered only by apply.
+to the protected default branch, entered only by apply (and, with
+`require-safe-outputs-pat`, by the check [below](#checking-the-token-before-the-agent)).
 
 With no nonempty apply secret, apply uses the job's own token (even with an environment),
 which can write only to the calling repository: `repo` then has to be
 the calling repository, and `output-repo` is left out. The job token
 cannot open a pull request either ([below](#pull-requests-come-from-a-fork)).
+
+### Checking the token before the agent
+
+Apply finds a wrong `SAFE_OUTPUTS_PAT` only after the agent has run.
+With `require-safe-outputs-pat: true` (off by default), the policy call
+refuses the run before the agent instead when the secret is missing or
+empty, names no user (`GET /user`), is a classic PAT without the `repo`
+or `public_repo` scope, cannot read the output repository, or belongs to
+the output repository's owner. The refusal names the secret and the fix.
+It saves an agent session and is not a security control: apply checks
+the token again, and a fine-grained token's permissions are not asked.
+
+The check is the `apply-token` job of policy.yml, which enters
+`apply-environment`, as an environment's secret reaches only a job that
+names it. An environment with required reviewers then asks before the
+agent as well as before apply. The token is in one step running the
+pinned `workflow/apply-token.cjs`, which only reads; it does not reach
+the agent's machine. A caller whose repository
+[accepts owner branches](#a-repository-the-applying-account-owns) leaves
+the setting off.
 
 ### Pull requests come from a fork
 
