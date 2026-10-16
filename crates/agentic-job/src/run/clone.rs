@@ -28,6 +28,8 @@ const GIT_TIMEOUT_S: &str = "120";
 /// runs a command, among them) is refused by git itself with these.
 const TRANSPORTS: &[&str] = &["https", "file"];
 const MAX_REF_LEN: usize = 200;
+/// The mode of the work and output directories: the sandbox user's alone.
+const PRIVATE_DIR_MODE: &str = "0700";
 /// What a commit id and one line of `git log` fit in.
 const MAX_GIT_OUTPUT: usize = 4096;
 
@@ -316,6 +318,14 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     let dir_text = utf8(&dir)?;
     sandbox.checked(
         &["mkdir", "-p", "--", utf8(&work)?, utf8(&out)?],
+        b"",
+        MAX_GIT_OUTPUT,
+    )?;
+    // Private by their mode, not by the umask: the run's umask is not
+    // what decides a new file's mode on every host (`agent::WRITE_SCRIPT`
+    // has the case), and an earlier try may have left them otherwise.
+    sandbox.checked(
+        &["chmod", PRIVATE_DIR_MODE, "--", utf8(&work)?, utf8(&out)?],
         b"",
         MAX_GIT_OUTPUT,
     )?;

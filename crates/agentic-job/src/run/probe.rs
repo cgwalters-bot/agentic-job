@@ -6,10 +6,11 @@
 //! These are the token's part of the old tree's
 //! `agent-isolation-check.mjs`. The probes that need no token are
 //! `sandbox check`'s (step 5), which the run action calls again unless
-//! it passed earlier in the same job. One
-//! of the old probes is left to that step, since it needs the container
-//! image `[sandbox.check]` names: that a container's subordinate uid
-//! cannot read the file.
+//! it passed earlier in the same job. With `[sandbox.check]
+//! before-agent`, `run` makes those again too ([`recheck`]), after its
+//! own commands as the sandbox user, and adds the old probe that needs
+//! the container image `[sandbox.check]` names: that a container's
+//! subordinate uid cannot read the token's files.
 //!
 //! The token goes to every search on standard input, never on a command
 //! line.
@@ -21,6 +22,7 @@ use anyhow::{Context, Result, ensure};
 use super::clone::utf8;
 use super::enter::Sandbox;
 use super::inference::Token;
+use crate::config::Config;
 
 /// Where the sandbox user can write, and so where a token handed to it
 /// could have been left, besides its home.
@@ -34,6 +36,19 @@ const PROCESSES_SCRIPT: &str = "cat /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>
 /// What those may add up to on a machine with many processes.
 const MAX_PROCESSES_BYTES: usize = 256 << 20;
 const MAX_OUTPUT: usize = 1 << 20;
+/// Any uid but root in a rootless container is a subordinate uid of the
+/// sandbox user's, as in `sandbox check`.
+const CONTAINER_UID: &str = "1000";
+/// Where a token's directory is in the container.
+const CONTAINER_DIR: &str = "/token-dir";
+/// How long a container may take, image pull included, in seconds.
+const CONTAINER_TIMEOUT_S: &str = "600";
+/// Reads `$1` and shows nothing of it: a container's output also goes
+/// to podman's log driver, which may be the journal.
+const READ_SCRIPT: &str = r#"cat -- "$1" >/dev/null"#;
+/// A file every uid of the image can read: the control that a
+/// subordinate uid's container runs at all.
+const WORLD_READABLE: &str = "/etc/os-release";
 const PRIVATE_FILE_MODE: &str = "600";
 const PRIVATE_DIR_MODE: &str = "700";
 
@@ -85,15 +100,83 @@ fn holds(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// The command that reads PATH, in a rootless container of IMAGE as UID
+/// with the directory DIR at [`CONTAINER_DIR`], and logs nothing of it.
+fn read_in_container(image: &str, uid: &str, dir: &str, path: &str) -> Vec<String> {
+    [
+        "timeout",
+        "--kill-after=10",
+        CONTAINER_TIMEOUT_S,
+        "podman",
+        "run",
+        "--rm",
+        "--network=none",
+        "--log-driver=none",
+        "--security-opt",
+        "label=disable",
+        "--user",
+        uid,
+        "-v",
+        &format!("{dir}:{CONTAINER_DIR}:ro"),
+        image,
+        "sh",
+        "-c",
+        READ_SCRIPT,
+        "sh",
+        path,
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// Probes that a rootless container's subordinate uid cannot read FILE
+/// in DIR, with the controls that the container's root, the sandbox
+/// user, can, and that the subordinate uid reads what everyone may.
+/// Without podman there is no container to read it from.
+fn from_container(sandbox: &Sandbox, image: &str, dir: &str, file: &str) -> Result<Vec<Probe>> {
+    let user = &sandbox.user;
+    if !sandbox
+        .run(&["sh", "-c", "command -v podman"], b"", MAX_OUTPUT)?
+        .success()
+    {
+        eprintln!("note: {user} has no podman, so no container to read {file} from");
+        return Ok(Vec::new());
+    }
+    let reads = |uid, path: &str| -> Result<bool> {
+        let argv = read_in_container(image, uid, dir, path);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        Ok(sandbox.run(&argv, b"", MAX_OUTPUT)?.success())
+    };
+    let inside = format!("{CONTAINER_DIR}/{file}");
+    Ok(vec![
+        Probe {
+            what: format!("a container of {user}'s, as its root, reads {file} (control)"),
+            passed: reads("0", &inside)?,
+        },
+        Probe {
+            what: format!(
+                "a container of {user}'s, as uid {CONTAINER_UID}, reads {WORLD_READABLE} (control)"
+            ),
+            passed: reads(CONTAINER_UID, WORLD_READABLE)?,
+        },
+        Probe {
+            what: format!("a container of {user}'s, as uid {CONTAINER_UID}, cannot read {file}"),
+            passed: !reads(CONTAINER_UID, &inside)?,
+        },
+    ])
+}
+
 /// Probes where the run token is. TOKEN_FILES are the files that should
 /// hold it, under the sandbox user's home: the agent's, and its child
 /// agent's if the run has one; GIVEN is the runner's own file the token
-/// came from, if it came from one.
+/// came from, if it came from one. With IMAGE, each file is also read
+/// from a container of it.
 pub fn token(
     sandbox: &Sandbox,
     token: &Token,
     token_files: &[&str],
     given: Option<&Path>,
+    image: Option<&str>,
 ) -> Result<Vec<Probe>> {
     let needle = format!("{}\n", token.expose());
     let user = &sandbox.user;
@@ -121,6 +204,13 @@ pub fn token(
             ("its directory", dir.as_str(), PRIVATE_DIR_MODE),
         ] {
             probes.push(private(sandbox, what, path, mode)?);
+        }
+        if let Some(image) = image {
+            let name = Path::new(token_file)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("the token's file has no name")?;
+            probes.extend(from_container(sandbox, image, &dir, name)?);
         }
         files.push(file);
     }
@@ -185,11 +275,30 @@ pub fn require(
     token: &Token,
     token_files: &[&str],
     given: Option<&Path>,
+    image: Option<&str>,
 ) -> Result<()> {
-    let probes = self::token(sandbox, token, token_files, given)?;
+    let probes = self::token(sandbox, token, token_files, given, image)?;
     ensure!(
         report(&probes),
         "the run token is not only where it belongs: see the failed probes above"
+    );
+    Ok(())
+}
+
+/// `sandbox check`'s probes of the sandbox CONFIG describes, again, and
+/// an error unless all passed: what `[sandbox.check] before-agent` asks
+/// of `run` once it has cloned the target. Between the run action's check
+/// and here `run` has run commands as the sandbox user, and a check
+/// probes what such a user left behind (a process, a unit, a listener).
+pub fn recheck(config: &Config) -> Result<()> {
+    eprintln!("Probing the sandbox again before the agent starts (sandbox.check.before-agent)");
+    let report = crate::sandbox::check::probes(config, None)?;
+    let failures: Vec<&str> = report.failures().into_iter().collect();
+    ensure!(
+        failures.is_empty(),
+        "{} sandbox check(s) failed before the agent started: {}",
+        failures.len(),
+        failures.join(", ")
     );
     Ok(())
 }

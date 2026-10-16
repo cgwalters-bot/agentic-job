@@ -10,6 +10,7 @@
 
 mod support;
 
+use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,7 @@ fn endpoint(proxy: &Proxy, mode: Mode) -> Endpoint {
 fn oidc_mode() -> Mode {
     Mode::GithubOidc {
         audience: AUDIENCE.to_owned(),
+        identity_proxy: None,
     }
 }
 
@@ -193,7 +195,7 @@ fn a_run_that_cannot_announce_itself_does_not_start() {
     let refusal = |status, text| vec![Fault::Status(status, text)];
     // (whether the proxy has the run API, what it answers registrations
     // with, the mode, the error, the registrations tried)
-    let cases: [(bool, Vec<Fault>, Mode, &str, usize); 9] = [
+    let cases: [(bool, Vec<Fault>, Mode, &str, usize); 10] = [
         (false, vec![], oidc_mode(), "has no run API (HTTP 404", 1),
         (false, vec![], Mode::Plain, "does not start", 1),
         // A proxy whose policy does not admit unproven runs.
@@ -247,6 +249,14 @@ fn a_run_that_cannot_announce_itself_does_not_start() {
             "returned no token",
             1,
         ),
+        // Not followed: the identity token would go wherever it points.
+        (
+            true,
+            vec![Fault::Redirect("/v1/runs")],
+            oidc_mode(),
+            "failed (HTTP 307",
+            1,
+        ),
     ];
     for (run_api, faults, mode, want, tries) in cases {
         let proxy = Proxy::start();
@@ -264,6 +274,63 @@ fn a_run_that_cannot_announce_itself_does_not_start() {
         assert_eq!(posts, tries, "{want}");
         assert!(proxy.live_tokens().is_empty(), "{want}");
     }
+}
+
+/// `identity-proxy`: the identity-token request, and it alone, goes
+/// through the proxy the configuration names, as a CONNECT tunnel to an
+/// https URL; one that is not https is refused before anything is sent.
+#[test]
+fn an_identity_proxy_carries_only_a_tunnel_to_the_ci_system() {
+    let proxy = Proxy::start();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let identity_proxy = format!("http://{}", listener.local_addr().unwrap());
+    let (seen, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let _ = seen.send(line.trim_end().to_owned());
+            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+        }
+    });
+    let mode = Mode::GithubOidc {
+        audience: AUDIENCE.to_owned(),
+        identity_proxy: Some(identity_proxy),
+    };
+    let ci = |url: &str| Identity {
+        oidc: Some(OidcRequest {
+            url: url.to_owned(),
+            bearer: REQUEST_BEARER.to_owned(),
+        }),
+        name: None,
+    };
+    let register = |identity: &Identity| {
+        error(Run::register(
+            &endpoint(&proxy, mode.clone()),
+            identity,
+            QUICK,
+            TIMEOUT_S,
+            NEVER,
+        ))
+    };
+
+    let err = register(&ci("https://ci.invalid:8443/oidc?api-version=2"));
+    assert!(err.contains("asking for the identity token"), "{err}");
+    let lines: Vec<String> = received.try_iter().collect();
+    assert!(!lines.is_empty(), "the proxy was not asked");
+    assert!(
+        lines
+            .iter()
+            .all(|line| line == "CONNECT ci.invalid:8443 HTTP/1.1"),
+        "{lines:?}"
+    );
+
+    let err = register(&ci(&proxy.oidc_url()));
+    assert!(err.contains("not https"), "{err}");
+    assert_eq!(received.try_iter().count(), 0);
+    // Nothing reached the inference proxy, nor the CI system's stand-in.
+    assert_eq!(proxy.seen(), [""; 0]);
 }
 
 /// What is missing on the job's side is said before anything is sent.

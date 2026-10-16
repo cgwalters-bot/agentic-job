@@ -241,6 +241,14 @@ pub struct SandboxCheck {
     pub allow_sockets: Vec<String>,
     /// Local TCP ports the sandbox user may connect to.
     pub allow_tcp_ports: Vec<u16>,
+    /// Whether `run` makes these probes again once it has cloned the
+    /// target, before it registers the run, and also tries to read the
+    /// run token from a rootless container as a subordinate uid. Off, the run action's `sandbox check
+    /// --unless-passed` before `run` is the last full check: what the
+    /// sandbox user did in `run`'s own preparation (the clone, the
+    /// agent's files), and a token that a container's other uids could
+    /// read, would go unprobed. It costs a full check's time.
+    pub before_agent: bool,
 }
 
 impl SandboxCheck {
@@ -277,6 +285,7 @@ impl Default for SandboxCheck {
             container_image: Self::DEFAULT_CONTAINER_IMAGE.to_owned(),
             allow_sockets: Vec::new(),
             allow_tcp_ports: Vec::new(),
+            before_agent: false,
         }
     }
 }
@@ -326,6 +335,11 @@ pub struct Inference {
     pub audience: Option<String>,
     /// For `token-file`: where the token is.
     pub token_file: Option<PathBuf>,
+    /// For `github-oidc`: the HTTP proxy that the request for the job's
+    /// identity token goes through, on a host that reaches the CI system
+    /// only through one. Unset, it goes directly, as everything to the
+    /// inference proxy does.
+    pub identity_proxy: Option<String>,
     /// Where the proxy serves the Anthropic Messages API (`URL/anthropic`
     /// unless set) and the OpenAI Responses API (`URL/v1`).
     pub anthropic_url: Option<String>,
@@ -659,11 +673,14 @@ mod tests {
             [sandbox.check]
             allow-sockets = ["/run/snapd.socket", "/run/pcscd/", "@ISCSIADM_ABSTRACT_NAMESPACE"]
             allow-tcp-ports = [3128]
+            before-agent = true
             [setup]
             packages = ["just", "gcc-c++"]
             npm = ["opencode-ai@1.2.3", "@agentclientprotocol/claude-agent-acp@0.4.0-beta.1"]
         "#;
         let config = Config::parse(good).unwrap();
+        assert!(config.sandbox.check.before_agent);
+        assert!(!Config::default().sandbox.check.before_agent);
         config.sandbox.validate().unwrap();
         config.setup.validate().unwrap();
         Config::default().sandbox.validate().unwrap();

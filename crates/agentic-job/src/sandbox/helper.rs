@@ -389,7 +389,7 @@ fn sessions(uid: u32) -> Vec<String> {
     let Ok(loginctl) = trusted_program("loginctl") else {
         return Vec::new();
     };
-    let listing = Command::new(loginctl)
+    let listing = host::bare(loginctl)
         .args([
             "show-user",
             &uid.to_string(),
@@ -411,7 +411,7 @@ fn sessions(uid: u32) -> Vec<String> {
 /// them; `None` for none. Any user may ask.
 pub fn survivors(uid: u32) -> Result<Option<String>> {
     let pgrep = trusted_program("pgrep")?;
-    let out = Command::new(pgrep)
+    let out = host::bare(pgrep)
         .args(["-l", "-u", &uid.to_string()])
         .stdin(Stdio::null())
         .output()

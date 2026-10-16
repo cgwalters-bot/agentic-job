@@ -51,7 +51,7 @@ pub mod upload;
 use std::future::Future;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -157,6 +157,9 @@ struct Plan {
     meta: Value,
     /// The run's identifier in it.
     run_id: String,
+    /// The configuration, when `[sandbox.check] before-agent` asks for
+    /// its probes again before the agent starts.
+    recheck: Option<Config>,
 }
 
 /// What the preparation leaves for the session.
@@ -200,6 +203,10 @@ struct Shared {
     /// Set when the run was told to stop: the preparation goes no
     /// further than the step it is in.
     stopped: AtomicBool,
+    /// Where the run's part of the egress proxy's log starts: moved past
+    /// the probes of `[sandbox.check] before-agent`, whose refusals are
+    /// not the agent's (and with them the clone's requests before them).
+    egress_from: AtomicU64,
 }
 
 impl Shared {
@@ -354,7 +361,7 @@ fn own_tokens() -> impl Iterator<Item = String> {
 
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
-        let config = load_config(&args.config)?;
+        let mut config = load_config(&args.config)?;
         // What `agentic-job config` held the file to, again: it is only
         // a file by the time `run` reads it.
         let Checked {
@@ -427,6 +434,11 @@ impl Plan {
             .create(work.join(HARNESS_DIR))
             .with_context(|| format!("creating {}", work.display()))?;
         let staging = Staging::create(&work)?;
+        let sandbox = Sandbox::new(&config)?;
+        let (commit, agent) = (
+            std::mem::take(&mut config.commit),
+            std::mem::take(&mut config.agent),
+        );
         Ok(Self {
             kind,
             limits,
@@ -439,16 +451,17 @@ impl Plan {
             policy,
             review_head: args.review_head.clone(),
             task,
-            sandbox: Sandbox::new(&config)?,
+            sandbox,
             exe: clone::utf8(&exe)?.to_owned(),
             work,
             out: args.out.clone(),
             staging,
-            commit: config.commit,
+            commit,
             meta,
             run_id,
-            agent: config.agent,
+            agent,
             child,
+            recheck: config.sandbox.check.before_agent.then_some(config),
         })
     }
 
@@ -537,6 +550,17 @@ impl Plan {
             clone::review_head(sandbox, &self.policy, &mut checkout, head)?;
         }
         let context = clone::context(sandbox, &self.policy)?;
+        // After the sandbox user's own commands, and before the run is
+        // registered, whose lifetime at the proxy is the agent's. These
+        // probes also pull the image the token's own probe uses.
+        if let Some(config) = &self.recheck {
+            shared.go_on()?;
+            probe::recheck(config)?;
+            shared.egress_from.store(
+                egress::offset(Path::new(egress::ACCESS_LOG), sandbox.root()),
+                Ordering::SeqCst,
+            );
+        }
         let cwd = session_cwd(
             self.kind,
             self.review_head.is_some(),
@@ -613,7 +637,11 @@ impl Plan {
             if has_child {
                 files.push(agent::CHILD_VIBE_CONFIG_FILE);
             }
-            probe::require(sandbox, run.token(), &files, given)?;
+            let image = self
+                .recheck
+                .as_ref()
+                .map(|config| config.sandbox.check.container_image.as_str());
+            probe::require(sandbox, run.token(), &files, given, image)?;
         }
         Ok(Prepared {
             cwd,
@@ -1020,7 +1048,10 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     let shared = Arc::new(Shared::default());
     // The egress proxy's log from here on is this run's: what is in it
     // already is `sandbox check`'s probes.
-    let egress_from = egress::offset(Path::new(egress::ACCESS_LOG), plan.sandbox.root());
+    shared.egress_from.store(
+        egress::offset(Path::new(egress::ACCESS_LOG), plan.sandbox.root()),
+        Ordering::SeqCst,
+    );
 
     // Its steps block (commands, requests), so it has a thread, which a
     // signal cannot cancel: it ends when its commands are killed, or at
@@ -1107,6 +1138,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
             let stopped = Arc::new(AtomicBool::new(false));
             let mut finishing = tokio::task::spawn_blocking({
                 let (plan, stopped) = (Arc::clone(&plan), Arc::clone(&stopped));
+                let egress_from = shared.egress_from.load(Ordering::SeqCst);
                 move || plan.finish(&session, egress_from, &standing, &stopped)
             });
             let finished = signals.or(&mut finishing).await;

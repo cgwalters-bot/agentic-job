@@ -29,7 +29,18 @@ const HOLD_SETTLE: Duration = Duration::from_secs(3);
 
 /// The probes that failed.
 fn failed(sandbox: &Sandbox, token: &Token, given: Option<&Path>) -> Vec<String> {
-    probe::token(sandbox, token, &[CLAUDE_ENV_FILE], given)
+    failed_in(sandbox, token, given, None)
+}
+
+/// The probes that failed, with the token's file read from containers
+/// of IMAGE if one is given.
+fn failed_in(
+    sandbox: &Sandbox,
+    token: &Token,
+    given: Option<&Path>,
+    image: Option<&str>,
+) -> Vec<String> {
+    probe::token(sandbox, token, &[CLAUDE_ENV_FILE], given, image)
         .unwrap()
         .into_iter()
         .filter(|probe| !probe.passed)
@@ -102,9 +113,9 @@ fn each_probe_fails_when_what_it_names_is_broken() {
     }
 
     // What `run` makes of the probes: it goes on only if all passed.
-    probe::require(&sandbox, &token, &[CLAUDE_ENV_FILE], None).unwrap();
+    probe::require(&sandbox, &token, &[CLAUDE_ENV_FILE], None, None).unwrap();
     sh(r#"chmod 0644 "$1""#);
-    let err = probe::require(&sandbox, &token, &[CLAUDE_ENV_FILE], None).unwrap_err();
+    let err = probe::require(&sandbox, &token, &[CLAUDE_ENV_FILE], None, None).unwrap_err();
     sh(r#"chmod 0600 "$1""#);
     assert!(
         err.to_string().contains("not only where it belongs"),
@@ -132,6 +143,49 @@ fn each_probe_fails_when_what_it_names_is_broken() {
         failed(&sandbox, &token, Some(Path::new("/etc/shadow"))),
         [""; 0]
     );
+
+    // From a rootless container, where the sandbox user has podman: its
+    // root reads the file, a subordinate uid does not, until the file is
+    // open to all. Pulled directly: this job runs no egress proxy.
+    let direct = Config::parse(&format!(
+        "[sandbox]\nuser = \"{user}\"\n[egress]\nproxy = false\n"
+    ))
+    .unwrap();
+    let image = direct.sandbox.check.container_image.clone();
+    let direct = Sandbox::new(&direct).unwrap();
+    let has_podman = direct
+        .run(&["podman", "--version"], b"", MAX_OUTPUT)
+        .is_ok_and(|out| out.success());
+    if has_podman {
+        assert!(
+            direct
+                .run(&["podman", "pull", "-q", &image], b"", 1 << 20)
+                .unwrap()
+                .success(),
+            "pulling {image}"
+        );
+        let probes = probe::token(&direct, &token, &[CLAUDE_ENV_FILE], None, Some(&image)).unwrap();
+        let container: Vec<_> = probes
+            .iter()
+            .filter(|probe| probe.what.contains("container"))
+            .collect();
+        assert_eq!(container.len(), 3, "{probes:?}");
+        assert!(probes.iter().all(|probe| probe.passed), "{probes:?}");
+        sh(r#"chmod 0644 "$1" && chmod 0755 "$(dirname "$1")""#);
+        let got = failed_in(&direct, &token, None, Some(&image));
+        sh(r#"chmod 0600 "$1" && chmod 0700 "$(dirname "$1")""#);
+        assert!(
+            got.iter()
+                .any(|what| what.contains("as uid 1000, cannot read")),
+            "{got:?}"
+        );
+        assert!(
+            !got.iter().any(|what| what.contains("(control)")),
+            "{got:?}"
+        );
+    } else {
+        eprintln!("{user} has no podman: the container probes are not tried");
+    }
 
     // The control: with the token gone from its file, finding it nowhere
     // else proves nothing, and the probes say so.

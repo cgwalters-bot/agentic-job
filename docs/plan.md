@@ -32,8 +32,10 @@ not coverage demonstrated by local tests.
 left open: other local DNS stubs' upstreams, UDP listeners and bus
 services that ask polkit nothing, and a test of a whole setup on an
 image's user. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/issues/20)
-include repeating host probes, stalled request counts and mandatory HTTP
-proxies. [Hand-back gaps (#22)](https://github.com/cgwalters-forge/agentic-job/issues/22)
+include why a file made under `umask 077` came out 0664 on ubuntu-26.04,
+host probes that `run` repeats only when asked (`before-agent`), proxies
+for anything but the identity-token request, stalled request counts, and a test of `run` with
+an agent that holds the token. [Hand-back gaps (#22)](https://github.com/cgwalters-forge/agentic-job/issues/22)
 include a summary for a session that ends in an internal error and
 streaming the transcript through redaction.
 

@@ -100,9 +100,17 @@ impl fmt::Debug for Token {
 /// How the run gets its token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    GithubOidc { audience: String },
+    GithubOidc {
+        audience: String,
+        /// The HTTP proxy the identity-token request goes through, on a
+        /// host where nothing else reaches the CI system: see
+        /// [`identity_http`].
+        identity_proxy: Option<String>,
+    },
     Plain,
-    TokenFile { path: PathBuf },
+    TokenFile {
+        path: PathBuf,
+    },
 }
 
 impl Mode {
@@ -155,6 +163,7 @@ impl Endpoint {
             register,
             audience,
             token_file,
+            identity_proxy,
             anthropic_url,
             openai_url,
         } = inference;
@@ -163,6 +172,7 @@ impl Endpoint {
                 register.is_none()
                     && audience.is_none()
                     && token_file.is_none()
+                    && identity_proxy.is_none()
                     && anthropic_url.is_none()
                     && openai_url.is_none(),
                 "inference.url is not set, and the rest of [inference] means nothing without it"
@@ -200,15 +210,21 @@ impl Endpoint {
                 );
                 Mode::GithubOidc {
                     audience: audience.to_owned(),
+                    identity_proxy: identity_proxy
+                        .as_deref()
+                        .map(|proxy| base_url("identity-proxy", proxy))
+                        .transpose()?,
                 }
             }
             Register::Plain => {
                 unused("audience", audience.is_some())?;
                 unused("token-file", token_file.is_some())?;
+                unused("identity-proxy", identity_proxy.is_some())?;
                 Mode::Plain
             }
             Register::TokenFile => {
                 unused("audience", audience.is_some())?;
+                unused("identity-proxy", identity_proxy.is_some())?;
                 let path = token_file.clone().unwrap_or_default();
                 ensure!(
                     path.is_absolute(),
@@ -349,6 +365,40 @@ fn http() -> ureq::Agent {
         .max_redirects(0)
         .build()
         .into()
+}
+
+/// The client for the identity-token request: [`http`]'s, or the same
+/// through PROXY, which the configuration names for a host that reaches
+/// the CI system only through one. The job's own HTTP_PROXY is still not
+/// taken: which proxy may carry the request is the configuration's to
+/// say. The proxy is a CONNECT proxy, and REQUEST_URL must be https: the
+/// proxy then passes on TLS it cannot read, and sees neither the job's
+/// request token nor the identity token, only the CI system's host. The
+/// run API, which carries the run token, never goes through it.
+fn identity_http(proxy: Option<&str>, request_url: &str) -> Result<ureq::Agent> {
+    let Some(proxy) = proxy else {
+        return Ok(http());
+    };
+    ensure!(
+        request_url.starts_with("https://"),
+        "inference.identity-proxy: the identity token is asked for at an URL that is not https, \
+         which would show the proxy the job's credential"
+    );
+    let proxy = ureq::Proxy::new(proxy).context("inference.identity-proxy")?;
+    ensure!(
+        matches!(
+            proxy.protocol(),
+            ureq::ProxyProtocol::Http | ureq::ProxyProtocol::Https
+        ),
+        "inference.identity-proxy: only an http or https CONNECT proxy is supported"
+    );
+    Ok(ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(Some(proxy))
+        .max_redirects(0)
+        .build()
+        .into())
 }
 
 /// The requests the run API and the identity token take: none has a
@@ -510,7 +560,7 @@ fn refusal(endpoint: &Endpoint, answer: &Answer) -> String {
         (503, _) if detail.starts_with(NOT_CONFIGURED) => {
             format!("{at} has no policy for registering runs (HTTP 503: {detail})")
         }
-        (401, Mode::GithubOidc { audience }) => format!(
+        (401, Mode::GithubOidc { audience, .. }) => format!(
             "{at} rejected the job's identity token (HTTP 401: {detail}): its audience is \
              {audience:?}, which the proxy's must match, and it must be issued after the proxy \
              started"
@@ -591,13 +641,17 @@ impl Run {
                 );
                 return Ok(run(token, None));
             }
-            Mode::GithubOidc { audience } => {
+            Mode::GithubOidc {
+                audience,
+                identity_proxy,
+            } => {
                 let request = identity.oidc.as_ref().with_context(|| {
                     format!(
                         "register = \"github-oidc\" needs {OIDC_URL_VAR} and {OIDC_TOKEN_VAR}: \
                          the job needs the permission id-token: write"
                     )
                 })?;
+                let http = identity_http(identity_proxy.as_deref(), &request.url)?;
                 Some(retry.run(stopped, |_| identity_token(&http, request, audience))?)
             }
             Mode::Plain => None,
@@ -864,7 +918,8 @@ mod tests {
             Endpoint {
                 url: "http://proxy.example:18080".into(),
                 mode: Mode::GithubOidc {
-                    audience: "praxis-credential-broker".into()
+                    audience: "praxis-credential-broker".into(),
+                    identity_proxy: None,
                 },
                 anthropic_url: "http://proxy.example:18080/anthropic".into(),
                 openai_url: "http://proxy.example:18080/v1".into(),
@@ -884,6 +939,19 @@ mod tests {
             .unwrap();
         assert_eq!(plain.mode, Mode::Plain);
         assert_eq!(Endpoint::from_config(&inference("")).unwrap(), None);
+        let proxied = Endpoint::from_config(&inference(&format!(
+            "{URL}register = \"github-oidc\"\naudience = \"a\"\n\
+             identity-proxy = \"http://squid.example:3128/\""
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            proxied.mode,
+            Mode::GithubOidc {
+                audience: "a".into(),
+                identity_proxy: Some("http://squid.example:3128".into()),
+            }
+        );
     }
 
     /// A configuration that names no mode is refused, and so is one whose
@@ -921,6 +989,21 @@ mod tests {
             (
                 format!("{URL}register = \"token-file\""),
                 "needs the absolute path",
+            ),
+            (
+                format!("{URL}register = \"plain\"\nidentity-proxy = \"http://p:3128\""),
+                "inference.identity-proxy is set",
+            ),
+            (
+                format!(
+                    "{URL}register = \"github-oidc\"\naudience = \"a\"\n\
+                     identity-proxy = \"http://user:pw@p:3128\""
+                ),
+                "inference.identity-proxy: \"http://user:pw@p:3128\" is not an http",
+            ),
+            (
+                "identity-proxy = \"http://p:3128\"".to_owned(),
+                "inference.url is not set",
             ),
             (
                 format!("{URL}register = \"token-file\"\ntoken-file = \"token\""),

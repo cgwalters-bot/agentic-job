@@ -60,7 +60,7 @@ impl User {
         // program directories root's, so an image whose getent is not
         // fails setup here, with the reason.
         let getent = super::helper::trusted_program("getent")?;
-        let output = Command::new(getent)
+        let output = bare(getent)
             .args(["passwd", "--", key])
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
@@ -135,6 +135,20 @@ pub fn succeeds(command: &mut Command) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+/// PROGRAM as a command that gets none of this process's variables that
+/// nothing it starts may inherit (`session::process::inherited_settings`):
+/// the job's identity-token request and `ACTIONS_*` among them. For what
+/// runs as the runner's user or as root, which holds them already, so
+/// that a command added later that does run as someone else starts
+/// without them too.
+pub fn bare(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for name in crate::session::process::inherited_settings() {
+        command.env_remove(name);
+    }
+    command
 }
 
 /// `argv` as a command.

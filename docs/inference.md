@@ -36,7 +36,12 @@ is refused, and so is a key that belongs to another mode:
 - `github-oidc` asks GitHub for the job's identity token, made out to
   `audience`, and sends it as the bearer of `POST /v1/runs`. The job
   needs `id-token: write`. This is the only identity token the binary
-  knows how to get; another forge needs another proof.
+  knows how to get; another forge needs another proof. Neither request
+  takes the job's `HTTP_PROXY`, since a proxy would see the tokens. On a
+  host that reaches the CI system only through a proxy, `identity-proxy`
+  names an http or https CONNECT proxy for the identity-token request alone: it
+  is refused unless that request's URL is https, so the proxy relays
+  TLS it cannot read. `POST /v1/runs` still goes directly.
 - `plain` sends a name and no proof: [below](#registering-without-proof).
 - `token-file` reads a token from the absolute path `token-file`. There
   is no run API then: nothing counts the run's requests and nothing

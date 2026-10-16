@@ -599,6 +599,10 @@ fn a_run_from_clone_to_the_end_of_its_run() {
         job.name
     ));
     assert_eq!(owner, user);
+    let modes = sh(&format!(
+        "home=\"$(getent passwd {user} | cut -d: -f6)\" && sudo -n stat -c %a \"$home/work\" \"$home/out\""
+    ));
+    assert_eq!(modes, "700\n700");
     assert!(got.stdout.contains("Fake run"), "{}", got.all());
     assert!(got.stderr.contains("Cloned local/"), "{}", got.all());
 

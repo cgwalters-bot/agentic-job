@@ -57,6 +57,9 @@ impl Request {
 pub enum Fault {
     /// A refusal, with its text.
     Status(u16, &'static str),
+    /// A redirect to this path, which would register the run if it were
+    /// followed.
+    Redirect(&'static str),
     /// The run is registered and the reply is lost.
     LostReply,
     /// The connection is closed before the request is looked at.
@@ -103,6 +106,11 @@ pub struct Proxy {
 }
 
 fn answer(stream: &mut TcpStream, status: u16, body: &str) {
+    answer_with(stream, status, "", body);
+}
+
+/// As [`answer`], with HEADERS, each line ending in CRLF.
+fn answer_with(stream: &mut TcpStream, status: u16, headers: &str, body: &str) {
     let kind = if body.starts_with('{') {
         "application/json"
     } else {
@@ -110,7 +118,7 @@ fn answer(stream: &mut TcpStream, status: u16, body: &str) {
     };
     let _ = write!(
         stream,
-        "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} X\r\n{headers}content-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     // Closing with something of the request unread (the end of an empty
@@ -278,6 +286,7 @@ impl Proxy {
                         let fault = registering.then(|| state.faults.pop_front()).flatten();
                         let answer = match &fault {
                             Some(Fault::Status(status, text)) => (*status, (*text).to_owned()),
+                            Some(Fault::Redirect(_)) => (307, String::new()),
                             Some(Fault::Closed) => (0, String::new()),
                             _ => state.handle(&request),
                         };
@@ -285,6 +294,9 @@ impl Proxy {
                     };
                     match fault {
                         Some(Fault::LostReply | Fault::Closed) => {}
+                        Some(Fault::Redirect(path)) => {
+                            answer_with(&mut stream, status, &format!("location: {path}\r\n"), "");
+                        }
                         Some(Fault::Slow(delay)) => {
                             std::thread::sleep(delay);
                             answer(&mut stream, status, &body);

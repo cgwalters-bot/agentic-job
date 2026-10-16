@@ -44,9 +44,9 @@ See [sandbox-check.md](sandbox-check.md).
 
 The runner's files and processes are unreadable to the sandbox user.
 The target is cloned without credentials. Network rules reject metadata
-and restrict private-network access. `run` probes the token's location
-but does not repeat all host probes
-([#20](https://github.com/cgwalters-forge/agentic-job/issues/20)).
+and restrict private-network access. `run` probes the token's location,
+and repeats all host probes only with `[sandbox.check] before-agent`
+([sandbox-check.md](sandbox-check.md)).
 [Inference modes](inference.md) differ: `plain` permits new registrations
 without proof; `token-file` has no request accounting or revocation by `run`.
 

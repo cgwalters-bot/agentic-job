@@ -23,7 +23,6 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::config::Config;
 use crate::sandbox::enter::Entry;
 use crate::sandbox::root::Root;
-use crate::session::process::inherited_settings;
 
 /// Stands for the command in a command line that is asked for only to
 /// get what comes before it.
@@ -127,19 +126,7 @@ impl Sandbox {
     /// user, in CWD: for the session, which appends the agent's own.
     pub fn wrapper(&self, cwd: &Path) -> Result<Vec<String>> {
         let command = self.entry.command(&[PLACEHOLDER.to_owned()], Some(cwd))?;
-        let mut argv = std::iter::once(command.get_program())
-            .chain(command.get_args())
-            .map(|arg| {
-                arg.to_str()
-                    .map(str::to_owned)
-                    .context("the command line into the sandbox is not UTF-8")
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            argv.pop().as_deref() == Some(PLACEHOLDER),
-            "the command line into the sandbox does not end in its command"
-        );
-        Ok(argv)
+        command_line(&command)
     }
 
     /// Runs ARGV as the sandbox user in its home, with INPUT on its
@@ -172,11 +159,32 @@ impl Sandbox {
 /// Everything `run` starts is made with this, also what runs as the
 /// runner's user or as root and holds those already.
 pub fn command(program: &str) -> Command {
-    let mut command = Command::new(program);
-    for name in inherited_settings() {
-        command.env_remove(name);
-    }
-    command
+    crate::sandbox::host::bare(program)
+}
+
+/// COMMAND as a command line, without its last argument, the
+/// placeholder. Only the program and arguments carry over to the line
+/// the session starts, so a variable or a directory set on COMMAND would
+/// be lost without a word: that is refused.
+fn command_line(command: &Command) -> Result<Vec<String>> {
+    ensure!(
+        command.get_envs().next().is_none() && command.get_current_dir().is_none(),
+        "the command into the sandbox sets variables or a directory, which its command line \
+         would drop"
+    );
+    let mut argv = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|arg| {
+            arg.to_str()
+                .map(str::to_owned)
+                .context("the command line into the sandbox is not UTF-8")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        argv.pop().as_deref() == Some(PLACEHOLDER),
+        "the command line into the sandbox does not end in its command"
+    );
+    Ok(argv)
 }
 
 /// A connected pair: this process's end, and the one the child inherits.
@@ -248,6 +256,7 @@ fn over_sockets(argv: &[String], input: &[u8], max_output: usize) -> Result<Outp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::host::User;
 
     fn argv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
@@ -287,13 +296,23 @@ mod tests {
     fn the_wrapper_is_the_way_in_without_its_command() {
         let own = Command::new("id").arg("-un").output().unwrap();
         let own = String::from_utf8(own.stdout).unwrap();
-        // Any user that exists will do: nothing is run.
-        let Ok(config) = Config::parse(&format!("[sandbox]\nuser = \"{}\"\n", own.trim())) else {
+        // Any user that exists will do, but root: nothing is run.
+        let own = match own.trim() {
+            "root" => "nobody",
+            own => own,
+        };
+        let Ok(config) = Config::parse(&format!("[sandbox]\nuser = \"{own}\"\n")) else {
             panic!("no configuration for {own}");
         };
-        let Ok(sandbox) = Sandbox::new(&config) else {
-            // A user this machine has no passwd line for, or root.
-            return;
+        let sandbox = match Sandbox::new(&config) {
+            Ok(sandbox) => sandbox,
+            // A machine without a passwd line for the user: a container
+            // image without `nobody`, or a static libc's lookup.
+            Err(err) if User::lookup(own).ok().flatten().is_none() => {
+                eprintln!("skipped: {err:#}");
+                return;
+            }
+            Err(err) => panic!("{err:#}"),
         };
         let wrapper = sandbox.wrapper(Path::new("/somewhere")).unwrap();
         assert_eq!(wrapper.last().map(String::as_str), Some("--"));
@@ -305,7 +324,7 @@ mod tests {
             Root::Sudo => {
                 assert!(has(&["run0"]), "{wrapper:?}");
                 assert!(has(&["--chdir=/somewhere"]), "{wrapper:?}");
-                let user = format!("--user={}", own.trim());
+                let user = format!("--user={own}");
                 assert!(has(&[user.as_str()]), "{wrapper:?}");
             }
             Root::Helper => assert!(
@@ -314,6 +333,28 @@ mod tests {
             ),
         }
         assert!(!wrapper.iter().any(|arg| arg == PLACEHOLDER), "{wrapper:?}");
+    }
+
+    /// Only a command's program and arguments carry over to the session's
+    /// line: one that sets more is refused, not cut short.
+    #[test]
+    fn a_wrapper_drops_nothing_of_its_command() {
+        let mut command = Command::new("run0");
+        command.args(["--", PLACEHOLDER]);
+        assert_eq!(command_line(&command).unwrap(), argv(&["run0", "--"]));
+        let mut with_env = Command::new("run0");
+        with_env.arg(PLACEHOLDER).env("X", "1");
+        let mut without_env = Command::new("run0");
+        without_env.arg(PLACEHOLDER).env_remove("X");
+        let mut in_dir = Command::new("run0");
+        in_dir.arg(PLACEHOLDER).current_dir("/");
+        for command in [with_env, without_env, in_dir] {
+            let err = command_line(&command).unwrap_err();
+            assert!(format!("{err:#}").contains("would drop"), "{err:#}");
+        }
+        let mut no_placeholder = Command::new("run0");
+        no_placeholder.arg("--");
+        assert!(command_line(&no_placeholder).is_err());
     }
 
     #[test]

@@ -328,6 +328,21 @@ jobs:
       # The probes of where the run token is, each failing when what it
       # names is broken.
       - run: cargo test --locked --test probe
+      # Shown, not checked: why a file made under `umask 077` as this
+      # user came out 0664 on this runner (#20). `run` sets its modes
+      # outright either way; this tells a umask that did not hold (a
+      # file that was there already keeps its mode, a default ACL
+      # replaces the umask) from one that did.
+      - name: Show how the sandbox user's new files get their mode
+        if: ${{ !cancelled() }}
+        run: |
+          sudo -n run0 --pipe --user="$AGENTIC_JOB_TEST_SANDBOX_USER" -- sh -c '
+            echo "umask of the session: $(umask)"
+            umask 077 && rm -f ~/umask-probe && : >~/umask-probe && stat -c "new file under umask 077: %a" ~/umask-probe && rm -f ~/umask-probe
+            stat -c "%a %U %n" ~ ~/.config ~/.config/* 2>&1
+            findmnt -no FSTYPE,OPTIONS -T ~
+            if command -v getfacl >/dev/null; then getfacl -p ~ ~/.config; else echo "no getfacl"; fi
+          ' || true
 
   # The old tree's check and the new one, on the same requests and
   # hand-backs: crates/agentic-job/tests/corpus. The old tree is fetched at

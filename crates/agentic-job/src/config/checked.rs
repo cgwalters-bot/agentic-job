@@ -289,7 +289,8 @@ mod tests {
         assert_eq!(
             endpoint.mode,
             Mode::GithubOidc {
-                audience: "proxy".into()
+                audience: "proxy".into(),
+                identity_proxy: None,
             }
         );
 
