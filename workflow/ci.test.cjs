@@ -18,7 +18,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
   full: ['lint', 'rust', 'vibe', 'corpus', 'static'],
-  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'confined'],
+  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'confined'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
@@ -402,6 +402,22 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.ok(job.indexOf(local) < job.indexOf('uses: actions/upload-artifact@'));
   assert.doesNotMatch(job, /actions\/github-script@/);
   assert.match(job, /- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions\/upload-artifact@/);
+});
+
+test('world-write-runtime proves the policy after the action, with no passing fallback', () => {
+  const job = block('world-write-runtime');
+  assert.match(job, /\n    runs-on: ubuntu-26\.04\n/);
+  assert.match(job, /\n    permissions:\n      contents: read\n    steps:\n/);
+  // This checkout's action, binary and object, never a release's.
+  assert.match(job, /uses: \.\/secure-host # zizmor: ignore\[self-repository\] .*\n        with:\n          build: true\n/);
+  const refused = job.indexOf('      - name: The sandbox user is refused a write to a world-writable file of root\n');
+  const control = job.indexOf('      - name: The sandbox user writes its own world-writable file (control)\n');
+  assert.ok(job.indexOf('uses: ./secure-host') < refused && refused < control);
+  assert.match(job, /"0 666 \$\(stat -c %d \/\)"/);
+  assert.match(job, /grep -qF "cannot create \$probe: Permission denied" "\$RUNNER_TEMP\/refused\.txt"/);
+  assert.match(job, /shell: agentic-job sandbox exec --stdin \{0\} -- bash -eo pipefail -s/);
+  assert.match(job, /"666 \$\(stat -c %d \/\)"/);
+  assert.doesNotMatch(job, /continue-on-error|\|\| true|lock: false|filesystem-view/);
 });
 
 test('the workflow classifies real Git paths without executing PR scripts', () => {

@@ -153,7 +153,12 @@ inventory went with the world-write walk
 ([secure-host.md](secure-host.md#what-went-with-the-walk)), and a trusted fresh
 image is assumed. File capabilities (`cap_setuid` on a program) are not looked
 for. The world-write probes test actual write refusal, not permission bits,
-for the runner and the sandbox user alike. The runner and cleanup remain
+for the runner and the sandbox user alike. Outside `sandbox check`, CI's
+`world-write-runtime` job repeats the sandbox user's refused append and an
+owned-file control after the `secure-host` action has exited, on hosted
+Ubuntu 26.04 only; its object provenance, packages and timings are in
+[secure-host.md](secure-host.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604).
+The runner and cleanup remain
 outside the view.
 See [setup](sandbox.md#what-sandbox-setup-does) for the trusted-image requirement.
 

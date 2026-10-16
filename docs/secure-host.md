@@ -165,6 +165,42 @@ The same workflow is called by CI and feeds its ruleset-required `ci` sentinel,
 including merge-queue runs. Enforcement failure cannot be treated as a skipped
 optional job; the check runs for all changes, including the world-write paths.
 
+### Run-time controls through the action on hosted Ubuntu 26.04
+
+The jobs above load the policy without the action, and `sandbox check`'s
+`world-write` probe tests it inside the action. CI's
+[`world-write-runtime` job](../.github/workflows/ci.yml) tests it from the
+caller's side instead: it runs this checkout's `secure-host` with `build: true`, so
+the binary and `world_write.bpf.o` are compiled from the commit under test
+(`clang -O2 -g -target bpfel` on `crates/agentic-job/bpf/world_write.bpf.c`,
+in [`binary.mjs`](../secure-host/binary.mjs)), never taken from a release.
+After the action has exited, with root gone:
+
+- positive control: the sandbox user appends to setup's probe file
+  `/etc/agentic-job/world-write-probe/file`, root-owned mode 0666 on the root
+  filesystem, and must fail with the shell's "Permission denied" for that path. Ordinary permissions
+  allow that write and the default configuration has no filesystem view, so
+  the refusal is the policy's;
+- negative control: the sandbox user creates a mode-0666 file of its own in
+  its home on the root filesystem and appends to it, which must succeed.
+
+There is no fallback: `sandbox setup` refuses a host without the four links,
+the positive control fails if the policy is switched off in its map, and the
+job is in the `required-checks` chain under the same `host` gate as the
+other privileged jobs. It has read-only contents permission, no secrets and a
+30-minute bound.
+
+On the hosted image the loader needs `runuser` (util-linux), bpftool from
+`linux-tools-common` and `linux-tools-$(uname -r)`, and kernel BTF, all
+present on image `ubuntu26/20261012.163`. Building the object also needs
+clang, which that image has; the source build installed only `musl-tools` and its `musl` dependencies.
+Main's `secure-host-published` job at `3dd22fd`
+([run 38847827027](https://github.com/cgwalters-forge/agentic-job/actions/runs/38847827027/job/116802245133)),
+which built from source, spent 384 ms in the action's load step (load, four
+link checks, map update and both loader controls), 158 s getting the binary
+and object, 43 s in setup and 18 s in the final probes. These are one run's
+step durations, not bounds. This is Ubuntu evidence only; RHEL 10 is below.
+
 ### Acceptance evidence and remaining host work
 
 Rechecked the [backlog audit](https://github.com/cgwalters-forge/tracker/issues/596#issuecomment-6183133751)

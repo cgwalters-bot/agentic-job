@@ -1386,6 +1386,50 @@ jobs:
       - name: Publish bounded enforcement and object evidence
         run: just world-write-evidence "$RUNNER_TEMP/world-write"
 
+  # The policy as a caller's job gets it: loaded by the secure-host
+  # action from this checkout's object, then tested after the action has
+  # exited, as the sandbox user. setup refuses a host without the four
+  # links, and the refused write below fails the job if the policy is
+  # switched off; there is no step that passes without it.
+  world-write-runtime:
+    needs: changes
+    if: ${{ needs.changes.outputs.host == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Secure the host
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action and its object.
+        with:
+          build: true
+      # setup's probe file: root's, mode 0666, on the root filesystem, so
+      # ordinary permissions allow the append. Without the view (off by
+      # default) nothing else refuses it: dash's own "Permission denied" for
+      # that path is the policy's EACCES.
+      - name: The sandbox user is refused a write to a world-writable file of root
+        run: |
+          probe=/etc/agentic-job/world-write-probe/file
+          test "$(stat -c '%u %a %d' "$probe")" = "0 666 $(stat -c %d /)"
+          # Expanded by the sandbox's shell, not this one.
+          # shellcheck disable=SC2016
+          if agentic-job sandbox exec -- sh -c ': >> "$1"' sh "$probe" 2> "$RUNNER_TEMP/refused.txt"; then
+            echo "::error::the sandbox user appended to $probe"; exit 1
+          fi
+          sed 's/::/: :/g' "$RUNNER_TEMP/refused.txt"
+          grep -qF "cannot create $probe: Permission denied" "$RUNNER_TEMP/refused.txt"
+      # The same kind of file, owned by the writer, still takes the write.
+      - name: The sandbox user writes its own world-writable file (control)
+        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
+        run: |
+          install -m 0666 /dev/null owned
+          test "$(stat -c '%a %d' owned)" = "666 $(stat -c %d /)"
+          echo control >> owned
+          grep -qx control owned
+
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file and the
   # cloud metadata service, and each must fail. Read-only token, no
@@ -1452,7 +1496,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1475,7 +1519,7 @@ jobs:
           FILTER: >-
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
-            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "confined"))) or
+            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "confined"))) or
             ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))

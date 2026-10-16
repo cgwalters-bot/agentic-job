@@ -403,7 +403,9 @@ the issue that tracks it, where one is filed.
 - The egress proxy has no read allowlist: any host may be read ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)).
 - Names resolve for the sandbox user on hosted runners, so data can leave
   through DNS ([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).
-- The world-write policy has no recorded runtime evidence on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
+- The world-write policy is proven at run time on hosted Ubuntu 26.04
+  ([CI's controls](docs/secure-host.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
+  not on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
 - Inference needs a praxis-credential-broker; there is no API-key mode
   (no issue yet).
 - A broker admits an agent job of the caller's own only by repository,
