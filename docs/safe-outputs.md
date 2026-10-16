@@ -98,7 +98,15 @@ rules of each type. gh-aw's compiler writes those into the workflows it
 generates and publishes them nowhere else, so
 [`validation.mjs`](../safe-outputs/validation.mjs) reads them out of
 gh-aw's own compiled workflows, and CI fails when the file is not what
-the pinned commit gives.
+the pinned commit gives. The same script reads, out of the handlers' code
+at that commit, the limits they hold a request to at apply and their
+errors: a comment's length and links (E006, E008), counted again with
+the footer gh-aw adds and apply's own note and marker, and the labels of an issue or of `add_labels`
+(E003). It fails on a limit check in the handlers it does not list.
+`agentic-job handback check` refuses a request over one in the session,
+in the handler's words, so the agent can still change it; apply refused
+a comment of 58 links after the session, and it was lost whole
+([#963](https://github.com/cgwalters-forge/agentic-job/issues/963)).
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `create_discussion`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,

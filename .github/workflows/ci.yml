@@ -196,10 +196,11 @@ jobs:
         env:
           WORKFLOW_LINT: ${{ vars.WORKFLOW_LINT }}
         run: just workflow-lint "$WORKFLOW_LINT"
-      # validation.json is generated from gh-aw's compiled workflows, and
-      # the egress proxy's ecosystem identifiers from its domain data, so a
-      # change of the pin has to regenerate both. The commit is the one
-      # safe-outputs-probe.yml takes gh-aw's setup action at.
+      # validation.json is generated from gh-aw's compiled workflows, the
+      # handlers' limits from their code, and the egress proxy's ecosystem
+      # identifiers from its domain data, so a change of the pin has to
+      # regenerate them. The commit is the one safe-outputs-probe.yml takes
+      # gh-aw's setup action at.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
@@ -207,6 +208,7 @@ jobs:
           path: gh-aw
           sparse-checkout: |
             .github/workflows
+            actions/setup/js
             pkg/workflow/data
           persist-credentials: false
       - run: node safe-outputs/validation.mjs gh-aw --check

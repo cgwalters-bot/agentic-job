@@ -16,6 +16,7 @@
 //! text again ([`links`]).
 
 pub mod checkpoint;
+pub mod handler_limits;
 pub mod links;
 pub mod memory;
 mod patch;

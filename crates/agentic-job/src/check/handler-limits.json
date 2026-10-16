@@ -1,0 +1,34 @@
+[
+  {
+    "type": "add_comment",
+    "field": "body",
+    "measure": "length",
+    "max": 65536,
+    "footer": 1842,
+    "message": "E006: Comment body exceeds maximum length of {max} characters (got {got}). Reduce the comment body to {max} characters or fewer."
+  },
+  {
+    "type": "add_comment",
+    "field": "body",
+    "measure": "links",
+    "max": 50,
+    "footer": 4,
+    "message": "E008: Comment contains {got} links, maximum is {max}. Reduce the number of URLs to {max} or fewer."
+  },
+  {
+    "type": "create_issue",
+    "field": "labels",
+    "measure": "distinct",
+    "max": 10,
+    "footer": 0,
+    "message": "E003: Cannot add more than {max} labels (received {got})"
+  },
+  {
+    "type": "add_labels",
+    "field": "labels",
+    "measure": "count",
+    "max": 10,
+    "footer": 0,
+    "message": "E003: Cannot add more than {max} labels (received {got})"
+  }
+]

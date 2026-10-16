@@ -358,6 +358,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
                 let text = as_collected(&outputs)?;
                 std::fs::write(&collected, &text)?;
                 report.notes.extend(redacted_links(&text, policy));
+                report.problems.extend(over_handler_limits(&text));
                 let verdict = check::check_outputs(&outputs, &collected, policy)?;
                 report
                     .problems
@@ -421,6 +422,36 @@ fn redacted_links(collected: &str, policy: &Policy) -> Vec<String> {
                     hosts.join(", ")
                 )
             })
+        })
+        .collect()
+}
+
+/// A problem for each request in COLLECTED (as [`as_collected`] writes it)
+/// that gh-aw's handler would refuse at apply, after the session, over a
+/// limit of its own ([`check::handler_limits`]).
+fn over_handler_limits(collected: &str) -> Vec<Problem> {
+    let Ok(Value::Object(result)) = serde_json::from_str::<Value>(collected) else {
+        return Vec::new();
+    };
+    let items = result.get("items").and_then(Value::as_array);
+    let requests = items.into_iter().flatten().filter_map(Value::as_object);
+    requests
+        .enumerate()
+        .flat_map(|(number, item)| {
+            let at = format!(
+                "{AGENT_OUTPUTS}, request {} ({})",
+                number + 1,
+                item.get("type").and_then(Value::as_str).unwrap_or("?")
+            );
+            check::handler_limits::refusals(item)
+                .into_iter()
+                .map(move |what| Problem {
+                    at: at.clone(),
+                    what,
+                    fix: "change the request to hold within the limit: apply refuses it whole, \
+                          when it can no longer be changed"
+                        .to_owned(),
+                })
         })
         .collect()
 }
@@ -865,6 +896,7 @@ mod tests {
                 "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024,
                 "max_patch_files": 3, "ready_when_complete": true,
             },
+            "add_comment": {"max": 1},
             "noop": {"max": 1},
         })
     }
@@ -1076,6 +1108,28 @@ mod tests {
                     pull("Per [the spec](http://src.fedoraproject.org/rpms/x)."),
                 )
             },
+            // Refused at apply by gh-aw's handler, not by `check`: the
+            // comment of tracker's run 38950333437 (#963).
+            Case {
+                want: Some(
+                    "request 1 (add_comment): E008: Comment contains 58 links, maximum is 50.",
+                ),
+                ..case(
+                    "a comment over the handler's limit of links",
+                    "",
+                    json!({"type": "add_comment", "body": (0..58)
+                        .map(|n| format!("- https://example.com/{n}\n"))
+                        .collect::<String>()})
+                    .to_string(),
+                )
+            },
+            // Within it by the links gh-aw's footer adds.
+            case(
+                "a comment at the handler's limit of links",
+                "",
+                json!({"type": "add_comment", "body": "https://example.com/x ".repeat(46)})
+                    .to_string(),
+            ),
         ];
         for case in cases {
             let (dir, run) = home(pull_requests());

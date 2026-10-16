@@ -732,6 +732,14 @@ jobs:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
+            // The footer names the workflow twice; handback check allows for
+            // a name this long (safe-outputs/validation.mjs), so a longer
+            // caller's is cut rather than push a comment over E006.
+            const MAX_WORKFLOW_NAME = 100;
+            const workflowName = process.env.GH_AW_WORKFLOW_NAME;
+            if (workflowName.length > MAX_WORKFLOW_NAME) {
+              process.env.GH_AW_WORKFLOW_NAME = `${workflowName.slice(0, MAX_WORKFLOW_NAME - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+            }
             // Issues may be opened up to the run's create_issue count, by any handler;
             // one is counted when it is made, so a request gh-aw retries counts once.
             let issues = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).create_issue?.max ?? 0;
