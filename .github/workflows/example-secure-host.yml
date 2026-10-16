@@ -72,7 +72,12 @@ jobs:
           SANDBOX_HOME: ${{ steps.host.outputs.sandbox-home }}
         run: |
           agentic-job sandbox exec -- cat report.txt > "$RUNNER_TEMP/report.txt"
-          grep -x OK "$RUNNER_TEMP/report.txt"
+          # unittest ends on `OK`, or `OK (skipped=N)`: test_live.py skips
+          # here, where mitmproxy is not installed; the lint job runs it.
+          if ! grep -Eqx 'OK( \(skipped=[0-9]+\))?' "$RUNNER_TEMP/report.txt"; then
+            echo "::error::the egress tests did not end with OK"
+            exit 1
+          fi
           echo "tested as $SANDBOX_USER in $SANDBOX_HOME" | tee -a "$GITHUB_STEP_SUMMARY"
       # A command's exit state is the step's.
       - name: A failure in the sandbox fails the step

@@ -11,7 +11,9 @@
 // through, and tests that); any other difference fails. Its pin is
 // another: the old tree's requirements.txt, which names mitmproxy alone,
 // is requirements.in here, and requirements.txt is generated from it
-// with every dependency and the hashes of its files.
+// with every dependency and the hashes of its files. And the files ADDED
+// since, which the old tree has no counterpart of: #116's ecosystem
+// identifiers, their generator, and the test through a live proxy.
 //
 //   OLD_TREE=... AGENTIC_JOB=.../agentic-job node --test nft.test.mjs
 import assert from "node:assert/strict";
@@ -31,6 +33,7 @@ const AGENTIC_JOB = env("AGENTIC_JOB");
 const EGRESS = join(dirname(fileURLToPath(import.meta.url)), "../../../../egress");
 const PINS = "requirements.txt";
 const PINS_SOURCE = "requirements.in";
+const ADDED = [PINS_SOURCE, "ecosystem_domains.json", "ecosystems.py", "test_live.py"];
 const DELTA = JSON.parse(readFileSync(new URL("egress-delta.json", import.meta.url), "utf8"));
 
 // From the first constant to the end of sandboxRules.
@@ -107,7 +110,7 @@ const withDelta = (text, name) => (DELTA[name] ?? []).reduce((text, { old, new: 
 test("egress/ is the old tree's agent/egress/ plus only the recorded delta", () => {
   const theirs = join(OLD_TREE, "agent/egress");
   const names = readdirSync(theirs).sort();
-  assert.deepEqual(readdirSync(EGRESS).filter((name) => name !== PINS_SOURCE).sort(), names);
+  assert.deepEqual(readdirSync(EGRESS).filter((name) => !ADDED.includes(name)).sort(), names);
   for (const name of Object.keys(DELTA)) assert.ok(names.includes(name), `${name}: delta for no file`);
   for (const name of names.filter((name) => name !== PINS)) {
     const ours = readFileSync(join(EGRESS, name));

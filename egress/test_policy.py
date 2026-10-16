@@ -1,10 +1,15 @@
 """Tests for policy.py, against the real policy.toml:
 python3 -m unittest discover -s agent/egress"""
 
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+import ecosystems
+import policy
 from policy import MAX_ALLOWED_DOMAINS, Policy, WriteRule, glob_regex, normalize_host
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +121,56 @@ class PolicyTest(unittest.TestCase):
                      '[egress]\nmode = "allowlist"\nextra = true', 'egress = []'):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 self.load_text(text)
+
+    def test_ecosystems(self):
+        # (allow, hosts allowed, hosts refused), against gh-aw's groups as
+        # ecosystem_domains.json has them
+        cases = [
+            ('["github"]', ["github.com", "api.github.com", "raw.githubusercontent.com", "githubusercontent.com"],
+             ["example.com", "pypi.org", "github.com.attacker.test"]),
+            ('["python"]', ["pypi.org", "files.pythonhosted.org", "pythonhosted.org"], ["github.com"]),
+            ('["node"]', ["registry.npmjs.org"], ["pypi.org"]),
+            ('["containers"]', ["ghcr.io", "registry-1.docker.io", "auth.docker.io"], ["docker.example"]),
+            ('["github", "example.com"]', ["github.com", "a.example.com"], ["pypi.org"]),
+            # the bound counts what identifiers expand to
+            (repr(["a.example"] * (MAX_ALLOWED_DOMAINS - 13) + ["github"]), ["github.com"], []),
+        ]
+        for allow, allowed, refused in cases:
+            with self.subTest(allow=allow[:60]):
+                policy = self.load_text('[egress]\nmode = "allowlist"\nallow = ' + allow)
+                for host in allowed:
+                    self.assertTrue(policy.connect(host).allowed, host)
+                for host in refused:
+                    self.assertFalse(policy.connect(host).allowed, host)
+        for allow in ['["nosuch"]', '["GitHub"]', '[""]', '["localhost"]',
+                      # gh-aw's loopback names and IP literals fail as written-out entries would
+                      '["local"]',
+                      repr(["a.example"] * (MAX_ALLOWED_DOMAINS - 12) + ["github"]),
+                      '["java", "java", "java", "java", "java", "java", "java", "java"]']:
+            with self.subTest(allow=allow[:60]), self.assertRaises(ValueError):
+                self.load_text('[egress]\nmode = "allowlist"\nallow = ' + allow)
+
+    def test_ecosystem_wildcards(self):
+        # Only a leading '*.' is gh-aw's subdomain wildcard; anything else
+        # with '*' refuses the policy.
+        for host, want in [("*.example.com", "example.com"), ("example.com", "example.com"),
+                           ("*.*.example.com", None), ("a.*.example.com", None), ("*", None),
+                           ("*example.com", None), ("example.*", None), ("https://example.com", None)]:
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp, "ecosystem_domains.json")
+                data.write_text(json.dumps({"ecosystems": {"test": [host]}}))
+                with mock.patch.object(policy, "ECOSYSTEMS_FILE", data):
+                    if want is None:
+                        with self.assertRaises(ValueError):
+                            self.load_text('[egress]\nmode = "allowlist"\nallow = ["test"]')
+                    else:
+                        self.assertEqual(self.load_text('[egress]\nmode = "allowlist"\nallow = ["test"]').allowlist,
+                                         frozenset({want}))
+
+    def test_ecosystems_file_matches_its_hash(self):
+        data = json.loads(policy.ECOSYSTEMS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(ecosystems.digest(data["ecosystems"]), data["sha256"])
+        self.assertIn(data["commit"], data["source"])
 
     def test_reasons(self):
         self.assertEqual(self.policy.request(method="GET", host="a.org", path="/").reason, "read")

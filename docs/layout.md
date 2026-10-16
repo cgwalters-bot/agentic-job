@@ -83,7 +83,9 @@ lists the files to change, the adapter contract and the security tests.
 `secure-host/` holds the standalone action, hosted configuration, release
 pin and binary-fetch script. `egress/` holds the mitmproxy addon, policy,
 hashed dependencies and Python tests. The runtime Python files, default
-policy and requirements file are embedded in the binary; the tests are not.
+policy, ecosystem identifiers and requirements file are embedded in the
+binary; the tests are not. Regenerate the identifiers with
+`python3 egress/ecosystems.py GH_AW_CHECKOUT` when changing gh-aw's pin.
 `skills/` holds the agents' [skills](skills.md) and subagents, also
 embedded.
 

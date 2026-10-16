@@ -1,7 +1,8 @@
 """The egress policy for runner-sandbox (scripts/egress-proxy.mjs).
 
 Reads default to open: GET, HEAD and OPTIONS without a body go to any host not on
-the threat feed. The optional [egress] allowlist gates all destinations.
+the threat feed. The optional [egress] allowlist gates all destinations;
+its entries are domains, or gh-aw's ecosystem identifiers for groups of them.
 Anything else (POST, PUT, PATCH, DELETE, a WebSocket, a
 read with a body) is a write, allowed only to the endpoints in policy.toml.
 The host is the one the connection really goes to; a Host header or TLS
@@ -11,6 +12,7 @@ applies it to the proxy's flows.
 """
 
 import ipaddress
+import json
 import re
 import tomllib
 from dataclasses import dataclass
@@ -24,6 +26,25 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE", WEBSOCKET})
 MAX_ALLOWED_DOMAINS = 256
 
 
+# gh-aw's ecosystem identifiers and their hosts, derived by ecosystems.py.
+ECOSYSTEMS_FILE = Path(__file__).with_name("ecosystem_domains.json")
+
+
+def ecosystem_hosts(name: str) -> list:
+    """The hosts gh-aw's ecosystem identifier NAME stands for, each checked
+    afterwards like an entry written out. gh-aw writes some as '*.x', for
+    the subdomains of x; an entry here already covers x and all of its
+    subdomains, so '*.x' becomes x, which adds only x itself, a name of the
+    same owner. Any other '*' is left alone, and refuses the policy."""
+    with ECOSYSTEMS_FILE.open(encoding="utf-8") as f:
+        data = json.load(f)
+    ecosystems = data.get("ecosystems") if isinstance(data, dict) else None
+    hosts = ecosystems.get(name) if isinstance(ecosystems, dict) else None
+    if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
+        raise ValueError(f"[egress] allow: {name!r} is neither a domain nor a known ecosystem identifier")
+    return [h.removeprefix("*.") for h in hosts]
+
+
 def parse_allowlist(data: dict) -> frozenset | None:
     """An explicit mode avoids silently ignoring a caller's intended restriction."""
     if not isinstance(data, dict) or set(data) - {"mode", "allow"}:
@@ -35,12 +56,24 @@ def parse_allowlist(data: dict) -> frozenset | None:
         if "allow" in data:
             raise ValueError("[egress] allow requires mode = allowlist")
         return None
-    domains = data.get("allow", [])
-    if not isinstance(domains, list) or len(domains) > MAX_ALLOWED_DOMAINS:
+    entries = data.get("allow", [])
+    if not isinstance(entries, list) or len(entries) > MAX_ALLOWED_DOMAINS:
         raise ValueError(f"[egress] allow must be a list of at most {MAX_ALLOWED_DOMAINS} domains")
+    domains = []
+    for entry in entries:
+        if not isinstance(entry, str) or len(entry) > 253:
+            raise ValueError("[egress] allow entries must be DNS domain names")
+        # A domain has two labels at least: an entry without a dot can only
+        # be an ecosystem identifier.
+        domains.extend(ecosystem_hosts(entry) if "." not in entry else [entry])
+    # What identifiers expand to counts too, so naming a few cannot make
+    # the list longer than one written out could be.
+    if len(domains) > MAX_ALLOWED_DOMAINS:
+        raise ValueError(f"[egress] allow names {len(domains)} domains with its ecosystems, "
+                         f"more than {MAX_ALLOWED_DOMAINS}")
     result = set()
     for domain in domains:
-        if not isinstance(domain, str) or len(domain) > 253:
+        if len(domain) > 253:
             raise ValueError("[egress] allow entries must be DNS domain names")
         # One terminal dot names the root; refuse more rather than guess what
         # a malformed entry meant.

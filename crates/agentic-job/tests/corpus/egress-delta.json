@@ -101,6 +101,101 @@
         "",
         "    def test_reasons(self):"
       ]
+    },
+    {
+      "old": [
+        "",
+        "import os"
+      ],
+      "new": [
+        "",
+        "import json",
+        "import os"
+      ]
+    },
+    {
+      "old": [
+        "import unittest",
+        ""
+      ],
+      "new": [
+        "import unittest",
+        "from pathlib import Path",
+        "from unittest import mock",
+        ""
+      ]
+    },
+    {
+      "old": [
+        "",
+        "from policy import MAX_ALLOWED_DOMAINS, Policy, WriteRule, glob_regex, normalize_host"
+      ],
+      "new": [
+        "",
+        "import ecosystems",
+        "import policy",
+        "from policy import MAX_ALLOWED_DOMAINS, Policy, WriteRule, glob_regex, normalize_host"
+      ]
+    },
+    {
+      "old": [
+        "",
+        "    def test_reasons(self):"
+      ],
+      "new": [
+        "",
+        "    def test_ecosystems(self):",
+        "        # (allow, hosts allowed, hosts refused), against gh-aw's groups as",
+        "        # ecosystem_domains.json has them",
+        "        cases = [",
+        "            ('[\"github\"]', [\"github.com\", \"api.github.com\", \"raw.githubusercontent.com\", \"githubusercontent.com\"],",
+        "             [\"example.com\", \"pypi.org\", \"github.com.attacker.test\"]),",
+        "            ('[\"python\"]', [\"pypi.org\", \"files.pythonhosted.org\", \"pythonhosted.org\"], [\"github.com\"]),",
+        "            ('[\"node\"]', [\"registry.npmjs.org\"], [\"pypi.org\"]),",
+        "            ('[\"containers\"]', [\"ghcr.io\", \"registry-1.docker.io\", \"auth.docker.io\"], [\"docker.example\"]),",
+        "            ('[\"github\", \"example.com\"]', [\"github.com\", \"a.example.com\"], [\"pypi.org\"]),",
+        "            # the bound counts what identifiers expand to",
+        "            (repr([\"a.example\"] * (MAX_ALLOWED_DOMAINS - 13) + [\"github\"]), [\"github.com\"], []),",
+        "        ]",
+        "        for allow, allowed, refused in cases:",
+        "            with self.subTest(allow=allow[:60]):",
+        "                policy = self.load_text('[egress]\\nmode = \"allowlist\"\\nallow = ' + allow)",
+        "                for host in allowed:",
+        "                    self.assertTrue(policy.connect(host).allowed, host)",
+        "                for host in refused:",
+        "                    self.assertFalse(policy.connect(host).allowed, host)",
+        "        for allow in ['[\"nosuch\"]', '[\"GitHub\"]', '[\"\"]', '[\"localhost\"]',",
+        "                      # gh-aw's loopback names and IP literals fail as written-out entries would",
+        "                      '[\"local\"]',",
+        "                      repr([\"a.example\"] * (MAX_ALLOWED_DOMAINS - 12) + [\"github\"]),",
+        "                      '[\"java\", \"java\", \"java\", \"java\", \"java\", \"java\", \"java\", \"java\"]']:",
+        "            with self.subTest(allow=allow[:60]), self.assertRaises(ValueError):",
+        "                self.load_text('[egress]\\nmode = \"allowlist\"\\nallow = ' + allow)",
+        "",
+        "    def test_ecosystem_wildcards(self):",
+        "        # Only a leading '*.' is gh-aw's subdomain wildcard; anything else",
+        "        # with '*' refuses the policy.",
+        "        for host, want in [(\"*.example.com\", \"example.com\"), (\"example.com\", \"example.com\"),",
+        "                           (\"*.*.example.com\", None), (\"a.*.example.com\", None), (\"*\", None),",
+        "                           (\"*example.com\", None), (\"example.*\", None), (\"https://example.com\", None)]:",
+        "            with self.subTest(host=host), tempfile.TemporaryDirectory() as tmp:",
+        "                data = Path(tmp, \"ecosystem_domains.json\")",
+        "                data.write_text(json.dumps({\"ecosystems\": {\"test\": [host]}}))",
+        "                with mock.patch.object(policy, \"ECOSYSTEMS_FILE\", data):",
+        "                    if want is None:",
+        "                        with self.assertRaises(ValueError):",
+        "                            self.load_text('[egress]\\nmode = \"allowlist\"\\nallow = [\"test\"]')",
+        "                    else:",
+        "                        self.assertEqual(self.load_text('[egress]\\nmode = \"allowlist\"\\nallow = [\"test\"]').allowlist,",
+        "                                         frozenset({want}))",
+        "",
+        "    def test_ecosystems_file_matches_its_hash(self):",
+        "        data = json.loads(policy.ECOSYSTEMS_FILE.read_text(encoding=\"utf-8\"))",
+        "        self.assertEqual(ecosystems.digest(data[\"ecosystems\"]), data[\"sha256\"])",
+        "        self.assertIn(data[\"commit\"], data[\"source\"])",
+        "",
+        "    def test_reasons(self):"
+      ]
     }
   ],
   "policy.py": [
@@ -253,6 +348,95 @@
         "        if not self.domain_allowed(host):",
         "            return Decision(False, \"host is not in the domain allowlist\")",
         "        if host_header and normalize_host(host_header) != host:"
+      ]
+    },
+    {
+      "old": [
+        "the threat feed. The optional [egress] allowlist gates all destinations."
+      ],
+      "new": [
+        "the threat feed. The optional [egress] allowlist gates all destinations;",
+        "its entries are domains, or gh-aw's ecosystem identifiers for groups of them."
+      ]
+    },
+    {
+      "old": [
+        "import ipaddress",
+        "import re"
+      ],
+      "new": [
+        "import ipaddress",
+        "import json",
+        "import re"
+      ]
+    },
+    {
+      "old": [
+        "",
+        "def parse_allowlist(data: dict) -> frozenset | None:"
+      ],
+      "new": [
+        "",
+        "# gh-aw's ecosystem identifiers and their hosts, derived by ecosystems.py.",
+        "ECOSYSTEMS_FILE = Path(__file__).with_name(\"ecosystem_domains.json\")",
+        "",
+        "",
+        "def ecosystem_hosts(name: str) -> list:",
+        "    \"\"\"The hosts gh-aw's ecosystem identifier NAME stands for, each checked",
+        "    afterwards like an entry written out. gh-aw writes some as '*.x', for",
+        "    the subdomains of x; an entry here already covers x and all of its",
+        "    subdomains, so '*.x' becomes x, which adds only x itself, a name of the",
+        "    same owner. Any other '*' is left alone, and refuses the policy.\"\"\"",
+        "    with ECOSYSTEMS_FILE.open(encoding=\"utf-8\") as f:",
+        "        data = json.load(f)",
+        "    ecosystems = data.get(\"ecosystems\") if isinstance(data, dict) else None",
+        "    hosts = ecosystems.get(name) if isinstance(ecosystems, dict) else None",
+        "    if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):",
+        "        raise ValueError(f\"[egress] allow: {name!r} is neither a domain nor a known ecosystem identifier\")",
+        "    return [h.removeprefix(\"*.\") for h in hosts]",
+        "",
+        "",
+        "def parse_allowlist(data: dict) -> frozenset | None:"
+      ]
+    },
+    {
+      "old": [
+        "    domains = data.get(\"allow\", [])",
+        "    if not isinstance(domains, list) or len(domains) > MAX_ALLOWED_DOMAINS:"
+      ],
+      "new": [
+        "    entries = data.get(\"allow\", [])",
+        "    if not isinstance(entries, list) or len(entries) > MAX_ALLOWED_DOMAINS:"
+      ]
+    },
+    {
+      "old": [
+        "        raise ValueError(f\"[egress] allow must be a list of at most {MAX_ALLOWED_DOMAINS} domains\")",
+        "    result = set()"
+      ],
+      "new": [
+        "        raise ValueError(f\"[egress] allow must be a list of at most {MAX_ALLOWED_DOMAINS} domains\")",
+        "    domains = []",
+        "    for entry in entries:",
+        "        if not isinstance(entry, str) or len(entry) > 253:",
+        "            raise ValueError(\"[egress] allow entries must be DNS domain names\")",
+        "        # A domain has two labels at least: an entry without a dot can only",
+        "        # be an ecosystem identifier.",
+        "        domains.extend(ecosystem_hosts(entry) if \".\" not in entry else [entry])",
+        "    # What identifiers expand to counts too, so naming a few cannot make",
+        "    # the list longer than one written out could be.",
+        "    if len(domains) > MAX_ALLOWED_DOMAINS:",
+        "        raise ValueError(f\"[egress] allow names {len(domains)} domains with its ecosystems, \"",
+        "                         f\"more than {MAX_ALLOWED_DOMAINS}\")",
+        "    result = set()"
+      ]
+    },
+    {
+      "old": [
+        "        if not isinstance(domain, str) or len(domain) > 253:"
+      ],
+      "new": [
+        "        if len(domain) > 253:"
       ]
     }
   ]

@@ -171,6 +171,14 @@ jobs:
           sed 's/--hash=sha256:..../--hash=sha256:0000/' egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
           if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
           grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
+      # The proxy as those wheels install it, offline and by the same
+      # hashes, with the addon in it: on loopback only, with no network.
+      - name: The addon refuses what the allowlist does not name, in a live proxy
+        run: |
+          python3 -m venv "$RUNNER_TEMP/proxy"
+          "$RUNNER_TEMP/proxy/bin/pip" install --quiet --disable-pip-version-check --no-index --require-hashes \
+            --only-binary :all: --find-links "$RUNNER_TEMP/wheels" -r egress/requirements.txt
+          "$RUNNER_TEMP/proxy/bin/python" -m unittest discover -s egress -p test_live.py -v
       # The forge's shared workflow check, once the WORKFLOW_LINT repository
       # variable names it (Justfile). Before gh-aw's workflows are checked
       # out below, where zizmor would find them. Read-only token, no secret.
@@ -186,17 +194,21 @@ jobs:
         env:
           WORKFLOW_LINT: ${{ vars.WORKFLOW_LINT }}
         run: just workflow-lint "$WORKFLOW_LINT"
-      # validation.json is generated from gh-aw's compiled workflows, so a
-      # change of the pin has to regenerate it. The commit is the one
+      # validation.json is generated from gh-aw's compiled workflows, and
+      # the egress proxy's ecosystem identifiers from its domain data, so a
+      # change of the pin has to regenerate both. The commit is the one
       # safe-outputs-probe.yml takes gh-aw's setup action at.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           ref: 462ed682857c4ab64d40f2c85e3738fa27834839
           path: gh-aw
-          sparse-checkout: .github/workflows
+          sparse-checkout: |
+            .github/workflows
+            pkg/workflow/data
           persist-credentials: false
       - run: node safe-outputs/validation.mjs gh-aw --check
+      - run: python3 -B egress/ecosystems.py gh-aw --check
 
   # The runner image's stable toolchain: nothing to download, and the
   # workspace's rust-version says what the code needs.

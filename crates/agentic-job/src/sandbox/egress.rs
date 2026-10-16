@@ -34,6 +34,9 @@ const POLICY_PY: &str = include_str!("../../../../egress/policy.py");
 
 const POLICY_TOML: &str = include_str!("../../../../egress/policy.toml");
 
+/// gh-aw's ecosystem identifiers, which policy.py reads beside itself.
+const ECOSYSTEMS: &str = include_str!("../../../../egress/ecosystem_domains.json");
+
 /// mitmproxy and everything it depends on, each at one version and with
 /// the hashes of its files: generated from `egress/requirements.in`.
 const REQUIREMENTS: &str = include_str!("../../../../egress/requirements.txt");
@@ -226,6 +229,7 @@ fn install(policy: Option<&Path>) -> Result<()> {
     for (name, content) in [
         ("addon.py", ADDON),
         ("policy.py", POLICY_PY),
+        ("ecosystem_domains.json", ECOSYSTEMS),
         ("policy.toml", rules.as_str()),
     ] {
         write(&format!("{POLICY_DIR}/{name}"), content)?;
@@ -679,5 +683,6 @@ mod tests {
         assert!(ADDON.contains("X-Egress-Denied"));
         assert!(POLICY_PY.contains("class Policy"));
         assert!(POLICY_TOML.contains("git-upload-pack"));
+        assert!(ECOSYSTEMS.contains("\"ecosystems\""));
     }
 }

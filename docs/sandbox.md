@@ -336,7 +336,22 @@ with more than one trailing dot is refused rather than normalized. Use ASCII
 DNS names (punycode for international names), not URLs, ports, wildcards or IP
 literals. IP-literal destinations are refused in this mode. At most 256 entries
 of at most 253 characters are accepted; an empty list denies every destination.
-There are no implicit hosts or ecosystem bundles.
+
+An entry without a dot names one of [gh-aw](https://github.github.com/gh-aw/)'s
+ecosystem identifiers, such as `github`, `containers`, `node` or `python`,
+and stands for its group of hosts, from gh-aw's
+`pkg/workflow/data/ecosystem_domains.json` at the commit CI pins gh-aw to.
+[`ecosystem_domains.json`](../egress/ecosystem_domains.json) records that
+commit and the file's hash; CI regenerates it with
+[`ecosystems.py`](../egress/ecosystems.py) and fails on any difference.
+An unknown identifier is refused, as are gh-aw's compound identifiers, which
+are not in that file. Each host of a group is then checked like an entry
+written out, and counts against the 256: gh-aw's `*.x` becomes `x`, which
+already covers the subdomains and adds only `x` itself, of the same owner;
+any other wildcard, loopback name or IP literal in a group (`local` has
+them) refuses the policy. Nothing is allowed that the policy does not name.
+Groups include shared hosting domains, such as `githubusercontent.com` in
+`github`, with the risk described below.
 
 Omitting the table, or setting `mode = "reads-anywhere"` without `allow`, keeps
 the reads-anywhere default. A [private run](private-repositories.md) requires
