@@ -189,7 +189,7 @@ on:
         type: string
         default: ""
       npm:
-        description: The agent's programs, each NAME@VERSION with an exact version, installed with npm
+        description: The agent's programs, each NAME@VERSION with an exact version, installed with npm in place of the built-in agent's pinned tarballs
         type: string
         default: ""
       setup:
@@ -779,7 +779,11 @@ jobs:
           SESSION: ${{ inputs.session && 'true' || '' }}
           IDLE_MINUTES: ${{ inputs.idle-minutes }}
           PACKAGES: ${{ inputs.packages }}
-          NPM: ${{ inputs.npm || (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') }}
+          NPM: ${{ inputs.npm }}
+          # The built-in agents come from the binary's pinned tarballs
+          # (crates/agentic-job/src/sandbox/setup/agents.toml), without
+          # npm or install scripts; an `npm` input replaces them.
+          AGENTS: ${{ inputs.npm == '' && (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') || '' }}
           SETUP: ${{ inputs.setup }}
           REPO: ${{ inputs.repo }}
         run: |
@@ -793,7 +797,8 @@ jobs:
             --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \
             --integer limits.max-tasks="$MAX_TASKS" --integer limits.budget="$BUDGET" \
             --boolean session.listen="$SESSION" --integer session.idle-minutes="$IDLE_MINUTES" \
-            --list setup.packages="$PACKAGES" --list setup.npm="$NPM" --string setup.script="$SETUP" \
+            --list setup.packages="$PACKAGES" --list setup.npm="$NPM" \
+            --list setup.agents="$AGENTS" --string setup.script="$SETUP" \
             > "$JOB_DIR/config.toml"
           cat "$JOB_DIR/config.toml"
       # What the agent job's actions read of this call, so that its job

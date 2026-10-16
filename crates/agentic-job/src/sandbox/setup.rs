@@ -35,6 +35,7 @@ use crate::run::agent::{self, Kind};
 use crate::run::inference::Endpoint;
 use crate::session::bridge::{self, Listen};
 
+pub mod agents;
 pub mod resolved;
 mod tools;
 
@@ -345,6 +346,9 @@ fn setup(args: &Args) -> Result<Exit> {
         let runner = runner_user(&config)?;
         // Every refusal comes before the first change.
         let existing = preflight(&config, &runner)?;
+        if !config.setup.agents.is_empty() {
+            agents::check_platform()?;
+        }
         if config.sandbox.close_resolved {
             resolved::bus_policy(&runner.name)?;
         }
@@ -437,6 +441,20 @@ fn setup(args: &Args) -> Result<Exit> {
     timed_setup("packages", || install_packages(&config.setup.packages))?;
     timed_setup("privileged-binary-allowlist", privileged_binaries::check)?;
     timed_setup("npm", || install_npm(&config.setup.npm))?;
+    timed_setup("agents", || {
+        for spec in &config.setup.agents {
+            agents::check_node(spec)?;
+            let dir = agents::install(
+                spec,
+                Path::new(agents::ROOT),
+                Path::new(agents::BIN_DIR),
+                &agents::fetch,
+            )?;
+            // What /usr/local/bin now runs: no one else may replace it.
+            make_roots_alone(&dir)?;
+        }
+        Ok(())
+    })?;
     if needs_vibe {
         timed_setup("vibe", install_vibe)?;
     }

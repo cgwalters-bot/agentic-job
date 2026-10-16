@@ -776,9 +776,14 @@ cannot reach a private proxy.
 - **Agent programs and limits:** `agent: claude` defaults to
   `@agentclientprotocol/claude-agent-acp@0.88.0` (the ACP adapter, which brings
   the Claude Agent SDK); `agent: opencode` defaults to `opencode-ai@1.18.35`.
-  Override `npm` with exact `NAME@VERSION` pins if needed, and choose
-  `model`, `max-requests`, `budget` and `timeout` with the operator.
-  These package pins do not pin every transitive dependency.
+  Both come from tarballs pinned in the binary, every dependency included,
+  installed without npm or install scripts (`setup.agents`, see
+  [the sandbox](sandbox.md#what-sandbox-setup-does)), and are for x86-64
+  Linux with glibc: setup refuses another OS or CPU before it changes
+  anything, but does not detect musl. Set `npm` to exact
+  `NAME@VERSION` pins to install with npm instead; those do not pin
+  their transitive dependencies. Choose `model`, `max-requests`,
+  `budget` and `timeout` with the operator.
 
   `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
   virtual environment before hardening; it does not use the `npm` input.

@@ -65,7 +65,7 @@ class PreflightTests(unittest.TestCase):
             env = dict.fromkeys([
                 "CONFIG", "MODEL", "CONFIG_REPO", "CONFIG_REF", "CONFIG_PATH",
                 "SKILLS", "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "PROVIDER", "TIMEOUT",
-                "MAX_REQUESTS", "MAX_TASKS", "BUDGET", "PACKAGES", "NPM", "SETUP",
+                "MAX_REQUESTS", "MAX_TASKS", "BUDGET", "PACKAGES", "NPM", "AGENTS", "SETUP",
                 "SESSION", "IDLE_MINUTES",
             ], "")
             env.update(JOB_DIR=str(root), PATH="/usr/bin:/bin", AGENT="fake", REPO="example/repo")

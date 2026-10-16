@@ -477,6 +477,10 @@ pub struct Setup {
     /// The agent programs, each `NAME@VERSION` with an exact version,
     /// installed for every user with `npm install -g`.
     pub npm: Vec<String>,
+    /// Agent programs from the npm tarballs pinned in this binary, each
+    /// `NAME@VERSION` as pinned, installed without npm or their scripts
+    /// (`sandbox::setup::agents`).
+    pub agents: Vec<String>,
     /// Run as the sandbox user, never as root: for toolchains.
     pub script: Option<PathBuf>,
     /// Trusted caller-selected tools, installed before network lockdown.
@@ -606,6 +610,16 @@ impl Setup {
                 "setup.npm: {spec:?} is not NAME@VERSION with an exact version"
             );
         }
+        if !self.agents.is_empty() {
+            let pinned = crate::sandbox::setup::agents::pinned()?;
+            for spec in &self.agents {
+                ensure!(
+                    pinned.contains(spec),
+                    "setup.agents: {spec:?} is not a pinned agent (pinned: {})",
+                    pinned.join(", ")
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -712,6 +726,7 @@ mod tests {
             [setup]
             packages = ["just", "gcc-c++"]
             npm = ["opencode-ai@1.2.3", "@agentclientprotocol/claude-agent-acp@0.4.0-beta.1"]
+            agents = ["opencode-ai@1.18.35"]
         "#;
         let config = Config::parse(good).unwrap();
         assert!(config.sandbox.check.before_agent);
@@ -742,6 +757,8 @@ mod tests {
             "[setup]\nnpm = [\"opencode-ai@latest\"]",
             "[setup]\nnpm = [\"opencode-ai@^1.2.3\"]",
             "[setup]\nnpm = [\"@scope/name\"]",
+            "[setup]\nagents = [\"opencode-ai@1.18.34\"]",
+            "[setup]\nagents = [\"opencode-linux-x64@1.18.35\"]",
         ];
         for text in bad {
             let config = Config::parse(text).unwrap_or_else(|err| panic!("{text:?}: {err:#}"));

@@ -198,7 +198,7 @@ on:
         type: string
         default: ""
       npm:
-        description: The agent's programs, each NAME@VERSION with an exact version, installed with npm
+        description: The agent's programs, each NAME@VERSION with an exact version, installed with npm in place of the built-in agent's pinned tarballs
         type: string
         default: ""
       setup:

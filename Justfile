@@ -65,7 +65,7 @@ workflow-lint source:
 
 # The real Claude Code ACP adapter, at the version the reusable workflow
 # installs, against a loopback stub: it must offer its own Read, Edit and
-# Write (tests/claude.rs). Needs node, npm and the registry; no model key.
+# Write (tests/claude.rs). Needs node and the registry; no npm, no model key.
 # A host with Claude Code's managed settings fails it: they would send
 # the requests elsewhere.
 claude-acp-test:
@@ -74,6 +74,22 @@ claude-acp-test:
     spec=$(grep -o -m1 '@agentclientprotocol/claude-agent-acp@[0-9][0-9.]*' .github/workflows/policy.yml)
     prefix=$(mktemp -d)
     trap 'rm -rf "$prefix"' EXIT
-    npm install --prefix "$prefix" --no-audit --no-fund --no-save -- "$spec"
-    AGENTIC_JOB_TEST_CLAUDE_ACP="$prefix/node_modules/@agentclientprotocol/claude-agent-acp" \
+    # As setup installs it: from the pins, without npm.
+    installed=$(cargo run --quiet --locked --bin pinned-agents -- install "$prefix" "$spec")
+    AGENTIC_JOB_TEST_CLAUDE_ACP="$installed/node_modules/@agentclientprotocol/claude-agent-acp" \
         cargo test --locked --test claude -- --nocapture
+
+# Prints SPEC's entry for crates/agentic-job/src/sandbox/setup/agents.toml,
+# from npm's resolution of PACKAGE for the runners' platform, without its
+# scripts; each LINK is NAME=PATH, a program and what it runs. PACKAGE is
+# SPEC unless SPEC's install script picks a platform package: then that.
+# Needs npm and the registry; review the entry before replacing the old.
+agents-lock spec package +links:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    echo '{}' > "$dir/package.json"
+    npm install --prefix "$dir" --package-lock-only --ignore-scripts --no-audit --no-fund \
+        --os=linux --cpu=x64 --libc=glibc -- "$2" >&2
+    cargo run --quiet --locked --bin pinned-agents -- lock "$1" "${@:3}" < "$dir/package-lock.json"

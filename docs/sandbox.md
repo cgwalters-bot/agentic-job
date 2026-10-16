@@ -54,7 +54,7 @@ this repository boots a VM as the sandbox user.
 
 It runs as root, once, from a configuration with three tables that
 concern it: `[sandbox]` (and `[sandbox.check]`), `[egress]` (`proxy`,
-`direct`, `policy`) and `[setup]` (`packages`, `npm`, `script`). In
+`direct`, `policy`) and `[setup]` (`packages`, `npm`, `agents`, `script`). In
 order, it:
 
 - creates the user (`runner-sandbox` unless named), with a home, a group
@@ -72,6 +72,12 @@ order, it:
   user but root and the runner's ([below](#network));
 - installs `setup.packages` (dnf or apt) and `setup.npm`, as root and on
   the open network; npm versions must be exact;
+- installs `setup.agents` from npm tarballs pinned in the binary
+  (`src/sandbox/setup/agents.toml`): every package of each agent by its
+  SHA-512 integrity, unpacked by `agentic-job` into
+  `/opt/agentic-job/agents` with no npm and no install script, its
+  programs linked in `/usr/local/bin`; a tarball that does not match its
+  pin is refused, and the pins are for Linux on x86-64 with glibc;
 - denies the sandbox user sudo, every polkit action, cron, at and
   lingering;
 - if configured, runs the caller-pinned `setup.tools` installer as that
@@ -393,7 +399,8 @@ show, and what was tried by hand elsewhere, is
 - The agent can read whatever is world-readable on the host, and connect
   to whatever listens for every local user unless the caller stops it.
 - `setup.npm` runs the packages' install scripts as root, which is why
-  the list is the caller's and never the task's.
+  the list is the caller's and never the task's. `setup.agents` runs
+  none, and installs only what a release of this repository reviewed.
 - Setup needs Python's `venv`, a package index, `curl` and `nft` on the
   machine. It has run on `ubuntu-26.04` in CI; other images are the
   caller's to try.
