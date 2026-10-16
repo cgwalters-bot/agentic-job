@@ -176,6 +176,32 @@ impl RunResult {
             .with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
+
+    /// The result of a session that [`run`] did not return one for, but
+    /// failed with ERROR: a failure that says why, with no command or
+    /// hand-back of its own.
+    pub fn internal_error(
+        agent: String,
+        limits: Limits,
+        error: &anyhow::Error,
+        started: chrono::DateTime<chrono::Utc>,
+        finished: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            schema: RESULT_SCHEMA.to_owned(),
+            agent,
+            command: Vec::new(),
+            result: Outcome::Failure,
+            stop_reason: None,
+            message: Some(digest::cut(&format!("internal error: {error:#}"))),
+            started_at: rfc3339(started),
+            finished_at: rfc3339(finished),
+            duration_s: (finished - started).num_seconds().max(0).unsigned_abs(),
+            limits,
+            handed_back: false,
+            reminded: false,
+        }
+    }
 }
 
 /// What the budget asks of the session short of stopping it.

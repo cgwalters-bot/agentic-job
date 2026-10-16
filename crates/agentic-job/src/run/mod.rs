@@ -188,6 +188,11 @@ fn session_cwd(kind: Kind, review: bool, base: &Path, head: &Path) -> PathBuf {
 /// A session that ended, and what is needed to take its results.
 struct Session {
     result: Box<RunResult>,
+    /// The session failed instead of returning RESULT, which stands in
+    /// for one (as in the old tree): the run is still summed up, as a
+    /// failure, but hands nothing back, since what the agent left was not
+    /// known to be finished.
+    internal_error: bool,
     checkout: Checkout,
     model: Option<String>,
     /// What replaced the secrets in the session's log, and its count.
@@ -806,20 +811,26 @@ impl Plan {
             sandbox: &self.sandbox,
             stopped,
         };
-        let change = handback::collect(&handback::Request {
-            runner: &runner,
-            home: &self.sandbox.home,
-            checkout: &session.checkout,
-            policy: &self.policy,
-            commit: &self.commit,
-            run_id: &self.run_id,
-            harness: Some(session.result.as_ref()),
-            run_dir: &staging.run(),
-            safe_outputs: &staging.safe_outputs(),
-        })?;
-        if let Some(why) = &change.dropped {
-            eprintln!("warning: no change handed back: {}", enter::one_line(why));
-        }
+        let change = if session.internal_error {
+            eprintln!("warning: no change handed back: the session ended in an internal error");
+            handback::Change::default()
+        } else {
+            let change = handback::collect(&handback::Request {
+                runner: &runner,
+                home: &self.sandbox.home,
+                checkout: &session.checkout,
+                policy: &self.policy,
+                commit: &self.commit,
+                run_id: &self.run_id,
+                harness: Some(session.result.as_ref()),
+                run_dir: &staging.run(),
+                safe_outputs: &staging.safe_outputs(),
+            })?;
+            if let Some(why) = &change.dropped {
+                eprintln!("warning: no change handed back: {}", enter::one_line(why));
+            }
+            change
+        };
 
         let transcript = staging.transcript();
         for name in [session::ACP_LOG, session::STDERR_LOG, session::RESULT_FILE] {
@@ -831,6 +842,14 @@ impl Plan {
                     return Err(err).with_context(|| format!("copying {}", from.display()));
                 }
             }
+        }
+        // In place of whatever result the failed session wrote, if any,
+        // so that the summary says why it failed. Redacted below with the
+        // rest: the error may quote what the agent wrote.
+        if session.internal_error {
+            let path = transcript.join(session::RESULT_FILE);
+            std::fs::write(&path, serde_json::to_string_pretty(&session.result)? + "\n")
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         // What the agent wrote to its own logs while the session ran.
         let since = session.started.timestamp_millis() as f64 / 1000.0;
@@ -1106,6 +1125,9 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     let prepared = signals.or(&mut preparing).await;
     // A task that has ended must not be waited for again.
     let still_preparing = prepared.is_err();
+    // Why the session failed, for a session that is summed up without
+    // a result of its own: still the run's error once that is done.
+    let mut internal_error = None;
     let stage = match prepared {
         Err(name) => Stage::Interrupted(name),
         Ok(Err(panic)) => Stage::Broken(anyhow::Error::from(panic).context("preparing the run")),
@@ -1118,11 +1140,32 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                 // started; the agent itself is the sandbox user's, below.
                 Ok((options, _counter, redactor)) => {
                     let started = chrono::Utc::now();
+                    let limits = options.limits.clone();
                     match signals.or(session::run(options)).await {
                         Err(name) => Stage::Interrupted(name),
-                        Ok(Err(err)) => Stage::Broken(err),
+                        Ok(Err(err)) => {
+                            let finished = chrono::Utc::now();
+                            let result = RunResult::internal_error(
+                                plan.kind.as_str().to_owned(),
+                                limits,
+                                &err,
+                                started,
+                                finished,
+                            );
+                            internal_error = Some(err);
+                            Stage::Ended(Session {
+                                result: Box::new(result),
+                                internal_error: true,
+                                checkout,
+                                model,
+                                redactor,
+                                started,
+                                finished,
+                            })
+                        }
                         Ok(Ok(result)) => Stage::Ended(Session {
                             result: Box::new(result),
+                            internal_error: false,
                             checkout,
                             model,
                             redactor,
@@ -1140,7 +1183,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     // or the agent.
     shared.stopped.store(true, Ordering::SeqCst);
     let mut reaped = match &stage {
-        Stage::Ended(_) => Ok(()),
+        Stage::Ended(session) if !session.internal_error => Ok(()),
         _ => user.reap().await,
     };
     // A run that is known is ended now, not after waiting for a thread.
@@ -1165,6 +1208,11 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     // checkout for it, as the sandbox user, whose processes are stopped
     // once more afterwards.
     let (stage, published) = match stage {
+        // What may still be writing the session's files has to be gone
+        // before anything reads them.
+        Stage::Ended(session) if session.internal_error && reaped.is_err() => {
+            (Stage::Finished(session.result.result.exit()), None)
+        }
         Stage::Ended(session) => {
             let standing = match &settled {
                 None => Settled::NO_RUN,
@@ -1227,6 +1275,10 @@ async fn supervise(plan: Plan) -> Result<Exit> {
              and nothing of this run may be uploaded"
         );
     }
+    // A signal while its results were taken is what stopped the run.
+    if matches!(stage, Stage::Interrupted(_)) {
+        internal_error = None;
+    }
     let exit = match stage {
         Stage::NotStarted(err) => {
             eprintln!(
@@ -1244,6 +1296,15 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         Stage::Ended(_) => bail!("the session's results were not taken"),
         Stage::Broken(err) => return Err(err),
     };
+    if let Some(err) = internal_error {
+        if let Some(Err(why)) = &published {
+            eprintln!(
+                "error: nothing of this run may be uploaded: {}",
+                enter::one_line(&format!("{why:#}"))
+            );
+        }
+        return Err(err);
+    }
     ensure!(
         !unclean,
         "the run could not be cleaned up after: see the errors above"

@@ -113,6 +113,9 @@ Callers branch on these, so they are part of the interface.
 | 124 | the timeout stopped the agent | |
 
 For 3 and 124, `summary.json` says whether the agent handed back.
+A session that ends in an internal error still exits 2, but its results
+are taken as a failure that hands nothing back, so a run that passes the
+gate leaves a summary saying why.
 
 ## What the binary knows of GitHub
 

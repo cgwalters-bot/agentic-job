@@ -805,6 +805,46 @@ Redacted 1 string(s).
         assert_eq!(s["handed_back"], false);
     }
 
+    /// A session that failed instead of returning a result is summed up
+    /// from the result `run` writes in its place: a failure that says
+    /// why, on one line.
+    #[test]
+    fn a_session_that_ended_in_an_internal_error_says_why() {
+        let started = chrono::Utc::now();
+        let err = anyhow::anyhow!("disk full\nno space").context("writing harness.json");
+        let result = RunResult::internal_error(
+            "fake".into(),
+            Limits::default(),
+            &err,
+            started,
+            started + chrono::Duration::seconds(7),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::session::RESULT_FILE),
+            serde_json::to_string_pretty(&result).unwrap(),
+        )
+        .unwrap();
+        let loaded = RunResult::load(dir.path()).unwrap();
+        let (records, measured) = (initialize(), measured());
+        let s = summarize(&Inputs {
+            records: &records,
+            result: Some(&loaded),
+            measured: &measured,
+            outcome: &json!({}),
+            usage: None,
+        });
+        assert_eq!(s["result"], "failure");
+        assert_eq!(s["handed_back"], false);
+        assert_eq!(s["failures"][0]["kind"], "agent_exit");
+        assert_eq!(
+            s["failures"][0]["message"],
+            "internal error: writing harness.json: disk full no space"
+        );
+        assert_eq!(loaded.duration_s, 7);
+        assert!(markdown(&s).contains("internal error: writing harness.json"));
+    }
+
     #[test]
     fn context_pins_and_paths_reach_both_summaries() {
         let mut measured = measured();

@@ -649,7 +649,7 @@ pub fn check_trailers(trailers: &[String]) -> Result<()> {
 }
 
 /// What the run found of the agent's change.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Change {
     /// The paths that differ from the commit the run started from.
     pub files: Vec<String>,
