@@ -382,17 +382,22 @@ test('E2E callers, concurrency and apt safeguards remain wired', () => {
   const action = fs.readFileSync(path.join(__dirname, '../secure-host/action.yml'), 'utf8');
   const apt = action.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n');
   assert.ok(action.indexOf('- name: Install the binary') < apt && apt < action.indexOf('- name: Write the configuration'));
-  const binary = fs.readFileSync(path.join(__dirname, '../secure-host/binary.mjs'), 'utf8');
-  assert.match(binary, /run\("sudo", \["apt-get", "-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=10", "-o", "Acquire::https::Timeout=10",\s+"install"/);
+  const binary = fs.readFileSync(path.join(__dirname, '../secure-host/binary.sh'), 'utf8');
+  assert.match(binary, /sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 \\\n\s+install /);
 });
 
-// The action's steps before setup are the binary's: Node only fetches it.
+// The action's steps before setup are the binary's, and a shell script
+// fetches it: Node is limited to the GitHub bootstrap. The binary admits the host
+// before it is installed.
 test('the action admits the host, tunes apt and loads the policy with its binary, before setup', () => {
   const action = fs.readFileSync(path.join(__dirname, '../secure-host/action.yml'), 'utf8');
   const steps = action.slice(action.indexOf('  steps:\n'));
-  assert.match(steps, /^  steps:\n(?:    #[^\n]*\n)*    - name: Get the binary\n/);
-  assert.doesNotMatch(steps, /platform\.mjs|apt\.mjs|world-write\.mjs/);
-  const order = ['- name: Install the binary', 'run: agentic-job secure-host supported\n',
+  assert.match(steps, /^  steps:\n(?:    #[^\n]*\n)*    - name: Prepare GitHub CLI\n/);
+  assert.match(steps, /run: node "\$ACTION\/github\.mjs"\n/);
+  assert.doesNotMatch(steps.slice(steps.indexOf('    - name: Get the binary\n')), /\bnode\b|\.mjs/);
+  assert.match(steps, /GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(steps, /bash "\$ACTION\/binary\.sh" get --out "\$RUNNER_TEMP\/secure-host\/bin" "\$@"\n/);
+  const order = ['- name: Prepare GitHub CLI', '- name: Get the binary', '"$BINARY" secure-host supported\n', '- name: Install the binary',
     'run: sudo /usr/local/bin/agentic-job secure-host apt\n', '- name: Write the configuration',
     '- name: Load the world-write policy', 'run: agentic-job sandbox timed setup\n'];
   const at = order.map(text => steps.indexOf(text));
@@ -429,9 +434,11 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.equal(job.split('uses: ./').length, 2);
   assert.equal(job.split('zizmor: ignore').length, 2);
   assert.ok(job.includes(`      - name: The JavaScript action main and post steps are confined\n${local}`));
-  assert.match(job, /binary\.mjs get --build --out "\$RUNNER_TEMP\/secure-host\/bin"/);
+  assert.match(job, /run: bash secure-host\/binary\.sh get --build --out "\$RUNNER_TEMP\/secure-host\/bin"\n/);
   assert.match(job, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o"\n/);
-  assert.ok(job.indexOf('run: agentic-job secure-host supported\n') < job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n'));
+  const supported = job.indexOf('"$RUNNER_TEMP/secure-host/bin/agentic-job" secure-host supported\'\n');
+  assert.ok(supported >= 0 && supported < job.indexOf("- name: \"Install the checkout's binary\""));
+  assert.ok(supported < job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n'));
   assert.ok(job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n') < job.indexOf('- name: Install bpftool'));
   assert.match(job, /--boolean sandbox\.deny-runner-metadata=true/);
   assert.match(job, /agentic-job sandbox check --record/);

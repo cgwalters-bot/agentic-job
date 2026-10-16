@@ -72,4 +72,10 @@ export async function download(url, missing = false, { run = execute } = {}) {
   return github(["api", "-H", "Accept: application/octet-stream", `repos/${repository}/releases/assets/${id}`], { run });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) prepare();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv[2] === "download") {
+    const bytes = await download(process.argv[3], process.argv[4] === "missing");
+    if (bytes === null) process.exitCode = 2;
+    else process.stdout.write(bytes);
+  } else prepare();
+}

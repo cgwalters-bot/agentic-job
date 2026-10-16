@@ -4,7 +4,7 @@ name: prebuilt
 on:
   push:
     branches: [main]
-    paths: [Cargo.lock, Cargo.toml, "crates/**", "egress/**", "skills/**", "workflow/review.md", "secure-host/binary.mjs", ".github/workflows/build.yml", ".github/workflows/pin.yml"]
+    paths: [Cargo.lock, Cargo.toml, "crates/**", "egress/**", "skills/**", "workflow/review.md", "secure-host/binary.sh", ".github/workflows/build.yml", ".github/workflows/pin.yml"]
   workflow_dispatch:
 
 permissions:
@@ -25,7 +25,9 @@ jobs:
         with:
           persist-credentials: false
       - id: source
-        run: echo "tag=build-$(node secure-host/binary.mjs digest)" >> "$GITHUB_OUTPUT"
+        run: |
+          source=$(bash secure-host/binary.sh digest)
+          echo "tag=build-$source" >> "$GITHUB_OUTPUT"
 
   build:
     needs: source

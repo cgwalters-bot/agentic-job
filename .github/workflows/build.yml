@@ -49,7 +49,7 @@ jobs:
       - name: Stage the binaries and their checksums
         run: |
           mkdir dist
-          node secure-host/binary.mjs object --out dist
+          bash secure-host/binary.sh object --out dist
           cd dist
           for name in agentic-job fake-agent; do
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
@@ -61,7 +61,7 @@ jobs:
         env:
           RELEASE: ${{ inputs.release }}
         run: |
-          node secure-host/binary.mjs pin --dist dist --release "$RELEASE" --repository "$GITHUB_REPOSITORY" > dist/release.json
+          bash secure-host/binary.sh pin --dist dist --release "$RELEASE" --repository "$GITHUB_REPOSITORY" > dist/release.json
       # A runner the binary is fetched onto may have another libc, or none.
       - name: The binary is static and runs
         run: |

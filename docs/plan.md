@@ -53,14 +53,13 @@ pinned, checksummed tarballs instead of a distribution's npm; remove the
 Python egress proxy (`python3-venv` and PyPI at setup), now that the Rust
 one is the default, keeping every egress test
 ([#919](https://github.com/cgwalters-forge/agentic-job/issues/919)); a prebuilt image or cached layer
-([#144](https://github.com/cgwalters-forge/agentic-job/issues/144)); then the
-rest of secure-host's Node steps. Those save little time, since hosted images
-ship Node, but take Node out of root's steps. `sandbox timed` replaced
-`setup-timing.mjs --run`, and `agentic-job secure-host` replaced
-`platform.mjs`, `apt.mjs` and root's bpftool loader `world-write.mjs`, run
-once the action has the binary. `binary.mjs`, which gets it, is the last: a
-shell step with `curl` and `sha256sum` has to select and verify the attested
-release (source digest, tagged release, attestation) before the binary exists.
+([#144](https://github.com/cgwalters-forge/agentic-job/issues/144)).
+secure-host's root steps run no Node any more, which saved little time, since
+hosted images ship Node: `sandbox timed`
+replaced `setup-timing.mjs --run`, `agentic-job secure-host` replaced
+`platform.mjs`, `apt.mjs` and root's bpftool loader `world-write.mjs`, and
+the shell script `binary.sh` replaced `binary.mjs`, which gets the binary.
+Its bootstrap still uses `github.mjs` to prepare gh and retry GitHub throttling.
 
 Done from the gh-aw gaps: the agent reads GitHub with a read-only token
 ([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), a label

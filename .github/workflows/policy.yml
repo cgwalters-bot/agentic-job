@@ -540,7 +540,7 @@ jobs:
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           [ "$BUILD" != true ] || set -- --build
-          node "$SOURCE_DIR/secure-host/binary.mjs" get --out "$JOB_DIR/bin" "$@"
+          bash "$SOURCE_DIR/secure-host/binary.sh" get --out "$JOB_DIR/bin" "$@"
       # An event-triggered run (docs/events.md). What the decision needs
       # of the forge comes from the API with the job's token, which can
       # read and no more; the binary makes no request. The actor's

@@ -105,9 +105,8 @@ runs:
   steps:
     # A release's, by its attested source-matching checksums, when
     # that release was built from this commit's source; a build of that
-    # source otherwise (binary.mjs). It changes nothing on the host but
-    # RUNNER_TEMP, unless it has to build and install a compiler; every
-    # step after it is this binary's.
+    # source otherwise (binary.sh). The bootstrap uses Node only for gh
+    # preparation and bounded GitHub retries, before the binary exists.
     - name: Prepare GitHub CLI
       if: ${{ inputs.binary == '' }}
       shell: bash
@@ -124,7 +123,15 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         [ "$BUILD" != true ] || set -- --build
-        node "$ACTION/binary.mjs" get --out "$RUNNER_TEMP/secure-host/bin" "$@"
+        bash "$ACTION/binary.sh" get --out "$RUNNER_TEMP/secure-host/bin" "$@"
+    # Before it is installed, and before apt, the policy or setup change
+    # the host: ID and VERSION_ID of os-release, never ID_LIKE.
+    - name: Check supported host
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary || format('{0}/secure-host/bin/agentic-job', runner.temp) }}
+      run: |
+        "$BINARY" secure-host supported
     # Where every user can run it: the sandbox user's commands start
     # through it.
     - name: Install the binary
@@ -134,11 +141,6 @@ runs:
       run: |
         [ "$BINARY" -ef /usr/local/bin/agentic-job ] || sudo install -m 0755 "$BINARY" /usr/local/bin/agentic-job
         agentic-job --version
-    # Before apt, the policy or setup change the host: ID and VERSION_ID
-    # of os-release, never ID_LIKE.
-    - name: Check supported host
-      shell: bash
-      run: agentic-job secure-host supported
     # Root's by its path: sudo's secure_path leaves out /usr/local/bin on RHEL.
     - name: Bound apt network waits and avoid the Azure mirror
       shell: bash

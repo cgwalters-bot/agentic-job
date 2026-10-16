@@ -1796,7 +1796,7 @@ None of them reads the sandbox user's files; the
 uploads take only what `run` put under its own directory after the gate.
 
 **Where the binary comes from.**
-[`secure-host/binary.mjs`](../secure-host/binary.mjs) hashes the content,
+[`secure-host/binary.sh`](../secure-host/binary.sh) hashes the content,
 modes and names of `Cargo.lock`, `Cargo.toml`, `crates`, `egress`, the
 skills it installs (`skills`, `workflow/review.md`) and itself (it decides what a release holds) at the caller's pinned commit.
 It looks for `build-FULL_DIGEST`, not the latest release. The release

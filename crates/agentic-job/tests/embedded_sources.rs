@@ -1,5 +1,5 @@
 //! Nothing is built in from outside what a release's source digest covers
-//! (`BUILT_FROM` in secure-host/binary.mjs): a file included from anywhere
+//! (`BUILT_FROM` in secure-host/binary.sh): a file included from anywhere
 //! else could change the binary without changing the digest callers verify.
 //!
 //! Every `include!`, `include_str!` and `include_bytes!` under `crates/` is

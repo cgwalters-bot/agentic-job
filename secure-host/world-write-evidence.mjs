@@ -4,14 +4,15 @@ import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compileObject } from "./binary.mjs";
 
-const inputs = ["secure-host/binary.mjs", "crates/agentic-job/bpf/world_write.bpf.c",
+const inputs = ["secure-host/binary.sh", "crates/agentic-job/bpf/world_write.bpf.c",
   "crates/agentic-job/bpf/world_write_policy.h"];
 const digest = path => createHash("sha256").update(readFileSync(path)).digest("hex");
 const command = (program, args) => execFileSync(program, args, {
   encoding: "utf8", timeout: 300_000, maxBuffer: 1024 * 1024,
 });
+// As the release build compiles it.
+const compileObject = (out, run) => run("bash", ["secure-host/binary.sh", "object", "--out", out]);
 
 // Record success only after each assertion-bearing command exits successfully.
 // A failed probe must never leave a green-looking acceptance summary.

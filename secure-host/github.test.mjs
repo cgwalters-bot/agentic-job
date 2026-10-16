@@ -1,6 +1,36 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { download, github, prepare } from "./github.mjs";
+
+test("download CLI distinguishes missing resources from refusals and returns bytes", () => {
+  const bin = mkdtempSync(join(tmpdir(), "github-cli-"));
+  try {
+    writeFileSync(join(bin, "gh"), `#!/bin/sh
+case "$2" in
+  repos/o/r/ok) printf 'bytes' ;;
+  *) printf '< HTTP/2.0 %s Failed\\n' "$TEST_STATUS" >&2; exit 1 ;;
+esac
+`, { mode: 0o755 });
+    for (const [resource, status, missing, expected] of [
+      ["ok", "200", false, 0], ["absent", "404", true, 2],
+      ["absent", "404", false, 1], ["denied", "403", true, 1],
+    ]) {
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL("./github.mjs", import.meta.url)),
+        "download", `https://api.github.com/repos/o/r/${resource}`, ...(missing ? ["missing"] : [])], {
+        encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_STATUS: status },
+      });
+      assert.equal(result.status, expected, result.stderr);
+      assert.equal(result.stdout, expected === 0 ? "bytes" : "");
+    }
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
 
 test("prep installs gh only when missing, including dnf hosts", () => {
   for (const manager of [null, "dnf", "apt-get"]) {

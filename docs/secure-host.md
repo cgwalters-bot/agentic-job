@@ -11,12 +11,14 @@ before untrusted steps, whether or not an agent runs afterwards: the action in
 agent job uses the same action and does not own it.
 
 The action supports exactly **Ubuntu 26.04** and **RHEL 10** (including
-RHEL 10 minor releases). Once it has the binary, its first step,
-`agentic-job secure-host supported`, reads `/etc/os-release` and refuses
+RHEL 10 minor releases). Once it has the binary, and before installing
+it, `agentic-job secure-host supported` reads `/etc/os-release` and refuses
 any other host, or a missing/unreadable release file, with one diagnostic
 before changing apt settings, loading the policy or invoking setup. Getting
 the binary changes nothing but the runner's temporary directory, unless it
-has to build and install a compiler. It checks
+has to build and install a compiler: with `build: true`, or where no release
+exists for the source, an unsupported host can get musl-tools and clang
+before it is refused. It checks
 `ID` and `VERSION_ID`, not `ID_LIKE`: Fedora, CentOS Stream and other
 derivatives are not supported hosts. This admission check does not prove
 kernel features or runtime enforcement; the setup checks and probes still
@@ -118,19 +120,19 @@ job's install log shows: "already the newest version" for
 `linux-tools-7.0.0-1012-azure`. An installation that leaves no working bpftool
 refuses the step. The host needs no compiler: the object
 `world_write.bpf.o` ships the way the binaries do
-([`binary.mjs`](../secure-host/binary.mjs)). The build compiles it once with
+([`binary.sh`](../secure-host/binary.sh)). The build compiles it once with
 clang (`-target bpfel`, CO-RE), the source-addressed release publishes it, and
 its SHA-256 is in the attested `release.json` next to the binaries'. A job
 fetches it with them and refuses it on a mismatch; a manifest without its
 checksum is refused whole. Where no release exists for the source, the same
 build that compiles the binaries compiles the object (installing clang with
-musl-tools when missing). `binary.mjs` is part of the source digest, so a
+musl-tools when missing). `binary.sh` is part of the source digest, so a
 release published before the object was one of its files is never taken for
 this source. With the `binary` input, the object must be `world_write.bpf.o`
 beside that binary, or loading is refused. The reusable workflow's agent job
 gets the object with the binary from the policy job's upload, and
 [`prepare`](../prepare/action.yml) installs it beside `/usr/local/bin/agentic-job`.
-The dedicated CI job compiles it with `binary.mjs object`, the command the
+The dedicated CI job compiles it with `binary.sh object`, the command the
 release build runs.
 
 Loading uses `bpftool prog loadall OBJECT PIN/links autoattach pinmaps PIN/maps`.
@@ -178,7 +180,7 @@ The jobs above load the policy without the action, and `sandbox check`'s
 caller's side instead: it runs this checkout's `secure-host` with `build: true`, so
 the binary and `world_write.bpf.o` are compiled from the commit under test
 (`clang -O2 -g -target bpfel` on `crates/agentic-job/bpf/world_write.bpf.c`,
-in [`binary.mjs`](../secure-host/binary.mjs)), never taken from a release.
+in [`binary.sh`](../secure-host/binary.sh)), never taken from a release.
 After the action has exited, with root gone:
 
 - positive control: the sandbox user appends to setup's probe file
@@ -840,15 +842,19 @@ the mapping before releasing it; `session-endpoint` is that address
 
 ## Where the binary comes from
 
-[`binary.mjs`](../secure-host/binary.mjs) computes the source digest at
+[`binary.sh`](../secure-host/binary.sh), a shell script since no
+`agentic-job` exists yet, computes the source digest at
 the action's pinned commit and fetches `build-FULL_DIGEST`. It verifies
 the release manifest's GitHub attestation before checking the source
 digest and the checksums of the binaries and the world-write policy
 object. A missing release falls back to a source build with a notice; failed verification stops the job. Main publishes
 these releases automatically, without a pin PR. See
 [the workflow's binary trust model](workflow.md#things-a-caller-should-know)
-for the verification and publishing boundaries. Fetching needs Node and
-`gh` with attestation support, but no token; building needs rustup.
+for the verification and publishing boundaries. Fetching needs bash,
+`sha256sum`, jq, Node and `gh` with attestation support. The bootstrap's
+`github.mjs` uses the job's read-only token and retries signaled GitHub
+throttling within two minutes; preparation installs gh if missing.
+Building needs rustup.
 A configuration with an `[inference]` table is first checked for a
 TCP connection to the proxy, which needs Python 3.11 or newer
 (`tomllib`); one without it, a deterministic job's, skips that check.
