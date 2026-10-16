@@ -505,7 +505,7 @@ jobs:
               else del(.hide_comment) end
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("create_discussion")).create_discussion) += {"target-repo": $action_repo, fallback_to_issue: false, close_older_discussions: false}
-            | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
+            | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: true}
             | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
             | (select(has("remove_labels")).remove_labels) += {"target-repo": $action_repo, target: "*"}
             | (select(has("update_issue")).update_issue) |= . + {"target-repo": $action_repo, target: "*",
@@ -534,10 +534,10 @@ jobs:
         run: |
           jq -e 'all(.items[]; .type != "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
             { echo "::error::the run was stopped at $STOPPED: a partial change is not pushed to a pull request's branch"; exit 1; }
-          jq -e 'any(.items[]; .type == "create_pull_request" or .type == "add_comment" or .type == "create_issue")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+          jq -e 'any(.items[]; .type == "create_pull_request" or .type == "add_comment" or .type == "create_issue" or .type == "close_issue")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
             { echo "::error::the run was stopped at $STOPPED and handed back nothing that could say so"; exit 1; }
           jq --arg note "**Partial work.** The run was stopped at $STOPPED before the task was done; this is what it handed back." \
-            '(.items[] | select(.type == "create_pull_request" or .type == "add_comment" or .type == "create_issue") | .body) |= "\($note)\n\n\(.)"' \
+            '(.items[] | select(.type == "create_pull_request" or .type == "add_comment" or .type == "create_issue" or .type == "close_issue") | .body) |= "\($note)\n\n\(.)"' \
             "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/marked.json"
           mv "$RUNNER_TEMP/marked.json" "$GH_AW_TMP/agent_output.json"
       # A pull request says which issue the caller made the run for, in
@@ -577,9 +577,9 @@ jobs:
       # the agent nor a commenter can make a request look applied, not even
       # with text the handlers decode into a name. A pull request's closing
       # comment is looked for the same way, and the pull request closed if it
-      # is still open. Closing an issue (without
-      # a comment: `allow_body` is false), adding labels and
-      # setting a project field are the same done twice and are left alone.
+      # is still open, and an issue's closing comment likewise. Adding
+      # labels and setting a project field are the same done twice and are
+      # left alone.
       # A discussion is not looked for, and a re-run posts it again.
       # A comment is hidden again, even one a maintainer unhid since.
       - name: Leave out what an earlier attempt applied
@@ -623,6 +623,27 @@ jobs:
               return fs.readFileSync(`${process.env.GH_AW_TMP}/${require('node:path').basename(report.patch.file)}`);
             };
             const skippedFile = `${process.env.GH_AW_TMP}/skipped.json`;
+            // Issues and pull requests share numbers, and gh-aw's close_issue
+            // handler closes and comments on a pull request through the
+            // issues API without looking; check cannot tell them apart. So a
+            // close_issue naming a pull request refuses the run here, before
+            // anything is applied, rather than let it close what the bounds
+            // only grant close_pull_request for. So does one whose issue was
+            // transferred: the API follows it to the other repository.
+            // REPO is read only for a close_issue: CI's re-run of this guard has no job env.
+            const issueOf = item => {
+              const [owner, repo] = process.env.REPO.split('/');
+              return { owner, repo, issue_number: item.issue_number };
+            };
+            const issues = new Map();
+            for (const item of output.items.filter(item => item.type === 'close_issue')) {
+              const { data } = await github.rest.issues.get(issueOf(item));
+              if (data.pull_request) throw new Error(`a close_issue names #${item.issue_number}, which is a pull request`);
+              if (String(data.repository_url).toLowerCase() !== `${process.env.GITHUB_API_URL}/repos/${process.env.REPO}`.toLowerCase()) {
+                throw new Error(`a close_issue names #${item.issue_number}, which is not an issue of ${process.env.REPO}`);
+              }
+              issues.set(item.issue_number, data);
+            }
             const kept = [], skipped = [];
             for (const [index, item] of output.items.entries()) {
               if (item.type === 'push_to_pull_request_branch') {
@@ -647,7 +668,7 @@ jobs:
                 }
                 continue;
               }
-              if (!['add_comment', 'close_pull_request', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
+              if (!['add_comment', 'close_issue', 'close_pull_request', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
               // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
               const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '').update('\0').update(JSON.stringify(item));
               if (item.type === 'create_pull_request') hash.update('\0').update(patch());
@@ -675,6 +696,17 @@ jobs:
                 // a second comment.
                 if (found && (await github.rest.pulls.get(pull)).data.state !== 'closed') {
                   await github.rest.pulls.update({ ...pull, state: 'closed' });
+                }
+              } else if (item.type === 'close_issue') {
+                // The same for an issue: its handler comments again on one
+                // already closed. Check held it to the run's repository. An
+                // issue someone reopened is left open, even one reopened
+                // before this run: a re-run does not overrule a person.
+                const issue = issues.get(item.issue_number);
+                const comments = await github.paginate(github.rest.issues.listComments, { ...issueOf(item), per_page: 100 });
+                found = comments.find(marked);
+                if (found && issue.state !== 'closed' && issue.state_reason !== 'reopened') {
+                  await github.rest.issues.update({ ...issueOf(item), state: 'closed', state_reason: item.state_reason ?? 'completed' });
                 }
               } else if (item.type === 'create_pull_request') {
                 // The branch is this run's, checked above; the handler names it so, in the fork.

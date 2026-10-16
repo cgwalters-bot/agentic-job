@@ -398,6 +398,11 @@ Other profiles allow one each of noop, missing_tool and missing_data, three
 outputs total; implement permits one draft PR, fix one push to the dispatched
 pull request's branch, triage/research one comment.
 Comment routing is fixed to the dispatched item, not agent-supplied fields.
+Triage may also close up to 30 issues of the target `repo` (not the item
+repository) that it finds finished or overtaken, each `close_issue` carrying
+its closing comment, within the bounds' 32 outputs; check refuses one naming
+another repository. A misled run's closes are undone by reopening, and each
+says why on the issue.
 
 ## Verification
 

@@ -189,9 +189,15 @@ a no-op. Reapplying a request is therefore safe. No label definitions are delete
 The pinned handler records other API errors as `failedLabels` but can report
 success after partial removal; callers should inspect the apply log when a
 label transition matters, rather than treating job success as atomic completion.
-For example, `{"type":"close_issue","repo":"OWNER/REPO","issue_number":7}`
-closes issue 7 without a comment. `body` is refused; use a separately bounded
-`add_comment` request to post a comment.
+For example, `{"type":"close_issue","repo":"OWNER/REPO","issue_number":7,"state_reason":"not_planned","body":"Overtaken by #9."}`
+posts the body on issue 7 and closes it. The body is required, so whoever
+watches an issue learns why it was closed; `state_reason` is `completed` or
+`not_planned`, `completed` when left out. Apply refuses the run, before it
+applies anything, when a `close_issue` names a pull request (they share
+numbers, and the handler would close one through the issues API) or an issue
+transferred to another repository. A re-run
+finds the comment by its name, as for a pull request's closing comment, and
+closes the issue if the attempt stopped in between, but not one reopened since.
 These operations need issue-write access in apply (PR labels can instead use
 pull-request write access). No producer or check token gains write access.
 

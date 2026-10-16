@@ -175,7 +175,9 @@ jobs:
               ? "Fix works in a checkout of the pull request's branch at its pinned head; the change is pushed to that branch as one commit. Use noop, missing_tool or missing_data when needed."
               : skills
               ? 'Use the implement skill. Implement proposes one draft pull request. Use noop, missing_tool or missing_data when needed.'
-              : 'Implement proposes one draft pull request. Triage and research leave the tree clean and return one add_comment. Use noop, missing_tool or missing_data when needed.';
+              : profile === 'triage'
+              ? `Triage leaves the tree clean and returns one add_comment. It may also close issues of ${repo} that it finds finished or overtaken, with one close_issue each giving repo "${repo}", issue_number, state_reason completed or not_planned, and a body saying why. Use noop, missing_tool or missing_data when needed.`
+              : 'Implement proposes one draft pull request. Research leaves the tree clean and returns one add_comment. Use noop, missing_tool or missing_data when needed.';
             const text = JSON.stringify({ repository: itemRepo, number: data.number, title: data.title, body: data.body })
               .replaceAll('<', '\\u003c').replaceAll('>', '\\u003e');
             const routing = profile === 'review'
@@ -216,8 +218,10 @@ jobs:
       repo: ${{ inputs.repo }}
       task: ${{ needs.target.outputs.task }}
       kind: ${{ (inputs.kind == 'implement' || inputs.kind == 'fix') && 'branch' || 'analysis' }}
-      outputs: ${{ inputs.kind == 'review' && 'add_comment,noop' || (inputs.kind == 'implement' && 'create_pull_request,noop,missing_tool,missing_data' || (inputs.kind == 'fix' && 'push_to_pull_request_branch,noop,missing_tool,missing_data' || 'add_comment,noop,missing_tool,missing_data')) }}
-      max-outputs: ${{ inputs.kind == 'review' && '1' || '3' }}
+      # A triage run may close issues of `repo` it finds done, each with
+      # its reason as the closing comment (dispatch.toml bounds how many).
+      outputs: ${{ inputs.kind == 'review' && 'add_comment,noop' || (inputs.kind == 'implement' && 'create_pull_request,noop,missing_tool,missing_data' || (inputs.kind == 'fix' && 'push_to_pull_request_branch,noop,missing_tool,missing_data' || (inputs.kind == 'triage' && 'close_issue,add_comment,noop,missing_tool,missing_data' || 'add_comment,noop,missing_tool,missing_data'))) }}
+      max-outputs: ${{ inputs.kind == 'review' && '1' || (inputs.kind == 'triage' && 'max' || '3') }}
       allow: .github/agentic-job/dispatch.toml
       agent: ${{ needs.target.outputs.agent }}
       model: ${{ needs.target.outputs.agent != 'fake' && vars.AGENT_MODEL || '' }}

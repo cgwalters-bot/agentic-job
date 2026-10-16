@@ -691,8 +691,27 @@ fn redirections_to(
             _ => problems.push(format!("a {output} requires a nonempty {people} array")),
         }
     }
-    if output == "close_issue" && item.contains_key("body") {
-        problems.push("a close_issue with body; closure does not post comments".to_owned());
+    // The handler posts the body on the issue, then closes it, so whoever
+    // watches the issue learns why; without one it fails in apply instead.
+    if output == "close_issue"
+        && !item
+            .get("body")
+            .and_then(Value::as_str)
+            .is_some_and(|body| !body.trim().is_empty())
+    {
+        problems.push("a close_issue requires a body saying why it is closed".to_owned());
+    }
+    // Finished or overtaken: `duplicate` would mark an issue a duplicate
+    // of nothing, as `duplicate_of`, which names another issue, is refused.
+    if output == "close_issue"
+        && item
+            .get("state_reason")
+            .is_some_and(|reason| !matches!(reason.as_str(), Some("completed" | "not_planned")))
+    {
+        problems.push(format!(
+            "a close_issue with state_reason {}, not completed or not_planned",
+            item["state_reason"]
+        ));
     }
     if output == CREATE_ISSUE {
         // gh-aw's handler links the new issue to any issue the request
@@ -1727,7 +1746,7 @@ mod tests {
     #[test]
     fn bounded_issue_actions() {
         for (output, number_key, field) in [
-            ("close_issue", "issue_number", "labels"),
+            ("close_issue", "issue_number", "body"),
             ("add_labels", "item_number", "labels"),
             ("remove_labels", "item_number", "labels"),
             ("update_issue", "issue_number", "body"),
@@ -2224,9 +2243,42 @@ mod tests {
             }
         }
         let policy = policy();
-        for body in [json!("comment"), json!(""), Value::Null] {
-            let item = json!({"type": "close_issue", "repo": policy.repo, "issue_number": 7, "body": body});
-            assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+        for (body, ok) in [
+            (Some(json!("Done in #8.")), true),
+            (Some(json!("")), false),
+            (Some(json!(" \n")), false),
+            (Some(Value::Null), false),
+            (Some(json!(["Done"])), false),
+            (None, false),
+        ] {
+            let mut item = json!({"type": "close_issue", "repo": policy.repo, "issue_number": 7});
+            if let Some(body) = body {
+                item["body"] = body;
+            }
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{item}"
+            );
+        }
+        for (reason, ok) in [
+            (Some(json!("completed")), true),
+            (Some(json!("not_planned")), true),
+            (None, true),
+            (Some(json!("duplicate")), false),
+            (Some(json!("COMPLETED")), false),
+            (Some(json!("")), false),
+            (Some(Value::Null), false),
+        ] {
+            let mut item = json!({"type": "close_issue", "repo": policy.repo, "issue_number": 7, "body": "Done."});
+            if let Some(reason) = reason {
+                item["state_reason"] = reason;
+            }
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{item}"
+            );
         }
     }
 
@@ -2814,8 +2866,8 @@ mod tests {
             if labels {
                 plain["labels"] = json!(["triage"]);
             }
-            if output == "close_pull_request" {
-                // Posted on the pull request as it is closed.
+            if matches!(output, "close_issue" | "close_pull_request") {
+                // Posted on the item as it is closed.
                 plain["body"] = json!("Superseded.");
             }
             for (n, key) in number_keys.iter().enumerate() {

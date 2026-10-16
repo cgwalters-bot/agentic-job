@@ -439,7 +439,7 @@ test("check: bounded issue actions, through the collector and the check", () => 
   assert.equal(result.status, 0, result.stderr);
   const policy = JSON.parse(result.stdout);
   for (const [type, key] of [['close_issue', 'issue_number'], ['add_labels', 'item_number']]) {
-    const item = { type, repo: REPO, [key]: 7, ...(type === 'add_labels' ? { labels: ['triage'] } : {}) };
+    const item = { type, repo: REPO, [key]: 7, ...(type === 'add_labels' ? { labels: ['triage'] } : { body: 'Done in #8.' }) };
     for (const [name, lines, ok] of [
       ['accepted', [item], true],
       ['another repository', [{ ...item, repo: 'other/repo' }], false],
@@ -453,6 +453,7 @@ test("check: bounded issue actions, through the collector and the check", () => 
         ['label object', [{ ...item, labels: [{ name: 'triage' }] }], false],
       ] : [
         ['duplicate relationship', [{ ...item, duplicate_of: 'other/repo#8' }], false],
+        ['no closing comment', [{ ...item, body: undefined }], false],
       ]),
     ]) {
       const verdict = newCheck(handback({ lines, base: null }), policy);

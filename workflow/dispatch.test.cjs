@@ -91,15 +91,16 @@ test('caller fixes capabilities and token boundary', () => {
     return Function('inputs', 'needs', `return ${expression}`)(
       { kind, item: '42' }, { target: { outputs: { agent } } });
   };
-  for (const [kind, run, outputs, review, push, fake] of [
-    ['implement', 'branch', 'create_pull_request,noop,missing_tool,missing_data', '', '', 'implement'],
-    ['fix', 'branch', 'push_to_pull_request_branch,noop,missing_tool,missing_data', '', '42', 'implement'],
-    ['review', 'analysis', 'add_comment,noop', '42', '', 'review'],
-    ['triage', 'analysis', 'add_comment,noop,missing_tool,missing_data', '', '', 'comment'],
-    ['research', 'analysis', 'add_comment,noop,missing_tool,missing_data', '', '', 'comment'],
+  for (const [kind, run, outputs, max, review, push, fake] of [
+    ['implement', 'branch', 'create_pull_request,noop,missing_tool,missing_data', '3', '', '', 'implement'],
+    ['fix', 'branch', 'push_to_pull_request_branch,noop,missing_tool,missing_data', '3', '', '42', 'implement'],
+    ['review', 'analysis', 'add_comment,noop', '1', '42', '', 'review'],
+    // Up to the bounds' max_outputs: the closes and the comment.
+    ['triage', 'analysis', 'close_issue,add_comment,noop,missing_tool,missing_data', 'max', '', '', 'comment'],
+    ['research', 'analysis', 'add_comment,noop,missing_tool,missing_data', '3', '', '', 'comment'],
   ]) {
-    assert.deepEqual(['kind', 'outputs', 'review-item', 'push-item', 'fake-profile'].map(input => routed(input, kind, 'fake')),
-      [run, outputs, review, push, fake], kind);
+    assert.deepEqual(['kind', 'outputs', 'max-outputs', 'review-item', 'push-item', 'fake-profile'].map(input => routed(input, kind, 'fake')),
+      [run, outputs, max, review, push, fake], kind);
     assert.equal(routed('fake-profile', kind), '', kind);
   }
   for (const line of ['allow: .github/agentic-job/dispatch.toml',
@@ -131,10 +132,11 @@ test('caller fixes capabilities and token boundary', () => {
     }
   }
   assert.match(bounds, /^repos = \["cgwalters-forge\/agentic-job"\]$/m);
-  assert.match(bounds, /^max_outputs = 3$/m);
+  assert.match(bounds, /^max_outputs = 32$/m);
   for (const type of ['create_pull_request', 'add_comment', 'noop', 'missing_tool', 'missing_data']) {
     assert.ok(bounds.includes(`${type} = { max = 1 }`), type);
   }
+  assert.match(bounds, /^close_issue = \{ max = 30 \}$/m);
   assert.doesNotMatch(bounds, /create_issue/);
 });
 
@@ -207,6 +209,16 @@ test('only implement with an agent that reads skills is told to use the implemen
   }
   const expression = workflow.match(/^      agent-skills: \$\{\{ (.+) \}\}$/m)?.[1];
   assert.equal(expression, "needs.target.outputs.skills == 'true'");
+});
+
+test('only triage is told it may close issues, and only of the target', async () => {
+  for (const PROFILE of ['implement', 'triage', 'research']) {
+    const calls = await preflight({ PROFILE, ITEM_REPO: 'owner/repo', APPLY_ENVIRONMENT: 'agent-apply' });
+    assert.equal(calls.task.includes('close_issue'), PROFILE === 'triage', PROFILE);
+  }
+  const calls = await preflight({ TARGET_REPO: 'owner/target', ITEM_REPO: 'owner/tracker', APPLY_ENVIRONMENT: 'agent-apply' });
+  assert.ok(calls.task.includes('close issues of owner/target'), calls.task);
+  assert.ok(calls.task.includes('repo "owner/target"'), calls.task);
 });
 
 test('issue text is passed as data, including hostile fence text', async () => {

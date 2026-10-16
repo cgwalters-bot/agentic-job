@@ -166,8 +166,9 @@ test('checked issue actions preserve the actual handler payload', async () => {
     ['Unicode normalization', ['ｒｅｌｅａｓｅ'], 1, ['release'], false],
     ['truncation bypass', [prefix + 'x'], 1, [prefix], false],
     ['per-request cap', ['triage', 'docs'], 1, [], false],
-    ['bodyless close', null, 1, [], true],
-    ['close with body', null, 1, [], false],
+    // The body is the closing comment; without one the handler would fail.
+    ['bodyless close', null, 1, [], false],
+    ['close with body', null, 1, [], true],
   ]) {
     const work = mkdtempSync(join(homedir(), 'handler-test-'));
     try {
@@ -176,7 +177,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
        const type = labels ? labelType : 'close_issue';
       const item = labels
         ? { type, repo, item_number: 7, labels }
-        : { type, repo, issue_number: 7, ...(name === 'close with body' ? { body: 'Do not silently discard this comment.' } : {}) };
+        : { type, repo, issue_number: 7, ...(name === 'close with body' ? { body: 'Done in #8.', state_reason: 'not_planned' } : {}) };
       writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${type}]\nmax = ${max}\n` +
         (labels ? `allowed = ${JSON.stringify(labels)}\nblocked = ${JSON.stringify(blocked)}\n` : ''));
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
@@ -211,7 +212,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
           addLabels: async payload => { calls.push(payload); return { data: payload.labels.map(name => ({ name })) }; },
           removeLabel: async payload => { calls.push(payload); return { data: [] }; },
           update: async payload => { calls.push(payload); return { data: { ...entity, state: 'closed' } }; },
-          createComment: async () => { assert.fail('closure must not post a comment'); },
+          createComment: async payload => { calls.push({ comment: payload.issue_number, body: payload.body }); return { data: { id: 1, html_url: 'u' } }; },
         } } },
       });
       if (verdict.ok) {
@@ -220,17 +221,17 @@ test('checked issue actions preserve the actual handler payload', async () => {
         const result = await handler(verdict.items[0], {});
         assert.equal(result.success, true, `${name}: ${JSON.stringify(result)}`);
         const target = { owner: 'owner', repo: 'source', issue_number: 7 };
-        assert.deepEqual(calls, labels && type === 'remove_labels'
-          ? labels.map(name => ({ ...target, name }))
-          : [{ ...target, ...(labels ? { labels } : { state: 'closed', state_reason: 'completed' }) }], name);
-        if (!labels) {
-          // Defense in depth: even if a body reaches apply, the workflow's
-          // explicit configuration must suppress the handler's comment path.
-          const direct = await require(join(js, `${type}.cjs`)).main(config[type]);
-          const closed = await direct({ ...item, body: 'Ignored by allow_body: false.' }, {});
-          assert.equal(closed.success, true, JSON.stringify(closed));
-          assert.deepEqual(calls[1], calls[0]);
-          assert.equal(calls.length, 2);
+        if (labels) {
+          assert.deepEqual(calls, type === 'remove_labels'
+            ? labels.map(name => ({ ...target, name }))
+            : [{ ...target, labels }], name);
+        } else {
+          // The checked body is posted on the issue it closes, then the
+          // issue closed with the requested reason.
+          assert.equal(calls.length, 2, JSON.stringify(calls));
+          assert.equal(calls[0].comment, 7);
+          assert.ok(calls[0].body.startsWith('Done in #8.'), calls[0].body);
+          assert.deepEqual(calls[1], { ...target, state: 'closed', state_reason: 'not_planned' });
         }
       } else {
         assert.deepEqual(calls, [], `${name}: refused outputs never reach apply`);

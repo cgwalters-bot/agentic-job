@@ -145,7 +145,7 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
     assert.deepEqual(config.close_issue, {
-      max: 2, 'target-repo': 'owner/source', target: '*', issue_intent: false, allow_body: false,
+      max: 2, 'target-repo': 'owner/source', target: '*', issue_intent: false, allow_body: true,
     });
     assert.deepEqual(config.add_labels, {
       max: 3, allowed: ['triage'], blocked: ['release'],
@@ -497,6 +497,8 @@ test("a partial run's push is not applied, whatever else it posts", () => {
   const name = 'Mark what a partial run opens or posts';
   for (const [types, status] of [
     [['add_comment'], 0],
+    // A closing comment says so on the issue it closes.
+    [['close_issue'], 0],
     [['push_to_pull_request_branch'], 1],
     [['push_to_pull_request_branch', 'add_comment'], 1],
   ]) {
@@ -508,6 +510,7 @@ test("a partial run's push is not applied, whatever else it posts", () => {
       });
       assert.equal(result.status, status, `${types}: ${result.stdout}${result.stderr}`);
       if (status) assert.match(result.stdout, /a partial change is not pushed to a pull request's branch/);
+      else assert.match(JSON.parse(readFileSync(join(root, 'agent_output.json'), 'utf8')).items[0].body, /^\*\*Partial work\.\*\* .*\n\nb$/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -941,7 +944,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Runs the guard against a forge holding `posted`, by whoever posted it,
 // with the job token or, with `pat`, a PAT that /user names as `me`.
-async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false, itemRepo = 'owner/repo', commentRepo = itemRepo, open = [] } = {}) {
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false, itemRepo = 'owner/repo', commentRepo = itemRepo, open = [], issueData = {} } = {}) {
   const dir = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
@@ -962,7 +965,13 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
           queries.push(['comments', params.issue_number]);
           assert.equal(`${params.owner}/${params.repo}`, commentRepo, 'a comment is looked for on the item');
           return posted.filter(p => p.on === params.issue_number);
-        } },
+        },
+        // An issue a close_issue names, in the run's repository.
+        get: async params => { assert.equal(`${params.owner}/${params.repo}`, 'owner/source'); queries.push(['issue', params.issue_number]);
+          return { data: { state: open.includes(params.issue_number) ? 'open' : 'closed', state_reason: null,
+            repository_url: 'https://api.github.com/repos/owner/source', ...issueData[params.issue_number] } }; },
+        update: async params => { assert.equal(`${params.owner}/${params.repo}`, 'owner/source');
+          queries.push(['update', params.issue_number, params.state, params.state_reason]); return { data: {} }; } },
         pulls: { list: params => { queries.push(['pulls', params.head]); return posted.filter(p => p.head === params.head); },
           get: async params => { queries.push(['pull', params.pull_number]);
             return { data: { state: open.includes(params.pull_number) ? 'open' : 'closed' } }; },
@@ -974,7 +983,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
     };
     const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', ITEM_REPO: itemRepo, REPO: 'owner/source', GITHUB_RUN_ID: run,
       COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork, TREE: checkedTree,
-      GITHUB_WORKSPACE: '/workspace', BASE: 'agent-run-7', REPLACEMENT_HEAD: 'replacement-head' };
+      GITHUB_WORKSPACE: '/workspace', BASE: 'agent-run-7', REPLACEMENT_HEAD: 'replacement-head', GITHUB_API_URL: 'https://api.github.com' };
     const exec = { getExecOutput: async (program, args) => {
       assert.equal(program, 'git');
       if (args[0] === 'show') {
@@ -1065,7 +1074,7 @@ test('a posted body hides the name the guard put last, and only that name', () =
 
 test('nothing applied yet: every created thing is named in its body, the rest pass as they are', async () => {
   const items = [comment(), pull, { type: 'create_issue', title: 'i', body: 'b' },
-    { type: 'close_issue', item_number: 3, body: 'done' }, { type: 'add_labels', labels: ['x'] },
+    { type: 'add_labels', labels: ['x'] },
     { type: 'update_project', project: 'p', fields: { Status: 'Done' } }, { type: 'noop', message: 'n' }];
   const { kept, skipped, summary, queries } = await leaveOutApplied(items, []);
   assert.deepEqual(skipped, []);
@@ -1076,7 +1085,7 @@ test('nothing applied yet: every created thing is named in its body, the rest pa
       assert.match(item.body, new RegExp(`^${items[index].body}\n\nagentic-job-applied: 7/${index}/[0-9a-f]{16}$`));
       assert.deepEqual({ ...item, body: items[index].body }, items[index]);
     } else {
-      // Closing, labelling and setting a field again leave the forge as it was.
+      // Labelling and setting a field again leave the forge as it was.
       assert.deepEqual(item, items[index]);
     }
   }
@@ -1516,9 +1525,46 @@ test('the job fails unless every output was applied and a pull request asked for
   }
 });
 
-test('closing an issue again posts nothing: its handler is told to drop any body', () => {
-  assert.match(step("Write the handlers' configuration"),
-    /\(select\(has\("close_issue"\)\)\.close_issue\) \+= \{[^}]*allow_body: false\}/);
+test('a closing comment an earlier attempt posted is found on the issue it closed, in the run\'s repository', async () => {
+  const close = { type: 'close_issue', repo: 'owner/source', issue_number: 12, state_reason: 'not_planned', body: 'Overtaken by #13.' };
+  const first = (await leaveOutApplied([close], [], { commentRepo: 'owner/source' })).kept[0];
+  assert.match(first.body, /^Overtaken by #13\.\n\nagentic-job-applied: 7\/0\/[0-9a-f]{16}$/);
+  const posted = [{ on: 12, user: actions, body: sent(`${first.body}\n\n> footer`), html_url: 'https://forge/issues/12#c', created_at: '2026-10-16T10:00:00Z' }];
+  const { kept, skipped, queries } = await leaveOutApplied([close], posted, { commentRepo: 'owner/source' });
+  assert.deepEqual(queries, [['issue', 12], ['comments', 12]]);
+  assert.deepEqual(kept, []);
+  assert.deepEqual(skipped.map(item => item.url), ['https://forge/issues/12#c']);
+  // The comment posted and the close failed: close it, with its reason, and comment no more.
+  const half = await leaveOutApplied([close], posted, { commentRepo: 'owner/source', open: [12] });
+  assert.deepEqual(half.queries, [['issue', 12], ['comments', 12], ['update', 12, 'closed', 'not_planned']]);
+  assert.deepEqual(half.kept, []);
+  // Reopened (GitHub then clears closed_at): it stays open.
+  const reopened = await leaveOutApplied([close], posted, { commentRepo: 'owner/source', open: [12], issueData: { 12: { state_reason: 'reopened' } } });
+  assert.deepEqual(reopened.queries, [['issue', 12], ['comments', 12]]);
+  assert.deepEqual(reopened.kept, []);
+  const plain = { ...close, state_reason: undefined };
+  const halfPlain = await leaveOutApplied([plain], [{ ...posted[0], body: sent((await leaveOutApplied([plain], [], { commentRepo: 'owner/source' })).kept[0].body) }],
+    { commentRepo: 'owner/source', open: [12] });
+  assert.deepEqual(halfPlain.queries.at(-1), ['update', 12, 'closed', 'completed']);
+  // Someone else's comment holding the name does not count.
+  const theirs = await leaveOutApplied([close], [{ ...posted[0], user: { login: 'mallory' } }], { commentRepo: 'owner/source', open: [12] });
+  assert.deepEqual(theirs.queries, [['issue', 12], ['comments', 12]]);
+  assert.equal(theirs.kept.length, 1);
+});
+
+test('a close_issue naming a pull request refuses the run before anything is applied', async () => {
+  const comment = { type: 'add_comment', body: 'Swept.' };
+  const issue = { type: 'close_issue', repo: 'owner/source', issue_number: 12, body: 'Done.' };
+  const pullAsIssue = { ...issue, issue_number: 13 };
+  await assert.rejects(leaveOutApplied([comment, issue, pullAsIssue], [], { commentRepo: 'owner/source', open: [12, 13], issueData: { 13: { pull_request: { url: 'u' } } } }),
+    /a close_issue names #13, which is a pull request/);
+  // A transferred issue: the API answers with the issue in its new repository.
+  for (const repository_url of ['https://api.github.com/repos/owner/elsewhere', 'https://api.github.com/repos/owner/source-x', undefined]) {
+    await assert.rejects(leaveOutApplied([issue], [], { commentRepo: 'owner/source', open: [12], issueData: { 12: { repository_url } } }),
+      /a close_issue names #12, which is not an issue of owner\/source/, repository_url);
+  }
+  const cased = await leaveOutApplied([issue], [], { commentRepo: 'owner/source', open: [12], issueData: { 12: { repository_url: 'https://api.github.com/repos/Owner/Source' } } });
+  assert.equal(cased.kept.length, 1);
 });
 
 for (const [state, merged, left] of [['open', null, true], ['closed', '2026-10-01T00:00:00Z', true], ['closed', null, false]]) {

@@ -215,7 +215,7 @@ Enforcement: [apply.test.cjs](../workflow/apply.test.cjs),
 **RC-012 — Issue payload bounds.** Check MUST require explicit repository and
 positive integer targets for `close_issue`, `add_labels`, `remove_labels`,
 `close_pull_request` and `link_sub_issue`, and refuse target aliases.
-`close_issue` MUST reject `body`; issue creation MUST reject relationships
+`close_issue` MUST carry a nonempty `body`, its closing comment; issue creation MUST reject relationships
 to other issues. Labels MUST fit the policy's case-insensitive allow/block
 bounds. Added labels MUST also fit the per-request count and the 1–64-character
 ASCII subset documented in [safe outputs](../docs/safe-outputs.md#closing-issues-and-changing-labels),

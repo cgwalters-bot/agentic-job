@@ -2,7 +2,9 @@
 hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
 bases = ["main"]
-max_outputs = 3
+# Room for a triage run's closes, its comment and one noop or missing_*;
+# every other profile asks for 3 or fewer.
+max_outputs = 32
 max_patch_bytes = 1048576
 max_patch_files = 50
 
@@ -12,6 +14,10 @@ add_comment = { max = 1 }
 noop = { max = 1 }
 missing_tool = { max = 1 }
 missing_data = { max = 1 }
+# Triage only: close issues of `repos` a run finds finished or overtaken,
+# each with a closing comment saying why. Closing is undone by reopening;
+# the cap keeps a misled run to a sweep's worth (#965 found 29).
+close_issue = { max = 30 }
 # The fix profile is off. It pushes to an open pull request's branch where
 # the applying user may push and apply allows (#553), so it needs
 # SAFE_OUTPUTS_PAT in an apply environment. To enable it, with the

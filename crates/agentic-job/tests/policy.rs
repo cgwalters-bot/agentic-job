@@ -474,6 +474,7 @@ fn dispatch_profiles_use_the_example_bounds() {
             0,
         ),
         ("analysis", "add_comment", "other/repo", 1),
+        ("analysis", "close_issue", "other/repo", 1),
         ("branch", "create_issue", "cgwalters-forge/agentic-job", 1),
         (
             "analysis",
@@ -511,6 +512,80 @@ fn dispatch_profiles_use_the_example_bounds() {
         if kind == "branch" {
             assert_eq!(policy["safe_outputs"]["create_pull_request"]["draft"], true);
         }
+    }
+}
+
+/// A triage run, as dispatch.yml requests it, may close issues of its own
+/// repository with a closing comment, and check refuses one elsewhere.
+#[test]
+fn dispatch_triage_closes_issues_only_in_its_repository() {
+    let allow =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/agentic-job/dispatch.toml");
+    let repo = "cgwalters-forge/agentic-job";
+    let output = policy(
+        &allow,
+        &[
+            ("--repo", repo),
+            ("--clone-url", &format!("https://github.com/{repo}")),
+            ("--kind", "analysis"),
+            (
+                "--outputs",
+                "close_issue,add_comment,noop,missing_tool,missing_data",
+            ),
+            ("--max-outputs", "max"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let compiled: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(compiled["max_outputs"], 32);
+    assert_eq!(compiled["safe_outputs"]["close_issue"]["max"], 30);
+    assert_eq!(compiled["safe_outputs"]["add_comment"]["max"], 1);
+
+    let dir = tempfile::tempdir().unwrap();
+    let policy_path = dir.path().join("policy.json");
+    std::fs::write(&policy_path, &output.stdout).unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let close = |repo: &str, number: u64| {
+        serde_json::json!({"type": "close_issue", "repo": repo, "issue_number": number,
+            "state_reason": "not_planned", "body": "Overtaken by #12."})
+    };
+    for (items, code) in [
+        (vec![close(repo, 7)], 0),
+        ((1..=30).map(|n| close(repo, n)).collect(), 0),
+        (vec![close("other/repo", 7)], 1),
+        (vec![close(repo, 7), close("other/repo", 8)], 1),
+        ((1..=31).map(|n| close(repo, n)).collect(), 1),
+    ] {
+        let lines: String = items.iter().map(|item| format!("{item}\n")).collect();
+        std::fs::write(out.join("outputs.jsonl"), lines).unwrap();
+        let collected = dir.path().join("collected.json");
+        std::fs::write(
+            &collected,
+            serde_json::to_vec(&serde_json::json!({"items": items, "errors": []})).unwrap(),
+        )
+        .unwrap();
+        let result = Command::new(BIN)
+            .arg("check")
+            .arg("--policy")
+            .arg(&policy_path)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(code),
+            "{} items: {}",
+            items.len(),
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }
 
