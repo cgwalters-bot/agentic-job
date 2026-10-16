@@ -43,8 +43,43 @@ fn open(path: &Path, access: OFlags) -> io::Result<File> {
     Ok(rustix::fs::open(path, flags, Mode::empty())?.into())
 }
 
-/// The content of the regular file at `path`, if it is at most `max` bytes.
-pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
+/// The regular file at `path`, opened to be read in pieces: reading more
+/// than `max` bytes from it, which a file still growing can give, fails
+/// with [`io::ErrorKind::FileTooLarge`].
+#[derive(Debug)]
+pub struct Regular {
+    file: File,
+    size: u64,
+    left: u64,
+}
+
+impl Regular {
+    /// Its size when it was opened.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+impl Read for Regular {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // One byte past the cap tells a file that grew from one that ends.
+        let room = usize::try_from(self.left.saturating_add(1)).unwrap_or(usize::MAX);
+        let room = buf.len().min(room);
+        let read = self.file.read(&mut buf[..room])?;
+        let read_u64 = u64::try_from(read).unwrap_or(u64::MAX);
+        if read_u64 > self.left {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "grew past its cap while it was read",
+            ));
+        }
+        self.left -= read_u64;
+        Ok(read)
+    }
+}
+
+/// Opens the regular file at `path`, if it is at most `max` bytes.
+pub fn open_regular(path: &Path, max: u64) -> Result<Regular, ReadError> {
     let file = open(path, OFlags::RDONLY).map_err(|err| {
         // What O_NOFOLLOW gives for a link.
         if err.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
@@ -63,24 +98,30 @@ pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
             max,
         });
     }
+    Ok(Regular {
+        file,
+        size: meta.len(),
+        left: max,
+    })
+}
+
+/// The content of the regular file at `path`, if it is at most `max` bytes.
+pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
+    let mut file = open_regular(path, max)?;
     // The size was read a moment ago and the file may still be growing.
     let mut content = Vec::new();
-    file.take(max.saturating_add(1))
-        .read_to_end(&mut content)
-        .map_err(ReadError::Io)?;
-    match u64::try_from(content.len()) {
-        Ok(size) if size <= max => Ok(content),
-        _ => Err(ReadError::TooBig {
+    match file.read_to_end(&mut content) {
+        Ok(_) => Ok(content),
+        Err(err) if err.kind() == io::ErrorKind::FileTooLarge => Err(ReadError::TooBig {
             size: max.saturating_add(1),
             max,
         }),
+        Err(err) => Err(ReadError::Io(err)),
     }
 }
 
 /// Replaces the content of the existing regular file at `path`.
-pub fn overwrite_regular(path: &Path, content: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-
+pub fn overwrite_regular(path: &Path, mut content: impl Read) -> io::Result<()> {
     let mut file = open(path, OFlags::WRONLY)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
@@ -90,7 +131,7 @@ pub fn overwrite_regular(path: &Path, content: &[u8]) -> io::Result<()> {
     }
     // Truncated only once it is known to be a regular file.
     file.set_len(0)?;
-    file.write_all(content)
+    io::copy(&mut content, &mut file).map(drop)
 }
 
 #[cfg(test)]
@@ -133,9 +174,9 @@ mod tests {
         std::fs::write(&file, b"a long first content").unwrap();
         symlink(&file, &link).unwrap();
 
-        assert!(overwrite_regular(&link, b"x").is_err());
+        assert!(overwrite_regular(&link, &b"x"[..]).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), b"a long first content");
-        overwrite_regular(&file, b"short").unwrap();
+        overwrite_regular(&file, &b"short"[..]).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"short");
     }
 }

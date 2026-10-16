@@ -7,11 +7,10 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Read, Seek, Write};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use regex::Regex;
 use regex::bytes::Regex as BytesRegex;
 
 use crate::files::{self, ReadError};
@@ -24,6 +23,19 @@ const MIN_LITERAL_BYTES: usize = 8;
 
 /// The largest file `redact_tree` rewrites; a bigger one is not a log.
 const MAX_REDACTED_BYTES: u64 = 1 << 30;
+
+/// How much of a file is read at a time to be searched.
+const CHUNK_BYTES: usize = 1 << 16;
+
+/// The bounds in the PEM pattern: of the label before `PRIVATE KEY`, and
+/// of what is between the two lines. A 16384-bit RSA key is about 13 KiB.
+const PEM_LABEL_BYTES: usize = 32;
+const PEM_BODY_BYTES: usize = 1 << 14;
+
+/// The longest PEM block the pattern matches whole: its body, and two
+/// lines of at most `-----BEGIN ` (the longer), a label and `PRIVATE KEY-----`.
+const MAX_PEM_BYTES: usize =
+    PEM_BODY_BYTES + 2 * ("-----BEGIN ".len() + PEM_LABEL_BYTES + "PRIVATE KEY-----".len());
 
 /// The shapes, in the syntax of the `regex` crate. One list for redacting
 /// and for refusing, so that nothing the check refuses is uploaded as it is.
@@ -41,8 +53,11 @@ const PATTERNS: &[&str] = &[
     // JWTs, such as a CI system's identity tokens
     r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*",
     // A whole PEM block, also when a JSON string holds it with escaped
-    // newlines; an unterminated one is cut at the end of the line.
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:(?s:.)*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[^\n]*)",
+    // newlines; an unterminated one, or one over MAX_PEM_BYTES, is cut at
+    // the end of the line, and `Redactor::redact_stream` replaces the rest
+    // of one with a last line. The only match that spans lines, so the
+    // bound is what streaming has to look ahead (see `stream`).
+    r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY-----(?:(?s:.){0,16384}?-----END [A-Z0-9 ]{0,32}PRIVATE KEY-----|[^\n]*)",
     // GitLab, AWS key ids, Google API keys, Slack
     r"glpat-[A-Za-z0-9_-]{20,}",
     r"AKIA[0-9A-Z]{16}",
@@ -63,6 +78,20 @@ static SECRET_SHAPED: LazyLock<BytesRegex> = LazyLock::new(|| {
     BytesRegex::new(&format!("(?-u){}", alternation(PATTERNS)))
         .expect("the built-in patterns are valid")
 });
+
+/// The last line of a PEM block, as the PEM pattern has it.
+static PEM_END: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(&format!(
+        "(?-u)-----END [A-Z0-9 ]{{0,{PEM_LABEL_BYTES}}}PRIVATE KEY-----"
+    ))
+    .expect("the built-in patterns are valid")
+});
+
+/// Whether a match is the PEM pattern's first line without the rest of
+/// its block: one with no last line within the bound.
+fn is_pem_without_end(found: &[u8]) -> bool {
+    found.starts_with(b"-----BEGIN ") && !PEM_END.is_match(found)
+}
 
 /// Each pattern by itself, to name the one that matched.
 static EACH_SHAPE: LazyLock<Vec<(&'static str, BytesRegex)>> = LazyLock::new(|| {
@@ -91,9 +120,95 @@ pub fn secret_shapes(bytes: &[u8]) -> Vec<&'static str> {
         .collect()
 }
 
-/// The 1-based line of `bytes` that byte `offset` is on.
-fn line_of(bytes: &[u8], offset: usize) -> usize {
-    1 + bytes[..offset].iter().filter(|&&b| b == b'\n').count()
+/// Hands `piece` all of `input`, in order, as the text between matches of
+/// `rule` and the matches themselves (`true`), until it returns false.
+///
+/// The pieces are exactly those of one search of the whole input, with
+/// memory for the longest line and `overlap`. That holds because no
+/// pattern looks behind or ahead of its match, and only a match of at
+/// most `overlap` bytes spans a newline. The input is searched in a
+/// buffer, and a match before a cut after a newline at least `overlap`
+/// bytes before the buffer's end is final: one that would need more input
+/// is longer than `overlap`, so it cannot span the newline, and starts
+/// after the cut. A match found across the cut is short enough to be
+/// final, so the cut moves to its end.
+fn stream(
+    rule: &BytesRegex,
+    overlap: usize,
+    mut input: impl Read,
+    mut piece: impl FnMut(&[u8], bool) -> io::Result<bool>,
+) -> io::Result<()> {
+    let mut buf = Vec::new();
+    loop {
+        // Doubling the buffer while no line ends early enough searches a
+        // long line a few times and not once for each chunk.
+        let want = CHUNK_BYTES.max(buf.len());
+        let read = (&mut input).take(want as u64).read_to_end(&mut buf)?;
+        let end = read < want;
+        let mut cut = if end {
+            buf.len()
+        } else {
+            buf[..buf.len().saturating_sub(overlap)]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |newline| newline + 1)
+        };
+        let mut done = 0;
+        for found in rule.find_iter(&buf) {
+            if found.start() >= cut {
+                break;
+            }
+            cut = cut.max(found.end());
+            if !piece(&buf[done..found.start()], false)? || !piece(found.as_bytes(), true)? {
+                return Ok(());
+            }
+            done = found.end();
+        }
+        if !piece(&buf[done..cut], false)? || end {
+            return Ok(());
+        }
+        buf.drain(..cut);
+    }
+}
+
+/// Whether bytes given in pieces are UTF-8.
+#[derive(Debug, Default)]
+struct Utf8 {
+    /// The start of a character the last piece did not finish.
+    pending: Vec<u8>,
+    invalid: bool,
+}
+
+impl Utf8 {
+    /// Takes the next piece: whether the bytes are still UTF-8 so far.
+    fn feed(&mut self, mut bytes: &[u8]) -> bool {
+        while !self.invalid && !self.pending.is_empty() {
+            let Some((&first, rest)) = bytes.split_first() else {
+                return true;
+            };
+            self.pending.push(first);
+            bytes = rest;
+            match std::str::from_utf8(&self.pending) {
+                Ok(_) => self.pending.clear(),
+                Err(err) => self.invalid = err.error_len().is_some(),
+            }
+        }
+        if !self.invalid {
+            match std::str::from_utf8(bytes) {
+                Ok(_) => {}
+                Err(err) if err.error_len().is_none() => {
+                    self.pending = bytes[err.valid_up_to()..].to_vec();
+                }
+                Err(_) => self.invalid = true,
+            }
+        }
+        !self.invalid
+    }
+
+    /// Whether all of it was UTF-8.
+    fn is_text(&self) -> bool {
+        !self.invalid && self.pending.is_empty()
+    }
 }
 
 /// Replaces secrets in text: the literal values it was given, and the
@@ -101,9 +216,12 @@ fn line_of(bytes: &[u8], offset: usize) -> usize {
 /// anything was found.
 #[derive(Debug)]
 pub struct Redactor {
-    rule: Regex,
-    /// The same rule over bytes, for content that is not text.
+    /// Over bytes, for content that is not text, and since the bounds in
+    /// the patterns count bytes.
     bytes: BytesRegex,
+    /// What [`stream`] needs to look ahead: the longest match that spans
+    /// a newline.
+    overlap: usize,
     count: usize,
 }
 
@@ -120,6 +238,7 @@ impl Redactor {
         // of the longer is replaced.
         let mut literals: Vec<String> = literals.into_iter().collect();
         literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
+        let overlap = literals.first().map_or(0, String::len).max(MAX_PEM_BYTES);
         let literals: Vec<String> = literals.iter().map(|l| regex::escape(l)).collect();
         let rule = alternation(
             literals
@@ -129,7 +248,7 @@ impl Redactor {
         );
         Ok(Self {
             bytes: BytesRegex::new(&format!("(?-u){rule}"))?,
-            rule: Regex::new(&rule)?,
+            overlap,
             count: 0,
         })
     }
@@ -141,21 +260,112 @@ impl Redactor {
         self.bytes.is_match(bytes)
     }
 
-    /// The line of the first secret [`Redactor::finds`] in `bytes`: a
-    /// location to report where the string itself may not be shown.
-    pub fn find_line(&self, bytes: &[u8]) -> Option<usize> {
-        self.bytes
-            .find(bytes)
-            .map(|found| line_of(bytes, found.start()))
+    /// The line of the first secret [`Redactor::finds`] in `input`, read
+    /// in pieces: a location to report where the string itself may not
+    /// be shown.
+    pub fn find_line_in(&self, input: impl Read) -> io::Result<Option<usize>> {
+        let mut line = 1;
+        let mut found = None;
+        stream(&self.bytes, self.overlap, input, |bytes, secret| {
+            if secret {
+                found = Some(line);
+                return Ok(false);
+            }
+            line += bytes.iter().filter(|&&b| b == b'\n').count();
+            Ok(true)
+        })?;
+        Ok(found)
     }
 
     /// `text` with every secret replaced by [`REPLACEMENT`].
     pub fn redact<'t>(&mut self, text: &'t str) -> Cow<'t, str> {
-        let count = &mut self.count;
-        self.rule.replace_all(text, |_: &regex::Captures<'_>| {
-            *count += 1;
-            REPLACEMENT
-        })
+        let mut redacted = io::Cursor::new(Vec::new());
+        match self.redact_stream(text.as_bytes(), &mut redacted) {
+            Ok(None) => Cow::Borrowed(text),
+            Ok(Some(found)) => {
+                self.count += found;
+                let end = usize::try_from(redacted.position()).unwrap_or(usize::MAX);
+                let mut redacted = redacted.into_inner();
+                redacted.truncate(end);
+                // Every match starts and ends at an ASCII byte or the end
+                // of a literal, so this is still UTF-8.
+                Cow::Owned(String::from_utf8_lossy(&redacted).into_owned())
+            }
+            // Memory is neither read nor written with an error; were it,
+            // none of the text would be shown.
+            Err(_) => {
+                self.count += 1;
+                Cow::Borrowed(REPLACEMENT)
+            }
+        }
+    }
+
+    /// Copies `input` to `output` with every secret replaced, if `input`
+    /// is UTF-8 and holds a secret: how many it replaced, or `None` and
+    /// `output` partly written. The count is the caller's to add. What
+    /// `output` holds past its position at the end is not part of it.
+    ///
+    /// A PEM block whose last line is beyond the pattern's bound, a big
+    /// key or one with much space, is replaced whole as one search of the
+    /// unbounded pattern would: the pattern replaces its first line, and
+    /// what follows is written for an unterminated block, then written
+    /// over when the last line comes. A key is not left to be put back
+    /// together from its body, and nothing is held in memory for it.
+    fn redact_stream(
+        &self,
+        input: impl Read,
+        mut output: impl Write + Seek,
+    ) -> io::Result<Option<usize>> {
+        let mut text = Utf8::default();
+        let mut found = 0;
+        // Where such a block's first line was replaced, and how many
+        // secrets were replaced since: what its last line takes back.
+        let mut pem: Option<(u64, usize)> = None;
+        let mut pem_tail = Vec::new();
+        stream(&self.bytes, self.overlap, input, |mut bytes, secret| {
+            if !text.feed(bytes) {
+                return Ok(false);
+            }
+            if let Some((start, within)) = pem {
+                // Literals can divide an END marker into several pieces.
+                // Search the original bytes, including secret pieces, with
+                // enough history for any marker that crosses their boundary.
+                let previous = pem_tail.len();
+                pem_tail.extend_from_slice(bytes);
+                if let Some(end) = PEM_END.find(&pem_tail) {
+                    let end = end.end() - previous;
+                    pem = None;
+                    pem_tail.clear();
+                    found -= within;
+                    output.seek(io::SeekFrom::Start(start))?;
+                    if secret {
+                        return Ok(true);
+                    }
+                    bytes = &bytes[end..];
+                } else {
+                    let keep = "-----END ".len() + PEM_LABEL_BYTES + "PRIVATE KEY-----".len() - 1;
+                    if pem_tail.len() > keep {
+                        pem_tail.drain(..pem_tail.len() - keep);
+                    }
+                    if secret {
+                        pem = Some((start, within + 1));
+                    }
+                }
+            }
+            if secret {
+                found += 1;
+                output.write_all(REPLACEMENT.as_bytes())?;
+                if pem.is_none() && is_pem_without_end(bytes) {
+                    pem_tail.clear();
+                    pem = Some((output.stream_position()?, 0));
+                }
+            } else {
+                output.write_all(bytes)?;
+            }
+            Ok(true)
+        })?;
+        output.flush()?;
+        Ok((text.is_text() && found > 0).then_some(found))
     }
 
     /// How many secrets were replaced so far.
@@ -181,8 +391,8 @@ impl Redactor {
         if !kind.is_file() {
             return std::fs::remove_file(path);
         }
-        let content = match files::read_regular(path, MAX_REDACTED_BYTES) {
-            Ok(content) => content,
+        let input = match files::open_regular(path, MAX_REDACTED_BYTES) {
+            Ok(input) => input,
             Err(ReadError::Io(err)) => return Err(err),
             // Became a link since the look above, or is too big to be text
             // this wrote: not something to upload.
@@ -190,13 +400,25 @@ impl Redactor {
                 return std::fs::remove_file(path);
             }
         };
-        let Ok(text) = std::str::from_utf8(&content) else {
+        // Unnamed and beside the file: nobody walking the tree sees it.
+        let mut redacted = tempfile::tempfile_in(path.parent().unwrap_or(Path::new(".")))?;
+        let found = match self.redact_stream(input, io::BufWriter::new(&mut redacted)) {
+            Ok(found) => found,
+            // Grew past the cap while it was read.
+            Err(err) if err.kind() == io::ErrorKind::FileTooLarge => {
+                return std::fs::remove_file(path);
+            }
+            Err(err) => return Err(err),
+        };
+        let Some(found) = found else {
             return Ok(());
         };
-        match self.redact(text) {
-            Cow::Borrowed(_) => Ok(()),
-            Cow::Owned(redacted) => files::overwrite_regular(path, redacted.as_bytes()),
-        }
+        let end = redacted.stream_position()?;
+        redacted.set_len(end)?;
+        redacted.rewind()?;
+        files::overwrite_regular(path, redacted)?;
+        self.count += found;
+        Ok(())
     }
 }
 
@@ -350,6 +572,211 @@ mod tests {
         );
     }
 
+    /// A key over the pattern's bound is replaced whole, and what is left
+    /// passes the upload gate's search: no line of its body survives.
+    #[test]
+    fn a_private_key_over_the_bound_is_replaced_whole() {
+        let line = |edge: &str| format!("-----{edge} RSA PRIVATE KEY-----");
+        let body = vec!["MIIE".repeat(16); PEM_BODY_BYTES / 64 + 1].join("\n");
+        let cases = [
+            ("big", format!("{}\n{body}\n{}", line("BEGIN"), line("END"))),
+            (
+                "spaced",
+                format!(
+                    "{}{}MIIE\n{}",
+                    line("BEGIN"),
+                    " ".repeat(PEM_BODY_BYTES),
+                    line("END")
+                ),
+            ),
+            (
+                "big, with a token in it",
+                format!(
+                    "{}\n{}\n{body}\n{}",
+                    line("BEGIN"),
+                    token("ghp_"),
+                    line("END")
+                ),
+            ),
+            (
+                "big and wrapped in CRLF",
+                format!(
+                    "{}\r\n{}\r\n{}",
+                    line("BEGIN"),
+                    body.replace('\n', "\r\n"),
+                    line("END")
+                ),
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let mut redactor = Redactor::new::<&str>([]).unwrap();
+        for (name, pem) in &cases {
+            let path = dir.path().join("log");
+            std::fs::write(&path, format!("before\n{pem}\nafter {}\n", token("ghp_"))).unwrap();
+            let before = redactor.count();
+            redactor.redact_tree(&path).unwrap();
+            let redacted = std::fs::read(&path).unwrap();
+            assert_eq!(
+                redacted,
+                format!("before\n{REPLACEMENT}\nafter {REPLACEMENT}\n").as_bytes(),
+                "{name}"
+            );
+            assert_eq!(redactor.count() - before, 2, "{name}");
+            assert_eq!(
+                redactor.find_line_in(&redacted[..]).unwrap(),
+                None,
+                "{name}"
+            );
+            // Text redacted in memory is the same.
+            let text = format!("before\n{pem}\nafter\n");
+            assert_eq!(
+                redactor.redact(&text),
+                format!("before\n{REPLACEMENT}\nafter\n"),
+                "{name}"
+            );
+        }
+    }
+
+    /// The bounds `stream` relies on are the ones in the pattern.
+    #[test]
+    fn the_pem_pattern_has_its_bounds() {
+        let pem = PATTERNS
+            .iter()
+            .find(|pattern| pattern.contains("PRIVATE KEY"))
+            .unwrap();
+        assert_eq!(pem.matches(&format!("{{0,{PEM_LABEL_BYTES}}}")).count(), 2);
+        assert!(pem.contains(&format!("(?s:.){{0,{PEM_BODY_BYTES}}}?")));
+        // No other pattern can span a newline.
+        for pattern in PATTERNS.iter().filter(|pattern| *pattern != pem) {
+            assert!(
+                !pattern.contains("(?s") && !pattern.contains("[^"),
+                "{pattern}"
+            );
+        }
+    }
+
+    /// Streamed redaction is byte for byte one search of the whole text,
+    /// wherever a secret falls against the buffer's end or its cut.
+    #[test]
+    fn streamed_as_whole() {
+        let literal = "a-literal-the-run-holds";
+        // Put together here, as `token` is.
+        let line = |edge: &str, label: &str| format!("-----{edge} {label}PRIVATE KEY-----");
+        let pem = |newline: &str, lines: usize| {
+            let body = vec!["MIIE".repeat(16); lines].join(newline);
+            let (begin, end) = (line("BEGIN", "RSA "), line("END", "RSA "));
+            format!("{begin}{newline}{body}{newline}{end}")
+        };
+        let unterminated = format!(
+            "{}\n{}",
+            line("BEGIN", ""),
+            vec!["MIIE".repeat(16); 20].join("\n")
+        );
+        let cases: &[(&str, String)] = &[
+            ("a GitHub token", token("ghp_")),
+            (
+                "a JWT",
+                format!("eyJ{0}.eyJ{0}.sig", "abcdefghij".repeat(20)),
+            ),
+            ("a literal", literal.to_owned()),
+            ("a PEM", pem("\n", 40)),
+            (
+                "a PEM with escaped newlines inside JSON",
+                format!(r#"{{"key":"{}\n"}}"#, pem(r"\n", 40)),
+            ),
+            ("an unterminated PEM", unterminated.clone()),
+            (
+                "an unterminated PEM inside JSON",
+                format!(r#"{{"key":"{}"}}"#, unterminated.replace('\n', r"\n")),
+            ),
+            ("a PEM over the bound", pem("\n", PEM_BODY_BYTES / 64 + 1)),
+            ("no secret, in characters of two bytes", "\u{e9}".repeat(40)),
+        ];
+        let redactor = Redactor::new([literal, "END RSA "]).unwrap();
+        // Independent whole-input oracle: the original, unbounded PEM
+        // pattern consumes a complete block before literals in its body/end.
+        let whole_rule =
+            BytesRegex::new(&redactor.bytes.as_str().replace("{0,16384}?", "*?")).unwrap();
+        // Lines of characters of more than a byte, so that pieces split them.
+        let filler = "filler caf\u{e9} line\n".repeat(2 * CHUNK_BYTES / 16);
+        let boundary = |at: usize| {
+            (0..=at)
+                .rev()
+                .find(|&at| filler.is_char_boundary(at))
+                .unwrap()
+        };
+        for (name, secret) in cases {
+            // The first cut, and the end of the first buffer.
+            for anchor in [CHUNK_BYTES - redactor.overlap, CHUNK_BYTES] {
+                let step = (secret.len() / 8).max(1);
+                let around = (anchor.saturating_sub(secret.len() + 64)..anchor + 64).step_by(step);
+                let ends = [anchor - secret.len(), anchor - secret.len() + 1, anchor - 1];
+                for at in around.chain(ends) {
+                    let at = boundary(at);
+                    let text = format!("{}{secret}{}", &filler[..at], &filler[at..]);
+                    let count = whole_rule.find_iter(text.as_bytes()).count();
+                    let whole = whole_rule.replace_all(text.as_bytes(), REPLACEMENT.as_bytes());
+                    let mut streamed = io::Cursor::new(Vec::new());
+                    let found = redactor
+                        .redact_stream(text.as_bytes(), &mut streamed)
+                        .unwrap();
+                    let end = usize::try_from(streamed.position()).unwrap();
+                    let mut streamed = streamed.into_inner();
+                    streamed.truncate(end);
+                    let at = format!("{name} at {at}");
+                    assert_eq!(found, (count > 0).then_some(count), "{at}");
+                    if count > 0 {
+                        assert!(streamed == whole.as_ref(), "{at}");
+                    }
+                    let line = redactor
+                        .bytes
+                        .find(text.as_bytes())
+                        .map(|found| 1 + text[..found.start()].matches('\n').count());
+                    assert_eq!(
+                        redactor.find_line_in(text.as_bytes()).unwrap(),
+                        line,
+                        "{at}"
+                    );
+                }
+            }
+        }
+        // Not text, wherever the byte that is not falls.
+        for at in [CHUNK_BYTES - 1, CHUNK_BYTES, CHUNK_BYTES + 1] {
+            let mut bytes = format!("{}{}", &filler[..boundary(at)], token("ghp_")).into_bytes();
+            bytes.insert(boundary(at), 0xff);
+            assert_eq!(
+                redactor
+                    .redact_stream(&bytes[..], io::Cursor::new(Vec::new()))
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_pem_with_literal_in_end_marker() {
+        for literal in ["END RSA ", "PRIVATE KEY", "-----END RSA PRIVATE KEY-----"] {
+            let begin = format!("-----{} RSA PRIVATE KEY-----", "BEGIN");
+            let end = format!("-----{} RSA PRIVATE KEY-----", "END");
+            for body in [
+                "body material\n".repeat(CHUNK_BYTES / 4),
+                "x".repeat(3 * CHUNK_BYTES),
+            ] {
+                let input = format!("before\n{begin}\n{body}\n{end}\nafter\n");
+                let expected = format!("before\n{REPLACEMENT}\nafter\n");
+                let mut redactor = Redactor::new([literal]).unwrap();
+                assert!(redactor.redact(&input) == expected, "{literal}");
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("transcript");
+                std::fs::write(&path, &input).unwrap();
+                redactor.redact_tree(dir.path()).unwrap();
+                let output = std::fs::read(&path).unwrap();
+                assert!(output == expected.as_bytes(), "{literal}");
+                assert_eq!(redactor.find_line_in(output.as_slice()).unwrap(), None);
+            }
+        }
+    }
+
     #[test]
     fn literals() {
         let mut redactor = Redactor::new([
@@ -380,8 +807,8 @@ mod tests {
         assert!(!is_secret_shaped(&bytes));
         assert!(redactor.finds(format!("x {} y", token("ghp_")).as_bytes()));
         let lines = format!("one\ntwo {} y\nthree hunter2-and-more\n", token("ghp_"));
-        assert_eq!(redactor.find_line(lines.as_bytes()), Some(2));
-        assert_eq!(redactor.find_line(b"one\ntwo\n"), None);
+        assert_eq!(redactor.find_line_in(lines.as_bytes()).unwrap(), Some(2));
+        assert_eq!(redactor.find_line_in(&b"one\ntwo\n"[..]).unwrap(), None);
         assert!(!redactor.finds(b"a short word, a.b*c(d)X"));
         assert_eq!(redactor.count(), 3);
     }

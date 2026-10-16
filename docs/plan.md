@@ -35,8 +35,9 @@ image's user. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/is
 include why a file made under `umask 077` came out 0664 on ubuntu-26.04,
 host probes that `run` repeats only when asked (`before-agent`), proxies
 for anything but the identity-token request, stalled request counts, and a test of `run` with
-an agent that holds the token. [Hand-back gaps (#22)](https://github.com/cgwalters-forge/agentic-job/issues/22)
-include streaming the transcript through redaction.
+an agent that holds the token. Streaming files through redaction and the
+upload gate ([#899](https://github.com/cgwalters-forge/agentic-job/issues/899))
+is done, except that one line is still held in memory whole.
 
 [Apply checks (#17)](https://github.com/cgwalters-forge/agentic-job/issues/17)
 need review against the base, file-list and rename checks already implemented.

@@ -22,6 +22,7 @@
 //! for a run whose results may be public. Whether the target is public
 //! at all is the workflow's to check, which can ask the forge.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -152,9 +153,10 @@ impl Staging {
         Ok(found)
     }
 
-    fn read(path: &Path) -> Result<Vec<u8>> {
-        match files::read_regular(path, MAX_FILE_BYTES) {
-            Ok(content) => Ok(content),
+    /// Opened to be read in pieces, up to [`MAX_FILE_BYTES`].
+    fn open(path: &Path) -> Result<files::Regular> {
+        match files::open_regular(path, MAX_FILE_BYTES) {
+            Ok(file) => Ok(file),
             Err(ReadError::Io(err)) => {
                 Err(err).with_context(|| format!("reading {}", path.display()))
             }
@@ -176,9 +178,12 @@ impl Staging {
             (SAFE_OUTPUTS_DIR, self.safe_outputs()),
         ] {
             for (name, path) in Self::files(&dir)? {
-                let content = Self::read(&path)?;
+                let file = Self::open(&path)?;
+                let found = redactor
+                    .with(|redactor| redactor.find_line_in(file))
+                    .with_context(|| format!("reading {}", path.display()))?;
                 // The line and not the string: this error is published.
-                if let Some(line) = redactor.with(|redactor| redactor.find_line(&content)) {
+                if let Some(line) = found {
                     bail!(
                         "a secret-shaped string {} {label}/{name}, line {line}",
                         if label == SAFE_OUTPUTS_DIR {
@@ -205,9 +210,10 @@ impl Staging {
         let encoder = zstd::Encoder::new(out, COMPRESSION_LEVEL).with_context(failed)?;
         let mut archive = tar::Builder::new(encoder);
         for (name, path) in Self::files(&self.transcript())? {
-            let content = Self::read(&path)?;
+            let mut file = Self::open(&path)?;
+            let size = file.size();
             let mut header = tar::Header::new_gnu();
-            header.set_size(u64::try_from(content.len()).with_context(failed)?);
+            header.set_size(size);
             header.set_mode(FILE_MODE);
             header.set_mtime(
                 std::fs::metadata(&path)
@@ -217,9 +223,16 @@ impl Staging {
                     .map_or(0, |since| since.as_secs()),
             );
             header.set_cksum();
+            // As many bytes as the header says, or the archive is corrupt.
+            let mut content = (&mut file).take(size);
             archive
-                .append_data(&mut header, &name, content.as_slice())
+                .append_data(&mut header, &name, &mut content)
                 .with_context(failed)?;
+            ensure!(
+                content.limit() == 0 && file.read(&mut [0])? == 0,
+                "{} changed size while it was packed",
+                path.display()
+            );
         }
         let encoder = archive.into_inner().with_context(failed)?;
         encoder.finish().with_context(failed)?;
