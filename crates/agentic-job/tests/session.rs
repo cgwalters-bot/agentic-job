@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use agentic_job::exit::Exit;
 use agentic_job::session::bridge::{self, Bridge, Listen};
 use agentic_job::session::digest::Digest;
+use agentic_job::session::steer::Watch;
 use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy, Record};
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -62,6 +63,10 @@ impl Write for Captured {
 struct Setup<'a> {
     /// Whether the registry says the agent takes notices during a turn.
     no_notices: bool,
+    /// Whether it says the agent takes `_session/steering`.
+    steering: bool,
+    /// The run's item, watched for the agent.
+    watch: Option<Watch>,
     files: &'a [(&'a str, &'a str)],
     timeout_s: u64,
     budget_aic: Option<f64>,
@@ -331,9 +336,10 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         .map(fill)
         .collect();
     let mut registry = format!(
-        "[fake]\ncommand = {}\nnotices = {}\n",
+        "[fake]\ncommand = {}\nnotices = {}\nsteering = {}\n",
         json!(command),
-        !setup.no_notices
+        !setup.no_notices,
+        setup.steering
     );
     if let Some(prefix) = setup.provider_error {
         registry.push_str(&format!("provider-error = {}\n", json!(prefix)));
@@ -383,6 +389,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
                 as session::Restate
         }),
         mcp_servers: Vec::new(),
+        watch: setup.watch,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -809,6 +816,7 @@ fn a_cap_nothing_counts_is_refused() {
         output: None,
         restate: None,
         mcp_servers: Vec::new(),
+        watch: None,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -960,6 +968,247 @@ fn no_notices_for_an_agent_that_takes_none() {
     assert_eq!(r.notices(), ["hand back"]);
     assert_eq!(r.result["handed_back"], true);
     assert!(r.log.contains("» Handed back."), "{}", r.log);
+}
+
+/// The run's item on a stub of GitHub's issue and comments endpoints:
+/// each answer carries an ETag, and a request whose `If-None-Match` is
+/// the current one is answered 304.
+#[derive(Clone, Default)]
+struct StubItem(Arc<Mutex<ItemState>>);
+
+#[derive(Default)]
+struct ItemState {
+    body: String,
+    comments: Vec<Value>,
+    /// Bumped by each change, for the ETags.
+    version: u64,
+    /// Requests answered, and of those 304.
+    requests: usize,
+    not_modified: usize,
+}
+
+const ITEM_URL: &str = "https://github.com/o/r/issues/7";
+
+impl StubItem {
+    /// Serves the item on loopback; the watch of it polls every 100ms.
+    fn serve(&self, body: &str) -> Watch {
+        self.0.lock().unwrap().body = body.to_owned();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let state = self.0.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0
+                        || line == "\r\n"
+                    {
+                        break;
+                    }
+                    head.push_str(&line.to_ascii_lowercase());
+                }
+                let mut s = state.lock().unwrap();
+                s.requests += 1;
+                let comments = head.contains("/comments?");
+                let etag = format!("\"{}-{}\"", comments, s.version);
+                let (status, body) = if head.contains(&format!("if-none-match: {etag}")) {
+                    s.not_modified += 1;
+                    ("304 Not Modified", String::new())
+                } else if comments {
+                    ("200 OK", Value::from(s.comments.clone()).to_string())
+                } else {
+                    let issue = json!({"html_url": ITEM_URL, "body": s.body,
+                        "user": {"login": "opener"}, "updated_at": "2026-10-16T10:00:00Z"});
+                    ("200 OK", issue.to_string())
+                };
+                let _ = (&stream).write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nETag: {etag}\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        Watch {
+            item: "o/r#7".parse().unwrap(),
+            api,
+            token: "read-token".to_owned(),
+            interval: Duration::from_millis(100),
+        }
+    }
+
+    /// After AFTER, someone comments with TEXT; its link.
+    fn comment(&self, after: Duration, id: u64, text: &str) -> String {
+        let (state, text) = (self.0.clone(), text.to_owned());
+        let url = format!("{ITEM_URL}#issuecomment-{id}");
+        let link = url.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let mut s = state.lock().unwrap();
+            s.comments
+                .push(json!({"id": id, "html_url": link, "created_at": now,
+                "body": text, "user": {"login": "someone"}}));
+            s.version += 1;
+        });
+        url
+    }
+
+    /// After AFTER, the item's body becomes BODY.
+    fn edit(&self, after: Duration, body: &str) {
+        let (state, body) = (self.0.clone(), body.to_owned());
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            let mut s = state.lock().unwrap();
+            s.body = body;
+            s.version += 1;
+        });
+    }
+}
+
+/// What changes on the run's item reaches the agent during its turn, as
+/// its agent takes a message then: steered into the turn for one that
+/// takes `_session/steering` (claude-agent-acp, for which a prompt would
+/// end the turn), queued as a notice for one that takes notices, and not
+/// at all for one that takes neither. Each update is sent once, and the
+/// turn goes on to its end.
+#[test]
+fn updates_of_the_item_reach_the_turn() {
+    const SCRIPT: &str = r#"[{"sleep": 3}, {"say": "Done."}]"#;
+    struct Case {
+        name: &'static str,
+        no_notices: bool,
+        steering: bool,
+        /// The method the updates are sent by, if any.
+        method: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            name: "steered",
+            no_notices: true,
+            steering: true,
+            method: Some("_session/steering"),
+        },
+        Case {
+            name: "steered where it also takes notices",
+            no_notices: false,
+            steering: true,
+            method: Some("_session/steering"),
+        },
+        Case {
+            name: "as a notice",
+            no_notices: false,
+            steering: false,
+            method: Some("session/prompt"),
+        },
+        Case {
+            name: "not at all",
+            no_notices: true,
+            steering: false,
+            method: None,
+        },
+    ];
+    for c in cases {
+        let name = c.name;
+        let stub = StubItem::default();
+        let watch = stub.serve("The brief.");
+        let comment = stub.comment(Duration::from_millis(500), 41, "Also do Z.\nThanks");
+        stub.edit(Duration::from_millis(1200), "The brief, edited.");
+        let r = run(
+            SCRIPT_MODE,
+            Setup {
+                no_notices: c.no_notices,
+                steering: c.steering,
+                watch: Some(watch),
+                files: &[("script.json", SCRIPT)],
+                timeout_s: 60,
+                ..Setup::default()
+            },
+        );
+        // The turn ends as its script does, after the updates came.
+        assert_result(&r, 0, "success");
+        assert_eq!(r.result["stop_reason"], "end_turn", "{name}");
+        assert!(r.log.contains("» Done."), "{name}: {}", r.log);
+        let sent: Vec<&Value> = r
+            .records
+            .iter()
+            .filter(|x| x["dir"] == "send")
+            .map(|x| &x["msg"])
+            .filter(|m| m["params"]["_meta"]["botHarness"]["notice"] == "update")
+            .collect();
+        let task_end =
+            r.position(|x| x["dir"] == "recv" && x["msg"]["result"]["stopReason"] == "end_turn");
+        let Some(method) = c.method else {
+            assert!(sent.is_empty(), "{name}: {sent:?}");
+            let not = "not sent (the agent takes no message during its turn)";
+            assert_eq!(r.log.matches(not).count(), 2, "{name}: {}", r.log);
+            assert!(r.digest().updates.is_empty(), "{name}");
+            continue;
+        };
+        let urls: Vec<&str> = sent
+            .iter()
+            .map(|m| m["params"]["_meta"]["botHarness"]["url"].as_str().unwrap())
+            .collect();
+        // The comment, then the body's edit, each once.
+        assert_eq!(urls, [comment.as_str(), ITEM_URL], "{name}");
+        for m in &sent {
+            assert_eq!(m["method"], method, "{name}");
+            let at = r.position(|x| x["dir"] == "send" && x["msg"]["id"] == m["id"]);
+            assert!(at < task_end, "{name}: sent after the turn ended");
+        }
+        let text = |i: usize| sent[i]["params"]["prompt"][0]["text"].as_str().unwrap();
+        assert!(
+            text(0).starts_with(&format!("[item update] New input on {ITEM_URL}, 20"))
+                && text(0).contains(&format!("a comment by @someone, {comment}."))
+                && text(0).ends_with("\n\n> Also do Z.\n> Thanks"),
+            "{name}: {}",
+            text(0)
+        );
+        assert!(
+            text(1).contains("an edit of its body (the item is by @opener;")
+                && text(1).ends_with("\n\n> The brief, edited."),
+            "{name}: {}",
+            text(1)
+        );
+        if method == "_session/steering" {
+            for m in &sent {
+                assert_eq!(
+                    m["params"]["_meta"]["steering"]["idleBehavior"], "promptRequired",
+                    "{name}"
+                );
+                let answer = r.position(|x| x["dir"] == "recv" && x["msg"]["id"] == m["id"]);
+                assert_eq!(r.records[answer]["msg"]["result"]["outcome"], "injected");
+            }
+            // Only the task was a prompt: nothing that would end its turn.
+            let prompts = r
+                .records
+                .iter()
+                .filter(|x| x["dir"] == "send" && x["msg"]["method"] == "session/prompt")
+                .count();
+            assert_eq!(prompts, 1, "{name}");
+        }
+        assert_eq!(r.digest().updates, urls, "{name}");
+        assert!(
+            r.log.contains(&format!(
+                "⚠ an update of the run's item to the agent: {comment}"
+            )),
+            "{name}: {}",
+            r.log
+        );
+        // The watch's polls were conditional, and mostly unchanged.
+        let s = stub.0.lock().unwrap();
+        assert!(
+            s.not_modified * 2 > s.requests,
+            "{name}: {}/{}",
+            s.not_modified,
+            s.requests
+        );
+    }
 }
 
 /// A turn the session interrupts near a limit, and what the agent does in

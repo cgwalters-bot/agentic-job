@@ -73,6 +73,7 @@ holds no secret.
 | `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped` |
 | `[mcp.NAME]` | `url`, `secret` (only `MCP_TOKEN`) and `allowed` of one remote [MCP server](mcp.md) `run` serves the agent with a credential it never holds |
+| `[session]` | `listen`, `operators`, `origins` and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default) |
 | `[commit]` | `author` and `trailers` of the hand-back's commit; a bounds file's `commit_author` ([safe outputs](safe-outputs.md#the-bounds-and-the-policy)) takes the place of `author` |
 
 `[limits]` without a timeout is refused, and so is one that caps neither

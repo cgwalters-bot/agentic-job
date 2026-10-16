@@ -664,7 +664,9 @@ pub struct Mcp {
 
 /// A conversation with an operator after the task's turn
 /// (specs/session.md). Off unless `listen` is set.
-/// `session::bridge::Listen::from_config` checks it.
+/// `session::bridge::Listen::from_config` checks it. Also the watch of
+/// the run's item, off unless `watch-item` is set, which
+/// `session::steer::interval` checks.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Session {
@@ -680,6 +682,12 @@ pub struct Session {
     /// How long the session waits for the client's next prompt. Zero
     /// means the default.
     pub idle_minutes: u64,
+    /// Whether the session watches the run's item (`run --watch-item`)
+    /// and passes its new comments and body edits to the agent
+    /// (`session::steer`). Off by default.
+    pub watch_item: bool,
+    /// How often it polls the item, in seconds. Zero means the default.
+    pub watch_seconds: u64,
 }
 
 #[cfg(test)]

@@ -119,6 +119,9 @@ runs:
       env:
         JOB_DIR: ${{ inputs.job-dir }}
         REVIEW_HEAD: ${{ steps.settings.outputs.review_head }}
+        # The run's item, which `run` polls with GH_TOKEN for the agent
+        # only where the installed configuration says (`[session] watch-item`).
+        WATCH_ITEM: ${{ steps.settings.outputs.watch_item }}
         # `agentic-job run` writes it to a file of the sandbox user's and
         # redacts it wherever the run logs or publishes.
         GH_TOKEN: ${{ inputs.github-token }}
@@ -132,6 +135,7 @@ runs:
         echo '::group::agent (condensed)'
         state=0
         [ -z "$REVIEW_HEAD" ] || set -- --review-head "$REVIEW_HEAD"
+        [ -z "$WATCH_ITEM" ] || set -- "$@" --watch-item "$WATCH_ITEM"
         agentic-job run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"

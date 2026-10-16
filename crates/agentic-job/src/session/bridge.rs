@@ -106,6 +106,7 @@ impl Listen {
             operators,
             origins,
             idle_minutes,
+            ..
         } = table;
         // The rest is inert without it: a caller's file names who may
         // attach once, and the workflow's `session` input turns it on per
@@ -774,6 +775,7 @@ mod tests {
             operators: owned(operators),
             origins: owned(origins),
             idle_minutes,
+            ..config::Session::default()
         }
     }
 

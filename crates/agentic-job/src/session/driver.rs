@@ -30,6 +30,11 @@
 //! one after each compaction the transcript sees, restating its task, its
 //! hand-back and what its own checkpoint says is left.
 //!
+//! With a watch of the run's item (`Options::watch`, `steer`), what changes
+//! there is sent into whatever turn is running, by `_session/steering` to
+//! an agent that takes it and otherwise as a notice is; never as a prompt
+//! that would end the turn, and never to start one.
+//!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
 //! agent runs in a login session of that user's, where a signal to the
@@ -50,7 +55,9 @@ use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest,
     TextContent,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Handled, Lines};
+use agent_client_protocol::{
+    Agent, Client, ConnectionTo, Dispatch, Handled, Lines, UntypedMessage,
+};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -68,6 +75,7 @@ use super::clients::Clients;
 use super::digest::{self, Dir};
 use super::permission::{self, Policy, Request, pick_option};
 use super::process::{self, Launch};
+use super::steer::{self, Seen, Watch};
 use super::transcript::{Log, Tap, set_stop};
 use crate::exit::Exit;
 use crate::sandbox::root::Root;
@@ -216,6 +224,8 @@ enum Nudge {
         text: String,
         window: Duration,
     },
+    /// From the watch of the run's item.
+    Item(Seen),
 }
 
 /// An MCP server the session gives the agent in `session/new`, over
@@ -274,6 +284,9 @@ pub struct Options {
     /// The MCP servers the agent is given, which it must take over HTTP;
     /// none for a run without.
     pub mcp_servers: Vec<HttpMcp>,
+    /// The run's item, whose new comments and body edits the agent is
+    /// sent while it works; none to watch nothing.
+    pub watch: Option<Watch>,
 }
 
 /// Watches the budget for the whole run, from before the session exists:
@@ -381,6 +394,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         output,
         restate,
         mcp_servers,
+        watch,
     } = opts;
     // A cap that nothing counts would be no cap, and silently: the
     // caller drops it, knowing so, or supplies the count.
@@ -429,6 +443,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         config_options: &config_options,
         prompt: &prompt,
         notices: spec.notices,
+        steering: spec.steering,
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
         output,
         restate: restate.filter(|_| spec.notices),
@@ -436,6 +451,12 @@ pub async fn run(opts: Options) -> Result<RunResult> {
     };
     let started = chrono::Utc::now();
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
+    let item_watcher = watch.map(|watch| {
+        let nudges = nudge_tx.clone();
+        tokio::spawn(steer::watch(watch, move |seen| {
+            nudges.send(Nudge::Item(seen)).is_ok()
+        }))
+    });
     let watcher = tokio::spawn(watch_budget(
         limits.clone(),
         requests,
@@ -492,6 +513,9 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         ),
     };
     watcher.abort();
+    if let Some(item_watcher) = item_watcher {
+        item_watcher.abort();
+    }
     let revoked = match hang_up {
         Some(hang_up) => hang_up.close().await,
         None => Ok(()),
@@ -567,6 +591,8 @@ struct Task<'a> {
     prompt: &'a str,
     /// The agent takes a prompt sent during a turn (`AgentSpec::notices`).
     notices: bool,
+    /// The agent takes `_session/steering` (`AgentSpec::steering`).
+    steering: bool,
     /// How long the agent gets to hand back after its turn ended on an
     /// error: as long as near a limit.
     hand_back_window: Duration,
@@ -896,6 +922,14 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     // once the task's turn is over.
     let (restated_tx, mut restated) = mpsc::unbounded_channel::<String>();
     let restating = Abandon(Arc::default());
+    let link = Link {
+        cx: &cx,
+        tap,
+        sid: &sid,
+        cancelling: &cancelling,
+        notices: task.notices,
+        steering: task.steering,
+    };
     let (why, text, window) = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
@@ -914,13 +948,11 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     if let Some(talk) = conversation.take() {
                         tokio::spawn(refuse_prompts(talk));
                     }
-                    let link = Link { cx: &cx, tap, sid: &sid, cancelling: &cancelling, notices: task.notices };
                     *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = ended.message.clone();
                     return after_error(&link, &mut stop, ended, task.hand_back_window).await;
                 }
                 let goes_on = ended.outcome == Outcome::Success
                     || (client_cancelled && ended.outcome == Outcome::Cancelled);
-                let link = Link { cx: &cx, tap, sid: &sid, cancelling: &cancelling, notices: task.notices };
                 let Some(talk) = conversation.take().filter(|_| goes_on) else {
                     // A conversation's client sees for itself what the
                     // agent left; a task run's turn is the run.
@@ -956,6 +988,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     });
                 }
                 Nudge::HandBack { why, text, window } => break (why, text, window),
+                Nudge::Item(seen) => from_item(&link, seen, true),
             },
             // What to restate is read off this loop, which goes on
             // meanwhile: the turn may end, or a limit come, while the
@@ -1018,13 +1051,6 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         // It doesn't answer, so it can't be asked anything.
         None => return Ended::stopped(&why, false),
     }
-    let link = Link {
-        cx: &cx,
-        tap,
-        sid: &sid,
-        cancelling: &cancelling,
-        notices: task.notices,
-    };
     hand_back(&link, &mut stop, &why, text, window).await
 }
 
@@ -1035,6 +1061,68 @@ struct Link<'a> {
     sid: &'a SessionId,
     cancelling: &'a AtomicBool,
     notices: bool,
+    steering: bool,
+}
+
+/// What the watch of the run's item saw: a note is logged, and an update
+/// sent into the running turn (IN_TURN), by steering where the agent takes
+/// it, else queued as a notice is. One that cannot be sent so is logged,
+/// not sent as a prompt that would end the turn or start one.
+fn from_item(link: &Link<'_>, seen: Seen, in_turn: bool) {
+    let Link { cx, tap, sid, .. } = *link;
+    let update = match seen {
+        Seen::Note(note) => return tap.log(&[digest::cut(&format!("⚠ {note}"))]),
+        Seen::Update(update) => update,
+    };
+    let not = if !in_turn {
+        Some("no turn is running")
+    } else if !(link.steering || link.notices) {
+        Some("the agent takes no message during its turn")
+    } else {
+        None
+    };
+    if let Some(why) = not {
+        tap.log(&[digest::cut(&format!(
+            "⚠ an update of the run's item not sent ({why}): {}",
+            update.url
+        ))]);
+        return;
+    }
+    let text = update.message();
+    let mut marks = meta(json!({"notice": steer::LABEL_UPDATE, "url": update.url}));
+    // Either is answered when the agent has taken it, or refused it (the
+    // digest says), so nobody waits for the answer.
+    if link.steering {
+        // An adapter that finds no turn running is to say so, not start
+        // one: the update then goes unsent.
+        marks.insert(
+            "steering".to_owned(),
+            json!({"idleBehavior": "promptRequired"}),
+        );
+        let params = json!({
+            "sessionId": sid,
+            "prompt": [ContentBlock::Text(TextContent::new(text))],
+            "_meta": marks,
+        });
+        let request = match UntypedMessage::new(steer::STEER_METHOD, params) {
+            Ok(request) => request,
+            Err(e) => return tap.log(&[format!("⚠ an update of the run's item not sent: {e}")]),
+        };
+        let answer = cx.send_request(request).block_task();
+        tokio::spawn(async move {
+            let _ = answer.await;
+        });
+    } else {
+        let request = PromptRequest::new(
+            sid.clone(),
+            vec![ContentBlock::Text(TextContent::new(text))],
+        )
+        .meta(marks);
+        let answer = cx.send_request(request).block_task();
+        tokio::spawn(async move {
+            let _ = answer.await;
+        });
+    }
 }
 
 /// Near a limit, with no turn running: the agent's last turn, in which it
@@ -1191,8 +1279,10 @@ async fn remind(
                 break stop_turn(cx, tap, sid, cancelling, why, response.as_mut()).await;
             }
             Some(nudge) = nudges.recv() => match nudge {
-                // The reminder is all the agent is to do now.
+                // The reminder is all the agent is to do now; an update
+                // of its item is still new input to it.
                 Nudge::Notice { .. } => {}
+                Nudge::Item(seen) => from_item(link, seen, true),
                 // Near a limit, as in the task's turn: interrupted, it is
                 // asked to hand back.
                 Nudge::HandBack { why, text, window } => {
@@ -1282,6 +1372,7 @@ async fn converse(
         sid,
         cancelling,
         notices,
+        ..
     } = *link;
     let Conversation {
         mut from_client,
@@ -1312,6 +1403,10 @@ async fn converse(
             Some(nudge) = nudges.recv() => match nudge {
                 // A notice is for a turn, and none is running.
                 Nudge::Notice { .. } => continue,
+                Nudge::Item(seen) => {
+                    from_item(link, seen, false);
+                    continue;
+                }
                 Nudge::HandBack { why, text, window } => {
                     tap.log(&[format!("⚠ {}: asking the agent to hand back", stopped(&why).1)]);
                     return Talked::HandBack { why, text, window };
@@ -1369,6 +1464,7 @@ async fn converse(
                             let _ = answer.await;
                         });
                     }
+                    Nudge::Item(seen) => from_item(link, seen, true),
                     Nudge::HandBack { why, text, window } => {
                         tap.log(&[format!(
                             "⚠ {}: interrupting the agent to hand back",

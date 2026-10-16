@@ -831,6 +831,9 @@ jobs:
           REVIEW_HEAD: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
           ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
+          # Checked above: a number, and a repository within the bounds.
+          ISSUE: ${{ steps.request.outputs.issue }}
+          ITEM_REPO: ${{ inputs.item-repo || inputs.output-repo || github.repository }}
           SOURCE_SHA: ${{ job.workflow_sha }}
         run: |
           if [ -n "$PROFILE" ]; then
@@ -839,9 +842,19 @@ jobs:
           fi
           if [ "$EVENT" = true ]; then [ -s "$JOB_DIR/task.md" ] || { echo "::error::the decision left no task for an event-triggered run"; exit 1; }
           else printf '%s\n' "$TASK" > "$JOB_DIR/task.md"; fi
+          # The issue or pull request the run is for, which `run` watches
+          # for the agent where the configuration's [session] watch-item
+          # says: the event's, in this repository, or the `issue` input's.
+          watch_item=
+          if [ -e "$JOB_DIR/event.json" ]; then
+            watch_item=$(jq -r --arg repo "$GITHUB_REPOSITORY" \
+              'if (.item.kind == "issue" or .item.kind == "pull_request") and (.item.number | type) == "number" then "\($repo)#\(.item.number)" else "" end' "$JOB_DIR/event.json")
+          elif [ -n "$ISSUE" ]; then
+            watch_item="$ITEM_REPO#$ISSUE"
+          fi
           jq -n --arg id "$ID" --arg repo "$REPO" --arg agent "$AGENT" --arg fake_profile "$PROFILE" \
             --arg agent_config_repo "$CONFIG_REPO" --arg review_head "$REVIEW_HEAD" --arg artifact_prefix "$ARTIFACT_PREFIX" \
-            --arg apply_partial "$APPLY_PARTIAL" --arg source_sha "$SOURCE_SHA" '$ARGS.named' | tee "$JOB_DIR/run.json"
+            --arg apply_partial "$APPLY_PARTIAL" --arg watch_item "$watch_item" --arg source_sha "$SOURCE_SHA" '$ARGS.named' | tee "$JOB_DIR/run.json"
       # With the event's decision and the task, when there was one; a
       # refused event leaves its decision and nothing else.
       - id: policy

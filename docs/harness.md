@@ -327,6 +327,42 @@ checkpoint is never taken for done: see
 `ready_when_complete`, the brief asks for no checkpoint and no
 `compaction` notice is sent.
 
+## Updates of the run's item
+
+Direction added to a run's issue used to mean cancelling the run and
+dispatching it again, losing its work (#925). With the repository-owned
+configuration's
+
+```toml
+[session]
+watch-item = true
+watch-seconds = 60   # the default; 10 to 3600
+```
+
+`run` polls the issue or pull request the run is for (`--watch-item`,
+which the reusable workflow sets from the event or the `issue` input)
+with the agent's own read-only token, and sends the agent each comment
+made on it (not a pull request's review comments), and each edit of the
+body, while it works. What came between the event and the session's
+start is in the brief or not seen. Off by default; without
+the token or an item it watches nothing, and says so. The polls are
+conditional (`If-None-Match`), so an unchanged item costs no rate limit,
+and a poll GitHub refuses for a limit waits as long as GitHub asks.
+
+Every update is passed on, whoever wrote it, and none claims authority:
+it is quoted with its author and link as new input on the item, which
+the agent weighs as any other text it reads. Anyone who can comment on
+the item could already put text before an agent that reads it with `gh`.
+A run takes at most ten updates, each cut to 8000 characters.
+
+Updates go into a running turn only: by claude-agent-acp's
+`_session/steering` for an entry with `steering = true`, which asks the
+adapter not to start a turn when none is running; otherwise as a notice
+is, for an entry with `notices = true`. An agent that takes neither (Vibe)
+is sent none, and the condensed log says so. Each update sent is a line
+of the condensed log, and its link is in `updates` of `summary.json`
+and in `summary.md`.
+
 ## A second agent
 
 A run can let its agent start a second agent, the child, and drive it

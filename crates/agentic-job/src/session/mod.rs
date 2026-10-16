@@ -16,6 +16,8 @@
 //!   ([`permission`]);
 //! - warns the agent as the run nears a limit, has it hand back near
 //!   one, and stops it at one ([`budget`]);
+//! - where the run asks for it, passes on what changes on the run's item
+//!   while the agent works ([`steer`]);
 //! - records every message in both directions to `acp.jsonl`
 //!   ([`transcript`]) and prints a condensed line for each event
 //!   ([`digest`]);
@@ -37,6 +39,7 @@ pub mod digest;
 mod driver;
 pub mod permission;
 pub mod process;
+pub mod steer;
 pub mod transcript;
 pub mod vibe;
 

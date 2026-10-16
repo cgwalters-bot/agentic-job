@@ -75,6 +75,7 @@ use crate::policy;
 use crate::redact::Redactor;
 use crate::session::bridge::{Bridge, Listen};
 use crate::session::process::SandboxUser;
+use crate::session::steer::{self, Watch};
 use crate::session::{self, Clients, Launch, Limits, Options, Policy, RunResult};
 
 /// Under `--out`: what `run` keeps for itself. Nothing here is redacted,
@@ -114,6 +115,8 @@ const TOKEN_VAR_SUFFIX: &str = "_TOKEN";
 const EDIT_TOOLS: &str = "Change files with your edit and write tools, reading a file with your \
      read tool first where the edit tool requires it, not with shell scripts, heredocs or sed; \
      formatters, code generators and `git mv` are fine.";
+/// Where the CI system says GitHub's API is (GitHub Actions sets it).
+const API_URL_VAR: &str = "GITHUB_API_URL";
 /// The file of the run's results that holds the condensed transcript.
 pub const CONDENSED_FILE: &str = "condensed.log";
 
@@ -134,6 +137,11 @@ pub struct Args {
     /// For an analysis review, fetch and start at this admitted commit SHA
     #[arg(long, value_name = "SHA")]
     pub review_head: Option<String>,
+    /// The issue or pull request the run was made for, whose new comments
+    /// and body edits the agent is sent while it works where the
+    /// configuration says (`[session] watch-item`)
+    #[arg(long, value_name = "OWNER/NAME#NUMBER")]
+    pub watch_item: Option<String>,
     /// The configuration, in place of the root-owned copy `sandbox setup`
     /// made. For tests: a job never passes it, since a file the job can
     /// write is not one the sandbox setup vouched for.
@@ -151,6 +159,8 @@ struct Plan {
     endpoint: Option<Endpoint>,
     /// Who may attach to the session, for a conversation.
     session: Option<Listen>,
+    /// The run's item, as the session watches it for the agent.
+    watch: Option<Watch>,
     identity: Identity,
     /// What `policy` allowed this run: the target, and where it is cloned
     /// from.
@@ -358,6 +368,46 @@ fn github_token() -> Result<Option<String>> {
     }
 }
 
+/// The watch of the run's ITEM, polled at INTERVAL where the configuration
+/// asks for one, with the agent's own read-only TOKEN and nothing more:
+/// a run without that token or without an item says why it watches
+/// nothing. GitHub's API is at API, where the CI system says it is.
+/// The item is read only then: a run that watches nothing never fails
+/// for it.
+fn watch_item(
+    interval: Option<Duration>,
+    item: Option<&str>,
+    token: Option<String>,
+    api: Option<String>,
+) -> Result<Option<Watch>> {
+    let Some(interval) = interval else {
+        return Ok(None);
+    };
+    let (Some(item), Some(token)) = (item, token) else {
+        eprintln!(
+            "warning: session.watch-item is set, but the run's item is not watched: it needs \
+             --watch-item and the read-only token {}",
+            agent::GITHUB_TOKEN_VAR
+        );
+        return Ok(None);
+    };
+    let item: steer::Item = item.parse()?;
+    let api = api
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| steer::DEFAULT_API.to_owned());
+    // The token goes with every request.
+    ensure!(
+        api.starts_with("https://"),
+        "{API_URL_VAR} {api:?} is not an https URL"
+    );
+    Ok(Some(Watch {
+        item,
+        api: api.trim_end_matches('/').to_owned(),
+        token,
+        interval,
+    }))
+}
+
 /// Refuses a provider's KEY that is also the agent's read-only GitHub
 /// TOKEN. A GitHub token is the key under `provider = "github"`, and a
 /// job's token is the one most callers give the agent: the agent would
@@ -444,7 +494,14 @@ impl Plan {
             host,
             child,
             mcp,
+            watch,
         } = config.check()?;
+        let watch = watch_item(
+            watch,
+            args.watch_item.as_deref(),
+            github_token()?,
+            std::env::var(API_URL_VAR).ok(),
+        )?;
         if limits.max_requests.is_none() && limits.budget_aic.is_none() {
             eprintln!(
                 "warning: this run is UNCAPPED (limits.uncapped = true): only its timeout of \
@@ -528,6 +585,7 @@ impl Plan {
             limits,
             endpoint,
             session: host.session,
+            watch,
             identity: Identity {
                 oidc,
                 name: run_name(&meta),
@@ -889,6 +947,7 @@ impl Plan {
             output,
             restate,
             mcp_servers: prepared.mcp.into_iter().collect(),
+            watch: self.watch.clone(),
         };
         Ok((options, counter, redactor))
     }
@@ -1577,6 +1636,73 @@ mod tests {
             assert!(!redacted.contains(secret), "{redacted}");
         }
         assert_eq!(redactor.count(), 4);
+    }
+
+    /// The run's item is watched only where the configuration asks, with
+    /// an item and the agent's token, and over https; a run that watches
+    /// nothing never reads `--watch-item`.
+    #[test]
+    fn what_watches_the_run_s_item() {
+        let minute = Some(Duration::from_secs(60));
+        let token = || Some("t".to_owned());
+        let some = |s: &str| Some(s.to_owned());
+        let cases: [(_, _, _, _, Result<Option<&str>, &str>); 8] = [
+            (None, Some("not an item"), token(), None, Ok(None)),
+            (minute, None, token(), None, Ok(None)),
+            (minute, Some("o/r#1"), None, None, Ok(None)),
+            (
+                minute,
+                Some("o/r#1"),
+                token(),
+                None,
+                Ok(Some(steer::DEFAULT_API)),
+            ),
+            (
+                minute,
+                Some("o/r#1"),
+                token(),
+                some(""),
+                Ok(Some(steer::DEFAULT_API)),
+            ),
+            (
+                minute,
+                Some("org/.github#2"),
+                token(),
+                some("https://ghe.example/api/v3/"),
+                Ok(Some("https://ghe.example/api/v3")),
+            ),
+            (
+                minute,
+                Some("o/r#1"),
+                token(),
+                some("http://api.example"),
+                Err("is not an https URL"),
+            ),
+            (minute, Some("o/r"), token(), None, Err("OWNER/NAME#NUMBER")),
+        ];
+        for (interval, item, token, api, want) in cases {
+            let got = watch_item(interval, item, token, api.clone());
+            match want {
+                Ok(want) => {
+                    let got = got.unwrap();
+                    assert_eq!(
+                        got.as_ref().map(|w| w.api.as_str()),
+                        want,
+                        "{item:?} {api:?}"
+                    );
+                    if let Some(watch) = got {
+                        assert_eq!(
+                            (watch.token.as_str(), watch.interval),
+                            ("t", Duration::from_secs(60))
+                        );
+                    }
+                }
+                Err(want) => {
+                    let e = format!("{:#}", got.err().unwrap());
+                    assert!(e.contains(want), "{e}");
+                }
+            }
+        }
     }
 
     /// The token that pays for inference is never also the agent's.

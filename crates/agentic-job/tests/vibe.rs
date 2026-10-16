@@ -308,6 +308,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
             output: None,
             restate: None,
             mcp_servers: Vec::new(),
+            watch: None,
         }))
         .unwrap();
     assert_eq!(

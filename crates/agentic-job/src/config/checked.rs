@@ -14,6 +14,8 @@
 //! there) or on the run (the task, `--meta`, the policy) stays with the
 //! command that meets it.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail, ensure};
 
 use super::{Config, Limits as LimitsTable, Provider};
@@ -24,6 +26,7 @@ use crate::run::mcp::Server;
 use crate::sandbox::network::{self, Direct};
 use crate::session::Limits;
 use crate::session::bridge::Listen;
+use crate::session::steer;
 
 /// What `sandbox setup` takes from a configuration it may act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,9 @@ pub struct Checked {
     pub child: Option<String>,
     /// The remote MCP server `run` serves the agent, if any.
     pub mcp: Option<Server>,
+    /// How often the run's item is polled for the agent; `None` when it
+    /// is not watched.
+    pub watch: Option<Duration>,
 }
 
 /// The limits, with the proxy's part in them checked: a cap on model
@@ -225,6 +231,7 @@ impl Config {
             limits,
             child,
             mcp,
+            watch: steer::interval(&self.session)?,
         })
     }
 }
@@ -306,6 +313,14 @@ mod tests {
             (600, Some(100.0))
         );
         assert_eq!(fake.host.session, None);
+        assert_eq!(fake.watch, None);
+        // The bounds themselves are steer's to test.
+        let watched = checked(&format!(
+            "{FAKE}{CAPPED}[session]\nwatch-item = true\nwatch-seconds = 30\n"
+        ))
+        .unwrap();
+        assert_eq!(watched.watch, Some(std::time::Duration::from_secs(30)));
+        assert!(checked(&format!("{FAKE}{CAPPED}[session]\nwatch-seconds = 30\n")).is_err());
         let session = checked(&format!(
             "{FAKE}{CAPPED}[session]\nlisten = true\noperators = [\"op@github\"]\n\
              origins = [\"https://review.example.ts.net\"]\n"

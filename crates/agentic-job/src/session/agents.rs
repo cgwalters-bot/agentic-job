@@ -14,7 +14,8 @@
 //!
 //! An agent without `model-env` gets its model through its `model`
 //! session config option (ACP's `session/set_config_option`). One with
-//! `notices = true` is sent the budget's notices during its turn.
+//! `notices = true` is sent the budget's notices during its turn, and one
+//! with `steering = true` the run's item's updates by `_session/steering`.
 
 use std::collections::BTreeMap;
 
@@ -44,6 +45,12 @@ pub struct AgentSpec {
     /// there as if the task were done.
     #[serde(default)]
     pub notices: bool,
+    /// Whether the agent takes ACP's `_session/steering` request, which
+    /// puts a message into the running turn without ending it, as
+    /// claude-agent-acp does: how the run's item's updates reach it
+    /// (`steer`). Preferred to `notices` where both are set.
+    #[serde(default)]
+    pub steering: bool,
     /// What the agent's last message of a turn starts with when it gave up
     /// on a model request the provider refused, for an agent that says so
     /// in text and answers the turn as done (Claude Code's "API Error: ..."
@@ -198,17 +205,18 @@ command = ["opencode", "acp"]
     }
 
     /// Only the agents known to queue a prompt behind the step they are on
-    /// are sent notices.
+    /// are sent notices, and only claude-agent-acp is steered.
     #[test]
     fn notices() {
-        for (agent, want) in [
-            ("opencode", true),
-            ("fake", true),
-            ("claude", false),
-            ("vibe", false),
+        for (agent, want, steering) in [
+            ("opencode", true, false),
+            ("fake", true, false),
+            ("claude", false, true),
+            ("vibe", false, false),
         ] {
             let spec = builtin(agent).unwrap();
             assert_eq!(spec.notices, want, "{agent}");
+            assert_eq!(spec.steering, steering, "{agent}");
             // Only Claude Code answers a turn it gave up on as done.
             assert_eq!(spec.provider_error.is_some(), agent == "claude", "{agent}");
         }

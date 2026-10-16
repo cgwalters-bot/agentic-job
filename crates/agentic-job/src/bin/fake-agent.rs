@@ -64,7 +64,10 @@
 //! headers it was given, calls the one named, and says what it got. As
 //! real agents do,
 //! it takes a `session/prompt` that arrives during a turn without
-//! starting another one, and answers it when the turn ends.
+//! starting another one, and answers it when the turn ends. A
+//! `_session/steering` it answers at once, as claude-agent-acp does one
+//! that asks not to start a turn: `injected` during a turn,
+//! `promptRequired` outside one.
 //!
 //! `{cwd}` is the session's working directory and `{home}` is `$HOME`.
 //! Commands run with `sh -c` in the session's working directory, with
@@ -118,6 +121,8 @@ const SLEEP_SLICE: Duration = Duration::from_millis(50);
 const LATER_TEXT: &str = "Nothing more to do.";
 const ALLOW: &str = "allow";
 const REJECT: &str = "reject";
+/// claude-agent-acp's request that puts a message into the running turn.
+const STEER_METHOD: &str = "_session/steering";
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -311,6 +316,15 @@ impl Conn {
         if self.in_turn && msg["method"] == "session/prompt" {
             self.queued.push(msg["id"].clone());
         }
+        // As claude-agent-acp answers one that opts out of starting a turn.
+        if msg["method"] == STEER_METHOD {
+            let outcome = if self.in_turn {
+                "injected"
+            } else {
+                "promptRequired"
+            };
+            self.respond(&msg["id"], json!({"outcome": outcome}));
+        }
         Some(msg)
     }
 
@@ -419,6 +433,8 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                     std::process::exit(status);
                 }
             }
+            // Answered as it arrived.
+            Some(STEER_METHOD) => {}
             // Notifications (a cancel before the prompt) need no answer.
             _ if id.is_null() => {}
             Some(other) => conn.send(json!({"jsonrpc": "2.0", "id": id,

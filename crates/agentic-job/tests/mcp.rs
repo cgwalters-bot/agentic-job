@@ -612,6 +612,7 @@ fn session_with(mode: &str, servers: Vec<HttpMcp>) -> (Value, String, Value) {
         output: None,
         restate: None,
         mcp_servers: servers,
+        watch: None,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -22,6 +22,10 @@
 mod context;
 mod guards;
 
+/// What is not text stripped, as from an event's: also for the updates of
+/// a run's item (`session::steer`).
+pub use context::sanitize;
+
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 

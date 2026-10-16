@@ -328,6 +328,8 @@ pub fn summarize(inputs: &Inputs) -> Value {
         json!(inputs.result.is_some_and(|r| r.reminded)),
     );
     s.insert("notices".into(), json!(digest.notices));
+    // The links of the updates of the run's item the agent was sent.
+    s.insert("updates".into(), json!(digest.updates));
     // A change made without one finished call of an edit kind that did not fail
     // (ACP's for Claude Code's Edit/Write, opencode's edit and Vibe's
     // write_file) was made through the shell: slower, harder to review in
@@ -378,6 +380,21 @@ fn human_duration(v: &Value) -> String {
 fn code(v: &Value) -> String {
     let s = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
     format!("`{}`", s.replace('`', "'").replace('|', "\\|"))
+}
+
+/// An https URL as a Markdown autolink, anything else as inline code.
+fn link(v: &Value) -> String {
+    match v.as_str() {
+        Some(url)
+            if url.starts_with("https://")
+                && url
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() && !b"<>`".contains(&b)) =>
+        {
+            format!("<{url}>")
+        }
+        _ => code(v),
+    }
 }
 
 fn text(v: &Value) -> String {
@@ -477,6 +494,14 @@ pub fn markdown(s: &Value) -> String {
             "The agent ended its turn without its required output and was reminded once."
                 .to_owned(),
         ]);
+    }
+    if let Some(updates) = s["updates"].as_array().filter(|u| !u.is_empty()) {
+        out.extend([
+            String::new(),
+            "Updates of the run's item sent to the agent while it worked:".to_owned(),
+            String::new(),
+        ]);
+        out.extend(updates.iter().map(|url| format!("- {}", link(url))));
     }
     if s["shell_edits"] == true {
         out.extend([
@@ -832,6 +857,29 @@ Redacted 1 string(s).
             md.contains("\nfake/default, 8  more cores: **success**\n"),
             "{md}"
         );
+    }
+
+    /// The updates of the run's item the agent was sent are links, and
+    /// only an https URL is rendered as one.
+    #[test]
+    fn updates_are_links() {
+        let run = json!({"repo": "o/r", "base": "main", "agent": "fake", "result": "success"});
+        let mut with = run.clone();
+        with["updates"] = json!([
+            "https://github.com/o/r/issues/1#issuecomment-2",
+            "javascript:alert(1)",
+            "https://x/a b",
+            "https://x/<b>"
+        ]);
+        let md = markdown(&with);
+        assert!(
+            md.contains(
+                "\n- <https://github.com/o/r/issues/1#issuecomment-2>\n- `javascript:alert(1)`\n\
+                 - `https://x/a b`\n- `https://x/<b>`\n"
+            ),
+            "{md}"
+        );
+        assert!(!markdown(&run).contains("Updates of the run's item"));
     }
 
     #[test]

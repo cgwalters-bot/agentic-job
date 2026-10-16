@@ -13,7 +13,8 @@
 # No `notices`: the adapter queues a prompt sent during a turn as a turn of
 # its own, and when Claude Code takes it up answers the running one with
 # end_turn, which would end the run as done. Its `_session/steering`
-# request is what would deliver one inside the turn.
+# request delivers one inside the turn (`steering`), which the run's
+# item's updates use; the budget's notices do not yet.
 #
 # When Claude Code gives up on a model request (a 429 after its own
 # retries), the adapter may say "API Error: ..." and answer end_turn.
@@ -21,6 +22,7 @@
 command = ["claude-agent-acp"]
 model-env = "ANTHROPIC_MODEL"
 provider-error = "API Error:"
+steering = true
 env = { ANTHROPIC_MODEL = "opus" }
 
 # opencode speaks ACP natively; its model is a session config option. A

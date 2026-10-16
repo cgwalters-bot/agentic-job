@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::permission::{self, PATH_KEYS};
+use super::steer::{LABEL_UPDATE, STEER_METHOD};
 
 /// Free text in log lines and the summary is cut to this many characters.
 pub const MAX_TEXT: usize = 200;
@@ -23,6 +24,8 @@ const TASK_KINDS: &[&str] = &["think", "other", ""];
 /// turn, as opposed to a prompt that starts one: its response says
 /// nothing about the run.
 const NOTICE_METHOD: &str = "session/prompt (notice)";
+/// The outcome of a `_session/steering` that reached the running turn.
+const STEER_INJECTED: &str = "injected";
 
 /// Which way a message went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -92,6 +95,12 @@ pub struct Digest {
     pub tasks: usize,
     /// The labels of the budget notices the harness sent, in order.
     pub notices: Vec<String>,
+    /// The links of the updates of the run's item the harness sent
+    /// (`steer`), in order, less those the agent refused or found no turn
+    /// for.
+    pub updates: Vec<String>,
+    /// The updates awaiting the agent's answer, by request id.
+    sent_updates: HashMap<String, String>,
     /// The first line of the agent's last message in the current turn,
     /// as streamed so far (`last_message`). It is kept apart from `text`,
     /// which another update flushes to the log midway through a message.
@@ -301,6 +310,12 @@ impl Digest {
                             self.new_message();
                         }
                     }
+                    // Into the running turn, which it does not end.
+                    STEER_METHOD => {
+                        if let Some(label) = notice_label(&msg["params"]) {
+                            self.notice(label, &msg["params"], id, &mut out);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -345,12 +360,24 @@ impl Digest {
     /// running.
     fn notice(&mut self, label: &str, params: &Value, id: Option<&Value>, out: &mut Vec<String>) {
         self.flush_text(out);
-        let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
-        let text = text
-            .strip_prefix(super::budget::NOTICE_PREFIX)
-            .unwrap_or(text);
-        out.push(cut(&format!("⚠ notice to the agent: {}", text.trim())));
-        self.notices.push(label.to_owned());
+        if label == LABEL_UPDATE {
+            // Its text is the item's, which the link leads to.
+            let url = notice_url(params).unwrap_or("?");
+            out.push(cut(&format!(
+                "⚠ an update of the run's item to the agent: {url}"
+            )));
+            self.updates.push(url.to_owned());
+            if let Some(id) = id {
+                self.sent_updates.insert(id_key(id), url.to_owned());
+            }
+        } else {
+            let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
+            let text = text
+                .strip_prefix(super::budget::NOTICE_PREFIX)
+                .unwrap_or(text);
+            out.push(cut(&format!("⚠ notice to the agent: {}", text.trim())));
+            self.notices.push(label.to_owned());
+        }
         if let Some(id) = id
             && !super::budget::TURN_LABELS.contains(&label)
         {
@@ -365,6 +392,21 @@ impl Digest {
             if let Some(e) = msg.get("error") {
                 let text = e["message"].as_str().unwrap_or("unknown error");
                 out.push(cut(&format!("⚠ the agent refused a notice: {text}")));
+            }
+            // A steered message the adapter found no turn for (its
+            // `promptRequired`) went unread.
+            let outcome = msg["result"]["outcome"].as_str();
+            if let Some(outcome) = outcome.filter(|o| *o != STEER_INJECTED) {
+                out.push(cut(&format!(
+                    "⚠ the agent did not take a message into its turn: {outcome}"
+                )));
+            }
+            let unread = msg.get("error").is_some() || outcome.is_some_and(|o| o != STEER_INJECTED);
+            let update = self.sent_updates.remove(&id_key(&msg["id"]));
+            if let (true, Some(url)) = (unread, update)
+                && let Some(i) = self.updates.iter().rposition(|u| *u == url)
+            {
+                self.updates.remove(i);
             }
             return;
         }
@@ -621,6 +663,11 @@ impl MessageLine {
 /// as one (`run` marks them in `_meta`).
 fn notice_label(params: &Value) -> Option<&str> {
     params["_meta"][permission::META_KEY]["notice"].as_str()
+}
+
+/// The link of an update of the run's item, as `run` marks it.
+fn notice_url(params: &Value) -> Option<&str> {
+    params["_meta"][permission::META_KEY]["url"].as_str()
 }
 
 /// The model a session runs: its `model` config option (stable ACP), else
@@ -1115,6 +1162,28 @@ mod tests {
                 json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "busy"}}),
             ),
             end(2, json!({"stopReason": "end_turn"})),
+            // Updates of the run's item, as a notice and steered: their
+            // links are kept, and a steer that found no turn is said.
+            {
+                let (dir, mut msg) = notice(4, "update", "[item update] the item's text");
+                msg["params"]["_meta"]["botHarness"]["url"] = json!("https://x/1#c1");
+                (dir, msg)
+            },
+            (
+                Dir::Send,
+                json!({"jsonrpc": "2.0", "id": 5, "method": "_session/steering", "params": {
+                    "sessionId": "s", "prompt": [{"type": "text", "text": "x"}],
+                    "_meta": {"botHarness": {"notice": "update", "url": "https://x/1#c2"},
+                        "steering": {"idleBehavior": "promptRequired"}}}}),
+            ),
+            end(5, json!({"outcome": "injected"})),
+            (
+                Dir::Send,
+                json!({"jsonrpc": "2.0", "id": 6, "method": "_session/steering", "params": {
+                    "_meta": {"botHarness": {"notice": "update", "url": "https://x/1#c3"}}}}),
+            ),
+            end(6, json!({"outcome": "promptRequired"})),
+            end(4, json!({"stopReason": "end_turn"})),
             end(0, json!({"stopReason": "cancelled"})),
             notice(3, "hand back", "[bot-harness budget notice] Hand back now."),
             end(3, json!({"stopReason": "end_turn"})),
@@ -1125,6 +1194,10 @@ mod tests {
                 "⚠ notice to the agent: Converge. more",
                 "⚠ notice to the agent: Finish.",
                 "⚠ the agent refused a notice: busy",
+                "⚠ an update of the run's item to the agent: https://x/1#c1",
+                "⚠ an update of the run's item to the agent: https://x/1#c2",
+                "⚠ an update of the run's item to the agent: https://x/1#c3",
+                "⚠ the agent did not take a message into its turn: promptRequired",
                 "done: cancelled, 5 tool calls",
                 "⚠ notice to the agent: Hand back now.",
                 "done: end_turn, 5 tool calls",
@@ -1132,6 +1205,8 @@ mod tests {
         );
         assert_eq!(d.tasks, 3);
         assert_eq!(d.notices, ["60%", "80%", "hand back"]);
+        // The one that found no turn went unread.
+        assert_eq!(d.updates, ["https://x/1#c1", "https://x/1#c2"]);
         assert_eq!(d.error, None);
         assert_eq!(d.stop_reason.as_deref(), Some("end_turn"));
     }
