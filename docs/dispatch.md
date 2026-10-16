@@ -104,8 +104,10 @@ naming it; its CI then runs the agent's branch with its secrets. A `fix`
 to such a pull request is pushed to its branch under the same file.
 
 Every run's result can be found from the issue it was dispatched for. A draft
-PR ends its body with `Refs OWNER/REPO#N`, which apply writes from the `repo`
-(or `item-repo`) and `item` inputs, not from agent text; `Refs` closes nothing on merge. Its
+PR gets a `Closes #N` line for an issue in the output repository, or
+`Refs OWNER/REPO#N` for an item elsewhere. Apply derives the line from the
+repository and item in policy and appends it only if absent; cross-repository
+references close nothing on merge. Fix runs leave existing PR bodies alone. Its
 title is the first line of the agent's summary, cut between words to 100
 characters. For non-review runs in the calling repository, notify and conclude
 upsert one status comment there, linking the current run and its result across
@@ -120,15 +122,19 @@ caller's `SAFE_OUTPUTS_PAT`). Otherwise the run stays green and status remains
 opt-in. The run summary also holds the reason. Reviews normally have no status
 comment, except for missing-data failures.
 
+Partial implement results also get the primary closing reference, but remain
+drafts: review must resolve the unfinished work before merging, or remove the
+closing line if merging only an incremental part.
+
 For a batched implement run, put the primary issue in `item` and name the
 small sibling issues and their requested work explicitly in `task`. The
-primary item routes admission, status and the generated `Refs` line; it is
+primary item routes admission, status and the generated reference line; it is
 not an allowlist of issues the PR may address. No extra input is needed:
 `create_pull_request` bounds count requests, not issue references in their
 bodies. One PR may therefore retain several agent-supplied `Closes #N`
-lines (use repository-qualified references for issues outside the target).
-Check accepts those lines and apply preserves them before appending `Refs`;
-the generated `Refs` line does not narrow the batch. Review covers the whole
+lines for completed siblings (use `Refs OWNER/REPO#N` outside the target).
+Check accepts those lines and apply preserves them while ensuring the primary
+reference is present; that reference does not narrow the batch. Review covers the whole
 PR diff, including the sibling work, rather than only the primary item.
 The batch still shares one run's existing output, patch and budget limits;
 this does not authorize extra comments or issue actions. Closing references

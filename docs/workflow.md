@@ -1472,7 +1472,9 @@ The workflow's outputs are `exit` (the exit state of `run`),
 `pull-request`, `applied-artifact-id` and `result-url`: the URL of the pull
 request, or else of the first comment or issue apply made or found made, also
 in the run summary. With `issue` set to a number of the output repository, a
-pull request ends its body with `Refs OWNER/NAME#N`. When notifications are
+new pull request gets `Closes #N` unless that line is already present;
+an item in another repository gets `Refs OWNER/NAME#N` instead. Existing batch
+references are preserved, and fix runs leave the PR body alone. When notifications are
 enabled, conclude puts the result link in the item's single status comment.
 A link that cannot be posted fails no run.
 A run whose checked outputs are only `noop`, `missing_tool` or

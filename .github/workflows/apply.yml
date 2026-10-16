@@ -525,14 +525,16 @@ jobs:
             "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/marked.json"
           mv "$RUNNER_TEMP/marked.json" "$GH_AW_TMP/agent_output.json"
       # A pull request says which issue the caller made the run for, in
-      # this file's words: `Refs`, which closes nothing when it is merged.
+      # this file's words. A closing reference lets the scheduler find the
+      # implementation instead of starting duplicate work. Cross-repository
+      # items are references only; existing batch closing lines stay intact.
       # Before the guard, so the name it digests is the same on a re-run.
+      # Only a real patch application can open a PR and has the trusted helper
+      # checkout; comment-only and staged runs must not require that checkout.
       - name: Say which issue a pull request is for
-        if: ${{ fromJSON(inputs.policy).issue != '' }}
+        if: ${{ fromJSON(inputs.policy).issue != '' && fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         run: |
-          jq --arg refs "Refs $ITEM_REPO#$ISSUE" '(.items[] | select(.type == "create_pull_request") | .body) |= "\(. // "")\n\n\($refs)"' \
-            "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/refs.json"
-          mv "$RUNNER_TEMP/refs.json" "$GH_AW_TMP/agent_output.json"
+          node "$GITHUB_WORKSPACE/apply-source/workflow/issue-reference.cjs"
       # A re-run of this job applies check's accepted outputs again, and
       # gh-aw's handlers would post each comment, issue and pull request
       # again. Each is named by this run, its place and its digest, the

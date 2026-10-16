@@ -1550,9 +1550,13 @@ test('a pull request without a checked patch stops the guard', async () => {
 function refs(items, issue = '64', itemRepo = 'owner/repo') {
   const dir = mkdtempSync(join(homedir(), 'refs-test-'));
   try {
+    mkdirSync(join(dir, 'apply-source/workflow'), { recursive: true });
+    writeFileSync(join(dir, 'apply-source/workflow/issue-reference.cjs'),
+      readFileSync(join(__dirname, 'issue-reference.cjs')));
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
     const result = command(dir, 'bash', ['-e', '-o', 'pipefail', '-c', step('Say which issue a pull request is for')],
-      { GH_AW_TMP: dir, RUNNER_TEMP: dir, OUTPUT_REPO: 'owner/repo', ITEM_REPO: itemRepo, ISSUE: issue });
+      { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_WORKSPACE: dir,
+        OUTPUT_REPO: 'owner/repo', ITEM_REPO: itemRepo, ISSUE: issue });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(readFileSync(join(dir, 'agent_output.json'), 'utf8')).items;
   } finally {
@@ -1560,27 +1564,55 @@ function refs(items, issue = '64', itemRepo = 'owner/repo') {
   }
 }
 
-test('the generated reference names the caller issue without closing it', () => {
+test('the generated reference links an implementation to the caller issue', () => {
   const [opened, commented] = refs([pull, comment()]);
-  assert.equal(opened.body, 'change\n\nRefs owner/repo#64');
+  assert.equal(opened.body, 'change\n\nCloses #64');
   assert.deepEqual(commented, comment());
-  assert.equal(refs([{ ...pull, body: undefined }])[0].body, '\n\nRefs owner/repo#64');
+  assert.equal(refs([{ ...pull, body: undefined }])[0].body, '\n\nCloses #64');
   // An item in another repository is named there.
   assert.equal(refs([pull], '64', 'owner/tracker')[0].body, 'change\n\nRefs owner/tracker#64');
-  // GitHub's closing keywords, none of which the line starts with.
-  assert.doesNotMatch(opened.body.split('\n').at(-1), /^(close[sd]?|fix(e[sd])?|resolve[sd]?)\b/i);
   const steps = workflow.split('\n      - name: ').map(text => text.split('\n')[0]);
   assert.ok(steps.indexOf('Say which issue a pull request is for') < steps.indexOf('Leave out what an earlier attempt applied'));
   assert.match(workflow.split('- name: Say which issue a pull request is for\n')[1].split('\n')[0],
-    /if: \$\{\{ fromJSON\(inputs\.policy\)\.issue != '' \}\}/);
+    /if: \$\{\{ fromJSON\(inputs\.policy\)\.issue != '' && fromJSON\(inputs\.check\)\.outputs.has-patch == 'true' && fromJSON\(inputs\.policy\)\.apply-staged != 'true' \}\}/);
 });
 
 test('a batched pull request preserves closing references for all its issues', () => {
   for (const itemRepo of ['owner/repo', 'owner/tracker']) {
     const body = 'Batch sibling work\n\nCloses #64\nCloses #65\nCloses owner/tracker#66';
     const [opened] = refs([{ ...pull, body }], '64', itemRepo);
-    assert.equal(opened.body, `${body}\n\nRefs ${itemRepo}#64`);
+    assert.equal(opened.body, itemRepo === 'owner/repo' ? body : `${body}\n\nRefs ${itemRepo}#64`);
   }
+});
+
+test('an existing reference is unchanged and fix outputs are untouched', () => {
+  for (const [itemRepo, line] of [['owner/repo', 'Closes #64'], ['OWNER/REPO', 'Closes #64'],
+    ['owner/tracker', 'Refs owner/tracker#64']]) {
+    for (const ending of ['', '\r\n']) {
+      const body = `Done.\n\n${line}${ending}`;
+      assert.equal(refs([{ ...pull, body }], '64', itemRepo)[0].body, body);
+    }
+  }
+  const fix = { type: 'push_to_pull_request_branch', message: 'Keep existing PR references.' };
+  assert.deepEqual(refs([fix]), [fix]);
+  assert.equal(refs([{ ...pull, body: 'Mentions Closes #64 in prose.' }])[0].body,
+    'Mentions Closes #64 in prose.\n\nCloses #64');
+});
+
+test('examples and comments cannot suppress the generated closing reference', () => {
+  for (const [body, closing] of [
+    ['```text\nCloses #64\n```', ''],
+    ['~~~\nCloses #64\n~~~', ''],
+    ['<!--\nCloses #64\n-->', ''],
+    ['<!-- Closes #64 -->', ''],
+    ['```text\nCloses #64', '\n```'],
+    ['<!--\nCloses #64', '\n-->'],
+  ]) {
+    assert.equal(refs([{ ...pull, body }])[0].body, `${body}${closing}\n\nCloses #64`);
+  }
+  // Partial work remains a draft; merging it still closes the primary issue.
+  const body = '**Partial work.** Not all work is done.';
+  assert.equal(refs([{ ...pull, body }])[0].body, `${body}\n\nCloses #64`);
 });
 
 // gh-aw's sanitizer, as far as these tests go: it neutralizes a mention and cuts at its limit.
