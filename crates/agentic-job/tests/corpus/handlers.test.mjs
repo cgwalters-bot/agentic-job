@@ -575,3 +575,78 @@ test('checked pull request closures and sub-issue links reach only the named ite
     }
   }
 });
+
+test('a checked discussion is posted only in the category the bounds pin', async () => {
+  const repo = 'owner/source';
+  const pinned = { id: 'DIC_reports', name: 'Agent reports', slug: 'agent-reports' };
+  const announcements = { id: 'DIC_ann', name: 'Announcements', slug: 'announcements' };
+  const item = { type: 'create_discussion', title: 'Weekly report', body: 'Nothing unusual this week: every scheduled job passed, and the details are in the linked run.' };
+  for (const [name, line, categories, ok, posted] of [
+    ['the pinned category', item, [announcements, pinned], true, pinned.id],
+    ['the pin named', { ...item, category: 'Agent reports' }, [announcements, pinned], true, pinned.id],
+    ['another category', { ...item, category: 'Announcements' }, [announcements, pinned], false],
+    ['another repository', { ...item, repo: 'owner/other' }, [announcements, pinned], false],
+    // The collector drops labels, which the handler would apply unbounded.
+    ['labels', { ...item, labels: ['release'] }, [announcements, pinned], true, pinned.id],
+    // The handler would fall back to Announcements; apply's guard refuses.
+    ['the pin missing from the repository', item, [announcements], true, null],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'handler-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.create_discussion]\nmax = 1\ncategory = "Agent reports"\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'create_discussion',
+        '--max-outputs', '1'], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      if (!ok) continue;
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), GITHUB_REPOSITORY: repo, REPO: repo, OUTPUT_REPO: 'owner/other',
+        ITEM_REPO: 'owner/other', BASE: 'main', BRANCH_PREFIX: '', READY: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '',
+        PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const config = JSON.parse(readFileSync(file('handler-config.json')));
+      assert.deepEqual(config.create_discussion, { max: 1, category: 'Agent reports', 'target-repo': repo,
+        fallback_to_issue: false, close_older_discussions: false });
+      const calls = [];
+      const client = { graphql: async (query, variables) => {
+        if (/\bcreateDiscussion\b/.test(query)) {
+          calls.push(['create', variables.repositoryId, variables.categoryId]);
+          return { createDiscussion: { discussion: { id: 'D_1', number: 1, title: variables.title, url: 'https://example.invalid/1' } } };
+        }
+        if (/addLabelsToLabelable/.test(query)) calls.push(['labels', variables]);
+        return { repository: { id: `R_${variables.owner}/${variables.repo}`, discussionCategories: { nodes: categories } } };
+      } };
+      // apply's guarded client, as the handlers get it.
+      const guardSource = workflow.split('const guarded = client => {')[1].split('client.hook.before')[0];
+      runInNewContext(`(client => { ${guardSource} })(client)`, { client,
+        process: { env: { GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: JSON.stringify(config) } } });
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, startGroup() {}, endGroup() {} },
+        context: { repo: { owner: 'owner', repo: 'source' }, runId: 1, serverUrl: 'https://github.com', eventName: 'workflow_dispatch', payload: {} },
+        github: client,
+      });
+      // What apply's runner and step give the handlers' execution provenance.
+      Object.assign(process.env, { GITHUB_REPOSITORY: repo, GITHUB_REPOSITORY_ID: '1', GITHUB_RUN_ID: '1',
+        GITHUB_RUN_ATTEMPT: '1', GITHUB_JOB: 'apply', GH_AW_WORKFLOW_ID: 'agentic-job', GH_AW_JOB_CHECK_RUN_ID: '1' });
+      const handler = await require(join(js, 'create_discussion.cjs')).main(config.create_discussion);
+      const result = await handler(verdict.items[0], {});
+      assert.equal(result.success, posted !== null, `${name}: ${JSON.stringify(result)}`);
+      assert.deepEqual(calls, posted === null ? [] : [['create', `R_owner/source`, posted]], name);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});

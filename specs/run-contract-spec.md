@@ -242,9 +242,20 @@ Apply MUST refuse the type when the run's repository is not the calling one.
 Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 `check_runs_keep_the_pinned_name_and_no_success`,
 [policy.rs](../crates/agentic-job/src/policy.rs) test
-`check_runs_take_their_name_from_the_bounds`, and
+`pinned_outputs_take_their_pin_from_the_bounds`, and
 [apply.test.cjs](../workflow/apply.test.cjs)
 `a check run keeps its pinned name and posts only in the run repository`.
+
+**RC-025 — Discussion bounds.** Bounds MUST pin a `create_discussion`
+category. Check MUST refuse a request naming another category or repository.
+Apply MUST post only in the run's repository, in a category it read back
+under the pin, without falling back to an issue.
+Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
+`discussions_keep_the_pinned_category_and_repo`,
+[policy.rs](../crates/agentic-job/src/policy.rs) test
+`pinned_outputs_take_their_pin_from_the_bounds`, and
+[handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
+`a checked discussion is posted only in the category the bounds pin`.
 
 **RC-013 — Re-run application.** A re-run of apply MUST NOT post an accepted
 comment, issue or pull request that an earlier attempt of the same run posted,

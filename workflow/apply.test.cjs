@@ -198,6 +198,24 @@ test('a check run keeps its pinned name and posts only in the run repository', (
   }
 });
 
+test('a discussion goes to the run repository, never to an issue in its place', () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ create_discussion: { max: 1, category: 'Agent reports' } }));
+    const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
+      GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), GITHUB_REPOSITORY: 'owner/caller', REPO: 'owner/source',
+      OUTPUT_REPO: 'owner/output', ITEM_REPO: 'owner/item', BASE: 'main', BRANCH_PREFIX: '',
+      READY: 'false', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+    assert.deepEqual(config.create_discussion, { max: 1, category: 'Agent reports', 'target-repo': 'owner/source',
+      fallback_to_issue: false, close_older_discussions: false });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // The settings a push is applied with, as the workflow states them.
 function stepEnv(name, key) {
   const section = workflow.split(`- name: ${name}\n`)[1].split('        run: |\n')[0];

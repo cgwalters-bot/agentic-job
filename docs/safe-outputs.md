@@ -73,7 +73,7 @@ generates and publishes them nowhere else, so
 gh-aw's own compiled workflows, and CI fails when the file is not what
 the pinned commit gives.
 
-The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
+The types a run can be allowed are `create_pull_request`, `create_issue`, `create_discussion`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
 `mark_pull_request_as_ready_for_review`, `create_check_run`, `update_project`, `push_to_pull_request_branch`,
 `add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`,
@@ -331,6 +331,34 @@ Which pull request in it is the agent's choice. GitHub lets only an app
 create check runs: apply needs `checks: write` for the job token, and fails
 with `SAFE_OUTPUTS_PAT` set to a user's token. If the pinned name is the
 calling workflow's name, the handler appends "(Result)" to it.
+
+### Starting a discussion
+
+`create_discussion` is off unless listed in bounds, and its bounds pin the
+category, by name, slug or node ID:
+
+```toml
+[outputs.create_discussion]
+max = 1
+category = "Agent reports"
+```
+
+The category is 1–64 characters, without control characters or surrounding
+whitespace; when two bounds files both allow the type, theirs must be the
+same. gh-aw's handler takes a request's own `category` over its
+configuration's, so check refuses a request naming any other than the exact
+pin, and one naming another repository. The handler posts in Announcements,
+or the first category, when it does not find the one it was given; apply
+refuses to post in a category not read back under the pin, so a pin that
+names no category in the repository fails the job rather than posting
+elsewhere. Pin a category whose readers expect agent posts.
+
+The discussion goes to the run's `repo`. It is not turned into an issue when
+discussions are off or the token cannot post one, and older discussions are
+not closed. The collector drops a request's `labels` and `temporary_id`. Apply
+needs `discussions: write` for the job token, or a `SAFE_OUTPUTS_PAT` that
+can post discussions there. A re-run of apply posts a discussion again: unlike
+an issue, it is not looked for under its name first.
 
 ### Pushing to a pull request's branch
 

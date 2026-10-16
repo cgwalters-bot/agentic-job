@@ -63,6 +63,7 @@ pub const OUTPUT_TYPES: &[&str] = &[
     CREATE_PULL_REQUEST,
     "add_comment",
     "create_issue",
+    "create_discussion",
     "close_issue",
     "add_labels",
     "remove_labels",
@@ -111,6 +112,10 @@ const MAX_REPLACEMENT_COMMITS: u32 = 50;
 /// The longest check run name bounds may pin: room for a readable name,
 /// none for a page of text in the forge's checks list.
 const MAX_CHECK_RUN_NAME: usize = 64;
+
+/// The longest discussion category bounds may pin, as for a check run's
+/// name: room for a readable name, slug or node ID.
+const MAX_DISCUSSION_CATEGORY: usize = 64;
 
 /// `--outputs all`: every type the bounds list.
 const ALL_OUTPUTS: &str = "all";
@@ -350,6 +355,13 @@ pub struct OutputLimit {
     /// `create_check_run`, and only for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The one category a discussion is posted in, by name, slug or node
+    /// ID. Required for `create_discussion`, and only for it: gh-aw's
+    /// handler takes a request's own category over this one, and an
+    /// unknown one for Announcements or the first category, so check
+    /// refuses another and apply refuses what the pin does not name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     /// For the two outputs that carry a patch: open complete work ready
     /// for review, and only a checkpoint (`check::checkpoint`) or a run
     /// stopped at a limit as a draft. Off, every pull request is a draft.
@@ -479,6 +491,19 @@ impl OutputLimit {
                     && name == name.trim()
                     && !name.chars().any(char::is_control),
                 "outputs.{output}: invalid check run name {name:?}"
+            );
+        }
+        ensure!(
+            (output == "create_discussion") == self.category.is_some(),
+            "outputs.{output}: `category` is required for create_discussion, and only for it"
+        );
+        if let Some(category) = &self.category {
+            ensure!(
+                !category.is_empty()
+                    && category.len() <= MAX_DISCUSSION_CATEGORY
+                    && category == category.trim()
+                    && !category.chars().any(char::is_control),
+                "outputs.{output}: invalid discussion category {category:?}"
             );
         }
         Ok(())
@@ -1192,6 +1217,10 @@ impl Bounds {
                 .outputs
                 .get(output)
                 .and_then(|bound| bound.name.clone()),
+            category: self
+                .outputs
+                .get(output)
+                .and_then(|bound| bound.category.clone()),
             ready_when_complete: false,
         };
         let ready = |output: &str| {
@@ -1363,6 +1392,9 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             if limit.name != bound.name {
                 limit.name = None;
             }
+            if limit.category != bound.category {
+                limit.category = None;
+            }
             true
         } else {
             false
@@ -1409,6 +1441,16 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
     {
         return Err(vec![
             "create_check_run has different check run names in the two bounds files".to_owned(),
+        ]);
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get("create_discussion")
+        .is_some_and(|limit| limit.category.is_none())
+    {
+        return Err(vec![
+            "create_discussion has different categories in the two bounds files".to_owned(),
         ]);
     }
     policy.safe_outputs.create_pull_request = match (
@@ -1999,65 +2041,69 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     }
 
     #[test]
-    fn check_runs_take_their_name_from_the_bounds() {
+    fn pinned_outputs_take_their_pin_from_the_bounds() {
         let accepts = |output: &str, text: &str| {
             toml::from_str::<OutputLimit>(text).is_ok_and(|limit| limit.validate(output).is_ok())
         };
-        for (output, text, ok) in [
-            ("create_check_run", "max = 1\nname = 'agent verdict'", true),
-            (
-                "create_check_run",
-                "max = 1\nname = 'agent/verdict (draft)'",
-                true,
-            ),
-            ("create_check_run", "max = 1", false),
-            ("create_check_run", "max = 1\nname = ''", false),
-            ("create_check_run", "max = 1\nname = ' agent'", false),
-            ("create_check_run", "max = 1\nname = \"a\\nb\"", false),
-            (
-                "create_check_run",
-                &format!("max = 1\nname = '{}'", "a".repeat(65)),
-                false,
-            ),
-            ("add_comment", "max = 1\nname = 'agent verdict'", false),
+        // The check run's name and the discussion's category: each
+        // required for its type, and only for it.
+        for (output, key, other) in [
+            ("create_check_run", "name", "category"),
+            ("create_discussion", "category", "name"),
         ] {
-            assert_eq!(accepts(output, text), ok, "{output}: {text}");
-        }
+            for (text, ok) in [
+                (format!("max = 1\n{key} = 'agent verdict'"), true),
+                (format!("max = 1\n{key} = 'agent/verdict (draft)'"), true),
+                ("max = 1".to_owned(), false),
+                (format!("max = 1\n{key} = ''"), false),
+                (format!("max = 1\n{key} = ' agent'"), false),
+                (format!("max = 1\n{key} = \"a\\nb\""), false),
+                (format!("max = 1\n{key} = '{}'", "a".repeat(64)), true),
+                (format!("max = 1\n{key} = '{}'", "a".repeat(65)), false),
+                (format!("max = 1\n{key} = 'a'\n{other} = 'b'"), false),
+            ] {
+                assert_eq!(accepts(output, &text), ok, "{output}: {text}");
+            }
+            assert!(!accepts("add_comment", &format!("max = 1\n{key} = 'a'")));
 
-        let configured = |name: &str| {
-            let mut bounds = bounds();
-            bounds.outputs.insert(
-                "create_check_run".to_owned(),
-                OutputLimit {
+            let configured = |pin: &str| {
+                let mut bounds = bounds();
+                let mut limit = OutputLimit {
                     max: 2,
-                    name: Some(name.to_owned()),
                     ..OutputLimit::default()
-                },
+                };
+                *if key == "name" {
+                    &mut limit.name
+                } else {
+                    &mut limit.category
+                } = Some(pin.to_owned());
+                bounds.outputs.insert(output.to_owned(), limit);
+                bounds.validate().unwrap();
+                bounds
+                    .compile(&Request {
+                        outputs: output,
+                        ..request()
+                    })
+                    .unwrap()
+            };
+            let policy = configured("agent verdict");
+            policy.validate().unwrap();
+            // gh-aw's handlers take a missing `max` for their own default,
+            // and a missing pin for the workflow's or any category: both
+            // are always written.
+            let config = serde_json::to_value(&policy.safe_outputs).unwrap();
+            assert_eq!(
+                config[output],
+                serde_json::json!({"max": 2, key: "agent verdict"})
             );
-            bounds.validate().unwrap();
-            bounds
-                .compile(&Request {
-                    outputs: "create_check_run",
-                    ..request()
-                })
-                .unwrap()
-        };
-        let policy = configured("agent verdict");
-        policy.validate().unwrap();
-        // gh-aw's handler takes a missing `max` for one and a missing
-        // `name` for the workflow's: both are always written.
-        let config = serde_json::to_value(&policy.safe_outputs).unwrap();
-        assert_eq!(
-            config["create_check_run"],
-            serde_json::json!({"max": 2, "name": "agent verdict"})
-        );
-        assert_eq!(
-            intersect(policy.clone(), configured("agent verdict"))
-                .unwrap()
-                .safe_outputs,
-            policy.safe_outputs
-        );
-        assert!(intersect(policy, configured("required-ci")).is_err());
+            assert_eq!(
+                intersect(policy.clone(), configured("agent verdict"))
+                    .unwrap()
+                    .safe_outputs,
+                policy.safe_outputs
+            );
+            assert!(intersect(policy, configured("required-ci")).is_err());
+        }
     }
 
     #[test]

@@ -455,6 +455,11 @@ jobs:
         # (unset, as in a test of this step alone, means a draft);
         # gh-aw's handler takes `draft` from here, never from the request.
         #
+        # A discussion goes to the run's repository, in the category the
+        # bounds pinned and check held requests to. It does not fall back to
+        # an issue, which create_issue's bounds would not cover, nor close
+        # earlier discussions.
+        #
         # The check run handler names the run from `name`, which the bounds
         # pinned, and with `target: "*"` posts on the head of the pull
         # request check held to one number. It posts in the calling
@@ -483,6 +488,7 @@ jobs:
               + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork], checkout_mapping: {($repo | ascii_downcase): "."}}
             | (select(has("add_comment")).add_comment) += {"target-repo": $item_repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
+            | (select(has("create_discussion")).create_discussion) += {"target-repo": $action_repo, fallback_to_issue: false, close_older_discussions: false}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
             | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
             | (select(has("remove_labels")).remove_labels) += {"target-repo": $action_repo, target: "*"}
@@ -547,6 +553,7 @@ jobs:
       # is still open. Closing an issue (without
       # a comment: `allow_body` is false), adding labels and
       # setting a project field are the same done twice and are left alone.
+      # A discussion is not looked for, and a re-run posts it again.
       - name: Leave out what an earlier attempt applied
         id: applied
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
@@ -801,6 +808,28 @@ jobs:
                   return result;
                 };
               }
+              const discussion = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).create_discussion;
+              if (discussion) {
+                // gh-aw's handler posts in Announcements, or the first
+                // category, when it does not find the pinned one (renamed,
+                // say, or past the 20 it reads). Only a category read back
+                // under the pin, as the handler matches it, may be posted in.
+                const graphql = client.graphql.bind(client);
+                const pin = discussion.category.toLowerCase();
+                const pinned = new Set();
+                client.graphql = async (query, variables) => {
+                  if (/\bcreateDiscussion\b/.test(query) && !pinned.has(variables?.categoryId)) {
+                    throw new Error("the discussion category is not the one the bounds pin");
+                  }
+                  const result = await graphql(query, variables);
+                  for (const category of result?.repository?.discussionCategories?.nodes ?? []) {
+                    if (category.id === discussion.category || category.name?.toLowerCase() === pin || category.slug?.toLowerCase() === pin) {
+                      pinned.add(category.id);
+                    }
+                  }
+                  return result;
+                };
+              }
               client.hook.before("request", options => {
                 if (creates(options, "issues") && issues <= 0) throw new Error("no issue beyond this run's create_issue outputs is opened");
                 // The handlers strip HTML comments from bodies; the name the
@@ -896,7 +925,7 @@ jobs:
             const applied = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/applied.json`, 'utf8'));
             // A push's URL is the pull request it pushed to.
             const posted = [...applied.already_applied, ...applied.made]
-              .filter(item => ['add_comment', 'create_issue', 'push_to_pull_request_branch'].includes(item.type) && item.url).map(item => item.url);
+              .filter(item => ['add_comment', 'create_issue', 'create_discussion', 'push_to_pull_request_branch'].includes(item.type) && item.url).map(item => item.url);
             const url = applied.pull_request?.url ?? posted[0] ?? '';
             core.setOutput('result-url', url);
             if (!url) {

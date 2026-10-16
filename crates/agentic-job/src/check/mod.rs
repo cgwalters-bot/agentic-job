@@ -516,6 +516,16 @@ fn redirections_to(
             }
         }
     }
+    if output == "create_discussion" {
+        // The handler takes a request's category over the pinned one, so an
+        // agent could post in Announcements or a category others watch.
+        let pinned = policy
+            .safe_outputs
+            .others
+            .get(output)
+            .and_then(|limit| limit.category.as_deref());
+        problems.extend(differs("category", &|category| Some(category) == pinned));
+    }
     if matches!(output, CREATE_ISSUE | "add_labels" | "remove_labels")
         && let Some(limit) = policy.safe_outputs.others.get(output)
         && (limit.allowed.is_some() || !limit.blocked.is_empty())
@@ -1856,6 +1866,56 @@ mod tests {
             }
             policy.safe_outputs.others.remove(output);
             assert!(!redirections(plain.as_object().unwrap(), &policy).is_empty());
+        }
+    }
+
+    #[test]
+    fn discussions_keep_the_pinned_category_and_repo() {
+        let mut policy = policy();
+        policy.safe_outputs.others.insert(
+            "create_discussion".to_owned(),
+            crate::policy::OutputLimit {
+                max: 1,
+                category: Some("Agent reports".to_owned()),
+                ..Default::default()
+            },
+        );
+        let plain = json!({"type": "create_discussion", "title": "t", "body": "b"});
+        for (key, value, ok) in [
+            ("category", json!("Agent reports"), true),
+            ("category", json!("agent reports"), false),
+            ("category", json!("Announcements"), false),
+            ("category", json!(""), false),
+            ("category", json!(["Agent reports"]), false),
+            ("category", Value::Null, false),
+            ("repo", json!(policy.repo.to_uppercase()), true),
+            ("repo", json!("other/repo"), false),
+        ] {
+            let mut item = plain.clone();
+            item[key] = value;
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{key}: {item}"
+            );
+        }
+        assert!(redirections(plain.as_object().unwrap(), &policy).is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join(OUTPUTS_FILE), format!("{plain}\n")).unwrap();
+        let collected = dir.path().join("collected.json");
+        for count in [1, 2] {
+            std::fs::write(
+                &collected,
+                json!({"items": vec![plain.clone(); count], "errors": []}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                check_outputs(&out, &collected, &policy).unwrap().ok,
+                count == 1,
+                "{count}"
+            );
         }
     }
 

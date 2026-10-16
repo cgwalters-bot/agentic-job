@@ -17,7 +17,7 @@ const LOCK_DIR = ".github/workflows";
 const LOCK_SUFFIX = ".lock.yml";
 const KEY = "GH_AW_VALIDATION_JSON: |";
 // The output types a run may be allowed.
-const TYPES = ["create_pull_request", "add_comment", "create_issue", "close_issue", "add_labels", "remove_labels", "update_issue", "update_pull_request", "mark_pull_request_as_ready_for_review", "add_reviewer", "assign_to_user", "close_pull_request", "link_sub_issue", "create_check_run", "update_project", "push_to_pull_request_branch", "noop", "missing_tool", "missing_data"];
+const TYPES = ["create_pull_request", "add_comment", "create_issue", "create_discussion", "close_issue", "add_labels", "remove_labels", "update_issue", "update_pull_request", "mark_pull_request_as_ready_for_review", "add_reviewer", "assign_to_user", "close_pull_request", "link_sub_issue", "create_check_run", "update_project", "push_to_pull_request_branch", "noop", "missing_tool", "missing_data"];
 // What a workflow of gh-aw's switches on for a type of its own: a free-form
 // `data` object and its schema. No run here is allowed one, and the
 // collector refuses `data` for a type without them.

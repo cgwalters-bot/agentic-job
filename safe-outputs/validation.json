@@ -138,6 +138,33 @@
     },
     "collapseData": true
   },
+  "create_discussion": {
+    "defaultMax": 1,
+    "fields": {
+      "body": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000,
+        "minLength": 64
+      },
+      "category": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 128
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "title": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 128
+      }
+    }
+  },
   "close_issue": {
     "defaultMax": 1,
     "fields": {
