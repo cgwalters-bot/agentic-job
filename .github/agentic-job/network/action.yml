@@ -1,0 +1,17 @@
+# This repository's own deployment's network step: review.yml's agent job
+# runs it, as root and before secure-host, because it is here, in the base
+# checkout of the repository being reviewed (docs/review.md#configuration).
+# It joins the tailnet the inference proxy is on; the action picks the
+# OAuth client and tags by organization, joins with --accept-dns=false and
+# makes tailscaled's socket root's only. The tailnet's federated identity
+# and the broker have to admit review.yml's job_workflow_ref
+# (docs/inference.md). Another deployment puts its own step here, or none.
+name: network
+description: Join this deployment's inference tailnet before secure-host
+runs:
+  using: composite
+  steps:
+    - name: Join the tailnet
+      uses: cgwalters-forge/actions/tailscale@d7bfa158217182d8c0b0b775189dcf91a6afcdde
+      with:
+        hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}

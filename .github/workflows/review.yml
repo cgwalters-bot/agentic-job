@@ -8,13 +8,14 @@
 # (max-requests, budget and timeout below), so only some authors start one
 # automatically (the policy job's `if:`).
 #
-# The agent job is this file's, as in tracker's caller, for its one
-# privileged step: joining the inference proxy's tailnet. So its identity
-# token's `job_workflow_ref` names this file, and the broker and the
-# tailnet's federated identity have to admit it (docs/inference.md).
-# The join is this project's own deployment's, with no input to replace
-# it, until this deployment-specific caller moves out of this repository
-# (docs/review.md#configuration).
+# The agent job is this file's, for its one privileged step of the
+# deployment's: reaching the inference proxy. A caller that needs a step
+# for that (a VPN or tailnet join) puts it in .github/agentic-job/network,
+# a local action in its own repository; the agent job runs it, from the
+# base checkout, before secure-host. Without one, nothing runs, and the
+# runner (AGENT_RUNNER) must already reach INFERENCE_URL. The identity
+# token's `job_workflow_ref` names this file, so whatever admits the run
+# has to admit it (docs/review.md#configuration, docs/inference.md).
 #
 # Another repository calls this file at a pinned commit from the same
 # events, with its own copies of the bounds and the task.
@@ -123,8 +124,8 @@ jobs:
           REASON: ${{ needs.policy.outputs.reason }}
         run: node .agentic-job-source/workflow/review.cjs refusal
 
-  # agentic-job.yml's agent job, with the tailnet join between prepare and
-  # secure-host.
+  # agentic-job.yml's agent job, with the caller's network step, if any,
+  # between prepare and secure-host.
   agent:
     needs: policy
     if: ${{ needs.policy.outputs.admitted == 'true' }}
@@ -136,7 +137,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.AGENT_RUNNER || '"ubuntu-26.04"') }}
     timeout-minutes: 360
     # Read only: the agent gets this job's token for GitHub reads. The
-    # identity token is for the tailnet join and the proxy's registration;
+    # identity token is for the network step and the proxy's registration;
     # `sandbox setup` keeps it from the agent's user.
     permissions:
       contents: read
@@ -173,14 +174,14 @@ jobs:
         with:
           binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
           policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
-      # The one privileged step, before anything of the agent's is on the
-      # machine, as tracker's caller has it: the action picks the client
-      # id and tags by organization, joins with --accept-dns=false and
-      # makes tailscaled's socket root's only.
-      - name: Join the tailnet
-        uses: cgwalters-forge/actions/tailscale@d7bfa158217182d8c0b0b775189dcf91a6afcdde
-        with:
-          hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}
+      # The deployment's network step, as root before anything of the
+      # agent's is on the machine. It is read from the base checkout above,
+      # never the head, so a pull request cannot change what runs here; a
+      # change to it is a change to the base branch like this file. Absent,
+      # the default, nothing runs.
+      - name: The caller's network step
+        if: ${{ hashFiles('.github/agentic-job/network/action.yml') != '' }}
+        uses: ./.github/agentic-job/network # zizmor: ignore[self-repository] The caller's own action at the policy-decided base commit, not the head.
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job

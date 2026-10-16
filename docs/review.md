@@ -258,19 +258,34 @@ not designed.
 
 ## Configuration
 
-The workflow is set up for this project's own deployment, like tracker's
-production caller: the agent job runs on `vars.AGENT_RUNNER` (default
-`ubuntu-26.04`) and joins the inference broker's tailnet with
-`cgwalters-forge/actions/tailscale` before `secure-host`. That join is the
-deployment's, not part of agentic-job: the action picks the deployment's
-OAuth client and tags by organization, and there is no input to replace or
-skip it, so outside that deployment the join fails or reaches no broker
-and no review runs. It stays here until this deployment-specific caller
-moves to `cgwalters-forge/actions`. Another deployment copies the jobs of
-`review.yml` into a caller of its own, with its own network step in place
-of the join, as in the [composed form](workflow.md#the-pieces-and-an-agent-job-of-your-own);
-that route has not been run. It needs these repository or organization
-variables, and no secret:
+`review.yml` has no network or inference setup of its own; the deployment
+supplies both, from what the repository owns, never from inputs a
+dispatcher could set:
+
+- **Network.** The agent job runs on `vars.AGENT_RUNNER` (default
+  `ubuntu-26.04`). Where that runner cannot reach the inference proxy, the
+  caller adds a [local composite action](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action)
+  at `.github/agentic-job/network/action.yml` in its own repository: a VPN
+  or tailnet join, for example. The agent job runs it as root after
+  `prepare` and before `secure-host`, so before anything of the agent's is
+  on the machine, and skips it when the file is absent, the default. It
+  comes from the agent job's checkout of the trusted base (the commit the
+  policy job decided), never the pull request's head, so a pull request
+  cannot change what runs there: changing it takes a merge to the base
+  branch, like changing `review.yml`. It has the agent job's identity
+  token, for a federated join, and no secret.
+- **Inference.** The variables below name the proxy and the agent; nothing
+  in `review.yml` defaults to a deployment's.
+
+This repository's own review gate, the `pull_request_target` caller of the
+same file, keeps working through that route: its network step is
+[`.github/agentic-job/network`](../.github/agentic-job/network/action.yml),
+which joins this deployment's tailnet, and its variables name this
+deployment's proxy. Other repositories of this deployment call
+`cgwalters-forge/actions`' `cgwalters-review.yml`, which composes the same
+jobs at a release with that join. The inline join this replaces ran
+here; the network step itself has not yet run on a real pull request.
+It needs these repository or organization variables, and no secret:
 
 | Variable | |
 | --- | --- |
@@ -284,17 +299,14 @@ variables, and no secret:
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the submit job's
-token. Here the agent job's identity token names
-this repository's own `review.yml` as its `job_workflow_ref`, so the broker
-needs the `any_workflow` entry narrowed to this repository, and the tailnet's
-federated identity has to admit it too
+token. The agent job's identity token names `review.yml` as its
+`job_workflow_ref`, so the broker, and a network step's federated identity,
+have to admit it: here the `any_workflow` entry narrowed to this repository
 ([inference.md](inference.md#which-workflows-a-broker-admits)).
 
 ## Another repository
 
-Another repository of the same deployment, one whose agent job the
-tailnet join [above](#configuration) admits (agent-board next), calls this
-workflow at a pinned commit:
+Another repository calls this workflow at a pinned commit:
 
 ```yaml
 name: review
@@ -325,7 +337,8 @@ jobs:
 copies [`workflow/review.toml`](../workflow/review.toml),
 [`workflow/review-command.toml`](../workflow/review-command.toml) (both with
 its own `repos` and `bases`) and [`workflow/review.md`](../workflow/review.md)
-to the same paths, and sets the variables above. Its own
+to the same paths, sets the variables above and, if its runner needs one,
+adds its own [network step](#configuration). Its own
 `.github/agentic-job/merge.toml` and CODEOWNERS, if any, are its
 [merge policy](#merge-policy); without them it is `person`. It needs no copy of
 `hosted.toml`: without `AGENT_CONFIG` the policy job reads the one in
@@ -353,15 +366,17 @@ job runs. It also checks that both review prompts require code analysis without
 running checks or consulting CI, findings tagged blocker, important or nit and
 CHANGES only for a blocker, and that the review agent job has no project
 toolchain installation or build-cache restore. `node --test
-workflow/agent-actions.test.cjs` checks that the tailnet join is one pinned
-step of the agent job, between `prepare` and `secure-host`. In the crate,
+workflow/agent-actions.test.cjs` checks that the caller's network step is
+one optional step of the agent job, from its base checkout, between
+`prepare` and `secure-host`, that no workflow joins a network itself, and
+that this repository's network action pins what it uses. In the crate,
 `tests/event.rs` runs the binary against both shipped bounds files as
 `review.yml`'s `allow:` line picks them (`review_caller_bounds_gate_roles`):
 anyone's pull request event, forks included, is admitted, `/review` needs
 write, and neither file admits the other's events; `tests/policy.rs` checks
 that both allow only the analysis outputs. CI's `e2e-review` runs the
 policy, agent, check and apply path with the scripted agent and no inference,
-through `agentic-job.yml`; `review.yml` itself, its tailnet join and its
+through `agentic-job.yml`; `review.yml` itself, its network step and its
 submit and status jobs' API calls run only on real pull requests. Real-model review quality is not
 asserted.
 

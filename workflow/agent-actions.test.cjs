@@ -339,39 +339,50 @@ test('the wrapper forwards every setting to the policy call as it is', () => {
 });
 
 // A network to join is the caller's own step (docs/workflow.md): no
-// workflow or action here joins one or takes its credentials, but for
-// review.yml, this repository's own caller, which composes its agent job
-// to join the inference proxy's tailnet as tracker's does.
+// workflow or action of agentic-job joins one or takes its credentials.
+// This repository's own deployment joins its tailnet in the network step
+// it keeps as a caller (.github/agentic-job/network), outside them.
 test('no workflow or action of this repository joins a network itself', () => {
   const root = join(__dirname, '..');
-  const files = [...readdirSync(join(root, '.github/workflows')).filter(file => file !== 'review.yml').map(file => `.github/workflows/${file}`),
+  const files = [...readdirSync(join(root, '.github/workflows')).map(file => `.github/workflows/${file}`),
     'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml', 'workflow/inference-preflight.py'];
   for (const file of files) {
-    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);
+    const text = readFileSync(join(root, file), 'utf8');
+    assert.doesNotMatch(text, /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);
+    assert.doesNotMatch(text, /cgwalters-forge\/actions/, file);
   }
 });
 
-// review.yml's exemption above, bounded: one join, by the pinned action, in
+// review.yml's network step is the caller's: a local action from the
+// agent job's base checkout, skipped when the caller has none, once and in
 // the agent job only, after prepare and before secure-host, so it runs
-// before anything of the agent's is on the machine; no other job, and
-// nothing outside the jobs, joins or mentions joining.
-test('review.yml joins the tailnet once, in its agent job, before secure-host', () => {
-  const review = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
-  const [head, body] = review.split(/^jobs:\n/m);
-  const joins = /tailscale|join(?:s|ing)? (?:a|the) tailnet/i;
-  assert.doesNotMatch(head, joins);
+// before anything of the agent's is on the machine.
+test('review.yml runs the caller\'s network step once, if any, before secure-host', () => {
+  const root = join(__dirname, '..');
+  const review = readFileSync(join(root, '.github/workflows/review.yml'), 'utf8');
+  const step = './.github/agentic-job/network';
+  const body = review.split(/^jobs:\n/m)[1];
   const jobs = Object.fromEntries(body.split(/^(?=  [-\w]+:\n)/m)
     .map(text => [text.match(/^  ([-\w]+):\n/)[1], text]));
   assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'submit', 'apply', 'status']);
   for (const [name, text] of Object.entries(jobs)) {
-    if (name !== 'agent') assert.doesNotMatch(text, joins, name);
+    if (name !== 'agent') assert.ok(!text.includes(step), name);
   }
+  // The base checkout it is read from is the first, at the policy's ref.
+  assert.match(jobs.agent, /steps:\n {6}# [^\n]*\n {6}- uses: actions\/checkout@[0-9a-f]{40} # [^\n]*\n {8}with:\n {10}ref: \$\{\{ needs\.policy\.outputs\.ref \}\}\n {10}persist-credentials: false\n/);
   const uses = [...jobs.agent.matchAll(/^ {6}(?:- )? *uses: (\S+)/gm)].map(([, action]) => action);
-  const tailscale = uses.filter(action => /tailscale/i.test(action));
-  assert.equal(tailscale.length, 1, uses.join('\n'));
-  assert.match(tailscale[0], /^cgwalters-forge\/actions\/tailscale@[0-9a-f]{40}$/);
-  assert.equal(jobs.agent.match(/tailscale/gi).length, 2, 'the step and its pin, nothing else');
-  const at = uses.indexOf(tailscale[0]);
+  assert.equal(uses.filter(action => action === step).length, 1, uses.join('\n'));
+  assert.equal(uses.filter(action => !/^(?:actions\/checkout@[0-9a-f]{40}|\.\/\.agentic-job-source\/)/.test(action)).length, 1,
+    uses.join('\n'));
+  const at = uses.indexOf(step);
   assert.equal(uses[at - 1], './.agentic-job-source/prepare');
   assert.equal(uses[at + 1], './.agentic-job-source/secure-host');
+  // Off unless the caller has one.
+  assert.match(jobs.agent, /if: \$\{\{ hashFiles\('\.github\/agentic-job\/network\/action\.yml'\) != '' \}\}\n {8}uses: \.\/\.github\/agentic-job\/network /);
+  // This repository's own, a composite action whose actions are pinned.
+  const own = readFileSync(join(root, '.github/agentic-job/network/action.yml'), 'utf8');
+  assert.match(own, /^  using: composite$/m);
+  const pinned = [...own.matchAll(/^ +(?:- )?uses: (\S+)/gm)].map(([, action]) => action);
+  assert.ok(pinned.length > 0);
+  for (const action of pinned) assert.match(action, /^[-\w]+\/[-\w./]+@[0-9a-f]{40}$/, action);
 });

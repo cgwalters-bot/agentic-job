@@ -296,9 +296,9 @@ and `AGENT_RUNNER`, a runner label as JSON. The broker's admission entry
 and the network route to it are the deployment's, not agentic-job's. In
 this project's own deployment the broker is on a tailnet, and the route is
 either a disposable self-hosted runner on it or a hosted `ubuntu-26.04`
-job that joins it with `cgwalters-forge/actions/tailscale` before
-`secure-host`, in the [composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)
-([`review.yml` does this](docs/review.md#configuration)). Another
+job that joins it before `secure-host`, in the
+[composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)
+or as `review.yml`'s [network step](docs/review.md#configuration). Another
 deployment brings its own. agentic-job provisions no runners: a
 self-hosted one must take one job and then be thrown away, with
 passwordless `sudo`, systemd 257 or later, Node, and `apt-get` or `dnf`
@@ -385,7 +385,7 @@ Those inputs have since been removed; see
 [Migrating from the Tailscale inputs](docs/workflow.md#migrating-from-the-tailscale-inputs).
 For a private network join today, use the caller's own step in the
 [composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own).
-This repository's `review.yml` does that with opencode on hosted
+This repository's review gate does that with opencode on hosted
 `ubuntu-26.04` ([run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)); no other caller has.
 
 Not supported: private target repositories and most of gh-aw's catalogue.
@@ -405,9 +405,6 @@ the issue that tracks it, where one is filed.
   through DNS ([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).
 - The world-write policy has no recorded runtime evidence on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
 - Inference needs a praxis-credential-broker; there is no API-key mode
-  (no issue yet).
-- `review.yml` always joins this project's tailnet, with no input to
-  replace the join, so another organization cannot call it as it is
   (no issue yet).
 - A broker admits an agent job of the caller's own only by repository,
   any workflow of it ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).

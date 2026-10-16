@@ -408,7 +408,8 @@ Read this before relying on it.
   [Migrating from the Tailscale inputs](#migrating-from-the-tailscale-inputs).
   A caller-owned network join has run a real agent on hosted
   `ubuntu-26.04` only in this repository's [`review.yml`](review.md#configuration),
-  which composes the pieces itself and joins this deployment's tailnet
+  which composes the pieces itself and joins this deployment's tailnet, then
+  inline and now in its network step
   (opencode, [run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)); no other caller has.
 - This repository's CI opens no pull request: apply opens one only from
   a fork, which takes a PAT that CI does not hold. `apply.test.cjs` runs
