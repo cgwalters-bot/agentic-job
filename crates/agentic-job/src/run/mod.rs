@@ -1581,12 +1581,16 @@ mod tests {
                 "[agent]\nname = \"opencode\"\nmodel = \"m\"\n",
                 ".config/opencode/",
             ),
+            (
+                "[agent]\nname = \"vibe\"\nmodel = \"m\"\n",
+                ".config/agentic-job/vibe/",
+            ),
         ] {
             for on in [false, true] {
                 let text = format!(
                     "{agent}skills = {on}\n[inference]\nurl = \"http://100.64.0.1:18080\"\n\
                      register = \"github-oidc\"\naudience = \"proxy\"\n\
-                     [limits]\ntimeout-minutes = 10\nbudget = 100\n\
+                     [limits]\ntimeout-minutes = 10\nbudget = 100\nmax-requests = 150\n\
                      [egress]\ndirect = [\"http://100.64.0.1:18080\"]\n"
                 );
                 let config = Config::parse(&text).unwrap();

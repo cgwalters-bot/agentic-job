@@ -189,7 +189,7 @@ Preflight names **all** missing model, runner, URL and audience (or, with
 `api-key`, provider) variables at once, before policy/build or agent
 startup. It rejects unknown agents and registrations other than
 `github-oidc` and `api-key`.
-With `claude` or `opencode`, `implement` installs the [skills](skills.md) and
+With `claude`, `opencode` or `vibe`, `implement` installs the [skills](skills.md) and
 its task names the skill ("Use the implement skill") in place of the procedure.
 Real agents have a 150-request cap; scripted sessions have no inference and
 `max-requests: 0`. Real agents do not install scripted sessions.

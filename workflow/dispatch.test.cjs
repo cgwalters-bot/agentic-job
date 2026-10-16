@@ -202,7 +202,7 @@ test('only implement with an agent that reads skills is told to use the implemen
   for (const PROFILE of ['implement', 'triage', 'research']) {
     for (const AGENT of ['fake', 'claude', 'opencode', 'vibe']) {
       const calls = await preflight({ ...ready, PROFILE, AGENT });
-      const skills = PROFILE === 'implement' && ['claude', 'opencode'].includes(AGENT);
+      const skills = PROFILE === 'implement' && ['claude', 'opencode', 'vibe'].includes(AGENT);
       assert.equal(calls.skills, String(skills), `${PROFILE} ${AGENT}`);
       assert.equal(calls.task.includes('Use the implement skill.'), skills, `${PROFILE} ${AGENT}`);
     }

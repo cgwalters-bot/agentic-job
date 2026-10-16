@@ -15,15 +15,15 @@ in this repository or the configured agent configuration repository.
 ## Turning it on
 
 It is off by default. `[agent] skills = true` in the run's configuration,
-or the workflow input `agent-skills: true`, installs them. Claude and
-opencode get the embedded procedures above; all three real harnesses,
-including Vibe, also get the root `skills/` tree from `[agent] config-repo`.
-`fake` refuses the option because it cannot use skills.
+or the workflow input `agent-skills: true`, installs them. All three real
+harnesses get the embedded procedures above, and also the root `skills/`
+tree from `[agent] config-repo`. `fake` refuses the option because it
+cannot use skills.
 
 The runner owns the current harness's user skills directory: each run
 replaces that tree, including when the option is off or no configuration
 repository is named. Other harnesses' directories are left alone. Embedded
-Claude/opencode procedures win over source files at the same paths.
+procedures win over source files at the same paths.
 
 To use agenthome's skills, set `agent.config-repo` (or the caller's
 `AGENT_CONFIG_REPO` repository variable) to the configuration repository
@@ -45,7 +45,7 @@ or arbitrary configuration in that tree. Tool installation is separate:
 this does not execute agenthome's `install-tools` step or skill scripts.
 
 The [dispatch caller](dispatch.md) turns it on for `implement` with
-`claude` or `opencode`, and its task then names the skill ("Use the
+`claude`, `opencode` or `vibe`, and its task then names the skill ("Use the
 implement skill") in place of the procedure. Other profiles and agents keep the
 prompt they had. The review caller does not use it yet: its standing task
 is still passed as the task.
@@ -59,19 +59,28 @@ into that user's home:
 | --- | --- | --- | --- |
 | `claude` | `~/.claude/skills/NAME/SKILL.md` | `~/.claude/agents/NAME.md` | The [skills](https://code.claude.com/docs/en/skills) and [subagents](https://code.claude.com/docs/en/sub-agents) documentation; `@agentclientprotocol/claude-agent-acp@0.88.0` starts the SDK with the `user` setting source |
 | `opencode` | `~/.config/opencode/skills/NAME/SKILL.md` | `~/.config/opencode/agents/NAME.md` | opencode v1.18.35's `src/skill/index.ts`, `src/config/paths.ts` and `src/config/agent.ts` |
-| `vibe` | `$VIBE_HOME/skills/NAME/SKILL.md` (`~/.config/agentic-job/vibe/skills/`) | Not installed | Vibe 2.26.1's `vibe/core/config/harness_files/_paths.py` and `vibe/core/skills/manager.py` |
+| `vibe` | `$VIBE_HOME/skills/NAME/SKILL.md` (`~/.config/agentic-job/vibe/skills/`) | `$VIBE_HOME/agents/NAME.toml` and `$VIBE_HOME/prompts/NAME.md` | Vibe 2.26.1's `vibe/core/config/harness_files/_paths.py`, `vibe/core/skills/manager.py`, `vibe/core/agents/` and `vibe/core/prompts/__init__.py` |
 
-Vibe gets source skills only, not the embedded `implement`/`review` procedures
-or `diff-reviewer` subagent. A task must name a skill actually present in
-its configured source. The dispatch caller still uses the embedded implement
-procedure only for Claude/opencode; enabling Vibe source skills is explicit
-in the run configuration.
+Vibe has no Markdown subagents. Its subagent is an agent profile with
+`agent_type = "subagent"`, which its `task` tool runs. The profile's
+`system_prompt_id` names the reviewer's text, without frontmatter, as
+its system prompt. The profile sets nothing else, so the reviewer runs
+with the main agent's tools and permissions. The launcher gives Vibe only
+its user source, so a target repository's `.vibe/` cannot replace them.
 
 The launcher turns off opencode's project configuration and external
 skills (`~/.claude/skills`, `~/.agents/skills`), so its global
 configuration directory is the only place it finds them. The subagent's
 `mode: subagent` is what makes it one for opencode; Claude Code ignores
 the key.
+
+For Vibe, the `vibe` CI job's `cargo test --test vibe`
+(`AGENTIC_JOB_TEST_VIBE_PYTHON`) loads the pinned Vibe's skill and agent
+managers, with the launcher's user-only source, against a home that `run`'s
+files were written to. It checks that they find `implement`, `review` and
+the `diff-reviewer` subagent with its prompt there. It also checks that they
+ignore a target repository's `.vibe/` in a folder Vibe trusts, which the
+project source would read. It makes no model request.
 
 The opt-in test `cargo test --test skills` runs the pinned opencode
 (`opencode debug skill` and `debug agent`) and the Claude Agent SDK the
@@ -113,6 +122,5 @@ that decides whether a published release is this source's: changing
 them, the review caller's task included, needs a new release before a
 caller that does not build the binary can use that commit.
 
-Not yet: skills for fix, triage and research, embedded procedures/subagents
-for Vibe, and a caller's configuration overriding embedded procedures
+Not yet: skills for fix, triage and research, and a caller's configuration overriding embedded procedures
 ([#542](https://github.com/cgwalters-forge/agentic-job/issues/542)).

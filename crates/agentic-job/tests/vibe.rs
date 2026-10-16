@@ -26,6 +26,7 @@ fn pinned_vibe_acp() {
     assert!(version.status.success());
     assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), "2.26.1");
     repository_models(&python);
+    finds_the_skills(&python);
     for handback in [false, true] {
         run_vibe(&python, handback);
     }
@@ -110,6 +111,118 @@ for m in config.models.values():
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+/// What Vibe lists with the launcher's user-only source, against a home
+/// that `run`'s skill files were written to: the embedded skills where
+/// they were written, and the reviewer as a subagent with its prompt; a
+/// target repository's own `.vibe/` is not read. No model request.
+fn finds_the_skills(python: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let work = root.path().join("work");
+    let config = agent::vibe(
+        &Endpoint {
+            url: "http://127.0.0.1:1".into(),
+            mode: Mode::Plain,
+            anthropic_url: String::new(),
+            openai_url: String::new(),
+        },
+        &Token::new("local-test-token-for-vibe").unwrap(),
+        Some("broker-model"),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let hostile = "---\nname: implement\ndescription: PROJECT_CANARY\n---\nPROJECT_CANARY\n";
+    let project = [
+        (".vibe/skills/implement/SKILL.md", hostile),
+        (
+            ".vibe/agents/diff-reviewer.toml",
+            "description = \"PROJECT_CANARY\"\nagent_type = \"subagent\"\n",
+        ),
+        (".vibe/prompts/diff-reviewer.md", hostile),
+    ];
+    let installed = config
+        .files
+        .into_iter()
+        .chain(agent::skills(agent::Kind::Vibe, true))
+        .map(|file| (home.join(file.path), file.content.unwrap()));
+    let project = project
+        .into_iter()
+        .map(|(path, text)| (work.join(path), text.to_owned()));
+    for (path, text) in installed.chain(project) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    // Vibe reads a project's `.vibe/` only in a folder it trusts: trust
+    // this one, so that only the source the launcher passes keeps the
+    // canaries out, as the control with the project source shows.
+    std::fs::write(
+        home.join(agent::VIBE_HOME).join("trusted_folders.toml"),
+        toml::to_string(&serde_json::json!({ "trusted": [work.canonicalize().unwrap()] })).unwrap(),
+    )
+    .unwrap();
+    let list = |sources: &[&str]| -> Value {
+        let out = std::process::Command::new(python)
+            .args([
+                "-I",
+                "-c",
+                r#"
+import asyncio, json, sys
+from vibe.core.paths import bootstrap_vibe_home
+from vibe.core.config.harness_files import init_harness_files_manager
+bootstrap_vibe_home()
+init_harness_files_manager(*sys.argv[1:])
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+from vibe.core.skills.manager import SkillManager
+from vibe.core.agents.manager import AgentManager
+orchestrator = asyncio.run(build_default_orchestrator())
+skills = SkillManager(lambda: orchestrator.config).available_skills
+agents = AgentManager(orchestrator, initial_agent="ask")
+subagents = {a.name: a for a in agents.get_subagents()}
+print(json.dumps({
+    "skills": {n: [str(s.skill_path), s.description] for n, s in skills.items()},
+    "subagents": {n: a.description for n, a in subagents.items()},
+    "prompt": agents.preview_config("diff-reviewer").system_prompt,
+}))
+"#,
+            ])
+            .args(sources)
+            .env_clear()
+            .env("HOME", &home)
+            .env("VIBE_HOME", home.join(agent::VIBE_HOME))
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let control = list(&["user", "project"]);
+    assert!(control.to_string().contains("PROJECT_CANARY"), "{control}");
+    let found = list(&["user"]);
+    assert!(!found.to_string().contains("PROJECT_CANARY"), "{found}");
+    for name in ["implement", "review"] {
+        let want = home.join(format!("{}/skills/{name}/SKILL.md", agent::VIBE_HOME));
+        assert_eq!(found["skills"][name][0].as_str(), want.to_str(), "{found}");
+    }
+    assert!(
+        found["subagents"]["diff-reviewer"]
+            .as_str()
+            .unwrap()
+            .starts_with("Adversarial reviewer"),
+        "{found}"
+    );
+    let prompt = found["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("# Diff reviewer"), "{prompt}");
+    assert!(
+        prompt.contains("You review a change you did not write."),
+        "{prompt}"
+    );
 }
 
 fn run_vibe(python: &str, handback: bool) {

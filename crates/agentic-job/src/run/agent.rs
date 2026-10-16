@@ -41,8 +41,8 @@
 //! other configuration files and run plugins, tools and commands found
 //! beside its configuration, none of which the provider check covers.
 //!
-//! With `[agent] skills`, either also gets this binary's skills and
-//! subagents ([`skills`]), the same text for both, so that a task can say
+//! With `[agent] skills`, each also gets this binary's skills and
+//! subagents ([`skills`]), the same text for all, so that a task can say
 //! "use the implement skill" rather than spell the procedure out.
 //!
 //! An agent is code here, and not an entry of a table a caller writes,
@@ -154,6 +154,37 @@ const OPENCODE_SKILLS: &[(&str, &str)] = &[
     (".config/opencode/skills/review/SKILL.md", REVIEW_SKILL),
     (".config/opencode/agents/diff-reviewer.md", DIFF_REVIEWER),
 ];
+/// Vibe 2.26.1 reads skills from `$VIBE_HOME/skills` as the others do,
+/// but has no Markdown subagents: a subagent is an agent profile,
+/// `$VIBE_HOME/agents/NAME.toml` with `agent_type = "subagent"`
+/// (`vibe/core/agents/models.py`), which its `task` tool runs; the
+/// profile's own `instructions` reach only plugins, so the reviewer's
+/// text is the system prompt it names, `$VIBE_HOME/prompts/ID.md`
+/// (`vibe/core/prompts/__init__.py`), without its frontmatter. The
+/// launcher gives Vibe only the user source, so a target repository's
+/// `.vibe/` cannot replace any of them. The profile sets nothing else:
+/// its tools and permissions are the main agent's.
+const VIBE_SKILLS: &[(&str, &str)] = &[
+    (
+        ".config/agentic-job/vibe/skills/implement/SKILL.md",
+        IMPLEMENT_SKILL,
+    ),
+    (
+        ".config/agentic-job/vibe/skills/review/SKILL.md",
+        REVIEW_SKILL,
+    ),
+    (
+        ".config/agentic-job/vibe/agents/diff-reviewer.toml",
+        VIBE_REVIEWER_PROFILE,
+    ),
+    (VIBE_REVIEWER_PROMPT_FILE, DIFF_REVIEWER),
+];
+const VIBE_REVIEWER_PROFILE: &str = r#"display_name = "Diff reviewer"
+description = "Adversarial reviewer of an uncommitted change in the working tree. Use for the review step of the implement skill; give it the review diff and repository, not your reasoning."
+agent_type = "subagent"
+system_prompt_id = "diff-reviewer"
+"#;
+const VIBE_REVIEWER_PROMPT_FILE: &str = ".config/agentic-job/vibe/prompts/diff-reviewer.md";
 /// The largest file taken from a configuration repository.
 const MAX_SOURCE_BYTES: usize = 1 << 20;
 /// What a failing command may say.
@@ -1160,21 +1191,34 @@ pub fn child(
 }
 
 /// The skills and subagents of KIND, installed when ON and removed when
-/// not, so that none an earlier run left is read. Vibe receives only the
-/// configuration repository's skills, not these harness-specific procedures.
+/// not, so that none an earlier run left is read.
 pub fn skills(kind: Kind, on: bool) -> Vec<HomeFile> {
     let files = match kind {
         Kind::Claude => CLAUDE_SKILLS,
         Kind::Opencode => OPENCODE_SKILLS,
-        Kind::Vibe | Kind::Fake => &[],
+        Kind::Vibe => VIBE_SKILLS,
+        Kind::Fake => &[],
     };
     files
         .iter()
-        .map(|(path, text)| HomeFile {
+        .map(|&(path, text)| HomeFile {
             path,
-            content: on.then(|| (*text).to_owned()),
+            content: on.then(|| {
+                let text = match path {
+                    VIBE_REVIEWER_PROMPT_FILE => body(text),
+                    _ => text,
+                };
+                text.to_owned()
+            }),
         })
         .collect()
+}
+
+/// TEXT without the frontmatter of a skill or subagent file, if it has one.
+fn body(text: &str) -> &str {
+    text.strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map_or(text, |(_, body)| body.trim_start())
 }
 
 /// The file that holds TOKEN, the run's read-only GitHub token, or that
@@ -1974,19 +2018,30 @@ provider = "llamacpp"
     /// what an earlier one left.
     #[test]
     fn skills_go_where_each_agent_reads_them() {
-        let want = [
+        let markdown = [
             "skills/implement/SKILL.md",
             "skills/review/SKILL.md",
             "agents/diff-reviewer.md",
         ];
-        for (kind, dir) in [
-            (Kind::Claude, ".claude/"),
-            (Kind::Opencode, ".config/opencode/"),
+        let vibe = [
+            "skills/implement/SKILL.md",
+            "skills/review/SKILL.md",
+            "agents/diff-reviewer.toml",
+            "prompts/diff-reviewer.md",
+        ];
+        for (kind, dir, want) in [
+            (Kind::Claude, ".claude/", &markdown[..]),
+            (Kind::Opencode, ".config/opencode/", &markdown[..]),
+            (Kind::Vibe, ".config/agentic-job/vibe/", &vibe[..]),
         ] {
             let files = skills(kind, true);
             let paths: Vec<_> = files.iter().map(|file| file.path).collect();
-            assert_eq!(paths, want.map(|path| format!("{dir}{path}")), "{kind:?}");
-            for file in &files {
+            let want: Vec<_> = want.iter().map(|path| format!("{dir}{path}")).collect();
+            assert_eq!(paths, want, "{kind:?}");
+            // Vibe's subagent is a profile and a prompt, checked below.
+            for file in files.iter().filter(|file| {
+                file.path.ends_with("SKILL.md") || file.path.ends_with("agents/diff-reviewer.md")
+            }) {
                 let text = file.content.as_deref().unwrap();
                 let (name, description) = frontmatter(text);
                 // A skill is called by its directory's name, a subagent by
@@ -2018,9 +2073,23 @@ provider = "llamacpp"
         // ignores the key.
         assert!(DIFF_REVIEWER.contains("\nmode: subagent\n"));
         assert!(IMPLEMENT_SKILL.contains("`diff-reviewer` subagent"));
-        for kind in [Kind::Vibe, Kind::Fake] {
-            assert_eq!(skills(kind, true), []);
-        }
+        assert_eq!(skills(Kind::Fake, true), []);
+        // Vibe's reviewer: a subagent profile that names the reviewer's
+        // text, without frontmatter, as its system prompt, and says of
+        // itself what the Markdown subagent says.
+        let files = skills(Kind::Vibe, true);
+        let profile: toml::Table = toml::from_str(files[2].content.as_deref().unwrap()).unwrap();
+        let (name, description) = frontmatter(DIFF_REVIEWER);
+        assert_eq!(profile["agent_type"].as_str(), Some("subagent"));
+        assert_eq!(profile["description"].as_str(), Some(description.as_str()));
+        assert_eq!(profile["system_prompt_id"].as_str(), Some(name.as_str()));
+        assert_eq!(
+            Path::new(files[3].path).file_stem(),
+            Some(std::ffi::OsStr::new(&name))
+        );
+        let prompt = files[3].content.as_deref().unwrap();
+        assert!(prompt.starts_with("# Diff reviewer\n"), "{prompt}");
+        assert!(DIFF_REVIEWER.ends_with(prompt));
     }
 
     #[test]
