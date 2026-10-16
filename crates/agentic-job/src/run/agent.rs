@@ -363,17 +363,46 @@ const MAX_VIBE_OUTPUT_TOKENS: u64 = 65_536;
 /// session config option (`vibe/acp/agent.py`, `set_config_option`).
 const VIBE_MAX_TOKENS_OPTION: &str = "max_tokens";
 
-/// The definition of the caller's MODEL under ALIAS.
-fn vibe_model(model: &str, alias: &str) -> Value {
+/// The context window of a model the job defines by name and
+/// `[agent] context-windows` does not list: small enough for any model
+/// the broker may route, at the cost of compacting often. At this window
+/// one GLM research task compacted 18 times and lost its findings (#821).
+const VIBE_CONTEXT_TOKENS: u64 = 32_768;
+/// The most `[agent] context-windows` may give a model, GLM-5.3's
+/// documented 1M window. Every request carries the whole context: at a
+/// few bytes of chat-completions JSON a token, a window this size keeps
+/// a request under the broker's 16 MiB body limit, so Vibe compacts
+/// before the broker refuses a request, not after.
+const MAX_VIBE_CONTEXT_TOKENS: u64 = 1_048_576;
+
+/// The definition of the caller's MODEL under ALIAS, with a context
+/// WINDOW that Vibe compacts at three quarters of.
+fn vibe_model(model: &str, alias: &str, window: u64) -> Value {
     // Model definitions deep-merge, by alias, with a built-in of the same
     // alias. Do not inherit Medium 3.5's image capability or 256k window.
     json!({
         "name": model, "alias": alias, "provider": "mistral",
         "display_name": model, "temperature": 0.2,
         "thinking": "off", "thinking_levels": ["off"], "supports_images": false,
-        "max_context_length": 32768, "auto_compact_threshold": 24576,
+        "max_context_length": window, "auto_compact_threshold": window / 4 * 3,
         "input_price": 0.0, "output_price": 0.0, "cached_input_price": 0.0,
     })
+}
+
+/// Refuses an entry of `[agent] context-windows` out of bounds.
+fn check_context_windows(windows: &BTreeMap<String, u64>) -> Result<()> {
+    for (model, window) in windows {
+        ensure!(
+            !model.is_empty(),
+            "agent.context-windows: a model name is empty"
+        );
+        ensure!(
+            (1..=MAX_VIBE_CONTEXT_TOKENS).contains(window),
+            "agent.context-windows: {model:?} = {window}, not a number from 1 to \
+             {MAX_VIBE_CONTEXT_TOKENS}"
+        );
+    }
+    Ok(())
 }
 
 /// The alias Vibe selects MODEL by, which defaults to its name.
@@ -481,12 +510,14 @@ fn vibe_source(text: &str) -> Result<(Vec<Value>, Option<String>)> {
 /// The models are the caller's MODEL alone, or those of a configuration
 /// repository's SOURCE: there, MODEL selects one of them by alias or name
 /// over the file's `active_model`, and is added as without a repository if
-/// the file has none of that name.
+/// the file has none of that name. Its window is its entry of WINDOWS,
+/// or [`VIBE_CONTEXT_TOKENS`].
 pub fn vibe(
     endpoint: &Endpoint,
     token: &Token,
     model: Option<&str>,
     source: Option<&str>,
+    windows: &BTreeMap<String, u64>,
 ) -> Result<Configuration> {
     let model = model.filter(|m| !m.is_empty());
     let (mut models, active) = source.map(vibe_source).transpose()?.unwrap_or_default();
@@ -514,9 +545,10 @@ pub fn vibe(
             // built-in's alias every run reported, and the model claimed to
             // be, Medium 3.5 (#562). It still replaces the built-in, which
             // Vibe's default and fallback paths would otherwise select.
-            models.push(vibe_model(model, model));
+            let window = windows.get(model).copied().unwrap_or(VIBE_CONTEXT_TOKENS);
+            models.push(vibe_model(model, model, window));
             if model != VIBE_BUILTIN_ALIAS {
-                models.push(vibe_model(model, VIBE_BUILTIN_ALIAS));
+                models.push(vibe_model(model, VIBE_BUILTIN_ALIAS, window));
             }
             model.to_owned()
         }
@@ -874,6 +906,7 @@ fn source_request(agent: &config::Agent) -> Result<Option<(&str, Option<&str>, &
 /// What can be said of the `[agent]` table before anything is fetched or
 /// registered.
 pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
+    check_context_windows(&agent.context_windows)?;
     // The scripted agent cannot discover or execute skills.
     ensure!(
         !agent.skills || kind != Kind::Fake,
@@ -1065,13 +1098,15 @@ fn source_skills(
     Ok(files)
 }
 
-/// The run's configuration of KIND.
+/// The run's configuration of KIND, Vibe's with the context WINDOWS of
+/// `[agent] context-windows`.
 pub fn generate(
     kind: Kind,
     endpoint: Option<&Endpoint>,
     token: Option<&Token>,
     model: Option<&str>,
     source: &Source,
+    windows: &BTreeMap<String, u64>,
 ) -> Result<Configuration> {
     let inference = || {
         endpoint.zip(token).with_context(|| {
@@ -1095,20 +1130,23 @@ pub fn generate(
         }
         Kind::Vibe => {
             let (endpoint, token) = inference()?;
-            vibe(endpoint, token, model, source.main.as_deref())?
+            vibe(endpoint, token, model, source.main.as_deref(), windows)?
         }
         Kind::Fake => Configuration::default(),
     })
 }
 
 /// The configuration of the run's child agent: Vibe, as the main agent
-/// would be configured with MODEL, on the same proxy and run token, in a
-/// home of its own. Without one (`None`), it removes the file an earlier
-/// run left, so that `acp-drive` finds no child to start.
-pub fn child(inference: Option<(&Endpoint, &Token, Option<&str>)>) -> Result<HomeFile> {
+/// would be configured with MODEL and WINDOWS, on the same proxy and run
+/// token, in a home of its own. Without one (`None`), it removes the file
+/// an earlier run left, so that `acp-drive` finds no child to start.
+pub fn child(
+    inference: Option<(&Endpoint, &Token, Option<&str>)>,
+    windows: &BTreeMap<String, u64>,
+) -> Result<HomeFile> {
     let content = inference
         .map(|(endpoint, token, model)| -> Result<String> {
-            let configuration = vibe(endpoint, token, model, None)
+            let configuration = vibe(endpoint, token, model, None, windows)
                 .map_err(|err| anyhow::anyhow!("child-agent: {err:#}"))?;
             let file = configuration.files.into_iter().next();
             file.and_then(|file| file.content)
@@ -1232,6 +1270,9 @@ mod tests {
     fn token() -> Token {
         Token::new(TOKEN).unwrap()
     }
+
+    /// No `[agent] context-windows`.
+    const NONE: BTreeMap<String, u64> = BTreeMap::new();
 
     fn file<'a>(configuration: &'a Configuration, path: &str) -> Option<&'a str> {
         let file = configuration.files.iter().find(|file| file.path == path);
@@ -1492,10 +1533,10 @@ mod tests {
         }
         // An agent with a model behind it does not start without a proxy.
         for kind in [Kind::Claude, Kind::Opencode, Kind::Vibe] {
-            let err = generate(kind, None, None, Some("m"), &Source::default()).unwrap_err();
+            let err = generate(kind, None, None, Some("m"), &Source::default(), &NONE).unwrap_err();
             assert!(format!("{err:#}").contains("needs inference"), "{err:#}");
         }
-        let fake = generate(Kind::Fake, None, None, None, &Source::default()).unwrap();
+        let fake = generate(Kind::Fake, None, None, None, &Source::default(), &NONE).unwrap();
         assert_eq!(fake, Configuration::default());
         let endpoint = endpoint(Mode::Plain);
         let claude = generate(
@@ -1504,13 +1545,21 @@ mod tests {
             Some(&token()),
             Some("sonnet"),
             &Source::default(),
+            &NONE,
         );
         assert_eq!(claude.unwrap().model.as_deref(), Some("sonnet"));
         let source = Source {
             main: Some(VIBE_SOURCE.into()),
             ..Source::default()
         };
-        let vibe = generate(Kind::Vibe, Some(&endpoint), Some(&token()), None, &source);
+        let vibe = generate(
+            Kind::Vibe,
+            Some(&endpoint),
+            Some(&token()),
+            None,
+            &source,
+            &NONE,
+        );
         assert_eq!(vibe.unwrap().model.as_deref(), Some("glm"));
     }
 
@@ -1527,6 +1576,7 @@ mod tests {
                 &token(),
                 Some("devstral-small-latest"),
                 None,
+                &NONE,
             )
             .unwrap();
             assert_eq!(got.files.len(), 1);
@@ -1567,7 +1617,7 @@ mod tests {
             assert_eq!(value["experiments"]["enable"].as_bool(), Some(false));
         }
         for model in [None, Some(""), Some("devstral-2")] {
-            assert!(vibe(&endpoint(Mode::Plain), &token(), model, None).is_err());
+            assert!(vibe(&endpoint(Mode::Plain), &token(), model, None, &NONE).is_err());
         }
         // The built-in's own name needs no second entry.
         let got = vibe(
@@ -1575,6 +1625,7 @@ mod tests {
             &token(),
             Some("mistral-medium-3.5"),
             None,
+            &NONE,
         )
         .unwrap();
         let value: toml::Value = toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
@@ -1600,15 +1651,81 @@ mod tests {
     #[test]
     fn child_configuration() {
         let endpoint = endpoint(Mode::Plain);
-        let got = child(Some((&endpoint, &token(), Some("zai-glm-5-3")))).unwrap();
+        let got = child(Some((&endpoint, &token(), Some("zai-glm-5-3"))), &NONE).unwrap();
         assert_eq!(got.path, CHILD_VIBE_CONFIG_FILE);
-        let main = vibe(&endpoint, &token(), Some("zai-glm-5-3"), None).unwrap();
+        let main = vibe(&endpoint, &token(), Some("zai-glm-5-3"), None, &NONE).unwrap();
         assert_eq!(got.content, main.files[0].content);
         assert!(got.content.unwrap().contains(TOKEN));
-        assert_eq!(child(None).unwrap().content, None);
+        assert_eq!(child(None, &NONE).unwrap().content, None);
         for model in [None, Some("devstral-2")] {
-            let err = child(Some((&endpoint, &token(), model))).unwrap_err();
+            let err = child(Some((&endpoint, &token(), model)), &NONE).unwrap_err();
             assert!(err.to_string().starts_with("child-agent:"), "{err}");
+        }
+    }
+
+    /// `[agent] context-windows` sets the window, and compaction at three
+    /// quarters of it, of the model it names, under both of its aliases,
+    /// for the main agent and the child; any other keeps the fallback.
+    #[test]
+    fn vibe_context_windows() {
+        let endpoint = endpoint(Mode::Plain);
+        let windows = BTreeMap::from([("zai-glm-5-3".to_owned(), 1_048_576)]);
+        for (model, window, threshold, cap) in [
+            ("zai-glm-5-3", 1_048_576, 786_432, 32_000),
+            ("devstral-small-latest", 32_768, 24_576, 8192),
+        ] {
+            let got = vibe(&endpoint, &token(), Some(model), None, &windows).unwrap();
+            let content = got.files[0].content.clone();
+            assert_eq!(
+                child(Some((&endpoint, &token(), Some(model))), &windows)
+                    .unwrap()
+                    .content,
+                content
+            );
+            let value: toml::Value = toml::from_str(content.as_ref().unwrap()).unwrap();
+            let models = value["models"].as_array().unwrap();
+            assert_eq!(models.len(), 2);
+            for m in models {
+                assert_eq!(
+                    m["max_context_length"].as_integer(),
+                    Some(window),
+                    "{model}"
+                );
+                assert_eq!(m["auto_compact_threshold"].as_integer(), Some(threshold));
+                // The output cap stays under the broker's body limit.
+                assert_eq!(m["max_output_tokens"].as_integer(), Some(cap));
+            }
+        }
+        // A model of a configuration repository keeps its own window.
+        let got = vibe(
+            &endpoint,
+            &token(),
+            Some("glm"),
+            Some(VIBE_SOURCE),
+            &windows,
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(got.files[0].content.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            value["models"][0]["max_context_length"].as_integer(),
+            Some(131_072)
+        );
+        for (entry, ok) in [
+            (Some(("m", 1)), true),
+            (Some(("m", MAX_VIBE_CONTEXT_TOKENS)), true),
+            (Some(("m", 0)), false),
+            (Some(("m", MAX_VIBE_CONTEXT_TOKENS + 1)), false),
+            (Some(("", 32_768)), false),
+            (None, true),
+        ] {
+            let agent = config::Agent {
+                model: Some("m".to_owned()),
+                context_windows: entry.map(|(m, w)| (m.to_owned(), w)).into_iter().collect(),
+                ..Default::default()
+            };
+            for kind in [Kind::Vibe, Kind::Claude] {
+                assert_eq!(check(kind, &agent).is_ok(), ok, "{entry:?}");
+            }
         }
     }
 
@@ -1658,7 +1775,14 @@ provider = "llamacpp"
         // An alias is matched before a name, as Vibe selects by alias.
         let crossed = "[[models]]\nname = \"a\"\nalias = \"b\"\nprovider = \"mistral\"\n\
                        [[models]]\nname = \"b\"\nalias = \"c\"\nprovider = \"mistral\"\n";
-        let got = vibe(&endpoint(Mode::Plain), &token(), Some("b"), Some(crossed)).unwrap();
+        let got = vibe(
+            &endpoint(Mode::Plain),
+            &token(),
+            Some("b"),
+            Some(crossed),
+            &NONE,
+        )
+        .unwrap();
         assert_eq!(got.model.as_deref(), Some("b"));
         // A model without a cap gets the default, or a quarter of the
         // window it declares if that is less.
@@ -1673,11 +1797,25 @@ provider = "llamacpp"
             ),
         ] {
             let text = format!("[[models]]\nname = \"m\"\nprovider = \"mistral\"\n{extra}");
-            let got = vibe(&endpoint(Mode::Plain), &token(), Some("m"), Some(&text)).unwrap();
+            let got = vibe(
+                &endpoint(Mode::Plain),
+                &token(),
+                Some("m"),
+                Some(&text),
+                &NONE,
+            )
+            .unwrap();
             assert_eq!(got.options, [("max_tokens", cap.to_owned())], "{extra}");
         }
         for (model, active, count, cap) in cases {
-            let got = vibe(&endpoint(Mode::Plain), &token(), model, Some(VIBE_SOURCE)).unwrap();
+            let got = vibe(
+                &endpoint(Mode::Plain),
+                &token(),
+                model,
+                Some(VIBE_SOURCE),
+                &NONE,
+            )
+            .unwrap();
             assert_eq!(got.model.as_deref(), Some(active), "{model:?}");
             assert_eq!(got.options, [("max_tokens", cap.to_string())]);
             let value: toml::Value =
@@ -1788,17 +1926,33 @@ provider = "llamacpp"
             ),
         ];
         for (text, model, want) in cases {
-            let err = vibe(&endpoint(Mode::Plain), &token(), model, Some(text)).unwrap_err();
+            let err = vibe(&endpoint(Mode::Plain), &token(), model, Some(text), &NONE).unwrap_err();
             assert!(format!("{err:#}").contains(want), "{text}: {err:#}");
         }
         let most: String = (0..MAX_VIBE_MODELS)
             .map(|i| format!("[[models]]\nname = \"m{i}\"\nprovider = \"mistral\"\n"))
             .collect();
-        assert!(vibe(&endpoint(Mode::Plain), &token(), Some("m0"), Some(&most)).is_ok());
+        assert!(
+            vibe(
+                &endpoint(Mode::Plain),
+                &token(),
+                Some("m0"),
+                Some(&most),
+                &NONE
+            )
+            .is_ok()
+        );
         let largest = format!(
             "[[models]]\nname = \"m\"\nprovider = \"mistral\"\nmax_output_tokens = {MAX_VIBE_OUTPUT_TOKENS}"
         );
-        let got = vibe(&endpoint(Mode::Plain), &token(), Some("m"), Some(&largest)).unwrap();
+        let got = vibe(
+            &endpoint(Mode::Plain),
+            &token(),
+            Some("m"),
+            Some(&largest),
+            &NONE,
+        )
+        .unwrap();
         assert_eq!(got.options, [("max_tokens", "65536".to_owned())]);
     }
 

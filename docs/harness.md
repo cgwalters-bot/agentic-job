@@ -101,8 +101,20 @@ ACP and tells the model it is, and also replaces the built-in model, which
 Vibe's default and fallback paths select. A model named `devstral-2`, which
 Vibe renames to the built-in's, is refused.
 Mid-turn notices are not supported. That broker model uses text-only tools
-and a conservative 32k context window with compaction at 24k, rather than
-inheriting Medium 3.5's capabilities.
+rather than inheriting Medium 3.5's capabilities. Its context window is
+its entry of `context-windows` in `[agent]` in the repository-owned
+configuration, for the main agent and the child alike, and Vibe compacts
+at three quarters of it. `config check` refuses a window over 1,048,576,
+which keeps a request under the broker's 16 MiB body limit.
+Without an entry a model gets a conservative 32k, compacted at 24k, at
+which a GLM research task compacted 18 times and lost its findings
+(#821). Z.ai documents a 1M window for GLM-5.3; check what the broker's
+provider serves before claiming it:
+
+```toml
+[agent.context-windows]
+"zai-glm-5-3" = 1048576
+```
 
 Each model's reply is capped by its `max_output_tokens`, at most 65,536.
 A model without one gets 32,000, or a quarter of its declared window if
@@ -326,7 +338,8 @@ set `[limits] timeout-minutes` and `max-requests`.
 `~/.config/agentic-job/child-vibe/config.toml`, as it would write the
 main agent's for that model: the same proxy route and run token, so the
 token probes expect it in that file and the agent's, and nowhere else.
-Its model is a built-in definition (a 32k window, compacted at 24k); the
+Its model is a built-in definition, with the window `[agent]
+context-windows` gives it (32k without an entry); the
 main agent may edit that file, which gives it nothing it does not have
 with its own token. The task is told the path of `acp-drive`.
 

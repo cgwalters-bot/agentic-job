@@ -493,6 +493,13 @@ model = \"m\"
                 "inference.url is not set",
             ),
             (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}{REQUESTS}{DIRECT}{CHILD}\
+                     [agent.context-windows]\nglm = 1048577\n"
+                ),
+                "agent.context-windows: \"glm\" = 1048577, not a number from 1 to 1048576",
+            ),
+            (
                 format!("{FAKE}{CAPPED}[child-agent]\nmodel = \"glm\"\n"),
                 "child-agent.model means nothing without child-agent.name",
             ),

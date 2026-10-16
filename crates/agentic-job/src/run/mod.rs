@@ -645,6 +645,7 @@ impl Plan {
             run.as_deref().map(Run::token),
             self.agent.model.as_deref(),
             &source,
+            &self.agent.context_windows,
         )?;
         let github = github_token()?;
         configuration
@@ -655,7 +656,9 @@ impl Plan {
             Some((endpoint, run.as_deref()?.token(), Some(model)))
         });
         let has_child = child.is_some();
-        configuration.files.push(agent::child(child)?);
+        configuration
+            .files
+            .push(agent::child(child, &self.agent.context_windows)?);
         agent::install(sandbox, &configuration)?;
         if let (Some(run), Some(file)) = (&run, self.kind.token_file()) {
             let given = match self.endpoint.as_ref().map(|endpoint| &endpoint.mode) {

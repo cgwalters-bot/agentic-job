@@ -2,6 +2,7 @@
 //! package talks only to a loopback broker fixture; no forge writes or setup.
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
@@ -68,6 +69,7 @@ provider = "llamacpp"
             &Token::new("local-test-token-for-vibe").unwrap(),
             model,
             Some(source),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(config.model.as_deref(), Some(active));
@@ -136,6 +138,7 @@ fn run_vibe(python: &str, handback: bool) {
         &token,
         Some("broker-model"),
         None,
+        &BTreeMap::new(),
     )
     .unwrap();
     for file in &config.files {

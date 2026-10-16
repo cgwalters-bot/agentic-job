@@ -414,6 +414,11 @@ pub struct Agent {
     pub skills: bool,
     /// Include the redacted session in the run summary. On by default.
     pub render_session: bool,
+    /// The context window, in tokens, of each Vibe model the job defines
+    /// by name (the main agent's and the child's), by that name: without
+    /// an entry, a model gets `run::agent`'s fallback. A model of a
+    /// configuration repository declares its own.
+    pub context_windows: BTreeMap<String, u64>,
 }
 
 impl Default for Agent {
@@ -426,6 +431,7 @@ impl Default for Agent {
             config_path: None,
             skills: false,
             render_session: true,
+            context_windows: BTreeMap::new(),
         }
     }
 }
