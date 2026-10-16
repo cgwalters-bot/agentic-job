@@ -16,11 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
+pub use crate::sandbox::egress::ACCESS_LOG;
 use crate::sandbox::root::Root;
-
-/// Where the proxy logs, one JSON object to a line. `sandbox setup`
-/// starts it with this path.
-pub const ACCESS_LOG: &str = "/var/log/egress-proxy/access.jsonl";
 /// What the log is called in the transcript, as in the old tree.
 pub const TRANSCRIPT_NAME: &str = "access.log";
 /// The most of the log one run's transcript takes.

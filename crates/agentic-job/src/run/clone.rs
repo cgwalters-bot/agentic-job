@@ -516,6 +516,7 @@ mod tests {
             max_outputs: 1,
             max_patch_bytes: 1 << 20,
             safe_outputs: SafeOutputs::default(),
+            commit_author: None,
         }
     }
 

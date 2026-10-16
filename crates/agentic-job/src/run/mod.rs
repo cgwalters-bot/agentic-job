@@ -287,7 +287,7 @@ fn run_id(meta: &Value) -> Result<String> {
             && id
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
-        "--meta: {META_RUN_ID} {id:?} is not at most {MAX_RUN_ID_CHARS} letters, digits and . _ -"
+        "--meta: {META_RUN_ID} {id:?} is not at most {MAX_RUN_ID_CHARS} letters, digits and . _ -, starting and ending with a letter or digit, without `..` and not ending in `.lock`"
     );
     Ok(id)
 }

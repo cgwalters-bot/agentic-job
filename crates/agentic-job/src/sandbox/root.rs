@@ -18,7 +18,7 @@ use super::enter::Entry;
 use super::helper::{self, Exec, ViaSudo};
 use super::setup::SELF_COPY;
 use crate::config::ROOT_COPY;
-use crate::run::egress::ACCESS_LOG;
+use crate::sandbox::egress::ACCESS_LOG;
 
 /// Becomes root for an operation without ever asking for a password.
 const SUDO: &[&str] = &["sudo", "-n", "--"];

@@ -33,7 +33,8 @@ include DNS through local services, resolver restrictions and runner
 prerequisite checks. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/issues/20)
 include repeating host probes, stalled request counts and mandatory HTTP
 proxies. [Hand-back gaps (#22)](https://github.com/cgwalters-forge/agentic-job/issues/22)
-include author validation and reporting failures without losing results.
+include a summary for a session that ends in an internal error and
+streaming the transcript through redaction.
 
 [Apply checks (#17)](https://github.com/cgwalters-forge/agentic-job/issues/17)
 need review against the base, file-list and rename checks already implemented.

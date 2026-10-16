@@ -209,6 +209,30 @@ static PULL_NUMBER_RE: LazyLock<Regex> =
 static COMMIT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9a-f]{40}$").expect("a valid pattern"));
 
+/// A pinned commit author: ASCII that git keeps as it is (no character
+/// its `ident.c` trims from either end of a name) and that `format-patch`
+/// writes at most quoted, never encoded, so that `check` knows the one
+/// `From:` line to expect. `github-actions[bot]`'s noreply address fits.
+/// The name is at most 60 characters, past which `git am` records the
+/// address in its place (`mailinfo`'s `get_sane_name`), and does not
+/// start with `(`, which it strips with the closing one.
+static COMMIT_AUTHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"^[A-Za-z0-9_+\[\]-](?:[A-Za-z0-9 _.+()\[\]-]{0,58}[A-Za-z0-9_+()\[\]-])?",
+        r" <[A-Za-z0-9_.+\[\]-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+>$",
+    ))
+    .expect("a valid pattern")
+});
+
+/// Whether `author` may be a bounds file's `commit_author`.
+pub fn check_commit_author(author: &str) -> Result<()> {
+    ensure!(
+        COMMIT_AUTHOR_RE.is_match(author) && !author.contains("  ") && author.len() <= 200,
+        "commit_author {author:?} is not `Name <address>` of plain ASCII (letters, digits, spaces and _ . + - ( ) [ ])"
+    );
+    Ok(())
+}
+
 /// The request's values may start with a dash: they are a stranger's text,
 /// and one that does is refused with a reason like any other.
 #[derive(Debug, clap::Args)]
@@ -302,6 +326,15 @@ pub struct Bounds {
     /// (`agentic-job event`). Absent, none may.
     #[serde(default)]
     pub trigger: Option<crate::event::Trigger>,
+    /// Who the hand-back's commit is by, as `Name <address>`. Without it,
+    /// whatever `run` says, which a compromised agent machine chooses:
+    /// with it, `check` refuses a patch by anyone else, so the run's
+    /// commit cannot be passed off as a maintainer's. A replacement series
+    /// keeps its commits' own authors and is not held to it, so bounds
+    /// that allow one (`replacement_max_commits`) leave that open.
+    /// See [`check_commit_author`].
+    #[serde(default)]
+    pub commit_author: Option<String>,
 }
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
@@ -548,6 +581,10 @@ pub struct Policy {
     /// The configuration gh-aw's collector reads (its `config.json`), and
     /// the rules `check` applies to a patch.
     pub safe_outputs: SafeOutputs,
+    /// The bounds' `commit_author`: who `run` commits as, and the only
+    /// author `check` lets a patch name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_author: Option<String>,
 }
 
 /// Reference context admitted before the agent starts. The workflow resolves
@@ -672,6 +709,9 @@ pub struct PatchRules<'a> {
     pub protect_top_level_dot_folders: bool,
     pub unprotected_dot_folders: &'a [String],
     pub max_patch_files: u32,
+    /// [`Policy::commit_author`], which `check` sets: the outputs' own
+    /// configuration does not carry it.
+    pub commit_author: Option<&'a str>,
 }
 
 impl PullRequest {
@@ -681,6 +721,7 @@ impl PullRequest {
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
             unprotected_dot_folders: &self.unprotected_dot_folders,
             max_patch_files: self.max_patch_files,
+            commit_author: None,
         }
     }
 }
@@ -692,6 +733,7 @@ impl Push {
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
             unprotected_dot_folders: &self.unprotected_dot_folders,
             max_patch_files: self.max_patch_files,
+            commit_author: None,
         }
     }
 }
@@ -772,6 +814,9 @@ impl Policy {
     /// the dot-folders protected.
     fn validate(&self) -> Result<()> {
         check_context(&self.context)?;
+        if let Some(author) = &self.commit_author {
+            check_commit_author(author)?;
+        }
         ensure!(
             self.context.is_empty() || self.repo.rsplit('/').next() != Some("context"),
             "target name conflicts with the context directory"
@@ -919,6 +964,9 @@ impl Bounds {
             );
         }
         ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
+        if let Some(author) = &self.commit_author {
+            check_commit_author(author)?;
+        }
         for repo in &self.unprotected_files.repos {
             ensure!(
                 REPO_RE.is_match(repo) && !dotted(repo),
@@ -1274,6 +1322,7 @@ impl Bounds {
             max_outputs: max,
             max_patch_bytes: self.max_patch_bytes,
             safe_outputs,
+            commit_author: self.commit_author.clone(),
         })
     }
 }
@@ -1369,6 +1418,14 @@ pub fn run(args: &Args) -> Result<Exit> {
 /// Intersect compiled policies rather than trying to intersect glob patterns.
 /// Each file independently checks the target and any explicitly requested type.
 fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
+    policy.commit_author = match (policy.commit_author, other.commit_author) {
+        (Some(own), Some(other)) if own != other => {
+            return Err(vec![format!(
+                "the bounds files pin different commit authors: {own:?} and {other:?}"
+            )]);
+        }
+        (own, other) => own.or(other),
+    };
     policy.max_outputs = policy.max_outputs.min(other.max_outputs);
     policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
     policy.safe_outputs.others.retain(|name, limit| {
@@ -2104,6 +2161,69 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             );
             assert!(intersect(policy, configured("required-ci")).is_err());
         }
+    }
+
+    #[test]
+    fn commit_authors_are_plain_and_pinned_by_both_files() {
+        let bot = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>";
+        for (author, ok) in [
+            ("A Bot <bot@example.org>", true),
+            ("A. Bot (ci) <a.bot+ci@mail.example.org>", true),
+            (bot, true),
+            ("Bot", false),
+            ("<bot@example.org>", false),
+            (" Bot <bot@example.org>", false),
+            ("Bot. <bot@example.org>", false),
+            ("A  Bot <bot@example.org>", false),
+            ("\"A Bot\" <bot@example.org>", false),
+            ("Bót <bot@example.org>", false),
+            ("=?UTF-8?q?x?= <bot@example.org>", false),
+            ("A Bot <bot@localhost>", false),
+            ("A Bot <bot@example.org> x", false),
+            ("A, Bot <bot@example.org>", false),
+            ("(bot) <bot@example.org>", false),
+            (
+                format!("{} <bot@example.org>", "a".repeat(60)).as_str(),
+                true,
+            ),
+            (
+                format!("{} <bot@example.org>", "a".repeat(61)).as_str(),
+                false,
+            ),
+            ("A\nBot <bot@example.org>", false),
+        ] {
+            let text = format!("commit_author = {}\n{BOUNDS}", toml::Value::from(author));
+            let bounds = toml::from_str::<Bounds>(&text).unwrap();
+            assert_eq!(bounds.validate().is_ok(), ok, "{author:?}");
+        }
+
+        let pinned = |author: Option<&str>| {
+            let mut bounds = bounds();
+            bounds.commit_author = author.map(str::to_owned);
+            let policy = bounds.compile(&request()).unwrap();
+            policy.validate().unwrap();
+            policy
+        };
+        let policy = pinned(Some(bot));
+        assert_eq!(policy.commit_author.as_deref(), Some(bot));
+        let loaded: Policy =
+            serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+        assert_eq!(loaded, policy);
+        // Unpinned, policy.json is as it was.
+        assert!(
+            !serde_json::to_string(&pinned(None))
+                .unwrap()
+                .contains("commit_author")
+        );
+        // Either file's pin holds; two that differ pin no one.
+        for (left, right) in [(Some(bot), None), (None, Some(bot)), (Some(bot), Some(bot))] {
+            let both = intersect(pinned(left), pinned(right)).unwrap();
+            assert_eq!(both.commit_author.as_deref(), Some(bot));
+        }
+        assert!(intersect(pinned(Some(bot)), pinned(Some("A Bot <bot@example.org>"))).is_err());
+        let mut bad = policy;
+        bad.commit_author = Some("Evil".into());
+        assert!(bad.validate().is_err());
     }
 
     #[test]

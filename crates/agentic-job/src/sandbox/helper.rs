@@ -37,7 +37,7 @@ use super::host::{self, User};
 use super::setup::SELF_COPY;
 use crate::config::{self, Config};
 use crate::exit::Exit;
-use crate::run::egress::ACCESS_LOG;
+use crate::sandbox::egress::ACCESS_LOG;
 
 /// The command's name, as the sudo rule and the client spell it.
 pub const COMMAND: &str = "helper";

@@ -130,9 +130,11 @@ const SIGN_OFF: &str = "signed-off-by:";
 const READ_SCRIPT: &str = r#"test ! -L "$1" && test -f "$1" && exec head -c "$2" -- "$1""#;
 /// Runs the command it is given and passes on at most `$1` bytes of what
 /// it writes, so that too much output is cut and not an error. The
-/// command's own status is the last line of standard error: a pipe's is
-/// that of `head`.
-const LIMIT_SCRIPT: &str = r#"limit=$1; shift; { "$@"; echo "$?" >&2; } | head -c "$limit""#;
+/// command's own status is the only line of standard error: a pipe's is
+/// that of `head`. The command's own messages are dropped, which nothing
+/// reads, so that they cannot push the status past what the runner keeps.
+const LIMIT_SCRIPT: &str =
+    r#"limit=$1; shift; { "$@" 2>/dev/null; echo "$?" >&2; } | head -c "$limit""#;
 
 /// The branch a run's pull request is on, which also names its patch.
 pub fn run_branch(run_id: &str) -> String {
@@ -548,9 +550,14 @@ pub fn commit_message(title: &str, body: &str, trailers: &[String], run_id: &str
 
 /// The author of the commit: `[commit] author`, as `Name <address>`.
 pub fn author(commit: &config::Commit) -> Result<(String, String)> {
-    let Some(author) = commit.author.as_deref() else {
-        return Ok((DEFAULT_AUTHOR.0.to_owned(), DEFAULT_AUTHOR.1.to_owned()));
-    };
+    match commit.author.as_deref() {
+        Some(author) => parse_author(author),
+        None => Ok((DEFAULT_AUTHOR.0.to_owned(), DEFAULT_AUTHOR.1.to_owned())),
+    }
+}
+
+/// `Name <address>` as the name and the address.
+fn parse_author(author: &str) -> Result<(String, String)> {
     let parsed = author
         .strip_suffix('>')
         .and_then(|rest| rest.split_once('<'))
@@ -592,8 +599,6 @@ pub struct Change {
     /// What `summary.json` says of the patch: `{base, bytes}`, or `{base,
     /// error}` for a change that could not be handed back, or null.
     pub patch: Value,
-    /// The agent's outcome, with `stopped_early` filled in.
-    pub outcome: Value,
     /// Why a change was not handed back.
     pub dropped: Option<String>,
 }
@@ -955,11 +960,12 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
         ..
     } = *request;
     let base = checkout.base_commit.as_str();
-    let git = Git::new(
-        runner,
-        clone::utf8(&checkout.dir)?,
-        &author(request.commit)?,
-    );
+    // An author the bounds pin is the only one `check` takes.
+    let author = match &policy.commit_author {
+        Some(pinned) => parse_author(pinned)?,
+        None => author(request.commit)?,
+    };
+    let git = Git::new(runner, clone::utf8(&checkout.dir)?, &author);
     let status = git.limited(
         &[
             "status",
@@ -1000,7 +1006,6 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
         let mut change = Change {
             files,
             patch: Value::Null,
-            outcome: outcome.to_value(),
             dropped: None,
         };
         let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
@@ -1101,9 +1106,16 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
     let mut change = Change {
         files,
         patch: Value::Null,
-        outcome: outcome.to_value(),
         dropped: None,
     };
+    // Said, as the old tree did, so that work the brief did not ask for is
+    // not lost without a word.
+    if policy.kind != Kind::Branch && changed && !unreadable {
+        change.drop_patch(
+            base,
+            "changes dropped: an analysis run hands back no change".to_owned(),
+        );
+    }
     if policy.kind != Kind::Branch && agent_text.is_empty() {
         return Ok(change);
     }
@@ -1121,7 +1133,15 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
                 change.drop_patch(base, why);
                 return Ok(change);
             }
-            Ok(None) => {}
+            // Commits of its own that leave the tree as it was: a request
+            // for a patch without one, which `check` would refuse whole.
+            Ok(None) => {
+                change.drop_patch(
+                    base,
+                    "the run's commits leave the tree as it was at the base, so there is no change to hand back".to_owned(),
+                );
+                return Ok(change);
+            }
             Ok(Some(patch)) => {
                 create_dir(request.safe_outputs)?;
                 let name = patch_file_name(&carrier(policy, run_id).1);
@@ -1184,6 +1204,7 @@ mod tests {
             max_outputs: 3,
             max_patch_bytes: 1 << 20,
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
+            commit_author: None,
         }
     }
 
@@ -1719,6 +1740,12 @@ mod tests {
             self.dir.path().join(name)
         }
 
+        /// The outcome `collect` saved with the run's results.
+        fn outcome(&self) -> Value {
+            serde_json::from_slice(&std::fs::read(self.path("results/outcome.json")).unwrap())
+                .unwrap()
+        }
+
         fn collect(&self, policy: &Policy, commit: &config::Commit) -> Change {
             self.collect_with_harness(policy, commit, None)
         }
@@ -1933,7 +1960,7 @@ mod tests {
         let change = home.collect(&policy, &commit);
         assert_eq!(change.files, ["a.txt", "sub/new-file.txt"]);
         assert_eq!(change.dropped, None);
-        assert_eq!(change.outcome["summary"], "Done.");
+        assert_eq!(home.outcome()["summary"], "Done.");
         let patch_name = "aw-agent-run-42.patch";
         let patch = std::fs::read_to_string(home.path("safe-outputs").join(patch_name)).unwrap();
         assert_eq!(
@@ -2164,23 +2191,19 @@ mod tests {
         let harness = harness(Outcome::Budget, Some("max-requests"));
         let change = home.collect_with_harness(&policy, &config::Commit::default(), Some(&harness));
         assert!(
-            change.outcome["stopped_early"]
+            home.outcome()["stopped_early"]
                 .as_str()
                 .unwrap()
                 .contains("limit")
         );
         assert_eq!(change.dropped, None);
-        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!([litter]));
+        assert_eq!(home.outcome()[OMITTED_BINARY_FILES], json!([litter]));
         assert!(
-            change.outcome["summary"]
+            home.outcome()["summary"]
                 .as_str()
                 .unwrap()
                 .contains("omitted 1")
         );
-        let saved: Value =
-            serde_json::from_slice(&std::fs::read(home.path("results/outcome.json")).unwrap())
-                .unwrap();
-        assert_eq!(saved, change.outcome);
         assert!(home.checkout.dir.join(litter).exists());
         let verdict = home.verdict(&policy);
         assert!(verdict.ok, "{:?}", verdict.errors);
@@ -2195,9 +2218,9 @@ mod tests {
         let policy = policy(Kind::Branch, pull_requests());
         std::fs::write(home.checkout.dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(home.checkout.dir.join("cache.pyc"), b"compiled\0python").unwrap();
-        let change = home.collect(&policy, &config::Commit::default());
-        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!(["cache.pyc"]));
-        assert!(change.outcome.get("summary").is_none());
+        home.collect(&policy, &config::Commit::default());
+        assert_eq!(home.outcome()[OMITTED_BINARY_FILES], json!(["cache.pyc"]));
+        assert!(home.outcome().get("summary").is_none());
         let verdict = home.verdict(&policy);
         assert!(verdict.ok, "{:?}", verdict.errors);
         assert_eq!(
@@ -2215,7 +2238,7 @@ mod tests {
         let change = home.collect(&policy, &config::Commit::default());
         assert!(change.patch.is_null());
         assert_eq!(change.dropped, None);
-        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!(["cache.pyc"]));
+        assert_eq!(home.outcome()[OMITTED_BINARY_FILES], json!(["cache.pyc"]));
         assert!(!home.path("safe-outputs").exists());
     }
 
@@ -2224,8 +2247,8 @@ mod tests {
         let home = Home::new();
         let policy = policy(Kind::Branch, pull_requests());
         std::fs::write(home.checkout.dir.join("a.txt"), b"changed\0binary").unwrap();
-        let change = home.collect(&policy, &config::Commit::default());
-        assert!(change.outcome.get(OMITTED_BINARY_FILES).is_none());
+        home.collect(&policy, &config::Commit::default());
+        assert!(home.outcome().get(OMITTED_BINARY_FILES).is_none());
         assert!(!home.verdict(&policy).ok);
     }
 
@@ -2248,10 +2271,10 @@ mod tests {
                 assert!(home.checkout.dir.join(name).exists());
                 let verdict = home.verdict(&policy);
                 if staged {
-                    assert!(change.outcome.get(OMITTED_BINARY_FILES).is_none());
+                    assert!(home.outcome().get(OMITTED_BINARY_FILES).is_none());
                     assert!(!verdict.ok, "{name:?}: {:?}", verdict.errors);
                 } else {
-                    assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!([name]));
+                    assert_eq!(home.outcome()[OMITTED_BINARY_FILES], json!([name]));
                     assert!(verdict.ok, "{name:?}: {:?}", verdict.errors);
                     assert_eq!(verdict.patch.unwrap().files, ["a.txt", "keep.txt"]);
                 }
@@ -2280,7 +2303,7 @@ mod tests {
         expected.remove(0);
         let change = home.collect(&policy, &config::Commit::default());
         assert_eq!(change.dropped, None);
-        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!(expected));
+        assert_eq!(home.outcome()[OMITTED_BINARY_FILES], json!(expected));
         let remaining = sh(&home.checkout.dir, "git ls-tree --name-only HEAD");
         let mut expected_remaining = vec!["a.txt".to_owned(), "binary-0000".to_owned()];
         expected_remaining.extend((0..512).map(|i| format!("text-{i:04}")));
@@ -2344,6 +2367,16 @@ mod tests {
             assert_eq!(change.dropped, None, "{settings}");
             let verdict = home.verdict(&policy);
             assert!(verdict.ok, "{settings}: {:?}", verdict.errors);
+            // The mail as well as the commit: `--no-from` and the subject
+            // options change only the first.
+            let patch =
+                std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-42.patch")).unwrap();
+            for line in [
+                "\nFrom: A Bot <bot@example.com>\n",
+                "\nSubject: [PATCH] T\n",
+            ] {
+                assert!(patch.contains(line), "{settings}: {patch}");
+            }
             let applied = home.path("applied");
             sh(
                 home.dir.path(),
@@ -2360,6 +2393,38 @@ mod tests {
             assert!(!fields[1].contains("1970"), "{settings}: {log}");
             assert_eq!(&fields[2..], ["T", "B"], "{settings}: {log}");
         }
+    }
+
+    /// An author the bounds pin is the one committed as, over the
+    /// configuration's, and the one `check` then takes.
+    #[test]
+    fn a_pinned_author_is_committed_as() {
+        let bot = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>";
+        let mut policy = policy(Kind::Branch, pull_requests());
+        policy.commit_author = Some(bot.into());
+        let commit = config::Commit {
+            author: Some("A Bot <bot@example.com>".into()),
+            trailers: Vec::new(),
+        };
+        let home = Home::new();
+        sh(&home.checkout.dir, "echo two >> a.txt");
+        let change = home.collect(&policy, &commit);
+        assert_eq!(change.dropped, None, "{}", change.patch);
+        let verdict = home.verdict(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        let log = sh(&home.checkout.dir, "git log -1 --format='%an <%ae>'");
+        assert_eq!(log.trim(), bot);
+    }
+
+    /// A command's status is read whatever it writes to standard error,
+    /// which the runner keeps only the start of.
+    #[test]
+    fn a_status_survives_a_noisy_command() {
+        let noisy = "head -c 100000 /dev/zero | tr '\\0' x >&2; echo out";
+        let argv = ["sh", "-c", LIMIT_SCRIPT, "sh", "100", "sh", "-c", noisy];
+        let out = Unconfined.run(&argv, b"", 100).unwrap();
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"0\n");
     }
 
     /// A checkout git cannot read is not taken for one with no change:
@@ -2421,12 +2486,27 @@ mod tests {
                 Some("changes dropped: create_pull_request is not an allowed output"),
                 &["outputs.jsonl"],
             ),
-            ("an analysis run", &analysis, "", true, None, &[]),
+            (
+                "an analysis run",
+                &analysis,
+                "",
+                true,
+                Some("changes dropped: an analysis run hands back no change"),
+                &[],
+            ),
             (
                 "an analysis run's request",
                 &analysis,
                 noop,
                 true,
+                Some("changes dropped: an analysis run hands back no change"),
+                &["outputs.jsonl"],
+            ),
+            (
+                "an analysis run without a change",
+                &analysis,
+                noop,
+                false,
                 None,
                 &["outputs.jsonl"],
             ),
@@ -2464,7 +2544,8 @@ mod tests {
     }
 
     /// The agent's own commits are part of the change, and a tree it
-    /// committed and then put back hands back nothing.
+    /// committed and then put back hands back nothing, saying so: not a
+    /// request for a pull request without its patch.
     #[test]
     fn commits_of_the_agent_are_part_of_the_change() {
         let policy = policy(Kind::Branch, pull_requests());
@@ -2487,8 +2568,10 @@ mod tests {
             &format!("echo two >> a.txt && {commit} Mine && echo one > a.txt && {commit} Back"),
         );
         let change = home.collect(&policy, &config::Commit::default());
-        assert_eq!(change.patch, Value::Null);
-        assert_eq!(change.dropped, None);
+        let why = change.dropped.unwrap();
+        assert!(why.contains("leave the tree as it was"), "{why}");
+        assert_eq!(change.patch["error"], why.as_str());
+        assert!(!home.path("safe-outputs").exists());
     }
 
     /// A link where a hand-back file should be is not read, whatever it
@@ -2501,8 +2584,8 @@ mod tests {
         std::fs::write(&elsewhere, "{\"summary\": \"LINKED-CONTENT\"}\n").unwrap();
         symlink(&elsewhere, home.path(AGENT_OUTCOME)).unwrap();
         symlink(&elsewhere, home.path(AGENT_OUTPUTS)).unwrap();
-        let change = home.collect(&policy, &config::Commit::default());
-        assert_eq!(change.outcome, json!({}));
+        home.collect(&policy, &config::Commit::default());
+        assert_eq!(home.outcome(), json!({}));
         assert!(!home.path("safe-outputs").exists());
         assert_eq!(
             std::fs::read_to_string(home.path("results/outcome.json")).unwrap(),
@@ -2520,8 +2603,8 @@ mod tests {
         for (text, want) in cases {
             let home = Home::new();
             std::fs::write(home.path(AGENT_OUTCOME), text).unwrap();
-            let change = home.collect(&policy, &config::Commit::default());
-            assert_eq!(change.outcome, want, "{}", &text[..text.len().min(40)]);
+            home.collect(&policy, &config::Commit::default());
+            assert_eq!(home.outcome(), want, "{}", &text[..text.len().min(40)]);
         }
     }
 }

@@ -4,7 +4,9 @@
 //! changes on purpose: the message of the patch's commit, which was the
 //! pull request's title alone and is now its title and body. And a pull
 //! request made up for an agent that wrote no summary now says that it
-//! is partial.
+//! is partial. And commits that put the tree back at the base are
+//! dropped, saying why, where the old tree made up a pull request without
+//! a patch, which `check` refuses.
 //!
 //! The old code is run as it is, from a checkout of the old tree at the
 //! commit the plan names (`OLD_TREE`), by `tests/corpus/handback-old.mjs`.
@@ -129,6 +131,9 @@ struct Case {
     patch: bool,
     /// Whether the new side's made-up pull request says it is partial.
     no_summary: bool,
+    /// Why the new side drops the change, where the old tree made up a
+    /// pull request without its patch.
+    dropped: Option<&'static str>,
 }
 
 fn pull_requests() -> Value {
@@ -152,6 +157,7 @@ fn cases() -> Vec<Case> {
         max_patch_bytes: 1 << 20,
         patch: true,
         no_summary: false,
+        dropped: None,
     };
     const EDIT: &str = "printf 'one\\n2\\nthree\\nfour\\n' > a.txt";
     const MANY: &str = "printf 'one\\n2\\nthree\\nfour\\n' > a.txt && git rm -q gone.txt && \
@@ -218,13 +224,16 @@ fn cases() -> Vec<Case> {
             "",
             json!({"summary": "Two things.\nBoth small."}),
         ),
-        case(
-            "a change put back",
-            "echo x >> a.txt && git -c user.name=a -c user.email=a@example.invalid commit -q -am Mine && \
-             printf 'one\\ntwo\\nthree\\n' > a.txt",
-            "",
-            json!({"summary": "Nothing after all."}),
-        ),
+        Case {
+            dropped: Some("leave the tree as it was"),
+            ..case(
+                "a change put back",
+                "echo x >> a.txt && git -c user.name=a -c user.email=a@example.invalid commit -q -am Mine && \
+                 printf 'one\\ntwo\\nthree\\n' > a.txt",
+                "",
+                json!({"summary": "Nothing after all."}),
+            )
+        },
         Case {
             outputs: json!({"noop": {"max": 1}}),
             ..case(
@@ -348,6 +357,19 @@ fn the_old_hand_back_and_the_new_differ_only_in_the_commit_message() {
         })
         .unwrap();
         std::fs::create_dir_all(new.home.join("safe-outputs")).unwrap();
+
+        if let Some(why) = case.dropped {
+            let dropped = change.dropped.unwrap();
+            assert!(dropped.contains(why), "{name}: {dropped}");
+            assert_eq!(change.patch["base"], new.checkout.base_commit, "{name}");
+            assert!(old_patch["base"].is_null(), "{name}: {old_patch}");
+            assert!(new.handed_back().is_empty(), "{name}");
+            assert!(
+                old.handed_back()["outputs.jsonl"].contains("create_pull_request"),
+                "{name}"
+            );
+            continue;
+        }
 
         // What the summary says of the patch: the same base and the same
         // refusal, and each side its own patch's size.

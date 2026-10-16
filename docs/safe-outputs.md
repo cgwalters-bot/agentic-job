@@ -561,6 +561,19 @@ files = ["CONTRIBUTING.md"]
 dot_folders = [".github"] # optional, and only ".github"; see the protections below
 ```
 
+Who the hand-back's commit is by is otherwise the agent machine's to say
+(`[commit] author`), so a compromised one could pass a commit off as a
+maintainer's. A bounds file can pin it, as `Name <address>` in plain ASCII:
+`commit_author = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"`.
+`run` then commits as that author, and `check` refuses a patch whose
+`From:` is anyone else's. Two bounds files that pin different authors
+refuse every run. A [replacement](#replacing-the-complete-series)
+keeps its commits' own authors and is not held to the pin, so bounds that
+pin an author should leave `replacement_max_commits` at zero. Whether or not
+one is pinned, `check` refuses a mail header given twice and a `From:`,
+`Subject:`, `Date:` or `[PATCH]` line at the start of the message, which
+`git am` would take over the mail's own.
+
 This does not relax the fixed patch refusals below. New executable files
 remain refused: add a script without its executable bit and run it with
 its interpreter. Check refusals appear as run annotations and, when a

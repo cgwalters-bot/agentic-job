@@ -29,7 +29,7 @@ pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, Policy, update_fields,
+    CREATE_PULL_REQUEST, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy, update_fields,
 };
 use crate::redact;
 
@@ -843,7 +843,16 @@ fn check_outputs_to(
         .collect();
     // The output that carries the patch: a pull request to open, or a
     // push to the open one the run started from, whose head is pinned.
-    let carrier = policy.safe_outputs.patch_carrier();
+    let carrier = policy.safe_outputs.patch_carrier().map(|(output, rules)| {
+        let commit_author = policy.commit_author.as_deref();
+        (
+            output,
+            PatchRules {
+                commit_author,
+                ..rules
+            },
+        )
+    });
     let pinned = policy
         .safe_outputs
         .push_to_pull_request_branch
@@ -1179,6 +1188,30 @@ mod tests {
         }
         let report = serde_json::to_value(Handback::pull_request().check_against(&ready)).unwrap();
         assert!(report.get("checkpoint").is_none());
+    }
+
+    /// The policy's commit author reaches the reading of the patch.
+    #[test]
+    fn a_pinned_author_is_held_to() {
+        let mut pinned = policy();
+        // The patch is by `agent <agent@localhost>`.
+        for author in ["agent <agent@localhost.example>", "Other <o@x.org>"] {
+            pinned.commit_author = Some(author.into());
+            let verdict = Handback::pull_request().check_against(&pinned);
+            assert!(!verdict.ok, "{author}");
+            assert!(
+                verdict.errors.iter().any(|e| e.contains("commit author")),
+                "{author}: {:?}",
+                verdict.errors
+            );
+        }
+        let handback = Handback::pull_request().with(
+            PATCH_NAME,
+            Some(patch_of("src/new.rs").replace("agent <agent@localhost>", "A Bot <a@b.org>")),
+        );
+        pinned.commit_author = Some("A Bot <a@b.org>".into());
+        let verdict = handback.check_against(&pinned);
+        assert!(verdict.ok, "{:?}", verdict.errors);
     }
 
     #[test]

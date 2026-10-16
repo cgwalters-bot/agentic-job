@@ -214,6 +214,40 @@ struct Reader {
     /// What the header of the file being read said it does to the file,
     /// once it has stated a mode.
     change: Option<Change>,
+    /// The mail headers read so far, by name.
+    headers: BTreeSet<String>,
+    /// The `From:` header's value, unfolded, once read.
+    from: Option<String>,
+    /// Whether the line before was the `From:` header or a fold of it.
+    in_from: bool,
+    /// Whether a line of the commit message's body was read, and whether
+    /// its first paragraph is over.
+    body: (bool, bool),
+}
+
+/// The fields `git mailinfo` takes from the start of a message's body
+/// over the mail's own (its `header[]`), as `From: x` or `subject:x`,
+/// and a `[PATCH]` line, which it takes for the subject. It reads them
+/// only at the start of a line, so `run` indents them.
+fn in_body_header(line: &str) -> bool {
+    line.starts_with("[PATCH")
+        || line.split_once(':').is_some_and(|(name, _)| {
+            ["From", "Subject", "Date"]
+                .iter()
+                .any(|header| name.trim_end().eq_ignore_ascii_case(header))
+        })
+}
+
+/// The `From:` value `format-patch` writes for AUTHOR, `Name <address>`
+/// as `policy::check_commit_author` admits it: the name quoted where it
+/// holds a character RFC 822 sets apart (git's `is_rfc822_special`).
+fn from_value(author: &str) -> String {
+    let (name, address) = author.split_once(" <").unwrap_or((author, ""));
+    if name.contains(['(', ')', '[', ']', '.']) {
+        format!("\"{name}\" <{address}")
+    } else {
+        author.to_owned()
+    }
 }
 
 /// What a file's header says the change does to the file.
@@ -244,9 +278,15 @@ impl Reader {
         if line.starts_with([' ', '\t']) {
             if !folds {
                 self.problem(format!("unexpected mail header {}", quoted(line)));
+            } else if self.in_from
+                && let Some(from) = &mut self.from
+            {
+                from.push(' ');
+                from.push_str(line.trim());
             }
             return State::Mail { folds };
         }
+        self.in_from = false;
         // Without a colon git takes the headers to be over.
         let Some((name, value)) = line.split_once(':') else {
             self.problem(format!("unexpected mail header {}", quoted(line)));
@@ -259,13 +299,51 @@ impl Reader {
             None if FREE_HEADERS.contains(&name) => {}
             _ => self.problem(format!("unexpected mail header {}", quoted(line))),
         }
-        if name == BASE_COMMIT_HEADER && self.base_commit.replace(value.to_owned()).is_some() {
-            self.problem(format!("{BASE_COMMIT_HEADER} twice"));
+        // `git am` takes the last of a header that is there twice, and
+        // this reader, or one that reads the patch for a person, the first.
+        if !self.headers.insert(name.to_owned()) {
+            self.problem(format!("{name} twice"));
         }
-        // Only a subject is long enough for git to fold it.
+        if name == BASE_COMMIT_HEADER {
+            self.base_commit = Some(value.to_owned());
+        }
+        if name == "From" {
+            self.from = Some(value.to_owned());
+            self.in_from = true;
+        }
+        // git folds a subject, and an author's line where the address
+        // takes it past 78 characters.
         State::Mail {
-            folds: name == "Subject",
+            folds: name == "Subject" || name == "From",
         }
+    }
+
+    /// A line of the commit message.
+    fn message(&mut self, line: &str) -> State {
+        let (started, over) = &mut self.body;
+        if line.is_empty() {
+            // git skips empty lines before the body.
+            *over |= *started;
+        } else if line == "---" {
+            // The end of the message, before the summary of changes.
+            *over = true;
+        } else if !*over {
+            *started = true;
+            if in_body_header(line) {
+                self.problem(format!(
+                    "a header at the start of the commit message, which git would take over the mail's: {}",
+                    quoted(line)
+                ));
+            }
+        }
+        // `---` alone ends the message, as format-patch writes it.
+        if reads_as_patch(line) {
+            self.problem(format!(
+                "a line of the commit message that git would read as a patch: {}",
+                quoted(line)
+            ));
+        }
+        State::Message
     }
 
     /// A `diff --git` line: the start of a file's change.
@@ -416,16 +494,7 @@ impl Reader {
         match state {
             State::Mail { folds } => self.mail(line, folds),
             State::Message if line.starts_with(DIFF_HEADER) => self.file(line),
-            State::Message => {
-                // `---` alone ends the message, as format-patch writes it.
-                if reads_as_patch(line) {
-                    self.problem(format!(
-                        "a line of the commit message that git would read as a patch: {}",
-                        quoted(line)
-                    ));
-                }
-                State::Message
-            }
+            State::Message => self.message(line),
             State::File {
                 path,
                 stage: Stage::Extended,
@@ -592,6 +661,7 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
         mut problems,
         files,
         base_commit: found,
+        from,
         ..
     } = reader;
     if files.is_empty() {
@@ -607,6 +677,14 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
     if found.as_deref() != Some(base_commit) {
         problems.push(format!(
             "the patch's {BASE_COMMIT_HEADER} is not the base commit {base_commit}"
+        ));
+    }
+    if let Some(author) = rules.commit_author
+        && from.as_deref() != Some(from_value(author).as_str())
+    {
+        problems.push(format!(
+            "the patch's author {} is not the policy's commit author {author:?}",
+            quoted(from.as_deref().unwrap_or_default())
         ));
     }
     let protected = protected(&files, rules);
@@ -779,6 +857,16 @@ mod tests {
             (
                 "a message that starts a line with From",
                 head().replace("Why it", "From now on it is so.\nWhy it") + &edit("a.rs"),
+            ),
+            // git reads headers only at the start of the body.
+            (
+                "a header-like line after the first paragraph",
+                head().replace("Why it changes.", "Why.\n\nFrom: a <a@b.c>\nDate: now")
+                    + &edit("a.rs"),
+            ),
+            (
+                "a folded author",
+                head().replace("From: agent", "From: \"github-actions[bot]\"\n") + &edit("a.rs"),
             ),
         ];
         for (name, patch) in cases {
@@ -1057,6 +1145,46 @@ mod tests {
                     + &edit("a.rs"),
                 "twice",
             ),
+            // `git am` takes the last of each, `check` and a reader the first.
+            (
+                "two authors",
+                head().replace("Date: ", "From: x <x@example.org>\nDate: ") + &edit("a.rs"),
+                "From twice",
+            ),
+            (
+                "two dates",
+                head().replace(
+                    "Subject: ",
+                    "Date: Thu, 1 Jan 2026 00:00:00 +0000\nSubject: ",
+                ) + &edit("a.rs"),
+                "Date twice",
+            ),
+            (
+                "two subjects",
+                head().replace("\n\nWhy", "\nSubject: [PATCH] Other\n\nWhy") + &edit("a.rs"),
+                "Subject twice",
+            ),
+            // ... and an in-body header over the mail's own.
+            (
+                "an author in the body",
+                head().replace("Why it", "From: x <x@example.org>\n\nWhy it") + &edit("a.rs"),
+                "a header at the start of the commit message",
+            ),
+            (
+                "a subject in the body, after empty lines",
+                head().replace("\n\nWhy it", "\n\n\n\nsubject:Other\nWhy it") + &edit("a.rs"),
+                "a header at the start of the commit message",
+            ),
+            (
+                "a subject line in the body",
+                head().replace("Why it", "[PATCH] Other\n\nWhy it") + &edit("a.rs"),
+                "a header at the start of the commit message",
+            ),
+            (
+                "a date in the first paragraph",
+                head().replace("Why it changes.", "Why.\nDate : now") + &edit("a.rs"),
+                "a header at the start of the commit message",
+            ),
             (
                 "a patch in the message",
                 head().replace("Why it changes.\n", bare) + &edit("a.rs"),
@@ -1124,7 +1252,7 @@ mod tests {
             ),
             (
                 "a folded header that is not the subject",
-                head().replace("\nDate:", "\n base64\nDate:") + &edit("a.rs"),
+                head().replace("\nSubject:", "\n base64\nSubject:") + &edit("a.rs"),
                 "unexpected mail header",
             ),
             (
@@ -1162,6 +1290,82 @@ mod tests {
             let found = problems(patch);
             assert!(found.iter().any(|p| p.contains(want)), "{name}: {found:#?}");
         }
+    }
+
+    #[test]
+    fn a_pinned_author_is_the_only_one_taken() {
+        let bot = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>";
+        let from = |value: &str| head().replace("agent <agent@localhost>", value) + &edit("a.rs");
+        let cases = [
+            (
+                "A Bot <bot@example.org>",
+                from("A Bot <bot@example.org>"),
+                true,
+            ),
+            (
+                "A. Bot <bot@example.org>",
+                from("\"A. Bot\" <bot@example.org>"),
+                true,
+            ),
+            // As format-patch folds a line over 78 characters.
+            (
+                bot,
+                from(
+                    "\"github-actions[bot]\"\n <41898282+github-actions[bot]@users.noreply.github.com>",
+                ),
+                true,
+            ),
+            (
+                "A Bot <bot@example.org>",
+                from("Evil <bot@example.org>"),
+                false,
+            ),
+            (
+                "A Bot <bot@example.org>",
+                from("A Bot <evil@example.org>"),
+                false,
+            ),
+            (
+                "A Bot <bot@example.org>",
+                from("\"A Bot\" <bot@example.org>"),
+                false,
+            ),
+            (
+                "A Bot <bot@example.org>",
+                from("=?UTF-8?q?A=20Bot?= <bot@example.org>"),
+                false,
+            ),
+            (
+                "A. Bot <bot@example.org>",
+                from("A. Bot <bot@example.org>"),
+                false,
+            ),
+            (
+                "A Bot <bot@example.org>",
+                head().replace("From: agent <agent@localhost>\n", "") + &edit("a.rs"),
+                false,
+            ),
+        ];
+        for (author, patch, ok) in cases {
+            let pr = policy().safe_outputs.create_pull_request.unwrap();
+            let rules = PatchRules {
+                commit_author: Some(author),
+                ..pr.rules()
+            };
+            let found = read_patch(&patch, &rules, BASE).problems;
+            assert_eq!(found.is_empty(), ok, "{author} {patch}: {found:?}");
+            if !ok {
+                assert!(
+                    found[0].contains("is not the policy's commit author"),
+                    "{found:?}"
+                );
+            }
+        }
+        // Unpinned, any author is taken.
+        assert_eq!(
+            problems(&from("Evil <x@example.org>")),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
