@@ -88,8 +88,9 @@ environment keys. Extend case-table tests for acceptance/refusal boundaries
 than duplicating test bodies. Rustfmt and warning-free Clippy are required.
 Tests must not use `include_str!` for files outside `crates/` or `egress/`;
 read those files at test time instead. The binary may also embed `skills/`
-and `workflow/review.md`, which the source digest covers; CI's `lint`
-job refuses anything else.
+and `workflow/review.md`, which the source digest covers; the
+`embedded_sources` test refuses anything else, and any include path that
+is not one plain string literal.
 Recent commits usually use `area: Imperative subject` (for example `run: Leave…`);
 explain the reason for a change, not just the diff, in its commit message.
 
