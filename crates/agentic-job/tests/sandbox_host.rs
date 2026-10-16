@@ -146,7 +146,7 @@ fn layered_removal_cases_are_observable() {
     }
 }
 
-/// The policy's map value, as secure-host/world-write.mjs writes it: the
+/// The policy's map value, as `secure-host world-write` writes it: the
 /// root filesystem's kernel dev_t (major << 20 | minor), then whether it
 /// is enabled, each a native-endian u32, in hex bytes for bpftool.
 fn world_write_config(enabled: bool) -> Vec<String> {

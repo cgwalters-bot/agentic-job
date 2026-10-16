@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::compose;
 use crate::exit::Exit;
-use crate::{acp_drive, audit, check, event, policy, run, sandbox, workflows};
+use crate::{acp_drive, audit, check, event, policy, run, sandbox, secure_host, workflows};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentic-job", version, about, propagate_version = true)]
@@ -29,6 +29,9 @@ pub enum Command {
     /// Prepare and probe the host the agent runs on
     #[command(subcommand)]
     Sandbox(sandbox::Command),
+    /// The steps of the secure-host action before `sandbox setup`: host admission, apt, the world-write policy
+    #[command(subcommand)]
+    SecureHost(secure_host::Command),
     /// Run the agent in the sandbox and take what it hands back
     Run(run::Args),
     /// Check the provider's API key that `register = "api-key"` needs, before the host is secured
@@ -62,6 +65,7 @@ impl Command {
             Self::Audit(args) => audit::run(args),
             Self::Policy(args) => policy::run(args),
             Self::Sandbox(command) => command.run(),
+            Self::SecureHost(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::CheckKey(args) => run::key_check::run(args),
             Self::Check(args) => check::run(args),
@@ -187,6 +191,30 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{args:?}: {err}"));
         }
         assert!(Cli::try_parse_from(["agentic-job", "sandbox", "exec"]).is_err());
+    }
+
+    /// Not in the plan's table: the secure-host action's steps before setup.
+    #[test]
+    fn the_secure_host_steps_parse() {
+        let lines: &[&[&str]] = &[
+            &["supported"],
+            &["apt"],
+            &["world-write", "/tmp/bin/world_write.bpf.o"],
+        ];
+        for args in lines {
+            Cli::try_parse_from(["agentic-job", "secure-host"].iter().chain(*args))
+                .unwrap_or_else(|err| panic!("{args:?}: {err}"));
+        }
+        for bad in [
+            &["secure-host"][..],
+            &["secure-host", "world-write"],
+            &["secure-host", "supported", "/etc/os-release"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["agentic-job"].iter().chain(bad)).is_err(),
+                "{bad:?} parsed"
+            );
+        }
     }
 
     /// Not in the plan's table: `sandbox check` runs it as the sandbox user.

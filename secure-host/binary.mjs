@@ -155,8 +155,10 @@ function build(out) {
   const missing = [["musl-gcc", "musl-tools"], ["clang", "clang"]].filter(([program]) => !has(program)).map(([, pkg]) => pkg);
   if (missing.length) {
     if (!has("apt-get")) throw new Error(`a build needs ${missing.join(" and ")}, and this machine has no apt-get to install them with`);
-    run("sudo", ["node", join(HERE, "apt.mjs")]);
-    run("sudo", ["apt-get", "install", "-y", "--no-install-recommends", ...missing]);
+    // Before agentic-job exists to tune apt (`secure-host apt`): the same
+    // network bounds, for this command only.
+    run("sudo", ["apt-get", "-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=10", "-o", "Acquire::https::Timeout=10",
+      "install", "-y", "--no-install-recommends", ...missing]);
   }
   compileObject(out);
   run("rustup", ["target", "add", TARGET]);

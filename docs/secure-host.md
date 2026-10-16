@@ -11,9 +11,12 @@ before untrusted steps, whether or not an agent runs afterwards: the action in
 agent job uses the same action and does not own it.
 
 The action supports exactly **Ubuntu 26.04** and **RHEL 10** (including
-RHEL 10 minor releases). Its first step reads `/etc/os-release` and refuses
+RHEL 10 minor releases). Once it has the binary, its first step,
+`agentic-job secure-host supported`, reads `/etc/os-release` and refuses
 any other host, or a missing/unreadable release file, with one diagnostic
-before fetching binaries, changing apt settings or invoking setup. It checks
+before changing apt settings, loading the policy or invoking setup. Getting
+the binary changes nothing but the runner's temporary directory, unless it
+has to build and install a compiler. It checks
 `ID` and `VERSION_ID`, not `ID_LIKE`: Fedora, CentOS Stream and other
 derivatives are not supported hosts. This admission check does not prove
 kernel features or runtime enforcement; the setup checks and probes still
@@ -94,7 +97,8 @@ exists but an asset is missing; repairing that published release is separate.
 ## Access-time world-write policy
 
 The action always loads `crates/agentic-job/bpf/world_write.bpf.c` through its
-[bpftool loader](../secure-host/world-write.mjs), before sandbox setup and
+bpftool loader, `agentic-job secure-host world-write`
+([`world_write.rs`](../crates/agentic-job/src/secure_host/world_write.rs)), before sandbox setup and
 while it still has root. There is no input to turn it off. It replaces the
 walk that setup used to make over the whole root filesystem, taking world
 write off every path it found and the setuid bit off setuid-root programs no
@@ -154,8 +158,9 @@ not selection based on the active LSM list. Actual kernel acceptance remains
 a runtime check, not an inference from the OS version.
 
 Before enabling, the loader proves a root-owned mode-0666 file on `/` is
-writable as `nobody`. After enabling, the same write must fail with `EACCES`,
-while a mode-0666 file owned by `nobody` remains writable. These are two fixed
+writable as `nobody`. After enabling, the same write must fail with `EACCES`
+(the shell's "Permission denied"; any other failure refuses), while a mode-0666
+file owned by `nobody` remains writable. These are two fixed
 fixtures, not a walk; each external command has a 120-second timeout.
 The [hosted Ubuntu job](../.github/workflows/world-write.yml) additionally
 repeats denied/owner-control writes in a separate step after the loader exits,
@@ -231,7 +236,7 @@ starts disabled and setup still refuses failed activation.
 RHEL 10 remains admitted by the action but **runtime-unverified**, not certified
 by the Ubuntu result. This organization has no RHEL self-hosted runner. The
 follow-up issue needs an operator-provisioned fresh RHEL 10 VM with root/sudo,
-Node 22, Git, just, kernel BTF and mount/BPF privileges; do not use a persistent
+Node 22, Rust (cargo), Git, just, kernel BTF and mount/BPF privileges; do not use a persistent
 workload host or a container. From the reviewed checkout, run:
 
 ```sh
@@ -501,9 +506,12 @@ main's `world-write` job, loading and proving the policy took about one second
 by the step timestamps. The after figure is this change's own e2e-full agent
 job, read from its CI; it is not recorded here before that has run.
 
-Before acquiring the binary or installing setup packages, the action runs
-[`apt.mjs`](../secure-host/apt.mjs) as root. CI's sandbox and static-build jobs
-and the reusable workflow's source-build fallback use the same snippet.
+Once it has the binary, before installing setup packages, the action runs
+`agentic-job secure-host apt` ([`apt.rs`](../crates/agentic-job/src/secure_host/apt.rs))
+as root, as CI's sandbox and confined jobs do. Where no binary exists yet
+(the static build, the release job and the source-build fallback), the
+`apt-get` command itself carries the same timeouts and retries, without the
+mirror change.
 It replaces `azure.archive.ubuntu.com` with `archive.ubuntu.com` in the runner's
 apt mirror lists and direct sources, leaving mirror-list fallback, security and
 ports mirrors, suites and signing settings intact. This follows the
@@ -516,10 +524,10 @@ HTTP and HTTPS timeouts are 10 seconds, with three acquisition retries.
 `Dl-Limit` is a bandwidth cap, not a minimum-speed watchdog, and is not set.
 A trickling transfer can still last longer: CI retains its five-minute apt
 step timeout as the backstop. Package signature/hash verification is unchanged.
-The added CI lines execute this fixed repository script before apt, with the
+The CI lines run this fixed subcommand of the checkout's binary before apt, with the
 existing read-only job permissions; no action pins or token placement change.
-CI's binary-test line also runs the apt regression tests, including a loopback
-server that sends a partial body and stalls; it needs neither root nor a token.
+Its unit tests include a loopback server that sends a partial body and stalls,
+which `apt-helper` must abandon; they need neither root nor a token.
 
 ## What a later step can count on, and what it cannot
 

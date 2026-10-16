@@ -146,10 +146,10 @@ What each part guarantees today, and what it does not:
 
 **Supported hosts:** Ubuntu 26.04 and RHEL 10 (with its minor
 releases), as `/etc/os-release`'s `ID` and `VERSION_ID` say. On any other
-host, derivatives such as Fedora or CentOS Stream included, the action's
-first step fails with `secure-host: requires Ubuntu 26.04 or RHEL 10;
-cannot establish a supported host from /etc/os-release`, before it
-changes anything. The machine must be thrown away after the job:
+host, derivatives such as Fedora or CentOS Stream included, the action
+fails with `secure-host: requires Ubuntu 26.04 or RHEL 10;
+cannot establish a supported host from /etc/os-release` once it has its
+binary, before it changes apt, loads the policy or sets anything up. The machine must be thrown away after the job:
 `sandbox setup` refuses one it has set up before. CI proves the policy
 and probes on hosted Ubuntu 26.04; on RHEL 10 the world-write policy's
 runtime is unverified.

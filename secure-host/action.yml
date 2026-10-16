@@ -103,19 +103,11 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Check supported host
-      shell: bash
-      env:
-        ACTION: ${{ github.action_path }}
-      run: node "$ACTION/platform.mjs"
-    - name: Bound apt network waits and avoid the Azure mirror
-      shell: bash
-      env:
-        ACTION: ${{ github.action_path }}
-      run: sudo node "$ACTION/apt.mjs"
     # A release's, by its attested source-matching checksums, when
     # that release was built from this commit's source; a build of that
-    # source otherwise (binary.mjs).
+    # source otherwise (binary.mjs). It changes nothing on the host but
+    # RUNNER_TEMP, unless it has to build and install a compiler; every
+    # step after it is this binary's.
     - name: Prepare GitHub CLI
       if: ${{ inputs.binary == '' }}
       shell: bash
@@ -142,6 +134,15 @@ runs:
       run: |
         [ "$BINARY" -ef /usr/local/bin/agentic-job ] || sudo install -m 0755 "$BINARY" /usr/local/bin/agentic-job
         agentic-job --version
+    # Before apt, the policy or setup change the host: ID and VERSION_ID
+    # of os-release, never ID_LIKE.
+    - name: Check supported host
+      shell: bash
+      run: agentic-job secure-host supported
+    # Root's by its path: sudo's secure_path leaves out /usr/local/bin on RHEL.
+    - name: Bound apt network waits and avoid the Azure mirror
+      shell: bash
+      run: sudo /usr/local/bin/agentic-job secure-host apt
     # An input that was left empty sets nothing, so the file stands.
     - name: Write the configuration
       shell: bash
@@ -186,9 +187,8 @@ runs:
     - name: Load the world-write policy
       shell: bash
       env:
-        ACTION: ${{ github.action_path }}
         BINARY: ${{ inputs.binary || format('{0}/secure-host/bin/agentic-job', runner.temp) }}
-      run: sudo node "$ACTION/world-write.mjs" "$(dirname "$BINARY")/world_write.bpf.o"
+      run: sudo /usr/local/bin/agentic-job secure-host world-write "$(dirname "$BINARY")/world_write.bpf.o"
     # The last thing in the job that has root, unless `lock` is off.
     - name: Secure the host
       shell: bash

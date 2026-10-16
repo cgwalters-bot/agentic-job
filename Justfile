@@ -23,11 +23,13 @@ runner-egress-fixture:
     node -e 'require("node:fs").writeFileSync(process.env.RUNNER_TEMP + "/runner-egress-fixture.txt", "Outbound observation fixture\n")'
 
 # Privileged integration proof: only on a fresh disposable supported host.
+# The checkout's binary loads the policy, as secure-host has it do.
 world-write-evidence out:
-    node secure-host/world-write-evidence.mjs "$1"
+    cargo build --locked -p agentic-job --bin agentic-job
+    node secure-host/world-write-evidence.mjs "$1" target/debug/agentic-job
 
 world-write-test:
-    node --test secure-host/world-write.test.mjs secure-host/world-write-cases.test.mjs secure-host/world-write-evidence.test.mjs
+    node --test secure-host/world-write-cases.test.mjs secure-host/world-write-evidence.test.mjs
 
 test-binary:
     node --test secure-host/binary.test.mjs
@@ -36,7 +38,7 @@ test-binary:
 setup-tests:
     cargo test --locked --lib sandbox::setup::tests
     cargo test --locked --lib sandbox::check::
-    node --test workflow/setup-timing.test.mjs secure-host/apt.test.mjs
+    node --test workflow/setup-timing.test.mjs
 
 # Refuses VERSION unless it may be released from this checkout (its tags
 # included); prints the previous version tag. See src/bin/release-check.rs.

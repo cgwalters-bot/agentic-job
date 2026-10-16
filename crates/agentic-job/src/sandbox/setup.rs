@@ -68,7 +68,7 @@ pub const WORLD_WRITE_PROBE_DIR: &str = "/etc/agentic-job/world-write-probe";
 /// Root-owned, mode 0666.
 pub const WORLD_WRITE_PROBE_FILE: &str = "/etc/agentic-job/world-write-probe/file";
 
-/// Where secure-host's loader (`secure-host/world-write.mjs`) pins the
+/// Where secure-host's loader (`secure-host world-write`) pins the
 /// world-write policy: a link for each of its programs, and its map.
 pub const WORLD_WRITE_PIN: &str = "/sys/fs/bpf/agentic-job-world-write";
 
@@ -1013,7 +1013,7 @@ fn require_world_write_policy(pin: &Path) -> Result<()> {
         .collect();
     ensure!(
         missing.is_empty(),
-        "the world-write policy is not loaded ({} has no link for {}): load it first, as secure-host does with secure-host/world-write.mjs",
+        "the world-write policy is not loaded ({} has no link for {}): load it first, as secure-host does with `agentic-job secure-host world-write`",
         pin.display(),
         missing.join(", ")
     );

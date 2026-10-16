@@ -5,7 +5,6 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compileObject } from "./binary.mjs";
-import { REFUSAL, supportedHost } from "./platform.mjs";
 
 const inputs = ["secure-host/binary.mjs", "crates/agentic-job/bpf/world_write.bpf.c",
   "crates/agentic-job/bpf/world_write_policy.h"];
@@ -16,7 +15,9 @@ const command = (program, args) => execFileSync(program, args, {
 
 // Record success only after each assertion-bearing command exits successfully.
 // A failed probe must never leave a green-looking acceptance summary.
-export function evidence(out, { run = command, hash = digest, build = compileObject,
+// BINARY is this checkout's agentic-job, which admits the host and loads
+// the policy as the secure-host action does.
+export function evidence(out, binary, { run = command, hash = digest, build = compileObject,
   osRelease = readFileSync("/etc/os-release", "utf8"),
   publish = text => appendFileSync(process.env.GITHUB_STEP_SUMMARY, text),
   clock = () => performance.now() } = {}) {
@@ -37,16 +38,14 @@ export function evidence(out, { run = command, hash = digest, build = compileObj
   };
   let passed = false;
   try {
-    stage("Host admission", () => {
-      if (!supportedHost(osRelease)) throw new Error(REFUSAL);
-    });
+    stage("Host admission", () => run(binary, ["secure-host", "supported"]));
     stage("Host and source", () => [run("git", ["rev-parse", "HEAD"]),
       run("uname", ["-a"]), osRelease,
       ...inputs.map(path => `${hash(path)}  ${path}`)].join("\n"));
     stage("Required packages", () => {
       const os = osRelease;
       if (/^ID=["']?ubuntu["']?$/m.test(os)) {
-        run("sudo", ["node", "secure-host/apt.mjs"]);
+        run("sudo", [binary, "secure-host", "apt"]);
         const packages = ["clang", "linux-tools-common", `linux-tools-${run("uname", ["-r"]).trim()}`, "util-linux"];
         run("sudo", ["apt-get", "-o", "Acquire::Retries=3", "install", "-y", "--no-install-recommends", ...packages]);
         return run("dpkg-query", ["-W", ...packages]);
@@ -68,7 +67,7 @@ export function evidence(out, { run = command, hash = digest, build = compileObj
     });
     stage("Baseline: foreign and owner writes succeed", () => run("sudo", ["node", "secure-host/world-write-host.mjs", "before"]));
     stage("Policy active: four links checked, map enabled, denial and owner control", () =>
-      run("sudo", ["node", "secure-host/world-write.mjs", `${out}/world_write.bpf.o`]));
+      run("sudo", [binary, "secure-host", "world-write", `${out}/world_write.bpf.o`]));
     stage("After loader exits: foreign write EACCES, owner write succeeds; operation matrix", () =>
       run("sudo", ["node", "secure-host/world-write-host.mjs", "after"]));
     stage("Loader version", () => run("sudo", ["bpftool", "version"]));
@@ -80,6 +79,8 @@ export function evidence(out, { run = command, hash = digest, build = compileObj
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (!process.argv[2] || !process.env.GITHUB_STEP_SUMMARY) throw new Error("requires output directory and GITHUB_STEP_SUMMARY");
-  evidence(process.argv[2]);
+  if (!process.argv[2] || !process.argv[3] || !process.env.GITHUB_STEP_SUMMARY) {
+    throw new Error("requires output directory, agentic-job binary and GITHUB_STEP_SUMMARY");
+  }
+  evidence(process.argv[2], resolve(process.argv[3]));
 }

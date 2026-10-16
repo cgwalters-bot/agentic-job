@@ -56,9 +56,11 @@ one is the default, keeping every egress test
 ([#144](https://github.com/cgwalters-forge/agentic-job/issues/144)); then the
 rest of secure-host's Node steps. Those save little time, since hosted images
 ship Node, but take Node out of root's steps. `sandbox timed` replaced
-`setup-timing.mjs --run`. `world-write.mjs` is root's bpftool loader and
-needs a privileged CI run to prove a port. `platform.mjs`, `apt.mjs` and
-`binary.mjs` run before the binary exists, so they wait until fetching it needs no Node.
+`setup-timing.mjs --run`, and `agentic-job secure-host` replaced
+`platform.mjs`, `apt.mjs` and root's bpftool loader `world-write.mjs`, run
+once the action has the binary. `binary.mjs`, which gets it, is the last: a
+shell step with `curl` and `sha256sum` has to select and verify the attested
+release (source digest, tagged release, attestation) before the binary exists.
 
 Done from the gh-aw gaps: the agent reads GitHub with a read-only token
 ([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), a label

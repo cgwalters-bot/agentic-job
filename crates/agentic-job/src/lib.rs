@@ -19,6 +19,7 @@ pub mod policy;
 pub mod redact;
 pub mod run;
 pub mod sandbox;
+pub mod secure_host;
 pub mod session;
 pub mod workflows;
 

@@ -149,7 +149,7 @@ jobs:
           failIfEmpty: false
           fail: true
       # Source-addressed release selection and fail-closed verification tests.
-      - run: node --test secure-host/binary.test.mjs secure-host/apt.test.mjs secure-host/platform.test.mjs secure-host/refresh-feed.test.mjs
+      - run: node --test secure-host/binary.test.mjs secure-host/refresh-feed.test.mjs
       # The digest of a checkout is the digest of the same commit as a
       # runner fetches it for an action, an archive without git.
       - name: The checkout and action archive have the same source digest
@@ -477,9 +477,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --locked --tests
+      - run: cargo build --locked --bins --tests
       # What the probes try must be there to be refused.
-      - run: sudo node secure-host/apt.mjs
+      - run: sudo target/debug/agentic-job secure-host apt
       - run: sudo apt-get -o Acquire::Retries=3 update -q
         timeout-minutes: 5
       - run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends at cron pkexec podman uidmap python3-venv nftables cargo socat clang
@@ -492,7 +492,7 @@ jobs:
       - name: Load the world-write policy
         run: |
           node secure-host/binary.mjs object --out "$RUNNER_TEMP/world-write"
-          sudo node secure-host/world-write.mjs "$RUNNER_TEMP/world-write/world_write.bpf.o"
+          sudo target/debug/agentic-job secure-host world-write "$RUNNER_TEMP/world-write/world_write.bpf.o"
       # For whoever has to say why a local-sockets probe failed, and what
       # the runner's user is before setup takes its root away.
       - name: What listens on this runner, and what its user is
@@ -1516,9 +1516,16 @@ jobs:
         with:
           persist-credentials: false
       - run: node --test .github/actions/confine-probe/probe.test.mjs
-      - run: sudo node secure-host/apt.mjs
-      - name: Install compiler and bpftool
-        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends clang linux-tools-common "linux-tools-$(uname -r)"
+      # Run secure-host's entry points from the checkout, not as a local
+      # action. Build both artifacts from this checkout, never a release;
+      # the build installs its compilers.
+      - run: node secure-host/binary.mjs get --build --out "$RUNNER_TEMP/secure-host/bin"
+      - name: "Install the checkout's binary"
+        run: sudo install -m 0755 "$RUNNER_TEMP/secure-host/bin/agentic-job" /usr/local/bin/agentic-job
+      - run: agentic-job secure-host supported
+      - run: sudo /usr/local/bin/agentic-job secure-host apt
+      - name: Install bpftool
+        run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends linux-tools-common "linux-tools-$(uname -r)"
         timeout-minutes: 5
       # Root's and world-writable, where setup's walk does not look (a
       # shared temporary directory): the access-time policy is all that
@@ -1527,18 +1534,12 @@ jobs:
         run: sudo install -m 0666 -o root -g root /dev/null /var/tmp/agentic-job-confine-root-file
       - name: Before the lock each route works (control)
         run: node .github/actions/confine-probe/probe.mjs control before
-      # Run secure-host's entry points from the checkout, not as a local
-      # action. Build both artifacts from this checkout, never a release.
-      - run: node secure-host/platform.mjs
-      - run: node secure-host/binary.mjs get --build --out "$RUNNER_TEMP/secure-host/bin"
-      - name: "Install the checkout's binary"
-        run: sudo install -m 0755 "$RUNNER_TEMP/secure-host/bin/agentic-job" /usr/local/bin/agentic-job
       - name: Write the confinement configuration
         run: |
           agentic-job config --host --from secure-host/hosted.toml \
             --boolean sandbox.deny-runner-metadata=true > "$RUNNER_TEMP/secure-host/config.toml"
       - name: "Load the checkout's world-write object"
-        run: sudo node secure-host/world-write.mjs "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
+        run: sudo /usr/local/bin/agentic-job secure-host world-write "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
       - name: Secure the host
         run: sudo /usr/local/bin/agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
       - run: agentic-job sandbox exec -- id -un

@@ -365,23 +365,60 @@ test('E2E callers, concurrency and apt safeguards remain wired', () => {
   const review = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   assert.match(review, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}/);
   assert.match(review, /group: review-pull-\$\{\{ github\.event\.pull_request\.number \|\| github\.event\.issue\.number \}\}/);
+  // Where a binary exists, `secure-host apt` tunes apt before it runs;
+  // where none does yet, the command bounds its own network waits.
   let operations = 0;
-  for (const file of ['ci.yml', 'build.yml']) {
+  for (const [file, tuned] of [['ci.yml', 'run: sudo target/debug/agentic-job secure-host apt\n'], ['build.yml', null]]) {
     const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows', file), 'utf8');
-    assert.match(workflow, /run: sudo node secure-host\/apt\.mjs/);
     for (const match of workflow.matchAll(/^      - run: (sudo apt-get[^\n]*)\n([^]*?)(?=^      - |\s*$)/gm)) {
       operations++;
-      assert.ok(workflow.indexOf('run: sudo node secure-host/apt.mjs') < match.index);
+      if (tuned) assert.ok(workflow.includes(tuned) && workflow.indexOf(tuned) < match.index);
+      else assert.match(match[1], /-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 /);
       assert.match(match[1], /-o Acquire::Retries=3/);
       assert.match(match[2], /^        timeout-minutes: 5$/m);
     }
   }
   assert.equal(operations, 3);
   const action = fs.readFileSync(path.join(__dirname, '../secure-host/action.yml'), 'utf8');
-  assert.ok(action.includes('run: sudo node "$ACTION/apt.mjs"'));
-  assert.ok(action.indexOf('run: sudo node "$ACTION/apt.mjs"') < action.indexOf('- name: Get the binary'));
+  const apt = action.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n');
+  assert.ok(action.indexOf('- name: Install the binary') < apt && apt < action.indexOf('- name: Write the configuration'));
   const binary = fs.readFileSync(path.join(__dirname, '../secure-host/binary.mjs'), 'utf8');
-  assert.match(binary, /run\("sudo", \["node", join\(HERE, "apt.mjs"\)\]\);\s+run\("sudo", \["apt-get"/);
+  assert.match(binary, /run\("sudo", \["apt-get", "-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=10", "-o", "Acquire::https::Timeout=10",\s+"install"/);
+});
+
+// The action's steps before setup are the binary's: Node only fetches it.
+test('the action admits the host, tunes apt and loads the policy with its binary, before setup', () => {
+  const action = fs.readFileSync(path.join(__dirname, '../secure-host/action.yml'), 'utf8');
+  const steps = action.slice(action.indexOf('  steps:\n'));
+  assert.match(steps, /^  steps:\n(?:    #[^\n]*\n)*    - name: Get the binary\n/);
+  assert.doesNotMatch(steps, /platform\.mjs|apt\.mjs|world-write\.mjs/);
+  const order = ['- name: Install the binary', 'run: agentic-job secure-host supported\n',
+    'run: sudo /usr/local/bin/agentic-job secure-host apt\n', '- name: Write the configuration',
+    '- name: Load the world-write policy', 'run: agentic-job sandbox timed setup\n'];
+  const at = order.map(text => steps.indexOf(text));
+  assert.ok(at.every((index, i) => index >= 0 && (i === 0 || at[i - 1] < index)), JSON.stringify(at));
+  // Always, with no input to switch it off; root's by path, as RHEL's sudo needs.
+  const step = action.split('    - name: Load the world-write policy\n')[1].split('\n    - ')[0];
+  assert.doesNotMatch(step, /\bif:/);
+  assert.match(step, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$\(dirname "\$BINARY"\)\/world_write\.bpf\.o"\n/);
+  assert.doesNotMatch(action, /world-write-bpf/);
+});
+
+test('world-write enforcement feeds the ruleset-required CI aggregate', () => {
+  const enforcement = fs.readFileSync(path.join(__dirname, '../.github/workflows/world-write.yml'), 'utf8');
+  assert.match(enforcement, /on:\n  workflow_call:/);
+  assert.match(ci, /merge_group:/);
+  const job = ci.split('  world-write:\n')[1].split(/\n  [^ \n]/)[0];
+  assert.match(job, /runs-on: ubuntu-26.04\n    timeout-minutes: 10/);
+  assert.match(job, /permissions:\n      contents: read/);
+  assert.equal(job.split('    steps:\n')[1].trimEnd(), enforcement.split('    steps:\n')[1].trimEnd());
+  assert.match(ci, /required-checks:[\s\S]*?needs: \[[^\]]*world-write[,\]]/);
+  assert.match(ci, /ci:\n    if: \$\{\{ always\(\) \}\}\n    needs: required-checks/);
+});
+
+test('the agent job\'s prepare installs the object beside the binary secure-host is given', () => {
+  const prepare = fs.readFileSync(path.join(__dirname, '../prepare/action.yml'), 'utf8');
+  assert.match(prepare, /sudo install -m 0644 "\$JOB_DIR\/world_write.bpf.o" \/usr\/local\/bin\/world_write.bpf.o/);
 });
 
 test('confined proves the checkout from run steps and a local action main and post step', () => {
@@ -393,7 +430,9 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.equal(job.split('zizmor: ignore').length, 2);
   assert.ok(job.includes(`      - name: The JavaScript action main and post steps are confined\n${local}`));
   assert.match(job, /binary\.mjs get --build --out "\$RUNNER_TEMP\/secure-host\/bin"/);
-  assert.match(job, /world-write\.mjs "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o"/);
+  assert.match(job, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o"\n/);
+  assert.ok(job.indexOf('run: agentic-job secure-host supported\n') < job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n'));
+  assert.ok(job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n') < job.indexOf('- name: Install bpftool'));
   assert.match(job, /--boolean sandbox\.deny-runner-metadata=true/);
   assert.match(job, /agentic-job sandbox check --record/);
   assert.match(job, /probe\.mjs confined run-step/);
