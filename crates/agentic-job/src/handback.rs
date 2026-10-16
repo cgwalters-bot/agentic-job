@@ -338,7 +338,9 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
             }
             if outputs.is_dir() {
                 let collected = scratch.path().join("collected.json");
-                std::fs::write(&collected, as_collected(&outputs)?)?;
+                let text = as_collected(&outputs)?;
+                std::fs::write(&collected, &text)?;
+                report.notes.extend(redacted_links(&text, policy));
                 let verdict = check::check_outputs(&outputs, &collected, policy)?;
                 report
                     .problems
@@ -368,6 +370,35 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
         });
     }
     Ok(report)
+}
+
+/// A note for each request in COLLECTED (as [`as_collected`] writes it)
+/// with links gh-aw's collector will redact under POLICY: the reader sees
+/// the host and not the link, so the agent can say what it cites another way.
+fn redacted_links(collected: &str, policy: &Policy) -> Vec<String> {
+    let Ok(Value::Object(result)) = serde_json::from_str::<Value>(collected) else {
+        return Vec::new();
+    };
+    let items = result.get("items").and_then(Value::as_array);
+    items
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(number, item)| {
+            let hosts = check::links::redacted_hosts(item, policy);
+            (!hosts.is_empty()).then(|| {
+                format!(
+                    "{AGENT_OUTPUTS}, request {} ({}): its links to {} are posted as \
+                     `text (host/redacted)`, without the link, since the caller's bounds do not \
+                     keep them (`allowed_domains`): name each such source in words a reader can \
+                     find it by",
+                    number + 1,
+                    item.get("type").and_then(Value::as_str).unwrap_or("?"),
+                    hosts.join(", ")
+                )
+            })
+        })
+        .collect()
 }
 
 /// The collector's result for the `outputs.jsonl` in OUTPUTS, as `check`
@@ -781,6 +812,7 @@ mod tests {
             safe_outputs: serde_json::from_value(outputs).unwrap(),
             commit_author: None,
             private: false,
+            allowed_domains: Vec::new(),
         };
         let run = RunFile {
             policy,
@@ -982,6 +1014,19 @@ mod tests {
                 ),
                 note: true,
                 ..case("an open checkpoint", "echo two >> a.txt", pull("Why."))
+            },
+            case(
+                "a link gh-aw keeps",
+                "echo two >> a.txt",
+                pull("Per [the issue](https://github.com/o/r/issues/1)."),
+            ),
+            Case {
+                note: true,
+                ..case(
+                    "a link gh-aw redacts",
+                    "echo two >> a.txt",
+                    pull("Per [the spec](https://src.fedoraproject.org/rpms/x)."),
+                )
             },
         ];
         for case in cases {

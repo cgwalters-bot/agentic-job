@@ -128,6 +128,7 @@ impl Job {
             safe_outputs: SafeOutputs::default(),
             commit_author: None,
             private: false,
+            allowed_domains: Vec::new(),
         };
         serde_json::to_string(&policy).unwrap()
     }

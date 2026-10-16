@@ -726,6 +726,7 @@ jobs:
           GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
           # The handlers sanitize text again: the collector's policy, in check.yml.
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
+          GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
         with:
           # Use the checkout's credential selection for API writes too.
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
@@ -945,6 +946,7 @@ jobs:
         env:
           # As the handlers sanitize text: the collector's policy, in check.yml.
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
+          GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}

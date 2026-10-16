@@ -401,6 +401,7 @@ mod tests {
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
             commit_author: None,
             private: false,
+            allowed_domains: Vec::new(),
         }
     }
 
@@ -664,6 +665,7 @@ mod brief_tests {
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
             commit_author: None,
             private: false,
+            allowed_domains: Vec::new(),
         }
     }
 

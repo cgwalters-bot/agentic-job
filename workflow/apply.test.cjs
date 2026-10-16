@@ -1742,6 +1742,21 @@ function scriptEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: (.*)$`, 'm'))?.[1];
 }
 
+// gh-aw replaces its own list with GH_AW_ALLOWED_DOMAINS: the collector,
+// the handlers and the reason all keep the links the policy call wrote down.
+test('every sanitizer keeps the links the policy keeps', () => {
+  const domains = '${{ fromJSON(inputs.policy).allowed-domains }}';
+  assert.equal(scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_ALLOWED_DOMAINS'), domains);
+  assert.equal(scriptEnv('Say where what the run made is', 'GH_AW_ALLOWED_DOMAINS'), domains);
+  const check = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  const collector = check.split("- name: Ingest the outputs with gh-aw's collector\n")[1].split('        with:\n')[0];
+  assert.match(collector, /\n {10}GH_AW_ALLOWED_DOMAINS: \$\{\{ fromJSON\(inputs\.policy\)\.allowed-domains \}\}\n/);
+  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+  assert.match(policy, /\n        value: \$\{\{ jobs\.policy\.outputs\.allowed-domains \}\}\n/);
+  assert.match(policy, /\n      allowed-domains: \$\{\{ steps\.request\.outputs\.allowed-domains \}\}\n/);
+  assert.match(policy, /"allowed-domains=\$\(jq -r '\.allowed_domains \/\/ \[\] \| join\(","\)' "\$JOB_DIR\/policy\.json"\)"/);
+});
+
 test('the reason of a run with no result is sanitized as the handlers sanitize a comment', () => {
   assert.equal(scriptEnv('Say where what the run made is', 'GH_AW_SAFE_OUTPUTS_URLS'), 'allowed-or-code-region');
   assert.equal(scriptEnv('Say where what the run made is', 'GH_AW_SAFE_OUTPUTS_URLS'),

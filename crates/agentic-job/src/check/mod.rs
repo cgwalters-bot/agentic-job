@@ -10,9 +10,12 @@
 //! at all: the hand-back holds only the files it may, within their sizes
 //! and free of secret-shaped strings; the requests fit the policy; a pull
 //! request comes with exactly its patch, against the policy's repository
-//! and base; and the patch passes the rules of [`patch`].
+//! and base; and the patch passes the rules of [`patch`]. One thing of
+//! the collector's is mended: a Markdown link it redacted is made plain
+//! text again ([`links`]).
 
 pub mod checkpoint;
+pub mod links;
 mod patch;
 pub mod replacement;
 
@@ -805,6 +808,11 @@ fn check_outputs_to(
         )
     })?;
     drop_collectors_incomplete(&mut collected.items);
+    // Mending joins nothing to a link's text (`links::repair`), so it
+    // makes no secret-shaped string, URL or mention the collector missed.
+    for item in &mut collected.items {
+        item.values_mut().for_each(links::repair_value);
+    }
     let items = if contents.contains_key(OUTPUTS_FILE) {
         errors.extend(collected.errors);
         collected.items
@@ -1251,6 +1259,27 @@ mod tests {
         assert_eq!(verdict.items.len(), 1);
         assert_eq!(verdict.items[0]["body"], body);
         assert!(verdict.patch.is_some());
+    }
+
+    /// What apply posts of a link the collector redacted is valid Markdown
+    /// naming the host.
+    #[test]
+    fn redacted_links_are_handed_to_apply_as_text() {
+        let mut handback = Handback::pull_request();
+        handback.items[0]["body"] = json!("Per [the spec]((src.fedoraproject.org/redacted).");
+        let verdict = handback.check();
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(
+            verdict.items[0]["body"],
+            "Per the spec (src.fedoraproject.org/redacted)."
+        );
+
+        // Text before a link is not joined to its own.
+        let token = format!("gh[p_{}]((e.example/redacted)", "a1B2".repeat(9));
+        handback.items[0]["body"] = json!(token);
+        let verdict = handback.check();
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.items[0]["body"], token);
     }
 
     #[test]

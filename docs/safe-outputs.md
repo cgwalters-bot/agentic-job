@@ -65,6 +65,22 @@ change's diff and to `out/`, and lists each match by file, line and
 pattern, never by the string. The final refusal names the file and line
 too.
 
+Which hosts' links are kept is gh-aw's
+[`safe-outputs.allowed-domains`](https://github.github.com/gh-aw/reference/safe-outputs/),
+given to the collector and the handlers as `GH_AW_ALLOWED_DOMAINS`. By
+default that is gh-aw's own GitHub domains. A caller's
+[bounds](#the-bounds-and-the-policy) can add others, subdomains included,
+with a top-level `allowed_domains` list of at most 64 plain domain names;
+with organization bounds a domain must be in both files. The shipped
+[dispatch bounds](../.github/agentic-job/dispatch.toml) keep the
+distribution and upstream hosts a research report cites. What a link to
+another host would show a reader, a lookalike download or a tracking
+image, is what the filter stops. gh-aw's redaction takes a Markdown link's
+closing parenthesis with it, posting `[text](https://host/path)` as
+`[text]((host/redacted)`, so check makes that `text (host/redacted)`
+before apply. `agentic-job handback check` notes, for each request, the
+hosts whose links would be redacted, before the session ends.
+
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the
 rules of each type. gh-aw's compiler writes those into the workflows it
@@ -580,7 +596,8 @@ their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
 A top-level `private = true` admits a target that is not public, under
 the conditions of [private repositories](private-repositories.md); it is
-off by default.
+off by default. A top-level `allowed_domains` keeps links to those
+domains in what is posted ([above](#what-is-gh-aws-and-why)).
 
 Some things no bounds file can change. A run hands back one patch, so at
 most one pull request. A pull request is a draft unless it is complete

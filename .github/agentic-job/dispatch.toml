@@ -5,6 +5,38 @@ bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
 max_patch_files = 50
+# Links kept in what a run posts, subdomains included, besides gh-aw's
+# GitHub domains: a research report cites distribution and upstream
+# sources. A link to any other host is posted as `text (host/redacted)`.
+allowed_domains = [
+  "almalinux.org",
+  "alpinelinux.org",
+  "archlinux.org",
+  "centos.org",
+  "crates.io",
+  "debian.org",
+  "docs.rs",
+  "fedoraproject.org",
+  "freedesktop.org",
+  "gentoo.org",
+  "gitlab.com",
+  "gnome.org",
+  "gnu.org",
+  "kernel.org",
+  "launchpad.net",
+  "lwn.net",
+  "nixos.org",
+  "opencontainers.org",
+  "opensuse.org",
+  "podman.io",
+  "python.org",
+  "redhat.com",
+  "rockylinux.org",
+  "rust-lang.org",
+  "sourceware.org",
+  "systemd.io",
+  "ubuntu.com",
+]
 
 [outputs]
 create_pull_request = { max = 1 }

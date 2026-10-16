@@ -202,6 +202,39 @@ pub const DEFAULT_PROTECTED_FILES: &[&str] = &[
     "AGENTS.md",
 ];
 
+/// The domains whose links gh-aw's sanitizer keeps when it is given none
+/// (`buildAllowedDomains` in `sanitize_content_core.cjs` at the pinned
+/// commit). `GH_AW_ALLOWED_DOMAINS` replaces this list, not extends it, so
+/// a policy that names domains of its own names these first.
+pub const GH_AW_LINK_DOMAINS: &[&str] = &[
+    "github.com",
+    "github.io",
+    "githubusercontent.com",
+    "githubassets.com",
+    "github.dev",
+    "codespaces.new",
+];
+
+/// The most domains a bounds file may keep links to: a list a reader can
+/// review, not a way to turn the filter off.
+pub const MAX_ALLOWED_DOMAINS: usize = 64;
+
+/// A domain bounds may keep links to: lowercase DNS labels, at least two,
+/// so no top-level domain, no wildcard (gh-aw keeps subdomains anyway) and
+/// nothing that would split `GH_AW_ALLOWED_DOMAINS`, which is comma-separated.
+static LINK_DOMAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+        .expect("a valid pattern")
+});
+
+fn check_link_domain(domain: &str) -> Result<()> {
+    ensure!(
+        domain.len() <= 253 && LINK_DOMAIN_RE.is_match(domain),
+        "allowed_domains: {domain:?} is not a lowercase domain name of two labels or more"
+    );
+    Ok(())
+}
+
 /// The output types that name people: `allowed` lists the logins they may
 /// name, exactly as written, since the handlers compare them so.
 pub const PERSON_OUTPUTS: &[&str] = &["add_reviewer", "assign_to_user"];
@@ -367,6 +400,14 @@ pub struct Bounds {
     /// (docs/private-repositories.md).
     #[serde(default)]
     pub private: bool,
+    /// Domains whose links gh-aw's sanitizer keeps in what is posted
+    /// (its `safe-outputs.allowed-domains`), subdomains included, beside
+    /// its own [`GH_AW_LINK_DOMAINS`]. A link to any other host is redacted
+    /// to `(host/redacted)`: that is what stops an agent's text putting a
+    /// link to a host nobody chose (a lookalike download, a tracking image)
+    /// in front of a reader. Empty by default.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
 }
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
@@ -640,6 +681,11 @@ pub struct Policy {
     /// conditions of docs/private-repositories.md before it clones.
     #[serde(default, skip_serializing_if = "is_false")]
     pub private: bool,
+    /// What check and apply give gh-aw as `GH_AW_ALLOWED_DOMAINS`:
+    /// [`GH_AW_LINK_DOMAINS`] and the bounds' `allowed_domains`, or empty,
+    /// leaving gh-aw its own, where the bounds name none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_domains: Vec<String>,
 }
 
 /// Reference context admitted before the agent starts. The workflow resolves
@@ -852,6 +898,23 @@ impl SafeOutputs {
 }
 
 impl Policy {
+    /// Whether gh-aw's sanitizer keeps a link to HOST, as its
+    /// `sanitizeUrlDomains` decides: the domain itself or a subdomain.
+    pub fn keeps_link_to(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        let kept = |domain: &str| {
+            host == domain
+                || host
+                    .strip_suffix(domain)
+                    .is_some_and(|sub| sub.ends_with('.'))
+        };
+        if self.allowed_domains.is_empty() {
+            GH_AW_LINK_DOMAINS.iter().any(|domain| kept(domain))
+        } else {
+            self.allowed_domains.iter().any(|domain| kept(domain))
+        }
+    }
+
     /// Reads the `policy.json` that `policy` printed.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
@@ -871,6 +934,17 @@ impl Policy {
         check_context(&self.context)?;
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
+        }
+        ensure!(
+            self.allowed_domains.len() <= GH_AW_LINK_DOMAINS.len() + MAX_ALLOWED_DOMAINS
+                && (self.allowed_domains.is_empty()
+                    || GH_AW_LINK_DOMAINS
+                        .iter()
+                        .all(|own| self.allowed_domains.iter().any(|domain| domain == own))),
+            "allowed_domains is not gh-aw's own and at most {MAX_ALLOWED_DOMAINS} more"
+        );
+        for domain in &self.allowed_domains {
+            check_link_domain(domain)?;
         }
         ensure!(
             self.context.is_empty() || self.repo.rsplit('/').next() != Some("context"),
@@ -1021,6 +1095,13 @@ impl Bounds {
         ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
+        }
+        ensure!(
+            self.allowed_domains.len() <= MAX_ALLOWED_DOMAINS,
+            "allowed_domains names more than {MAX_ALLOWED_DOMAINS} domains"
+        );
+        for domain in &self.allowed_domains {
+            check_link_domain(domain)?;
         }
         for repo in &self.unprotected_files.repos {
             ensure!(
@@ -1429,6 +1510,18 @@ impl Bounds {
             safe_outputs,
             commit_author: self.commit_author.clone(),
             private,
+            allowed_domains: if self.allowed_domains.is_empty() {
+                Vec::new()
+            } else {
+                let mut domains: Vec<String> =
+                    GH_AW_LINK_DOMAINS.iter().map(|d| (*d).to_owned()).collect();
+                for domain in &self.allowed_domains {
+                    if !domains.contains(domain) {
+                        domains.push(domain.clone());
+                    }
+                }
+                domains
+            },
         })
     }
 }
@@ -1538,6 +1631,15 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
         }
         (own, other) => own.or(other),
     };
+    // A link is kept only where both files keep it; one that names no
+    // domains leaves gh-aw its own.
+    if other.allowed_domains.is_empty() {
+        policy.allowed_domains.clear();
+    } else {
+        policy
+            .allowed_domains
+            .retain(|domain| other.allowed_domains.contains(domain));
+    }
     policy.max_outputs = policy.max_outputs.min(other.max_outputs);
     policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
     policy.safe_outputs.others.retain(|name, limit| {
@@ -2459,6 +2561,102 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         assert!(intersect(pinned(Some(bot)), pinned(Some("A Bot <bot@example.org>"))).is_err());
         let mut bad = policy;
         bad.commit_author = Some("Evil".into());
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn allowed_domains_are_plain_bounded_and_kept_where_both_files_keep_them() {
+        for (domain, ok) in [
+            ("fedoraproject.org", true),
+            ("src.fedoraproject.org", true),
+            ("x-1.example", true),
+            ("org", false),
+            ("*.example.org", false),
+            ("Example.org", false),
+            ("a.example,b.example", false),
+            ("-a.example", false),
+            ("a-.example", false),
+            ("a..example", false),
+            ("example.org.", false),
+            ("https://example.org", false),
+            ("", false),
+        ] {
+            let text = format!(
+                "allowed_domains = {}\n{BOUNDS}",
+                toml::Value::from(vec![domain])
+            );
+            let bounds = toml::from_str::<Bounds>(&text).unwrap();
+            assert_eq!(bounds.validate().is_ok(), ok, "{domain:?}");
+        }
+        let many: Vec<String> = (0..=MAX_ALLOWED_DOMAINS)
+            .map(|n| format!("d{n}.example"))
+            .collect();
+        let mut over = bounds();
+        over.allowed_domains = many[1..].to_vec();
+        assert!(over.validate().is_ok());
+        over.allowed_domains = many;
+        assert!(over.validate().is_err());
+
+        let keeping = |domains: &[&str]| {
+            let mut bounds = bounds();
+            bounds.allowed_domains = domains.iter().map(|d| (*d).to_owned()).collect();
+            let policy = bounds.compile(&request()).unwrap();
+            policy.validate().unwrap();
+            policy
+        };
+        // None named, policy.json is as it was and gh-aw keeps its own.
+        let none = keeping(&[]);
+        assert!(
+            !serde_json::to_string(&none)
+                .unwrap()
+                .contains("allowed_domains")
+        );
+        assert!(none.keeps_link_to("raw.githubusercontent.com"));
+        assert!(!none.keeps_link_to("src.fedoraproject.org"));
+
+        let some = keeping(&["fedoraproject.org", "github.com"]);
+        assert_eq!(
+            some.allowed_domains,
+            GH_AW_LINK_DOMAINS
+                .iter()
+                .chain(&["fedoraproject.org"])
+                .map(|d| (*d).to_owned())
+                .collect::<Vec<_>>()
+        );
+        let loaded: Policy = serde_json::from_value(serde_json::to_value(&some).unwrap()).unwrap();
+        assert_eq!(loaded, some);
+        for (host, kept) in [
+            ("src.fedoraproject.org", true),
+            ("SRC.FedoraProject.org", true),
+            ("fedoraproject.org", true),
+            ("github.com", true),
+            ("notfedoraproject.org", false),
+            ("fedoraproject.org.example", false),
+            ("bugzilla.redhat.com", false),
+        ] {
+            assert_eq!(some.keeps_link_to(host), kept, "{host}");
+        }
+
+        let both = intersect(
+            keeping(&["fedoraproject.org", "redhat.com"]),
+            keeping(&["redhat.com", "debian.org"]),
+        )
+        .unwrap();
+        assert!(both.keeps_link_to("bugzilla.redhat.com"));
+        assert!(!both.keeps_link_to("src.fedoraproject.org"));
+        assert!(!both.keeps_link_to("deb.debian.org"));
+        for (left, right) in [(&["redhat.com"][..], &[][..]), (&[], &["redhat.com"])] {
+            let both = intersect(keeping(left), keeping(right)).unwrap();
+            assert!(both.allowed_domains.is_empty());
+        }
+
+        // A policy that would narrow gh-aw's own list, or carry a domain
+        // that would split the list, is none `policy` wrote.
+        let mut bad = some.clone();
+        bad.allowed_domains.retain(|d| d != "github.com");
+        assert!(bad.validate().is_err());
+        let mut bad = some;
+        bad.allowed_domains.push("a.example,evil.example".into());
         assert!(bad.validate().is_err());
     }
 

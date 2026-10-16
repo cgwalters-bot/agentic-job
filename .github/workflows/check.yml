@@ -163,6 +163,9 @@ jobs:
           # see docs/safe-outputs.md for why that is acceptable. Secret-shaped
           # strings are refused by check either way.
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
+          # The hosts whose links are kept: the caller's bounds'
+          # `allowed_domains` with gh-aw's own, or gh-aw's own when empty.
+          GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
         with:
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;

@@ -316,6 +316,11 @@ on:
       issue:
         description: The `issue` input
         value: ${{ jobs.policy.outputs.issue }}
+      allowed-domains:
+        description: >-
+          The domains, comma-separated, whose links gh-aw keeps in what is posted: the policy's
+          `allowed_domains`, or empty for gh-aw's own
+        value: ${{ jobs.policy.outputs.allowed-domains }}
       review-head:
         description: The exact review head resolved by the read-only policy job
         value: ${{ jobs.policy.outputs.review-head }}
@@ -422,6 +427,7 @@ jobs:
       base: ${{ steps.request.outputs.base }}
       comment-target: ${{ steps.request.outputs.comment-target }}
       issue: ${{ steps.request.outputs.issue }}
+      allowed-domains: ${{ steps.request.outputs.allowed-domains }}
       push-item: ${{ inputs.push-item }}
       review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
       source-repository: ${{ job.workflow_repository }}
@@ -734,6 +740,8 @@ jobs:
           fi
           jq . "$JOB_DIR/policy.json"
           printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
+          # The binary wrote and checked these: domain names, no comma.
+          echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" | tee -a "$GITHUB_OUTPUT"
       - id: binary
         if: ${{ steps.event.outputs.admitted != 'false' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -565,6 +565,7 @@ mod tests {
             safe_outputs: SafeOutputs::default(),
             commit_author: None,
             private: false,
+            allowed_domains: Vec::new(),
         }
     }
 
