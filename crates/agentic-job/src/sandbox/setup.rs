@@ -287,6 +287,7 @@ struct Preflight {
     /// The configuration as written, which setup installs.
     text: String,
     config: Config,
+    install_vibe: bool,
     direct: Vec<Direct>,
     /// A session run's: its bridge is served on the tailnet.
     session: Option<Listen>,
@@ -301,6 +302,7 @@ fn setup(args: &Args) -> Result<Exit> {
     let Preflight {
         text,
         config,
+        install_vibe: needs_vibe,
         direct,
         session,
         runner,
@@ -311,7 +313,11 @@ fn setup(args: &Args) -> Result<Exit> {
             .with_context(|| format!("reading {}", args.config.display()))?;
         let config =
             Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
-        let config::checked::Host { direct, session } = config.check_host()?;
+        let config::checked::Host {
+            direct,
+            session,
+            install_vibe,
+        } = config.check_host()?;
         ensure!(host::is_root(), "`sandbox setup` must run as root");
         ensure!(
             session.is_none() || host::has_program("tailscale"),
@@ -352,6 +358,7 @@ fn setup(args: &Args) -> Result<Exit> {
         Ok(Preflight {
             text,
             config,
+            install_vibe,
             direct,
             session,
             runner,
@@ -405,7 +412,7 @@ fn setup(args: &Args) -> Result<Exit> {
     timed_setup("packages", || install_packages(&config.setup.packages))?;
     timed_setup("privileged-binary-allowlist", privileged_binaries::check)?;
     timed_setup("npm", || install_npm(&config.setup.npm))?;
-    if config.agent.name == "vibe" {
+    if needs_vibe {
         timed_setup("vibe", install_vibe)?;
     }
     // After the packages: one of them may be what a rule is for (polkit,

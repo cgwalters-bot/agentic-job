@@ -305,6 +305,23 @@ name = "vibe"
 model = "zai-glm-5-3"
 ```
 
+`sandbox setup` installs the same pinned Vibe 2.26.1 runtime whether
+Vibe is the main agent, the child, or both. Other child names are refused
+by `config check` and setup: only Vibe has a supported child installer.
+
+The child uses `[inference] url` plus `/mistral/v1`, not the main
+agent's `openai-url` or `anthropic-url`. The
+[broker's run-token contract](https://github.com/cgwalters-bot/praxis-credential-broker/blob/main/INTERNALS.md#credential-modes)
+admits an active run token on every injected route, including Mistral;
+registration is not scoped to the main agent's provider. No child pool
+list or second registration is needed by this protocol (this repository
+has no pool configuration). The broker deployment must enable its Mistral
+route and supply its Mistral credential. This confirms the documented
+protocol, not a live deployment test. The repository-owned configuration
+must explicitly set `[inference] url`, `register` (and `audience` for
+`github-oidc`), allow that address in `egress.direct` when required, and
+set `[limits] timeout-minutes` and `max-requests`.
+
 `run` then writes the child a Vibe configuration of its own,
 `~/.config/agentic-job/child-vibe/config.toml`, as it would write the
 main agent's for that model: the same proxy route and run token, so the

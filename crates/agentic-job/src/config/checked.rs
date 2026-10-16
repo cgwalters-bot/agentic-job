@@ -27,6 +27,8 @@ use crate::session::bridge::Listen;
 /// What `sandbox setup` takes from a configuration it may act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
+    /// Install the pinned Vibe runtime once, for either or both agents.
+    pub install_vibe: bool,
     /// Where the sandbox user connects without the egress proxy.
     pub direct: Vec<Direct>,
     /// `None` for a task run, which no client attaches to; otherwise
@@ -117,11 +119,6 @@ impl Config {
             );
             return Ok(None);
         }
-        ensure!(
-            child.name == Kind::Vibe.as_str(),
-            "child-agent.name: {:?} cannot be a child agent, only \"vibe\"",
-            child.name
-        );
         let model =
             model.context("child-agent.model is not set: vibe needs a Mistral model name")?;
         let endpoint = endpoint.context(
@@ -141,6 +138,13 @@ impl Config {
     pub fn check_host(&self) -> Result<Host> {
         self.sandbox.validate()?;
         self.setup.validate()?;
+        // Keep setup's closed installer set and run's child set together:
+        // accepting a child whose runtime is absent fails only after setup.
+        ensure!(
+            self.child_agent.name.is_empty() || self.child_agent.name == Kind::Vibe.as_str(),
+            "child-agent.name: {:?} cannot be a child agent, only \"vibe\" has a pinned installer",
+            self.child_agent.name
+        );
         // Setup would serve the bridge's port on the tailnet, with the
         // operator's login on what it passes on, for any later step that
         // listens there: only a run's bridge checks it.
@@ -149,6 +153,8 @@ impl Config {
             "session.listen needs agent.name: only `run` holds the port setup serves"
         );
         Ok(Host {
+            install_vibe: self.agent.name == Kind::Vibe.as_str()
+                || self.child_agent.name == Kind::Vibe.as_str(),
             direct: network::direct(&self.egress)?,
             session: Listen::from_config(&self.session)?,
         })
@@ -213,6 +219,42 @@ mod tests {
 
     fn checked(text: &str) -> Result<Checked> {
         Config::parse(text)?.check()
+    }
+
+    #[test]
+    fn setup_installs_vibe_for_either_agent() {
+        for (main, child, install) in [
+            ("fake", "", false),
+            ("fake", CHILD, true),
+            ("claude", CHILD, true),
+            ("opencode", CHILD, true),
+            ("vibe", "", true),
+            ("vibe", CHILD, true),
+        ] {
+            let config = Config::parse(&format!("[agent]\nname = {main:?}\n{child}")).unwrap();
+            assert_eq!(
+                config.check_host().unwrap().install_vibe,
+                install,
+                "{main}/{child}"
+            );
+        }
+        let run = checked(&format!("{FAKE}{PROXY}{OIDC}{REQUESTS}{DIRECT}{CHILD}")).unwrap();
+        assert!(run.host.install_vibe);
+        assert_eq!(run.child.as_deref(), Some("glm"));
+        for child in ["claude", "opencode", "fake", "unknown"] {
+            let config = Config::parse(&format!(
+                "{FAKE}[child-agent]\nname = {child:?}\nmodel = \"glm\"\n"
+            ))
+            .unwrap();
+            assert!(
+                config
+                    .check_host()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("pinned installer")
+            );
+            assert!(config.check().is_err());
+        }
     }
 
     #[test]
@@ -483,6 +525,7 @@ model = \"m\"
         assert_eq!(
             config.check_host().unwrap(),
             Host {
+                install_vibe: false,
                 direct: vec![],
                 session: None
             }
