@@ -2,7 +2,8 @@
 //!
 //! gh-aw's collector, as check.yml runs it (`allowed-or-code-region`),
 //! redacts a URL in prose to a host the policy does not keep
-//! ([`Policy::keeps_link_to`]) into `(host/redacted)`. Its pattern takes a
+//! ([`Policy::keeps_link_to`]: every public host, as `policy` writes it)
+//! or of a scheme other than https into `(host/redacted)`. Its pattern takes a
 //! Markdown link's closing parenthesis as part of the URL's path, so
 //! `[text](https://host/path)` is posted as `[text]((host/redacted)`: no
 //! link, and its brackets shown (#908). [`repair`] makes that
@@ -275,6 +276,8 @@ mod tests {
     #[test]
     fn hosts_the_collector_redacts() {
         let mut policy = crate::policy::tests::policy();
+        // gh-aw's own list, as in a policy written by hand.
+        policy.allowed_domains.clear();
         let body = |text: &str| json!({"type": "add_comment", "body": text});
         let text = "[F](https://src.fedoraproject.org/x) [G](https://github.com/a) \
                     https://raw.githubusercontent.com/x http://example.org/x file:///etc \
@@ -291,13 +294,11 @@ mod tests {
                 "bugzilla.redhat.com"
             ]
         );
-        policy.allowed_domains = crate::policy::GH_AW_LINK_DOMAINS
-            .iter()
-            .chain(&["fedoraproject.org", "redhat.com"])
-            .map(|d| (*d).to_owned())
-            .collect();
+        // As `policy` writes it: an https link to any public host is kept.
+        policy.allowed_domains = crate::policy::link_domains().to_vec();
+        let text = format!("{text} [any](https://arbitrary-host.example.net/report#src)");
         assert_eq!(
-            redacted_hosts(&body(text), &policy),
+            redacted_hosts(&body(&text), &policy),
             ["example.org", "file://", "x"]
         );
         assert!(redacted_hosts(&json!({"title": "no links"}), &policy).is_empty());

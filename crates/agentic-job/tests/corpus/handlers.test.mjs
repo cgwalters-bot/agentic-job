@@ -429,7 +429,7 @@ function urlPolicy(file, name) {
   return section.match(/^ {10}GH_AW_SAFE_OUTPUTS_URLS: (\S+)$/m)?.[1];
 }
 
-test('build output in code survives gh-aw\'s URL filtering, a secret in it does not', () => {
+test('links and build output survive gh-aw\'s URL filtering, a private key does not', () => {
   const policies = [
     urlPolicy('check.yml', 'Ingest the outputs with gh-aw\'s collector'),
     urlPolicy('apply.yml', 'Apply the outputs with gh-aw\'s handlers'),
@@ -440,14 +440,18 @@ test('build output in code survives gh-aw\'s URL filtering, a secret in it does 
   const cargo = '{"packages":[{"name":"agentic-job","version":"0.0.3","id":"path+file:///home/u/agentic-job#0.0.3","license":"MIT OR Apache-2.0"}]}';
   // Put together here, so that no file holds a secret-shaped string.
   const token = ['gh', 's_', 'a1B2'.repeat(10)].join('');
+  const key = ['-----BEGIN ', 'PRIVATE KEY-----'].join('');
+  const link = '[the report](https://arbitrary-host.example.net/a/b?c=d#e)';
   // [name, body, accepted, what the comment shows, what it must not]
   for (const [name, body, ok, shown, hidden] of [
     ['cargo metadata in a code block', `\`\`\`text\n${cargo}\n\`\`\``, true, cargo, '(redacted)'],
     ['a package id in inline code', 'id `path+file:///home/u/x#0.1.0` ok', true, 'path+file:///home/u/x#0.1.0', '(redacted)'],
     ['cargo metadata in prose', cargo, true, '"id":"(redacted) OR Apache-2.0"', 'path+file'],
     ['a link in prose', 'see ftp://evil.example/x', true, '(evil.example/redacted)', 'ftp://'],
-    ['a job token in a code block', `\`\`\`text\n${cargo} ${token}\n\`\`\``, false],
-    ['a job token in a URL in code', `\`git://x/${token}\``, false],
+    ['an https link to any public host in prose', `See ${link}.`, true, link, 'redacted'],
+    // Shaped like a token, as a fixture is: a warning, not a refusal.
+    ['a token-shaped string in a code block', `\`\`\`text\n${cargo} ${token}\n\`\`\``, true, token, '(redacted)'],
+    ['a private key in a code block', `\`\`\`text\n${key}\n\`\`\``, false],
   ]) {
     const work = mkdtempSync(join(homedir(), 'url-test-'));
     try {
@@ -461,8 +465,11 @@ test('build output in code survives gh-aw\'s URL filtering, a secret in it does 
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type: 'add_comment', item_number: 7, body }) + '\n');
+      // As policy.yml passes it to check.yml and apply.yml.
+      const domains = JSON.parse(policyResult.stdout).allowed_domains.join(',');
       const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')],
+      { encoding: 'utf8', env: { ...process.env, GH_AW_ALLOWED_DOMAINS: domains } });
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -470,20 +477,23 @@ test('build output in code survives gh-aw\'s URL filtering, a secret in it does 
       assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
       assert.equal(checked.status, ok ? 0 : 1, name);
       if (!ok) {
-        assert.match(verdict.errors.join('\n'), /secret-shaped/, name);
+        assert.match(verdict.errors.join('\n'), /private key/, name);
         continue;
       }
       // The handler sanitizes the body again before posting it, with apply's policy.
       globalThis.core = { info() {}, warning() {}, debug() {}, error() {} };
       const { sanitizeContent } = require(join(js, 'sanitize_content.cjs'));
-      const previous = process.env.GH_AW_SAFE_OUTPUTS_URLS;
+      const previous = [process.env.GH_AW_SAFE_OUTPUTS_URLS, process.env.GH_AW_ALLOWED_DOMAINS];
       process.env.GH_AW_SAFE_OUTPUTS_URLS = policies[1];
+      process.env.GH_AW_ALLOWED_DOMAINS = domains;
       let posted;
       try {
         posted = sanitizeContent(verdict.items[0].body, {});
       } finally {
-        if (previous === undefined) delete process.env.GH_AW_SAFE_OUTPUTS_URLS;
-        else process.env.GH_AW_SAFE_OUTPUTS_URLS = previous;
+        for (const [env, value] of [['GH_AW_SAFE_OUTPUTS_URLS', previous[0]], ['GH_AW_ALLOWED_DOMAINS', previous[1]]]) {
+          if (value === undefined) delete process.env[env];
+          else process.env[env] = value;
+        }
       }
       for (const text of [verdict.items[0].body, posted]) {
         assert.ok(text.includes(shown), `${name}: ${text}`);

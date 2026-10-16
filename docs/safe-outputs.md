@@ -49,37 +49,48 @@ non-`https` one up to the next space, so build output was lost: Cargo's
 `path+file://` package ids took the JSON after them with them
 ([#401](https://github.com/cgwalters-forge/agentic-job/issues/401)).
 Now URLs in inline code and code blocks are kept, and those in prose
-are filtered as before. gh-aw's idea of code is not exactly GitHub's
+are filtered. gh-aw's idea of code is not exactly GitHub's
 (an HTML block around a fence, escaped backticks, a span across a blank
-line), so an agent that means to can still get a link or image to any
-host posted. That adds no channel out: the sandbox's reads are open to
-any host anyway, links to github.com pass the filter too, and GitHub
-fetches images through its own proxy. The filter is not secret
-redaction: check refuses a credential-shaped string anywhere in the
-outputs, code included, and `run` refuses to upload outputs holding one
-or the run's own secrets. That refusal comes only after the session, so
-the brief tells the agent to build fake keys at run time from parts.
-`agentic-job handback check` (below) runs the scan of
-`agentic-job handback scan --base BASE_SHA` too. The scan applies the same patterns, a line at a time, to the
-change's diff and to `out/`, and lists each match by file, line and
-pattern, never by the string. The final refusal names the file and line
-too.
+line), which no longer matters for https links: see below.
 
-Which hosts' links are kept is gh-aw's
-[`safe-outputs.allowed-domains`](https://github.github.com/gh-aw/reference/safe-outputs/),
-given to the collector and the handlers as `GH_AW_ALLOWED_DOMAINS`. By
-default that is gh-aw's own GitHub domains. A caller's
-[bounds](#the-bounds-and-the-policy) can add others, subdomains included,
-with a top-level `allowed_domains` list of at most 64 plain domain names;
-with organization bounds a domain must be in both files. The shipped
-[dispatch bounds](../.github/agentic-job/dispatch.toml) keep the
-distribution and upstream hosts a research report cites. What a link to
-another host would show a reader, a lookalike download or a tracking
-image, is what the filter stops. gh-aw's redaction takes a Markdown link's
-closing parenthesis with it, posting `[text](https://host/path)` as
+An `https://` link to any public host is kept as written, in prose and
+code, for every output type
+([#918](https://github.com/cgwalters-forge/agentic-job/issues/918)).
+The filter cost reports their sources and stopped no leak: the sandbox
+holds no credential worth one, its reads are open to any host anyway,
+and GitHub fetches images through its own proxy. The pinned sanitizer
+has no setting that keeps every https link, and no wildcard for every
+domain, so `policy` gives it, as
+[`safe-outputs.allowed-domains`](https://github.github.com/gh-aw/reference/safe-outputs/)
+(`GH_AW_ALLOWED_DOMAINS` to the collector and the handlers), every
+top-level domain in IANA's list, whose subdomains it keeps.
+`just refresh-top-level-domains` updates the list; a link to a domain
+newer than it, to an address or to a host of one label is still
+redacted, as is a non-`https` URL in prose. gh-aw's other sanitizing
+stays: mentions, bot triggers, HTML and link titles. A bounds file's
+top-level `allowed_domains` (from
+[#910](https://github.com/cgwalters-forge/agentic-job/issues/910)) is
+accepted and ignored. gh-aw's redaction takes a Markdown link's
+closing parenthesis with it, posting `[text](http://host/path)` as
 `[text]((host/redacted)`, so check makes that `text (host/redacted)`
 before apply. `agentic-job handback check` notes, for each request, the
 hosts whose links would be redacted, before the session ends.
+
+Secrets are not filtered by shape either, beyond redacting logs. `run`
+refuses to upload anything while the hand-back or a file that could not
+be redacted holds a value the run itself holds, its run token among
+them: that one would be a real leak. Check and `run` refuse a PEM
+private key anywhere in the outputs, code included, since one cannot be
+a harmless fixture. Any other credential-shaped string (a `ghp_`, `sk-`
+or `AKIA` token, a JWT) is most likely a test fixture, and lost runs
+all their work when it was refused
+([#720](https://github.com/cgwalters-forge/agentic-job/issues/720)): it
+is kept, and reported as a warning by file, line and pattern, never by
+the string, in check's report and summary and in the run's summary.
+`agentic-job handback check` runs the scan of
+`agentic-job handback scan --base BASE_SHA` too, which lists the same
+by file and line in the change's diff and in `out/`, and exits 1 only
+for a private key. The final refusal names the file and line too.
 
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the
@@ -596,8 +607,8 @@ their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
 A top-level `private = true` admits a target that is not public, under
 the conditions of [private repositories](private-repositories.md); it is
-off by default. A top-level `allowed_domains` keeps links to those
-domains in what is posted ([above](#what-is-gh-aws-and-why)).
+off by default. A top-level `allowed_domains` is accepted and ignored:
+links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 
 Some things no bounds file can change. A run hands back one patch, so at
 most one pull request. A pull request is a draft unless it is complete
@@ -760,7 +771,8 @@ agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE]
 
 takes the collector's result and does none of it again, except to
 count. It refuses a hand-back holding any other file, a file over its
-size or a string shaped like a credential; a request naming another
+size or a private key, and reports any other string shaped like a
+credential as a warning; a request naming another
 repository or base than the policy's; a pull request that asks not to be
 a draft, or does not come with exactly its patch; and, under
 `ready_when_complete`, a malformed [checkpoint](#ready-or-draft). It refuses any request

@@ -135,9 +135,10 @@ fn scan_names_where_a_secret_shaped_string_is_and_passes_one_built_from_parts() 
             .unwrap()
     };
 
+    // Shapes other than a private key are warnings: listed, and no failure.
     let output = scan();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
     for want in [
         "committed.rs:2: matches `gh[posur]_",
         "new.txt:1: matches `gh[posur]_",
@@ -157,6 +158,19 @@ fn scan_names_where_a_secret_shaped_string_is_and_passes_one_built_from_parts() 
         git(&repo, &["status", "--porcelain"]),
         format!("?? {named}\n?? new.txt\n")
     );
+
+    // A private key, which the run refuses, fails the scan.
+    let key = format!("-----BEGIN {}-----", "PRIVATE KEY");
+    std::fs::write(repo.join("key.pem"), format!("{key}\n")).unwrap();
+    let output = scan();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("key.pem:1: matches `-----BEGIN"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains(&key), "{stdout}");
+    std::fs::remove_file(repo.join("key.pem")).unwrap();
 
     // The same values built from parts at run time pass.
     std::fs::write(

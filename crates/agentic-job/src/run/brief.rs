@@ -195,8 +195,8 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
         );
     }
     text.push_str(
-        "\n- Never write a secret-shaped string (a `ghp_`, `sk-` or `AKIA` token, a JWT, a \
-         private key), a fake one in a test included: build it at run time from parts.\n\n\
+        "\n- Never write a private key, a fake one in a test included: build it at run time from \
+         parts. Other credential-shaped strings are reported as warnings.\n\n\
          Before you end your turn, run `agentic-job handback check` and fix what it reports \
          until it exits 0. It makes the checks the run makes after your session, on your \
          change, requests, report and checkpoint, and says how to fix each problem; run it as \
@@ -352,18 +352,20 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
              continued, never as done, whatever else you write."
         );
     }
-    // Two runs lost all their work to a fake key in a test fixture, found
-    // by the final gate only after their sessions had ended (#720).
+    // Runs lost all their work to a fake key in a test fixture, found by
+    // the final gate only after their sessions had ended (#720); now only
+    // a private key is refused, and other shapes are warnings (#918).
     let _ = writeln!(
         text,
-        "- Secret-shaped strings: one shaped like a credential (a `ghp_`, `sk-` or `AKIA` \
-         token, a JWT, a private key) anywhere in the change or in these files gets \
-         everything this run hands back refused after your session ends, a fake one in a \
-         test included. Never write one literally: build a test value at run time from parts \
-         that do not match by themselves (`\"gh\" + \"p_\" + \"a1B2\" * 10`, say). Before \
-         you finish, run `agentic-job handback scan --base {base}` in your checkout: it lists \
-         the file, line and pattern of each such string in your change and in `{}`, and \
-         exits 1 while there is one; `agentic-job handback check` runs it with the other checks.",
+        "- Secret-shaped strings: a private key (`-----BEGIN ... PRIVATE KEY-----`) anywhere \
+         in the change or in these files gets everything this run hands back refused after \
+         your session ends, a fake one in a test included: build one at run time from parts \
+         that do not match by themselves. Any other string shaped like a credential (a \
+         `ghp_`, `sk-` or `AKIA` token, a JWT) is kept and reported by file and line as a \
+         warning; make sure each is a fixture. Run `agentic-job handback scan --base {base}` \
+         in your checkout: it lists the file, line and pattern of each such string in your \
+         change and in `{}`, and exits 1 while there is a private key; `agentic-job handback \
+         check` runs it with the other checks.",
         home.join("out").display(),
     );
     text.push_str(
@@ -456,7 +458,8 @@ mod tests {
             "`/home/agent/out/outcome.json`: your report",
             "one JSON object of at most 64 KiB",
             "\"stopped_early\": null}`",
-            "Never write one literally",
+            "a private key (`-----BEGIN ... PRIVATE KEY-----`)",
+            "is kept and reported by file and line as a warning",
             "`agentic-job handback scan --base 0123abcd`",
             "in `/home/agent/out`",
         ] {
@@ -698,7 +701,7 @@ mod brief_tests {
             "\"exit_code\": 0",
             "\"checkpoint\": {\"complete\": false",
             "set `complete` to true last",
-            "a `ghp_`, `sk-` or `AKIA` token",
+            "Never write a private key, a fake one in a test included",
             "run `agentic-job handback check` and fix what it reports until it exits 0",
             "`agentic-job handback guide` prints these rules in full",
         ] {

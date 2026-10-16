@@ -318,8 +318,8 @@ on:
         value: ${{ jobs.policy.outputs.issue }}
       allowed-domains:
         description: >-
-          The domains, comma-separated, whose links gh-aw keeps in what is posted: the policy's
-          `allowed_domains`, or empty for gh-aw's own
+          The domains, comma-separated, whose links gh-aw keeps in what is posted, subdomains
+          included: the policy's `allowed_domains`, every top-level domain
         value: ${{ jobs.policy.outputs.allowed-domains }}
       review-head:
         description: The exact review head resolved by the read-only policy job
@@ -739,10 +739,11 @@ jobs:
             echo "::error::hide_comment is for an event-triggered run only when output-repo is the calling repository, where the event's item is"
             exit 1
           fi
-          jq . "$JOB_DIR/policy.json"
+          # The top-level domains by their count: over a thousand.
+          jq '.allowed_domains |= length' "$JOB_DIR/policy.json"
           printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
           # The binary wrote and checked these: domain names, no comma.
-          echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" | tee -a "$GITHUB_OUTPUT"
+          echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
       - id: binary
         if: ${{ steps.event.outputs.admitted != 'false' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

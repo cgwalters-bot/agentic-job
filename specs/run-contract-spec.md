@@ -138,7 +138,8 @@ Enforcement: [proposals.test.cjs](../workflow/proposals.test.cjs),
 **RC-005 — Hand-back files.** Check MUST accept only `outputs.jsonl`, optional
 `base.json` and at most one `aw-BRANCH.patch`, or the replacement form of RC-023.
 It MUST refuse unexpected files,
-symlinks, directories, oversized files and recognized secret-shaped strings.
+symlinks, directories, oversized files and PEM private keys; it MUST report
+other recognized secret-shaped strings as warnings by file and line, not refuse them.
 A pull-request request MUST have exactly its named patch and valid base
 metadata matching the policy repository/base and patch header; a patch without
 a pull-request request MUST be refused.

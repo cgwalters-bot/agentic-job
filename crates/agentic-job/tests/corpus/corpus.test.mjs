@@ -158,7 +158,7 @@ test("policy: a request against the bounds", () => {
     // What gh-aw's collector is configured with, key for key, and the caps.
     assert.deepEqual(now.policy.safe_outputs, was.policy.safe_outputs, name);
     for (const key of ["repo", "base", "max_outputs", "max_patch_bytes"]) assert.deepEqual(now.policy[key], was.policy[key], `${name}: ${key}`);
-    assert.deepEqual(Object.keys(now.policy).sort(), ["base", "clone_url", "kind", "max_outputs", "max_patch_bytes", "repo", "safe_outputs"], name);
+    assert.deepEqual(Object.keys(now.policy).sort(), ["allowed_domains", "base", "clone_url", "kind", "max_outputs", "max_patch_bytes", "repo", "safe_outputs"], name);
   }
 });
 
@@ -166,6 +166,8 @@ const BRANCH = "agent-run-7";
 const PR = { type: "create_pull_request", title: "Fix the thing", body: "Why.", branch: BRANCH };
 const NOOP = { type: "noop", message: "Nothing to do." };
 const TOKEN = `ghp_${"a1B2".repeat(10)}`;
+// A private key, which both refuse; put together, so this file holds none.
+const KEY = ["-----BEGIN ", "PRIVATE KEY-----"].join("");
 
 // A hand-back directory: outputs.jsonl LINES, a base.json and the patch.
 function handback({ lines, patch, base, baseJson, repo = REPO, extra = {}, also = () => {} }) {
@@ -249,6 +251,24 @@ test("check: what both accept", async () => {
   }
 });
 
+// The old tree refused any string shaped like a credential; the new check
+// refuses only a private key and names the rest as warnings, by line: a
+// fake key in a test fixture cost runs all their work (#720, #918).
+const SHAPED = new Set(["a secret in a request", "a secret in the patch", "a ghr_ token", "a GitLab token",
+  "an AWS key id", "a run token in a request", "a secret in base.json"]);
+
+async function warned(name, args, want) {
+  const { was, now } = bothPolicies();
+  const dir = handback(args);
+  const oldVerdict = await old.checkOutputs(dir, was);
+  assert.match(oldVerdict.errors.join("\n"), want, name);
+  const newVerdict = newCheck(dir, now);
+  assert.equal(newVerdict.ok, true, `${name}: ${JSON.stringify(newVerdict.errors)}`);
+  assert.equal(newVerdict.warnings.length, 1, name);
+  assert.match(newVerdict.warnings[0], /^(outputs\.jsonl|aw-.*\.patch|base\.json), line \d+: matches `/, name);
+  assert.ok(!JSON.stringify(newVerdict.warnings).includes(TOKEN), name);
+}
+
 test("check: what both refuse", async () => {
   const executable = patchOf((d) => {
     write(d, { "run.sh": "#!/bin/sh\n" });
@@ -323,7 +343,8 @@ test("check: what both refuse", async () => {
     ["a request with no type", { lines: [{ message: "x" }], base: null }, /./],
     ["a request that is an array", { lines: ["[1, 2]"], base: null }, /./],
   ]) {
-    await same(name, args, want);
+    if (SHAPED.has(name)) await warned(name, args, want);
+    else await same(name, args, want);
   }
 });
 
@@ -335,7 +356,7 @@ test("check: docs are unprotected only in the repositories the bounds name", asy
     ["other protected docs", { "CONTRIBUTING.md": "x\n" }, /protected files.*CONTRIBUTING\.md/, /protected files.*CONTRIBUTING\.md/],
     ["a manifest", { "package.json": "{}\n" }, /protected files.*package\.json/, /protected files.*package\.json/],
     ["CI, beside a README", { "README.md": "x\n", ".github/workflows/x.yml": "on: push\n" }, /\.github/, /\.github/],
-    ["a secret in a README", { "README.md": `${TOKEN}\n` }, /secret-shaped/, /secret-shaped/],
+    ["a secret in a README", { "README.md": `${KEY}\n` }, /secret-shaped|private key/, /secret-shaped|private key/],
   ]) {
     const { patch, base } = patchOf(edit(files));
     for (const [repo, want] of [[OWN_REPO, own], [REPO, upstream]]) {

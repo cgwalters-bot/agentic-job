@@ -1000,6 +1000,10 @@ impl Plan {
             outcome: &outcome,
             usage: settled.usage.as_ref(),
         });
+        let shaped = staging.shape_warnings()?;
+        if !shaped.is_empty() {
+            summary[summary::SECRET_SHAPED] = json!(shaped);
+        }
         session_markdown::write(
             staging,
             &records,

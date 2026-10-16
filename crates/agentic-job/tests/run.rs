@@ -1060,8 +1060,8 @@ fn a_planted_link_reads_nothing_of_the_runners() {
 }
 
 /// A run of which something may not be published leaves nothing where
-/// uploads are taken from, and says why: a secret-shaped string in what
-/// the agent handed back, which cannot be redacted; a fake agent's run
+/// uploads are taken from, and says why: a private key in what the agent
+/// handed back, which cannot be redacted; a fake agent's run
 /// in which the redaction found nothing; a run the proxy did not end.
 #[test]
 fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
@@ -1070,14 +1070,14 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
     };
     let change = json!({"write": {"title": "Write", "path": "{cwd}/FAKE.md", "content": "x\n"}});
     let leak = json!({"execute": {"title": "Bash",
-        "command": "printf 'token = gh%s_%s\\n' p FAKEREDACTIONCANARY0123456789abcdef > settings.toml"}});
+        "command": "printf -- '-----BEGIN %s-----\\n' 'PRIVATE KEY' > key.pem"}});
     // (the case, the session, whether the proxy ends the run, the reason)
     let cases = [
         (
             "secret",
             json!([canary(), leak, {"say": "Done."}]),
             true,
-            "a secret-shaped string is in what the agent handed back, \
+            "a secret of the run's or a private key is in what the agent handed back, \
              safe-outputs/aw-agent-run-4242.patch",
         ),
         (

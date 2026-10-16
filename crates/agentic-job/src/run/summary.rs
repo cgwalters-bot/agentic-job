@@ -69,6 +69,10 @@ pub struct Measured {
     pub redactions: usize,
 }
 
+/// `summary.json`'s list of the strings shaped like a credential in the
+/// hand-back, by place (`upload::Staging::shape_warnings`); absent if none.
+pub const SECRET_SHAPED: &str = "secret_shaped";
+
 /// Reads a JSON Lines file; lines that are not what is asked for are
 /// skipped.
 pub fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
@@ -616,6 +620,16 @@ pub fn markdown(s: &Value) -> String {
             format!("Denied egress: {}", domains.join(", ")),
         ]);
     }
+    if let Some(found) = list(SECRET_SHAPED) {
+        out.extend([
+            String::new(),
+            "Secret-shaped strings handed back (kept: the run holds no credential of their \
+             shape; check that each is a fixture):"
+                .to_owned(),
+            String::new(),
+        ]);
+        out.extend(found.iter().map(|w| format!("- {}", text(w))));
+    }
     if let Some(n) = s["redactions"].as_u64().filter(|n| *n > 0) {
         out.extend([String::new(), format!("Redacted {n} string(s).")]);
     }
@@ -740,6 +754,7 @@ mod tests {
             "permissions": {"allowed": 2, "denied": [{"tool": "Bash", "summary": "git push", "rule": "no-push"}]},
             "tests": [], "egress_denied": [{"domain": "evil.example", "count": 2}], "redactions": 1,
             "patch": {"base": "abc", "error": "the change is over 64 bytes"},
+            "secret_shaped": ["safe-outputs/aw-x.patch, line 3: matches `AKIA[0-9A-Z]{16}`"],
         });
         assert_eq!(
             markdown(&s),
@@ -773,6 +788,10 @@ Denied by the policy:
 - `Bash`: `git push` (rule no-push)
 
 Denied egress: `evil.example` (2)
+
+Secret-shaped strings handed back (kept: the run holds no credential of their shape; check that each is a fixture):
+
+- safe-outputs/aw-x.patch, line 3: matches `AKIA[0-9A-Z]{16}`
 
 Redacted 1 string(s).
 "

@@ -1,9 +1,14 @@
-//! Secret-shaped strings: what `check` refuses in a hand-back, and what
-//! `run` replaces in everything it logs or uploads.
+//! Secret-shaped strings: what `run` replaces in everything it logs or
+//! uploads, and what `check` and `run` report or refuse in a hand-back.
 //!
 //! This is a safety net and not the defence: the agent's environment holds
 //! no credential worth leaking beyond its own run token. The patterns are
-//! shapes, so they also match strings that only look like a credential.
+//! shapes, so they also match strings that only look like a credential: a
+//! fake key in a test fixture cost three runs all their work (#720, #918).
+//! So a hand-back is refused only for what is surely a leak, a value the
+//! run itself holds ([`Redactor::find_line_in`]) or a private key
+//! ([`is_private_key`]), which cannot be a harmless fixture; any other
+//! shape is a warning ([`shaped_lines`]), by line and never by string.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -37,8 +42,19 @@ const PEM_BODY_BYTES: usize = 1 << 14;
 const MAX_PEM_BYTES: usize =
     PEM_BODY_BYTES + 2 * ("-----BEGIN ".len() + PEM_LABEL_BYTES + "PRIVATE KEY-----".len());
 
-/// The shapes, in the syntax of the `regex` crate. One list for redacting
-/// and for refusing, so that nothing the check refuses is uploaded as it is.
+/// The most shapes [`shaped_lines`] reports: enough to find each, and a
+/// bound on what an agent's hand-back can put in a summary.
+pub const MAX_SHAPE_WARNINGS: usize = 32;
+
+/// A whole PEM private key block, also when a JSON string holds it with
+/// escaped newlines; an unterminated one, or one over MAX_PEM_BYTES, is
+/// cut at the end of the line, and `Redactor::redact_stream` replaces the
+/// rest of one with a last line. The only match that spans lines, so the
+/// bound is what streaming has to look ahead (see `stream`).
+pub const PRIVATE_KEY: &str = r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY-----(?:(?s:.){0,16384}?-----END [A-Z0-9 ]{0,32}PRIVATE KEY-----|[^\n]*)";
+
+/// The shapes, in the syntax of the `regex` crate. Redacted in what `run`
+/// logs, and warned about in a hand-back.
 const PATTERNS: &[&str] = &[
     // GitHub: personal, OAuth, server, user and refresh tokens
     r"gh[posur]_[A-Za-z0-9_]{20,}",
@@ -52,12 +68,7 @@ const PATTERNS: &[&str] = &[
     r"praxis-run-[0-9a-f]{64}",
     // JWTs, such as a CI system's identity tokens
     r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*",
-    // A whole PEM block, also when a JSON string holds it with escaped
-    // newlines; an unterminated one, or one over MAX_PEM_BYTES, is cut at
-    // the end of the line, and `Redactor::redact_stream` replaces the rest
-    // of one with a last line. The only match that spans lines, so the
-    // bound is what streaming has to look ahead (see `stream`).
-    r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY-----(?:(?s:.){0,16384}?-----END [A-Z0-9 ]{0,32}PRIVATE KEY-----|[^\n]*)",
+    PRIVATE_KEY,
     // GitLab, AWS key ids, Google API keys, Slack
     r"glpat-[A-Za-z0-9_-]{20,}",
     r"AKIA[0-9A-Z]{16}",
@@ -105,9 +116,37 @@ static EACH_SHAPE: LazyLock<Vec<(&'static str, BytesRegex)>> = LazyLock::new(|| 
         .collect()
 });
 
+static PRIVATE_KEY_RE: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(&format!("(?-u){PRIVATE_KEY}")).expect("the built-in patterns are valid")
+});
+
 /// Whether `bytes` holds a string shaped like a credential.
 pub fn is_secret_shaped(bytes: &[u8]) -> bool {
     SECRET_SHAPED.is_match(bytes)
+}
+
+/// Whether `bytes` holds the first line of a PEM private key.
+pub fn is_private_key(bytes: &[u8]) -> bool {
+    PRIVATE_KEY_RE.is_match(bytes)
+}
+
+/// The line of each string shaped like a credential in `input`, read in
+/// pieces, with a pattern it matches: at most [`MAX_SHAPE_WARNINGS`].
+pub fn shaped_lines(input: impl Read) -> io::Result<Vec<(usize, &'static str)>> {
+    let mut line = 1;
+    let mut found = Vec::new();
+    stream(&SECRET_SHAPED, MAX_PEM_BYTES, input, |bytes, secret| {
+        if secret {
+            let pattern = secret_shapes(bytes).first().copied().unwrap_or(PRIVATE_KEY);
+            found.push((line, pattern));
+            if found.len() == MAX_SHAPE_WARNINGS {
+                return Ok(false);
+            }
+        }
+        line += bytes.iter().filter(|&&b| b == b'\n').count();
+        Ok(true)
+    })?;
+    Ok(found)
 }
 
 /// The patterns that match in `bytes`, for telling an agent what to fix:
@@ -219,6 +258,9 @@ pub struct Redactor {
     /// Over bytes, for content that is not text, and since the bounds in
     /// the patterns count bytes.
     bytes: BytesRegex,
+    /// The literals and [`PRIVATE_KEY`]: what is refused where it cannot
+    /// be redacted.
+    refused: BytesRegex,
     /// What [`stream`] needs to look ahead: the longest match that spans
     /// a newline.
     overlap: usize,
@@ -246,8 +288,10 @@ impl Redactor {
                 .map(String::as_str)
                 .chain(PATTERNS.iter().copied()),
         );
+        let refused = alternation(literals.iter().map(String::as_str).chain([PRIVATE_KEY]));
         Ok(Self {
             bytes: BytesRegex::new(&format!("(?-u){rule}"))?,
+            refused: BytesRegex::new(&format!("(?-u){refused}"))?,
             overlap,
             count: 0,
         })
@@ -260,13 +304,13 @@ impl Redactor {
         self.bytes.is_match(bytes)
     }
 
-    /// The line of the first secret [`Redactor::finds`] in `input`, read
-    /// in pieces: a location to report where the string itself may not
-    /// be shown.
+    /// The line of the first of its literals or private key in `input`,
+    /// read in pieces: a location to report where the string itself may
+    /// not be shown. Other shapes are [`shaped_lines`]'s to report.
     pub fn find_line_in(&self, input: impl Read) -> io::Result<Option<usize>> {
         let mut line = 1;
         let mut found = None;
-        stream(&self.bytes, self.overlap, input, |bytes, secret| {
+        stream(&self.refused, self.overlap, input, |bytes, secret| {
             if secret {
                 found = Some(line);
                 return Ok(false);
@@ -728,13 +772,18 @@ mod tests {
                     if count > 0 {
                         assert!(streamed == whole.as_ref(), "{at}");
                     }
-                    let line = redactor
-                        .bytes
-                        .find(text.as_bytes())
-                        .map(|found| 1 + text[..found.start()].matches('\n').count());
+                    let line_of = |rule: &BytesRegex| {
+                        rule.find(text.as_bytes())
+                            .map(|found| 1 + text[..found.start()].matches('\n').count())
+                    };
                     assert_eq!(
                         redactor.find_line_in(text.as_bytes()).unwrap(),
-                        line,
+                        line_of(&redactor.refused),
+                        "{at}"
+                    );
+                    assert_eq!(
+                        shaped_lines(text.as_bytes()).unwrap().first().map(|f| f.0),
+                        line_of(&SECRET_SHAPED),
                         "{at}"
                     );
                 }
@@ -806,11 +855,69 @@ mod tests {
         assert!(redactor.finds(&bytes));
         assert!(!is_secret_shaped(&bytes));
         assert!(redactor.finds(format!("x {} y", token("ghp_")).as_bytes()));
+        // What is refused is a literal, not a shape that is no literal.
         let lines = format!("one\ntwo {} y\nthree hunter2-and-more\n", token("ghp_"));
-        assert_eq!(redactor.find_line_in(lines.as_bytes()).unwrap(), Some(2));
+        assert_eq!(redactor.find_line_in(lines.as_bytes()).unwrap(), Some(3));
         assert_eq!(redactor.find_line_in(&b"one\ntwo\n"[..]).unwrap(), None);
         assert!(!redactor.finds(b"a short word, a.b*c(d)X"));
         assert_eq!(redactor.count(), 3);
+    }
+
+    /// A hand-back is refused for a value the run holds and for a private
+    /// key, and only warned about for any other shape, by line.
+    #[test]
+    fn refused_or_warned() {
+        let run_token = token("ghs_");
+        let redactor = Redactor::new([run_token.as_str()]).unwrap();
+        let pem = format!(
+            "-----BEGIN RSA {0}-----\nabc\n-----END RSA {0}-----\n",
+            "PRIVATE KEY"
+        );
+        let fixture = format!("one\nkey = \"{}\"\n", token("ghp_"));
+        // (the case, the text, the line refused, the lines warned)
+        let cases: &[(&str, String, Option<usize>, &[usize])] = &[
+            ("a fake key in a fixture", fixture.clone(), None, &[2]),
+            (
+                "the run's own token",
+                format!("{fixture}three {run_token}\n"),
+                Some(3),
+                &[2, 3],
+            ),
+            (
+                "a private key",
+                format!("{fixture}{pem}after\n"),
+                Some(3),
+                &[2, 3],
+            ),
+            ("nothing", "one\ntwo\n".to_owned(), None, &[]),
+        ];
+        for (name, text, refused, warned) in cases {
+            assert_eq!(
+                redactor.find_line_in(text.as_bytes()).unwrap(),
+                *refused,
+                "{name}"
+            );
+            let lines: Vec<usize> = shaped_lines(text.as_bytes())
+                .unwrap()
+                .into_iter()
+                .map(|(line, _)| line)
+                .collect();
+            assert_eq!(lines, *warned, "{name}");
+            assert_eq!(
+                is_private_key(text.as_bytes()),
+                text.contains(&pem),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            shaped_lines(fixture.as_bytes()).unwrap(),
+            [(2, r"gh[posur]_[A-Za-z0-9_]{20,}")]
+        );
+        let many = format!("{}\n", token("ghp_")).repeat(MAX_SHAPE_WARNINGS + 5);
+        assert_eq!(
+            shaped_lines(many.as_bytes()).unwrap().len(),
+            MAX_SHAPE_WARNINGS
+        );
     }
 
     #[test]

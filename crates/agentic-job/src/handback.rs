@@ -33,7 +33,8 @@ pub enum Command {
         range: Option<String>,
     },
     /// Find secret-shaped strings in what the run would hand back: the
-    /// change against BASE, and the files in `out/` under your home
+    /// change against BASE, and the files in `out/` under your home. Exits
+    /// 1 only for a private key, which the run refuses; others are warnings
     Scan {
         /// The commit the change is made against: the one the run started from
         #[arg(long, default_value = "HEAD")]
@@ -58,19 +59,27 @@ impl Command {
             Self::Scan { base } => {
                 let home = std::env::var_os("HOME").context("HOME is not set")?;
                 let found = scan(Path::new("."), base, Path::new(&home))?;
-                if !found.is_empty() {
-                    for finding in &found {
-                        println!("{finding}");
-                    }
+                for finding in &found {
+                    println!("{finding}");
+                }
+                let keys = found.iter().filter(|f| f.is_refused()).count();
+                if keys > 0 {
                     eprintln!(
-                        "{} secret-shaped string(s): `run` refuses everything this run hands \
-                         back while one is there. Remove each, or build it at run time from \
-                         parts that do not match, then scan again.",
-                        found.len()
+                        "{keys} private key(s): `run` refuses everything this run hands back \
+                         while one is there. Remove each, or build it at run time from parts \
+                         that do not match, then scan again."
                     );
                     return Ok(Exit::Failure);
                 }
-                eprintln!("No secret-shaped string in the change or in {}", OUT_DIR);
+                if found.is_empty() {
+                    eprintln!("No secret-shaped string in the change or in {}", OUT_DIR);
+                } else {
+                    eprintln!(
+                        "{} secret-shaped string(s), kept and reported by line as warnings: \
+                         make sure each is a fixture and no real credential.",
+                        found.len()
+                    );
+                }
             }
             Self::Check => {
                 let home = std::env::var_os("HOME").context("HOME is not set")?;
@@ -209,7 +218,7 @@ const FIXES: &[(&str, &str)] = &[
         "make it a regular file that is not executable, or restore it",
     ),
     (
-        "secret-shaped",
+        "private key",
         "remove it, or build it at run time from parts that do not match",
     ),
     (
@@ -363,11 +372,18 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     }
 
     for finding in scan(&run.checkout, &run.base, home)? {
-        report.problems.push(Problem {
-            at: finding.location,
-            what: format!("a secret-shaped string, matching `{}`", finding.pattern),
-            fix: fix_for("secret-shaped").to_owned(),
-        });
+        if finding.is_refused() {
+            report.problems.push(Problem {
+                at: finding.location,
+                what: "a private key".to_owned(),
+                fix: fix_for("private key").to_owned(),
+            });
+        } else {
+            report.notes.push(format!(
+                "{finding}: a secret-shaped string, kept and reported as a warning; make sure \
+                 it is a fixture and no real credential"
+            ));
+        }
     }
     Ok(report)
 }
@@ -389,9 +405,9 @@ fn redacted_links(collected: &str, policy: &Policy) -> Vec<String> {
             (!hosts.is_empty()).then(|| {
                 format!(
                     "{AGENT_OUTPUTS}, request {} ({}): its links to {} are posted as \
-                     `text (host/redacted)`, without the link, since the caller's bounds do not \
-                     keep them (`allowed_domains`): name each such source in words a reader can \
-                     find it by",
+                     `text (host/redacted)`, without the link: only https links to a public \
+                     domain are kept outside code; link with https, or name each such source \
+                     in words a reader can find it by",
                     number + 1,
                     item.get("type").and_then(Value::as_str).unwrap_or("?"),
                     hosts.join(", ")
@@ -513,17 +529,26 @@ struct Finding {
     pattern: &'static str,
 }
 
+impl Finding {
+    /// Whether `run` refuses it: a private key cannot be a harmless
+    /// fixture. Any other shape is a warning (see [`redact`]).
+    fn is_refused(&self) -> bool {
+        self.pattern == redact::PRIVATE_KEY
+    }
+}
+
 impl std::fmt::Display for Finding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: matches `{}`", self.location, self.pattern)
     }
 }
 
-/// What `run`'s final gate would refuse in the change of the checkout
-/// REPO against BASE and in HOME's `out/`, while the session can still
-/// fix it: found only then, it cost two runs all their work (#720). Not
-/// the gate itself, which also knows the run's own secrets and scans the
-/// patch as it is made; a line at a time, which finds what the gate
+/// The secret-shaped strings in the change of the checkout REPO against
+/// BASE and in HOME's `out/`, while the session can still fix them: the
+/// private keys `run`'s final gate refuses (found only then, a refusal
+/// cost runs all their work, #720) and the shapes it reports as warnings.
+/// Not the gate itself, which also knows the run's own secrets and scans
+/// the patch as it is made; a line at a time, which finds what the gate
 /// finds, since no pattern but a private key's spans lines and that one
 /// also matches its first line alone.
 fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
@@ -812,7 +837,7 @@ mod tests {
             safe_outputs: serde_json::from_value(outputs).unwrap(),
             commit_author: None,
             private: false,
-            allowed_domains: Vec::new(),
+            allowed_domains: crate::policy::link_domains().to_vec(),
         };
         let run = RunFile {
             policy,
@@ -877,6 +902,7 @@ mod tests {
     #[test]
     fn the_session_is_told_what_check_would_refuse() {
         let token = format!("gh{}_{}", "p", "a1B2".repeat(10));
+        let key = format!("-----BEGIN {}-----", "PRIVATE KEY");
         let pull = |body: &str| {
             json!({"type": "create_pull_request", "title": "Fix it", "body": body}).to_string()
         };
@@ -976,10 +1002,18 @@ mod tests {
                 ..case("a line that is not JSON", "", "noop please".to_owned())
             },
             Case {
-                want: Some("a secret-shaped string"),
+                note: true,
                 ..case(
-                    "a secret-shaped string",
+                    "a secret-shaped string, a fixture's fake key",
                     &format!("echo 'key = \"{token}\"' > key.txt"),
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("a private key"),
+                ..case(
+                    "a private key",
+                    &format!("echo '{key}' > key.pem"),
                     pull("Why."),
                 )
             },
@@ -1020,12 +1054,17 @@ mod tests {
                 "echo two >> a.txt",
                 pull("Per [the issue](https://github.com/o/r/issues/1)."),
             ),
+            case(
+                "a link to any public host",
+                "echo two >> a.txt",
+                pull("Per [the spec](https://src.fedoraproject.org/rpms/x)."),
+            ),
             Case {
                 note: true,
                 ..case(
-                    "a link gh-aw redacts",
+                    "a link gh-aw redacts, not https",
                     "echo two >> a.txt",
-                    pull("Per [the spec](https://src.fedoraproject.org/rpms/x)."),
+                    pull("Per [the spec](http://src.fedoraproject.org/rpms/x)."),
                 )
             },
         ];
@@ -1078,7 +1117,10 @@ mod tests {
                 assert_eq!(checked, after, "{}", case.name);
             }
             assert!(
-                shown.iter().all(|problem| !problem.contains(&token)),
+                shown
+                    .iter()
+                    .chain(&report.notes)
+                    .all(|problem| !problem.contains(&token) && !problem.contains(&key)),
                 "{}: {shown:#?}",
                 case.name
             );

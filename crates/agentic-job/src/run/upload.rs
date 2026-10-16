@@ -9,11 +9,13 @@
 //!   may be live, and the agent could read its token: nothing that might
 //!   quote it is published while it still buys anything;
 //! - **no secret is left** in the results, the transcript or the
-//!   hand-back: none of the values the run holds, and nothing shaped
-//!   like a credential. The first two were redacted, as far as they are
-//!   text; the hand-back cannot be (a patch with a string replaced no
-//!   longer applies), so a secret there, or in a file that is not text,
-//!   fails the run;
+//!   hand-back: none of the values the run holds, and no private key.
+//!   The first two were redacted, as far as they are text, of those and
+//!   of anything else shaped like a credential; the hand-back cannot be (a
+//!   patch with a string replaced no longer applies), so a secret there,
+//!   or in a file that is not text, fails the run. Any other shape in the
+//!   hand-back is most likely a test fixture, since the run holds no
+//!   credential but its own: it is a warning ([`Staging::shape_warnings`]);
 //! - **the redaction did something** in a run of the fake agent, whose
 //!   session prints a credential-shaped string so that this can be asked.
 //!
@@ -30,6 +32,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::log::Shared;
 use crate::files::{self, ReadError};
+use crate::redact;
 
 /// Under `--out`: the run's summary, its condensed log and the agent's
 /// outcome; the transcript; and what the agent handed back, if anything.
@@ -185,7 +188,7 @@ impl Staging {
                 // The line and not the string: this error is published.
                 if let Some(line) = found {
                     bail!(
-                        "a secret-shaped string {} {label}/{name}, line {line}",
+                        "a secret of the run's or a private key {} {label}/{name}, line {line}",
                         if label == SAFE_OUTPUTS_DIR {
                             "is in what the agent handed back,"
                         } else {
@@ -201,6 +204,26 @@ impl Staging {
              secret-shaped string"
         );
         Ok(())
+    }
+
+    /// Where the hand-back holds a string shaped like a credential that
+    /// [`Staging::check`] does not refuse, by file, line and pattern and
+    /// never by the string: for the run's summary.
+    pub fn shape_warnings(&self) -> Result<Vec<String>> {
+        let mut warnings = Vec::new();
+        for (name, path) in Self::files(&self.safe_outputs())? {
+            let found = redact::shaped_lines(Self::open(&path)?)
+                .with_context(|| format!("reading {}", path.display()))?;
+            for (line, pattern) in found {
+                if warnings.len() == redact::MAX_SHAPE_WARNINGS {
+                    return Ok(warnings);
+                }
+                warnings.push(format!(
+                    "{SAFE_OUTPUTS_DIR}/{name}, line {line}: matches `{pattern}`"
+                ));
+            }
+        }
+        Ok(warnings)
     }
 
     /// Packs the transcript into FILE.
@@ -298,6 +321,12 @@ mod tests {
 
     fn token() -> String {
         format!("gh{}_{}", "p", "a1B2".repeat(10))
+    }
+
+    /// The first line of a private key, put together so that this file
+    /// holds none.
+    fn private_key() -> String {
+        format!("-----BEGIN {}-----", "PRIVATE KEY")
     }
 
     struct Out {
@@ -440,11 +469,11 @@ mod tests {
                 "was not ended at the inference proxy",
             ),
             (
-                "a secret in the hand-back",
+                "a private key in the hand-back",
                 |out| {
                     out.hand_back(
                         "aw-agent-run-1.patch",
-                        &format!("@@ -1 +1 @@\n+key = {}\n", token()),
+                        &format!("@@ -1 +1 @@\n+{}\n", private_key()),
                     );
                 },
                 OPEN,
@@ -452,10 +481,10 @@ mod tests {
                 "is in what the agent handed back, safe-outputs/aw-agent-run-1.patch, line 2",
             ),
             (
-                "a secret in bytes that are not text",
+                "a private key in bytes that are not text",
                 |out| {
                     let mut bytes = vec![0xff, 0xfe];
-                    bytes.extend_from_slice(token().as_bytes());
+                    bytes.extend_from_slice(private_key().as_bytes());
                     std::fs::write(out.staging.run().join("condensed.log"), bytes).unwrap();
                 },
                 OPEN,
@@ -532,9 +561,31 @@ mod tests {
             std::fs::read_to_string(out.staging.safe_outputs().join("outputs.jsonl")).unwrap(),
             line
         );
-        let err = out.staging.check(OPEN, &redactor).unwrap_err();
+        // Left as it is, and a warning, not a refusal: the run holds no
+        // credential of that shape.
+        out.staging.check(OPEN, &redactor).unwrap();
+        assert_eq!(
+            out.staging.shape_warnings().unwrap(),
+            ["safe-outputs/outputs.jsonl, line 1: matches `gh[posur]_[A-Za-z0-9_]{20,}`"]
+        );
+    }
+
+    /// A fake key in a test fixture passes with a warning by line, and
+    /// the run's own secret beside it is still refused.
+    #[test]
+    fn a_fixture_shaped_like_a_key_is_a_warning() {
+        let out = Out::new();
+        let patch = format!("@@ -1,2 +1,3 @@\n one\n+let key = \"{}\";\n two\n", token());
+        out.hand_back("aw-agent-run-1.patch", &patch);
+        out.staging.check(OPEN, &redactor(1)).unwrap();
+        assert_eq!(
+            out.staging.shape_warnings().unwrap(),
+            ["safe-outputs/aw-agent-run-1.patch, line 3: matches `gh[posur]_[A-Za-z0-9_]{20,}`"]
+        );
+        out.hand_back("outputs.jsonl", &format!("{{\"k\":\"{LITERAL}\"}}\n"));
+        let err = out.staging.check(OPEN, &redactor(1)).unwrap_err();
         assert!(
-            format!("{err:#}").contains("safe-outputs/outputs.jsonl"),
+            format!("{err:#}").contains("safe-outputs/outputs.jsonl, line 1"),
             "{err:#}"
         );
     }

@@ -93,3 +93,9 @@ agents-lock spec package +links:
     npm install --prefix "$dir" --package-lock-only --ignore-scripts --no-audit --no-fund \
         --os=linux --cpu=x64 --libc=glibc -- "$2" >&2
     cargo run --quiet --locked --bin pinned-agents -- lock "$1" "${@:3}" < "$dir/package-lock.json"
+
+# IANA's top-level domains, the hosts whose https links gh-aw keeps in
+# what a run posts (policy::link_domains). A domain added since the last
+# refresh has its links redacted until this runs; review the diff.
+refresh-top-level-domains:
+    curl --fail --silent --show-error --proto '=https' --output crates/agentic-job/src/top-level-domains.txt https://data.iana.org/TLD/tlds-alpha-by-domain.txt

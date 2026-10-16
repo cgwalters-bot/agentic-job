@@ -8,7 +8,8 @@
 //! here with `--collected`. Nothing of it is done again. What is done
 //! here is what gh-aw leaves to the workflow it generates, or does not do
 //! at all: the hand-back holds only the files it may, within their sizes
-//! and free of secret-shaped strings; the requests fit the policy; a pull
+//! and free of private keys (other secret-shaped strings are warnings: see
+//! [`redact`]); the requests fit the policy; a pull
 //! request comes with exactly its patch, against the policy's repository
 //! and base; and the patch passes the rules of [`patch`]. One thing of
 //! the collector's is mended: a Markdown link it redacted is made plain
@@ -99,6 +100,11 @@ pub struct Verdict {
     /// pull request or push says the work stopped at: apply keeps it a draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<checkpoint::Checkpoint>,
+    /// Where the hand-back holds a string shaped like a credential, by
+    /// file, line and pattern: not a refusal, since the run holds none but
+    /// its own, which `run` refuses before anything is uploaded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// The patch of an accepted pull request.
@@ -146,6 +152,7 @@ impl Verdict {
             items,
             patch,
             checkpoint: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -190,6 +197,11 @@ impl Verdict {
             self.errors
                 .iter()
                 .map(|error| format!("- refused: {}", one_line(error))),
+        );
+        lines.extend(
+            self.warnings
+                .iter()
+                .map(|warning| format!("- warning: a secret-shaped string in {warning}")),
         );
         lines.join("\n") + "\n"
     }
@@ -775,30 +787,43 @@ fn check_outputs_to(
     names.sort();
 
     let mut contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut warnings = Vec::new();
     for name in &names {
         let Some(name) = name.to_str().filter(|name| is_handback_file(name)) else {
             errors.push(format!("unexpected file {name:?}"));
             continue;
         };
         match files::read_regular(&dir.join(name), max_bytes_of(name, policy)) {
-            Ok(content) if redact::is_secret_shaped(&content) => {
-                errors.push(format!("a secret-shaped string in {name}"));
+            // A private key cannot be a harmless fixture.
+            Ok(content) if redact::is_private_key(&content) => {
+                errors.push(format!("a secret-shaped string in {name}: a private key"));
             }
             Ok(content) => {
+                let shaped = redact::shaped_lines(&content[..])
+                    .with_context(|| format!("searching {name}"))?;
+                warnings.extend(
+                    shaped
+                        .into_iter()
+                        .map(|(line, pattern)| format!("{name}, line {line}: matches `{pattern}`")),
+                );
                 contents.insert(name.to_owned(), content);
             }
             Err(err) => errors.push(format!("{name} {err}")),
         }
     }
+    warnings.truncate(redact::MAX_SHAPE_WARNINGS);
     // Taken from a path of its own and never from `dir`, which the agent's
     // machine uploaded: a result found there could be the agent's.
     let collected_bytes = files::read_regular(collected, MAX_COLLECTED_BYTES)
         .with_context(|| format!("the collector's result {}", collected.display()))?;
-    if redact::is_secret_shaped(&collected_bytes) {
-        errors.push("a secret-shaped string in the collected outputs".to_owned());
+    if redact::is_private_key(&collected_bytes) {
+        errors.push("a secret-shaped string in the collected outputs: a private key".to_owned());
     }
     if !errors.is_empty() {
-        return Ok(Verdict::new(errors, Vec::new(), None));
+        return Ok(Verdict {
+            warnings,
+            ..Verdict::new(errors, Vec::new(), None)
+        });
     }
 
     let mut collected: Collected = serde_json::from_slice(&collected_bytes).with_context(|| {
@@ -924,6 +949,7 @@ fn check_outputs_to(
         }
         return Ok(Verdict {
             checkpoint,
+            warnings,
             ..Verdict::new(errors, items, patch)
         });
     }
@@ -998,6 +1024,7 @@ fn check_outputs_to(
     }
     Ok(Verdict {
         checkpoint,
+        warnings,
         ..Verdict::new(errors, items, patch)
     })
 }
@@ -1013,6 +1040,9 @@ pub fn run(args: &Args) -> Result<Exit> {
     }
     for error in &verdict.errors {
         eprintln!("error: {}", one_line(error));
+    }
+    for warning in &verdict.warnings {
+        eprintln!("warning: a secret-shaped string in {warning}");
     }
     print!("{}", verdict.markdown(&policy));
     Ok(if verdict.ok {
@@ -2211,7 +2241,8 @@ mod tests {
 
     #[test]
     fn what_is_refused() {
-        let token = format!("ghp_{}", "a1B2".repeat(10));
+        // Put together, so that this file holds no private key.
+        let key = format!("-----BEGIN {}-----", "PRIVATE KEY");
         let pr = Handback::pull_request;
         let comment = json!({"type": "add_comment", "body": "x", "item_number": 1});
         let other_base = |repo: &str, branch: &str, commit: &str| {
@@ -2293,12 +2324,12 @@ mod tests {
                 "there is no outputs.jsonl",
             ),
             (
-                "a secret in a request",
+                "a private key in a request",
                 Handback {
-                    items: vec![json!({"type": "noop", "message": token})],
+                    items: vec![json!({"type": "noop", "message": key})],
                     ..Handback::default()
                 },
-                "a secret-shaped string in outputs.jsonl",
+                "a secret-shaped string in outputs.jsonl: a private key",
             ),
             // The collector strips HTML comments outside code, not inside.
             (
@@ -2323,12 +2354,12 @@ mod tests {
                 "a noop holding agentic-job-applied, which apply writes",
             ),
             (
-                "a secret in the patch",
+                "a private key in the patch",
                 pr().with(
                     PATCH_NAME,
-                    Some(patch_of("src/k.rs").replace("+x\n", &format!("+{token}\n"))),
+                    Some(patch_of("src/k.rs").replace("+x\n", &format!("+{key}\n"))),
                 ),
-                "a secret-shaped string in aw-agent-run-7.patch",
+                "a secret-shaped string in aw-agent-run-7.patch: a private key",
             ),
             (
                 "a pull request without its patch",
@@ -2463,6 +2494,32 @@ mod tests {
                 verdict.errors
             );
         }
+    }
+
+    /// A string only shaped like a credential, a test fixture's fake key,
+    /// is accepted and named by place, never shown.
+    #[test]
+    fn a_fixture_shaped_like_a_key_is_a_warning() {
+        let token = format!("gh{}_{}", "p", "a1B2".repeat(10));
+        let patch = patch_of("src/k.rs").replace("+x\n", &format!("+{token}\n"));
+        let line = 1 + patch[..patch.find(&token).unwrap()].matches('\n').count();
+        let verdict = Handback::pull_request()
+            .with(PATCH_NAME, Some(patch))
+            .check();
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(
+            verdict.warnings,
+            [format!(
+                "{PATCH_NAME}, line {line}: matches `gh[posur]_[A-Za-z0-9_]{{20,}}`"
+            )]
+        );
+        let shown = format!(
+            "{}{}",
+            verdict.markdown(&policy()),
+            serde_json::to_string(&verdict).unwrap()
+        );
+        assert!(shown.contains("- warning: a secret-shaped string in aw-agent-run-7.patch"));
+        assert!(!shown.contains(&token));
     }
 
     #[test]
