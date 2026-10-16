@@ -108,6 +108,7 @@ class PolicyTest(unittest.TestCase):
         for value in ['"example.com"', '["*.example.com"]', '["https://example.com"]',
                       '["example.com:443"]', '["192.0.2.1"]', '["::1"]', '[1]',
                       '["localhost"]', '["-bad.example"]', '["a..example"]',
+                      '["example.com.."]', '["example.com..."]', '["."]',
                       repr(["a.example"] * (MAX_ALLOWED_DOMAINS + 1))]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.load_text('[egress]\nmode = "allowlist"\nallow = ' + value)

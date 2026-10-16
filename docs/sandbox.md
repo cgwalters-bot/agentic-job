@@ -308,7 +308,8 @@ or agent-produced files.
 The gate applies to CONNECT and every HTTP request, including destinations of
 redirects and writes. A write still needs its write rule; the threat feed and
 Host/TLS-name checks still apply. Entries match the named domain and all its
-subdomains on label boundaries, ignoring case and a trailing dot. Use ASCII
+subdomains on label boundaries, ignoring case and one trailing dot; an entry
+with more than one trailing dot is refused rather than normalized. Use ASCII
 DNS names (punycode for international names), not URLs, ports, wildcards or IP
 literals. IP-literal destinations are refused in this mode. At most 256 entries
 of at most 253 characters are accepted; an empty list denies every destination.

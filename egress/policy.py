@@ -42,7 +42,9 @@ def parse_allowlist(data: dict) -> frozenset | None:
     for domain in domains:
         if not isinstance(domain, str) or len(domain) > 253:
             raise ValueError("[egress] allow entries must be DNS domain names")
-        domain = domain.lower().rstrip(".")
+        # One terminal dot names the root; refuse more rather than guess what
+        # a malformed entry meant.
+        domain = domain.lower().removesuffix(".")
         labels = domain.split(".")
         if len(labels) < 2 or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
                                   for label in labels):
