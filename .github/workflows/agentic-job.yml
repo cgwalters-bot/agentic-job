@@ -301,7 +301,8 @@ on:
         description: Optional credential for applying safe outputs; defaults to the job token when empty
         required: false
       # For `inference-register: api-key`: the provider's API key. Only the
-      # agent job's `run` step gets it, and the sandbox user never does:
+      # agent job's `run` step and its check before secure-host get it, and
+      # the sandbox user never does:
       # `run` serves the agent a proxy that puts the key in place of a
       # token of the run's (docs/inference.md).
       INFERENCE_API_KEY:
@@ -461,6 +462,14 @@ jobs:
         with:
           binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
           policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
+      # With `api-key`, the key checked with the provider now, in seconds,
+      # rather than by `run` after the minutes of secure-host; nothing to
+      # do otherwise. Only the binary policy's commit built gets it, before
+      # anything of the agent's is on the machine, and never prints it.
+      - name: Check the inference API key
+        env:
+          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
+        run: agentic-job check-key --config .agentic-job/config.toml
       # `sandbox setup`, which ends by taking root from this job, and
       # `sandbox check`, with the binary and configuration of the policy
       # job. Every step after it is this file's, and none of them has root.

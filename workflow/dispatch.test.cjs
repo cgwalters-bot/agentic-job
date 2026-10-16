@@ -106,7 +106,9 @@ test('caller fixes capabilities and token boundary', () => {
     'comment-target: ${{ inputs.item }}', 'issue: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}', 'item-repo: ${{ inputs.item-repo }}',
     'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', "notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}",
     'model: ${{ needs.target.outputs.agent != \'fake\' && vars.AGENT_MODEL || \'\' }}', 'inference-url: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_URL || \'\' }}',
-    'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
+    'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}',
+    'inference-register: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_REGISTER || \'github-oidc\' }}',
+    'inference-provider: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_PROVIDER || \'\' }}']) {
     assert.ok(workflow.includes(line), line);
   }
   assert.doesNotMatch(workflow, /^\s+runner:/m);
@@ -114,7 +116,7 @@ test('caller fixes capabilities and token boundary', () => {
   const target = workflow.split('\n  target:\n')[1].split('\n  run:\n')[0];
   assert.doesNotMatch(target, /secrets(?:[.:]|\[)/);
   const forwarded = workflow.split('\n  run:\n')[1].split('    secrets:\n')[1].split('    permissions:\n')[0];
-  const names = ['SAFE_OUTPUTS_PAT'];
+  const names = ['SAFE_OUTPUTS_PAT', 'INFERENCE_API_KEY'];
   assert.deepEqual([...forwarded.matchAll(/^      ([-\w]+):/gm)].map(m => m[1]), names);
   for (const name of names) {
     assert.ok(workflow.includes(`      ${name}:\n        required: false`), name);
@@ -144,6 +146,18 @@ test('real agent preflight names all missing deployment variables together', asy
       INFERENCE_URL: 'http://broker', INFERENCE_AUDIENCE: 'broker' });
     assert.equal(calls.agent, AGENT);
   }
+  // With a provider's key, the provider in place of the audience.
+  for (const AGENT of ['opencode', 'claude']) {
+    const keyed = { AGENT, AGENT_MODEL: 'm', AGENT_RUNNER: 'ubuntu-26.04', INFERENCE_URL: 'https://api.example',
+      INFERENCE_REGISTER: 'api-key' };
+    await assert.rejects(preflight(keyed), /: INFERENCE_PROVIDER$/);
+    assert.equal((await preflight({ ...keyed, INFERENCE_PROVIDER: 'anthropic' })).agent, AGENT);
+  }
+  for (const INFERENCE_REGISTER of ['plain', 'token-file', ' api-key']) {
+    await assert.rejects(preflight({ AGENT: 'claude', INFERENCE_REGISTER }), /INFERENCE_REGISTER must be/);
+  }
+  // The scripted agent needs no inference, whatever the variables say.
+  assert.equal((await preflight({ INFERENCE_REGISTER: 'plain' })).agent, 'fake');
   await assert.rejects(preflight({ TARGET_REPO: 'other/repo' }), /APPLY_ENVIRONMENT/);
   // A pull request is opened from a fork, and a fix pushed to one, which
   // the job token cannot make.

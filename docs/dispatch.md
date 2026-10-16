@@ -165,6 +165,14 @@ Set operator-controlled repository variables (not dispatch inputs):
   `["self-hosted","agentic-job"]`, for a disposable proxy-reachable image.
 - `INFERENCE_URL`: the reachable broker URL, for example `http://BROKER:PORT`.
 - `INFERENCE_AUDIENCE`: the broker's configured GitHub OIDC audience.
+- Or, with a provider's API key and no broker: `INFERENCE_REGISTER` set to
+  `api-key`, `INFERENCE_PROVIDER` to `anthropic` (claude) or `openai`
+  (opencode), `INFERENCE_URL` to the provider's API root, such as
+  `https://api.anthropic.com`, no `INFERENCE_AUDIENCE`, and the key as the
+  repository secret `INFERENCE_API_KEY`, which a copied caller passes on
+  as it passes `SAFE_OUTPUTS_PAT`. The agent job checks the key with the
+  provider before `secure-host`, and only that check and `run` get it
+  ([inference](inference.md#a-provider-api-key)).
 - `AGENT_CONFIG`: the caller's runner configuration path if not using hosted
   Ubuntu 26.04 or giving your targets a toolchain. The default is this
   repository's `hosted.toml` at the pinned commit; a scripted trial always
@@ -176,8 +184,10 @@ Set operator-controlled repository variables (not dispatch inputs):
   a directory shared by both agents needs both `opencode.json` and `config.toml`. They
   select agent configuration, not the runner TOML named by `AGENT_CONFIG`.
 
-Preflight names **all** missing model, runner, URL and audience variables at
-once, before policy/build or agent startup. It rejects unknown agents.
+Preflight names **all** missing model, runner, URL and audience (or, with
+`api-key`, provider) variables at once, before policy/build or agent
+startup. It rejects unknown agents and registrations other than
+`github-oidc` and `api-key`.
 With `claude` or `opencode`, `implement` installs the [skills](skills.md) and
 its task names the skill ("Use the implement skill") in place of the procedure.
 Real agents have a 150-request cap; scripted sessions have no inference and

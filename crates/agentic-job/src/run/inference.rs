@@ -704,18 +704,13 @@ impl Run {
             }
             Mode::Plain => None,
             Mode::ApiKey { provider } => {
-                let key = identity.api_key.as_deref().with_context(|| {
-                    format!(
-                        "register = \"api-key\" needs the provider's key in {}: pass it as \
-                         the workflow's secret INFERENCE_API_KEY{}",
-                        api_key::API_KEY_VAR,
-                        github_hint(*provider)
-                    )
-                })?;
-                let key = ApiKey::new(key)?;
-                retry.run(stopped, |_| {
-                    check_key(&http, &endpoint.url, *provider, &key)
-                })?;
+                let key = check_api_key(
+                    &endpoint.url,
+                    *provider,
+                    identity.api_key.as_deref(),
+                    retry,
+                    stopped,
+                )?;
                 let local = Local::start(*provider, &endpoint.url, key, identity.max_requests)?;
                 eprintln!(
                     "Serving the run's inference proxy at {} for the {} API at {}",
@@ -985,6 +980,30 @@ impl Run {
 /// Stops the counting of a run's requests when dropped.
 pub struct Counter {
     _stop: mpsc::Sender<()>,
+}
+
+/// Checks KEY, as the environment has it, with the provider at URL, and
+/// returns it: what `run` does before the agent starts, and `check-key`
+/// before the host is secured.
+pub fn check_api_key(
+    url: &str,
+    provider: Provider,
+    key: Option<&str>,
+    retry: Retry,
+    stopped: Stopped,
+) -> Result<ApiKey> {
+    let key = key.with_context(|| {
+        format!(
+            "register = \"api-key\" needs the provider's key in {}: pass it as the workflow's \
+              secret INFERENCE_API_KEY{}",
+            api_key::API_KEY_VAR,
+            github_hint(provider)
+        )
+    })?;
+    let key = ApiKey::new(key)?;
+    let http = http();
+    retry.run(stopped, |_| check_key(&http, url, provider, &key))?;
+    Ok(key)
 }
 
 /// Checks KEY with the provider at URL by asking for its list of models,

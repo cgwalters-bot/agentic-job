@@ -338,3 +338,41 @@ fn oversized_evidence_never_registers() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("at most 2 MiB"));
 }
+
+/// Agent credentials never reach the detector's host. Unsupported modes
+/// must block apply, not silently bypass an explicitly enabled detector.
+#[test]
+fn agent_credential_modes_fail_closed() {
+    for inference in [
+        "register = 'api-key'\nprovider = 'openai'\nurl = 'http://127.0.0.1:1'",
+        "register = 'token-file'\ntoken-file = '/nonexistent'\nurl = 'http://127.0.0.1:1'",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("[inference]\n{inference}\n"),
+        )
+        .unwrap();
+        for (name, text) in [("task.md", "task"), ("agent_output.json", "{}")] {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args(["detect", "--config"])
+            .arg(dir.path().join("config.toml"))
+            .arg("--task")
+            .arg(dir.path().join("task.md"))
+            .arg("--checked")
+            .arg(dir.path())
+            .args(["--model", "stub"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{inference}: {stderr}");
+        assert!(stdout.is_empty(), "{inference}: {stdout}");
+        assert!(
+            stderr.contains("detector needs run registration"),
+            "{stderr}"
+        );
+    }
+}

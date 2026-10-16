@@ -16,6 +16,8 @@
 # runner (AGENT_RUNNER) must already reach INFERENCE_URL. The identity
 # token's `job_workflow_ref` names this file, so whatever admits the run
 # has to admit it (docs/review.md#configuration, docs/inference.md).
+# With a provider's API key instead (INFERENCE_REGISTER `api-key`), only
+# the agent job's key check and `run` get the key, never the sandbox.
 #
 # Another repository calls this file at a pinned commit from the same
 # events, with its own copies of the bounds and the task.
@@ -29,6 +31,10 @@ on:
     # Forward only this declared credential, never inherit.
     secrets:
       SAFE_OUTPUTS_PAT:
+        required: false
+      # With INFERENCE_REGISTER `api-key`: the provider's key, for the
+      # agent job's key check and `run` alone, as in agentic-job.yml.
+      INFERENCE_API_KEY:
         required: false
 permissions: {}
 jobs:
@@ -85,6 +91,11 @@ jobs:
       agent-config-repo: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
       agent-config-path: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       inference-url: ${{ vars.INFERENCE_URL }}
+      # A broker's `github-oidc` unless the repository says `api-key`, with
+      # the provider, and keeps the key as the secret INFERENCE_API_KEY.
+      # Repository variables only: no event or comment chooses them.
+      inference-register: ${{ vars.INFERENCE_REGISTER || 'github-oidc' }}
+      inference-provider: ${{ vars.INFERENCE_PROVIDER }}
       inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       # What one review may spend, stated here rather than inherited: model
       # requests, AIC (hundredths of a dollar; under the broker's `plain`
@@ -182,6 +193,12 @@ jobs:
       - name: The caller's network step
         if: ${{ hashFiles('.github/agentic-job/network/action.yml') != '' }}
         uses: ./.github/agentic-job/network # zizmor: ignore[self-repository] The caller's own action at the policy-decided base commit, not the head.
+      # As in agentic-job.yml: with `api-key`, the key checked with the
+      # provider before secure-host's minutes; nothing to do otherwise.
+      - name: Check the inference API key
+        env:
+          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
+        run: agentic-job check-key --config .agentic-job/config.toml
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
@@ -191,6 +208,9 @@ jobs:
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           github-token: ${{ github.token }}
+          # Held by `run` outside the sandbox; the agent gets a token of
+          # the run's in its place (docs/inference.md).
+          inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
 
   check:
     needs: [policy, agent]

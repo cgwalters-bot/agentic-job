@@ -75,7 +75,8 @@ pub fn run(args: &Args) -> Result<Exit> {
     }
     let config = Config::load(&args.config)?;
     let endpoint = Endpoint::from_config(&config.inference)?.context("detector needs inference")?;
-    // A caller's static agent token must not be exposed on this separate host.
+    // Agent credentials must not reach this host. An enabled detector must
+    // fail closed when it cannot register, regardless of credential mode.
     ensure!(
         !matches!(endpoint.mode, Mode::TokenFile { .. } | Mode::ApiKey { .. }),
         "detector needs run registration"

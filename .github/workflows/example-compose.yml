@@ -84,6 +84,10 @@ jobs:
       #   inference-url: ${{ vars.INFERENCE_URL }}
       #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       #   max-requests: "150"
+      # or, with a provider's API key in place of a proxy (docs/inference.md):
+      #   inference-url: https://api.anthropic.com
+      #   inference-register: api-key
+      #   inference-provider: anthropic
       max-requests: "0"
       artifact-prefix: compose-
 
@@ -138,6 +142,12 @@ jobs:
       - name: A caller's privileged step (example)
         run: sudo install -m 0600 -o root -g root /dev/null /var/lib/compose-caller-step
       # ---- End of your privileged steps. ----
+      # With `inference-register: api-key`, declare the secret
+      # INFERENCE_API_KEY and check the key here, before secure-host's
+      # minutes, as agentic-job.yml does:
+      #   - env:
+      #       AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
+      #     run: agentic-job check-key --config .agentic-job/config.toml
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
@@ -148,6 +158,9 @@ jobs:
         with:
           # The job's own read-only token expires when the job ends.
           github-token: ${{ github.token }}
+          # With `api-key`, the provider's key, which `run` holds outside
+          # the sandbox; give it to no step of yours but the check above:
+          #   inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
       # ---- Your later steps go here. They run as the runner's user outside ----
       # the sandbox, with no sudo, after the agent's outputs are uploaded;
       # nothing of the agent's machine is trusted by check or apply. Treat

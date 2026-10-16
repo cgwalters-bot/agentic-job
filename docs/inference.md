@@ -174,10 +174,16 @@ agent's client would be given, such as `https://api.anthropic.com` or
 `https://api.openai.com/v1`, and must be `https` (plain `http` only to
 loopback). `github` is GitHub's billing, [below](#github-billing). `anthropic-url` and `openai-url` are refused, and so is an
 agent the provider's API does not serve: Vibe, and a child agent.
-Threat detection (`detect`) needs a registered run, and refuses this
-mode. The reusable workflow takes the key as the secret
-`INFERENCE_API_KEY` and gives it, as `AGENTIC_JOB_INFERENCE_KEY`, to
-the one step that runs `run`.
+Threat detection (`detect`) needs a registered run, and the key never
+reaches its host, so enabled detection fails closed in this mode and blocks
+apply. The caller must unset `AGENTIC_JOB_DETECT_MODEL` to use API-key
+inference without detection. The reusable workflows take the key as the secret
+`INFERENCE_API_KEY` and give it, as `AGENTIC_JOB_INFERENCE_KEY`, to the
+step that runs `run` and to `agentic-job check-key`, a step before
+`secure-host` that checks the key as below, so that a missing or refused
+key fails the job before minutes of setup. Both are binaries of the
+policy's commit; `check-key` runs before anything of the agent's is on
+the machine, and with another registration checks nothing.
 
 `run` reads the key from its environment and asks the provider for its
 list of models with it, retried as a registration is. A missing key, one

@@ -440,3 +440,31 @@ test('review.yml runs the caller\'s network step once, if any, before secure-hos
   assert.ok(pinned.length > 0);
   for (const action of pinned) assert.match(action, /^[-\w]+\/[-\w./]+@[0-9a-f]{40}$/, action);
 });
+
+// The provider's key, with `api-key`, reaches two steps of the agent job
+// and nothing else: its check before secure-host, which fails a bad key
+// before the minutes of setup, and `run`, outside the sandbox. In
+// review.yml the check follows the caller's network step, which never
+// gets it, and the policy call takes the mode from repository variables.
+for (const file of ['agentic-job.yml', 'review.yml']) {
+  test(`${file} checks the inference API key before secure-host and gives it to run alone`, () => {
+    const source = readFileSync(join(__dirname, '../.github/workflows', file), 'utf8');
+    const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+    const uses = [...source.matchAll(/secrets\.INFERENCE_API_KEY/g)].length;
+    assert.equal(uses, 2, file);
+    const check = "      - name: Check the inference API key\n        env:\n          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}\n" +
+      '        run: agentic-job check-key --config .agentic-job/config.toml\n';
+    assert.ok(agent.includes(check), file);
+    assert.match(agent, /\n {10}inference-api-key: \$\{\{ secrets\.INFERENCE_API_KEY \}\}\n/);
+    const at = text => { const index = agent.indexOf(text); assert.ok(index >= 0, `${file}: ${text}`); return index; };
+    const order = ['uses: ./.agentic-job-source/prepare',
+      ...(file === 'review.yml' ? ['uses: ./.github/agentic-job/network'] : []),
+      '- name: Check the inference API key', 'uses: ./.agentic-job-source/secure-host', 'uses: ./.agentic-job-source/run'].map(at);
+    assert.deepEqual(order, [...order].sort((a, b) => a - b), file);
+    assert.match(source, /^      INFERENCE_API_KEY:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
+    if (file === 'review.yml') {
+      assert.ok(source.includes("      inference-register: ${{ vars.INFERENCE_REGISTER || 'github-oidc' }}\n"));
+      assert.ok(source.includes('      inference-provider: ${{ vars.INFERENCE_PROVIDER }}\n'));
+    }
+  });
+}

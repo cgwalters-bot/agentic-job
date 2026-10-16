@@ -52,7 +52,11 @@ separate jobs on separate machines. The apply job's additional checks are
 ## Optional threat detection
 
 Set the caller repository variable `AGENTIC_JOB_DETECT_MODEL` to a model served
-by the configured inference proxy to enable detection. An empty or absent
+by the configured inference proxy to enable detection. A run with a provider's
+API key (`inference-register: api-key`) has no proxy the detector could
+register with, and its key never reaches the detector's host: enabled detection
+fails closed and blocks apply. To use API-key inference without detection,
+the caller must explicitly unset this variable. An empty or absent
 variable disables it (the default); dispatch inputs cannot change this setting.
 The concrete threats are prompt-injected output instructions, secret leaks and
 malicious patches that pass structural checks. Detection supplements, never
@@ -61,7 +65,7 @@ replaces, deterministic validation, and is not proof that a proposal is safe.
 The separate detect job has `contents: read` and `id-token: write`, no write
 credential or agent tools. It registers its own run through the same inference
 proxy using the policy's configuration (`github-oidc` or `plain`, not
-`token-file`). That proxy must be reachable from the hosted detector runner.
+`token-file` or `api-key`, which fail). That proxy must be reachable from the hosted detector runner.
 It sends the task, checked outputs and patches as untrusted evidence to one
 OpenAI-compatible chat-completions request, capped at 2 MiB of evidence, 256
 output tokens and 120 seconds. There are no retries or tool continuations.
@@ -161,7 +165,7 @@ agent. The pieces are:
 | Piece | What it is | Its credential |
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
-| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key or GitHub token as `run`'s input `inference-api-key`; for GitHub billing with this job's own token, `copilot-requests: write` and no GitHub read token |
+| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key or GitHub token as `run`'s input `inference-api-key`, and as `AGENTIC_JOB_INFERENCE_KEY` for an optional `agentic-job check-key --config .agentic-job/config.toml` before `secure-host`; for GitHub billing with this job's own token, `copilot-requests: write` and no GitHub read token |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
@@ -740,7 +744,8 @@ access as the secret `INFERENCE_API_KEY`
 ([GitHub billing](inference.md#github-billing)). With a provider's API key
 (`inference-register: api-key`), it needs that key as `INFERENCE_API_KEY`,
 `inference-url` and `inference-provider` ([inference](../README.md#inference)); the agent
-programs and limits below still apply. The rest of this list is for a
+programs and limits below still apply. Opencode also needs its `model`,
+which has no default. The rest of this list is for a
 broker.
 
 Before replacing `agent: fake` with a broker, ask the inference and network
@@ -904,9 +909,10 @@ starts; the message names the input `max-requests`, which sets
 inference proxy, the scripted agent's for one, passes `max-requests:
 "0"` and keeps `budget`.
 
-**An inference proxy**, for a real agent: `inference-url`, as
-`http://ADDRESS:PORT`, and how the run announces itself there
-(`inference-register`). The workflow passes `github-oidc` unless told
+**Inference**, for a real agent: `inference-url`, a broker's address
+(such as `http://ADDRESS:PORT`) or, with `api-key`, the provider's API
+root (such as `https://api.anthropic.com`), and how the run announces
+itself there (`inference-register`). The workflow passes `github-oidc` unless told
 otherwise: the job proves to the proxy that it is a CI job with its
 identity token, for the audience `inference-audience`, which the agent's
 user cannot obtain. `plain` sends the run's name and no proof, and
@@ -914,7 +920,8 @@ user cannot obtain. `plain` sends the run's name and no proof, and
 both have to be chosen by name. `api-key` needs no proxy of anyone's:
 `inference-url` is the provider's API root, `inference-provider` the API
 it speaks, and the secret `INFERENCE_API_KEY` its key, which only the
-agent job's `run` step gets ([inference.md](inference.md#a-provider-api-key)).
+agent job's key check before `secure-host` and its `run` step get
+([inference.md](inference.md#a-provider-api-key)).
 `inference-provider: github` alone sets `api-key` and GitHub's API root,
 whatever `inference-register` and `inference-url` say, unless
 `inference-register` is `api-key` ([GitHub billing](inference.md#github-billing)). The proxy speaks

@@ -42,6 +42,7 @@ pub mod egress;
 pub mod enter;
 pub mod handback;
 pub mod inference;
+pub mod key_check;
 pub mod launch;
 pub mod log;
 pub mod probe;

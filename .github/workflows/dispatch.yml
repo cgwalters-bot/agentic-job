@@ -10,6 +10,10 @@ on:
     secrets:
       SAFE_OUTPUTS_PAT:
         required: false
+      # With INFERENCE_REGISTER `api-key`: the provider's key, which only
+      # the agent job's key check and `run` get (agentic-job.yml).
+      INFERENCE_API_KEY:
+        required: false
     outputs:
       review-head:
         description: Exact PR head resolved for the review profile
@@ -97,6 +101,8 @@ jobs:
           AGENT_RUNNER: ${{ vars.AGENT_RUNNER }}
           INFERENCE_URL: ${{ vars.INFERENCE_URL }}
           INFERENCE_AUDIENCE: ${{ vars.INFERENCE_AUDIENCE }}
+          INFERENCE_REGISTER: ${{ vars.INFERENCE_REGISTER }}
+          INFERENCE_PROVIDER: ${{ vars.INFERENCE_PROVIDER }}
           APPLY_ENVIRONMENT: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}
         with:
           script: |
@@ -110,8 +116,17 @@ jobs:
             }
             const agent = process.env.AGENT;
             if (!['fake', 'opencode', 'claude', 'vibe'].includes(agent)) throw new Error('AGENT must be fake, opencode, claude or vibe');
+            // A broker's registration by the job's identity token, or the
+            // provider's API key (INFERENCE_REGISTER `api-key`), held as the
+            // secret INFERENCE_API_KEY. This job holds no secret: the agent
+            // job checks the key, before secure-host.
+            const register = process.env.INFERENCE_REGISTER || 'github-oidc';
+            if (agent !== 'fake' && !['github-oidc', 'api-key'].includes(register)) {
+              throw new Error('INFERENCE_REGISTER must be empty, github-oidc or api-key');
+            }
+            const apiKey = register === 'api-key';
             const missing = agent === 'fake' ? [] :
-              ['AGENT_MODEL', 'AGENT_RUNNER', 'INFERENCE_URL', 'INFERENCE_AUDIENCE']
+              ['AGENT_MODEL', 'AGENT_RUNNER', 'INFERENCE_URL', apiKey ? 'INFERENCE_PROVIDER' : 'INFERENCE_AUDIENCE']
                 .filter(key => !process.env[key]?.trim());
             const repo = process.env.TARGET_REPO;
             const item = process.env.TARGET_ITEM;
@@ -182,6 +197,7 @@ jobs:
     # checker; the agent gets only its job's read-only token.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}
+      INFERENCE_API_KEY: ${{ !inputs.scripted && secrets.INFERENCE_API_KEY || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
       # use these writes; neither executes agent-produced code. Every push
@@ -221,6 +237,8 @@ jobs:
       # policy, and the bounds must allow the push (off by default).
       push-item: ${{ inputs.kind == 'fix' && inputs.item || '' }}
       inference-url: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_URL || '' }}
+      inference-register: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_REGISTER || 'github-oidc' }}
+      inference-provider: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_PROVIDER || '' }}
       inference-audience: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_AUDIENCE || '' }}
       output-repo: ${{ inputs.repo }}
       item-repo: ${{ inputs.item-repo }}

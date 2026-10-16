@@ -579,3 +579,80 @@ fn ending_the_run_cuts_off_a_request_on_its_way() {
     assert_eq!(mock.seen().len(), 1, "only the check of the key");
     assert_eq!(run.usage().unwrap().model_requests(), Some(0));
 }
+
+/// `check-key`, the workflow's step before `sandbox setup`, as a job runs
+/// it: (the provider, the key in its environment, whether it passes, what
+/// stderr says).
+#[test]
+fn check_key_checks_the_key_before_the_host_is_secured() {
+    let wrong = format!("{}-{}", "test-key-not-secret", "wrong-one");
+    let cases: [(Provider, Option<String>, bool, &str); 5] = [
+        (Provider::Anthropic, Some(key()), true, "took the key"),
+        (Provider::Openai, Some(key()), true, "took the key"),
+        (Provider::Anthropic, None, false, "INFERENCE_API_KEY"),
+        (Provider::Anthropic, Some(String::new()), false, "is empty"),
+        (
+            Provider::Openai,
+            Some(wrong.clone()),
+            false,
+            "refused the API key",
+        ),
+    ];
+    for (provider, given, passes, says) in cases {
+        let mock = MockProvider::start(provider);
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[inference]\nurl = \"{}\"\nregister = \"api-key\"\nprovider = \"{}\"\n",
+                mock.url,
+                provider.as_str()
+            ),
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-job"));
+        command
+            .args(["check-key", "--config"])
+            .arg(&config)
+            .env_remove(API_KEY_VAR);
+        if let Some(given) = &given {
+            command.env(API_KEY_VAR, given);
+        }
+        let got = command.output().unwrap();
+        let (stdout, stderr) = (
+            String::from_utf8(got.stdout).unwrap(),
+            String::from_utf8(got.stderr).unwrap(),
+        );
+        let case = format!("{provider:?} {:?}: {stderr}", given.is_some());
+        assert_eq!(got.status.success(), passes, "{case}");
+        assert!(stderr.contains(says), "{case}");
+        // The key is never printed, nor the wrong one the provider refused.
+        for key in [key(), wrong.clone()] {
+            assert!(!stderr.contains(&key) && !stdout.contains(&key), "{case}");
+        }
+        // Only the list of models was asked for, and only with a key.
+        let seen = mock.seen();
+        let asked = given.as_deref().is_some_and(|key| !key.is_empty());
+        assert_eq!(seen.len(), usize::from(asked), "{case}");
+        for request in seen {
+            assert_eq!(request.method, "GET", "{case}");
+        }
+    }
+
+    // A broker's configuration has no key to check, and asks nobody.
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[inference]\nurl = \"http://127.0.0.1:1\"\nregister = \"github-oidc\"\naudience = \"broker\"\n",
+    )
+    .unwrap();
+    let got = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .args(["check-key", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(got.status.success());
+    assert!(String::from_utf8_lossy(&got.stderr).contains("No API key to check"));
+}

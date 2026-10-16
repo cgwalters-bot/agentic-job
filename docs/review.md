@@ -285,13 +285,14 @@ deployment's proxy. Other repositories of this deployment call
 `cgwalters-forge/actions`' `cgwalters-review.yml`, which composes the same
 jobs at a release with that join. The inline join this replaces ran
 here; the network step itself has not yet run on a real pull request.
-It needs these repository or organization variables, and no secret:
+It needs these repository or organization variables, and with a broker no secret:
 
 | Variable | |
 | --- | --- |
 | `AGENT` | `claude` or `opencode`; unset fails the run rather than fall back to the scripted agent |
 | `AGENT_MODEL` | the model, as the proxy serves it |
 | `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and the audience of the run's identity token |
+| `INFERENCE_REGISTER`, `INFERENCE_PROVIDER` | optional: `api-key` and the provider (`anthropic` or `openai`) for a provider's API key in place of a broker; `INFERENCE_URL` is then the provider's API root, `INFERENCE_AUDIENCE` stays unset, and the key is the repository secret `INFERENCE_API_KEY` ([inference](inference.md#a-provider-api-key)) |
 | `AGENT_RUNNER` | optional, a runner label as JSON |
 | `AGENT_CONFIG` | optional, the caller's runner configuration file; default this repository's [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit, written for `ubuntu-26.04` |
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
@@ -299,7 +300,16 @@ It needs these repository or organization variables, and no secret:
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the submit job's
-token. The agent job's identity token names `review.yml` as its
+token. With `api-key`, the secret `INFERENCE_API_KEY` goes to the agent
+job's key check before `secure-host` and to `run`, as in `agentic-job.yml`,
+and never to the sandbox. The caller's network step does not get it, but
+what that step leaves running as root could read it, as it could read
+`run`'s environment. A pull request
+cannot reach it: the workflow, its steps and the network step are the base
+branch's, and the head is data inside the sandbox. Without a broker
+nothing caps reviews across runs, so the key's own spending limit at the
+provider is the only bound beyond each review's `max-requests`, `budget`
+and `timeout`. The agent job's identity token names `review.yml` as its
 `job_workflow_ref`, so the broker, and a network step's federated identity,
 have to admit it: here the `any_workflow` entry narrowed to this repository
 ([inference.md](inference.md#which-workflows-a-broker-admits)).
@@ -331,6 +341,8 @@ jobs:
       statuses: write
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      # Only with INFERENCE_REGISTER `api-key`:
+      INFERENCE_API_KEY: ${{ secrets.INFERENCE_API_KEY }}
 ```
 
 `COMMIT` is the full SHA of a reviewed commit of this repository. The caller

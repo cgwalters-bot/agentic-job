@@ -420,7 +420,10 @@ test('caller and write job retain the trusted-source boundary', () => {
     refusal: ['pull-requests'], submit: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);
-    if (name !== 'apply') assert.doesNotMatch(jobs[name], /secrets/, name);
+    // The agent job holds the provider's key, for its check and `run`
+    // alone, as agentic-job.yml's does; no other secret.
+    const secrets = name === 'agent' ? jobs[name].replaceAll('${{ secrets.INFERENCE_API_KEY }}', '') : jobs[name];
+    if (name !== 'apply') assert.doesNotMatch(secrets, /secrets/, name);
   }
   assert.match(jobs.agent, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
   for (const [, action] of caller.matchAll(/^ +(?:- )?uses: ([^.\s]\S*)/gm)) assert.match(action, /@[0-9a-f]{40}$/, action);
