@@ -53,7 +53,8 @@ impl Request {
     }
 }
 
-/// What the next registration gets in place of an answer.
+/// What the next registration, or ending with [`Proxy::fail_endings`],
+/// gets in place of an answer.
 #[derive(Debug, Clone)]
 pub enum Fault {
     /// A refusal, with its text.
@@ -89,8 +90,8 @@ struct State {
     unproven: bool,
     /// Whether the run API exists at all.
     no_run_api: bool,
-    /// Refusals for the next `DELETE`s.
-    end_faults: VecDeque<u16>,
+    /// Faults for the next `DELETE`s.
+    end_faults: VecDeque<Fault>,
     /// A proxy that will not let go of a run.
     keeps_runs_active: bool,
     run_secs: Option<u64>,
@@ -229,9 +230,6 @@ impl State {
     /// `GET` and `DELETE /v1/runs/self`.
     fn own(&mut self, request: &Request) -> (u16, String) {
         let ending = request.method == "DELETE";
-        if ending && let Some(status) = self.end_faults.pop_front() {
-            return (status, "upstream error\n".into());
-        }
         let keep = self.keeps_runs_active;
         let Some(run) = request
             .bearer()
@@ -280,11 +278,14 @@ impl Proxy {
                     let Some(request) = read_request(&stream) else {
                         return;
                     };
-                    let registering = request.method == "POST";
                     let (fault, (status, body)) = {
                         let mut state = state.lock().unwrap();
                         state.requests.push(request.clone());
-                        let fault = registering.then(|| state.faults.pop_front()).flatten();
+                        let fault = match request.method.as_str() {
+                            "POST" => state.faults.pop_front(),
+                            "DELETE" => state.end_faults.pop_front(),
+                            _ => None,
+                        };
                         let answer = match &fault {
                             Some(Fault::Status(status, text)) => (*status, (*text).to_owned()),
                             Some(Fault::Redirect(_)) => (307, String::new()),
@@ -339,8 +340,8 @@ impl Proxy {
         self
     }
 
-    pub fn fail_endings(&self, statuses: impl IntoIterator<Item = u16>) -> &Self {
-        self.state().end_faults.extend(statuses);
+    pub fn fail_endings(&self, faults: impl IntoIterator<Item = Fault>) -> &Self {
+        self.state().end_faults.extend(faults);
         self
     }
 

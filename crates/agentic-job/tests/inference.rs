@@ -480,7 +480,7 @@ fn the_end_of_a_run() {
     // A proxy that is briefly down is asked again.
     let proxy = Proxy::start();
     let run = register(&proxy, oidc_mode()).unwrap();
-    proxy.fail_endings([502, 503]);
+    proxy.fail_endings([502, 503].map(|status| Fault::Status(status, "upstream error\n")));
     assert!(matches!(run.end(QUICK).unwrap(), Ended::Ended(Some(_))));
     assert_eq!(
         proxy
@@ -496,7 +496,11 @@ fn the_end_of_a_run() {
     for (statuses, tries) in [(vec![500; 4], 4), (vec![400], 1)] {
         let proxy = Proxy::start();
         let run = register(&proxy, oidc_mode()).unwrap();
-        proxy.fail_endings(statuses);
+        proxy.fail_endings(
+            statuses
+                .into_iter()
+                .map(|status| Fault::Status(status, "upstream error\n")),
+        );
         let err = format!("{:#}", run.end(QUICK).unwrap_err());
         assert!(err.contains(LIVE), "{err}");
         assert_eq!(

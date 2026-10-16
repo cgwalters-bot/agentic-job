@@ -4,7 +4,7 @@
 mod support;
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -17,10 +17,23 @@ fn answer(finish: &str, message: Value) -> String {
     json!({"choices": [{"finish_reason": finish, "message": message}]}).to_string()
 }
 
-/// Answers the detector's one request with STATUS and BODY, after
-/// checking that it carries only data.
-fn serve(listener: TcpListener, status: u16, body: String) {
-    let (mut stream, _) = listener.accept().unwrap();
+/// What the model stub does with the detector's one request.
+#[derive(Default)]
+enum Model {
+    /// The detector must not ask at all.
+    #[default]
+    Unasked,
+    /// It answers with this status and body.
+    Answer(u16, String),
+    /// It reads the request and closes without answering.
+    Drop,
+    /// It promises one byte more than this body, sends the body and
+    /// closes.
+    Short(String),
+}
+
+/// Reads the detector's one request and checks that it carries only data.
+fn read_request(stream: &mut TcpStream) {
     let mut bytes = Vec::new();
     let header_end = loop {
         let mut byte = [0];
@@ -51,228 +64,262 @@ fn serve(listener: TcpListener, status: u16, body: String) {
         serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
     assert_eq!(evidence["task"], "task");
     assert_eq!(evidence["patches"].as_array().unwrap().len(), 2);
+}
+
+/// Serves the detector's one request as MODEL says.
+fn serve(listener: TcpListener, model: Model) {
+    let (mut stream, _) = listener.accept().unwrap();
+    read_request(&mut stream);
+    let (status, body, extra) = match model {
+        Model::Unasked => unreachable!(),
+        Model::Answer(status, body) => (status, body, 0),
+        Model::Drop => return,
+        Model::Short(body) => (200, body, 1),
+    };
     // The detector stops reading an oversized answer, so the rest of the
     // write may fail.
     let _ = write!(
         stream,
         "HTTP/1.1 {status} Stub\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        body.len() + extra
     );
 }
 
-/// (case, registration fault, ending fault, status, body, what stderr
-/// says, run states)
-type Case = (
-    &'static str,
-    Option<Fault>,
-    Option<u16>,
-    u16,
-    String,
-    &'static str,
-    &'static [&'static str],
-);
+/// One way the detector's run can go: what the proxy and the model do,
+/// what stderr then says, and the run states and live tokens the proxy
+/// is left with.
+#[derive(Default)]
+struct Case {
+    name: &'static str,
+    registration: Option<Fault>,
+    ending: Option<Fault>,
+    model: Model,
+    error: &'static str,
+    states: &'static [&'static str],
+    live: usize,
+}
 
 /// Every way the one detector request can go wrong must fail `detect`,
 /// which is what keeps check.yml from releasing the artifact to apply.
 #[test]
 fn stub_detector_gates_and_always_ends_its_run() {
     let clean = || json!({"content": CLEAN});
+    let ok = |message| Model::Answer(200, answer("stop", message));
     let malicious = r#"{"prompt_injection":false,"secret_leak":false,"malicious_patch":true}"#;
     let tool =
         json!([{"id": "1", "type": "function", "function": {"name": "x", "arguments": "{}"}}]);
-    let cases: Vec<Case> = vec![
-        (
-            "clean",
-            None,
-            None,
-            200,
-            answer("stop", clean()),
-            "",
-            &["finished"],
-        ),
-        (
-            "threat",
-            None,
-            None,
-            200,
-            answer("stop", json!({"content": malicious})),
-            "refused the proposal",
-            &["finished"],
-        ),
-        (
-            "not JSON",
-            None,
-            None,
-            200,
-            answer("stop", json!({"content": "not JSON"})),
-            "invalid detector verdict",
-            &["finished"],
-        ),
-        (
-            "truncated",
-            None,
-            None,
-            200,
-            answer("length", clean()),
-            "incomplete detector response",
-            &["finished"],
-        ),
-        (
-            "unavailable",
-            None,
-            None,
-            503,
-            answer("stop", clean()),
-            "http status: 503",
-            &["finished"],
-        ),
-        (
-            "registration refused",
-            Some(Fault::Status(503, "upstream error\n")),
-            None,
-            200,
-            String::new(),
-            "registering the run",
-            &[],
-        ),
-        (
-            "registration lost",
-            Some(Fault::Closed),
-            None,
-            200,
-            String::new(),
-            "cannot reach the inference proxy",
-            &[],
-        ),
+    let finished: &[&str] = &["finished"];
+    let cases = [
+        Case {
+            name: "clean",
+            model: ok(clean()),
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "threat",
+            model: ok(json!({"content": malicious})),
+            error: "refused the proposal",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "not JSON",
+            model: ok(json!({"content": "not JSON"})),
+            error: "invalid detector verdict",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "truncated",
+            model: Model::Answer(200, answer("length", clean())),
+            error: "incomplete detector response",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "unavailable",
+            model: Model::Answer(503, answer("stop", clean())),
+            error: "http status: 503",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "registration refused",
+            registration: Some(Fault::Status(503, "upstream error\n")),
+            error: "registering the run",
+            ..Case::default()
+        },
+        Case {
+            name: "registration lost",
+            registration: Some(Fault::Closed),
+            error: "cannot reach the inference proxy",
+            ..Case::default()
+        },
+        // The proxy registered the run, but the detector never learned
+        // its token, so cannot end it: the proxy's expiry does.
+        Case {
+            name: "registration reply lost",
+            registration: Some(Fault::LostReply),
+            error: "cannot reach the inference proxy",
+            states: &["active"],
+            live: 1,
+            ..Case::default()
+        },
         // A clean verdict is not enough when the run cannot be ended.
-        (
-            "ending refused",
-            None,
-            Some(503),
-            200,
-            answer("stop", clean()),
-            "ending the run at the proxy failed",
-            &["active"],
-        ),
-        (
-            "tool calls",
-            None,
-            None,
-            200,
-            answer("tool_calls", json!({"content": CLEAN, "tool_calls": tool})),
-            "incomplete detector response",
-            &["finished"],
-        ),
-        (
-            "tool calls on stop",
-            None,
-            None,
-            200,
-            answer("stop", json!({"content": CLEAN, "tool_calls": tool})),
-            "detector requested tools",
-            &["finished"],
-        ),
-        (
-            "function call",
-            None,
-            None,
-            200,
-            answer(
-                "stop",
-                json!({"content": CLEAN, "function_call": {"name": "x", "arguments": "{}"}}),
+        Case {
+            name: "ending refused",
+            ending: Some(Fault::Status(503, "upstream error\n")),
+            model: ok(clean()),
+            error: "ending the run at the proxy failed",
+            states: &["active"],
+            live: 1,
+            ..Case::default()
+        },
+        Case {
+            name: "ending lost",
+            ending: Some(Fault::Closed),
+            model: ok(clean()),
+            error: "to end the run",
+            states: &["active"],
+            live: 1,
+            ..Case::default()
+        },
+        // Here and below only ureq's text says what went wrong, and
+        // this is its shortest stable part.
+        Case {
+            name: "model drops the connection",
+            model: Model::Drop,
+            error: "Peer disconnected",
+            states: finished,
+            ..Case::default()
+        },
+        // All of a clean answer, but short of the length it promised: a
+        // body that ends early must not be taken for the whole of it.
+        Case {
+            name: "model truncates the body",
+            model: Model::Short(answer("stop", clean())),
+            error: "Peer disconnected",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "tool calls",
+            model: Model::Answer(
+                200,
+                answer("tool_calls", json!({"content": CLEAN, "tool_calls": tool})),
             ),
-            "detector requested tools",
-            &["finished"],
-        ),
-        (
-            "no choices",
-            None,
-            None,
-            200,
-            json!({"choices": []}).to_string(),
-            "incomplete detector response",
-            &["finished"],
-        ),
-        (
-            "choices not a list",
-            None,
-            None,
-            200,
-            json!({"choices": {"finish_reason": "stop", "message": {"content": CLEAN}}})
+            error: "incomplete detector response",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "tool calls on stop",
+            model: ok(json!({"content": CLEAN, "tool_calls": tool})),
+            error: "detector requested tools",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "function call",
+            model: ok(json!({"content": CLEAN, "function_call": {"name": "x", "arguments": "{}"}})),
+            error: "detector requested tools",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "no choices",
+            model: Model::Answer(200, json!({"choices": []}).to_string()),
+            error: "incomplete detector response",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "choices not a list",
+            model: Model::Answer(
+                200,
+                json!({"choices": {"finish_reason": "stop", "message": {"content": CLEAN}}})
+                    .to_string(),
+            ),
+            error: "missing detector choices",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "two choices",
+            model: Model::Answer(
+                200,
+                json!({"choices": [
+                    {"finish_reason": "stop", "message": {"content": CLEAN}},
+                    {"finish_reason": "stop", "message": {"content": CLEAN}},
+                ]})
                 .to_string(),
-            "missing detector choices",
-            &["finished"],
-        ),
-        (
-            "two choices",
-            None,
-            None,
-            200,
-            json!({"choices": [
-                {"finish_reason": "stop", "message": {"content": CLEAN}},
-                {"finish_reason": "stop", "message": {"content": CLEAN}},
-            ]})
-            .to_string(),
-            "incomplete detector response",
-            &["finished"],
-        ),
-        (
-            "no message",
-            None,
-            None,
-            200,
-            json!({"choices": [{"finish_reason": "stop"}]}).to_string(),
-            "missing detector verdict",
-            &["finished"],
-        ),
-        (
-            "content not text",
-            None,
-            None,
-            200,
-            answer(
-                "stop",
-                json!({"content": [{"type": "text", "text": CLEAN}]}),
             ),
-            "missing detector verdict",
-            &["finished"],
-        ),
-        (
-            "not an object",
-            None,
-            None,
-            200,
-            "[]".to_owned(),
-            "missing detector choices",
-            &["finished"],
-        ),
+            error: "incomplete detector response",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "no message",
+            model: Model::Answer(
+                200,
+                json!({"choices": [{"finish_reason": "stop"}]}).to_string(),
+            ),
+            error: "missing detector verdict",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "content not text",
+            model: ok(json!({"content": [{"type": "text", "text": CLEAN}]})),
+            error: "missing detector verdict",
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "not an object",
+            model: Model::Answer(200, "[]".to_owned()),
+            error: "missing detector choices",
+            states: finished,
+            ..Case::default()
+        },
         // A clean answer padded past the 32 KiB response cap.
-        (
-            "oversized",
-            None,
-            None,
-            200,
-            json!({
-                "choices": [{"finish_reason": "stop", "message": {"content": CLEAN}}],
-                "padding": "x".repeat(32 * 1024),
-            })
-            .to_string(),
-            "larger than request limit",
-            &["finished"],
-        ),
+        Case {
+            name: "oversized",
+            model: Model::Answer(
+                200,
+                json!({
+                    "choices": [{"finish_reason": "stop", "message": {"content": CLEAN}}],
+                    "padding": "x".repeat(32 * 1024),
+                })
+                .to_string(),
+            ),
+            error: "larger than request limit",
+            states: finished,
+            ..Case::default()
+        },
     ];
-    for (case, registration, ending, status, body, error, states) in cases {
+    for Case {
+        name: case,
+        registration,
+        ending,
+        model,
+        error,
+        states,
+        live,
+    } in cases
+    {
         let proxy = Proxy::start();
         proxy.admit_unproven();
-        let registers = registration.is_none();
         proxy.fail_registrations(registration);
         proxy.fail_endings(ending);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        listener.set_nonblocking(!registers).unwrap();
         // Without a run the detector must not ask the model at all.
-        let listener = if registers {
-            Ok(std::thread::spawn(move || serve(listener, status, body)))
+        let asked = !matches!(model, Model::Unasked);
+        listener.set_nonblocking(!asked).unwrap();
+        let listener = if asked {
+            Ok(std::thread::spawn(move || serve(listener, model)))
         } else {
             Err(listener)
         };
@@ -315,11 +362,7 @@ fn stub_detector_gates_and_always_ends_its_run() {
         assert_eq!(output.status.success(), case == "clean", "{case}: {stderr}");
         assert!(stderr.contains(error), "{case}: {stderr}");
         assert_eq!(proxy.run_states(), states, "{case}");
-        assert_eq!(
-            proxy.live_tokens().len(),
-            usize::from(ending.is_some()),
-            "{case}"
-        );
+        assert_eq!(proxy.live_tokens().len(), live, "{case}");
     }
 }
 
