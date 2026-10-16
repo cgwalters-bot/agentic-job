@@ -221,6 +221,87 @@ fn an_openai_compatible_provider_gets_the_key_as_its_bearer() {
     );
 }
 
+/// GitHub billing: the GitHub token is checked against the model list
+/// as GitHub's API wants it, and both agents' requests reach that API
+/// with the token and the proxy's integration id in place of the run
+/// token. A missing token, and one without the permission, stop the run
+/// saying what GitHub takes, without the token.
+#[test]
+fn github_billing_puts_the_token_in_place_of_the_run_token() {
+    let mock = MockProvider::start(Provider::Github);
+    let run = register(&mock, Provider::Github, Some(key())).unwrap();
+    let check = &mock.seen()[0];
+    assert_eq!(
+        (check.method.as_str(), check.target.as_str()),
+        ("GET", "/models")
+    );
+    assert_eq!(check.headers["x-github-api-version"], "2026-07-01");
+    let agent = run.agent_endpoint(&endpoint(&mock.url, Provider::Github));
+    assert!(!format!("{agent:?}").contains(&key()));
+    let token = run.token().expose().to_owned();
+    // (where the agent's client was pointed, the path, its credential)
+    let cases = [
+        (
+            &agent.anthropic_url,
+            "/v1/messages",
+            ("x-run-token", &token),
+        ),
+        (
+            &agent.openai_url,
+            "/chat/completions",
+            ("authorization", &format!("Bearer {token}")),
+        ),
+        (
+            &agent.openai_url,
+            "/responses",
+            ("authorization", &format!("Bearer {token}")),
+        ),
+    ];
+    for (url, path, credential) in cases {
+        let (status, _, text) = ask(
+            url,
+            "POST",
+            path,
+            // The agent does not choose which integration it is.
+            &[
+                (credential.0, credential.1.as_str()),
+                ("copilot-integration-id", "vscode-chat"),
+            ],
+            "{\"model\":\"m\"}",
+        )
+        .unwrap();
+        assert_eq!((status, text.as_str()), (200, ANSWER), "{path}");
+        let forwarded = mock.seen().pop().unwrap();
+        assert_eq!(forwarded.target, path);
+        assert_eq!(
+            forwarded.headers["authorization"],
+            format!("Bearer {}", key())
+        );
+        assert_eq!(
+            forwarded.headers["copilot-integration-id"],
+            "agentic-workflows"
+        );
+        assert!(
+            !forwarded
+                .headers
+                .values()
+                .any(|value| value.contains(&token)),
+            "{forwarded:?}"
+        );
+    }
+    assert_eq!(run.usage().unwrap().model_requests(), Some(3));
+
+    let err = error(register(&mock, Provider::Github, None));
+    assert!(err.contains(API_KEY_VAR), "{err}");
+    assert!(err.contains("copilot-requests: write"), "{err}");
+    let wrong = format!("{}-{}", "test-key-not-secret", "no-permission");
+    let err = error(register(&mock, Provider::Github, Some(wrong.clone())));
+    assert!(err.contains("HTTP 403"), "{err}");
+    assert!(err.contains("\"Copilot Requests\" permission"), "{err}");
+    assert!(err.contains("copilot-requests: write"), "{err}");
+    assert!(!err.contains(&wrong), "{err}");
+}
+
 /// What the proxy refuses never reaches the provider: a request without
 /// the run's token, and one outside the model requests, such as a batch
 /// that the count would see as one request.
@@ -385,6 +466,22 @@ fn the_proxy_refuses_provider_network_access() {
             "/v1/messages",
             r#"{"model":"m","max_tokens":1,"messages":[],"mcp_servers":[{"type":"url","url":"https://attacker.invalid/mcp","name":"x"}]}"#,
         ),
+        // GitHub's API is held to both APIs' checks.
+        (
+            Provider::Github,
+            "/v1/messages",
+            r#"{"model":"m","max_tokens":1,"messages":[],"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
+        ),
+        (
+            Provider::Github,
+            "/responses",
+            r#"{"model":"m","input":"hi","tools":[{"type":"web_search"}]}"#,
+        ),
+        (
+            Provider::Github,
+            "/chat/completions",
+            r#"{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://attacker.invalid/image"}}]}]}"#,
+        ),
     ];
     for (provider, path, body) in cases {
         let mock = MockProvider::start(provider);
@@ -392,7 +489,7 @@ fn the_proxy_refuses_provider_network_access() {
         let agent = run.agent_endpoint(&endpoint(&mock.url, provider));
         let url = match provider {
             Provider::Anthropic => agent.anthropic_url,
-            Provider::Openai => agent.openai_url,
+            Provider::Openai | Provider::Github => agent.openai_url,
         };
         let token = run.token().expose().to_owned();
         let (status, _, text) = ask(&url, "POST", path, &[("x-run-token", &token)], body).unwrap();

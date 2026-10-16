@@ -13,8 +13,9 @@ inputs:
     default: ""
   inference-api-key:
     description: >-
-      For `[inference] register = "api-key"`, the provider's API key. Only `agentic-job run` gets
-      it, which keeps it from the agent; empty for a broker
+      For `[inference] register = "api-key"`, the provider's API key, or with `provider = "github"`
+      a GitHub token with Copilot access, never the one passed as `github-token`. Only
+      `agentic-job run` gets it, which keeps it from the agent; empty for a broker
     default: ""
 outputs:
   exit:

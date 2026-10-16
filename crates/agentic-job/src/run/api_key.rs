@@ -55,12 +55,24 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// The version of the Anthropic API the check of the key asks for; the
 /// agent's own requests carry theirs.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// What GitHub's Copilot API needs beside the token. A job token is a
+/// GitHub App's, and the API refuses one whose integration id is not
+/// one it allows for that App (HTTP 400); this is gh-aw's, which it
+/// sends for every engine it routes there, the job token's included
+/// (gh-aw-firewall `containers/api-proxy/providers/copilot.js`). It
+/// also decides which of the account's models the API offers.
+const GITHUB_INTEGRATION: (&str, &str) = ("copilot-integration-id", "agentic-workflows");
+/// The version of the model list the check of the key asks for, as gh-aw
+/// does.
+const GITHUB_API_VERSION: (&str, &str) = ("x-github-api-version", "2026-07-01");
 /// The headers of the agent's request not passed on: those of this
 /// connection, and every credential, the run token's included.
 const DROPPED_HEADERS: &[&str] = &[
     "authorization",
     "x-api-key",
     RUN_TOKEN_HEADER,
+    // Set by the proxy for GitHub: the agent does not choose another.
+    GITHUB_INTEGRATION.0,
     "cookie",
     "proxy-authorization",
     "host",
@@ -157,19 +169,23 @@ impl fmt::Debug for ApiKey {
     }
 }
 
-/// The header that carries KEY to PROVIDER.
-pub fn credential(provider: Provider, key: &ApiKey) -> (&'static str, String) {
+/// The headers that carry KEY to PROVIDER with every request.
+pub fn credential(provider: Provider, key: &ApiKey) -> Vec<(&'static str, String)> {
+    let bearer = ("authorization", format!("Bearer {}", key.expose()));
     match provider {
-        Provider::Anthropic => ("x-api-key", key.expose().to_owned()),
-        Provider::Openai => ("authorization", format!("Bearer {}", key.expose())),
+        Provider::Anthropic => vec![("x-api-key", key.expose().to_owned())],
+        Provider::Openai => vec![bearer],
+        Provider::Github => vec![bearer, (GITHUB_INTEGRATION.0, GITHUB_INTEGRATION.1.into())],
     }
 }
 
 /// The headers a check of KEY at PROVIDER sends.
 pub fn check_headers(provider: Provider, key: &ApiKey) -> Vec<(&'static str, String)> {
-    let mut headers = vec![credential(provider, key)];
-    if provider == Provider::Anthropic {
-        headers.push(("anthropic-version", ANTHROPIC_VERSION.to_owned()));
+    let mut headers = credential(provider, key);
+    match provider {
+        Provider::Anthropic => headers.push(("anthropic-version", ANTHROPIC_VERSION.to_owned())),
+        Provider::Github => headers.push((GITHUB_API_VERSION.0, GITHUB_API_VERSION.1.into())),
+        Provider::Openai => {}
     }
     headers
 }
@@ -179,15 +195,23 @@ pub fn check_headers(provider: Provider, key: &ApiKey) -> Vec<(&'static str, Str
 pub const fn models_path(provider: Provider) -> &'static str {
     match provider {
         Provider::Anthropic => "/v1/models",
-        Provider::Openai => "/models",
+        Provider::Openai | Provider::Github => "/models",
     }
 }
 
-/// The model requests of PROVIDER's API, under its root.
+/// The model requests of PROVIDER's API, under its root. GitHub's serves
+/// the Anthropic and the OpenAI ones at the same root, and the checks of
+/// a request's content go by its path.
 const fn model_paths(provider: Provider) -> &'static [&'static str] {
     match provider {
         Provider::Anthropic => &["/v1/messages", "/v1/messages/count_tokens"],
         Provider::Openai => &["/responses", "/chat/completions"],
+        Provider::Github => &[
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/responses",
+            "/chat/completions",
+        ],
     }
 }
 
@@ -584,8 +608,9 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
     if counted {
         request = request.header("content-type", "application/json");
     }
-    let (name, value) = credential(state.provider, &state.key);
-    request = request.header(name, value);
+    for (name, value) in credential(state.provider, &state.key) {
+        request = request.header(name, value);
+    }
     // Counted before it is sent: a request whose answer is lost may still
     // have been answered, and paid for.
     state.admit(counted)?;
@@ -893,7 +918,7 @@ mod tests {
     /// account's administration do not.
     #[test]
     fn what_is_forwarded() {
-        use Provider::{Anthropic, Openai};
+        use Provider::{Anthropic, Github, Openai};
         let cases = [
             (Anthropic, "POST", "/v1/messages", true),
             (Anthropic, "POST", "/v1/messages/count_tokens", true),
@@ -917,6 +942,15 @@ mod tests {
             (Openai, "POST", "/batches", false),
             (Openai, "POST", "/files", false),
             (Openai, "POST", "/v1/messages", false),
+            (Github, "POST", "/v1/messages", true),
+            (Github, "POST", "/chat/completions", true),
+            (Github, "POST", "/responses", true),
+            (Github, "GET", "/models", true),
+            (Github, "GET", "/v1/models", false),
+            (Github, "POST", "/v1/messages/batches", false),
+            (Github, "POST", "/files", false),
+            (Github, "POST", "/models/session", false),
+            (Github, "POST", "/auto", false),
         ];
         for (provider, method, path, want) in cases {
             assert_eq!(

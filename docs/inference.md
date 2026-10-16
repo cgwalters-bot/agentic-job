@@ -172,7 +172,7 @@ opencode at an OpenAI-compatible API with a bearer key (opencode's
 built-in configuration uses the Responses API); `url` is the root the
 agent's client would be given, such as `https://api.anthropic.com` or
 `https://api.openai.com/v1`, and must be `https` (plain `http` only to
-loopback). `anthropic-url` and `openai-url` are refused, and so is an
+loopback). `github` is GitHub's billing, [below](#github-billing). `anthropic-url` and `openai-url` are refused, and so is an
 agent the provider's API does not serve: Vibe, and a child agent.
 Threat detection (`detect`) needs a registered run, and refuses this
 mode. The reusable workflow takes the key as the secret
@@ -236,3 +236,56 @@ the job ends. A deployment that wants no long-lived key in its
 repositories uses a broker. gh-aw does the same with a proxy container
 on loopback beside the agent; here the proxy is part of `run`, so
 nothing else is started.
+
+## GitHub billing
+
+`provider = "github"` is the same proxy with a GitHub token as the key,
+so GitHub bills the run's inference as gh-aw's
+[Copilot engine](https://github.github.com/gh-aw/engines/copilot/) has
+it billed. In the reusable workflow `inference-provider: github` is the
+one input: it implies `register = "api-key"` and the root
+`https://api.githubcopilot.com`, and the token is the secret
+`INFERENCE_API_KEY`. Another root, such as GitHub Enterprise's, takes
+`inference-url` with `inference-register: api-key`, so that the URL of a
+broker left in a caller never gets the token (Enterprise is untried).
+
+The API is GitHub's Copilot API, the one gh-aw's
+[API proxy](https://github.com/github/gh-aw-firewall/blob/main/docs/api-proxy-sidecar.md)
+forwards to, at one root for both agents: Claude Code's `POST
+/v1/messages` and opencode's `POST /responses` and `/chat/completions`,
+with every check of the section above. The proxy sends the token as a
+bearer with gh-aw's `Copilot-Integration-Id`, `agentic-workflows`,
+in place of any the agent sends: the API refuses a job token without an
+integration id its App allows (HTTP 400), and the id also decides which
+models it offers. The key is checked against `GET /models`. `model` has
+to be a name that list offers: they are GitHub's, such as
+`claude-sonnet-4.5`, not the provider's. Claude Code's background
+requests name its own small model, which GitHub may not know under that
+name. opencode's built-in configuration uses the Responses API, which
+GitHub serves for some of its models only. GitHub Models
+(`models.github.ai`, `models: read`) is not used: it serves only OpenAI's
+chat completions, and no Anthropic model.
+
+GitHub takes two tokens for this, as it does for gh-aw:
+
+- a fine-grained personal access token with the Copilot Requests
+  permission, billed to its owner's Copilot. The reusable workflow takes
+  this one; its agent's GitHub read token is another.
+- the job's own token where the job has `copilot-requests: write`,
+  billed to the organization if its Copilot policy allows Copilot CLI
+  billed to it
+  ([GitHub's docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions)).
+  The reusable workflow does not ask for that permission: every caller
+  would have to grant it to every call, and the agent's read token,
+  the job's, would then pay for inference. An
+  [agent job of the caller's own](workflow.md#the-pieces-and-an-agent-job-of-your-own)
+  grants it and passes `inference-api-key: ${{ github.token }}` to
+  `run`, with `github-token` empty.
+
+`run` refuses a key that is also the agent's GitHub token, `GH_TOKEN`:
+the agent would hold what pays, outside the run's caps. It cannot tell
+whether another token the agent gets has Copilot access; in a job that
+grants `copilot-requests: write`, the job token must not be the agent's. A token GitHub
+refuses stops the run before the agent starts with GitHub's reason, such
+as a token without the Copilot Requests permission, and says which
+tokens it takes.

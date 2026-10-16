@@ -331,6 +331,25 @@ fn github_token() -> Result<Option<String>> {
     }
 }
 
+/// Refuses a provider's KEY that is also the agent's read-only GitHub
+/// TOKEN. A GitHub token is the key under `provider = "github"`, and a
+/// job's token is the one most callers give the agent: the agent would
+/// hold what pays for inference, and could spend it past the run's caps.
+fn separate_tokens(key: Option<&str>, token: Option<&str>) -> Result<()> {
+    let same = key
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty() && token.is_some_and(|token| token.trim() == key));
+    ensure!(
+        !same,
+        "{} is also {}, the agent's GitHub token: the agent would hold what pays for inference. \
+         Give the agent no GitHub token (the workflow's github-reads: false), or pay with \
+         another token",
+        api_key::API_KEY_VAR,
+        agent::GITHUB_TOKEN_VAR
+    );
+    Ok(())
+}
+
 /// What a private run (docs/private-repositories.md) needs of this
 /// machine before it clones: the proxy, with a policy that holds the
 /// sandbox to its allowlist and git fetch writes
@@ -546,6 +565,9 @@ impl Plan {
     /// never started. The registered run goes into SHARED as soon as
     /// there is one, so that whoever stops this can end it.
     fn prepare(&self, shared: &Shared) -> Result<Prepared> {
+        // Here, not in planning: like a missing or refused key, a key
+        // that is also the agent's token is a run that never started.
+        separate_tokens(self.identity.api_key.as_deref(), github_token()?.as_deref())?;
         let sandbox = &self.sandbox;
         if self.kind != Kind::Fake {
             // The session starts this binary as the sandbox user.
@@ -1432,6 +1454,29 @@ mod tests {
         assert!(!redacted.contains(&key), "{redacted}");
         assert!(!redacted.contains(token.expose()), "{redacted}");
         assert_eq!(redactor.count(), 2);
+    }
+
+    /// The token that pays for inference is never also the agent's.
+    #[test]
+    fn the_inference_key_is_not_the_agents_token() {
+        let key = format!("{}-{}", "test-key-not-secret", "0123456789abcdef");
+        let other = format!("{}-{}", "test-key-not-secret", "fedcba9876543210");
+        for (given, token, ok) in [
+            (None, Some(key.as_str()), true),
+            (Some(key.as_str()), None, true),
+            (Some(key.as_str()), Some(other.as_str()), true),
+            (Some(""), Some(""), true),
+            (Some(key.as_str()), Some(key.as_str()), false),
+            (Some(&format!("{key}\n")), Some(key.as_str()), false),
+        ] {
+            let result = separate_tokens(given, token);
+            assert_eq!(result.is_ok(), ok, "{given:?} {token:?}");
+            if let Err(err) = result {
+                let err = err.to_string();
+                assert!(err.contains("github-reads: false"), "{err}");
+                assert!(!err.contains(&key), "{err}");
+            }
+        }
     }
 
     #[test]

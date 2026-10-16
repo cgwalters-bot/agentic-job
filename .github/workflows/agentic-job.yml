@@ -153,7 +153,10 @@ on:
         type: string
         default: github-oidc
       inference-provider:
-        description: "For `api-key`, the API the key is for: `anthropic` (claude) or `openai` (opencode)"
+        description: >-
+          For `api-key`, the API the key is for: `anthropic` (claude), `openai` (opencode), or
+          `github` (either), which is GitHub's billing with a GitHub token as INFERENCE_API_KEY and
+          needs no other inference input (docs/inference.md)
         type: string
         default: ""
       inference-audience:

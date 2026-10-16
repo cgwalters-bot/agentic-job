@@ -722,8 +722,38 @@ fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
     let Some((user, _turn)) = sandbox_user() else {
         return;
     };
+    // GitHub billing takes the same way, with a GitHub token as the key.
+    let github = MockProvider::start(Provider::Github);
+    let job = Job::new("github");
+    job.repository(&user);
+    let got = Finished::of(
+        job.command(&config(&user, &api_key(&github, Provider::Github)))
+            .env(API_KEY_VAR, key())
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert_eq!(github.seen()[0].target, "/models");
+    assert!(!got.all().contains(&key()), "{}", got.all());
+    for (path, content) in job.written() {
+        assert!(!contains(&content, &key()), "{path}");
+    }
+    // Nor does the agent get it as its GitHub token.
+    let job = Job::new("shared");
+    job.repository(&user);
+    let got = Finished::of(
+        job.command(&config(&user, &api_key(&github, Provider::Github)))
+            .env(API_KEY_VAR, key())
+            .env("GH_TOKEN", key())
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
+    assert!(got.stderr.contains("github-reads: false"), "{}", got.all());
+    assert_eq!(github.seen().len(), 1);
+
     let provider = MockProvider::start(Provider::Anthropic);
-    let inference = api_key(&provider);
+    let inference = api_key(&provider, Provider::Anthropic);
     let job = Job::new("apikey");
     job.repository(&user);
     let got = Finished::of(
@@ -752,7 +782,7 @@ fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
     let job = Job::new("nokey");
     job.repository(&user);
     let got = Finished::of(
-        job.command(&config(&user, &api_key(&provider)))
+        job.command(&config(&user, &api_key(&provider, Provider::Anthropic)))
             .env_remove(API_KEY_VAR)
             .output()
             .unwrap(),
@@ -762,10 +792,11 @@ fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
     assert_eq!(provider.seen().len(), 1);
 }
 
-fn api_key(provider: &MockProvider) -> String {
+fn api_key(mock: &MockProvider, provider: Provider) -> String {
     format!(
-        "[inference]\nurl = \"{}\"\nregister = \"api-key\"\nprovider = \"anthropic\"\n",
-        provider.url
+        "[inference]\nurl = \"{}\"\nregister = \"api-key\"\nprovider = \"{}\"\n",
+        mock.url,
+        provider.as_str()
     )
 }
 

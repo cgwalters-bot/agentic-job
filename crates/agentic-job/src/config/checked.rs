@@ -86,16 +86,21 @@ impl Config {
     /// speaks one provider's API, which has to be the agent's.
     fn check_reachable(&self, kind: Kind, endpoint: &Endpoint, direct: &[Direct]) -> Result<()> {
         if let Mode::ApiKey { provider } = endpoint.mode {
-            let serves = match provider {
-                Provider::Anthropic => Kind::Claude,
-                Provider::Openai => Kind::Opencode,
+            let serves: &[Kind] = match provider {
+                Provider::Anthropic => &[Kind::Claude],
+                Provider::Openai => &[Kind::Opencode],
+                Provider::Github => &[Kind::Claude, Kind::Opencode],
             };
             ensure!(
-                kind == serves || kind == Kind::Fake,
+                serves.contains(&kind) || kind == Kind::Fake,
                 "inference.provider = {:?} serves the agent {}, not {}: register = \"api-key\" \
                  forwards one provider's API",
                 provider.as_str(),
-                serves.as_str(),
+                serves
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" or "),
                 kind.as_str()
             );
             return Ok(());
@@ -232,6 +237,8 @@ mod tests {
     const DIRECT: &str = "[egress]\ndirect = [\"http://100.64.0.1:18080\"]\n";
     const CHILD: &str = "[child-agent]\nname = \"vibe\"\nmodel = \"glm\"\n";
     const REQUESTS: &str = "[limits]\ntimeout-minutes = 10\nmax-requests = 50\n";
+    const GITHUB: &str = "[inference]\nurl = \"https://api.github.example\"\n\
+                          register = \"api-key\"\nprovider = \"github\"\n";
     const API_KEY: &str = "[inference]\nurl = \"https://api.anthropic.example\"\n\
                            register = \"api-key\"\nprovider = \"anthropic\"\n";
 
@@ -326,6 +333,17 @@ mod tests {
                 provider: Provider::Anthropic
             }
         );
+
+        // GitHub's API serves both agents' APIs.
+        for agent in [CLAUDE, "[agent]\nname = \"opencode\"\nmodel = \"m\"\n"] {
+            let github = checked(&format!("{agent}{GITHUB}{REQUESTS}")).unwrap();
+            assert_eq!(
+                github.endpoint.unwrap().mode,
+                Mode::ApiKey {
+                    provider: Provider::Github
+                }
+            );
+        }
 
         let text = format!(
             "[agent]\nname = \"opencode\"\nmodel = \"m\"\nskills = true\n{PROXY}{OIDC}{CAPPED}{DIRECT}"
@@ -468,6 +486,10 @@ model = \"m\"
             (
                 format!("{CLAUDE}{API_KEY}{REQUESTS}{CHILD}"),
                 "serves the agent claude, not vibe",
+            ),
+            (
+                format!("{CLAUDE}{GITHUB}{REQUESTS}{CHILD}"),
+                "serves the agent claude or opencode, not vibe",
             ),
             (
                 format!(

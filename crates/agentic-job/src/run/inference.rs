@@ -264,7 +264,7 @@ impl Endpoint {
                 );
                 let provider = provider.context(
                     "inference.provider: register = \"api-key\" needs the API the key is for, \
-                     \"anthropic\" or \"openai\"",
+                     \"anthropic\", \"openai\" or \"github\"",
                 )?;
                 return Ok(Some(Self {
                     anthropic_url: url.clone(),
@@ -707,8 +707,9 @@ impl Run {
                 let key = identity.api_key.as_deref().with_context(|| {
                     format!(
                         "register = \"api-key\" needs the provider's key in {}: pass it as \
-                         the workflow's secret INFERENCE_API_KEY",
-                        api_key::API_KEY_VAR
+                         the workflow's secret INFERENCE_API_KEY{}",
+                        api_key::API_KEY_VAR,
+                        github_hint(*provider)
                     )
                 })?;
                 let key = ApiKey::new(key)?;
@@ -1008,13 +1009,25 @@ fn check_key(http: &ureq::Agent, url: &str, provider: Provider, key: &ApiKey) ->
         200 => Attempt::Done(()),
         401 | 403 => Attempt::Failed(format!(
             "{at} refused the API key in {} (HTTP {}: {detail}): is it a key of this provider, \
-             and still valid?",
+             and still valid?{}",
             api_key::API_KEY_VAR,
-            answer.status
+            answer.status,
+            github_hint(provider)
+        )),
+        // GitHub's answer to a token whose App it does not serve.
+        400 if provider == Provider::Github => Attempt::Failed(format!(
+            "{at} refused the token in {} (HTTP 400: {detail}){}",
+            api_key::API_KEY_VAR,
+            github_hint(provider)
         )),
         404 => Attempt::Failed(format!(
-            "{at} has no {path} (HTTP 404): is inference.url the API's root, such as \
-             https://api.anthropic.com or https://api.openai.com/v1?"
+            "{at} has no {path} (HTTP 404): is inference.url the API's root, such as {}?",
+            match provider {
+                Provider::Github => "https://api.githubcopilot.com",
+                Provider::Anthropic | Provider::Openai => {
+                    "https://api.anthropic.com or https://api.openai.com/v1"
+                }
+            }
         )),
         status if answer.transient() => {
             Attempt::Again(format!("checking the key with {at}: HTTP {status}"))
@@ -1022,6 +1035,18 @@ fn check_key(http: &ureq::Agent, url: &str, provider: Provider, key: &ApiKey) ->
         status => Attempt::Failed(format!(
             "checking the key with {at} failed (HTTP {status}: {detail})"
         )),
+    }
+}
+
+/// What GitHub's API takes as the key, for a refusal to say.
+fn github_hint(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Github => {
+            " (GitHub's API takes the job's token where the job has the permission \
+             copilot-requests: write, or a fine-grained personal access token with the \
+             Copilot Requests permission)"
+        }
+        Provider::Anthropic | Provider::Openai => "",
     }
 }
 

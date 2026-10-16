@@ -70,7 +70,7 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 | Where | What it holds |
 | --- | --- |
 | The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key`, the provider's key, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
@@ -91,11 +91,10 @@ jobs:
       outputs: create_pull_request,noop
       allow: .github/agentic-job/allow.toml   # what a run may ask for at all
       agent: claude
-      inference-url: https://api.anthropic.com
-      inference-register: api-key
-      inference-provider: anthropic
+      model: claude-sonnet-4.5   # a name GitHub's model list offers
+      inference-provider: github
     secrets:
-      INFERENCE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      INFERENCE_API_KEY: ${{ secrets.COPILOT_GITHUB_TOKEN }}
 ```
 
 That is the shape, not the whole call: a caller also grants the job its
@@ -157,8 +156,22 @@ runtime is unverified.
 ## Inference
 
 A real agent needs a model, and never holds the key that pays for it.
-There are two ways to give it one ([docs/inference.md](docs/inference.md)).
-The scripted agent (`agent: fake`) needs neither.
+There are three ways to give it one ([docs/inference.md](docs/inference.md)).
+The scripted agent (`agent: fake`) needs none.
+
+**GitHub's billing** (`inference-provider: github`) is the simplest,
+as gh-aw's Copilot engine is there. The caller stores a
+fine-grained personal access token with the Copilot Requests permission
+as a secret, `COPILOT_GITHUB_TOKEN` above, and passes it as
+`INFERENCE_API_KEY`; GitHub bills that account's Copilot. The run takes
+it the way it takes a provider's key, below: `run` checks it, serves the
+agent a loopback proxy that puts it in place of a token of the run's,
+and counts the requests. GitHub's API serves both Claude Code and
+opencode; `model` is a name from its model list. The organization's
+billing, through a job token with `copilot-requests: write`, needs an
+agent job of the caller's own: the called workflow cannot ask for that
+permission without every caller granting it, and its agent's GitHub
+token is the job's ([GitHub billing](docs/inference.md#github-billing)).
 
 **A provider API key** (`inference-register: api-key`) is the simple
 one. The caller stores the key in a repository secret and passes it as
@@ -304,9 +317,23 @@ against a source-matching attested manifest; see
 [where the binary comes from](docs/workflow.md#things-a-caller-should-know).
 
 **A real agent** replaces `agent: fake` with `claude`, drops
-`max-requests: "0"` (the default caps at 150 requests), and adds a
-provider's key ([inference](#inference)), stored as the repository
-secret `ANTHROPIC_API_KEY`:
+`max-requests: "0"` (the default caps at 150 requests), and adds
+GitHub's billing ([inference](#inference)), with a fine-grained token
+with the Copilot Requests permission stored as the repository secret
+`COPILOT_GITHUB_TOKEN`:
+
+```yaml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      INFERENCE_API_KEY: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+    with:
+      # ...
+      agent: claude
+      model: claude-sonnet-4.5
+      inference-provider: github
+```
+
+With a provider's key instead, stored as `ANTHROPIC_API_KEY`:
 
 ```yaml
     secrets:
@@ -320,8 +347,8 @@ secret `ANTHROPIC_API_KEY`:
       inference-provider: anthropic
 ```
 
-The hosted `ubuntu-26.04` runner reaches the provider as it is. With a
-broker instead, it adds:
+The hosted `ubuntu-26.04` runner reaches GitHub and the provider as it
+is. With a broker instead, it adds:
 
 ```yaml
       inference-url: ${{ vars.INFERENCE_URL }}
@@ -449,7 +476,10 @@ the issue that tracks it, where one is filed.
   not on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
 - With `inference-register: api-key`, nothing outside the provider caps
   what the long-lived key spends; the run's request cap and timeout bound
-  one run (no issue yet).
+  one run (no issue yet). GitHub billing is the same with a token.
+- GitHub billing through the job token needs an agent job of the
+  caller's own, without `github-reads`
+  ([GitHub billing](docs/inference.md#github-billing)).
 - A broker admits an agent job of the caller's own only by repository,
   any workflow of it ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,

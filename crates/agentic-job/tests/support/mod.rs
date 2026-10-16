@@ -429,6 +429,15 @@ fn credential(provider: Provider, headers: &BTreeMap<String, String>) -> Option<
             .get("authorization")?
             .strip_prefix("Bearer ")
             .map(str::to_owned),
+        // GitHub's API wants its integration id beside the token.
+        Provider::Github => headers
+            .get("authorization")?
+            .strip_prefix("Bearer ")
+            .filter(|_| {
+                headers.get("copilot-integration-id").map(String::as_str)
+                    == Some("agentic-workflows")
+            })
+            .map(str::to_owned),
     }
 }
 
@@ -488,6 +497,15 @@ fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<S
         body,
     });
     let (status, kind, extra, text) = match (method.as_str(), given == Some(key())) {
+        // As GitHub's API answers a job token without the permission.
+        (_, false) if provider == Provider::Github => (
+            403,
+            "text/plain",
+            "",
+            "forbidden: the GitHub App installation access token does not have the \
+             \"Copilot Requests\" permission"
+                .to_owned(),
+        ),
         (_, false) => (
             401,
             "application/json",

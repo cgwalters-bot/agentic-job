@@ -381,6 +381,9 @@ pub enum Provider {
     Anthropic,
     /// An OpenAI-compatible API (Responses, Chat Completions), for opencode.
     Openai,
+    /// GitHub's Copilot API, which serves both, billed to the owner of
+    /// the GitHub token used as the key: for Claude Code or opencode.
+    Github,
 }
 
 impl Provider {
@@ -388,6 +391,7 @@ impl Provider {
         match self {
             Self::Anthropic => "anthropic",
             Self::Openai => "openai",
+            Self::Github => "github",
         }
     }
 }
