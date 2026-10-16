@@ -10,6 +10,7 @@ use clap::Subcommand;
 use crate::exit::Exit;
 
 pub mod apt;
+pub mod inference;
 pub mod platform;
 pub mod world_write;
 
@@ -23,6 +24,11 @@ pub enum Command {
     WorldWrite {
         /// The policy object, `world_write.bpf.o`, that came with this binary
         object: PathBuf,
+    },
+    /// Refuse a runner that cannot open a TCP connection to the inference proxy CONFIG names
+    Inference {
+        /// The configuration `agentic-job config --host` wrote
+        config: PathBuf,
     },
 }
 
@@ -38,6 +44,10 @@ impl Command {
             Self::Apt => match apt::configure(std::path::Path::new(apt::APT)) {
                 Ok(()) => return Ok(Exit::Success),
                 Err(err) => eprintln!("configuring apt for CI: {err:#}"),
+            },
+            Self::Inference { config } => match inference::run(config) {
+                Ok(()) => return Ok(Exit::Success),
+                Err(err) => eprintln!("error: {err:#}"),
             },
             Self::WorldWrite { object } => match world_write::load(object) {
                 Ok(()) => return Ok(Exit::Success),

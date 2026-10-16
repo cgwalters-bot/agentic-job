@@ -291,6 +291,70 @@ test('the source an agent job takes its actions from is the policy call\'s own',
   }
 });
 
+// Followed through the composite actions in place: the agent job installs
+// the policy job's binary, writes no configuration of its own, checks the
+// inference proxy with that binary before setup, and runs the agent only
+// after the host is secured.
+test('the agent job installs the trusted binary and checks the proxy before setup', () => {
+  const secure = readFileSync(join(__dirname, '../secure-host/action.yml'), 'utf8');
+  assert.match(policy, /"\$JOB_DIR\/bin\/agentic-job" config/);
+  assert.ok(policy.split('agentic-job-policy\n')[1].split('\n  activate:')[0].includes('.agentic-job/config.toml'));
+  assert.doesNotMatch(policy, /CONFIG_BINARY/);
+  assert.ok(prepare.includes('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job'));
+  assert.ok(prepare.indexOf('artifact-ids:') < prepare.indexOf('- name: Install the binary'));
+  assert.match(secure.split('- name: Check inference proxy reachability\n')[1].split('- name:')[0],
+    /^ {6}run: agentic-job secure-host inference "\$RUNNER_TEMP\/secure-host\/config\.toml"$/m);
+  for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose]]) {
+    const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+    assert.doesNotMatch(agent, / config /, file);
+    assert.ok(agent.includes('config: .agentic-job/config.toml'), file);
+    const expanded = agent.replace('uses: ./.agentic-job-source/prepare', prepare)
+      .replace('uses: ./.agentic-job-source/secure-host', secure)
+      .replace('uses: ./.agentic-job-source/run', run);
+    let position = 0;
+    for (const name of ['Install the binary', 'Write what the run is called', 'Write the configuration',
+      'Check inference proxy reachability', 'Secure the host', 'Prove the host is secured', 'Run the agent']) {
+      position = expanded.indexOf(`- name: ${name}\n`, position);
+      assert.ok(position >= 0, `${file}: ${name}`);
+    }
+  }
+  assert.ok(policy.includes('@agentclientprotocol/claude-agent-acp@0.88.0'));
+});
+
+// echo stands in for the binary to record its arguments.
+test('the policy job writes the configuration with its own binary, and not for proposals', () => {
+  const directory = mkdtempSync(join(homedir(), 'policy-config-'));
+  try {
+    mkdirSync(join(directory, 'bin'));
+    writeFileSync(join(directory, 'bin/agentic-job'), '#!/bin/sh\necho "$@"\n', { mode: 0o755 });
+    const env = Object.fromEntries(['CONFIG', 'MODEL', 'CONFIG_REPO', 'CONFIG_REF', 'CONFIG_PATH', 'SKILLS', 'URL',
+      'REGISTER', 'AUDIENCE', 'TOKEN_FILE', 'PROVIDER', 'TIMEOUT', 'MAX_REQUESTS', 'MAX_TASKS', 'BUDGET', 'PACKAGES',
+      'NPM', 'AGENTS', 'SETUP', 'SESSION', 'IDLE_MINUTES'].map(name => [name, '']));
+    // A workflow's step, two levels deeper than an action's.
+    const body = policy.split('- name: Write the configuration\n')[1].split('        run: |\n')[1];
+    const script = body.match(/^(?: {10}[^\n]*\n)+/)[0].replace(/^ {10}/gm, '');
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', script], {
+      encoding: 'utf8', env: { ...env, JOB_DIR: directory, PATH: '/usr/bin:/bin', AGENT: 'fake', REPO: 'example/repo' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(readFileSync(join(directory, 'config.toml'), 'utf8').startsWith('config --repo example/repo --string agent.name=fake '));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  const section = policy.split('- name: Write the configuration\n')[1].split('- name:')[0];
+  assert.ok(section.includes("if: ${{ inputs.proposals-artifact == '' && steps.event.outputs.admitted != 'false' }}"));
+});
+
+test('the end-to-end callers run the scripted agent, which needs no proxy', () => {
+  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
+  for (const name of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review']) {
+    // Job bodies are indented at least four spaces.
+    const job = ci.split(`\n  ${name}:\n`)[1].split(/\n  [^ ]/)[0];
+    assert.ok(job.includes('agent: fake'), name);
+    assert.ok(!job.includes('inference-url:'), name);
+  }
+});
+
 // example-compose.yml is what a caller copies, with steps of its own in
 // two marked places. Its example steps, which CI's e2e-compose runs, show
 // where those run: the one before secure-host has root, the one after run
@@ -419,7 +483,7 @@ test('the wrapper forwards every setting to the policy call as it is', () => {
 test('no workflow or action of this repository joins a network itself', () => {
   const root = join(__dirname, '..');
   const files = [...readdirSync(join(root, '.github/workflows')).map(file => `.github/workflows/${file}`),
-    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml', 'workflow/inference-preflight.py'];
+    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml'];
   for (const file of files) {
     const text = readFileSync(join(root, file), 'utf8');
     assert.doesNotMatch(text, /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);

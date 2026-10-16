@@ -1,7 +1,8 @@
 // `node --test secure-host/binary.test.mjs`: the digest names content, modes and names
 // and nothing else, and a file that is not the pinned one is refused. binary.sh
-// runs in a copy of a small source tree, with the fetch helper, gh and build tools
-// replaced by stubs that serve fixture files and log what they were asked.
+// runs in a copy of a small source tree, with gh and the build tools replaced by
+// stubs: gh serves fixture files as GitHub's REST API would and logs what it was
+// asked, and sleep logs the waits of the retries.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -11,7 +12,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import "./github.test.mjs";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "binary.sh");
 const BUILT_FROM = readFileSync(SCRIPT, "utf8").match(/^BUILT_FROM=\(([^)]*)\)$/m)[1].split(" ");
@@ -21,8 +21,50 @@ const NAMES = ["agentic-job", "fake-agent"];
 const OBJECT = "world_write.bpf.o";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+// gh's API calls log the URL they stand for. The Nth call fails with the
+// trace in trace-N, where there is one; a URL ending in the name in
+// `fail` fails with a server error. A release's assets get IDs in the
+// order they are listed.
+const GH = `
+missing() { printf '< HTTP/2.0 404 Not Found\\n' >&2; exit 1; }
+serve() {
+  echo "fetch https://$1" >> "$STUB_LOG"
+  if [ -e "$STUB_FILES/fail" ] && [[ "$1" == */"$(cat "$STUB_FILES/fail")" ]]; then
+    printf '< HTTP/2.0 500 Internal Server Error\\n' >&2; exit 1
+  fi
+  [ -f "$STUB_FILES/$1" ] || missing
+  cat "$STUB_FILES/$1"
+}
+if [ "$1" != api ]; then
+  echo "gh $*" >> "$STUB_LOG"
+  [ ! -e "$STUB_FILES/gh-fail" ] || { echo "signature refused" >&2; exit 1; }
+  exit 0
+fi
+[ "$GH_DEBUG" = api ] || { echo "no API trace asked for" >&2; exit 3; }
+calls=$(( $(cat "$STUB_FILES/calls" 2> /dev/null || echo 0) + 1 ))
+echo "$calls" > "$STUB_FILES/calls"
+[ ! -e "$STUB_FILES/trace-$calls" ] || { cat "$STUB_FILES/trace-$calls" >&2; exit 1; }
+shift
+if [ "$1" = -H ]; then
+  [ "$2" = "Accept: application/octet-stream" ] || exit 3
+  serve "$(cat "$STUB_FILES/asset-\${3##*/}")"
+elif [[ "$1" =~ ^repos/([^/]+/[^/]+)/releases/tags/([^/]+)$ ]]; then
+  release="github.com/\${BASH_REMATCH[1]}/releases/download/\${BASH_REMATCH[2]}"
+  [ -d "$STUB_FILES/$release" ] || missing
+  for name in "$STUB_FILES/$release"/*; do
+    id=$(( $(cat "$STUB_FILES/ids" 2> /dev/null || echo 0) + 1 ))
+    echo "$id" > "$STUB_FILES/ids"
+    echo "$release/\${name##*/}" > "$STUB_FILES/asset-$id"
+    jq -n --arg name "\${name##*/}" --argjson id "$id" '{name: $name, id: $id}'
+  done | jq -s '{assets: .}'
+else
+  serve "api.github.com/$1"
+fi
+`;
+
 const STUBS = {
-  gh: `echo "gh $*" >> "$STUB_LOG"; [ ! -e "$STUB_FILES/gh-fail" ] || { echo "signature refused" >&2; exit 1; }`,
+  gh: GH,
+  sleep: `echo "sleep $*" >> "$STUB_LOG"`,
   clang: `echo "clang $*" >> "$STUB_LOG"; while [ "$1" != -o ]; do shift; done; echo object > "$2"`,
   "musl-gcc": "exit 0",
   rustup: `echo "rustup $*" >> "$STUB_LOG"`,
@@ -54,25 +96,12 @@ function tree() {
     }
   }
   copyFileSync(SCRIPT, join(root, "secure-host/binary.sh"));
-  // The helper's gh transport/retry cases run above; this boundary supplies
-  // bytes and the helper's distinct missing-resource exit status.
-  writeFileSync(join(root, "secure-host/github.mjs"), `
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-const [, , command, url, missing] = process.argv;
-if (command !== "download") process.exit(1);
-appendFileSync(process.env.STUB_LOG, "fetch " + url + "\\n");
-const root = process.env.STUB_FILES;
-const path = root + "/" + url.replace(/^https:\\/\\//, "");
-const fail = existsSync(root + "/fail") && url.endsWith("/" + readFileSync(root + "/fail", "utf8"));
-if (fail) process.exit(1);
-if (!existsSync(path)) process.exit(missing === "missing" ? 2 : 1);
-process.stdout.write(readFileSync(path));
-`);
   return root;
 }
 
-function run(root, args, { env = {}, files = {}, fail, ghFail = false, script = join(root, "secure-host/binary.sh") } = {}) {
+function run(root, args, { env = {}, files = {}, fail, ghFail = false, traces = [], script = join(root, "secure-host/binary.sh") } = {}) {
   const served = mkdtempSync(join(tmpdir(), "served-"));
+  traces.forEach((trace, at) => { if (trace !== null) writeFileSync(join(served, `trace-${at + 1}`), trace); });
   for (const [url, bytes] of Object.entries(files)) {
     const path = join(served, url.replace(/^https:\/\//, ""));
     mkdirSync(dirname(path), { recursive: true });
@@ -140,9 +169,8 @@ test("the digest is of the listing binary.sh documents", () => {
     `l ${sha256("../x")} egress/l`, `f ${file("egress/src/lib.rs")} egress/src/lib.rs`,
     `f ${file("skills/src/lib.rs")} skills/src/lib.rs`, `f ${file("workflow/review.md")} workflow/review.md`,
     `f ${file("secure-host/binary.sh")} secure-host/binary.sh`,
-    `f ${file("secure-host/github.mjs")} secure-host/github.mjs`,
   ];
-  assert.deepEqual(BUILT_FROM, ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.sh", "secure-host/github.mjs"]);
+  assert.deepEqual(BUILT_FROM, ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.sh"]);
   assert.equal(digest(root), sha256(listing.map((line) => `${line}\n`).join("")));
 });
 
@@ -332,5 +360,131 @@ test("an unknown command or argument is refused", () => {
     const result = run(root, args);
     assert.equal(result.status, 1, args.join(" "));
     assert.match(result.stderr, /^error: /, args.join(" "));
+  }
+});
+
+// One fetch as `get` makes it: the bytes, exit status 2 for an absent
+// resource where that is asked for, and the waits it slept.
+function fetchOne(url, { missing = false, traces = [], files = {} } = {}) {
+  const root = tree();
+  const file = join(mkdtempSync(join(tmpdir(), "fetch-")), "file");
+  const result = run(root, ["fetch", "--url", url, "--out", file, ...(missing ? ["--missing"] : [])], { traces, files });
+  return { ...result, bytes: existsSync(file) ? readFileSync(file, "utf8") : null,
+    waits: result.log.filter((line) => line.startsWith("sleep ")).map((line) => Number(line.slice(6))) };
+}
+
+test("a fetch tells an absent resource from a refusal", () => {
+  const url = "https://api.github.com/repos/o/r/ok";
+  const files = { [url]: "bytes" };
+  for (const [resource, missing, trace, expected] of [
+    ["ok", false, null, 0], ["ok", true, null, 0],
+    ["absent", true, null, 2], ["absent", false, null, 1],
+    ["ok", true, "< HTTP/2.0 403 Forbidden\n", 1],
+  ]) {
+    const result = fetchOne(`https://api.github.com/repos/o/r/${resource}`, { missing, traces: [trace], files });
+    assert.equal(result.status, expected, `${resource} ${missing}: ${result.stderr}`);
+    if (expected === 0) assert.equal(result.bytes, "bytes");
+    if (expected === 1) assert.match(result.stderr, /^error: fetching https:\/\/api\.github\.com\/repos\/o\/r\/\w+: GitHub request failed \(HTTP 40[34]\); check token permissions/m);
+    assert.deepEqual(result.waits, []);
+  }
+});
+
+// The failed response's own headers decide, not a redirect's before it,
+// and a wait that would end past the two minutes fails at once.
+test("only a throttled response is retried, as long as GitHub asks, within the budget", () => {
+  const now = () => Math.floor(Date.now() / 1000);
+  const url = "https://api.github.com/repos/o/r/ok";
+  for (const [trace, waits] of [
+    ["< HTTP/2.0 403 Forbidden\n< Retry-After: 0\n", [1]],
+    ["< HTTP/2.0 403 Forbidden\n\nYou have exceeded a secondary rate limit.\n", [1]],
+    ["< HTTP/2.0 429 Too Many Requests\n< retry-after: 3\n", [3]],
+    [`< HTTP/2.0 429 Too Many Requests\n< Retry-After: ${new Date((now() + 20) * 1000).toUTCString()}\n`, [19, 20]],
+    [`< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: ${now() + 10}\n`, [9, 10]],
+    [`< HTTP/2.0 302 Found\n< X-Ratelimit-Remaining: 4999\n< X-Ratelimit-Reset: 1\n< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: ${now() + 60}\n`, [59, 60]],
+    ["< HTTP/2.0 403 Forbidden\n", null],
+    ["< HTTP/2.0 302 Found\n< Retry-After: 1\n< HTTP/2.0 403 Forbidden\n", null],
+    ["< HTTP/2.0 500 Internal Server Error\n< Retry-After: 1\n", null],
+    ["< HTTP/2.0 429 Too Many Requests\n< Retry-After: 121\n", "budget"],
+  ]) {
+    const result = fetchOne(url, { traces: [trace], files: { [url]: "bytes" } });
+    if (Array.isArray(waits)) {
+      assert.equal(result.status, 0, `${trace}: ${result.stderr}`);
+      assert.equal(result.bytes, "bytes");
+      assert.equal(result.waits.length, 1, trace);
+      assert.ok(waits.includes(result.waits[0]), `${trace}: waited ${result.waits}`);
+    } else {
+      assert.equal(result.status, 1, trace);
+      assert.match(result.stderr, waits === "budget" ? /GitHub rate limit \(HTTP 429\); retry budget exhausted/ : /GitHub request failed/, trace);
+      assert.deepEqual(result.waits, [], trace);
+    }
+  }
+  // Backoff doubles while GitHub names no wait.
+  const limited = "< HTTP/2.0 429 Too Many Requests\n< X-Ratelimit-Remaining: 0\n";
+  const result = fetchOne(url, { traces: [limited, limited, limited], files: { [url]: "bytes" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.waits, [1, 2, 4]);
+});
+
+// In `get`, where a fetch's failure must still stop the job: a throttled
+// lookup of the release waits and takes it, a refused one builds nothing.
+test("get waits out a throttled lookup and stops at a refused one", () => {
+  const root = tree();
+  const source = digest(root);
+  const from = `https://github.com/${REPOSITORY}/releases/download/build-${source}`;
+  const files = { [`${from}/release.json`]: JSON.stringify({ repository: REPOSITORY, release: `build-${source}`, target: TARGET, source, sha256: checksums() }),
+    [`${from}/provenance.jsonl`]: "bundle", ...assets(from) };
+  for (const [trace, expected] of [["< HTTP/2.0 429 Too Many Requests\n< Retry-After: 2\n", 0], ["< HTTP/2.0 403 Forbidden\n", 1]]) {
+    const out = join(mkdtempSync(join(tmpdir(), "throttled-")), "bin");
+    const result = run(root, ["get", "--out", out], { files, traces: [trace] });
+    assert.equal(result.status, expected, result.stderr);
+    assert.ok(!result.log.some((line) => line.startsWith("cargo")), result.log.join("\n"));
+    if (expected === 0) {
+      fetched(out);
+      assert.deepEqual(result.log.filter((line) => line.startsWith("sleep ")), ["sleep 2"]);
+    } else assert.match(result.stderr, /fetching .*release\.json: GitHub request failed \(HTTP 403\)/);
+  }
+});
+
+test("a release asset comes from one REST lookup, then the asset by its ID", () => {
+  const from = "https://github.com/o/r/releases/download/build-1";
+  const files = { [`${from}/other`]: "other", [`${from}/release.json`]: "manifest" };
+  for (const [name, missing, expected] of [
+    ["release.json", false, 0], ["release.json", true, 0],
+    ["absent", true, 2], ["absent", false, /release build-1 has no asset absent/],
+  ]) {
+    const result = fetchOne(`${from}/${name}`, { missing, files });
+    if (expected instanceof RegExp) {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, expected);
+    } else assert.equal(result.status, expected, result.stderr);
+    if (expected === 0) assert.equal(result.bytes, "manifest");
+  }
+  // An absent release is the lookup's 404.
+  for (const [missing, expected] of [[true, 2], [false, 1]]) {
+    assert.equal(fetchOne("https://github.com/o/r/releases/download/build-2/release.json", { missing, files }).status, expected);
+  }
+  assert.equal(fetchOne("https://example.com/release.json").status, 1);
+});
+
+// With only what `gh` needs on PATH: the stubs, and dirname for the script.
+test("gh is installed only where it is missing, by dnf or apt-get", () => {
+  for (const [present, expected] of [[["gh", "dnf"], []], [["dnf", "apt-get"], ["sudo dnf install -y gh"]],
+    [["apt-get"], ["sudo apt-get install -y gh"]], [[], /no supported package manager/]]) {
+    const bin = mkdtempSync(join(tmpdir(), "path-"));
+    const log = join(bin, "log");
+    for (const name of [...present, "sudo"]) {
+      writeFileSync(join(bin, name), `#!/bin/bash\necho "${name} $*" >> "${log}"\n`);
+      chmodSync(join(bin, name), 0o755);
+    }
+    symlinkSync(spawnSync("bash", ["-c", "command -v dirname"], { encoding: "utf8" }).stdout.trim(), join(bin, "dirname"));
+    const result = spawnSync("/bin/bash", [SCRIPT, "gh"], { encoding: "utf8", env: { PATH: bin } });
+    const logged = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : [];
+    if (expected instanceof RegExp) {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, expected);
+    } else {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(logged, expected);
+    }
   }
 });

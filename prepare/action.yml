@@ -21,7 +21,7 @@ runs:
   steps:
     - name: Prepare GitHub CLI
       shell: bash
-      run: node "$GITHUB_ACTION_PATH/../secure-host/github.mjs"
+      run: bash "$GITHUB_ACTION_PATH/../secure-host/binary.sh" gh
     # Empty artifact IDs otherwise select all uploads, including attacker
     # proposals. Never fall back to artifact names for these trusted inputs.
     - name: Require trusted upload IDs

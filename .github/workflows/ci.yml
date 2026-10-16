@@ -243,7 +243,6 @@ jobs:
           printf '%s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' 'e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a  zizmor.tar.gz' | sha256sum -c -
           tar -xzf actionlint.tar.gz actionlint
           tar -xzf zizmor.tar.gz zizmor
-      # Loopback-only TCP preflight tests; no OIDC credential or external proxy.
       # Ingress fixtures are local Git repositories, inspected but never run.
       - run: python3 -m unittest discover -s workflow -p 'test_*.py' -v
         env:

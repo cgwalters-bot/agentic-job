@@ -58,8 +58,9 @@ secure-host's root steps run no Node any more, which saved little time, since
 hosted images ship Node: `sandbox timed`
 replaced `setup-timing.mjs --run`, `agentic-job secure-host` replaced
 `platform.mjs`, `apt.mjs` and root's bpftool loader `world-write.mjs`, and
-the shell script `binary.sh` replaced `binary.mjs`, which gets the binary.
-Its bootstrap still uses `github.mjs` to prepare gh and retry GitHub throttling.
+the shell script `binary.sh` replaced `binary.mjs`, which gets the binary,
+and `github.mjs`, which prepared gh and retried GitHub throttling for it;
+`agentic-job secure-host inference` replaced `inference-preflight.py`.
 
 Done from the gh-aw gaps: the agent reads GitHub with a read-only token
 ([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), a label

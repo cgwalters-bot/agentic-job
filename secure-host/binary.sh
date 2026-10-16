@@ -1,7 +1,8 @@
 # Gets a source-addressed release using its attested manifest, or builds
 # this source when no manifest has been published yet. It runs before any
-# agentic-job exists on the machine. It uses sha256sum, jq and gh, with
-# github.mjs for bounded GitHub retries; every step after it is the binary's.
+# agentic-job exists on the machine, so it is shell and not the binary's
+# Rust. It uses sha256sum, jq, coreutils' timeout and gh, which `gh`
+# installs where it is missing; every step after it is the binary's.
 #
 # What decides that a file is the release's is its checksum in the
 # verified, source-matching manifest, and not where it came from:
@@ -18,6 +19,9 @@
 #   binary.sh get --out DIR [--build]   the binaries, into DIR
 #   binary.sh object --out DIR          the world-write policy object, into DIR
 #   binary.sh digest [--root DIR]       the digest of the source at DIR
+#   binary.sh gh                        install gh, where it is missing
+#   binary.sh fetch --url URL --out FILE [--missing]
+#                                       one GitHub URL, with bounded retries
 #   binary.sh pin --dist DIR --release TAG [--repository OWNER/NAME]
 #                                       release.json for a build of this source
 #
@@ -43,7 +47,7 @@ REPOSITORY=cgwalters-forge/agentic-job
 # decides what a release holds: a release published before that changed
 # lacks a file this one requires, and must not be taken for this source.
 # `skills` and `workflow/review.md` are the agents' skills, built in.
-BUILT_FROM=(Cargo.lock Cargo.toml crates egress skills workflow/review.md secure-host/binary.sh secure-host/github.mjs)
+BUILT_FROM=(Cargo.lock Cargo.toml crates egress skills workflow/review.md secure-host/binary.sh)
 
 # The scripted agent too: a run with `agent: fake` needs it.
 NAMES=(agentic-job fake-agent)
@@ -107,17 +111,97 @@ digest() {
   printf %s "$listing" | sha256
 }
 
+# How long one fetch may spend retrying GitHub's signaled throttling,
+# in seconds, and the most one backoff waits unless GitHub asks for more.
+GITHUB_BUDGET=120
+GITHUB_BACKOFF_MAX=30
+
+# gh, where the image lacks it: by the host's package manager, as root.
+need_gh() {
+  local manager
+  command -v gh > /dev/null && return 0
+  for manager in dnf apt-get; do
+    if command -v "$manager" > /dev/null; then
+      sudo "$manager" install -y gh || fail "could not install gh"
+      return 0
+    fi
+  done
+  fail "gh is required; no supported package manager found"
+}
+
+# `gh ARGS`, which fetches URL, with its output in FILE, retrying a response GitHub marks as
+# throttled within GITHUB_BUDGET: a transient limit should not lose a job
+# before it starts, and a permission denial should not wait. With
+# `missing` for MISSING, a 404 returns 1; any other failure stops. gh's
+# API trace (GH_DEBUG) is how the status and headers are known; it can
+# hold credentials, so it stays in this variable and is never printed.
+github() {
+  local file=$1 missing=$2 url=$3 deadline attempt=0 left trace code status response after reset remaining delay requested
+  shift 3
+  deadline=$(( $(date +%s) + GITHUB_BUDGET ))
+  while :; do
+    left=$(( deadline - $(date +%s) ))
+    (( left > 0 )) || left=1
+    trace=$(GH_DEBUG=api timeout "$left" gh "$@" 2>&1 > "$file") && return 0 || code=$?
+    # timeout's status: the trace can hold an earlier status line, a 200.
+    [ "$code" != 124 ] || fail "fetching $url: no complete answer from GitHub within ${GITHUB_BUDGET}s"
+    status=$(grep -oE 'HTTP/[^[:space:]]+[[:space:]]+[0-9]{3}' <<< "$trace" | tail -n 1 | grep -oE '[0-9]{3}$') || status=""
+    [ "$missing" != missing ] || [ "$status" != 404 ] || return 1
+    # A request can follow redirects: the headers are the failed
+    # response's, from its status line on, not an earlier one's.
+    response=$(awk '/HTTP\/[^[:space:]]+[[:space:]]+[0-9][0-9][0-9]/ { kept = "" } { kept = kept $0 "\n" } END { printf "%s", kept }' <<< "$trace")
+    after=$(header "$response" retry-after)
+    reset=$(header "$response" x-ratelimit-reset)
+    remaining=$(header "$response" x-ratelimit-remaining)
+    if ! { [[ "$status" == 403 || "$status" == 429 ]] && { [ -n "$after" ] || [ "$remaining" = 0 ] ||
+        grep -qiE 'secondary rate limit|API rate limit exceeded' <<< "$trace"; }; }; then
+      fail "fetching $url: GitHub request failed${status:+ (HTTP $status)}; check token permissions and resource availability"
+    fi
+    delay=$(( 1 << attempt ))
+    (( delay <= GITHUB_BACKOFF_MAX )) || delay=$GITHUB_BACKOFF_MAX
+    # Retry-After is seconds or an HTTP date; the reset is epoch seconds.
+    if [ -n "$after" ]; then
+      if [[ "$after" =~ ^[0-9]+$ ]]; then requested=$after
+      else requested=$(( $(date -d "$after" +%s 2> /dev/null || date +%s) - $(date +%s) ))
+      fi
+      (( requested <= delay )) || delay=$requested
+    fi
+    if [ "$remaining" = 0 ] && [[ "$reset" =~ ^[0-9]+$ ]]; then
+      requested=$(( reset - $(date +%s) ))
+      (( requested <= delay )) || delay=$requested
+    fi
+    (( $(date +%s) + delay < deadline )) || fail "fetching $url: GitHub rate limit (HTTP $status); retry budget exhausted"
+    sleep "$delay"
+    attempt=$(( attempt + 1 ))
+  done
+}
+
+# The first header NAME of RESPONSE, a trace's `< Name: value` lines.
+header() {
+  sed -nE "s/^< $2:[[:blank:]]*(.*[^[:space:]])[[:space:]]*$/\1/Ip" <<< "$1" | head -n 1
+}
+
 # URL into FILE using authenticated gh and bounded rate-limit retries.
 # With `missing`, only an absent release or asset returns 1.
 fetch() {
-  local url=$1 file=$2 status
-  if node "$ROOT/secure-host/github.mjs" download "$url" "${3-}" > "$file"; then
+  local url=$1 file=$2 missing=${3-} repository tag name id
+  if [[ "$url" =~ ^https://api\.github\.com/(.+)$ ]]; then
+    github "$file" "$missing" "$url" api "${BASH_REMATCH[1]}" || return 1
     return 0
-  else
-    status=$?
-    [ "${3-}" = missing ] && [ "$status" = 2 ] && return 1
-    fail "fetching $url: GitHub request failed"
   fi
+  [[ "$url" =~ ^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/([^/]+)$ ]] || fail "unsupported release URL: $url"
+  repository=${BASH_REMATCH[1]} tag=${BASH_REMATCH[2]} name=${BASH_REMATCH[3]}
+  # Not `gh release download`: it looks up published (REST) and draft
+  # (GraphQL) releases concurrently, so the last status in its trace need
+  # not be the lookup's, and an absent release can end in GraphQL's 200.
+  # One REST lookup at a time keeps 404 and rate-limit statuses unambiguous.
+  github "$file" "$missing" "$url" api "repos/$repository/releases/tags/$(jq -rn --arg tag "$tag" '$tag | @uri')" || return 1
+  id=$(jq -r --arg name "$name" 'first(.assets[]? | select(.name == $name) | .id | select(type == "number" and . >= 0 and . == floor)) // ""' "$file" 2> /dev/null) || id=""
+  if [ -z "$id" ]; then
+    [ "$missing" != missing ] || return 1
+    fail "release $tag has no asset $name"
+  fi
+  github "$file" "" "$url" api -H "Accept: application/octet-stream" "repos/$repository/releases/assets/$id"
 }
 
 # Throws unless MANIFEST pins a checksum for each file; then each file of
@@ -226,6 +310,7 @@ get() {
   source=$(digest "$ROOT")
   mkdir -p -- "$out"
   if [ "$asked" != true ]; then
+    need_gh
     fetch_tagged "$source" "$out"
     [ -n "$fetched" ] || fetch_release "$source" "$out"
   fi
@@ -263,12 +348,13 @@ pin() {
 }
 
 main() {
-  local command=${1-} out="" build=false root=$ROOT dist="" release="" repository=""
+  local command=${1-} out="" build=false root=$ROOT dist="" release="" repository="" url="" missing=""
   [ $# -eq 0 ] || shift
   while [ $# -gt 0 ]; do
     case $1 in
       --build) build=true; shift; continue ;;
-      --out | --root | --dist | --release | --repository) [ $# -ge 2 ] || fail "$1 needs a value" ;;
+      --missing) missing=missing; shift; continue ;;
+      --out | --root | --dist | --release | --repository | --url) [ $# -ge 2 ] || fail "$1 needs a value" ;;
       *) fail "unknown argument: $1" ;;
     esac
     case $1 in
@@ -277,6 +363,7 @@ main() {
       --dist) dist=$2 ;;
       --release) release=$2 ;;
       --repository) repository=$2 ;;
+      --url) url=$2 ;;
     esac
     shift 2
   done
@@ -285,7 +372,10 @@ main() {
     object) [ -n "$out" ] || fail "object: --out DIR is required"; object "$out" ;;
     digest) digest "$root" ;;
     pin) pin "$dist" "$release" "$repository" ;;
-    *) fail "usage: binary.sh get|object|digest|pin [options]" ;;
+    gh) need_gh ;;
+    # Exit status 2 for an absent resource, with --missing.
+    fetch) [ -n "$url" ] && [ -n "$out" ] || fail "fetch: --url URL and --out FILE are required"; fetch "$url" "$out" "$missing" || exit 2 ;;
+    *) fail "usage: binary.sh get|object|digest|pin|gh|fetch [options]" ;;
   esac
 }
 

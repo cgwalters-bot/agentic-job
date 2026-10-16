@@ -599,14 +599,13 @@ Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
 off agent outputs` and its `example-compose.yml` twin,
 `the source an agent job takes its actions from is the policy call's own`,
 `apply applies only what check accepted, whatever the caller's gate`,
-`the wrapper forwards every setting to the policy call as it is` and
-`no workflow or action of this repository joins a network itself`;
+`the wrapper forwards every setting to the policy call as it is`,
+`no workflow or action of this repository joins a network itself` and
+`the agent job installs the trusted binary and checks the proxy before setup`;
 [apply.test.cjs](../workflow/apply.test.cjs), `check and apply refuse a
 policy call of another commit, and apply an empty checked ID` and `apply
 takes only this run's check output, whatever the caller wired`;
 [specs](../specs/README.md), `BrokenWiring`;
-[test_inference_preflight.py](../workflow/test_inference_preflight.py),
-`test_workflow_order_and_trusted_binary`;
 [dispatch.test.cjs](../workflow/dispatch.test.cjs),
 `caller fixes capabilities and token boundary`.
 

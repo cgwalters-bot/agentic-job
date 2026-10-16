@@ -105,14 +105,8 @@ runs:
   steps:
     # A release's, by its attested source-matching checksums, when
     # that release was built from this commit's source; a build of that
-    # source otherwise (binary.sh). The bootstrap uses Node only for gh
-    # preparation and bounded GitHub retries, before the binary exists.
-    - name: Prepare GitHub CLI
-      if: ${{ inputs.binary == '' }}
-      shell: bash
-      env:
-        ACTION: ${{ github.action_path }}
-      run: node "$ACTION/github.mjs"
+    # source otherwise (binary.sh, which installs gh where it is missing
+    # and bounds GitHub retries, before the binary exists).
     - name: Get the binary
       id: binary
       if: ${{ inputs.binary == '' }}
@@ -172,15 +166,11 @@ runs:
     # to it as the runner's user, before setup, so that a runner off the
     # proxy's network fails here and says so rather than in a probe of
     # setup's rules. It sends no HTTP request, identity token or model
-    # credential, and the scripted agent is not checked. A configuration
-    # without the table, a deterministic job's, needs no Python 3.11 here.
+    # credential; a configuration without a proxy, a deterministic job's,
+    # and the scripted agent are not checked.
     - name: Check inference proxy reachability
       shell: bash
-      env:
-        ACTION: ${{ github.action_path }}
-      run: |
-        grep -qx '\[inference\]' "$RUNNER_TEMP/secure-host/config.toml" || exit 0
-        python3 "$ACTION/../workflow/inference-preflight.py" "$RUNNER_TEMP/secure-host/config.toml"
+      run: agentic-job secure-host inference "$RUNNER_TEMP/secure-host/config.toml"
     # Before setup, which refuses a host without it: no user but a
     # world-writable file's or directory's owner may change it, on the root
     # filesystem, from here on. The object came with the binary, by the

@@ -851,13 +851,13 @@ object. A missing release falls back to a source build with a notice; failed ver
 these releases automatically, without a pin PR. See
 [the workflow's binary trust model](workflow.md#things-a-caller-should-know)
 for the verification and publishing boundaries. Fetching needs bash,
-`sha256sum`, jq, Node and `gh` with attestation support. The bootstrap's
-`github.mjs` uses the job's read-only token and retries signaled GitHub
-throttling within two minutes; preparation installs gh if missing.
+`sha256sum`, jq and `gh` with attestation support, which it installs
+where it is missing. It uses the job's read-only token and retries
+signaled GitHub throttling within two minutes.
 Building needs rustup.
-A configuration with an `[inference]` table is first checked for a
-TCP connection to the proxy, which needs Python 3.11 or newer
-(`tomllib`); one without it, a deterministic job's, skips that check.
+A configuration with an inference proxy is first checked, by
+`agentic-job secure-host inference`, for a TCP connection to the proxy;
+one without it, a deterministic job's, skips that check.
 Pass `build: true` to build even when a prebuilt exists.
 
 ## Without the action

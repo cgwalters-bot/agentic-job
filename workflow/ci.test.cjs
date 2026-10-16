@@ -387,18 +387,18 @@ test('E2E callers, concurrency and apt safeguards remain wired', () => {
 });
 
 // The action's steps before setup are the binary's, and a shell script
-// fetches it: Node is limited to the GitHub bootstrap. The binary admits the host
-// before it is installed.
+// fetches it, so the action runs no Node or Python. The binary admits the
+// host before it is installed.
 test('the action admits the host, tunes apt and loads the policy with its binary, before setup', () => {
   const action = fs.readFileSync(path.join(__dirname, '../secure-host/action.yml'), 'utf8');
   const steps = action.slice(action.indexOf('  steps:\n'));
-  assert.match(steps, /^  steps:\n(?:    #[^\n]*\n)*    - name: Prepare GitHub CLI\n/);
-  assert.match(steps, /run: node "\$ACTION\/github\.mjs"\n/);
-  assert.doesNotMatch(steps.slice(steps.indexOf('    - name: Get the binary\n')), /\bnode\b|\.mjs/);
+  assert.match(steps, /^  steps:\n(?:    #[^\n]*\n)*    - name: Get the binary\n/);
+  assert.doesNotMatch(steps, /\bnode\b|\.mjs|\bpython3?\b|\.py\b/);
   assert.match(steps, /GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(steps, /bash "\$ACTION\/binary\.sh" get --out "\$RUNNER_TEMP\/secure-host\/bin" "\$@"\n/);
-  const order = ['- name: Prepare GitHub CLI', '- name: Get the binary', '"$BINARY" secure-host supported\n', '- name: Install the binary',
+  const order = ['- name: Get the binary', '"$BINARY" secure-host supported\n', '- name: Install the binary',
     'run: sudo /usr/local/bin/agentic-job secure-host apt\n', '- name: Write the configuration',
+    'run: agentic-job secure-host inference "$RUNNER_TEMP/secure-host/config.toml"\n',
     '- name: Load the world-write policy', 'run: agentic-job sandbox timed setup\n'];
   const at = order.map(text => steps.indexOf(text));
   assert.ok(at.every((index, i) => index >= 0 && (i === 0 || at[i - 1] < index)), JSON.stringify(at));
