@@ -124,36 +124,90 @@ test('agent exit is captured before uploads and partial result gate is unchanged
   assert.match(run, /steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != ''/);
 });
 
-test('public visibility refusal blocks publication and repository names are data', () => {
+// A mock of `gh api`: the target's answer for REPO, OTHER for the rest,
+// each as the step's own jq would print it.
+const gh = 'gh() { if [ "$2" = "repos/$REPO" ]; then printf "%s\\n" "$TARGET"; else printf "%s\\n" "$OTHER"; fi; return "${API_EXIT:-0}"; };\n';
+
+test('public visibility refusal blocks publication and repository names are data', (t) => {
   const script = step(run, 'Check again that the repositories are public');
-  for (const [repo, repos, publicRepo, expected] of [
-    ['owner/repo', 'owner/repo', 'true', 0], ['owner/repo', 'owner/repo owner/config', 'true', 0],
-    ['owner/repo', 'owner/repo', 'false', 1], ['$(exit 99)', '$(exit 99)', 'true', 1],
-    ['', '', 'true', 1], [' ', ' ', 'true', 1], ['owner/repo', 'owner/repo invalid', 'true', 1],
+  const dir = mkdtempSync(join(homedir(), 'visibility-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const policyFile = (repo, isPrivate) => writeFileSync(join(dir, 'policy.json'),
+    JSON.stringify({ repo, ...(isPrivate ? { private: true } : {}) }));
+  // Target, agent configuration, the target's and the others' answers,
+  // whether the policy is private and for which repository, the caller,
+  // and the exit status.
+  for (const [repo, repos, target, other, isPrivate, policyRepo, caller, expected] of [
+    ['owner/repo', '', 'public', 'public', false, 'owner/repo', 'owner/caller', 0],
+    ['owner/repo', 'owner/config', 'public', 'public', false, 'owner/repo', 'owner/caller', 0],
+    ['owner/repo', '', 'private', 'public', false, 'owner/repo', 'owner/repo', 1],
+    ['owner/repo', '', 'private', 'public', true, 'owner/repo', 'owner/repo', 0],
+    ['owner/repo', '', 'private', 'public', true, 'owner/other', 'owner/repo', 1],
+    ['owner/repo', '', 'private', 'public', true, 'owner/repo', 'owner/caller', 1],
+    ['owner/repo', '', 'unknown', 'public', true, 'owner/repo', 'owner/repo', 1],
+    ['owner/repo', 'owner/config', 'private', 'private', true, 'owner/repo', 'owner/repo', 1],
+    ['$(exit 99)', '', 'public', 'public', false, '$(exit 99)', 'owner/caller', 1],
+    ['', '', 'public', 'public', false, '', 'owner/caller', 1],
+    [' ', '', 'public', 'public', false, ' ', 'owner/caller', 1],
+    ['owner/repo', 'invalid', 'public', 'public', false, 'owner/repo', 'owner/caller', 1],
   ]) {
-    const result = shell('gh() { printf "%s\\n" "$PUBLIC"; };\n' + script,
-      { REPO: repo, REPOS: repos, PUBLIC: publicRepo });
-    assert.equal(result.status, expected, result.stdout + result.stderr);
+    policyFile(policyRepo, isPrivate);
+    const result = shell(gh + script, {
+      REPO: repo, REPOS: repos, TARGET: target, OTHER: other, JOB_DIR: dir, GITHUB_REPOSITORY: caller,
+    });
+    assert.equal(result.status, expected, `${repo} ${target} ${isPrivate}: ${result.stdout}${result.stderr}`);
   }
   assert.ok(run.indexOf('Check again that') < run.indexOf('uses: actions/upload-artifact'));
 });
 
-test('admission and upload gates refuse unknown visibility with private-run guidance', () => {
+test('admission and upload gates refuse unknown visibility with private-run guidance', (t) => {
   const admission = policy.split('- name: Check that the repositories are public\n')[1]
     .split('        run: |\n')[1].split('\n      #')[0].replace(/^ {10}/gm, '');
+  const dir = mkdtempSync(join(homedir(), 'visibility-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'policy.json'), JSON.stringify({ repo: 'owner/repo' }));
   for (const script of [admission, step(run, 'Check again that the repositories are public')]) {
     assert.match(script, /\.private == false and \.visibility == "public"/);
     for (const [answer, apiExit, expected] of [
-      ['true', 0, 0], ['false', 0, 1], ['null', 0, 1], ['', 0, 1], ['true', 1, 1],
+      ['public', 0, 0], ['private', 0, 1], ['unknown', 0, 1], ['', 0, 1], ['public', 1, 1],
     ]) {
-      const result = shell('gh() { printf "%s\\n" "$ANSWER"; return "$API_EXIT"; };\n' + script,
-        { REPO: 'owner/repo', REPOS: 'owner/repo owner/config owner/item',
-          ANSWER: answer, API_EXIT: String(apiExit) });
+      const result = shell(gh + script, {
+        REPO: 'owner/repo', REPOS: 'owner/config owner/item', TARGET: answer, OTHER: answer,
+        API_EXIT: String(apiExit), JOB_DIR: dir, GITHUB_REPOSITORY: 'owner/caller', GITHUB_OUTPUT: join(dir, 'output'),
+      });
       assert.equal(result.status, expected, result.stdout + result.stderr);
       if (expected !== 0) assert.match(result.stdout, /private runs are refused.*docs\/private-repositories\.md/);
     }
   }
   assert.ok(policy.indexOf('Check that the repositories are public') < policy.indexOf('name: This workflow'));
+});
+
+test('admission marks only the calling repository, private, as a private target', (t) => {
+  const admission = policy.split('- name: Check that the repositories are public\n')[1]
+    .split('        run: |\n')[1].split('\n      #')[0].replace(/^ {10}/gm, '');
+  const dir = mkdtempSync(join(homedir(), 'visibility-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Target, agent configuration and item, the target's and the others'
+  // answers, the caller, the exit status and what the step outputs.
+  for (const [repo, repos, target, other, caller, expected, output] of [
+    ['owner/repo', 'owner/config', 'public', 'public', 'owner/caller', 0, ''],
+    ['owner/repo', 'owner/config', 'private', 'public', 'owner/repo', 0, 'private=true\n'],
+    ['owner/repo', '', 'private', 'public', 'owner/caller', 1, ''],
+    ['owner/repo', 'owner/config', 'private', 'private', 'owner/repo', 1, 'private=true\n'],
+    ['owner/repo', 'owner/repo', 'private', 'private', 'owner/repo', 1, 'private=true\n'],
+    ['owner/repo', '', 'unknown', 'public', 'owner/repo', 1, ''],
+  ]) {
+    const file = join(dir, 'output');
+    writeFileSync(file, '');
+    const result = shell(gh + admission, {
+      REPO: repo, REPOS: repos, TARGET: target, OTHER: other, GITHUB_REPOSITORY: caller, GITHUB_OUTPUT: file,
+    });
+    assert.equal(result.status, expected, `${target} ${caller}: ${result.stdout}${result.stderr}`);
+    assert.equal(readFileSync(file, 'utf8'), output);
+  }
+  const request = policy.split('- name: Check the request against the caller\'s bounds\n')[1].split('\n      - ')[0];
+  assert.match(request, /PRIVATE: \$\{\{ steps.visibility.outputs.private \}\}/);
+  assert.match(request, /set -- "\$@" --private\n.*--output-repo "\$\{OUTPUT_REPO:-\$GITHUB_REPOSITORY\}"/);
 });
 
 // The wrapper's agent job and the example's caller-owned one are the same

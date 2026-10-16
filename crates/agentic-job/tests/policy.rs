@@ -119,6 +119,70 @@ fn organization_bounds_cli() {
     }
 }
 
+/// `--private` reaches the bounds: refused unless the caller's and the
+/// organization's files both set `private = true`, and then recorded.
+#[test]
+fn a_private_request_needs_every_bounds_file_to_opt_in() {
+    let temp = tempfile::tempdir().unwrap();
+    let opted = temp.path().join("private.toml");
+    let shipped = std::fs::read_to_string(data("allow.toml")).unwrap();
+    std::fs::write(&opted, format!("private = true\n{shipped}")).unwrap();
+    // The bounds file, the organization's, the outputs, the exit status
+    // and a part of the refusal.
+    for (allow, org, outputs, code, refusal) in [
+        (&opted, None, "noop", 0, ""),
+        (&data("allow.toml"), None, "noop", 1, "private = true"),
+        (
+            &opted,
+            Some(data("allow.toml")),
+            "noop",
+            1,
+            "private = true",
+        ),
+        (&opted, Some(opted.clone()), "noop", 0, ""),
+        (
+            &opted,
+            None,
+            "create_pull_request,noop",
+            1,
+            "hands back no patch",
+        ),
+    ] {
+        let mut command = Command::new(BIN);
+        command.arg("policy").arg("--allow").arg(allow);
+        if let Some(org) = &org {
+            command.arg("--org-allow").arg(org);
+        }
+        let output = command
+            .args(REQUEST.iter().flat_map(|(flag, value)| {
+                [
+                    *flag,
+                    if *flag == "--outputs" {
+                        outputs
+                    } else {
+                        *value
+                    },
+                ]
+            }))
+            .args(["--private", "--output-repo", "bootc-dev/bootc"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{stderr}");
+        if code == 0 {
+            let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(policy["private"], true);
+        } else {
+            assert!(output.stdout.is_empty());
+            assert!(stderr.contains(refusal), "{stderr}");
+        }
+    }
+    // Opting in admits a private run; it does not mark a public one.
+    let output = policy(&opted, &[]);
+    let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(policy.get("private").is_none(), "{policy}");
+}
+
 #[test]
 fn a_request_within_the_bounds_prints_its_policy() {
     let output = policy(&data("allow.toml"), &[]);

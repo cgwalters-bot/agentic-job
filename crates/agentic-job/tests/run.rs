@@ -125,6 +125,7 @@ impl Job {
             max_patch_bytes: 1 << 20,
             safe_outputs: SafeOutputs::default(),
             commit_author: None,
+            private: false,
         };
         serde_json::to_string(&policy).unwrap()
     }

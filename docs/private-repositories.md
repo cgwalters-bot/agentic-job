@@ -1,10 +1,14 @@
-# Private repositories: why runs are refused
+# Private repositories
 
-Private runs are not supported. There is no `private = true` setting or
-dispatcher override. The public-only admission check stops private source and
-configuration from becoming public run evidence; repository bounds alone do
-not establish confidentiality. API errors, unknown visibility and internal
-repositories are refused, not treated as public.
+Runs are public-only by default. The public-only admission check stops private
+source and configuration from becoming public run evidence. API errors, unknown
+visibility and internal repositories are refused, not treated as public. A
+caller can opt one kind of private run in: its own private repository as the
+target, with `private = true` in every bounds file, the egress domain allowlist
+on the agent machine and its runner's logs kept private. Such a run hands back
+comments, reviews and other non-patch outputs, not a patch or a project
+update. Each checked
+condition below is refused when it does not hold.
 
 ## What is published today
 
@@ -28,11 +32,11 @@ comments and reviews, potentially in a different repository.
 
 On a public caller these are public run evidence (artifact downloads may require
 authentication). A private caller's Actions access controls do not make a run
-safe: the target, caller, output repository, runner operator and inference
-service can be different trust domains. Runner provisioning/diagnostic logs
-are another publication surface; some runner providers publish them separately
-from Actions. Shorter artifact retention does not retract logs, downloads or
-already-applied outputs.
+safe on their own: the target, caller, output repository, runner operator and
+inference service can be different trust domains. Runner provisioning/diagnostic
+logs are another publication surface; some runner providers publish them
+separately from Actions. Shorter artifact retention does not retract logs,
+downloads or already-applied outputs.
 
 ## What a private run would leak
 
@@ -51,35 +55,56 @@ attacker-controlled subdomain can receive those bytes. Runner-user processes,
 direct endpoints and local services must not provide a bypass around the
 sandbox user's proxy policy.
 
-## Requirements before any future opt-in
+## Opting in
 
-Keep the existing public-only gate until all of these have an implementation
-and acceptance evidence. This document does not grant an exception.
+Add `private = true` at the top level of the caller's bounds file, and of the
+organization's if there is one; both must set it. Then a run is admitted with a
+private target only if all of these hold, each checked where it is enforced:
 
-- **Evidence disclosure:** keep private logs, summaries, artifacts, caches and
-  runner diagnostics within the intended audience, including failure, rerun
-  and post-job paths. Define retention/deletion and access policy for each
-  surface. Redact sensitive evidence before publication or withhold it;
-  token masking alone is insufficient. Check output destinations against that
-  audience before apply, and cover inference retention/access separately.
-- **Network disclosure:** require the shipped bounded
-  [domain allowlist](sandbox.md#opt-in-domain-allowlist) from #616, selected by
-  trusted caller configuration. Its maximum 256 domains and 253-character
-  entries are limits, not evidence that a domain is safe. Review every allowed
-  domain and subdomain, inference endpoint, write rule and direct endpoint for
-  exfiltration. Demonstrate denied redirects and runner/local-service bypasses;
-  allowlist support alone does not enable private runs.
-- **Credential disclosure:** define separate read-token routing for target,
-  context and agent-configuration fetches and optional forge reads. The
-  agent-configuration clone currently has no credential; adding a broad PAT
-  to make it work would expand exposure. Preserve policy/check read-only
-  access and apply-only write credentials, keeping OIDC and runner service
-  tokens out of the sandbox. Test cross-repository routing and token absence
-  from logs, artifacts, URLs and process environments outside the intended
-  consumer.
+- **Evidence stays with the repository's audience.** The policy job admits a
+  target that is not public only if the API reports it `private` and it is
+  the calling repository. Its Actions logs, summaries and artifacts are then
+  visible only to its collaborators. `agentic-job policy --private` refuses
+  the run unless every bounds file opts in. It also requires the output
+  repository to be the target, so that comments and status do not land in
+  another, possibly public, repository; the workflow accepts no `item-repo`
+  for a private run. It refuses `create_pull_request` and
+  `push_to_pull_request_branch`: apply pushes a patch through a fork, which
+  it checks without a credential, so a private fork is out of its reach.
+  It refuses `update_project` too: a project's fields are read by the
+  project's audience, which nothing confines to the repository's.
+  The run action repeats the visibility check before upload.
+- **The proxy limits where the source can go.** `run` refuses a private
+  policy unless the sandbox uses the egress proxy (`egress.proxy`) and the
+  policy file the proxy enforces sets `[egress] mode = "allowlist"`
+  ([domain allowlist](sandbox.md#opt-in-domain-allowlist)), selected by
+  `egress.policy` in the caller's configuration. That file may keep no
+  `[[write]]` rule but git fetch's `POST` to paths ending in
+  `/git-upload-pack`: any other rule is a channel to what its endpoint stores.
+  The shipped GraphQL rule, for example, would pass a mutation that another
+  token posts to a public issue, so `gh`'s GraphQL reads are unavailable;
+  REST reads (`gh api`) still work. Review every allowed domain, the inference
+  endpoint and any `egress.direct` endpoint as a place the source can go:
+  direct endpoints do not pass the proxy, and the check cannot judge them.
+- **One read credential, for the target only.** The agent configuration
+  and context repositories are cloned without a credential and stay
+  public-only. `run` refuses
+  a private policy without the job's read token (`github-reads`, the default).
+  It clones the target with a git credential helper scoped to the target's
+  clone URL, which reads that token from the sandbox user's file of it. The
+  token is never in a command line, URL or configuration value. The job token
+  can read only the calling repository and expires with the job; no PAT is
+  added. Policy and check keep read-only access; only apply holds a write
+  credential.
 
-Any future opt-in and repository/organization identities must come from
-repository-owned trusted configuration, not workflow inputs a dispatcher can
-set. Refusal must remain the default and fail closed when requirements cannot
-be verified. BPF host evidence and release binaries improve other boundaries;
-neither supplies private-log isolation or safe read-token routing.
+One condition cannot be checked: **the runner's own logs must not be public.**
+Use a runner whose provisioning and diagnostic logs only the repository's
+audience can read, such as the caller's own. Some providers, including
+bootc-dev's devspace runners, publish theirs. The runner is a workflow input,
+so a caller that opts in should not let a dispatcher choose it. Inference
+access and retention are likewise the caller's decision.
+
+Organization and repository identities come from the caller's repository: the
+bounds files it owns and the repository the workflow runs in, never a workflow
+input a dispatcher can set. BPF host evidence and release binaries improve other
+boundaries; they do not make a private run safe on their own.

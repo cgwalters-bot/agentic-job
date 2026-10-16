@@ -156,19 +156,30 @@ runs:
           }
     # Re-check visibility before uploading: a repository can become private
     # while the agent works. This credential stays with the runner user.
+    # A policy the binary marked private admitted the calling repository,
+    # private, as its target; that target may stay so, nothing else.
     - name: Check again that the repositories are public
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        JOB_DIR: ${{ inputs.job-dir }}
         REPO: ${{ steps.settings.outputs.repo }}
-        REPOS: ${{ steps.settings.outputs.repo }} ${{ steps.settings.outputs.agent_config_repo }}
+        REPOS: ${{ steps.settings.outputs.agent_config_repo }}
       run: |
-        [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo '::error::run requires a public target repository name'; exit 1; }
+        name='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+        [[ "$REPO" =~ $name ]] || { echo '::error::run requires a public target repository name'; exit 1; }
+        refuse() { echo "::error::$1 cannot be confirmed to be public; private runs are refused unless the target is the calling repository and the bounds set private = true, because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"; exit 1; }
+        visibility() {
+          gh api "repos/$1" --jq 'if .private == false and .visibility == "public" then "public"
+            elif .private == true and .visibility == "private" then "private" else "unknown" end' || echo unknown
+        }
+        target=$(visibility "$REPO")
+        private=$(jq -r --arg repo "$REPO" 'if .private == true and .repo == $repo then "true" else "false" end' "$JOB_DIR/policy.json")
+        [ "$target" = public ] || { [ "$target/$private" = private/true ] && [ "$REPO" = "$GITHUB_REPOSITORY" ]; } || refuse "$REPO"
         set -f
         for repo in $REPOS; do
-          [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::not a repository name: $repo"; exit 1; }
-          gh api "repos/$repo" --jq '.private == false and .visibility == "public"' | grep -qx true ||
-            { echo "::error::$repo cannot be confirmed to be public; private runs are refused because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"; exit 1; }
+          [[ "$repo" =~ $name ]] || { echo "::error::not a repository name: $repo"; exit 1; }
+          [ "$(visibility "$repo")" = public ] || refuse "$repo"
         done
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:

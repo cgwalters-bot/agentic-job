@@ -233,6 +233,75 @@ fn install(policy: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// The most of the installed policy file read: 256 allowed domains and
+/// the write rules fit many times over.
+const MAX_POLICY_BYTES: u64 = 1 << 20;
+
+/// The end of the one path a private run's write rules may name: git's
+/// smart HTTP fetch, whose POST holds the commits it wants and has.
+const GIT_FETCH_PATH: &str = "/git-upload-pack";
+
+/// What a private run (docs/private-repositories.md) needs of the policy
+/// file TEXT, as `egress/policy.py` reads it: every destination limited
+/// to its `[egress] allow` list, since under reads-anywhere a GET carries
+/// what the agent read to any host; and no write rule but git fetch's
+/// POST to `git-upload-pack`, which a forge does not keep. Any other rule
+/// is a channel to whatever its endpoint stores: the shipped GraphQL rule
+/// passes a mutation that another token posts to a public issue. A file
+/// the proxy would not load leaves no proxy running, so this reads only
+/// the fields it checks.
+pub fn check_private_policy(text: &str) -> Result<()> {
+    let table: toml::Table = toml::from_str(text).context("parsing the egress policy")?;
+    let mode = table
+        .get("egress")
+        .and_then(|egress| egress.get("mode"))
+        .and_then(toml::Value::as_str);
+    ensure!(
+        mode == Some("allowlist"),
+        "a private run needs the egress policy's domain allowlist ([egress] mode = \"allowlist\" \
+         in egress.policy): under reads-anywhere a GET can carry what the agent read anywhere"
+    );
+    let strings = |rule: &toml::Value, key: &str| -> Option<Vec<String>> {
+        rule.get(key)?
+            .as_array()?
+            .iter()
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect()
+    };
+    let rules = match table.get("write") {
+        None => &[][..],
+        Some(rules) => rules
+            .as_array()
+            .context("[[write]] is not a list of rules")?,
+    };
+    for rule in rules {
+        let fetch = strings(rule, "methods").is_some_and(|methods| {
+            methods
+                .iter()
+                .all(|method| method.eq_ignore_ascii_case("POST"))
+        }) && strings(rule, "paths")
+            .is_some_and(|paths| paths.iter().all(|path| path.ends_with(GIT_FETCH_PATH)));
+        ensure!(
+            fetch,
+            "a private run allows no egress write rule but git fetch's POST to *{GIT_FETCH_PATH}; \
+             remove [[write]] {:?} from egress.policy",
+            rule.get("name")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("without a name")
+        );
+    }
+    Ok(())
+}
+
+/// Checks the policy this machine's proxy enforces, root's copy that
+/// `sandbox setup` installed, with [`check_private_policy`].
+pub fn check_installed_private() -> Result<()> {
+    let path = Path::new(POLICY_DIR).join("policy.toml");
+    let bytes = crate::files::read_regular(&path, MAX_POLICY_BYTES)
+        .with_context(|| format!("reading {}, which `sandbox setup` installs", path.display()))?;
+    check_private_policy(&String::from_utf8(bytes).context("the egress policy is not UTF-8")?)
+}
+
 /// How many domains a feed's text holds.
 fn feed_entries(text: &str) -> usize {
     text.lines()
@@ -371,6 +440,96 @@ pub fn start(egress: &Egress) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_runs_need_the_allowlist_and_only_git_fetch_writes() {
+        let allow = "[egress]\nmode = \"allowlist\"\nallow = [\"github.com\"]\n";
+        let fetch = "[[write]]\nname = \"git fetch\"\nhosts = [\"github.com\"]\n\
+                     methods = [\"POST\"]\npaths = [\"/**/git-upload-pack\"]\n";
+        let rule = |methods: &str, paths: &str| {
+            format!(
+                "[[write]]\nname = \"r\"\nhosts = [\"api.github.com\"]\n\
+                 methods = {methods}\npaths = {paths}\n"
+            )
+        };
+        // The text, and a part of the refusal if it is refused.
+        let cases = [
+            (POLICY_TOML.to_owned(), Some("domain allowlist")),
+            (String::new(), Some("domain allowlist")),
+            (
+                "[egress]\nmode = \"reads-anywhere\"\n".to_owned(),
+                Some("domain allowlist"),
+            ),
+            (
+                "egress = \"allowlist\"\n".to_owned(),
+                Some("domain allowlist"),
+            ),
+            (
+                "[egress]\nmode = [\"allowlist\"]\n".to_owned(),
+                Some("domain allowlist"),
+            ),
+            ("[egress\n".to_owned(), Some("parsing")),
+            (allow.to_owned(), None),
+            (
+                "[egress]\nmode = \"allowlist\"\nallow = []\n".to_owned(),
+                None,
+            ),
+            (format!("{allow}{fetch}"), None),
+            (
+                format!("{allow}{}", rule("[\"post\"]", "[\"/a/git-upload-pack\"]")),
+                None,
+            ),
+            // The shipped rules but git fetch's.
+            (
+                POLICY_TOML.replacen(
+                    "[[write]]",
+                    "[egress]\nmode = \"allowlist\"\n\n[[write]]",
+                    1,
+                ),
+                Some("\"GitHub GraphQL reads\""),
+            ),
+            (
+                format!("{allow}{}", rule("[\"POST\"]", "[\"/graphql\"]")),
+                Some("\"r\""),
+            ),
+            (
+                format!(
+                    "{allow}{}",
+                    rule("[\"WEBSOCKET\"]", "[\"/git-upload-pack\"]")
+                ),
+                Some("\"r\""),
+            ),
+            (
+                format!(
+                    "{allow}{}",
+                    rule("[\"POST\", \"PUT\"]", "[\"/git-upload-pack\"]")
+                ),
+                Some("\"r\""),
+            ),
+            (
+                format!(
+                    "{allow}{}",
+                    rule("[\"POST\"]", "[\"/git-upload-pack\", \"/**\"]")
+                ),
+                Some("\"r\""),
+            ),
+            (
+                format!("{allow}{}", rule("[\"POST\"]", "[\"/git-upload-pack-x\"]")),
+                Some("\"r\""),
+            ),
+            (format!("{allow}{}", rule("[]", "\"/x\"")), Some("\"r\"")),
+            (format!("write = 1\n{allow}"), Some("not a list")),
+        ];
+        for (text, want) in cases {
+            match (check_private_policy(&text), want) {
+                (Ok(()), None) => {}
+                (Err(err), Some(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{text}: {err:#}");
+                }
+                (result, _) => panic!("{text}: {result:?}"),
+            }
+        }
+    }
 
     /// The old tree's command line, argument for argument.
     #[test]

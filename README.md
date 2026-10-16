@@ -389,7 +389,9 @@ For a private network join today, use the caller's own step in the
 This repository's review gate does that with opencode on hosted
 `ubuntu-26.04` ([run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)); no other caller has.
 
-Not supported: private target repositories and most of gh-aw's catalogue.
+Not supported: most of gh-aw's catalogue. Private targets are refused unless the caller
+opts its own repository in under the conditions of
+[private repositories](docs/private-repositories.md).
 Pull requests from forks
 do not get the end-to-end jobs that write. The sandbox setup takes two
 to five minutes on a hosted runner. Nobody but its authors has used it.

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
+use super::agent::GITHUB_TOKEN_FILE;
 use super::enter::{Runner, Sandbox, one_line};
 use crate::policy::Policy;
 
@@ -208,6 +209,7 @@ fn clone_args<'a>(
     branch: Option<&'a str>,
     depth: &'a str,
     dir: &'a str,
+    credential: &'a [String],
 ) -> Vec<&'a str> {
     let mut argv = networked_git(None);
     argv.extend([
@@ -217,6 +219,7 @@ fn clone_args<'a>(
         "--depth",
         depth,
     ]);
+    argv.extend(credential.iter().flat_map(|item| ["-c", item.as_str()]));
     argv.extend(branch.iter().flat_map(|branch| ["--branch", branch]));
     argv.extend(["--", url, dir]);
     argv
@@ -263,13 +266,40 @@ pub fn git_clone(
     branch: Option<&str>,
     depth: &str,
     dir: &str,
+    credential: &[String],
 ) -> Result<()> {
     check_url(url)?;
     branch.map(check_ref).transpose()?;
     sandbox
-        .checked(&clone_args(url, branch, depth, dir), b"", MAX_GIT_OUTPUT)
+        .checked(
+            &clone_args(url, branch, depth, dir, credential),
+            b"",
+            MAX_GIT_OUTPUT,
+        )
         .with_context(|| format!("cloning {url}"))?;
     Ok(())
+}
+
+/// The configuration a private target's clone is made with
+/// (docs/private-repositories.md): no helper but one that answers for
+/// URL alone with the job's read token, read from TOKEN_FILE, the sandbox
+/// user's file of it. `git clone -c` keeps it in the checkout, so the
+/// fetches of a push's or a review's head that follow have it too; the
+/// token is in no command line, URL or configuration value. Context and
+/// agent configuration clones are repositories of their own and get no
+/// credential, so they stay public-only.
+fn credential_config(url: &str, token_file: &str) -> Result<Vec<String>> {
+    ensure!(
+        !url.contains(['=', '\'']) && !token_file.contains(['\'', '\n']),
+        "{url:?} and {token_file:?} cannot name a credential helper"
+    );
+    Ok(vec![
+        "credential.helper=".to_owned(),
+        format!(
+            "credential.{url}.helper=!f() {{ test \"$1\" = get && \
+             printf 'username=x-access-token\\npassword=%s\\n' \"$(cat '{token_file}')\"; }}; f"
+        ),
+    ])
 }
 
 /// PATH as an argument for a command.
@@ -298,12 +328,19 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     // that is fetched and checked out, detached, on the default branch's
     // clone.
     let push = policy.safe_outputs.push_to_pull_request_branch.as_ref();
+    let credential = if policy.private {
+        let token_file = sandbox.home.join(GITHUB_TOKEN_FILE);
+        credential_config(&policy.clone_url, utf8(&token_file)?)?
+    } else {
+        Vec::new()
+    };
     git_clone(
         sandbox,
         &policy.clone_url,
         push.is_none().then_some(policy.base.as_str()),
         DEPTH,
         dir_text,
+        &credential,
     )?;
     // Read as the sandbox user, like everything in the checkout: it is
     // the agent's from here on.
@@ -517,6 +554,7 @@ mod tests {
             max_patch_bytes: 1 << 20,
             safe_outputs: SafeOutputs::default(),
             commit_author: None,
+            private: false,
         }
     }
 
@@ -567,6 +605,7 @@ mod tests {
             Some("main"),
             DEPTH,
             "/home/agent/work/r",
+            &[],
         );
         assert_eq!(
             argv,
@@ -593,7 +632,7 @@ mod tests {
             ]
         );
         // Without a branch, the repository's default.
-        let argv = clone_args("file:///srv/r.git", None, "1", "d");
+        let argv = clone_args("file:///srv/r.git", None, "1", "d", &[]);
         assert_eq!(
             argv[argv.len() - 5..],
             ["--depth", "1", "--", "file:///srv/r.git", "d"]
@@ -684,7 +723,7 @@ mod tests {
         let replacement_base = in_repo(&["rev-parse", "HEAD"]);
         in_repo(&["checkout", "-q", "main"]);
         let url = format!("file://{repo_text}");
-        ok(&clone_args(&url, None, DEPTH, dir_text));
+        ok(&clone_args(&url, None, DEPTH, dir_text, &[]));
         assert!(!run(&["git", "-C", dir_text, "cat-file", "-e", &replacement_base]).0);
         ok(&fetch_args(dir_text, &replacement_base, DEPTH));
         ok(&fetch_args(dir_text, &head, DEPTH));
@@ -699,6 +738,44 @@ mod tests {
             ]),
             replacement_base
         );
+        // A private target's clone: git asks the checkout's helper for its
+        // URL alone, which reads the token from its file; any other URL,
+        // as a context clone's, gets nothing.
+        let token_file = temp.path().join("github-token");
+        std::fs::write(&token_file, "test-token-not-secret\n").unwrap();
+        let credential = credential_config(&url, utf8(&token_file).unwrap()).unwrap();
+        let private = temp.path().join("private");
+        let private_text = utf8(&private).unwrap();
+        ok(&clone_args(&url, None, DEPTH, private_text, &credential));
+        let fill = |for_url: &str| {
+            let mut child = Command::new("git")
+                .args(["-C", private_text, "credential", "fill"])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "/bin/false")
+                .env("SSH_ASKPASS", "/bin/false")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            let input = format!("url={for_url}\n\n");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert!(fill(&url).contains("password=test-token-not-secret\n"));
+        assert!(!fill(&format!("{url}-other")).contains("password="));
+        assert!(!fill("https://example.invalid/o/r").contains("password="));
+        let config = std::fs::read_to_string(private.join(".git/config")).unwrap();
+        assert!(!config.contains("test-token-not-secret"), "{config}");
+        assert!(credential_config("https://h/o/r=x", "/t").is_err());
+        assert!(credential_config(&url, "/t'; touch /x; '").is_err());
         // A commit the repository does not have is not there to fetch.
         assert!(!run(&fetch_args(dir_text, &"3".repeat(40), DEPTH)).0);
         let context_dir = temp.path().join("context");

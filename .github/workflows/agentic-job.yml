@@ -65,7 +65,7 @@ on:
         type: string
         default: ""
       repo:
-        description: The repository the agent works on, OWNER/NAME on github.com; it must be public
+        description: The repository the agent works on, OWNER/NAME on github.com; it must be public, or the calling repository where the bounds set `private = true` (docs/private-repositories.md)
         type: string
         required: true
       base:

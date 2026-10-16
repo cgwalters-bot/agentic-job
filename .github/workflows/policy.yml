@@ -60,7 +60,7 @@ on:
         type: string
         default: ""
       repo:
-        description: The repository the agent works on, OWNER/NAME on github.com; it must be public
+        description: The repository the agent works on, OWNER/NAME on github.com; it must be public, or the calling repository where the bounds set `private = true` (docs/private-repositories.md)
         type: string
         required: true
       base:
@@ -462,17 +462,37 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && github.workflow_sha || (inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha) }}
       # Logs, transcripts and patches are published, so nothing is run for
       # a repository that cannot be shown to be public. An answer that is
-      # an error counts as not public.
+      # an error counts as not public. The one exception is a target that
+      # is the calling repository and private: its logs and artifacts are
+      # its collaborators' alone and the job token reads it. The policy
+      # step passes `--private`, which the binary refuses unless every
+      # bounds file sets `private = true`; the agent configuration is
+      # cloned without a credential and stays public
+      # (docs/private-repositories.md).
       - name: Check that the repositories are public
+        id: visibility
         env:
           GH_TOKEN: ${{ github.token }}
-          REPOS: ${{ inputs.repo }} ${{ inputs.agent-config-repo }} ${{ inputs.item-repo }}
+          REPO: ${{ inputs.repo }}
+          REPOS: ${{ inputs.agent-config-repo }} ${{ inputs.item-repo }}
         run: |
           set -f
+          name='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+          refuse() { echo "::error::$1 cannot be confirmed to be public; private runs are refused unless the target is the calling repository and the bounds set private = true, because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"; exit 1; }
+          visibility() {
+            gh api "repos/$1" --jq 'if .private == false and .visibility == "public" then "public"
+              elif .private == true and .visibility == "private" then "private" else "unknown" end' || echo unknown
+          }
+          [[ "$REPO" =~ $name ]] || { echo "::error::not a repository name: $REPO"; exit 1; }
+          target=$(visibility "$REPO")
+          case "$target" in
+            public) ;;
+            private) [ "$REPO" = "$GITHUB_REPOSITORY" ] || refuse "$REPO"; echo private=true >> "$GITHUB_OUTPUT" ;;
+            *) refuse "$REPO" ;;
+          esac
           for repo in $REPOS; do
-            [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::not a repository name: $repo"; exit 1; }
-            gh api "repos/$repo" --jq '.private == false and .visibility == "public"' | grep -qx true ||
-              { echo "::error::$repo cannot be confirmed to be public; private runs are refused because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"; exit 1; }
+            [[ "$repo" =~ $name ]] || { echo "::error::not a repository name: $repo"; exit 1; }
+            [ "$(visibility "$repo")" = public ] || refuse "$repo"
           done
       # Which repository and commit this file is running from. Without
       # them the checkout below would quietly take the caller's.
@@ -653,6 +673,7 @@ jobs:
           REPLACEMENT_BASE: ${{ steps.push.outputs.replacement-base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
           ITEM_REPO: ${{ inputs.item-repo }}
+          PRIVATE: ${{ steps.visibility.outputs.private }}
           EVENT: ${{ inputs.event }}
           REVIEW_ITEM: ${{ inputs.review-item }}
           REVIEW: ${{ inputs.review }}
@@ -674,6 +695,12 @@ jobs:
           if [ -n "$PUSH_ITEM" ]; then
             base=$PUSH_BRANCH
             set -- "$@" --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
+          fi
+          # A private run names where its outputs go, for the binary to
+          # hold them to its own repository.
+          if [ "$PRIVATE" = true ]; then
+            set -- "$@" --private
+            [ -n "$PUSH_ITEM" ] || set -- "$@" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
           fi
           # Without an apply environment apply holds the job token: refuse
           # here, not after the agent ran, what that token cannot apply.

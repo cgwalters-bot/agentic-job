@@ -541,6 +541,9 @@ it (`--repo`, `--clone-url`, `--base`, `--kind`, `--outputs`,
 `--outputs all` is every type the bounds list, and `--max-outputs max`
 their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
+A top-level `private = true` admits a target that is not public, under
+the conditions of [private repositories](private-repositories.md); it is
+off by default.
 
 Some things no bounds file can change. A run hands back one patch, so at
 most one pull request. A pull request is a draft unless it is complete

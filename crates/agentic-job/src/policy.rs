@@ -26,6 +26,10 @@ pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
 /// branch: one commit on top of the head the run started from.
 pub const PUSH_TO_PULL_REQUEST_BRANCH: &str = "push_to_pull_request_branch";
 
+/// The output type that sets fields on a Projects v2 board: a destination
+/// of its own, outside the output repository.
+const UPDATE_PROJECT: &str = "update_project";
+
 /// The output type that takes a pull request out of draft. Off unless a
 /// bounds file lists it: apply opens a pull request as a draft unless its
 /// work is complete under `ready_when_complete`, and this, like `draft:
@@ -292,6 +296,10 @@ pub struct Args {
     /// `repos`, as `--repo` must
     #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
     pub item_repo: Option<String>,
+    /// The repository could not be confirmed public: refused unless every
+    /// bounds file sets `private = true`
+    #[arg(long)]
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -335,6 +343,13 @@ pub struct Bounds {
     /// See [`check_commit_author`].
     #[serde(default)]
     pub commit_author: Option<String>,
+    /// Whether a run may work on a repository that is not public. Off,
+    /// run evidence is published and only public repositories are run;
+    /// on, `policy` keeps such a run's outputs in its own repository and
+    /// `run` requires the egress allowlist and a read token
+    /// (docs/private-repositories.md).
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
@@ -562,6 +577,8 @@ pub struct Request<'a> {
     pub output_repo: Option<&'a str>,
     /// Where the run's item is, when not in the output repository.
     pub item_repo: Option<&'a str>,
+    /// Whether the repository is not public.
+    pub private: bool,
 }
 
 /// What `policy.json` holds: the request, once it is within the bounds.
@@ -585,6 +602,10 @@ pub struct Policy {
     /// author `check` lets a patch name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_author: Option<String>,
+    /// A repository that is not public: `run` holds the machine to the
+    /// conditions of docs/private-repositories.md before it clones.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private: bool,
 }
 
 /// Reference context admitted before the agent starts. The workflow resolves
@@ -1060,6 +1081,7 @@ impl Bounds {
             pull_request,
             output_repo,
             item_repo,
+            private,
         } = *request;
         let mut errors = Vec::new();
 
@@ -1086,6 +1108,29 @@ impl Bounds {
                 "item repo {item_repo:?} is not within the bounds ({})",
                 self.repos.join(", ")
             ));
+        }
+        // A private repository's content is only as private as where the
+        // run leaves it: outputs applied in, or a status comment on, another
+        // repository could publish it, so both stay in the run's own.
+        if private {
+            if !self.private {
+                errors.push(format!(
+                    "repo {repo:?} is not public, and the bounds do not set `private = true`"
+                ));
+            }
+            if !output_repo.is_some_and(|output_repo| output_repo.eq_ignore_ascii_case(repo)) {
+                errors.push(format!(
+                    "a private run applies only to its own repository {repo:?}, not {}",
+                    output_repo.map_or("an unnamed one".to_owned(), |name| format!("{name:?}"))
+                ));
+            }
+            if let Some(item_repo) =
+                item_repo.filter(|item_repo| !item_repo.eq_ignore_ascii_case(repo))
+            {
+                errors.push(format!(
+                    "a private run's item is in its own repository {repo:?}, not {item_repo:?}"
+                ));
+            }
         }
         // An analysis run has no change to propose.
         let no_change = kind == Kind::Analysis;
@@ -1115,6 +1160,9 @@ impl Bounds {
                             && matches!(*output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH))
                     })
                     .filter(|output| *output != other_carrier)
+                    .filter(|output| {
+                        !(private && (carries_patch(output) || *output == UPDATE_PROJECT))
+                    })
                     .filter(|output| needs_token(output).is_none()),
             );
         } else {
@@ -1152,10 +1200,29 @@ impl Bounds {
                 )
             })
         }));
+        // A project's fields are read by the project's audience, which no
+        // check here confines to the private repository's: refused until
+        // that destination can be bounded, as patches are below.
+        if private && types.contains(&UPDATE_PROJECT) {
+            errors.push(format!(
+                "a private run can't {UPDATE_PROJECT}: its project can be read outside the \
+                 repository"
+            ));
+        }
         for carrier in [CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH] {
             if no_change && types.contains(&carrier) {
                 errors.push(format!(
                     "an analysis run hands back no change, so it can't {carrier}"
+                ));
+            }
+            // Apply pushes a patch through a fork of the output repository
+            // and checks that fork without a credential, which a private
+            // repository's fork does not answer: refused before an agent
+            // runs, not after.
+            if private && types.contains(&carrier) {
+                errors.push(format!(
+                    "a private run hands back no patch, so it can't {carrier}: apply's fork is \
+                     not supported for private repositories"
                 ));
             }
         }
@@ -1323,8 +1390,14 @@ impl Bounds {
             max_patch_bytes: self.max_patch_bytes,
             safe_outputs,
             commit_author: self.commit_author.clone(),
+            private,
         })
     }
+}
+
+/// Whether OUTPUT hands back a patch.
+fn carries_patch(output: &str) -> bool {
+    matches!(output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH)
 }
 
 /// Whether a component of `name` is dots alone: no directory to clone
@@ -1390,6 +1463,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         pull_request: args.pull_request.as_deref().zip(args.head.as_deref()),
         output_repo: args.output_repo.as_deref(),
         item_repo: args.item_repo.as_deref(),
+        private: args.private,
     };
     let compiled = bounds
         .compile(&request)
@@ -1610,6 +1684,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             pull_request: None,
             output_repo: None,
             item_repo: None,
+            private: false,
         }
     }
 
@@ -1799,6 +1874,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 pull_request: None,
                 output_repo: None,
                 item_repo: None,
+                private: false,
             });
             assert_eq!(result.is_ok(), allowed, "{base}, {outputs}: {result:?}");
         }
@@ -2535,6 +2611,181 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         }
     }
 
+    /// A repository that is not public is admitted only where every bounds
+    /// file opts in, and only with its outputs and item in that repository.
+    #[test]
+    fn private_runs_need_every_bounds_file_and_stay_in_their_repository() {
+        let own = Request {
+            private: true,
+            output_repo: Some(REPO),
+            outputs: "add_comment,noop",
+            ..request()
+        };
+        // The name, whether the caller's and the organization's files
+        // opt in, the request, and a part of the refusal if it is refused.
+        let cases: &[(&str, bool, bool, Request<'_>, Option<&str>)] = &[
+            ("public, neither opts in", false, false, request(), None),
+            ("private, both opt in", true, true, own, None),
+            (
+                "private, the caller does not opt in",
+                false,
+                true,
+                own,
+                Some("do not set `private = true`"),
+            ),
+            (
+                "private, the organization does not opt in",
+                true,
+                false,
+                own,
+                Some("do not set `private = true`"),
+            ),
+            (
+                "private, no output repository",
+                true,
+                true,
+                Request {
+                    output_repo: None,
+                    ..own
+                },
+                Some("not an unnamed one"),
+            ),
+            (
+                "private, outputs to another repository",
+                true,
+                true,
+                Request {
+                    output_repo: Some("bootc-dev/other"),
+                    ..own
+                },
+                Some("not \"bootc-dev/other\""),
+            ),
+            (
+                "private, the item in another repository",
+                true,
+                true,
+                Request {
+                    item_repo: Some("bootc-dev/other"),
+                    ..own
+                },
+                Some("item is in its own repository"),
+            ),
+            (
+                "private, of another case",
+                true,
+                true,
+                Request {
+                    output_repo: Some("BOOTC-DEV/BOOTC"),
+                    item_repo: Some("Bootc-Dev/Bootc"),
+                    ..own
+                },
+                None,
+            ),
+            (
+                "private, a pull request",
+                true,
+                true,
+                Request {
+                    outputs: "create_pull_request,noop",
+                    ..own
+                },
+                Some("can't create_pull_request"),
+            ),
+            (
+                "private, a project",
+                true,
+                true,
+                Request {
+                    outputs: "update_project,noop",
+                    ..own
+                },
+                Some("can't update_project"),
+            ),
+            (
+                "private, all outputs but a patch or a project",
+                true,
+                true,
+                Request {
+                    outputs: ALL_OUTPUTS,
+                    ..own
+                },
+                None,
+            ),
+            (
+                "public, all outputs with a project",
+                false,
+                false,
+                Request {
+                    outputs: ALL_OUTPUTS,
+                    ..request()
+                },
+                None,
+            ),
+            (
+                "private, the item in its own repository",
+                true,
+                true,
+                Request {
+                    item_repo: Some(REPO),
+                    ..own
+                },
+                None,
+            ),
+        ];
+        let with = |private: bool| {
+            let mut bounds = Bounds {
+                private,
+                ..bounds()
+            };
+            bounds.outputs.insert(
+                UPDATE_PROJECT.to_owned(),
+                OutputLimit {
+                    max: 1,
+                    projects: vec!["https://github.com/orgs/example/projects/2".to_owned()],
+                    fields: vec!["Status".to_owned()],
+                    ..OutputLimit::default()
+                },
+            );
+            bounds
+        };
+        for (name, caller, org, request, want) in cases {
+            let compiled = with(*caller).compile(request).and_then(|policy| {
+                with(*org)
+                    .compile(request)
+                    .and_then(|other| intersect(policy, other))
+            });
+            match (compiled, want) {
+                (Ok(policy), None) => {
+                    assert_eq!(policy.private, request.private, "{name}");
+                    assert!(
+                        !request.private || policy.safe_outputs.patch_carrier().is_none(),
+                        "{name}"
+                    );
+                    assert_eq!(
+                        policy.safe_outputs.others.contains_key(UPDATE_PROJECT),
+                        request.outputs == ALL_OUTPUTS && !request.private,
+                        "{name}"
+                    );
+                    let json = serde_json::to_value(&policy).unwrap();
+                    // Absent unless set, so a public run's policy.json is
+                    // what it was before the setting.
+                    assert_eq!(json.get("private").is_some(), request.private, "{name}");
+                    let loaded: Policy = serde_json::from_value(json).unwrap();
+                    assert_eq!(loaded, policy, "{name}");
+                }
+                (Err(errors), Some(want)) => {
+                    assert!(
+                        errors.iter().any(|e| e.contains(want)),
+                        "{name}: {errors:?}"
+                    );
+                }
+                (result, _) => panic!("{name}: {result:?}"),
+            }
+        }
+        let bounds: Bounds = toml::from_str(&format!("private = true\n{BOUNDS}")).unwrap();
+        assert!(bounds.private && !self::bounds().private);
+    }
+
     #[test]
     fn what_the_job_token_cannot_apply_is_refused() {
         let mut bounds = bounds();
@@ -2658,6 +2909,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             pull_request: None,
             output_repo: None,
             item_repo: None,
+            private: false,
         };
         let errors = bounds().compile(&request).unwrap_err();
         assert_eq!(errors.len(), 5, "{errors:?}");

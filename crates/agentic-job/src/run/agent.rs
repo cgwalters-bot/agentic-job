@@ -914,7 +914,7 @@ pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Res
     let checkout = sandbox.home.join(CONFIG_CHECKOUT);
     let checkout_text = utf8(&checkout)?;
     sandbox.checked(&["rm", "-rf", "--", checkout_text], b"", MAX_COMMAND_OUTPUT)?;
-    git_clone(sandbox, url, branch, "1", checkout_text)?;
+    git_clone(sandbox, url, branch, "1", checkout_text, &[])?;
     if agent.skills {
         install_source_skills(sandbox, kind, checkout_text)?;
     }

@@ -99,9 +99,10 @@ errors, denials, output refusals and estimated cost. Missing evidence is
 not success. It does not replay code or send telemetry. OTLP export is
 deferred ([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)).
 
-Private targets are refused here
-([#115](https://github.com/cgwalters-forge/agentic-job/issues/115)); gh-aw
-supports them. Apply uses a job token or an environment secret, without
+Private targets are refused here unless the caller opts its own repository in
+with the egress allowlist ([private repositories](private-repositories.md),
+[#115](https://github.com/cgwalters-forge/agentic-job/issues/115)); gh-aw
+supports them more broadly. Apply uses a job token or an environment secret, without
 gh-aw's computed permission union or per-run App-token integration.
 
 ## GitHub CLI proxy reuse

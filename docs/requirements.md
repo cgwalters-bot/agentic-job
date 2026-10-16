@@ -112,7 +112,9 @@ Use a disposable Linux VM with systemd 257 or later, sudo and nftables.
 Trust and protect the caller ref containing bounds and setup configuration.
 Give each job minimal permissions; notification and apply jobs inherit
 the caller's grant. Limit an apply environment to trusted refs. Targets
-must be public. [workflow.md](workflow.md) explains these settings.
+must be public unless the caller opts its own private repository in under the
+conditions of [private repositories](private-repositories.md).
+[workflow.md](workflow.md) explains these settings.
 
 ### R11. Lints are not boundaries
 

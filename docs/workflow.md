@@ -119,8 +119,9 @@ repository write permissions, and hands its token to the agent for
 `[{"repo":"OWNER/REPO","ref":"main"}]`. Omit `ref` to use the default branch.
 The policy machine resolves each ref to a full commit before the agent machine
 starts. It confirms public visibility through the forge API; errors fail closed.
-As with the target, the reusable workflow refuses private repositories because
-run evidence can disclose source (see [private repositories](private-repositories.md)).
+The reusable workflow refuses private context repositories because run evidence
+can disclose source and context is cloned without a credential (see
+[private repositories](private-repositories.md)); only the target may be private.
 The CLI also admits non-public context only
 when every caller/organization bounds file allows its repository. Every clone URL
 must name that repository on a host allowed by every bounds file. Public context

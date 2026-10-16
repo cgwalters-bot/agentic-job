@@ -339,12 +339,11 @@ of at most 253 characters are accepted; an empty list denies every destination.
 There are no implicit hosts or ecosystem bundles.
 
 Omitting the table, or setting `mode = "reads-anywhere"` without `allow`, keeps
-the public-only default unchanged. This is not private-repository enablement:
-allowed domains can still receive data in URLs, and allowing a shared hosting
-domain or attacker-controlled subdomain delegates that risk to its owner.
-Logs, runner exposure, direct endpoints and read-token routing need separate
-review before private data is admitted. Network address restrictions remain
-unchanged; this adds no access to private addresses.
+the reads-anywhere default. A [private run](private-repositories.md) requires
+`mode = "allowlist"`, but the mode alone does not admit one: allowed domains can still
+receive data in URLs, and allowing a shared hosting domain or
+attacker-controlled subdomain delegates that risk to its owner. Network address
+restrictions remain unchanged; this adds no access to private addresses.
 
 ## What is tested
 

@@ -304,6 +304,44 @@ const fn aic_pricing(kind: Kind) -> &'static str {
     }
 }
 
+/// The run's read-only GitHub token, if it was given one. Its value is a
+/// literal of the redaction, as every *_TOKEN of this process is
+/// (`own_tokens`).
+fn github_token() -> Result<Option<String>> {
+    match std::env::var(agent::GITHUB_TOKEN_VAR) {
+        Ok(token) => Ok(Some(token).filter(|token| !token.is_empty())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{} is not a token", agent::GITHUB_TOKEN_VAR)
+        }
+    }
+}
+
+/// What a private run (docs/private-repositories.md) needs of this
+/// machine before it clones: the proxy, with a policy that holds the
+/// sandbox to its allowlist and git fetch writes
+/// ([`crate::sandbox::egress::check_private_policy`]); and the job's read
+/// token, the only credential its clone gets. Each refusal names what is
+/// missing.
+fn check_private(
+    proxy: bool,
+    installed_policy: impl FnOnce() -> Result<()>,
+    token: bool,
+) -> Result<()> {
+    ensure!(
+        proxy,
+        "a private run needs the egress proxy (egress.proxy): without it the sandbox's network \
+         is open"
+    );
+    installed_policy()?;
+    ensure!(
+        token,
+        "a private run needs the job's read token ({}, github-reads) to clone its repository",
+        agent::GITHUB_TOKEN_VAR
+    );
+    Ok(())
+}
+
 /// The values of the credentials this process was started with.
 fn own_tokens() -> impl Iterator<Item = String> {
     std::env::vars_os().filter_map(|(name, value)| {
@@ -360,6 +398,13 @@ impl Plan {
         let run_id = run_id(&meta)?;
         let policy = policy::Policy::load(&args.policy)?;
         clone::check(&policy)?;
+        if policy.private {
+            check_private(
+                config.egress.proxy,
+                crate::sandbox::egress::check_installed_private,
+                github_token()?.is_some(),
+            )?;
+        }
         if let Some(head) = &args.review_head {
             clone::check_review_head(&policy, head)?;
         }
@@ -474,6 +519,18 @@ impl Plan {
         }
         let source = agent::fetch_source(sandbox, &self.agent, self.kind)?;
         shared.go_on()?;
+        if self.policy.private {
+            // The private clone's credential: the file the agent gets
+            // anyway, written before the clone that reads it.
+            let token = agent::github_token(github_token()?.as_deref())?;
+            agent::install(
+                sandbox,
+                &agent::Configuration {
+                    files: vec![token],
+                    ..agent::Configuration::default()
+                },
+            )?;
+        }
         let mut checkout = clone::clone(sandbox, &self.policy)?;
         let base_dir = checkout.dir.clone();
         if let Some(head) = &self.review_head {
@@ -536,15 +593,7 @@ impl Plan {
             self.agent.model.as_deref(),
             &source,
         )?;
-        // Its value is a literal of the redaction, as every *_TOKEN of
-        // this process is (`own_tokens`).
-        let github = match std::env::var(agent::GITHUB_TOKEN_VAR) {
-            Ok(token) => Some(token),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                bail!("{} is not a token", agent::GITHUB_TOKEN_VAR)
-            }
-        };
+        let github = github_token()?;
         configuration
             .files
             .extend(home_files(self.kind, &self.agent, github.as_deref())?);
@@ -1150,6 +1199,37 @@ pub fn run(args: &Args) -> Result<Exit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A private run starts only with every condition, and each refusal
+    /// names the one that is missing.
+    #[test]
+    fn private_runs_need_the_proxy_its_allowlist_and_a_read_token() {
+        // The name, whether there is a proxy, the refusal of its policy if
+        // it has one, whether there is a token, and a part of the refusal
+        // if it is refused.
+        let cases = [
+            ("all", true, None, true, None),
+            ("no proxy", false, None, true, Some("egress.proxy")),
+            (
+                "the policy is refused",
+                true,
+                Some("not the allowlist"),
+                true,
+                Some("not the allowlist"),
+            ),
+            ("no token", true, None, false, Some("read token")),
+        ];
+        for (name, proxy, refusal, token, want) in cases {
+            let installed = || refusal.map_or(Ok(()), |refusal| Err(anyhow::anyhow!(refusal)));
+            match (check_private(proxy, installed, token), want) {
+                (Ok(()), None) => {}
+                (Err(err), Some(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{name}: {err:#}");
+                }
+                (result, _) => panic!("{name}: {result:?}"),
+            }
+        }
+    }
 
     #[test]
     fn real_reviewers_start_in_base_and_scripted_reviewers_in_head() {
