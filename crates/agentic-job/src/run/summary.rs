@@ -356,7 +356,7 @@ pub fn summarize(inputs: &Inputs) -> Value {
 }
 
 /// "1.2M", "40k" or "386"; "?" when unknown.
-fn human_count(v: &Value) -> String {
+pub(super) fn human_count(v: &Value) -> String {
     match v.as_u64() {
         None => "?".to_owned(),
         Some(n) if n >= 1_000_000 => format!("{}M", (n / 100_000) as f64 / 10.0),

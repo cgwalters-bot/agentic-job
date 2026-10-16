@@ -17,9 +17,136 @@ const ARG_BYTES: usize = 240;
 const SUMMARY_BYTES: usize = (1 << 20) - 4096;
 const NOTICE: &str = "\nSession shortened to fit GitHub's summary limit. Full Markdown: `session.md` in the [**agent-run** artifact](#artifacts) (with the configured artifact prefix).\n";
 
+// A subagent's updates name the call that started it, and its blocks render
+// inside that call's. The transcript names the parents, so this bounds the
+// recursion: deeper blocks render at the top level instead.
+const MAX_DEPTH: usize = 4;
+// Marked so the expensive turns stand out in a long session.
+const COSTLIEST: usize = 3;
+
 struct Block {
     assistant: bool,
     markdown: String,
+}
+
+/// A block as rendered, before subagents' are nested into their calls'.
+struct Raw {
+    assistant: bool,
+    markdown: String,
+    /// What closes a tool call's block, after its subagent's blocks.
+    tail: String,
+    /// A tool call's block, always an earlier one, so the nesting is acyclic.
+    parent: Option<usize>,
+    depth: usize,
+}
+
+fn push(raw: &mut Vec<Raw>, assistant: bool, markdown: String, parent: Option<usize>) {
+    let depth = parent.map_or(0, |p| raw[p].depth + 1);
+    raw.push(Raw {
+        assistant,
+        markdown,
+        tail: String::new(),
+        parent,
+        depth,
+    });
+}
+
+/// The block of the call whose subagent sent UPDATE. Claude's adapter marks
+/// its subagents' updates so; other agents' subagents aren't in the session.
+fn parent(update: &Value, tools: &HashMap<String, Tool>, raw: &[Raw]) -> Option<usize> {
+    let id = update["_meta"]["claudeCode"]["parentToolUseId"].as_str()?;
+    let block = tools.get(id)?.block;
+    (raw[block].depth < MAX_DEPTH).then_some(block)
+}
+
+fn nested(raw: &[Raw], children: &[Vec<usize>], i: usize) -> String {
+    let mut out = raw[i].markdown.clone();
+    for &child in &children[i] {
+        out.push_str(&nested(raw, children, child));
+    }
+    out.push_str(&raw[i].tail);
+    out
+}
+
+enum Usage {
+    /// A `usage_update`: the context's tokens, and the session's cost so far.
+    Context {
+        used: Value,
+        size: Value,
+        cost: Option<f64>,
+    },
+    /// A `session/prompt` response's usage: the turn's tokens.
+    Turn(Value),
+}
+
+/// Fills in the usage blocks. Agents report the session's cumulative cost,
+/// so a turn's is what it added to the previous reading.
+fn usage_lines(usages: &[(usize, Usage)], raw: &mut [Raw]) {
+    let mut previous = 0.0;
+    let mut turns = Vec::new();
+    for (_, usage) in usages {
+        let turn = match usage {
+            Usage::Context {
+                cost: Some(amount), ..
+            } => {
+                // A lower reading is a new count, not a refund.
+                let turn = if *amount >= previous {
+                    amount - previous
+                } else {
+                    *amount
+                };
+                previous = *amount;
+                Some((turn, *amount))
+            }
+            _ => None,
+        };
+        turns.push(turn);
+    }
+    let mut ranked: Vec<f64> = turns.iter().flatten().map(|(turn, _)| *turn).collect();
+    ranked.sort_by(|a, b| b.total_cmp(a));
+    // With no more turns than that, every one would be marked.
+    let threshold = ranked
+        .get(COSTLIEST - 1)
+        .filter(|_| ranked.len() > COSTLIEST)
+        .copied();
+    for ((block, usage), turn) in usages.iter().zip(turns) {
+        raw[*block].markdown = match usage {
+            Usage::Context { used, size, .. } => {
+                let mut line = format!(
+                    "\nContext: {} of {} tokens",
+                    summary::human_count(used),
+                    summary::human_count(size)
+                );
+                if let Some((turn, total)) = turn {
+                    let cost = format!("turn cost ${turn:.4}");
+                    if threshold.is_some_and(|t| turn > 0.0 && turn >= t) {
+                        line.push_str(&format!("; **{cost}, among the {COSTLIEST} costliest**"));
+                    } else {
+                        line.push_str(&format!("; {cost}"));
+                    }
+                    line.push_str(&format!(" (session ${total:.4})"));
+                }
+                line + "\n"
+            }
+            Usage::Turn(usage) => {
+                let counts: Vec<String> = [
+                    ("inputTokens", "input"),
+                    ("outputTokens", "output"),
+                    ("cachedReadTokens", "cache read"),
+                    ("cachedWriteTokens", "cache write"),
+                ]
+                .iter()
+                .filter(|(key, _)| usage[key].is_u64())
+                .map(|(key, name)| format!("{} {name}", summary::human_count(&usage[key])))
+                .collect();
+                if counts.is_empty() {
+                    "\nTurn tokens: not reported\n".to_owned()
+                } else {
+                    format!("\nTurn tokens: {}\n", counts.join(", "))
+                }
+            }
+        };
+    }
 }
 
 pub(super) struct Session {
@@ -160,40 +287,48 @@ impl Session {
 }
 
 pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
-    let mut blocks = vec![Block {
-        assistant: false,
-        markdown: "\n## Agent session\n".to_owned(),
-    }];
+    let mut raw = Vec::new();
+    push(&mut raw, false, "\n## Agent session\n".to_owned(), None);
     let mut tools: HashMap<String, Tool> = HashMap::new();
-    let mut prose: Option<(String, String)> = None;
+    // (label, text, parent block)
+    let mut prose: Option<(&str, String, Option<usize>)> = None;
     let mut message_id = Value::Null;
-    let flush = |prose: &mut Option<(String, String)>, blocks: &mut Vec<Block>| {
-        if let Some((kind, text)) = prose.take() {
+    // (block, reading): usage_update readings, merged while consecutive, and
+    // the per-turn usage of `session/prompt` responses.
+    let mut usages: Vec<(usize, Usage)> = Vec::new();
+    let flush = |prose: &mut Option<(&str, String, Option<usize>)>, raw: &mut Vec<Raw>| {
+        if let Some((kind, text, parent)) = prose.take() {
             let markdown = if kind == "Reasoning" {
                 format!(
                     "\n<details><summary>Reasoning</summary>\n\n{}\n\n</details>\n",
                     escape(&text, redactor)
                 )
             } else {
-                format!("\n### {kind}\n\n{}\n", escape(&text, redactor))
+                // A subagent's prose is inside its call's block, not a turn
+                // of the agent's own that the preview must keep.
+                let label = if parent.is_some() && kind == "Assistant" {
+                    "Subagent"
+                } else {
+                    kind
+                };
+                format!("\n### {label}\n\n{}\n", escape(&text, redactor))
             };
-            blocks.push(Block {
-                assistant: kind == "Assistant",
-                markdown,
-            });
+            push(raw, kind == "Assistant", markdown, parent);
         }
     };
     for record in records {
         let Some(msg) = &record.msg else { continue };
         if record.dir == Dir::Send && msg["method"] == "session/prompt" {
-            flush(&mut prose, &mut blocks);
-            blocks.push(Block {
-                assistant: false,
-                markdown: format!(
+            flush(&mut prose, &mut raw);
+            push(
+                &mut raw,
+                false,
+                format!(
                     "\n### User\n\n{}\n",
                     escape(&texts(&msg["params"]["prompt"]), redactor)
                 ),
-            });
+                None,
+            );
             continue;
         }
         if record.dir != Dir::Recv {
@@ -201,6 +336,7 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
         }
         let u = &msg["params"]["update"];
         let kind = u["sessionUpdate"].as_str().unwrap_or_default();
+        let parent = parent(u, &tools, &raw);
         // Vibe's thinking, sent as messages, is reasoning like any other.
         if let Some((kind, chunk)) = crate::session::vibe::chunk(u) {
             let label = match kind {
@@ -208,28 +344,27 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
                 "agent_thought_chunk" => "Reasoning",
                 _ => "User",
             };
-            if prose.as_ref().is_some_and(|(k, _)| k != label)
+            if prose
+                .as_ref()
+                .is_some_and(|(k, _, p)| *k != label || *p != parent)
                 || (!u["messageId"].is_null() && u["messageId"] != message_id)
             {
-                flush(&mut prose, &mut blocks);
+                flush(&mut prose, &mut raw);
             }
             message_id = u["messageId"].clone();
-            let (_, text) = prose.get_or_insert_with(|| (label.to_owned(), String::new()));
+            let (_, text, _) = prose.get_or_insert_with(|| (label, String::new(), parent));
             text.push_str(&chunk);
             continue;
         }
-        flush(&mut prose, &mut blocks);
+        flush(&mut prose, &mut raw);
         message_id = Value::Null;
         if matches!(kind, "tool_call" | "tool_call_update") {
             let Some(id) = u["toolCallId"].as_str() else {
                 continue;
             };
             let tool = tools.entry(id.to_owned()).or_insert_with(|| {
-                let block = blocks.len();
-                blocks.push(Block {
-                    assistant: false,
-                    markdown: String::new(),
-                });
+                let block = raw.len();
+                push(&mut raw, false, String::new(), parent);
                 Tool {
                     block,
                     start: (kind == "tool_call").then_some(record.ts),
@@ -247,22 +382,38 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
             if matches!(u["status"].as_str(), Some("completed" | "failed")) {
                 tool.end.get_or_insert(record.ts);
             }
-        } else if kind == "usage_update" || !msg["result"]["usage"].is_null() {
-            let usage = if kind == "usage_update" {
-                u
+        } else if kind == "usage_update" {
+            // Claude's adapter sends one per streamed step and the cost
+            // only at the end of a turn: one line per run of readings.
+            // The budget is in USD, as the digest counts it.
+            let amount = (u["cost"]["currency"] == "USD")
+                .then(|| u["cost"]["amount"].as_f64())
+                .flatten();
+            // A turn ends at a cost; the next reading starts the next.
+            if let Some((block, Usage::Context { used, size, cost })) = usages.last_mut()
+                && *block + 1 == raw.len()
+                && cost.is_none()
+            {
+                *used = u["used"].clone();
+                *size = u["size"].clone();
+                *cost = amount;
             } else {
-                &msg["result"]["usage"]
-            };
-            blocks.push(Block {
-                assistant: false,
-                markdown: format!(
-                    "\nReported usage (agent-reported; may be cumulative): {}\n",
-                    bounded(&usage.to_string(), OUTPUT_BYTES, redactor)
-                ),
-            });
+                usages.push((
+                    raw.len(),
+                    Usage::Context {
+                        used: u["used"].clone(),
+                        size: u["size"].clone(),
+                        cost: amount,
+                    },
+                ));
+                push(&mut raw, false, String::new(), None);
+            }
+        } else if !msg["result"]["usage"].is_null() {
+            usages.push((raw.len(), Usage::Turn(msg["result"]["usage"].clone())));
+            push(&mut raw, false, String::new(), None);
         }
     }
-    flush(&mut prose, &mut blocks);
+    flush(&mut prose, &mut raw);
     for tool in tools.values() {
         let f = &tool.fields;
         let name = f["_meta"]["claudeCode"]["toolName"]
@@ -287,14 +438,35 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
                     .ok()
             })
             .map_or_else(|| "exit unknown".to_owned(), |code| format!("exit {code}"));
-        blocks[tool.block].markdown = format!(
-            "\n<details><summary>{} — {duration}, {}, {exit}</summary>\n\nArguments: {}\n\n<pre>{}</pre>\n\n</details>\n",
+        let block = &mut raw[tool.block];
+        block.markdown = format!(
+            "\n<details><summary>{} — {duration}, {}, {exit}</summary>\n\nArguments: {}\n",
             bounded(name, ARG_BYTES, redactor),
             bounded(status, ARG_BYTES, redactor),
             bounded(&f["rawInput"].to_string(), ARG_BYTES, redactor),
+        );
+        // A subagent's turns, if any, come between the call and its output.
+        block.tail = format!(
+            "\n<pre>{}</pre>\n\n</details>\n",
             bounded(&output, OUTPUT_BYTES, redactor)
         );
     }
+    usage_lines(&usages, &mut raw);
+    let mut children = vec![Vec::new(); raw.len()];
+    for (i, block) in raw.iter().enumerate() {
+        if let Some(p) = block.parent {
+            children[p].push(i);
+        }
+    }
+    let blocks: Vec<Block> = raw
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.parent.is_none())
+        .map(|(i, b)| Block {
+            assistant: b.assistant,
+            markdown: nested(&raw, &children, i),
+        })
+        .collect();
     let full = blocks.iter().map(|b| b.markdown.as_str()).collect();
     Session { full, blocks }
 }
@@ -377,6 +549,136 @@ mod tests {
         assert!(!s.full.contains("```"));
         assert_eq!(s.full.matches("</details>").count(), 2);
         assert_eq!(s.preview(s.full.len()), s.full);
+    }
+
+    fn child(mut update: Value, parent: &str) -> Value {
+        update["_meta"] = json!({"claudeCode": {"parentToolUseId": parent}});
+        update
+    }
+
+    /// Claude's adapter marks a subagent's updates with the call that
+    /// started it; they render inside that call, its markup still escaped.
+    #[test]
+    fn subagent_turns_nest_under_their_call() {
+        let redactor = Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap());
+        let records = vec![
+            record(
+                0.0,
+                json!({"sessionUpdate":"tool_call","toolCallId":"agent","title":"Agent","rawInput":{"description":"review"}}),
+            ),
+            record(
+                1.0,
+                child(
+                    json!({"sessionUpdate":"agent_message_chunk","content":{"text":"reviewing </details>"}}),
+                    "agent",
+                ),
+            ),
+            record(
+                2.0,
+                child(
+                    json!({"sessionUpdate":"tool_call","toolCallId":"read","title":"Read"}),
+                    "agent",
+                ),
+            ),
+            record(
+                3.0,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":"completed","content":[{"text":"</pre></details>"}]}),
+            ),
+            record(
+                4.0,
+                json!({"sessionUpdate":"tool_call_update","toolCallId":"agent","status":"completed","content":[{"text":"no blockers"}]}),
+            ),
+            record(
+                5.0,
+                json!({"sessionUpdate":"agent_message_chunk","content":{"text":"done"}}),
+            ),
+            // A call can't be its own parent.
+            record(
+                6.0,
+                child(
+                    json!({"sessionUpdate":"tool_call","toolCallId":"self","title":"Self"}),
+                    "self",
+                ),
+            ),
+        ];
+        let s = render(&records, &redactor);
+        let at = |needle: &str| s.full.find(needle).unwrap();
+        assert!(at("<summary>Agent") < at("### Subagent"), "{}", s.full);
+        assert!(at("### Subagent") < at("<summary>Read"));
+        assert!(at("<summary>Read") < at("no blockers"));
+        assert!(at("no blockers") < at("### Assistant"));
+        assert!(!s.full.contains("reviewing </details>"));
+        assert_eq!(
+            s.full.matches("<details>").count(),
+            s.full.matches("</details>").count()
+        );
+        // Header, the agent's call, its message, and the self-parented call.
+        assert_eq!(s.blocks.len(), 4);
+        assert_eq!(s.blocks.iter().filter(|b| b.assistant).count(), 1);
+
+        // A chain of parents nests only MAX_DEPTH deep, then starts again.
+        let mut records = Vec::new();
+        for i in 0..10 {
+            let call = json!({"sessionUpdate":"tool_call","toolCallId":format!("c{i}"),"title":format!("c{i}")});
+            records.push(record(
+                i as f64,
+                if i == 0 {
+                    call
+                } else {
+                    child(call, &format!("c{}", i - 1))
+                },
+            ));
+        }
+        let s = render(&records, &redactor);
+        let tops: Vec<_> = s.blocks.iter().skip(1).map(|b| &b.markdown[..30]).collect();
+        assert_eq!(tops.len(), 2, "{tops:?}");
+        assert!(s.blocks[2].markdown.starts_with("\n<details><summary>c5 "));
+    }
+
+    /// Turns' tokens and cost, readings in a row merged, the costliest
+    /// marked, and the cost of a turn told from the session's running total.
+    #[test]
+    fn per_turn_usage_and_costliest_turns() {
+        let redactor = Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap());
+        let usage = |used: u64, cost: Option<f64>| {
+            let mut u = json!({"sessionUpdate":"usage_update","used":used,"size":200000});
+            if let Some(amount) = cost {
+                u["cost"] = json!({"amount": amount, "currency": "USD"});
+            }
+            u
+        };
+        let say = || json!({"sessionUpdate":"agent_message_chunk","content":{"text":"step"}});
+        let mut records = Vec::new();
+        for (i, cost) in [0.1, 0.15, 0.95, 1.0, 1.5].into_iter().enumerate() {
+            records.push(record(i as f64, say()));
+            records.push(record(i as f64, usage(1000, None)));
+            records.push(record(i as f64, usage(30000 + i as u64, Some(cost))));
+        }
+        records.push(record(9.0, usage(5, Some(0.5))));
+        records.push(
+            serde_json::from_value(json!({"ts": 10.0, "dir": "recv", "msg": {"id": 1, "result": {"stopReason": "end_turn", "usage": {"inputTokens": 8706, "outputTokens": 14}}}}))
+                .unwrap(),
+        );
+        let s = render(&records, &redactor);
+        assert_eq!(s.full.matches("\nContext: ").count(), 6, "{}", s.full);
+        assert!(
+            s.full
+                .contains("\nContext: 30k of 200k tokens; turn cost $0.1000 (session $0.1000)\n")
+        );
+        assert!(s.full.contains("; turn cost $0.0500 (session $0.1500)\n"));
+        assert!(
+            s.full
+                .contains("; **turn cost $0.8000, among the 3 costliest** (session $0.9500)\n")
+        );
+        assert!(s.full.contains("; turn cost $0.0500 (session $1.0000)\n"));
+        assert!(
+            s.full
+                .contains("; **turn cost $0.5000, among the 3 costliest** (session $1.5000)\n")
+        );
+        // A lower running total starts a new count; that turn ties the third.
+        assert!(s.full.contains("\nContext: 5 of 200k tokens; **turn cost $0.5000, among the 3 costliest** (session $0.5000)\n"));
+        assert!(s.full.contains("\nTurn tokens: 8k input, 14 output\n"));
+        assert!(!s.full.contains("usageUpdate"));
     }
 
     /// Vibe's thinking, which it sends as messages holding Python reprs,

@@ -69,8 +69,15 @@ Joined text is redacted again so secrets split across streamed chunks stay hidde
 (tool outputs are still bounded). The summary reserves space for accounting
 and stays below GitHub's 1 MiB limit: assistant prose is retained first, then
 head and tail blocks. If assistant prose alone exceeds the limit, each message
-is abbreviated; the artifact keeps it. Usage updates are labelled agent-reported
-and potentially cumulative, not invented per-turn costs.
+is abbreviated; the artifact keeps it.
+
+A subagent's messages and tool calls render inside the call that started it,
+where the agent says which that is (Claude Code does; opencode and vibe
+report only the call's output). Each step shows the context's tokens as the
+agent reports them. Where it reports the session's running cost in USD, each
+reading shows what the turn added, and the three costliest turns are bold;
+`session/prompt` responses show their turn's tokens. These are the agent's
+figures, not the inference proxy's.
 
 To replay a long real run in the renderer regression test, download its
 `*-agent-transcript` artifact and extract `acp.jsonl`, then run
