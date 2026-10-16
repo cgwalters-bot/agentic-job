@@ -9,6 +9,7 @@ use std::path::Path;
 
 use super::handback::{
     AGENT_OUTCOME, AGENT_OUTPUTS, MAX_LINES, MAX_OUTCOME_BYTES, MAX_OUTPUTS_BYTES,
+    OUTCOME_CHECKPOINT,
 };
 use crate::check::checkpoint::{FENCE, REASONS};
 use crate::policy::{
@@ -84,6 +85,16 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
         rules.max_patch_files
     );
     text
+}
+
+/// Whether the agent of a run of POLICY keeps a checkpoint in its outcome
+/// from the start: where its change is proposed and the bounds open
+/// complete work ready for review (`ready_when_complete`), so that a
+/// draft means "not finished". It is off where that is.
+pub fn asks_for_checkpoint(policy: &Policy) -> bool {
+    policy.kind == Kind::Branch
+        && policy.safe_outputs.patch_carrier().is_some()
+        && policy.safe_outputs.ready_when_complete()
 }
 
 /// The text for a run of POLICY whose agent has the home HOME and works
@@ -181,7 +192,8 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> S
              below.\n",
         );
     }
-    if carrier.is_some() && outputs.ready_when_complete() {
+    let checkpoint = asks_for_checkpoint(policy);
+    if checkpoint {
         let (what, field) = if push.is_some() {
             ("pull request is marked", "message")
         } else {
@@ -201,14 +213,35 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> S
     }
     let _ = writeln!(
         text,
-        "- `{}`: your report, written last, as one JSON object of at most {} KiB: \
+        "- `{}`: your report, {}, as one JSON object of at most {} KiB: \
          `{{\"summary\": \"...\", \"tests\": [{{\"command\": \"...\", \"exit_code\": 0, \
          \"duration_s\": 12}}], \"stopped_early\": null}}`. `summary` says what you did and \
          why; `tests` lists the commands you ran to check it, with their real exit codes; \
          `stopped_early` is null, or why you stopped before the task was done.",
         home.join(AGENT_OUTCOME).display(),
+        if checkpoint {
+            "written early and kept current"
+        } else {
+            "written last"
+        },
         MAX_OUTCOME_BYTES / KIB,
     );
+    // Agents whose context was compacted have lost their hand-back, and
+    // ended well with nothing; an early checkpoint, kept current and
+    // restated after a compaction, brought one back (#813). That it is
+    // there is not that the work is done: it stays open until the agent
+    // closes it.
+    if checkpoint {
+        let _ = writeln!(
+            text,
+            "  Write it as soon as you have read the task, not only at the end: a `summary` of \
+             what you are doing, and `\"{OUTCOME_CHECKPOINT}\": {{\"complete\": false, \
+             \"done\": \"...\", \"left\": \"...\", \"next\": \"...\"}}`: what is done, \
+             what is left and how to continue. Update both as you work. Finishing means setting \
+             `complete` to true, last; until then your change is handed back as a draft to be \
+             continued, never as done, whatever else you write."
+        );
+    }
     // Two runs lost all their work to a fake key in a test fixture, found
     // by the final gate only after their sessions had ended (#720).
     let _ = writeln!(
@@ -330,9 +363,17 @@ mod tests {
             "end the body with a checkpoint",
             "a line ````checkpoint`",
             "one of budget, runtime, cap, incomplete",
+            // The early checkpoint in the outcome (#822).
+            "`/home/agent/out/outcome.json`: your report, written early and kept current",
+            "Write it as soon as you have read the task",
+            "`\"checkpoint\": {\"complete\": false, \"done\": \"...\", \"left\": \"...\", \
+             \"next\": \"...\"}`",
+            "Finishing means setting `complete` to true, last",
+            "never as done",
         ] {
             assert!(ready.contains(want), "{want}\n{ready}");
         }
+        assert!(branch.contains("your report, written last"), "{branch}");
 
         // An analysis run is offered no pull request, whatever the policy
         // file says; a run with no outputs is told to write none.

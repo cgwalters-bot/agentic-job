@@ -87,6 +87,9 @@ struct Setup<'a> {
     /// The file, under the test's directory, whose existence is the
     /// output the run requires; none for a run that requires none.
     output: Option<&'a str>,
+    /// What the session tells the agent after a compaction; none for
+    /// nothing.
+    restate: Option<&'a str>,
 }
 
 /// What a test's client does on its end of the connection.
@@ -373,6 +376,11 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             Arc::new(move |_: &std::sync::atomic::AtomicBool| {
                 (!file.exists()).then(|| "No output was left.".to_owned())
             }) as session::OutputCheck
+        }),
+        restate: setup.restate.map(|text| {
+            let text = text.to_owned();
+            Arc::new(move |_: &std::sync::atomic::AtomicBool| Some(text.clone()))
+                as session::Restate
         }),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -798,6 +806,7 @@ fn a_cap_nothing_counts_is_refused() {
         bridge: None,
         log: Box::new(std::io::sink()),
         output: None,
+        restate: None,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1408,6 +1417,59 @@ fn a_turn_that_ends_without_the_required_output() {
             r.elapsed < Duration::from_secs(30),
             "{name}: took {:?}",
             r.elapsed
+        );
+    }
+}
+
+/// After a compaction of its context during the task's turn, reported or
+/// seen in its usage, an agent that takes notices is told its task again
+/// (#822), once for each; one that does not, or a run that asks for
+/// nothing, is told nothing.
+#[test]
+fn a_compaction_has_the_task_restated() {
+    const RESTATED: &str = "Your context was just compacted. Left: the tests.";
+    const REPORTED: &str = r#"["compact", {"sleep": 0.5}, {"say": "Done."}]"#;
+    const INFERRED: &str = r#"[
+      {"context": {"used": 24000, "size": 32768}},
+      {"context": {"used": 3000, "size": 32768}},
+      {"sleep": 0.5}, {"say": "Done."}
+    ]"#;
+    const TWICE: &str =
+        r#"["compact", {"sleep": 0.3}, "compact", {"sleep": 0.5}, {"say": "Done."}]"#;
+    // (the case, the script, whether the agent takes notices, whether the
+    // run restates, how many restatements)
+    let cases = [
+        ("reported", REPORTED, true, true, 1),
+        ("inferred", INFERRED, true, true, 1),
+        ("each compaction", TWICE, true, true, 2),
+        ("no notices", REPORTED, false, true, 0),
+        ("nothing to restate", REPORTED, true, false, 0),
+        ("no compaction", r#"[{"say": "Done."}]"#, true, true, 0),
+    ];
+    for (name, script, notices, restate, count) in cases {
+        let r = run(
+            SCRIPT_MODE,
+            Setup {
+                files: &[("script.json", script)],
+                timeout_s: 60,
+                no_notices: !notices,
+                restate: restate.then_some(RESTATED),
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, 0, "success");
+        assert_eq!(r.notices(), vec!["compaction"; count], "{name}");
+        let sent = r
+            .records
+            .iter()
+            .filter(|x| x["msg"]["params"]["_meta"]["botHarness"]["notice"] == "compaction")
+            .all(|x| x["msg"]["params"]["prompt"][0]["text"] == RESTATED);
+        assert!(sent, "{name}");
+        assert_eq!(
+            r.log.matches("compacted: restating its task").count(),
+            count,
+            "{name}: {}",
+            r.log
         );
     }
 }

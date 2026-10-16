@@ -4,8 +4,9 @@
 //! The [`Tap`] is the one place all of the agent's traffic goes through.
 //! It records each message in `acp.jsonl`, feeds the digest (which makes
 //! the condensed log and counts what the limits need), stops the session
-//! when the agent reports spending over the budget, and passes the
-//! agent's messages on to whatever clients are attached.
+//! when the agent reports spending over the budget, counts the
+//! compactions of the agent's context it reports or shows, and passes
+//! the agent's messages on to whatever clients are attached.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -19,6 +20,7 @@ use tokio::sync::watch;
 
 use super::budget::{Limits, Stop};
 use super::clients::Clients;
+use super::compaction::Compactions;
 use super::digest::{Digest, Dir};
 
 /// The files a session writes to its output directory.
@@ -55,6 +57,8 @@ pub(super) struct Tap {
     clients: Clients,
     /// `AgentSpec::provider_error`.
     provider_error: Option<String>,
+    /// How many compactions of the agent's context have finished.
+    compacted: watch::Sender<u64>,
 }
 
 struct Inner {
@@ -62,6 +66,7 @@ struct Inner {
     stderr: BufWriter<File>,
     log: Log,
     digest: Digest,
+    compactions: Compactions,
     /// The last thing the agent said on its standard error.
     last_stderr: Option<String>,
     /// The first write error; the run fails with it.
@@ -117,6 +122,7 @@ impl Tap {
                 stderr: open(STDERR_LOG)?,
                 log,
                 digest: Digest::new(),
+                compactions: Compactions::default(),
                 last_stderr: None,
                 error: None,
             }),
@@ -124,6 +130,7 @@ impl Tap {
             stop,
             clients,
             provider_error,
+            compacted: watch::Sender::new(0),
         })
     }
 
@@ -155,8 +162,24 @@ impl Tap {
             set_stop(&self.stop, stop);
         }
         if dir == Dir::Recv {
+            if msg["method"] == "session/update" {
+                let update = &msg["params"]["update"];
+                if inner
+                    .compactions
+                    .update(update)
+                    .is_some_and(|seen| seen.finished(update))
+                {
+                    self.compacted.send_modify(|n| *n += 1);
+                }
+            }
             self.clients.relay(msg);
         }
+    }
+
+    /// The count of finished compactions of the agent's context, which
+    /// changes with each.
+    pub fn compactions(&self) -> watch::Receiver<u64> {
+        self.compacted.subscribe()
     }
 
     /// A line of the agent's standard error.

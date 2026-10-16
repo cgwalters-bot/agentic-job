@@ -738,6 +738,17 @@ impl Plan {
                 handback::output_missing(&runner, &sandbox.home, &checkout, &policy)
             }) as session::OutputCheck
         });
+        // As the brief asks for a checkpoint: off where it does not.
+        let restate = brief::asks_for_checkpoint(&self.policy).then(|| {
+            let (sandbox, task) = (self.sandbox.clone(), self.task.clone());
+            Arc::new(move |stopped: &AtomicBool| {
+                let runner = Stoppable {
+                    sandbox: &sandbox,
+                    stopped,
+                };
+                Some(handback::restatement(&runner, &sandbox.home, &task))
+            }) as session::Restate
+        });
         let options = Options {
             name: self.kind.as_str().to_owned(),
             agent: spec,
@@ -767,6 +778,7 @@ impl Plan {
                 redactor.clone(),
             )),
             output,
+            restate,
         };
         Ok((options, counter, redactor))
     }

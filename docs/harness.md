@@ -304,6 +304,23 @@ The check only decides the reminder; the hand-back is still collected and
 checked as before. A run with a bridge client is not reminded: the
 client sees what the agent left.
 
+Where the bounds set `ready_when_complete` for the run's change, the
+brief asks the agent to write its outcome early, with a `checkpoint`
+object (`complete`, `done`, `left`, `next`) marked incomplete, keep it
+current, and set `complete` to true last. Restating the hand-back's path
+and what was left is what brought back a hand-back lost to a compaction,
+where a bare reminder did not (#813). So the reminder quotes the
+checkpoint's `left` and `next`, and after each compaction the session
+sees during the task's turn (a Vibe-style compaction tool call that
+completes, or the context reported in a `usage_update` falling below
+half, as for [a second agent](#a-second-agent)), an agent that takes
+notices is sent a `compaction` notice: the start of its task, the paths
+it hands back in, and what its checkpoint says is left. An open
+checkpoint is never taken for done: see
+[ready or draft](safe-outputs.md#ready-or-draft). Without
+`ready_when_complete`, the brief asks for no checkpoint and no
+`compaction` notice is sent.
+
 ## A second agent
 
 A run can let its agent start a second agent, the child, and drive it

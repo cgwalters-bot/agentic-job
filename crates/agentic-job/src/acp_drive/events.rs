@@ -7,17 +7,12 @@
 //! or the caller asking for events, whichever comes first: a message
 //! still streaming when asked for is cut there and goes on in the next.
 //!
-//! Compaction is an event of its own. Vibe 2.26.1 reports one as a tool
-//! call titled "Compacting context", then "Context compacted" (and its
-//! `/compact` command as "Compacting conversation history..."), so a tool
-//! call whose title starts with "compact" or ends with "compacted" is
-//! taken for one, and so are the later updates of the same call. An agent that does
-//! not say so is caught by what it reports of its context: a
-//! `usage_update` whose `used` falls below half of the last one, with no
-//! reported compaction between them, is an inferred compaction.
+//! Compaction is an event of its own, reported or inferred as
+//! [`crate::session::compaction`] tells one.
 
 use serde_json::{Map, Value, json};
 
+use crate::session::compaction::{Compactions, Seen};
 use crate::session::vibe;
 
 /// The most events kept, and the most bytes of them; later ones are
@@ -30,12 +25,6 @@ const MAX_BYTES: usize = 32 << 20;
 const MAX_TEXT: usize = 64 << 10;
 /// The most characters of a tool call's input or output in one event.
 const MAX_TOOL_TEXT: usize = 2048;
-/// How a compaction's title starts or ends, lowercased.
-const COMPACTION_START: &str = "compact";
-const COMPACTION_END: &str = "compacted";
-/// A context that falls to below 1/COMPACTION_DROP of its last reported
-/// size was compacted.
-const COMPACTION_DROP: u64 = 2;
 
 const MESSAGE_CHUNK: &str = "agent_message_chunk";
 const THOUGHT_CHUNK: &str = "agent_thought_chunk";
@@ -67,11 +56,6 @@ fn shown(value: &Value) -> Option<String> {
     }
 }
 
-fn is_compaction(title: &str) -> bool {
-    let title = title.trim().to_lowercase();
-    title.starts_with(COMPACTION_START) || title.ends_with(COMPACTION_END)
-}
-
 /// The events of one child session.
 #[derive(Debug, Default)]
 pub struct Events {
@@ -82,12 +66,7 @@ pub struct Events {
     dropped: u64,
     /// Streamed text not yet an event: its kind, text and characters.
     pending: Option<(&'static str, String, usize)>,
-    /// The tool calls that are compactions, by id.
-    compactions: Vec<String>,
-    /// The context's size at the last `usage_update`.
-    last_used: Option<u64>,
-    /// A compaction was reported since then.
-    compacted: bool,
+    compactions: Compactions,
 }
 
 impl Events {
@@ -153,20 +132,29 @@ impl Events {
         let id = update["toolCallId"].as_str().unwrap_or_default();
         let title = update["title"].as_str();
         let status = update["status"].as_str();
-        let known = !id.is_empty() && self.compactions.iter().any(|c| c == id);
-        match update["sessionUpdate"].as_str().unwrap_or_default() {
-            "tool_call" | "tool_call_update" if known || title.is_some_and(is_compaction) => {
+        match self.compactions.update(update) {
+            Some(Seen::Reported) => {
                 self.flush(ts);
-                if !known && !id.is_empty() {
-                    self.compactions.push(id.to_owned());
-                }
-                self.compacted = true;
                 self.push(
                     ts,
                     "compaction",
                     json!({"id": id, "title": title, "status": status, "inferred": false}),
                 );
+                return;
             }
+            Some(Seen::Inferred { before, after }) => {
+                self.flush(ts);
+                self.push(
+                    ts,
+                    "compaction",
+                    json!({"inferred": true, "used_before": before, "used_after": after,
+                        "size": update["size"]}),
+                );
+                return;
+            }
+            None => {}
+        }
+        match update["sessionUpdate"].as_str().unwrap_or_default() {
             "tool_call" => {
                 self.flush(ts);
                 self.push(
@@ -190,25 +178,6 @@ impl Events {
                     "tool_result",
                     json!({"id": id, "title": title, "status": status, "output": output}),
                 );
-            }
-            "usage_update" => {
-                let used = update["used"].as_u64();
-                if let (Some(before), Some(after)) = (self.last_used, used)
-                    && !self.compacted
-                    && after.saturating_mul(COMPACTION_DROP) < before
-                {
-                    self.flush(ts);
-                    self.push(
-                        ts,
-                        "compaction",
-                        json!({"inferred": true, "used_before": before, "used_after": after,
-                            "size": update["size"]}),
-                    );
-                }
-                if used.is_some() {
-                    self.last_used = used;
-                    self.compacted = false;
-                }
             }
             _ => {}
         }

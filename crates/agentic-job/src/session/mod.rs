@@ -32,6 +32,7 @@ pub mod agents;
 pub mod bridge;
 pub mod budget;
 pub mod clients;
+pub mod compaction;
 pub mod digest;
 mod driver;
 pub mod permission;
@@ -42,7 +43,9 @@ pub mod vibe;
 pub use agents::AgentSpec;
 pub use budget::Limits;
 pub use clients::Clients;
-pub use driver::{Options, Outcome, OutputCheck, RESULT_FILE, RESULT_SCHEMA, RunResult, run};
+pub use driver::{
+    Options, Outcome, OutputCheck, RESULT_FILE, RESULT_SCHEMA, Restate, RunResult, run,
+};
 pub use permission::Policy;
 pub use process::Launch;
 pub use transcript::{ACP_LOG, Log, Record, STDERR_LOG};

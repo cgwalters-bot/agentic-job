@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 
 use super::clone::{self, Checkout};
 use super::enter::Runner;
-use crate::check::checkpoint::Checkpoint;
+use crate::check::checkpoint::{self, Checkpoint};
 use crate::check::{BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, patch_file_name};
 use crate::config;
 use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
@@ -57,6 +57,18 @@ pub const DEFAULT_AUTHOR: (&str, &str) = ("agent", "agent@localhost");
 
 const MAX_TITLE_CHARS: usize = 100;
 const MAX_REASON_CHARS: usize = 200;
+/// The key of the agent's outcome that holds its own checkpoint, kept
+/// current as it works (`brief::asks_for_checkpoint`): open, the work is
+/// not done, until `complete` is `true`.
+pub const OUTCOME_CHECKPOINT: &str = "checkpoint";
+const CHECKPOINT_COMPLETE: &str = "complete";
+/// The most characters taken of each of its `done`, `left` and `next`:
+/// three of them, even with every character escaped as JSON (six bytes),
+/// stay well within the checkpoint `check` takes (`checkpoint::MAX_BYTES`).
+const MAX_CHECKPOINT_CHARS: usize = 400;
+/// The most characters of the task the agent is reminded of after a
+/// compaction: enough to recognize it, not to restate the whole brief.
+const MAX_TASK_EXCERPT_CHARS: usize = 500;
 /// What a pull request made up for an agent that wrote no summary says.
 const NO_SUMMARY: &str = "Partial change: the agent did not say what it did or that it was done.";
 /// A subject longer than this is cut: it is one line of a mail header.
@@ -321,10 +333,42 @@ pub fn default_pull_request(outcome: &Object, run_id: &str) -> PullRequest {
     }
 }
 
+/// The checkpoint OUTCOME holds that says the work is not done. One the
+/// agent wrote early and never marked complete is unfinished work, as is
+/// one it marked in any other way than `"complete": true`, so that what
+/// cannot be read is never taken for done; what it says is cut to fit.
+fn open_checkpoint(outcome: &Object) -> Option<Checkpoint> {
+    let checkpoint = outcome.get(OUTCOME_CHECKPOINT).filter(|c| !c.is_null())?;
+    if checkpoint[CHECKPOINT_COMPLETE] == Value::Bool(true) {
+        return None;
+    }
+    let said = |key: &str, default: &str| {
+        let text = checkpoint[key].as_str().map(squeeze).unwrap_or_default();
+        if text.is_empty() {
+            default.to_owned()
+        } else {
+            cut(&text, MAX_CHECKPOINT_CHARS)
+        }
+    };
+    Some(Checkpoint {
+        reason: "incomplete".to_owned(),
+        done: said("done", "unknown: the checkpoint does not say"),
+        left: said("left", "unknown: the checkpoint does not say"),
+        next: said(
+            "next",
+            "read this change and its description, then continue the task",
+        ),
+    })
+}
+
 /// The checkpoint of a pull request made up from OUTCOME, for work that
-/// [`default_pull_request`] calls partial: under `ready_when_complete`
-/// that work would otherwise open ready for review.
+/// [`default_pull_request`] calls partial, or that the agent's own
+/// checkpoint says is not done: under `ready_when_complete` that work
+/// would otherwise open ready for review.
 fn fallback_checkpoint(outcome: &Object) -> Option<Checkpoint> {
+    if let Some(open) = open_checkpoint(outcome) {
+        return Some(open);
+    }
     let summary = outcome.text("summary").unwrap_or_default().trim();
     let left = match outcome.get("stopped_early") {
         Some(early) if truthy(early) => early
@@ -425,6 +469,19 @@ pub fn build_outputs(
                     "message",
                     json!(format!("{}\n\n{}", fallback.title, fallback.body)),
                 );
+            }
+            // The agent's own words without a checkpoint, while its outcome
+            // says the work is not done, would open it ready: the outcome's
+            // goes with them. One they hold already, or a malformed one,
+            // is left for the check to read.
+            let field = if push { "message" } else { "body" };
+            if policy.safe_outputs.ready_when_complete()
+                && let Some(open) = open_checkpoint(outcome)
+                && let Some(words) = item.text(field)
+                && matches!(checkpoint::find(words), Ok(None))
+            {
+                let words = format!("{}\n\n{}", words.trim_end(), open.markdown());
+                item.set(field, json!(words));
             }
             let text = |key: &str, default: &str| {
                 item.text(key)
@@ -892,10 +949,73 @@ pub fn has_output(runner: &dyn Runner, home: &Path, checkout: &Checkout, policy:
     }
 }
 
+/// The agent's outcome as it stands, while it still runs.
+fn read_outcome(runner: &dyn Runner, home: &Path) -> Option<Object> {
+    read_agent_file(runner, &home.join(AGENT_OUTCOME), MAX_OUTCOME_BYTES)
+        .and_then(|bytes| serde_json::from_slice::<Object>(&bytes).ok())
+}
+
+/// What the agent's open checkpoint says is left and how to go on, as a
+/// sentence of the session's to the agent; empty without one.
+fn checkpoint_left(runner: &dyn Runner, home: &Path) -> String {
+    match read_outcome(runner, home)
+        .as_ref()
+        .and_then(open_checkpoint)
+    {
+        Some(open) => format!(
+            " Your checkpoint in `{}` says this is left: {} Next: {}",
+            home.join(AGENT_OUTCOME).display(),
+            open.left,
+            open.next
+        ),
+        None => String::new(),
+    }
+}
+
+/// Why the agent has not left the output its run requires, for its
+/// reminder (`session::OutputCheck`), with what its own checkpoint says
+/// is left: agents that forgot their hand-back after a compaction went
+/// on from what was left, not from being told to hand back (#813).
+pub fn output_missing(
+    runner: &dyn Runner,
+    home: &Path,
+    checkout: &Checkout,
+    policy: &Policy,
+) -> Option<String> {
+    let why = missing(runner, home, checkout, policy)?;
+    Some(format!("{why}{}", checkpoint_left(runner, home)))
+}
+
+/// What the agent is told after a compaction of its context
+/// (`session::Restate`): its TASK, cut, where it hands back, and what its
+/// checkpoint says is left, as the agent wrote it. A compacted agent has
+/// ended its turn with no hand-back; restating the path and what was left
+/// brought one back where a bare reminder did not (#813).
+pub fn restatement(runner: &dyn Runner, home: &Path, task: &str) -> String {
+    let left = checkpoint_left(runner, home);
+    let left = if left.is_empty() {
+        format!(
+            " There is no open checkpoint in `{}`: if the work is not complete, write one now \
+             that says what is done, what is left and how to continue.",
+            home.join(AGENT_OUTCOME).display()
+        )
+    } else {
+        left
+    };
+    format!(
+        "Your context was just compacted. Go on with the task this session started with, which \
+         begins: \"{}\". Hand back as the brief at its start says: your report and checkpoint \
+         in `{}`, your requests in `{}`.{left}",
+        cut_words(&squeeze(task), MAX_TASK_EXCERPT_CHARS),
+        home.join(AGENT_OUTCOME).display(),
+        home.join(AGENT_OUTPUTS).display(),
+    )
+}
+
 /// A fix must not silently succeed with work stranded in a rebase or an
 /// unmerged index, even if it also wrote a request. This is a completion
 /// check, not output admission: `check` still validates every proposal.
-pub fn output_missing(
+fn missing(
     runner: &dyn Runner,
     home: &Path,
     checkout: &Checkout,
@@ -1363,6 +1483,39 @@ mod tests {
             ),
             (json!({}), &ready, Some(NO_SUMMARY)),
             (json!({"stopped_early": "out of time"}), &off, None),
+            // The agent's own checkpoint, kept in its outcome: open until
+            // it says, exactly, that the work is complete.
+            (
+                json!({"summary": "Half.", "checkpoint": {"complete": false, "done": "the parser",
+                    "left": "its  tests", "next": "add them"}}),
+                &ready,
+                Some("its tests"),
+            ),
+            (
+                json!({"summary": "Done.", "checkpoint": {"complete": true, "left": "nothing"}}),
+                &ready,
+                None,
+            ),
+            (
+                json!({"summary": "Done.", "checkpoint": {"complete": "yes", "left": "x"}}),
+                &ready,
+                Some("x"),
+            ),
+            (
+                json!({"summary": "Half.", "checkpoint": "wip"}),
+                &ready,
+                Some("unknown: the checkpoint does not say"),
+            ),
+            (
+                json!({"summary": "Done.", "checkpoint": null}),
+                &ready,
+                None,
+            ),
+            (
+                json!({"summary": "Half.", "checkpoint": {"complete": false, "left": "x"}}),
+                &off,
+                None,
+            ),
         ];
         for (outcome, policy, left) in cases {
             let got = build_outputs("", policy, true, &object(outcome.clone()), RUN_ID);
@@ -1373,6 +1526,124 @@ mod tests {
             assert_eq!(found.as_ref().map(|c| c.left.as_str()), left, "{outcome}");
             assert!(found.is_none_or(|c| c.reason == "incomplete"));
         }
+        // However long, and however escaped, it fits what the check reads.
+        let long = "\u{1}".repeat(MAX_OUTCOME_BYTES);
+        let outcome = object(json!({"summary": "Half.", "checkpoint": {
+            "complete": false, "done": long, "left": long, "next": long}}));
+        let (_, body) = build_outputs("", &ready, true, &outcome, RUN_ID)
+            .message
+            .unwrap();
+        let found = crate::check::checkpoint::find(&body).unwrap().unwrap();
+        assert_eq!(found.left.chars().count(), MAX_CHECKPOINT_CHARS);
+    }
+
+    /// The agent's own request, while its outcome's checkpoint is open,
+    /// carries that checkpoint unless it holds one: its words alone would
+    /// open unfinished work ready for review.
+    #[test]
+    fn an_open_checkpoint_keeps_the_agents_own_request_a_draft() {
+        let mut ready = pull_requests();
+        ready["create_pull_request"]["ready_when_complete"] = json!(true);
+        let ready = policy(Kind::Branch, ready);
+        let off = policy(Kind::Branch, pull_requests());
+        let mut push = crate::policy::tests::push_policy();
+        push.safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap()
+            .ready_when_complete = true;
+        let open = object(json!({"summary": "Half.",
+            "checkpoint": {"complete": false, "done": "a", "left": "the tests", "next": "b"}}));
+        let done = object(json!({"summary": "All.", "checkpoint": {"complete": true}}));
+        let own = Checkpoint {
+            reason: "budget".into(),
+            done: "d".into(),
+            left: "mine".into(),
+            next: "n".into(),
+        };
+        let pr = |body: &str| json!({"type": "create_pull_request", "title": "T", "body": body});
+        let with_own = format!("B\n\n{}", own.markdown());
+        // (the case, the request, the policy, the outcome, the field, what
+        // its checkpoint says is left)
+        let cases = [
+            ("open", pr("B"), &ready, &open, "body", Some("the tests")),
+            (
+                "its own",
+                pr(&with_own),
+                &ready,
+                &open,
+                "body",
+                Some("mine"),
+            ),
+            ("complete", pr("B"), &ready, &done, "body", None),
+            ("off", pr("B"), &off, &open, "body", None),
+            (
+                "a push",
+                json!({"type": "push_to_pull_request_branch", "message": "T\n\nB"}),
+                &push,
+                &open,
+                "message",
+                Some("the tests"),
+            ),
+        ];
+        for (case, request, policy, outcome, field, left) in cases {
+            let got = build_outputs(&request.to_string(), policy, true, outcome, RUN_ID);
+            let item: Value = serde_json::from_str(got.text.trim()).unwrap();
+            let words = item[field].as_str().unwrap();
+            let found = crate::check::checkpoint::find(words).unwrap();
+            assert_eq!(found.map(|c| c.left), left.map(str::to_owned), "{case}");
+            assert!(
+                words.starts_with(if field == "body" { "B" } else { "T\n\nB" }),
+                "{case}"
+            );
+            let (_, body) = got.message.unwrap();
+            assert!(field == "message" || body == words, "{case}");
+        }
+    }
+
+    /// The reminder and the restatement after a compaction say what the
+    /// agent's open checkpoint says is left, and where it hands back.
+    #[test]
+    fn the_reminder_and_the_restatement_quote_what_is_left() {
+        let policy = policy(Kind::Branch, pull_requests());
+        let home = Home::new();
+        let outcome = home.path(AGENT_OUTCOME);
+        let task = format!("Fix the parser. {}", "More words. ".repeat(100));
+        let restated = restatement(&Unconfined, home.dir.path(), &task);
+        for want in [
+            "Your context was just compacted.",
+            "begins: \"Fix the parser. More words.",
+            &format!("in `{}`", outcome.display()),
+            &format!("in `{}`", home.path(AGENT_OUTPUTS).display()),
+            "There is no open checkpoint",
+        ] {
+            assert!(restated.contains(want), "{want}\n{restated}");
+        }
+        assert!(restated.len() < task.len(), "{restated}");
+        let reminder = output_missing(&Unconfined, home.dir.path(), &home.checkout, &policy);
+        assert_eq!(reminder.as_deref(), Some("No hand-back was left."));
+
+        std::fs::write(
+            &outcome,
+            r#"{"summary": "Half.", "checkpoint": {"complete": false, "done": "the parser",
+                "left": "the tests for empty input.", "next": "add them to parser.rs."}}"#,
+        )
+        .unwrap();
+        let left = format!(
+            "Your checkpoint in `{}` says this is left: the tests for empty input. Next: add \
+             them to parser.rs.",
+            outcome.display()
+        );
+        let reminder = output_missing(&Unconfined, home.dir.path(), &home.checkout, &policy);
+        assert_eq!(reminder, Some(format!("No hand-back was left. {left}")));
+        let restated = restatement(&Unconfined, home.dir.path(), &task);
+        assert!(restated.ends_with(&left), "{restated}");
+        // Output that is there earns no reminder, whatever is left.
+        sh(&home.checkout.dir, "echo two >> a.txt");
+        assert_eq!(
+            output_missing(&Unconfined, home.dir.path(), &home.checkout, &policy),
+            None
+        );
     }
 
     /// A run that fixes a pull request asks for a push to its branch,

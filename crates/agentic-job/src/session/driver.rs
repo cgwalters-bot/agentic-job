@@ -23,6 +23,13 @@
 //! (`Options::output`) is not done either: the agent gets one reminder
 //! turn, and the run fails if it still left none (`remind`).
 //!
+//! An agent whose context is compacted during the task's turn may lose
+//! what it was doing and where it hands back: agents have ended their
+//! turn after one with nothing handed back (#607, #813). Where the run
+//! asks for it (`Options::restate`), an agent that takes notices is sent
+//! one after each compaction the transcript sees, restating its task, its
+//! hand-back and what its own checkpoint says is left.
+//!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
 //! agent runs in a login session of that user's, where a signal to the
@@ -53,7 +60,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::agents::AgentSpec;
 use super::bridge::{Bridge, FromClient};
 use super::budget::{
-    Budget, LABEL_HAND_BACK, LABEL_REMINDER, Limits, Signal, Stop, Usage, hand_back_text,
+    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_REMINDER, Limits, Signal, Stop, Usage,
+    hand_back_text,
 };
 use super::clients::Clients;
 use super::digest::{self, Dir};
@@ -101,6 +109,10 @@ const NO_OUTPUT: &str = "the agent ended its turn without the output the run req
 /// starts none once its flag is set: the session sets it when it stops
 /// waiting for the check, before it stops what the sandbox user runs.
 pub type OutputCheck = Arc<dyn Fn(&AtomicBool) -> Option<String> + Send + Sync>;
+/// What the agent is told after a compaction of its context; `None` for
+/// nothing. It runs as an [`OutputCheck`] does, and reads the agent's
+/// files the same way.
+pub type Restate = OutputCheck;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -219,6 +231,9 @@ pub struct Options {
     /// an agent that answers `end_turn` having forgotten its output (as
     /// after a compaction of its context) would otherwise pass for done.
     pub output: Option<OutputCheck>,
+    /// What the agent is told after each compaction of its context during
+    /// the task's turn, if it takes notices; none to tell it nothing.
+    pub restate: Option<Restate>,
 }
 
 /// Watches the budget for the whole run, from before the session exists:
@@ -324,6 +339,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         bridge,
         log,
         output,
+        restate,
     } = opts;
     // A cap that nothing counts would be no cap, and silently: the
     // caller drops it, knowing so, or supplies the count.
@@ -374,6 +390,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         notices: spec.notices,
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
         output,
+        restate: restate.filter(|_| spec.notices),
     };
     let started = chrono::Utc::now();
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
@@ -512,6 +529,8 @@ struct Task<'a> {
     /// error: as long as near a limit.
     hand_back_window: Duration,
     output: Option<OutputCheck>,
+    /// `Options::restate`, for an agent that takes notices.
+    restate: Option<Restate>,
 }
 
 /// Speaks ACP with a started agent, over its standard input and output,
@@ -829,6 +848,11 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     // Whether the client cancelled the task's turn: the session is then
     // the client's to go on with.
     let mut client_cancelled = false;
+    let mut compacted = tap.compactions();
+    // The restatements read after compactions, and what stops the reading
+    // once the task's turn is over.
+    let (restated_tx, mut restated) = mpsc::unbounded_channel::<String>();
+    let restating = Abandon(Arc::default());
     let (why, text, window) = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
@@ -890,6 +914,27 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 }
                 Nudge::HandBack { why, text, window } => break (why, text, window),
             },
+            // What to restate is read off this loop, which goes on
+            // meanwhile: the turn may end, or a limit come, while the
+            // checkpoint is read, and then nothing is sent.
+            Ok(()) = compacted.changed(), if task.restate.is_some() => {
+                if let Some(restate) = task.restate.clone() {
+                    let (tx, stopped) = (restated_tx.clone(), restating.0.clone());
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(text) = restate(&stopped) {
+                            let _ = tx.send(text);
+                        }
+                    });
+                }
+            }
+            // Queued as a notice is.
+            Some(text) = restated.recv() => {
+                tap.log(&["⚠ the agent's context was compacted: restating its task".to_owned()]);
+                let answer = cx.send_request(notice_prompt(&sid, LABEL_COMPACTION, text)).block_task();
+                tokio::spawn(async move {
+                    let _ = answer.await;
+                });
+            }
             // A client that attached during the task's turn is treated as
             // during its own turns.
             msg = next_from_client(&mut conversation) => match msg {
@@ -910,6 +955,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         }
     };
 
+    drop(restating);
     // Near a limit: a notice queued now may never be read (a subagent
     // task can outlast the run), so the turn is interrupted, and what is
     // left of the budget is a turn in which the agent hands back.
@@ -1036,6 +1082,18 @@ async fn after_error(
     }
 }
 
+/// Sets its flag when dropped: however the wait for a check of the
+/// sandbox user's ends, the session returning or its future dropped on a
+/// signal, the check goes no further than the command it is in, which
+/// the reaping then kills.
+struct Abandon(Arc<AtomicBool>);
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Whether CHECK finds the agent's output (a check that could not be run
 /// finds none), unless a limit stops the session first: the check runs
 /// git on the agent's checkout, which the agent can make slow.
@@ -1043,15 +1101,6 @@ async fn has_output(
     check: &OutputCheck,
     stop: &mut watch::Receiver<Option<Stop>>,
 ) -> Result<Option<String>, Ended> {
-    /// Sets its flag when dropped: however the wait ends, the session
-    /// returning or its future dropped on a signal, the check goes no
-    /// further than the command it is in, which the reaping then kills.
-    struct Abandon(Arc<AtomicBool>);
-    impl Drop for Abandon {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
     let abandon = Abandon(Arc::default());
     let (check, stopped) = (check.clone(), abandon.0.clone());
     tokio::select! {

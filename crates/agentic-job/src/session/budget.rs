@@ -111,6 +111,9 @@ pub const LABEL_HAND_BACK: &str = "hand back";
 /// The label of the one prompt that reminds an agent which ended its
 /// turn without the output its run requires (`session::OutputCheck`).
 pub const LABEL_REMINDER: &str = "reminder";
+/// The label of the prompt that restates the task after a compaction of
+/// the agent's context (`session::Restate`), queued like a notice.
+pub const LABEL_COMPACTION: &str = "compaction";
 /// The labels of the session's prompts that start a turn of their own,
 /// rather than being queued behind the running one.
 pub const TURN_LABELS: [&str; 2] = [LABEL_HAND_BACK, LABEL_REMINDER];
