@@ -350,7 +350,8 @@ fn root_write(path: &str, content: &str, mode: &str) {
 /// What must fail with no network rules at all, on CI's hosted runner:
 /// Azure, whose metadata service the runner reaches, with a local
 /// resolver on loopback. Its WireServer does not answer HTTP there even
-/// for the runner, so those two probes have nothing to lose.
+/// for the runner, so those two probes have nothing to lose; its DNS
+/// port answers every user.
 const NO_RULES: &[&str] = &[
     "metadata",
     "container-metadata",
@@ -358,6 +359,7 @@ const NO_RULES: &[&str] = &[
     "egress-tcp",
     "egress-resolve",
     "egress-dns",
+    "egress-wireserver-dns",
     "egress-proxy-metadata",
     "egress-container-direct",
     "egress-container-own-network",
@@ -369,6 +371,7 @@ const NO_EGRESS_RULES: &[&str] = &[
     "egress-tcp",
     "egress-resolve",
     "egress-dns",
+    "egress-wireserver-dns",
     "egress-proxy-metadata",
     "egress-container-direct",
     "egress-container-own-network",
@@ -850,15 +853,89 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
     }
     let expect: Vec<&str> = expect.iter().map(String::as_str).collect();
     cases.push(Case::new("a stopped service started", &expect, move || {
+        // Setup masked them all, so the woken units too: what wakes them
+        // is the runner's probe, not this.
+        for u in std::iter::once(&unit).chain(&woken) {
+            root(&["systemctl", "unmask", "--runtime", "--", u]);
+        }
         root(&["systemctl", "start", &unit]);
         Removed::new(
             std::iter::once(&unit)
                 .chain(&woken)
-                .map(|u| strings(&["systemctl", "stop", "--", u]))
+                .flat_map(|u| {
+                    [
+                        strings(&["systemctl", "stop", "--", u]),
+                        strings(&["systemctl", "mask", "--runtime", "--", u]),
+                    ]
+                })
                 .collect(),
             Vec::new(),
         )
     }));
+    if config.sandbox.close_resolved && setup::resolved::startable().unwrap() {
+        // The bus policy aside, and the Varlink socket open again: the
+        // socket is one more that any user connects to.
+        let aside = format!("{}.off", setup::resolved::BUS_POLICY);
+        cases.push(Case::new(
+            "systemd-resolved open to every user",
+            &["resolved-bus", "resolved-varlink", "local-sockets"],
+            move || {
+                let reload: &[&str] = &[
+                    "busctl",
+                    "call",
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "ReloadConfig",
+                ];
+                let socket = setup::resolved::VARLINK_SOCKET;
+                let policy = setup::resolved::BUS_POLICY;
+                Removed::by(
+                    &[
+                        &["mv", "--", policy, &aside],
+                        reload,
+                        &["chmod", "o+rw", "--", socket],
+                    ],
+                    &[
+                        &["mv", "--", &aside, policy],
+                        reload,
+                        &["chmod", "o-rwx", "--", socket],
+                    ],
+                )
+            },
+        ));
+        // Closed where it is not running yet, which the bus and its
+        // sockets would start; the runner's control starts it again.
+        let unit = setup::resolved::UNIT;
+        cases.push(Case::new("systemd-resolved stopped", &[], move || {
+            Removed::by(
+                &[&["systemctl", "stop", "--", unit]],
+                &[&["systemctl", "start", "--", unit]],
+            )
+        }));
+        // Its sockets made again, as a restart after setup (a package's)
+        // makes them: the drop-ins keep them closed.
+        let triggers = Command::new("systemctl")
+            .args(["show", "--property=TriggeredBy", "--value", "--", unit])
+            .output()
+            .unwrap();
+        let mut units: Vec<String> = String::from_utf8_lossy(&triggers.stdout)
+            .split_whitespace()
+            .filter(|u| u.ends_with(".socket"))
+            .map(str::to_owned)
+            .collect();
+        units.push(unit.to_owned());
+        cases.push(Case::new(
+            "systemd-resolved and its sockets restarted",
+            &[],
+            move || {
+                let units: Vec<&str> = units.iter().map(String::as_str).collect();
+                let stop = [&["systemctl", "stop", "--"][..], &units].concat();
+                let start = [&["systemctl", "start", "--"][..], &units].concat();
+                Removed::by(&[&stop, &start], &[&start])
+            },
+        ));
+    }
     cases.push(Case::new(
         "listeners any user can connect to",
         &["local-sockets", "local-tcp"],

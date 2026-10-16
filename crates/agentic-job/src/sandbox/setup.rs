@@ -35,6 +35,7 @@ use crate::run::agent::{self, Kind};
 use crate::run::inference::Endpoint;
 use crate::session::bridge::{self, Listen};
 
+pub mod resolved;
 mod tools;
 
 #[derive(Debug, clap::Args)]
@@ -325,7 +326,13 @@ fn setup(args: &Args) -> Result<Exit> {
         );
         ensure!(
             host::has_program(RUN0),
-            "{RUN0} not found: the sandbox is entered with it, and it needs systemd 257 or later"
+            "{RUN0} not found: the sandbox is entered with it, and it needs systemd {RUN0_SYSTEMD} or later"
+        );
+        let version = host::run(Command::new(RUN0).arg("--version"))?;
+        ensure!(
+            systemd_version(&version).is_some_and(|v| v >= RUN0_SYSTEMD),
+            "{RUN0} is from {:?}: the sandbox is entered with `{RUN0} --pipe`, which needs systemd {RUN0_SYSTEMD} or later",
+            version.lines().next().unwrap_or_default()
         );
         // Root's umask is the caller's, and some images build with 000.
         rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
@@ -338,6 +345,9 @@ fn setup(args: &Args) -> Result<Exit> {
         let runner = runner_user(&config)?;
         // Every refusal comes before the first change.
         let existing = preflight(&config, &runner)?;
+        if config.sandbox.close_resolved {
+            resolved::bus_policy(&runner.name)?;
+        }
         require_world_write_policy(Path::new(WORLD_WRITE_PIN))?;
         let mut resolvers = Vec::new();
         if config.egress.proxy {
@@ -346,14 +356,26 @@ fn setup(args: &Args) -> Result<Exit> {
                 Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
                 Err(err) => return Err(err).with_context(|| format!("reading {RESOLV_CONF}")),
             };
-            let on_tailnet = network::tailnet_resolvers(&resolv_conf);
             resolvers = network::resolvers(&resolv_conf)
                 .with_context(|| format!("reading resolvers from {RESOLV_CONF}"))?;
-            ensure!(
-                on_tailnet.is_empty(),
-                "{RESOLV_CONF} names {} on the tailnet, which the egress proxy may not reach: join the tailnet without its DNS (tailscale up --accept-dns=false)",
-                on_tailnet.join(", ")
-            );
+            // A local stub (resolved's) passes on what the proxy asks to
+            // its own upstream, which may be the tailnet's resolver; the
+            // proxy then resolves the tailnet's names, though it cannot
+            // reach them. Other stubs (dnsmasq) keep their upstream
+            // elsewhere and are not read.
+            for path in [RESOLV_CONF, resolved::UPSTREAM_RESOLV_CONF] {
+                let text = match fs::read_to_string(path) {
+                    Ok(text) => text,
+                    Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err).with_context(|| format!("reading {path}")),
+                };
+                let on_tailnet = network::tailnet_resolvers(&text);
+                ensure!(
+                    on_tailnet.is_empty(),
+                    "{path} names {} on the tailnet, which the egress proxy may not reach: join the tailnet without its DNS (tailscale up --accept-dns=false)",
+                    on_tailnet.join(", ")
+                );
+            }
         }
         Ok(Preflight {
             text,
@@ -394,6 +416,9 @@ fn setup(args: &Args) -> Result<Exit> {
     timed_setup("stop-services", || {
         stop_services(&config.sandbox.stop_services)
     })?;
+    if config.sandbox.close_resolved {
+        timed_setup("close-resolved", || resolved::close(&runner.name))?;
+    }
     timed_setup("install-self", || {
         install_self()?;
         // The helper's copy, the configuration it reads and the programs it
@@ -1215,6 +1240,10 @@ fn hide_other_processes() -> Result<()> {
     Ok(())
 }
 
+/// Stops `units` and masks them until reboot, with the units that
+/// trigger them: stopped alone, a unit is started again by its socket, a
+/// path or timer, or a dependency, after `sandbox check` found it
+/// stopped. A unit that is not on the machine is skipped.
 fn stop_services(units: &[String]) -> Result<()> {
     let (present, absent): (Vec<&String>, Vec<&String>) = units.iter().partition(|unit| {
         host::succeeds(Command::new("systemctl").args(["cat", "--", unit.as_str()]))
@@ -1223,16 +1252,65 @@ fn stop_services(units: &[String]) -> Result<()> {
         let names: Vec<&str> = absent.iter().map(|unit| unit.as_str()).collect();
         println!("Not on this machine, so not stopped: {}", names.join(", "));
     }
-    if !present.is_empty() {
+    let mut stopped: Vec<String> = Vec::new();
+    for unit in present {
+        let triggers = host::run(Command::new("systemctl").args([
+            "show",
+            "--property=TriggeredBy",
+            "--value",
+            "--",
+            unit,
+        ]))?;
+        for name in std::iter::once(unit.as_str()).chain(triggers.split_whitespace()) {
+            if !stopped.iter().any(|seen| seen == name) {
+                stopped.push(name.to_owned());
+            }
+        }
+    }
+    if !stopped.is_empty() {
         host::run(
             Command::new("systemctl")
                 .args(["stop", "--"])
-                .args(&present),
+                .args(&stopped),
         )?;
-        let names: Vec<&str> = present.iter().map(|unit| unit.as_str()).collect();
-        println!("Stopped {}", names.join(", "));
+        host::run(
+            Command::new("systemctl")
+                .args(["mask", "--runtime", "--"])
+                .args(&stopped),
+        )?;
+        // A runtime mask is below `/etc/systemd/system` in the load path,
+        // so a unit file there still loads, and the unit can start.
+        let mut unmasked = Vec::new();
+        for unit in &stopped {
+            let state = host::run(Command::new("systemctl").args([
+                "show",
+                "--property=LoadState",
+                "--value",
+                "--",
+                unit,
+            ]))?;
+            if state != "masked" {
+                unmasked.push(format!("{unit} ({state})"));
+            }
+        }
+        ensure!(
+            unmasked.is_empty(),
+            "sandbox.stop-services: masking left {} startable; a unit file in /etc/systemd/system overrides a runtime mask: remove it, or mask the unit there",
+            unmasked.join(", ")
+        );
+        println!("Stopped and masked until reboot: {}", stopped.join(", "));
     }
     Ok(())
+}
+
+/// What `run0 --pipe` needs.
+const RUN0_SYSTEMD: u32 = 257;
+
+/// The systemd version `--version` printed first: `systemd 259 (259.5-1)`.
+fn systemd_version(text: &str) -> Option<u32> {
+    let mut words = text.lines().next()?.split_whitespace();
+    (words.next()? == "systemd").then_some(())?;
+    words.next()?.parse().ok()
 }
 
 /// Makes PATH and every directory above it root's alone, as the helper
@@ -1497,6 +1575,22 @@ fn install_file(path: &Path, content: &[u8], mode: u32, validate: Option<&[&str]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn systemd_versions() {
+        let cases = [
+            ("systemd 259 (259.5-0ubuntu3.4)\n+PAM +AUDIT", Some(259)),
+            ("systemd 257 (257.9-1.el10)", Some(257)),
+            ("systemd 256", Some(256)),
+            ("systemd 257.1 (x)", None),
+            ("run0 257", None),
+            ("", None),
+            ("systemd", None),
+        ];
+        for (text, want) in cases {
+            assert_eq!(systemd_version(text), want, "{text:?}");
+        }
+    }
 
     #[test]
     fn subordinate_uid_ranges() {

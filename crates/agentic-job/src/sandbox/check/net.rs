@@ -18,7 +18,15 @@ const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version
 const METADATA_V6: &[&str] = &["-g", "http://[fd00:ec2::254]/latest/meta-data/"];
 
 /// Azure's WireServer, which serves the VM's configuration.
+const WIRESERVER: &str = "168.63.129.16";
+
 const WIRESERVER_URL: &str = "http://168.63.129.16/?comp=versions";
+
+/// The WireServer is also Azure's resolver, and the Azure guest agent's
+/// firewall, which drops every user but root's new connections to its
+/// HTTP port, leaves its DNS port to all: the address's control where the
+/// HTTP one has none.
+const WIRESERVER_DNS_PORT: u16 = 53;
 
 /// It is the VM's own host and answers at once where it answers at all.
 /// Where it does not (a hosted runner drops the packets), waiting out
@@ -365,6 +373,8 @@ impl Checker<'_> {
         let resolve = ["getent", "hosts", host_name.as_str()];
         let dns = tcp_probe(PUBLIC_DNS, DNS_PORT);
         let dns: Vec<&str> = dns.iter().map(String::as_str).collect();
+        let wireserver_dns = tcp_probe(WIRESERVER, WIRESERVER_DNS_PORT);
+        let wireserver_dns: Vec<&str> = wireserver_dns.iter().map(String::as_str).collect();
         let wireserver = direct(&[
             "--connect-timeout",
             WIRESERVER_CONNECT_SECONDS,
@@ -392,6 +402,18 @@ impl Checker<'_> {
                 &dns,
             ),
             Attempt::control("egress-wireserver-control", "the WireServer", &wireserver),
+            Attempt::control(
+                "egress-wireserver-dns-control",
+                format!("the WireServer at {WIRESERVER}:{WIRESERVER_DNS_PORT}"),
+                &wireserver_dns,
+            ),
+            Attempt::refused(
+                "egress-wireserver-dns",
+                format!(
+                    "{user} can't open a TCP connection to the WireServer at {WIRESERVER}:{WIRESERVER_DNS_PORT}"
+                ),
+                &wireserver_dns,
+            ),
             Attempt::refused(
                 "egress-wireserver",
                 format!("{user} can't reach the WireServer"),
@@ -625,7 +647,7 @@ fn refused_by_proxy(headers: &str) -> bool {
 }
 
 /// The host of an http or https URL.
-fn url_host(url: &str) -> &str {
+pub(super) fn url_host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority

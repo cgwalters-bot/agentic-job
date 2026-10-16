@@ -79,12 +79,19 @@ pub struct Sandbox {
     /// cloud role's credentials. Off by default; needs [`Self::lock_runner`],
     /// since with sudo the runner's user could remove the rule.
     pub deny_runner_metadata: bool,
+    /// Whether `sandbox setup` closes systemd-resolved to every user but
+    /// root and, on the bus, the runner's. resolved answers any local user over its
+    /// Varlink socket and the system bus, as itself, so the uid rules do
+    /// not stop the sandbox user sending names out through it, around
+    /// the egress proxy. Off by default; a host without resolved has
+    /// nothing to close.
+    pub close_resolved: bool,
     /// More directories closed to every user but their owner, besides
     /// the runner user's home and [`Sandbox::ALWAYS_PRIVATE_DIRS`]. One
     /// that does not exist is skipped.
     pub private_dirs: Vec<PathBuf>,
-    /// systemd units stopped by `sandbox setup`, a container daemon for
-    /// one. A unit a socket starts is listed with its socket.
+    /// systemd units stopped and masked until reboot by `sandbox setup`,
+    /// a container daemon for one, with the units that trigger them.
     pub stop_services: Vec<String>,
     /// Variables every command of the sandbox user gets, over the fixed
     /// ones (see `sandbox::enter`).
@@ -209,6 +216,7 @@ impl Default for Sandbox {
             lock_runner: true,
             filesystem_view: false,
             deny_runner_metadata: false,
+            close_resolved: false,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
             env: BTreeMap::new(),
@@ -644,6 +652,7 @@ mod tests {
             groups = ["kvm", "render"]
             runner-user = "runner"
             deny-runner-metadata = true
+            close-resolved = true
             private-dirs = ["/opt/hca"]
             stop-services = ["docker.socket", "docker.service"]
             env = { PATH = "/home/agent/.cargo/bin:/usr/bin" }

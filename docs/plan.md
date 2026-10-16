@@ -29,8 +29,9 @@ to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/
 not coverage demonstrated by local tests.
 
 [Sandbox gaps (#21)](https://github.com/cgwalters-forge/agentic-job/issues/21)
-include DNS through local services, resolver restrictions and runner
-prerequisite checks. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/issues/20)
+left open: other local DNS stubs' upstreams, UDP listeners and bus
+services that ask polkit nothing, and a test of a whole setup on an
+image's user. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/issues/20)
 include repeating host probes, stalled request counts and mandatory HTTP
 proxies. [Hand-back gaps (#22)](https://github.com/cgwalters-forge/agentic-job/issues/22)
 include a summary for a session that ends in an internal error and

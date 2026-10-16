@@ -64,7 +64,12 @@ order, it:
   `/etc/environment`;
 - sets mode 0700 on the runner user's home, `/opt/hca`,
   `/var/run/tailscale` and `sandbox.private-dirs`;
-- stops the units of `sandbox.stop-services`;
+- stops the units of `sandbox.stop-services`, with the sockets, paths
+  and timers that trigger them, and masks them all until reboot, so that
+  nothing starts one again after `sandbox check` found it stopped (it
+  refuses a unit whose file in `/etc/systemd/system` outranks the mask);
+- with `sandbox.close-resolved = true`, closes systemd-resolved to every
+  user but root and the runner's ([below](#network));
 - installs `setup.packages` (dnf or apt) and `setup.npm`, as root and on
   the open network; npm versions must be exact;
 - denies the sandbox user sudo, every polkit action, cron, at and
@@ -151,7 +156,7 @@ and none of the caller's environment. It gets a fixed `PATH` and `LANG`,
 the proxy's variables and `sandbox.env`; a variable named `ACTIONS_*`
 (the job's identity-token request is two of them) is refused by name in
 the configuration and again at entry. `--pipe` needs systemd 257; setup
-checks only that `run0` is there.
+refuses a `run0` whose `--version` names an older one.
 
 ### Why a systemd read-only view has not replaced the walk
 
@@ -240,6 +245,24 @@ rejected by name as well. The proxy's own uid is rejected on the tailnet
 and on private, loopback and link-local addresses, except for TCP and UDP
 port 53 at literal resolvers read from `/etc/resolv.conf` during setup.
 New connections to other DNS destinations, including public ones, are rejected.
+
+systemd-resolved, where it runs (the hosted Ubuntu image, not the RHEL 10
+runners), resolves names for any local user over its Varlink socket and
+the system bus, and asks upstream as itself, so the rules above do not
+stop the sandbox user sending data out in names. With
+`sandbox.close-resolved = true` setup takes other users' access off the
+sockets in `/run/systemd/resolve/` (the runner's user loses them too)
+and installs a bus policy that refuses calls to `org.freedesktop.resolve1`
+by default and allows root and the runner's user. Both refuse by who connects, not by uid range, so the
+subordinate uids of a container are refused too. It does so wherever
+resolved is running (even if masked) or can start, since a call on
+the bus or a connection to a socket would start it; drop-ins in
+`/etc/systemd/system` keep the socket units' modes when they are made
+again. This requires systemd 258 or newer where resolved uses socket
+activation; setup refuses older versions, whose daemon-created sockets
+cannot be closed before publication by a post-start chmod. Glibc's lookups through
+nsswitch's `dns` use the stub on loopback and need neither. Off by
+default; the hosted configurations turn it on.
 The existing established/related-connection exception is unchanged. Tailnet
 denials precede these exceptions. For a [session run](../specs/session.md),
 the sandbox user is also rejected on loopback at the session bridge's port and

@@ -27,6 +27,7 @@ use super::host::{self, User};
 use super::root::Root;
 use crate::config::{self, Config};
 use crate::exit::Exit;
+use crate::run::inference::{self, Endpoint};
 
 mod net;
 mod on_host;
@@ -344,6 +345,16 @@ fn canary() -> Result<String> {
     Ok(format!("isolation-canary-{hex}"))
 }
 
+/// Whether a run's token is got with the job's identity token, which
+/// says that the variables that request one were there; `plain` and
+/// `token-file` registrations need none.
+fn from_identity_token(inference: &config::Inference) -> Result<bool> {
+    Ok(matches!(
+        Endpoint::from_config(inference)?.map(|endpoint| endpoint.mode),
+        Some(inference::Mode::GithubOidc { .. })
+    ))
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack
@@ -368,11 +379,13 @@ impl Checker<'_> {
             self.runner_privileges()?;
         }
         let environs = self.environments()?;
-        self.job_variables(&environs, token.is_some())?;
+        let oidc_token = token.is_some() && from_identity_token(&self.config.inference)?;
+        self.job_variables(&environs, oidc_token)?;
         self.files()?;
         self.schedulers()?;
         self.services();
         self.local_services()?;
+        self.resolved()?;
         self.tailscaled()?;
         if let Some(token) = token {
             self.run_token(token, &environs)?;
@@ -703,6 +716,33 @@ mod diagnostic_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_identity_token_registration_needs_the_request_variables() {
+        let cases = [
+            ("", false),
+            (
+                "[inference]\nurl = \"http://100.64.0.1:8080\"\nregister = \"github-oidc\"\naudience = \"proxy\"",
+                true,
+            ),
+            (
+                "[inference]\nurl = \"http://100.64.0.1:8080\"\nregister = \"plain\"",
+                false,
+            ),
+            (
+                "[inference]\nurl = \"http://100.64.0.1:8080\"\nregister = \"token-file\"\ntoken-file = \"/run/token\"",
+                false,
+            ),
+        ];
+        for (text, want) in cases {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(
+                from_identity_token(&config.inference).unwrap(),
+                want,
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn byte_search() {

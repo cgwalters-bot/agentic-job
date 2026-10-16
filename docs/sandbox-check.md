@@ -93,7 +93,8 @@ matches on them.
 | `filesystem-view-userns`, `filesystem-view-kvm`, `container-build`, `container-built-run` | compatibility controls: Podman user/mount namespaces, KVM API, rootless build and run | existing container pull/network controls | no blanket namespace, device or privilege-elevation prohibition |
 | `ptrace-scope` | (none: reads the kernel setting) | | setup raises it to 1 |
 | `cron`, `at` | install a crontab; use `at` | the runner's user may | `/etc/cron.deny`, `/etc/at.deny` |
-| `service:UNIT` | (none: asks systemd) | journald is active | `sandbox.stop-services` |
+| `service:UNIT` | (none: asks systemd that the unit is inactive and masked, or not on the host) | journald is active | `sandbox.stop-services` |
+| `resolved-bus`, `resolved-varlink` | resolve a name through systemd-resolved, over the system bus (`busctl`) and its Varlink socket (`varlinkctl`) | the runner's user resolves it over the bus; the sandbox user calls the bus itself, and PID 1 over Varlink | `sandbox.close-resolved`: a bus policy and the sockets' modes; without it, or without resolved, a note |
 | `local-sockets`, `local-tcp` | connect to every listening Unix socket and local TCP port | it finds and reaches two listeners opened for it | stopping the daemon, or naming the socket as allowed |
 | `tailscale-status`, `tailscale-localapi` | use tailscaled's LocalAPI | root can | its socket directory is closed |
 | `token-runner-file` | read the runner's copy of the run token | the runner reads it | the runner's home is closed |
@@ -268,7 +269,7 @@ the inference proxy for one, and brings the tailnet rows.
 | `egress-post`, `egress-push`, `egress-fronting`, `egress-container-post` | POST to a host with no write rule, push to a forge, name another host in `Host` than it connected to; the POST also from a container | the answer must be the proxy's own 403, with its `X-Egress-Denied` header | the proxy's policy |
 | `egress-direct`, `egress-tcp`, `egress-container-direct`, `egress-container-own-network` | reach the public page around the proxy, by URL and by plain TCP, and from containers on the host's network and on their own | the runner's user opens the same TCP connection | everything but loopback is rejected for its uids |
 | `egress-resolve`, `egress-dns` | resolve a name; reach a public DNS server | the runner's user does both | the same, and loopback's port 53 |
-| `egress-wireserver` | reach Azure's WireServer | the runner's user, where it can | the same |
+| `egress-wireserver`, `egress-wireserver-dns` | reach Azure's WireServer over HTTP, and open a TCP connection to its DNS port | the runner's user, where it can: the guest agent's firewall drops all but root's connections to its HTTP port and leaves its DNS port open | the same |
 | `egress-proxy-metadata`, `egress-proxy-wireserver`, `egress-proxy-direct` | have the proxy reach the metadata service, the WireServer or a direct endpoint for it | | the rules on the proxy's own uid |
 | `tailnet-direct`, `tailnet-container-direct` | (controls: reach each direct endpoint) | | |
 | `tailnet:ADDR:PORT`, `tailnet-container:ADDR:PORT`, `tailnet-nc` | reach another port of the endpoint's host, its IPv6 address, tailscaled's own address and this node's, directly, from a container, and through tailscaled | the runner's user, for each target it reaches | the tailnet rules, and tailscaled's closed socket |
@@ -295,8 +296,9 @@ established/related exception is unchanged. Tailnet denials still precede
 the exceptions. Parser and rule-order unit tests cover this change; it has
 not yet been validated by removing this protection on a privileged host.
 
-Setup's refusal of a resolver on the tailnet still reads
-`/etc/resolv.conf` alone: a local stub whose upstream is the tailnet's
+Setup's refusal of a resolver on the tailnet reads `/etc/resolv.conf`
+and systemd-resolved's upstream list, `/run/systemd/resolve/resolv.conf`.
+Another local stub (dnsmasq) whose upstream is the tailnet's still
 passes, and the proxy can then resolve tailnet names, though not reach
 them.
 
@@ -340,16 +342,20 @@ services directly under `/run/systemd/`, the randomly named datagram
 sockets systemd's daemons take notifications on, polkit's password
 helper, and the user's own under `/run/user/UID/`. systemd-resolved's
 sockets are deliberately not on it: it resolves names for any user, as
-itself. Anything else fails the check until the caller either stops the
+itself, until `sandbox.close-resolved` closes them. Anything else fails the check until the caller either stops the
 daemon with `sandbox.stop-services` or names the socket in
 `sandbox.check.allow-sockets` or `allow-tcp-ports`. Either way it is a
 line in the caller's configuration that someone decided.
 
 It does not see UDP, a listener bound only to an IPv6 link-local
-address, nor a service that only listens on another machine. The system
+address, nor a service that only listens on another machine. UDP has no
+listening state: an unconnected socket is a server or a client's
+(the hosted image has root's on random ports), and a datagram sent
+proves nothing without an answer, so there is no list to hold it to;
+the rules close loopback's port 53, the local resolver's. The system
 bus is one socket with many services behind it; polkit denies the
-sandbox user every action, and a service that asks polkit nothing is
-not seen by this probe.
+sandbox user every action, resolved is closed by its own policy, and
+another service that asks polkit nothing is not seen by this probe.
 
 ## Where each probe has been seen to fail
 
@@ -407,8 +413,10 @@ a job should start one.
 `tests/sandbox_fresh.rs` runs before setup in the same job: setup
 refuses a user that exists, an image's user in a forbidden group, a
 home left without its user and a group that does not exist, each
-before it has changed anything. That setup goes on to use an image's
-user when told to is not exercised.
+before it has changed anything. An image's user with
+`sandbox.allow-existing-user` is taken: setup goes on to the next
+refusal, the world-write policy's, with nothing changed. The rest of a
+setup on such a user is not exercised.
 
 The first time that test ran it found a probe that passed for the wrong
 reason: `pkexec` started straight from `run0` refuses because its
@@ -433,22 +441,27 @@ What the hosted runner cannot show:
   with that node's own cockpit port as the direct endpoint.
 - It runs systemd-resolved, and the runner's network depends on it.
   resolved answers any local user over its own sockets and over the
-  system bus, as itself, so there the sandbox user can presumably
-  still send names out through it (inferred from how resolved works;
-  not tried). The `local-sockets` probe fails on those sockets, and
-  CI's configuration allows them by name with that said. Closing it
-  (the sockets' modes and a bus policy) is not built
-  ([agentic-job#21](https://github.com/cgwalters-forge/agentic-job/issues/21)). The RHEL 10
-  runners have no resolved.
+  system bus, as itself: from an agent's sandbox on ubuntu-26.04
+  (systemd 259) both resolved a name before `sandbox.close-resolved`.
+  CI's configuration closes it, and the test opens the bus policy and
+  the Varlink socket again, which must fail `resolved-bus`,
+  `resolved-varlink` and `local-sockets`; with resolved stopped, and
+  after it and its sockets restart, every probe must pass. The RHEL 10 runners have no
+  resolved.
 - Neither runner's user gets an HTTP answer from the WireServer, so
   `egress-wireserver` and `egress-proxy-wireserver` have never had a
-  control and have never been seen to fail.
+  control and have never been seen to fail. Its DNS port answers every
+  user, which gives `egress-wireserver-dns` a control, and the test
+  without rules expects that probe to fail.
 - It runs AppArmor, not SELinux. That `run0` needs sockets for the
   standard streams under SELinux is exercised only on RHEL.
 - `/dev/kvm`: the sandbox user is put in the `kvm` group, and nothing
   here starts a VM as it.
 
 The same RHEL 10 runner image has listeners of its own that the caller
-there has to stop or allow in step 8: cockpit on port 9090, sshd, the
-sssd credential cache, `lsmd`, iscsid, and the SELinux troubleshooter,
-which starts on the first denial.
+there has to stop or allow in its own configuration: cockpit on port
+9090, sshd, the sssd credential cache, `lsmd`, iscsid, and the SELinux
+troubleshooter, which starts on the first denial. No configuration for
+that image is in this repository. Listing a service in
+`sandbox.stop-services` now stops and masks the socket that triggers it
+too (`cockpit.service` takes `cockpit.socket` with it).

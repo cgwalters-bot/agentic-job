@@ -1,5 +1,5 @@
 //! `sandbox setup` refuses a machine that is not fresh, and has changed
-//! nothing when it does.
+//! nothing when it does; and it takes an image's user it is told to.
 //!
 //! This adds and removes users as root through sudo: it is for a machine
 //! that is thrown away, BEFORE `sandbox setup` has run there. CI's
@@ -21,6 +21,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 const CONFIG_DIR: &str = "/etc/agentic-job";
 
 const EXISTING_USER: &str = "aj-test-existing";
+
+/// An image's user, as `sandbox.allow-existing-user` is for.
+const IMAGE_USER: &str = "aj-test-image";
 
 const LEFTOVER_HOME: &str = "/home/aj-test-leftover";
 
@@ -66,6 +69,7 @@ fn setup_refuses_a_machine_that_is_not_fresh() {
     root(&["test", "!", "-e", "/sys/fs/bpf/agentic-job-world-write"]);
     root(&["useradd", "--create-home", EXISTING_USER]);
     root(&["usermod", "-aG", "adm", EXISTING_USER]);
+    root(&["useradd", "--create-home", IMAGE_USER]);
     root(&["mkdir", LEFTOVER_HOME]);
 
     // The configuration, and what the refusal must say.
@@ -87,6 +91,11 @@ fn setup_refuses_a_machine_that_is_not_fresh() {
             "[sandbox]\nuser = \"aj-test-new\"\ngroups = [\"no-such-group\"]\n".to_owned(),
             "no group no-such-group",
         ),
+        // The image's user, taken: setup goes on to the next refusal.
+        (
+            format!("[sandbox]\nuser = \"{IMAGE_USER}\"\nallow-existing-user = true\n"),
+            "the world-write policy is not loaded",
+        ),
         // Fresh, but the world-write policy is not loaded yet: CI runs
         // this before its loader.
         (
@@ -106,6 +115,7 @@ fn setup_refuses_a_machine_that_is_not_fresh() {
         .collect();
 
     root(&["userdel", "--remove", EXISTING_USER]);
+    root(&["userdel", "--remove", IMAGE_USER]);
     root(&["rmdir", LEFTOVER_HOME]);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

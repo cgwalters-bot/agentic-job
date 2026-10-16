@@ -550,8 +550,9 @@ It is not a container and not a virtual machine. It is a uid boundary
 on one kernel: a kernel flaw crosses it, and so does local IPC that
 answers any user (the system bus, a world-connectable socket), which
 the check finds and the configuration has to stop or accept by name. On
-the hosted image the resolver answers the sandbox user too, so names can
-leave through DNS ([sandbox-check.md](sandbox-check.md#the-network-probes)).
+the hosted image the resolver answers every user, and names could leave
+through it; the hosted configuration sets `sandbox.close-resolved`
+([sandbox.md](sandbox.md#network)).
 
 It secures what runs after it. A step before it runs with the runner's
 sudo, and nothing holds a job to the order: that is what a compiler
@@ -807,7 +808,7 @@ file says, and the file's own default where it says nothing.
 | `lock` | `false` keeps the runner's sudo: the host is hardened for the sandbox user only, and every later step has root. Default `true` |
 | `egress` | `false` starts no proxy and leaves the sandbox user's network open but for the metadata service and the tailnet. Default `true` |
 | `egress-policy` | A proxy policy file replacing [the binary's](../egress/policy.toml): write rules and an optional [domain allowlist](sandbox.md#opt-in-domain-allowlist). Select from trusted caller configuration |
-| `stop-services` | systemd units to stop, in place of the file's list |
+| `stop-services` | systemd units to stop and mask, with what triggers them, in place of the file's list |
 | `sandbox-user` | The second user's name. Default `runner-sandbox` |
 | `runner-user` | The user the job's steps run as. Default: the one that runs the step |
 | `script` | A file: a script setup runs as the sandbox user at its end |

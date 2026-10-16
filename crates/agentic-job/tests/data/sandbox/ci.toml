@@ -20,14 +20,13 @@ stop-services = [
     "iscsid.socket",
     "iscsid.service",
 ]
+# systemd-resolved, which the whole runner resolves names with, resolves
+# them for any user, around the egress proxy: setup leaves it to root and
+# the runner's user (docs/sandbox-check.md).
+close-resolved = true
 
 [sandbox.check]
 allow-sockets = [
-    # systemd-resolved, which the whole runner resolves names with, the
-    # egress proxy included. It resolves for any user, so on this image
-    # the sandbox user still has a way to send names out through it
-    # (docs/sandbox-check.md). The runners agents run on do not have it.
-    "/run/systemd/resolve/",
     # systemd-networkd, which the runner's network depends on: it
     # describes the links to any user and changes them only for root.
     "/run/systemd/netif/",

@@ -16,7 +16,7 @@ use super::{Checker, Want, contains};
 use crate::config::Sandbox;
 use crate::sandbox::enter::OIDC_REQUEST_VARS;
 use crate::sandbox::local::{ABSTRACT_PREFIX, Reached};
-use crate::sandbox::setup::{self, SELF_COPY};
+use crate::sandbox::setup::{self, SELF_COPY, resolved};
 use crate::sandbox::{egress, host, network};
 
 /// A variable of a process of the runner's, standing in for the tokens in
@@ -97,6 +97,14 @@ const HOST_SOCKETS: &[&str] = &[
     "/run/systemd/io.systemd.sysext",
     "/run/polkit/agent-helper.socket",
 ];
+
+/// The load states of a unit nothing can start: masked by setup, or not
+/// on this machine.
+const STOPPED_LOAD_STATES: &[&str] = &["masked", "not-found"];
+
+/// PID 1's own Varlink service, which answers every user: the control
+/// that the sandbox user speaks Varlink at all.
+const VARLINK_CONTROL: &str = "/run/systemd/io.systemd.Manager";
 
 /// A unit that is active on every host this runs on.
 const ALWAYS_ACTIVE_UNIT: &str = "systemd-journald.service";
@@ -419,15 +427,15 @@ impl Checker<'_> {
     /// The variables that ask for the job's identity token are in every
     /// step's environment when the job may have one, this process's too;
     /// what runs as the sandbox user starts without them.
-    pub(super) fn job_variables(&mut self, environs: &[u8], has_token: bool) -> Result<()> {
+    pub(super) fn job_variables(&mut self, environs: &[u8], oidc_token: bool) -> Result<()> {
         let user = self.user().to_owned();
         let values: Vec<(&str, String)> = OIDC_REQUEST_VARS
             .iter()
             .filter_map(|&name| Some((name, std::env::var(name).ok().filter(|v| !v.is_empty())?)))
             .collect();
-        // A run token was got with the identity token, so then the
-        // variables must be here to be proven absent from the sandbox.
-        if has_token || !values.is_empty() {
+        // A run token got with the identity token says they were, so then
+        // the variables must be here to be proven absent from the sandbox.
+        if oidc_token || !values.is_empty() {
             self.report.expect(
                 Want::Succeed,
                 "oidc-control",
@@ -811,7 +819,8 @@ impl Checker<'_> {
         Ok(())
     }
 
-    /// The units the configuration says are stopped, are.
+    /// The units the configuration says are stopped, are, and masked
+    /// (or not on this machine), so that nothing starts them again.
     pub(super) fn services(&mut self) {
         let units = &self.config.sandbox.stop_services;
         if units.is_empty() {
@@ -826,12 +835,21 @@ impl Checker<'_> {
             format!("{ALWAYS_ACTIVE_UNIT} is active (control)"),
             active(ALWAYS_ACTIVE_UNIT),
         );
+        let startable = |unit: &str| {
+            let state = Command::new("systemctl")
+                .args(["show", "--property=LoadState", "--value", "--", unit])
+                .stderr(Stdio::null())
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+                .unwrap_or_default();
+            !STOPPED_LOAD_STATES.contains(&state.as_str())
+        };
         for unit in units {
             self.report.expect(
                 Want::Fail,
                 &format!("service:{unit}"),
-                format!("{unit} is not running"),
-                active(unit),
+                format!("{unit} is not running, and is masked"),
+                active(unit) || startable(unit),
             );
         }
     }
@@ -935,6 +953,99 @@ impl Checker<'_> {
                 )
             },
             !tcp.is_empty(),
+        );
+        Ok(())
+    }
+
+    /// With `sandbox.close-resolved`, systemd-resolved resolves no name
+    /// for the sandbox user, over the system bus or over Varlink. Its
+    /// subordinate uids are refused by the same means (see
+    /// `setup::resolved`), and are not tried apart.
+    pub(super) fn resolved(&mut self) -> Result<()> {
+        let user = self.user().to_owned();
+        // Not running is not enough: the sandbox user's own call would
+        // start it.
+        if !resolved::startable()? {
+            self.report
+                .note("no systemd-resolved to start on this host, so none to ask for names");
+            return Ok(());
+        }
+        if !self.config.sandbox.close_resolved {
+            self.report.note(&format!(
+                "systemd-resolved resolves names for {user}, around the egress proxy: sandbox.close-resolved is off"
+            ));
+            return Ok(());
+        }
+        let name = super::net::url_host(&self.config.sandbox.check.control_url).to_owned();
+        let bus = [
+            "busctl",
+            "call",
+            resolved::BUS_NAME,
+            "/org/freedesktop/resolve1",
+            "org.freedesktop.resolve1.Manager",
+            "ResolveHostname",
+            "isit",
+            "0",
+            &name,
+            "0",
+            "0",
+        ];
+        // Before the runner's control, which starts resolved where it is
+        // inactive: the sandbox user's call must not start it either.
+        let sandbox_bus = self.sandbox_succeeds(&bus)?;
+        self.report.expect(
+            Want::Succeed,
+            "resolved-control",
+            format!(
+                "{} resolves {name} through {} (control)",
+                self.runner.name,
+                resolved::BUS_NAME
+            ),
+            super::runner_reaches(&bus),
+        );
+        let got = self.sandbox_succeeds(&[
+            "busctl",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetId",
+        ])?;
+        self.report.expect(
+            Want::Succeed,
+            "resolved-bus-control",
+            format!("{user} calls the bus itself on the system bus (control)"),
+            got,
+        );
+        self.report.expect(
+            Want::Fail,
+            "resolved-bus",
+            format!("{user} can't resolve {name} through {}", resolved::BUS_NAME),
+            sandbox_bus,
+        );
+        let got = self.sandbox_succeeds(&["varlinkctl", "info", VARLINK_CONTROL])?;
+        self.report.expect(
+            Want::Succeed,
+            "resolved-varlink-control",
+            format!("{user} calls {VARLINK_CONTROL} over Varlink (control)"),
+            got,
+        );
+        let request = serde_json::json!({ "name": name }).to_string();
+        let got = self.sandbox_succeeds(&[
+            "varlinkctl",
+            "call",
+            resolved::VARLINK_SOCKET,
+            "io.systemd.Resolve.ResolveHostname",
+            &request,
+        ])?;
+        self.report.expect(
+            Want::Fail,
+            "resolved-varlink",
+            format!(
+                "{user} can't resolve {name} through {}",
+                resolved::VARLINK_SOCKET
+            ),
+            got,
         );
         Ok(())
     }
