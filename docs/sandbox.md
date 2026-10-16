@@ -285,18 +285,20 @@ The policy needs the method and path of every request, so the proxy has
 to end TLS. One that did not could only allow by host name, and would
 lose the rule that reads are open and writes are not.
 
-By default [mitmproxy](https://mitmproxy.org), pinned in
-`egress/requirements.txt`, runs the addon and policy of `egress/`,
-which the binary carries; setup installs it into a Python environment.
-With `[egress] rust-proxy = true` in the host configuration the binary
-runs its own proxy instead (`sandbox egress-proxy`,
+By default the binary runs its own proxy (`sandbox egress-proxy`,
 `crates/agentic-job/src/sandbox/proxy/`), on hyper and rustls, with the
-same policy ported from `policy.py`, the same refusals and the same
-access log, and setup needs no Python or package index. It is off while
-both ship ([#885](https://github.com/cgwalters-forge/agentic-job/issues/885)):
-CI's baseline sandbox shard runs the probes against it, the others
-against mitmproxy. It speaks HTTP/1.1 to both sides, where mitmproxy
-also speaks HTTP/2: a client offered only HTTP/1.1 uses it.
+policy of `egress/` ported from `policy.py`, the same refusals and the
+same access log as mitmproxy, and setup needs no Python or package
+index. It speaks HTTP/1.1 to both sides, where mitmproxy also speaks
+HTTP/2: a client offered only HTTP/1.1 uses it. With `[egress]
+rust-proxy = false` in the host configuration
+[mitmproxy](https://mitmproxy.org), pinned in `egress/requirements.txt`,
+runs the addon and policy of `egress/` instead, which the binary
+carries; setup installs it into a Python environment, so the host needs
+`python3-venv` in `[setup] packages`. That switch stays until mitmproxy
+is removed ([#919](https://github.com/cgwalters-forge/agentic-job/issues/919)):
+CI's baseline sandbox shard runs the probes against mitmproxy, the
+others against the Rust proxy.
 
 Either starts on `127.0.0.1:3128` as the user `egress-proxy`, in a
 transient unit with no capabilities and a read-only system. The key of

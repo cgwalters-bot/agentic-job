@@ -309,8 +309,9 @@ pub struct Egress {
     pub policy: Option<PathBuf>,
     /// Whether the proxy is this binary's own (`sandbox egress-proxy`)
     /// rather than mitmproxy: the same policy, and no Python or package
-    /// index at setup. Off while both ship, until the Rust one has run
-    /// the probes as long as mitmproxy has.
+    /// index at setup. On by default; `false` keeps mitmproxy, which
+    /// needs Python's venv module (`python3-venv`) in `[setup] packages`,
+    /// until it is removed (#919).
     pub rust_proxy: bool,
 }
 
@@ -320,7 +321,7 @@ impl Default for Egress {
             proxy: true,
             direct: Vec::new(),
             policy: None,
-            rust_proxy: false,
+            rust_proxy: true,
         }
     }
 }
@@ -714,14 +715,14 @@ mod tests {
         assert_eq!(config.commit.trailers, ["Generated-by: AI"]);
     }
 
-    /// The egress proxy is mitmproxy unless the host configuration
-    /// names the Rust one.
+    /// The egress proxy is the Rust one unless the host configuration
+    /// asks for mitmproxy.
     #[test]
-    fn the_rust_proxy_is_opt_in() {
-        assert!(!Config::default().egress.rust_proxy);
+    fn the_rust_proxy_is_the_default() {
+        assert!(Config::default().egress.rust_proxy);
         for (text, want) in [
-            ("", false),
-            ("[egress]\nproxy = true\n", false),
+            ("", true),
+            ("[egress]\nproxy = true\n", true),
             ("[egress]\nrust-proxy = true\n", true),
             ("[egress]\nrust-proxy = false\n", false),
         ] {

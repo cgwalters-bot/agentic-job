@@ -554,6 +554,7 @@ mod tests {
 
     /// The shipped runner configuration gives this repository cargo,
     /// which the scripted dispatch review relies on, and others nothing.
+    /// It installs no Python for the egress proxy, which is the Rust one.
     #[test]
     fn shipped_hosted_config_gives_this_repository_cargo() {
         let hosted = concat!(
@@ -565,7 +566,13 @@ mod tests {
                 repo: Some(repo.to_owned()),
                 ..args(Some(hosted), RUN, LIMITS, &[])
             };
-            let packages = composed(&args).setup.packages;
+            let config = composed(&args);
+            assert!(config.egress.rust_proxy, "{repo}");
+            let packages = config.setup.packages;
+            assert!(
+                !packages.contains(&"python3-venv".to_owned()),
+                "{repo}: {packages:?}"
+            );
             assert_eq!(
                 packages.contains(&"cargo".to_owned()),
                 cargo,

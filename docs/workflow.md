@@ -1719,7 +1719,7 @@ package manager.
 
 **The egress proxy's pins.** `sandbox setup` runs as root and takes two
 things from the network before the rules load, each pinned in this
-repository (the first not with `[egress] rust-proxy`). mitmproxy and
+repository (the first only with `[egress] rust-proxy = false`). mitmproxy and
 all it depends on are installed with `pip --require-hashes
 --only-binary :all:` from `egress/requirements.txt`, which names each
 at one version with the hashes of its files: pip installs no file that is not one of those, and builds nothing. That

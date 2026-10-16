@@ -1,7 +1,7 @@
-//! The egress proxy, installed and started by `sandbox setup`: mitmproxy,
-//! with the addon and policy of `egress/` at the top of this repository,
-//! or with `egress.rust-proxy` this binary's own ([`super::proxy`]),
-//! which applies the same policy and writes the same log.
+//! The egress proxy, installed and started by `sandbox setup`: this
+//! binary's own ([`super::proxy`]), or with `egress.rust-proxy = false`
+//! mitmproxy, with the addon and policy of `egress/` at the top of this
+//! repository, which applies the same policy and writes the same log.
 //!
 //! The policy needs the method and path of every request, so the proxy
 //! has to end TLS. This module is the old tree's `egress-proxy.mjs
@@ -11,9 +11,8 @@
 //! change its policy; and the network rules keep that user off
 //! everything private.
 //!
-//! With mitmproxy, setup therefore needs Python, a package index and the
-//! threat feed's host on the network; with the Rust proxy, the feed's
-//! host alone. What it takes from them is pinned here: every package by
+//! Setup therefore needs the threat feed's host on the network, and with
+//! mitmproxy also Python and a package index. What it takes from them is pinned here: every package by
 //! the hashes of `egress/requirements.txt`, and the feed by a commit and
 //! a checksum. docs/workflow.md says how each pin is moved.
 
@@ -236,7 +235,7 @@ fn install(policy: Option<&Path>, rust: bool) -> Result<()> {
         return write(&format!("{POLICY_DIR}/policy.toml"), &rules);
     }
     host::run(Command::new("python3").args(["-m", "venv", INSTALL_DIR])).context(
-        "making the egress proxy's Python environment (is python3's venv module installed?)",
+        "making mitmproxy's Python environment (egress.rust-proxy = false needs python3's venv module, python3-venv in [setup] packages)",
     )?;
     let requirements = format!("{INSTALL_DIR}/requirements.txt");
     write(&requirements, REQUIREMENTS)?;

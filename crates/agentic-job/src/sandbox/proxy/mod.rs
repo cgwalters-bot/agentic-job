@@ -1,6 +1,6 @@
 //! The egress proxy in Rust: `sandbox egress-proxy`, which `sandbox
-//! setup` starts in place of mitmproxy when `egress.rust-proxy` is set
-//! (off by default while both ship; docs/sandbox.md).
+//! setup` starts by default, and mitmproxy in its place with
+//! `egress.rust-proxy = false` (docs/sandbox.md).
 //!
 //! It does what `egress/addon.py` has mitmproxy do. It listens for proxy
 //! requests: a plain HTTP request in absolute form, or a CONNECT, which

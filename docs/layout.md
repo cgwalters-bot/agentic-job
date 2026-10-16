@@ -83,8 +83,8 @@ lists the files to change, the adapter contract and the security tests.
 
 `secure-host/` holds the standalone action, hosted configuration, release
 pin and binary-fetch script. `egress/` holds the mitmproxy addon, policy,
-hashed dependencies and Python tests; the Rust proxy that can replace
-mitmproxy is `crates/agentic-job/src/sandbox/proxy/`. The runtime Python files, default
+hashed dependencies and Python tests; the Rust proxy, the default in
+place of mitmproxy, is `crates/agentic-job/src/sandbox/proxy/`. The runtime Python files, default
 policy, ecosystem identifiers and requirements file are embedded in the
 binary; the tests are not. Regenerate the identifiers with
 `python3 egress/ecosystems.py GH_AW_CHECKOUT` when changing gh-aw's pin.

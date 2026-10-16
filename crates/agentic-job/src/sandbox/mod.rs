@@ -41,7 +41,7 @@ pub enum Command {
     /// Print the network rules setup would load; CI compares them with the old tree's
     #[command(hide = true)]
     NftRules(NftRulesArgs),
-    /// Run the egress proxy; `setup` starts it as its own user with `egress.rust-proxy`
+    /// Run the egress proxy; `setup` starts it as its own user unless `egress.rust-proxy = false`
     #[command(hide = true)]
     EgressProxy(proxy::Args),
 }

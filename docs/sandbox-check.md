@@ -260,9 +260,9 @@ as the walk it replaced was ([agentic-job#108](https://github.com/cgwalters-forg
 ## The network probes
 
 `sandbox setup` loads nftables rules keyed on the sandbox user's uid and
-its subordinate uids, and by default starts the egress proxy: mitmproxy
-with the addon and policy of `egress/`, or with `[egress] rust-proxy`
-the binary's own, as its own user. The rules are
+its subordinate uids, and by default starts the egress proxy: the
+binary's own with the policy of `egress/`, or with `[egress] rust-proxy
+= false` mitmproxy with its addon, as its own user. The rules are
 the old tree's except for resolver-scoped proxy DNS; a corpus test generates
 both and compares them with that intentional difference. With `[egress]
 proxy = false` only the first three rows

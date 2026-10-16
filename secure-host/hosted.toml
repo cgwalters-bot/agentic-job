@@ -39,6 +39,5 @@ allow-sockets = [
 # The egress proxy and the network rules are on by default: no [egress].
 
 [setup]
-# The egress proxy runs in a Python environment of its own, behind
-# nftables rules.
-packages = ["python3-venv", "nftables"]
+# The egress proxy is the binary's own, behind nftables rules.
+packages = ["nftables"]

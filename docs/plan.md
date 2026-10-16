@@ -49,9 +49,10 @@ host-wide walk is gone, replaced by the access-time world-write policy.
 our setup code should be the binary's, with no package fetches beyond an
 agent's. Ranked by expected time saved and fetches removed (estimates from one hosted job's
 61 s `packages` stage, not yet measured per slice): install agents from
-pinned, checksummed tarballs instead of a distribution's npm; replace the
-Python egress proxy (`python3-venv` and PyPI at setup) with Rust, keeping
-every egress test; a prebuilt image or cached layer
+pinned, checksummed tarballs instead of a distribution's npm; remove the
+Python egress proxy (`python3-venv` and PyPI at setup), now that the Rust
+one is the default, keeping every egress test
+([#919](https://github.com/cgwalters-forge/agentic-job/issues/919)); a prebuilt image or cached layer
 ([#144](https://github.com/cgwalters-forge/agentic-job/issues/144)); then the
 rest of secure-host's Node steps. Those save little time, since hosted images
 ship Node, but take Node out of root's steps. `sandbox timed` replaced
