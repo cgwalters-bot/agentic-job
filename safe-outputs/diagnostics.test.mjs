@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { diagnostics, refusalReasons } from './diagnostics.mjs';
+import { diagnostics, handlerErrors, refusalReasons } from './diagnostics.mjs';
 
 for (const phase of ['collector', 'policy']) {
   test(`${phase} refusal produces a downloadable diagnostics-only layout`, async () => {
@@ -82,3 +82,28 @@ test('refusal reasons bound report count and text', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// gh-aw's safe-output-errors.json, as its handler manager writes it.
+for (const [report, expected] of [
+  [{ status: 'failure', message: '1 safe output(s) failed:\n  - add_comment: E008: too many links',
+     failures: [{ type: 'add_comment', errorCode: 'E099', error: 'E008: Comment contains 52 links, maximum is 50.' }] },
+   ['add\\_comment: E008: Comment contains 52 links, maximum is 50.']],
+  [{ failures: [{ type: 'add_comment', error: 'bad\n::error::\r@user [link](x) `code`' }, { type: 'create_issue' }] },
+   ['add\\_comment: bad ::error:: @\u200buser \\[link\\](x) \\`code\\`', 'create\\_issue: no error given']],
+  [{ message: 'Handler manager failed: boom', failures: [] }, ['Handler manager failed: boom']],
+  [{ failures: Array(101).fill({ type: 'add_comment', error: 'x'.repeat(1001) }) }, Array(100).fill(`add\\_comment: ${'x'.repeat(987)}`)],
+]) {
+  test(`handler errors: ${JSON.stringify(report).slice(0, 80)}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'handler-errors-'));
+    try {
+      const file = join(dir, 'safe-output-errors.json');
+      assert.deepEqual(await handlerErrors(file), []);
+      await writeFile(file, JSON.stringify(report));
+      assert.deepEqual(await handlerErrors(file), expected);
+      await writeFile(file, JSON.stringify({ failures: [{ type: 42 }] }));
+      await assert.rejects(handlerErrors(file), /Invalid handler error report/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}

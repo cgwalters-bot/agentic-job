@@ -45,11 +45,32 @@ export async function refusalReasons(source) {
     }
     reasons.push(...report.errors.slice(0, MAX_ERRORS));
   }
-  // Paths and collector errors can contain hostile text. Keep outputs on one
-  // line and neutralize Markdown/mentions before using them in a comment.
-  return reasons.slice(0, MAX_ERRORS).map(e => e.slice(0, MAX_REASON_CHARS)
+  return reasons.slice(0, MAX_ERRORS).map(neutralize);
+}
+
+// Paths, collector and handler errors can contain hostile text. Keep outputs
+// on one line and neutralize Markdown/mentions before using them in a comment.
+function neutralize(reason) {
+  return reason.slice(0, MAX_REASON_CHARS)
     .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
-    .replace(/@/g, '@\u200b').replace(/[\\`*_\[\]<>]/g, '\\$&'));
+    .replace(/@/g, '@\u200b').replace(/[\\`*_\[\]<>]/g, '\\$&');
+}
+
+// What gh-aw's handler manager records when outputs fail (its
+// safe_output_manifest.cjs, secrets redacted): each failed output's type
+// and its handler's error, or the manager's own message when it failed
+// before any output did. The requests and patch are not in it.
+export async function handlerErrors(path) {
+  const report = await readReport(path);
+  if (report === null) return [];
+  const failures = report.failures ?? [];
+  if (!Array.isArray(failures) || !failures.every(f => typeof f?.type === 'string' && typeof (f.error ?? '') === 'string') ||
+      (report.message !== undefined && typeof report.message !== 'string')) {
+    throw new Error('Invalid handler error report');
+  }
+  const reasons = failures.length ? failures.slice(0, MAX_ERRORS).map(f => `${f.type}: ${f.error || 'no error given'}`)
+    : [report.message].filter(Boolean);
+  return reasons.map(neutralize);
 }
 
 export async function diagnostics(source, destination) {

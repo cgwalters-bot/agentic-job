@@ -88,6 +88,7 @@ jobs:
       no-result: ${{ steps.result.outputs.no-result }}
       missing-data: ${{ steps.result.outputs.missing-data }}
       no-result-reason: ${{ steps.result.outputs.no-result-reason }}
+      handler-errors: ${{ steps.handler-errors.outputs.reason }}
     env:
       OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
       # The issue the caller made the run for, a number policy checked, and
@@ -969,6 +970,34 @@ jobs:
             }
             await core.summary.addHeading('What the run made', 3).addLink(url, url).write();
             // Result links are reported by conclude, not a separate status comment.
+      # gh-aw logs a handler's error inside the apply step, which does not
+      # fail the job (continue-on-error), so the job's annotations and the
+      # status comment would say only how many outputs failed. Its error
+      # report holds each failed output's type and error, not the request:
+      # bounded and neutralized as check's refusal reasons are, as a
+      # handler's error can quote the agent's text. The reader is this
+      # workflow's pinned source: a comment-only run has no other checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !cancelled() && steps.apply.outcome == 'failure' }}
+        continue-on-error: true
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: apply-diagnostics
+          sparse-checkout: safe-outputs
+          persist-credentials: false
+      - name: Show why a handler failed
+        id: handler-errors
+        if: ${{ !cancelled() && steps.apply.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { handlerErrors } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/apply-diagnostics/safe-outputs/diagnostics.mjs`).href);
+            const reasons = await handlerErrors(`${process.env.GH_AW_TMP}/safe-output-errors.json`);
+            for (const reason of reasons) core.error(`Failed to apply ${reason}`);
+            core.setOutput('reason', reasons.join('; ').slice(0, 4000));
       # A run that asked for a pull request and has none did not do what
       # it was for, and neither did one of whose outputs a handler failed.
       - name: Every output was applied
@@ -1075,6 +1104,7 @@ jobs:
           MISSING_DATA: ${{ needs.apply.outputs.missing-data }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
+          HANDLER_ERRORS: ${{ needs.apply.outputs.handler-errors }}
           STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ && ( -z "$PR_REPO" || "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ) ]]
@@ -1097,6 +1127,8 @@ jobs:
             fi
           fi
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
+          # One line, already neutralized by apply.
+          [ -z "$HANDLER_ERRORS" ] || text="$text Failed outputs: $HANDLER_ERRORS"
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
           [ "${STAGED:-}" != true ] || [ "$reaction" != rocket ] || text="$text Staged: nothing was applied; the apply job's summary shows what would have been."
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
