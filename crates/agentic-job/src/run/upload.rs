@@ -39,6 +39,11 @@ use crate::redact;
 pub const RUN_DIR: &str = "run";
 pub const TRANSCRIPT_FILE: &str = "transcript.tar.zst";
 pub const SAFE_OUTPUTS_DIR: &str = "safe-outputs";
+/// Under `--out`, beside those and never uploaded with them: where the
+/// gate found a secret, for the workflow's summary and status comment.
+/// Without it a person learns only from the job's log which file to
+/// look at in a run that handed back nothing (#720).
+pub const SECRET_AT_FILE: &str = "secret-at";
 /// Under `OUT/work`: where those are put together.
 const STAGING_DIR: &str = "staging";
 const TRANSCRIPT_DIR: &str = "transcript";
@@ -64,6 +69,42 @@ pub struct Gate {
     pub fake_agent: bool,
 }
 
+/// The gate's refusal of a secret: `place` is `DIR/NAME, line N`, the
+/// location and never the string, which may be real.
+#[derive(Debug)]
+pub struct SecretAt {
+    place: String,
+    handed_back: bool,
+}
+
+impl std::fmt::Display for SecretAt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let how = if self.handed_back {
+            "is in what the agent handed back,"
+        } else {
+            "survived redaction in"
+        };
+        write!(
+            f,
+            "a secret of the run's or a private key {how} {}",
+            self.place
+        )
+    }
+}
+
+impl std::error::Error for SecretAt {}
+
+/// Writes where ERR, the gate's refusal, found a secret to
+/// [`SECRET_AT_FILE`]; nothing for any other refusal.
+pub fn record_secret_at(out: &Path, err: &anyhow::Error) -> Result<()> {
+    if let Some(found) = err.downcast_ref::<SecretAt>() {
+        let path = out.join(SECRET_AT_FILE);
+        std::fs::write(&path, format!("{}\n", found.place))
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// The places under OUT that a workflow uploads from.
 fn published(out: &Path) -> [PathBuf; 3] {
     [RUN_DIR, TRANSCRIPT_FILE, SAFE_OUTPUTS_DIR].map(|name| out.join(name))
@@ -73,7 +114,7 @@ fn published(out: &Path) -> [PathBuf; 3] {
 /// uploaded from there must be this run's and have passed this run's
 /// gate.
 pub fn refuse_earlier_results(out: &Path) -> Result<()> {
-    for path in published(out) {
+    for path in published(out).into_iter().chain([out.join(SECRET_AT_FILE)]) {
         ensure!(
             std::fs::symlink_metadata(&path).is_err(),
             "{} exists: --out must not hold the results of an earlier run",
@@ -187,14 +228,11 @@ impl Staging {
                     .with_context(|| format!("reading {}", path.display()))?;
                 // The line and not the string: this error is published.
                 if let Some(line) = found {
-                    bail!(
-                        "a secret of the run's or a private key {} {label}/{name}, line {line}",
-                        if label == SAFE_OUTPUTS_DIR {
-                            "is in what the agent handed back,"
-                        } else {
-                            "survived redaction in"
-                        }
-                    );
+                    return Err(SecretAt {
+                        place: format!("{label}/{name}, line {line}"),
+                        handed_back: label == SAFE_OUTPUTS_DIR,
+                    }
+                    .into());
                 }
             }
         }
@@ -456,8 +494,17 @@ mod tests {
     #[test]
     fn what_the_gate_refuses() {
         type Arrange = fn(&Out);
-        // (the case, what is wrong, the gate, redactions, the refusal)
-        let cases: [(&str, Arrange, Gate, usize, &str); 7] = [
+        // (the case, what is wrong, the gate, redactions, the refusal,
+        // where it says the secret is for the summary)
+        type Case = (
+            &'static str,
+            Arrange,
+            Gate,
+            usize,
+            &'static str,
+            Option<&'static str>,
+        );
+        let cases: [Case; 7] = [
             (
                 "a run still live at the proxy",
                 |_| {},
@@ -467,6 +514,7 @@ mod tests {
                 },
                 1,
                 "was not ended at the inference proxy",
+                None,
             ),
             (
                 "a private key in the hand-back",
@@ -479,6 +527,7 @@ mod tests {
                 OPEN,
                 1,
                 "is in what the agent handed back, safe-outputs/aw-agent-run-1.patch, line 2",
+                Some("safe-outputs/aw-agent-run-1.patch, line 2"),
             ),
             (
                 "a private key in bytes that are not text",
@@ -490,6 +539,7 @@ mod tests {
                 OPEN,
                 1,
                 "survived redaction in run/condensed.log",
+                Some("run/condensed.log, line 1"),
             ),
             (
                 "a secret of the run's own, which has no shape, in the hand-back",
@@ -497,6 +547,7 @@ mod tests {
                 OPEN,
                 1,
                 "is in what the agent handed back, safe-outputs/outputs.jsonl",
+                Some("safe-outputs/outputs.jsonl, line 1"),
             ),
             (
                 "the same in a log that is not text, which redaction skips",
@@ -509,6 +560,7 @@ mod tests {
                 OPEN,
                 1,
                 "survived redaction in transcript/agent-stderr.log",
+                Some("transcript/agent-stderr.log, line 1"),
             ),
             (
                 "a link among the results",
@@ -516,6 +568,7 @@ mod tests {
                 OPEN,
                 1,
                 "outcome.json is not a regular file",
+                None,
             ),
             (
                 "a fake agent's run with nothing redacted",
@@ -526,9 +579,10 @@ mod tests {
                 },
                 0,
                 "replaced nothing in a run of the fake agent",
+                None,
             ),
         ];
-        for (name, arrange, gate, redactions, want) in cases {
+        for (name, arrange, gate, redactions, want, place) in cases {
             let out = Out::new();
             arrange(&out);
             let err = out
@@ -536,6 +590,11 @@ mod tests {
                 .check(gate, &redactor(redactions))
                 .expect_err(name);
             assert!(format!("{err:#}").contains(want), "{name}: {err:#}");
+            record_secret_at(out.out(), &err).unwrap();
+            let recorded = std::fs::read_to_string(out.out().join(SECRET_AT_FILE)).ok();
+            assert_eq!(recorded, place.map(|place| format!("{place}\n")), "{name}");
+            // Left by this run, it is not taken for the next one's.
+            assert_eq!(refuse_earlier_results(out.out()).is_err(), place.is_some());
         }
     }
 

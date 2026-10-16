@@ -224,6 +224,7 @@ jobs:
     outputs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
+      secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

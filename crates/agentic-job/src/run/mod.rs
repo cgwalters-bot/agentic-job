@@ -1151,13 +1151,16 @@ impl Plan {
             &mut summary,
         )?;
 
-        staging.check(
-            Gate {
-                ended: settled.dead,
-                fake_agent: self.kind == Kind::Fake,
-            },
-            &session.redactor,
-        )?;
+        let gate = Gate {
+            ended: settled.dead,
+            fake_agent: self.kind == Kind::Fake,
+        };
+        if let Err(err) = staging.check(gate, &session.redactor) {
+            if let Err(why) = upload::record_secret_at(&self.out, &err) {
+                eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
+            }
+            return Err(err);
+        }
         staging.publish(&self.out, stopped)?;
         eprintln!(
             "The agent {} ended: {}. Redacted {} string(s).",

@@ -159,6 +159,7 @@ jobs:
     outputs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
+      secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
       # This job's ID, for the review's footer to link (#592).
       job: ${{ job.check_run_id }}

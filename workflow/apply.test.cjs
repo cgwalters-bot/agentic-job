@@ -703,8 +703,8 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
 
 // Item-scoped status upserts are exercised in status.test.cjs.
 
-// How conclude says the run ended: [results, pull request, no result, text, result URL, over budget, pull request's repository, staged].
-for (const [results, pr, none, text, url = '', over = '', prRepo = '', staged = ''] of [
+// How conclude says the run ended: [results, pull request, no result, text, result URL, over budget, pull request's repository, staged, secret at].
+for (const [results, pr, none, text, url = '', over = '', prRepo = '', staged = '', secretAt = ''] of [
   ['success/success/success', '', '', '✅ [w](u) ended well.'],
   ['success/success/success', '39', '', '✅ [w](u) ended well and opened pull request #39.'],
   // Said on an item of another repository (`item-repo`).
@@ -722,13 +722,17 @@ for (const [results, pr, none, text, url = '', over = '', prRepo = '', staged = 
   // A staged run applied nothing, and one that failed says only that.
   ['success/success/success', '', '', "✅ [w](u) ended well. Staged: nothing was applied; the apply job's summary shows what would have been.", '', '', '', 'true'],
   ['success/success/failure', '', '', '❌ [w](u) failed (agent, check, apply: success/success/failure; the agent\'s exit state: 0).', '', '', '', 'true'],
+  // A run whose upload gate refused a secret names where it is, and only a place.
+  ['failure/skipped/skipped', '', '', '❌ [w](u) failed (agent, check, apply: failure/skipped/skipped; the agent\'s exit state: 0). Nothing was uploaded: a secret or a private key is in `safe-outputs/aw-agent-run-1.patch, line 3`.', '', '', '', '', 'safe-outputs/aw-agent-run-1.patch, line 3'],
+  ['failure/skipped/skipped', '', '', '❌ [w](u) failed (agent, check, apply: failure/skipped/skipped; the agent\'s exit state: 0).', '', '', '', '', 'safe-outputs/a`@b`.patch, line 3'],
+  ['failure/skipped/skipped', '', '', '❌ [w](u) failed (agent, check, apply: failure/skipped/skipped; the agent\'s exit state: 0).', '', '', '', '', '../x, line 3'],
 ]) {
   test(`conclude says ${text}`, () => {
     const dir = mkdtempSync(join(homedir(), 'ended-'));
     try {
       const output = join(dir, 'output');
       const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('How the run ended')], {
-        RESULTS: results, EXIT: '0', PR: pr, PR_REPO: prRepo, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, OVER_BUDGET: over, STAGED: staged, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
+        RESULTS: results, EXIT: '0', PR: pr, PR_REPO: prRepo, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, OVER_BUDGET: over, SECRET_AT: secretAt, STAGED: staged, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
       assert.equal(ran.status, 0, ran.stderr);
       assert.equal(readFileSync(output, 'utf8').split('\n')[0], `text=${text}`);
     } finally {

@@ -90,7 +90,10 @@ the string, in check's report and summary and in the run's summary.
 `agentic-job handback check` runs the scan of
 `agentic-job handback scan --base BASE_SHA` too, which lists the same
 by file and line in the change's diff and in `out/`, and exits 1 only
-for a private key. The final refusal names the file and line too.
+for a private key. The final refusal names the file and line too, never
+the string: in the job's log, its summary and, through the run action's
+`secret-at` output, the status comment, since such a run uploads nothing
+else to look in.
 
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the

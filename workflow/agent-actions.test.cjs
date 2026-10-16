@@ -1,6 +1,6 @@
 // Exercise the extracted actions' actual shell without changing this host.
 const assert = require('node:assert/strict');
-const { mkdirSync, readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const { existsSync, mkdirSync, readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -120,6 +120,27 @@ test('agent exit is captured before uploads and partial result gate is unchanged
     assert.equal(readFileSync(output, 'utf8'), `exit=0\n${over && `over-budget=${over}\n`}`);
     assert.equal(result.stdout.includes(`::warning::the agent ended its turn over budget: spent ${over}\n`), over !== '');
     rmSync(output);
+  }
+  rmSync(join(directory, 'out/run'), { recursive: true });
+  // A run that uploaded nothing for a secret says where, and only a place.
+  for (const [at, expected] of [
+    ['safe-outputs/aw-agent-run-1.patch, line 3\n', 'safe-outputs/aw-agent-run-1.patch, line 3'],
+    ['transcript/acp.jsonl, line 12\nmore\n', 'transcript/acp.jsonl, line 12'],
+    ['safe-outputs/a`@b`.patch, line 3\n', ''],
+    ['../x, line 3\n', ''],
+    ['safe-outputs/x.patch, line 3 $(exit 9)\n', ''],
+  ]) {
+    writeFileSync(join(directory, 'out/secret-at'), at);
+    const output = join(directory, 'output-secret');
+    const summary = join(directory, 'summary-secret');
+    const result = shell('agentic-job() { return 1; };\n' + step(run, 'Run the agent'), {
+      JOB_DIR: directory, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(output, 'utf8'), `exit=1\n${expected && `secret-at=${expected}\n`}`);
+    assert.equal(existsSync(summary) ? readFileSync(summary, 'utf8') : '',
+      expected && `Nothing of this run was uploaded: a secret or a private key is in ${expected}.\n`);
+    rmSync(output);
+    rmSync(summary, { force: true });
   }
   assert.match(run, /steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != ''/);
 });

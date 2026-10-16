@@ -31,6 +31,12 @@ outputs:
       For a run that ended well although the cost its agent reported went over the budget, how far
       ("565.9 of 500 AIC"); empty otherwise
     value: ${{ steps.run.outputs.over-budget }}
+  secret-at:
+    description: >-
+      For a run that uploaded nothing because a secret or a private key was in what it would have
+      published, where: the file and line ("safe-outputs/aw-agent-run-1.patch, line 3"), never
+      the string; empty otherwise
+    value: ${{ steps.run.outputs.secret-at }}
   safe-outputs-artifact-id:
     description: Immutable untrusted proposals upload ID; never a policy or checked artifact
     value: ${{ steps.safe-outputs.outputs.artifact-id }}
@@ -148,6 +154,14 @@ runs:
         if [ -n "$over" ]; then
           echo "::warning::the agent ended its turn over budget: spent $over"
           echo "over-budget=$over" >> "$GITHUB_OUTPUT"
+        fi
+        # Nothing of such a run is uploaded, its summary included: the
+        # place alone, which the log has already, says where to look.
+        at=
+        [ ! -e "$JOB_DIR/out/secret-at" ] || at=$(head -c 200 "$JOB_DIR/out/secret-at" | head -n 1)
+        if [[ "$at" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]]; then
+          echo "Nothing of this run was uploaded: a secret or a private key is in $at." >> "$GITHUB_STEP_SUMMARY"
+          echo "secret-at=$at" >> "$GITHUB_OUTPUT"
         fi
     # Read-only Actions metadata; never expose this credential to the agent.
     - name: Report job setup duration

@@ -1176,6 +1176,7 @@ jobs:
           RESULTS: ${{ fromJSON(inputs.policy).proposals-artifact != '' && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
           EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
           OVER_BUDGET: ${{ fromJSON(inputs.agent).outputs.over-budget }}
+          SECRET_AT: ${{ fromJSON(inputs.agent).outputs.secret-at }}
           PR: ${{ needs.apply.outputs.pull-request }}
           # The status comment is on the item: a pull request of another
           # repository is named with it, or `#N` would link the item's own N.
@@ -1207,6 +1208,9 @@ jobs:
               printf '%s\n' "no-result-reason=$NO_RESULT_REASON" >> "$GITHUB_OUTPUT"
             fi
           fi
+          # Where, never what: the run action wrote it, and it is checked again here.
+          [[ ! "$SECRET_AT" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]] || [ "$reaction" = rocket ] ||
+            text="$text Nothing was uploaded: a secret or a private key is in \`$SECRET_AT\`."
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           # One line, already neutralized by apply.
           [ -z "$HANDLER_ERRORS" ] || text="$text Failed outputs: $HANDLER_ERRORS"

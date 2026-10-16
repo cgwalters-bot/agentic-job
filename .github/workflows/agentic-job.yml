@@ -438,6 +438,7 @@ jobs:
     outputs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
+      secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
       # With `session`: where the operator attaches; also in the job's
       # summary from when the agent starts.
