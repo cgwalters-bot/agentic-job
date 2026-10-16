@@ -340,6 +340,8 @@ pub struct Inference {
     /// only through one. Unset, it goes directly, as everything to the
     /// inference proxy does.
     pub identity_proxy: Option<String>,
+    /// For `api-key`: which API the provider at `url` speaks.
+    pub provider: Option<Provider>,
     /// Where the proxy serves the Anthropic Messages API (`URL/anthropic`
     /// unless set) and the OpenAI Responses API (`URL/v1`).
     pub anthropic_url: Option<String>,
@@ -355,6 +357,9 @@ pub enum Register {
     GithubOidc,
     /// No run API: the token is given.
     TokenFile,
+    /// No broker: `run` serves the proxy itself, with the provider's API
+    /// key from its own environment.
+    ApiKey,
 }
 
 impl Register {
@@ -363,6 +368,26 @@ impl Register {
             Self::Plain => "plain",
             Self::GithubOidc => "github-oidc",
             Self::TokenFile => "token-file",
+            Self::ApiKey => "api-key",
+        }
+    }
+}
+
+/// The API a provider's key is for, under `register = "api-key"`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    /// The Anthropic Messages API, for Claude Code.
+    Anthropic,
+    /// An OpenAI-compatible API (Responses, Chat Completions), for opencode.
+    Openai,
+}
+
+impl Provider {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
         }
     }
 }
@@ -728,6 +753,7 @@ mod tests {
             "[sandbox]\nusr = \"x\"",
             "[sandbx]\nuser = \"x\"",
             "[inference]\nregister = \"oidc\"",
+            "[inference]\nprovider = \"mistral\"",
             "[limits]\ntimeout = 5",
             "[limits]\nmax-requests = -1",
         ];

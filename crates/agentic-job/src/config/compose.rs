@@ -251,6 +251,11 @@ fn compose(args: &Args) -> Result<String> {
         let url = table
             .get("inference")
             .and_then(Value::as_table)
+            // Under `api-key` only `run` reaches the provider; the agent
+            // reaches `run`'s proxy on loopback.
+            .filter(|inference| {
+                inference.get("register").and_then(Value::as_str) != Some("api-key")
+            })
             .and_then(|inference| inference.get("url"))
             .and_then(Value::as_str)
             .filter(|url| Direct::parse(url).is_ok())
@@ -373,6 +378,19 @@ mod tests {
             let expected: &[&str] = if direct { &[url] } else { &[] };
             assert_eq!(config.egress.direct, expected, "{url}");
         }
+        // Under `api-key` the agent never reaches `url` itself.
+        let config = composed(&args(
+            None,
+            &[
+                RUN[0],
+                "inference.url=https://100.64.0.1",
+                "inference.register=api-key",
+                "inference.provider=anthropic",
+            ],
+            LIMITS,
+            &[],
+        ));
+        assert!(config.egress.direct.is_empty());
     }
 
     #[test]

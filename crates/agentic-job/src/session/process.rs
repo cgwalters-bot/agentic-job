@@ -30,9 +30,11 @@ const ZOMBIE: &str = "Z";
 /// system's own services (`ACTIONS_*`), and what selects an agent's
 /// provider, credential and configuration, which come from the run's
 /// configuration and nowhere else. The old tree's launchers cleared the
-/// second kind.
+/// second kind. And the provider's key of `register = "api-key"`, which
+/// only `run` holds.
 const NOT_INHERITED: &[&str] = &[
     "ACTIONS_",
+    crate::run::api_key::API_KEY_VAR,
     "ANTHROPIC_",
     "CLAUDE_",
     "OPENCODE_",
@@ -290,6 +292,7 @@ mod tests {
             ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", true),
             ("ACTIONS_RUNTIME_TOKEN", true),
             ("ANTHROPIC_API_KEY", true),
+            ("AGENTIC_JOB_INFERENCE_KEY", true),
             ("ANTHROPIC_MODEL", true),
             ("CLAUDE_CODE_USE_BEDROCK", true),
             ("OPENCODE_CONFIG", true),

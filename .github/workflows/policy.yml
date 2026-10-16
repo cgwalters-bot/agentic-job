@@ -134,13 +134,19 @@ on:
         type: boolean
         default: false
       inference-url:
-        description: The inference proxy, as http://ADDRESS:PORT; empty for an agent that needs none
+        description: >-
+          The inference proxy, as http://ADDRESS:PORT, or with `api-key` the provider's API root; empty
+          for an agent that needs none
         type: string
         default: ""
       inference-register:
-        description: "How the run announces itself to the proxy named by `inference-url`: `github-oidc`, `plain` or `token-file`"
+        description: "How the run announces itself to the proxy named by `inference-url`: `github-oidc`, `plain`, `token-file` or `api-key`"
         type: string
         default: github-oidc
+      inference-provider:
+        description: "For `api-key`, the API the key is for: `anthropic` (claude) or `openai` (opencode)"
+        type: string
+        default: ""
       inference-audience:
         description: For `github-oidc`, the audience of the identity token
         type: string
@@ -749,6 +755,7 @@ jobs:
           REGISTER: ${{ inputs.inference-url != '' && inputs.inference-register || '' }}
           AUDIENCE: ${{ inputs.inference-audience }}
           TOKEN_FILE: ${{ inputs.inference-token-file }}
+          PROVIDER: ${{ inputs.inference-provider }}
           TIMEOUT: ${{ inputs.timeout }}
           MAX_REQUESTS: ${{ inputs.max-requests }}
           MAX_TASKS: ${{ inputs.max-tasks }}
@@ -767,6 +774,7 @@ jobs:
             --boolean agent.skills="$SKILLS" \
             --string inference.url="$URL" --string inference.register="$REGISTER" \
             --string inference.audience="$AUDIENCE" --string inference.token-file="$TOKEN_FILE" \
+            --string inference.provider="$PROVIDER" \
             --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \
             --integer limits.max-tasks="$MAX_TASKS" --integer limits.budget="$BUDGET" \
             --boolean session.listen="$SESSION" --integer session.idle-minutes="$IDLE_MINUTES" \

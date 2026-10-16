@@ -161,7 +161,7 @@ agent. The pieces are:
 | Piece | What it is | Its credential |
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
-| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token |
+| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key as `run`'s input `inference-api-key` |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
@@ -734,11 +734,17 @@ is built from that same commit, so the pin covers both. Never pass
 
 ### Real agent checklist
 
-Before replacing `agent: fake`, ask the inference and network operator for
-the following. The proxy is a
+With a provider's API key (`inference-register: api-key`), a real agent
+needs only that key as the secret `INFERENCE_API_KEY`, `inference-url` and
+`inference-provider` ([inference](../README.md#inference)); the agent
+programs and limits below still apply. The rest of this list is for a
+broker.
+
+Before replacing `agent: fake` with a broker, ask the inference and network
+operator for the following. The proxy is a
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker);
 nothing else speaks the run API that the default `github-oidc` and
-`plain` registrations use, and there is no API-key mode
+`plain` registrations use
 ([what it must provide](../README.md#inference)). Hosted Ubuntu alone
 cannot reach a private proxy.
 
@@ -899,7 +905,10 @@ otherwise: the job proves to the proxy that it is a CI job with its
 identity token, for the audience `inference-audience`, which the agent's
 user cannot obtain. `plain` sends the run's name and no proof, and
 `token-file` reads a token from `inference-token-file` on the runner;
-both have to be chosen by name. The proxy speaks
+both have to be chosen by name. `api-key` needs no proxy of anyone's:
+`inference-url` is the provider's API root, `inference-provider` the API
+it speaks, and the secret `INFERENCE_API_KEY` its key, which only the
+agent job's `run` step gets ([inference.md](inference.md#a-provider-api-key)). The proxy speaks
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)'s run API. A proxy on a private network is
 reached by joining it in a step of your own agent job. When the inference URL is an HTTP(S) IPv4 literal in
 100.64.0.0/10, `agentic-job config` defaults `[egress] direct` to that URL

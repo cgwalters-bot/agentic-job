@@ -16,10 +16,10 @@
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::{Config, Limits as LimitsTable};
+use super::{Config, Limits as LimitsTable, Provider};
 use crate::run::agent::{self, Kind};
 use crate::run::handback;
-use crate::run::inference::Endpoint;
+use crate::run::inference::{Endpoint, Mode};
 use crate::sandbox::network::{self, Direct};
 use crate::session::Limits;
 use crate::session::bridge::Listen;
@@ -80,7 +80,26 @@ impl Config {
     /// agent itself uses is held to this: `run` registers from outside
     /// the sandbox. A name cannot be judged here, since only what it
     /// resolves to on the machine is on the tailnet or not.
+    ///
+    /// Under `api-key` the agent uses the proxy `run` serves on loopback,
+    /// and the provider at `url` is reached by `run` alone: that proxy
+    /// speaks one provider's API, which has to be the agent's.
     fn check_reachable(&self, kind: Kind, endpoint: &Endpoint, direct: &[Direct]) -> Result<()> {
+        if let Mode::ApiKey { provider } = endpoint.mode {
+            let serves = match provider {
+                Provider::Anthropic => Kind::Claude,
+                Provider::Openai => Kind::Opencode,
+            };
+            ensure!(
+                kind == serves || kind == Kind::Fake,
+                "inference.provider = {:?} serves the agent {}, not {}: register = \"api-key\" \
+                 forwards one provider's API",
+                provider.as_str(),
+                serves.as_str(),
+                kind.as_str()
+            );
+            return Ok(());
+        }
         let Some(url) = kind.api_url(endpoint).filter(|_| self.egress.proxy) else {
             return Ok(());
         };
@@ -213,6 +232,8 @@ mod tests {
     const DIRECT: &str = "[egress]\ndirect = [\"http://100.64.0.1:18080\"]\n";
     const CHILD: &str = "[child-agent]\nname = \"vibe\"\nmodel = \"glm\"\n";
     const REQUESTS: &str = "[limits]\ntimeout-minutes = 10\nmax-requests = 50\n";
+    const API_KEY: &str = "[inference]\nurl = \"https://api.anthropic.example\"\n\
+                           register = \"api-key\"\nprovider = \"anthropic\"\n";
 
     fn direct(url: &str) -> String {
         format!("[egress]\ndirect = [{url:?}]\n")
@@ -291,6 +312,18 @@ mod tests {
             Mode::GithubOidc {
                 audience: "proxy".into(),
                 identity_proxy: None,
+            }
+        );
+
+        // A provider's key: the proxy is `run`'s own, on loopback, so no
+        // direct endpoint, and it counts requests, so a cap on them binds.
+        let keyed = checked(&format!("{CLAUDE}{API_KEY}{REQUESTS}")).unwrap();
+        assert_eq!(keyed.limits.max_requests, Some(50));
+        assert!(keyed.host.direct.is_empty());
+        assert_eq!(
+            keyed.endpoint.unwrap().mode,
+            Mode::ApiKey {
+                provider: Provider::Anthropic
             }
         );
 
@@ -420,6 +453,44 @@ model = \"m\"
 {CAPPED}{DIRECT}"
                 ),
                 "add \"https://100.64.0.2:443\" to egress.direct",
+            ),
+            (
+                format!("[agent]\nname = \"opencode\"\nmodel = \"m\"\n{API_KEY}{CAPPED}"),
+                "inference.provider = \"anthropic\" serves the agent claude, not opencode",
+            ),
+            (
+                format!(
+                    "{CLAUDE}[inference]\nurl = \"https://api.openai.example/v1\"\n\
+                     register = \"api-key\"\nprovider = \"openai\"\n{CAPPED}"
+                ),
+                "serves the agent opencode, not claude",
+            ),
+            (
+                format!("{CLAUDE}{API_KEY}{REQUESTS}{CHILD}"),
+                "serves the agent claude, not vibe",
+            ),
+            (
+                format!(
+                    "{CLAUDE}[inference]\nurl = \"https://api.anthropic.example\"\n\
+                     register = \"api-key\"\n{CAPPED}"
+                ),
+                "inference.provider: register = \"api-key\" needs the API",
+            ),
+            (
+                format!("{CLAUDE}{PROXY}{OIDC}provider = \"anthropic\"\n{CAPPED}{DIRECT}"),
+                "inference.provider is set, which register = \"github-oidc\" does not use",
+            ),
+            (
+                format!("{CLAUDE}{API_KEY}audience = \"x\"\n{CAPPED}"),
+                "inference.audience is set",
+            ),
+            (
+                format!("{CLAUDE}{API_KEY}anthropic-url = \"https://x.example\"\n{CAPPED}"),
+                "inference.anthropic-url is set",
+            ),
+            (
+                format!("{FAKE}[inference]\nprovider = \"anthropic\"\n{CAPPED}"),
+                "inference.url is not set",
             ),
             (
                 format!("{FAKE}{CAPPED}[child-agent]\nmodel = \"glm\"\n"),

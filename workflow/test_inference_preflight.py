@@ -64,7 +64,7 @@ class PreflightTests(unittest.TestCase):
             (root / "bin/agentic-job").chmod(0o755)
             env = dict.fromkeys([
                 "CONFIG", "MODEL", "CONFIG_REPO", "CONFIG_REF", "CONFIG_PATH",
-                "SKILLS", "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "TIMEOUT",
+                "SKILLS", "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "PROVIDER", "TIMEOUT",
                 "MAX_REQUESTS", "MAX_TASKS", "BUDGET", "PACKAGES", "NPM", "SETUP",
                 "SESSION", "IDLE_MINUTES",
             ], "")

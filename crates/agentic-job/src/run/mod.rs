@@ -35,6 +35,7 @@
 
 pub mod agent;
 pub mod agent_log;
+pub mod api_key;
 pub mod brief;
 pub mod clone;
 pub mod egress;
@@ -60,6 +61,7 @@ use serde_json::{Value, json};
 use tokio::signal::unix::{SignalKind, signal};
 
 use self::agent::Kind;
+use self::api_key::ApiKey;
 use self::clone::Checkout;
 use self::enter::Sandbox;
 use self::inference::{Ended, Endpoint, Identity, OidcRequest, Retry, Run};
@@ -359,6 +361,18 @@ fn own_tokens() -> impl Iterator<Item = String> {
     })
 }
 
+/// The run's own secrets, which every log and file of the run is redacted
+/// of: the run token, which the agent can read, and what only this process
+/// holds, should the agent ever come by it: the request for the job's
+/// identity token, and the provider's key.
+fn secrets(token: Option<&inference::Token>, identity: &Identity) -> impl Iterator<Item = String> {
+    token
+        .map(|token| token.expose().to_owned())
+        .into_iter()
+        .chain(identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
+        .chain(identity.api_key.iter().map(|key| key.trim().to_owned()))
+}
+
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
         let mut config = load_config(&args.config)?;
@@ -424,6 +438,13 @@ impl Plan {
         )
         .then(OidcRequest::from_env)
         .flatten();
+        // Likewise the provider's key, which only this process holds.
+        let api_key = matches!(
+            endpoint.as_ref().map(|endpoint| &endpoint.mode),
+            Some(inference::Mode::ApiKey { .. })
+        )
+        .then(ApiKey::from_env)
+        .flatten();
         let exe = std::env::current_exe().context("finding this program's own path")?;
         let work = args.out.join(WORK_DIR);
         // Private to the runner's user: the transcript is not redacted
@@ -439,6 +460,7 @@ impl Plan {
             std::mem::take(&mut config.commit),
             std::mem::take(&mut config.agent),
         );
+        let max_requests = limits.max_requests;
         Ok(Self {
             kind,
             limits,
@@ -447,6 +469,8 @@ impl Plan {
             identity: Identity {
                 oidc,
                 name: run_name(&meta),
+                api_key,
+                max_requests,
             },
             policy,
             review_head: args.review_head.clone(),
@@ -610,9 +634,14 @@ impl Plan {
                 inference::RECORD_SCHEMA
             );
         }
+        // Under `api-key`, the proxy this process serves, not the provider.
+        let endpoint = match (&run, &self.endpoint) {
+            (Some(run), Some(endpoint)) => Some(run.agent_endpoint(endpoint)),
+            _ => self.endpoint.clone(),
+        };
         let mut configuration = agent::generate(
             self.kind,
-            self.endpoint.as_ref(),
+            endpoint.as_ref(),
             run.as_deref().map(Run::token),
             self.agent.model.as_deref(),
             &source,
@@ -622,7 +651,7 @@ impl Plan {
             .files
             .extend(home_files(self.kind, &self.agent, github.as_deref())?);
         let child = self.child.as_deref().and_then(|model| {
-            let endpoint = self.endpoint.as_ref()?;
+            let endpoint = endpoint.as_ref()?;
             Some((endpoint, run.as_deref()?.token(), Some(model)))
         });
         let has_child = child.is_some();
@@ -642,6 +671,9 @@ impl Plan {
                 .as_ref()
                 .map(|config| config.sandbox.check.container_image.as_str());
             probe::require(sandbox, run.token(), &files, given, image)?;
+        }
+        if let Some(key) = &self.identity.api_key {
+            probe::require_absent(sandbox, key)?;
         }
         Ok(Prepared {
             cwd,
@@ -668,11 +700,7 @@ impl Plan {
             .unzip();
         // The agent can read its token, and its words are in these lines
         // and in every file of the session.
-        let secrets = run
-            .map(|run| run.token().expose().to_owned())
-            .into_iter()
-            .chain(self.identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
-            .chain(own_tokens());
+        let secrets = secrets(run.map(|run| run.token()), &self.identity).chain(own_tokens());
         let redactor = log::Shared::new(
             Redactor::new(secrets).context("building the redaction of the run's secrets")?,
         );
@@ -1310,6 +1338,24 @@ mod tests {
                 assert_eq!(files[1..], agent::skills(kind, on), "{text}");
             }
         }
+    }
+
+    /// The provider's key is redacted from the run's logs, as the run
+    /// token is.
+    #[test]
+    fn the_runs_secrets_are_redacted() {
+        let key = format!("{}-{}", "test-key-not-secret", "0123456789abcdef");
+        let token = inference::Token::new("agentic-job-run-0123456789abcdef").unwrap();
+        let identity = Identity {
+            api_key: Some(format!("{key}\n")),
+            ..Identity::default()
+        };
+        let mut redactor = Redactor::new(secrets(Some(&token), &identity)).unwrap();
+        let line = format!("the key {key} and the token {}", token.expose());
+        let redacted = redactor.redact(&line).into_owned();
+        assert!(!redacted.contains(&key), "{redacted}");
+        assert!(!redacted.contains(token.expose()), "{redacted}");
+        assert_eq!(redactor.count(), 2);
     }
 
     #[test]

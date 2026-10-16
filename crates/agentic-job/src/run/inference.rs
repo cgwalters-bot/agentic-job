@@ -9,7 +9,8 @@
 //! register a run of its own. `plain` sends a name and no proof, and is
 //! for a client with no identity token. `token-file` has no run API: the
 //! token is read from a file, nothing counts the run's requests and
-//! nothing ends it.
+//! nothing ends it. `api-key` has no broker: `run` serves the proxy
+//! itself ([`super::api_key`]) and gives the agent its address.
 //!
 //! The old tree's `praxis.mjs` took a proxy without the run API (404) as
 //! one that needs no token, and ran the agent uncapped. Here a run that
@@ -28,7 +29,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use tokio::sync::watch;
 
-use crate::config::{self, Register};
+use super::api_key::{self, ApiKey, Local};
+use crate::config::{self, Provider, Register};
 
 /// The proxy's run API, under its root.
 const RUNS_PATH: &str = "/v1/runs";
@@ -111,6 +113,10 @@ pub enum Mode {
     TokenFile {
         path: PathBuf,
     },
+    /// `url` is the provider's root, which only `run` reaches.
+    ApiKey {
+        provider: Provider,
+    },
 }
 
 impl Mode {
@@ -119,6 +125,7 @@ impl Mode {
             Self::GithubOidc { .. } => Register::GithubOidc,
             Self::Plain => Register::Plain,
             Self::TokenFile { .. } => Register::TokenFile,
+            Self::ApiKey { .. } => Register::ApiKey,
         }
     }
 
@@ -166,6 +173,7 @@ impl Endpoint {
             identity_proxy,
             anthropic_url,
             openai_url,
+            provider,
         } = inference;
         if url.is_empty() {
             ensure!(
@@ -173,6 +181,7 @@ impl Endpoint {
                     && audience.is_none()
                     && token_file.is_none()
                     && identity_proxy.is_none()
+                    && provider.is_none()
                     && anthropic_url.is_none()
                     && openai_url.is_none(),
                 "inference.url is not set, and the rest of [inference] means nothing without it"
@@ -182,8 +191,8 @@ impl Endpoint {
         let url = base_url("url", url)?;
         let Some(register) = register else {
             bail!(
-                "inference.register is not set: say \"github-oidc\", \"plain\" or \
-                 \"token-file\". There is no default, since \"plain\" lets whoever reaches the \
+                "inference.register is not set: say \"github-oidc\", \"plain\", \
+                 \"token-file\" or \"api-key\". There is no default, since \"plain\" lets whoever reaches the \
                  proxy register a run"
             );
         };
@@ -195,6 +204,9 @@ impl Endpoint {
             );
             Ok(())
         };
+        if *register != Register::ApiKey {
+            unused("provider", provider.is_some())?;
+        }
         let mode = match register {
             Register::GithubOidc => {
                 unused("token-file", token_file.is_some())?;
@@ -232,6 +244,34 @@ impl Endpoint {
                      the file that holds the token"
                 );
                 Mode::TokenFile { path }
+            }
+            Register::ApiKey => {
+                unused("audience", audience.is_some())?;
+                unused("token-file", token_file.is_some())?;
+                unused("identity-proxy", identity_proxy.is_some())?;
+                // The agent gets the proxy `run` serves, at one root.
+                unused("anthropic-url", anthropic_url.is_some())?;
+                unused("openai-url", openai_url.is_some())?;
+                // The key goes to `url` with every request: never in the
+                // clear over a network, only to this machine's loopback.
+                let host = url
+                    .strip_prefix("http://")
+                    .map(|rest| rest.split(['/', ':']).next().unwrap_or_default());
+                ensure!(
+                    host.is_none_or(|host| host == "127.0.0.1" || host == "localhost"),
+                    "inference.url: register = \"api-key\" sends the key to {url:?}, which must \
+                     be https"
+                );
+                let provider = provider.context(
+                    "inference.provider: register = \"api-key\" needs the API the key is for, \
+                     \"anthropic\" or \"openai\"",
+                )?;
+                return Ok(Some(Self {
+                    anthropic_url: url.clone(),
+                    openai_url: url.clone(),
+                    url,
+                    mode: Mode::ApiKey { provider },
+                }));
             }
         };
         let or_under = |key: &str, set: &Option<String>, path: &str| match set {
@@ -272,6 +312,11 @@ pub struct Identity {
     pub oidc: Option<OidcRequest>,
     /// For `plain`: the run's identifier, from `--meta`.
     pub name: Option<String>,
+    /// For `api-key`: the provider's key, as `run`'s environment has it.
+    pub api_key: Option<String>,
+    /// For `api-key`: `limits.max-requests`, which the proxy `run` serves
+    /// enforces itself, as a broker would.
+    pub max_requests: Option<u64>,
 }
 
 /// How often, and how far apart, a request to the proxy is tried.
@@ -506,6 +551,8 @@ pub struct Run {
     register: Register,
     /// What the proxy said of the run when it registered.
     registered: Option<Record>,
+    /// For `api-key`: the proxy this process serves.
+    local: Option<Local>,
 }
 
 /// How ending a run went.
@@ -623,12 +670,13 @@ impl Run {
         stopped: Stopped,
     ) -> Result<Self> {
         let http = http();
-        let run = |token, registered| Self {
+        let run = |token, registered, local| Self {
             http: http.clone(),
             url: endpoint.url.clone(),
             token,
             register: endpoint.mode.register(),
             registered,
+            local,
         };
         let proof = match &endpoint.mode {
             Mode::TokenFile { path } => {
@@ -639,7 +687,7 @@ impl Run {
                      lives as long as the proxy lets it",
                     path.display()
                 );
-                return Ok(run(token, None));
+                return Ok(run(token, None, None));
             }
             Mode::GithubOidc {
                 audience,
@@ -655,6 +703,31 @@ impl Run {
                 Some(retry.run(stopped, |_| identity_token(&http, request, audience))?)
             }
             Mode::Plain => None,
+            Mode::ApiKey { provider } => {
+                let key = identity.api_key.as_deref().with_context(|| {
+                    format!(
+                        "register = \"api-key\" needs the provider's key in {}: pass it as \
+                         the workflow's secret INFERENCE_API_KEY",
+                        api_key::API_KEY_VAR
+                    )
+                })?;
+                let key = ApiKey::new(key)?;
+                retry.run(stopped, |_| {
+                    check_key(&http, &endpoint.url, *provider, &key)
+                })?;
+                let local = Local::start(*provider, &endpoint.url, key, identity.max_requests)?;
+                eprintln!(
+                    "Serving the run's inference proxy at {} for the {} API at {}",
+                    local.url(),
+                    provider.as_str(),
+                    endpoint.url
+                );
+                let (token, record) = (
+                    local.token().clone(),
+                    Record::parse(local.record(RECORD_SCHEMA)),
+                );
+                return Ok(run(token, record, Some(local)));
+            }
         };
         let name = match &endpoint.mode {
             Mode::Plain => Some(identity.name.as_deref().context(
@@ -729,11 +802,25 @@ impl Run {
                 "warning: the inference proxy registered the run without a {RECORD_SCHEMA} record"
             ),
         }
-        Ok(run(token, record))
+        Ok(run(token, record, None))
     }
 
     pub fn token(&self) -> &Token {
         &self.token
+    }
+
+    /// Where the agent sends its requests: ENDPOINT, or under `api-key`
+    /// the proxy this process serves, in place of the provider.
+    pub fn agent_endpoint(&self, endpoint: &Endpoint) -> Endpoint {
+        match &self.local {
+            Some(local) => Endpoint {
+                url: local.url(),
+                anthropic_url: local.url(),
+                openai_url: local.url(),
+                mode: endpoint.mode.clone(),
+            },
+            None => endpoint.clone(),
+        }
     }
 
     pub fn register_mode(&self) -> Register {
@@ -770,6 +857,9 @@ impl Run {
     pub fn usage(&self) -> Option<Record> {
         if !self.has_run_api() {
             return None;
+        }
+        if let Some(local) = &self.local {
+            return Record::parse(local.record(RECORD_SCHEMA));
         }
         let answer = self.own(Method::Get).ok()?;
         (answer.status == 200)
@@ -833,6 +923,15 @@ impl Run {
         if !self.has_run_api() {
             return Ok(Ended::NoRunApi);
         }
+        if let Some(local) = &self.local {
+            local.end();
+            let record = Record::parse(local.record(RECORD_SCHEMA));
+            eprintln!(
+                "Ended the run's inference proxy: {} model request(s)",
+                local.requests()
+            );
+            return Ok(Ended::Ended(record));
+        }
         const LIVE: &str = "its token may still be live until the run expires";
         retry.run(NEVER, |_| {
             let answer = match self.own(Method::Delete) {
@@ -885,6 +984,45 @@ impl Run {
 /// Stops the counting of a run's requests when dropped.
 pub struct Counter {
     _stop: mpsc::Sender<()>,
+}
+
+/// Checks KEY with the provider at URL by asking for its list of models,
+/// so that a key it refuses stops the run before the agent starts.
+fn check_key(http: &ureq::Agent, url: &str, provider: Provider, key: &ApiKey) -> Attempt<()> {
+    let path = api_key::models_path(provider);
+    let headers = api_key::check_headers(provider, key);
+    let headers: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    let answer = match send(http, Method::Get, &format!("{url}{path}"), &headers) {
+        Ok(answer) => answer,
+        Err(err) => {
+            return Attempt::Again(format!(
+                "cannot reach the {} API at {url} ({err})",
+                provider.as_str()
+            ));
+        }
+    };
+    // Some providers quote part of a key they refuse.
+    let detail = answer.detail().replace(key.expose(), "[the key]");
+    let at = format!("the {} API at {url}", provider.as_str());
+    match answer.status {
+        200 => Attempt::Done(()),
+        401 | 403 => Attempt::Failed(format!(
+            "{at} refused the API key in {} (HTTP {}: {detail}): is it a key of this provider, \
+             and still valid?",
+            api_key::API_KEY_VAR,
+            answer.status
+        )),
+        404 => Attempt::Failed(format!(
+            "{at} has no {path} (HTTP 404): is inference.url the API's root, such as \
+             https://api.anthropic.com or https://api.openai.com/v1?"
+        )),
+        status if answer.transient() => {
+            Attempt::Again(format!("checking the key with {at}: HTTP {status}"))
+        }
+        status => Attempt::Failed(format!(
+            "checking the key with {at} failed (HTTP {status}: {detail})"
+        )),
+    }
 }
 
 fn read_token_file(path: &Path) -> Result<Token> {
@@ -1028,6 +1166,24 @@ mod tests {
             (
                 format!("{URL}register = \"plain\"\nanthropic-url = \"x\""),
                 "inference.anthropic-url",
+            ),
+            // The key would cross the network in the clear.
+            (
+                format!(
+                    "{URL}register = \"api-key\"\nprovider = \"openai\"\n\
+                     identity-proxy = \"http://p:3128\""
+                ),
+                "inference.identity-proxy is set",
+            ),
+            (
+                format!("{URL}register = \"api-key\"\nprovider = \"openai\""),
+                "which must be https",
+            ),
+            (
+                "url = \"http://127.0.0.1.example\"\nregister = \"api-key\"\n\
+                 provider = \"openai\""
+                    .to_owned(),
+                "which must be https",
             ),
         ];
         for (text, want) in cases {

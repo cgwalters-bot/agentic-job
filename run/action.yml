@@ -11,6 +11,11 @@ inputs:
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
       The agent can leak it: give a job token with read permissions only, or a read-only token
     default: ""
+  inference-api-key:
+    description: >-
+      For `[inference] register = "api-key"`, the provider's API key. Only `agentic-job run` gets
+      it, which keeps it from the agent; empty for a broker
+    default: ""
 outputs:
   exit:
     description: Exit state of agentic-job run
@@ -111,6 +116,9 @@ runs:
         # `agentic-job run` writes it to a file of the sandbox user's and
         # redacts it wherever the run logs or publishes.
         GH_TOKEN: ${{ inputs.github-token }}
+        # Held by `run` alone, outside the sandbox: its proxy puts the key
+        # in place of the run's token on the agent's requests.
+        AGENTIC_JOB_INFERENCE_KEY: ${{ inputs.inference-api-key }}
       run: |
         echo '::group::agent (condensed)'
         state=0

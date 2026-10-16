@@ -10,12 +10,13 @@ URL and a token for this run. The proxy checks the token, adds the real
 credential, forwards the request and counts what the run uses; when the
 run is ended its token admits nothing more.
 
-Today the only proxy that speaks this protocol is
+The proxy is either
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker),
-which its operator runs and which the agent's runner has to reach; how to
-run one is in its README. There is no mode that takes a provider API key
-([not built](#not-built)). The [README](../README.md#inference) sums up what
-a broker has to provide.
+which its operator runs and which the agent's runner has to reach (how to
+run one is in its README), or, for a caller with only a provider's API
+key, one that `run` serves itself ([below](#a-provider-api-key)). The
+agent sees the same thing either way: an address and a token for the run.
+The [README](../README.md#inference) sums up what each needs.
 
 `tests/inference.rs` exercises registration with a mock proxy. Real-agent
 deployment evidence is reported in the [README](../README.md#what-is-real-today).
@@ -46,6 +47,9 @@ is refused, and so is a key that belongs to another mode:
 - `token-file` reads a token from the absolute path `token-file`. There
   is no run API then: nothing counts the run's requests and nothing
   ends it, so a cap on requests is [refused](harness.md#limits).
+- `api-key` has no broker: `url` is the provider's API root, `provider`
+  says which API, and `run` serves the proxy itself
+  ([below](#a-provider-api-key)).
 
 The reusable workflow passes `github-oidc` unless its caller names
 another ([workflow.md](workflow.md#what-a-caller-provides)).
@@ -160,9 +164,75 @@ does not bind spending to one run. Under `plain`, the agent can register
 another run. The binary has no default registration mode; non-GitHub
 callers must choose one explicitly.
 
-## Not built
+## A provider API key
 
-There is no API-key mode: a repository that has only a provider API key
-cannot run a real agent today. gh-aw serves that case with a proxy the
-job starts itself, as a container beside it on loopback. Nothing here starts one; `token-file` is how a token made for such
-a proxy would be given to `run`.
+`register = "api-key"` is for a caller with a provider's API key and no
+broker. `provider` is `anthropic`, for Claude Code, or `openai`, for
+opencode at an OpenAI-compatible API with a bearer key (opencode's
+built-in configuration uses the Responses API); `url` is the root the
+agent's client would be given, such as `https://api.anthropic.com` or
+`https://api.openai.com/v1`, and must be `https` (plain `http` only to
+loopback). `anthropic-url` and `openai-url` are refused, and so is an
+agent the provider's API does not serve: Vibe, and a child agent.
+Threat detection (`detect`) needs a registered run, and refuses this
+mode. The reusable workflow takes the key as the secret
+`INFERENCE_API_KEY` and gives it, as `AGENTIC_JOB_INFERENCE_KEY`, to
+the one step that runs `run`.
+
+`run` reads the key from its environment and asks the provider for its
+list of models with it, retried as a registration is. A missing key, one
+that is not a key, and one the provider refuses (401 or 403) stop the
+run before the agent starts, with the variable's name and the provider's
+answer, the key cut out of it. Then `run` listens on a loopback port and
+gives the agent that address and a token it made for the run, in the
+same places a broker's would go. The sandbox user reaches loopback
+without the egress proxy. For each request the proxy:
+
+- refuses it (401) unless it carries the run's token, in `x-run-token`,
+  as a bearer, or in `x-api-key`, and once the run has ended;
+- refuses (403) all but the model requests (`POST /v1/messages` and
+  `/v1/messages/count_tokens`; `POST /responses` and `/chat/completions`)
+  and the list of models. A batch would run many model requests that the
+  count sees as one, and an uploaded file stays at the provider after the
+  run;
+- refuses (403) a model request that offers the model a tool the
+  provider runs, such as web search or fetch, code execution or an MCP
+  server, or that names Anthropic's `mcp_servers` or `container`,
+  `web_search_options` or a stored `prompt`. The provider would reach the
+  network for the agent, outside the egress filter, with whatever the
+  agent puts in the request. Only tools the agent runs itself pass:
+  `function` and `custom` ones, and Anthropic's own client tools;
+- refuses (403) a model request that names OpenRouter's `plugins` or
+  fallback `models`, or a model whose name says it searches the web with
+  every request (`search`, `sonar`, `:online`). Names are the provider's
+  choice, so this list cannot be complete: a caller whose provider serves
+  other such models should not use this mode with them;
+- refuses (403) a model request whose content the provider would fetch:
+  an image, document or file named by URL or by a file id at the
+  provider (the run uploads none). Content is read by its API's shapes at
+  every depth, such as a tool's result, and a content block of a type the
+  proxy does not know is refused, so a new provider feature stays closed
+  until it is named. Inline content (text, base64, `data:` URLs) passes.
+  What is sent is the JSON that was checked, written out again, so the
+  provider cannot read the request otherwise than the check did;
+- refuses (403) a model request past `max-requests`, counted when it is
+  admitted, so that requests sent at once cannot pass the cap together;
+- drops every credential the agent sent, adds the key, and passes the
+  answer back as it streams, with its content type, request id and
+  `retry-after` and no other header of the provider's.
+
+It counts every model request it forwards, and that count is what
+`max-requests` reads, as it reads a broker's. Ending the run closes the
+port and cuts off every connection, so a request whose body was still
+arriving is not sent. Before the agent starts, `run` checks that no process the sandbox
+user can read holds the key, beside the [probes](sandbox.md#what-is-tested)
+of the run token. The key is redacted from the run's logs and files, as
+the run token is.
+
+What this does not give: the key is long-lived and the provider's own
+limits are its only spending cap. The run's request cap, budget and
+timeout bound one run, as with a broker, but nothing ends the key when
+the job ends. A deployment that wants no long-lived key in its
+repositories uses a broker. gh-aw does the same with a proxy container
+on loopback beside the agent; here the proxy is part of `run`, so
+nothing else is started.

@@ -180,7 +180,6 @@ pub fn token(
 ) -> Result<Vec<Probe>> {
     let needle = format!("{}\n", token.expose());
     let user = &sandbox.user;
-    let home = utf8(&sandbox.home)?;
     let mut probes = Vec::new();
     let mut files = Vec::new();
     for token_file in token_files {
@@ -214,8 +213,26 @@ pub fn token(
         }
         files.push(file);
     }
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    probes.extend(elsewhere(sandbox, "the token", token.expose(), &files)?);
     let mut probe = |what: String, passed: bool| probes.push(Probe { what, passed });
 
+    if let Some(given) = given {
+        let given = utf8(given)?;
+        let read = sandbox.run(&["cat", "--", given], b"", MAX_OUTPUT)?;
+        probe(format!("{user} cannot read {given}"), !read.success());
+    }
+    Ok(probes)
+}
+
+/// Probes that SECRET is in no file under the sandbox user's home and the
+/// directories it shares but FILES, and in no environment or command line
+/// it can read. WHAT names the secret. The search of files runs as the
+/// sandbox user and is given SECRET: only for one that user holds anyway.
+fn elsewhere(sandbox: &Sandbox, what: &str, secret: &str, files: &[&str]) -> Result<Vec<Probe>> {
+    let user = &sandbox.user;
+    let needle = format!("{secret}\n");
+    let home = utf8(&sandbox.home)?;
     let search = [
         &[
             "timeout",
@@ -235,36 +252,51 @@ pub fn token(
     let timed_out = code == Some(TIMEOUT_EXIT);
     let found = search.text();
     let found: Vec<&str> = found.lines().collect();
-    probe(
-        format!(
-            "{user} finds the token in no other file it can write ({})",
-            if timed_out {
-                format!("the search took more than {SEARCH_TIMEOUT_S}s")
-            } else if found.is_empty() {
-                "nowhere".to_owned()
-            } else {
-                found.join(", ")
-            }
-        ),
-        only_in(
-            code,
-            &found,
-            &files.iter().map(String::as_str).collect::<Vec<_>>(),
-        ),
-    );
+    Ok(vec![
+        Probe {
+            what: format!(
+                "{user} finds {what} in no other file it can write ({})",
+                if timed_out {
+                    format!("the search took more than {SEARCH_TIMEOUT_S}s")
+                } else if found.is_empty() {
+                    "nowhere".to_owned()
+                } else {
+                    found.join(", ")
+                }
+            ),
+            passed: only_in(code, &found, files),
+        },
+        in_no_process(sandbox, what, secret)?,
+    ])
+}
 
+/// Probes that no environment or command line the sandbox user can read
+/// holds SECRET. What it reads comes back here to be searched: SECRET
+/// itself goes to none of its processes.
+fn in_no_process(sandbox: &Sandbox, what: &str, secret: &str) -> Result<Probe> {
     let processes = sandbox.run(&["sh", "-c", PROCESSES_SCRIPT], b"", MAX_PROCESSES_BYTES)?;
-    probe(
-        format!("no process {user} can read has the token in its environment or command line"),
-        !holds(&processes.stdout, token.expose().as_bytes()),
-    );
+    Ok(Probe {
+        what: format!(
+            "no process {} can read has {what} in its environment or command line",
+            sandbox.user
+        ),
+        passed: !holds(&processes.stdout, secret.as_bytes()),
+    })
+}
 
-    if let Some(given) = given {
-        let given = utf8(given)?;
-        let read = sandbox.run(&["cat", "--", given], b"", MAX_OUTPUT)?;
-        probe(format!("{user} cannot read {given}"), !read.success());
-    }
-    Ok(probes)
+/// Probes that the provider's KEY, which only `run` holds under
+/// `api-key`, is in no process the sandbox user can read, prints what was
+/// found, and fails unless it held. Its files are not searched for the
+/// key, since that search would hand the key to a process of the sandbox
+/// user's: nothing writes it there, and the run token's probes show that
+/// what `run` writes for the agent is where it belongs.
+pub fn require_absent(sandbox: &Sandbox, key: &str) -> Result<()> {
+    let probe = in_no_process(sandbox, "the provider's API key", key.trim())?;
+    ensure!(
+        report(&[probe]),
+        "the provider's API key is where the sandbox user can read it: see the failed probes above"
+    );
+    Ok(())
 }
 
 /// Probes where TOKEN is, prints what was found, and fails unless every

@@ -14,11 +14,12 @@
 #![allow(dead_code, clippy::unwrap_used)]
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use agentic_job::config::Provider;
 use serde_json::{Value, json};
 
 pub const AUDIENCE: &str = "mock-proxy";
@@ -393,4 +394,122 @@ impl Proxy {
         let live = state.runs.iter().filter(|run| run.state == "active");
         live.map(|run| run.token.clone()).collect()
     }
+}
+
+/// Not shaped like any provider's key, so nothing takes it for one.
+pub fn key() -> String {
+    format!("{}-{}", "test-key-not-secret", "0123456789abcdef")
+}
+
+pub const ANSWER: &str = "data: {\"type\":\"message_stop\"}\n\n";
+
+/// One request as the provider saw it, header names in lower case.
+#[derive(Debug, Clone)]
+pub struct Seen {
+    pub method: String,
+    pub target: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+/// A provider that takes only `key()`: its model list answers 200 with
+/// it and 401 without, echoing what it was given, as some providers
+/// quote part of a key they refuse; a model request answers with a
+/// stream, a cookie of the account's, and its request id.
+#[derive(Clone)]
+pub struct MockProvider {
+    pub url: String,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+fn credential(provider: Provider, headers: &BTreeMap<String, String>) -> Option<String> {
+    match provider {
+        Provider::Anthropic => headers.get("x-api-key").cloned(),
+        Provider::Openai => headers
+            .get("authorization")?
+            .strip_prefix("Bearer ")
+            .map(str::to_owned),
+    }
+}
+
+impl MockProvider {
+    pub fn start(provider: Provider) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mock = Self {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            seen: Arc::default(),
+        };
+        let seen = Arc::clone(&mock.seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let seen = Arc::clone(&seen);
+                std::thread::spawn(move || answer_provider(provider, stream, &seen));
+            }
+        });
+        mock
+    }
+
+    pub fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<Seen>>) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    let mut parts = first.split_whitespace();
+    let (method, target) = (
+        parts.next().unwrap().to_owned(),
+        parts.next().unwrap().to_owned(),
+    );
+    let mut headers = BTreeMap::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':').unwrap();
+        headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+    }
+    let length = headers
+        .get("content-length")
+        .map_or(0, |n| n.parse().unwrap());
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    let given = credential(provider, &headers);
+    seen.lock().unwrap().push(Seen {
+        method: method.clone(),
+        target,
+        headers,
+        body,
+    });
+    let (status, kind, extra, text) = match (method.as_str(), given == Some(key())) {
+        (_, false) => (
+            401,
+            "application/json",
+            "",
+            format!(
+                "{{\"error\":\"invalid key: {}\"}}",
+                given.unwrap_or_default()
+            ),
+        ),
+        ("GET", true) => (200, "application/json", "", "{\"data\":[]}".to_owned()),
+        _ => (
+            200,
+            "text/event-stream",
+            "set-cookie: account=1\r\nrequest-id: req_1\r\n",
+            ANSWER.to_owned(),
+        ),
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\n{extra}content-length: {}\r\n\
+         connection: close\r\n\r\n{text}",
+        text.len()
+    );
+    let _ = stream.shutdown(Shutdown::Write);
 }

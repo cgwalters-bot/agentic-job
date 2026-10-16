@@ -77,7 +77,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     let endpoint = Endpoint::from_config(&config.inference)?.context("detector needs inference")?;
     // A caller's static agent token must not be exposed on this separate host.
     ensure!(
-        !matches!(endpoint.mode, Mode::TokenFile { .. }),
+        !matches!(endpoint.mode, Mode::TokenFile { .. } | Mode::ApiKey { .. }),
         "detector needs run registration"
     );
     let retry = Retry {
@@ -93,6 +93,8 @@ pub fn run(args: &Args) -> Result<Exit> {
                 std::process::id(),
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
             )),
+            api_key: None,
+            max_requests: None,
         },
         retry,
         120,

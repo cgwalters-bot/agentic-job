@@ -23,9 +23,11 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use agentic_job::config::Provider;
 use agentic_job::policy::{Kind, Policy, SafeOutputs};
+use agentic_job::run::api_key::API_KEY_VAR;
 use serde_json::{Value, json};
-use support::{Fault, Proxy};
+use support::{Fault, MockProvider, Proxy, key};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 const SANDBOX_USER_VAR: &str = "AGENTIC_JOB_TEST_SANDBOX_USER";
@@ -709,6 +711,62 @@ fn a_run_from_clone_to_the_end_of_its_run() {
         got.all()
     );
     assert!(!job.path("out/safe-outputs").exists());
+}
+
+/// `register = "api-key"`: the key is checked with the provider, the
+/// probe that no process of the sandbox user's holds it passes, and it
+/// is in nothing the run wrote or said. Without a key the run does not
+/// start, and says which variable it wanted.
+#[test]
+fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
+    let Some((user, _turn)) = sandbox_user() else {
+        return;
+    };
+    let provider = MockProvider::start(Provider::Anthropic);
+    let inference = api_key(&provider);
+    let job = Job::new("apikey");
+    job.repository(&user);
+    let got = Finished::of(
+        job.command(&config(&user, &inference))
+            .env(API_KEY_VAR, key())
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert!(
+        got.stderr.contains("ok   no process") && got.stderr.contains("has the provider's API key"),
+        "{}",
+        got.all()
+    );
+    assert_eq!(provider.seen()[0].target, "/v1/models");
+    let inference = job.json("out/work/inference.json");
+    assert_eq!(inference["register"], "api-key");
+    assert_eq!(inference["ended"], true);
+    assert_eq!(inference["usage"]["state"], "ended");
+    assert!(!got.all().contains(&key()), "{}", got.all());
+    for (path, content) in job.written() {
+        assert!(!contains(&content, &key()), "{path}");
+    }
+    assert_eq!(processes_of(&user), "");
+
+    let job = Job::new("nokey");
+    job.repository(&user);
+    let got = Finished::of(
+        job.command(&config(&user, &api_key(&provider)))
+            .env_remove(API_KEY_VAR)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
+    assert!(got.stderr.contains(API_KEY_VAR), "{}", got.all());
+    assert_eq!(provider.seen().len(), 1);
+}
+
+fn api_key(provider: &MockProvider) -> String {
+    format!(
+        "[inference]\nurl = \"{}\"\nregister = \"api-key\"\nprovider = \"anthropic\"\n",
+        provider.url
+    )
 }
 
 /// gh-aw's collector on the requests of a hand-back, if this machine

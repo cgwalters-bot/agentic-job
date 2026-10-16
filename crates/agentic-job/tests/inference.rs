@@ -50,6 +50,8 @@ fn job(proxy: &Proxy) -> Identity {
             bearer: REQUEST_BEARER.to_owned(),
         }),
         name: Some(NAME.to_owned()),
+        api_key: None,
+        max_requests: None,
     }
 }
 
@@ -304,6 +306,8 @@ fn an_identity_proxy_carries_only_a_tunnel_to_the_ci_system() {
             bearer: REQUEST_BEARER.to_owned(),
         }),
         name: None,
+        api_key: None,
+        max_requests: None,
     };
     let register = |identity: &Identity| {
         error(Run::register(
@@ -359,6 +363,8 @@ fn a_run_needs_what_its_mode_sends() {
             bearer: "not-the-jobs".to_owned(),
         }),
         name: Some("a name".to_owned()),
+        api_key: None,
+        max_requests: None,
     };
     let err = error(Run::register(
         &endpoint(&proxy, oidc_mode()),

@@ -49,9 +49,10 @@ what is not.
 **An agent run with no write credential in reach.** The reusable
 workflow runs Claude Code, opencode or Vibe in that sandbox on a task
 you give it. The agent holds no model key and no token that can write
-to the forge. It reaches the model through a credential broker on
-another machine, which holds the key and caps what the run can spend
-([inference, below](#inference)). The agent cannot push, comment or
+to the forge. It reaches the model through a proxy that holds the key:
+one `run` serves on the runner with a provider API key the caller passes
+as a secret, or a credential broker on another machine, which also caps
+what the run can spend ([inference, below](#inference)). The agent cannot push, comment or
 open anything. It leaves a file of requests ("open a pull request with
 this patch", "comment on this issue"), which a second job checks on a
 clean machine and a third applies. The jobs that hold a write token,
@@ -68,8 +69,8 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 
 | Where | What it holds |
 | --- | --- |
-| The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the broker's run token for this one run. Not the identity-token request credential, not a model key, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not `SAFE_OUTPUTS_PAT` |
+| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key`, the provider's key, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
@@ -90,12 +91,15 @@ jobs:
       outputs: create_pull_request,noop
       allow: .github/agentic-job/allow.toml   # what a run may ask for at all
       agent: claude
-      inference-url: ${{ vars.INFERENCE_URL }}
+      inference-url: https://api.anthropic.com
+      inference-register: api-key
+      inference-provider: anthropic
+    secrets:
+      INFERENCE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 That is the shape, not the whole call: a caller also grants the job its
-permissions, and a real agent needs an inference broker the runner can
-reach. [Try it](#try-it) has a whole caller.
+permissions. [Try it](#try-it) has a whole caller.
 `COMMIT` may also be a released version's tag, such as `v0.3.0`, which
 Dependabot can then upgrade: see [versions to pin](docs/workflow.md#things-a-caller-should-know).
 The docs describe main: a tag lacks what was merged after it (after
@@ -152,15 +156,33 @@ runtime is unverified.
 
 ## Inference
 
-A real agent needs, today, a
-[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)
-that the agent's runner can reach. There is no mode yet that takes a
-provider API key. The scripted agent (`agent: fake`) needs no broker.
-(`inference-register: token-file` hands `run` a token for some other
-proxy, but nothing then counts or ends the run, and nothing here makes
-such a token.)
+A real agent needs a model, and never holds the key that pays for it.
+There are two ways to give it one ([docs/inference.md](docs/inference.md)).
+The scripted agent (`agent: fake`) needs neither.
 
-What the broker has to provide ([docs/inference.md](docs/inference.md)):
+**A provider API key** (`inference-register: api-key`) is the simple
+one. The caller stores the key in a repository secret and passes it as
+`INFERENCE_API_KEY`; `inference-url` is the provider's API root and
+`inference-provider` the API it speaks: `anthropic` for Claude Code
+(`https://api.anthropic.com`) or `openai` for opencode, at a provider
+that serves OpenAI's Responses API (`https://api.openai.com/v1`). Only the step
+that runs `agentic-job run` gets the key. `run` checks it with the
+provider, then serves the agent a proxy on loopback that takes a token
+made for the run and puts the key in its place, so the key is in no file,
+variable or answer of the agent's. The proxy forwards model requests
+only and counts them, so `max-requests` binds as with a broker. What
+nothing in the job bounds is the key itself: it is long-lived, and the
+spending limits are the ones the provider sets on it.
+
+**A credential broker** is for a deployment that wants no long-lived key
+in its repositories: a
+[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)
+that the agent's runner can reach, which registers each run with the
+job's identity token, and caps and ends it. (`inference-register:
+token-file` hands `run` a token for some other proxy, but nothing then
+counts or ends the run, and nothing here makes such a token.)
+
+What the broker has to provide:
 
 - its root URL, given as `inference-url`, serving the Anthropic API at
   `/anthropic` (Claude Code), the OpenAI Responses API at `/v1`
@@ -281,9 +303,25 @@ a notice and builds locally (about two minutes). Downloads are verified
 against a source-matching attested manifest; see
 [where the binary comes from](docs/workflow.md#things-a-caller-should-know).
 
-**A real agent** replaces `agent: fake` with `claude`, `opencode` or
-`vibe`, drops `max-requests: "0"` (the default caps at 150 requests), and
-adds:
+**A real agent** replaces `agent: fake` with `claude`, drops
+`max-requests: "0"` (the default caps at 150 requests), and adds a
+provider's key ([inference](#inference)), stored as the repository
+secret `ANTHROPIC_API_KEY`:
+
+```yaml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      INFERENCE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      # ...
+      agent: claude
+      inference-url: https://api.anthropic.com
+      inference-register: api-key
+      inference-provider: anthropic
+```
+
+The hosted `ubuntu-26.04` runner reaches the provider as it is. With a
+broker instead, it adds:
 
 ```yaml
       inference-url: ${{ vars.INFERENCE_URL }}
@@ -409,8 +447,9 @@ the issue that tracks it, where one is filed.
 - The world-write policy is proven at run time on hosted Ubuntu 26.04
   ([CI's controls](docs/secure-host.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
   not on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
-- Inference needs a praxis-credential-broker; there is no API-key mode
-  (no issue yet).
+- With `inference-register: api-key`, nothing outside the provider caps
+  what the long-lived key spends; the run's request cap and timeout bound
+  one run (no issue yet).
 - A broker admits an agent job of the caller's own only by repository,
   any workflow of it ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
