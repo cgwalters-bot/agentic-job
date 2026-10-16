@@ -44,6 +44,20 @@ need review against the base, file-list and rename checks already implemented.
 still tracks feed-pin maintenance; source-attested releases exist, and the
 host-wide walk is gone, replaced by the access-time world-write policy.
 
+[Setup in Rust (#882)](https://github.com/cgwalters-forge/agentic-job/issues/882):
+our setup code should be the binary's, with no package fetches beyond an
+agent's. Ranked by expected time saved and fetches removed (estimates from one hosted job's
+61 s `packages` stage, not yet measured per slice): install agents from
+pinned, checksummed tarballs instead of a distribution's npm; replace the
+Python egress proxy (`python3-venv` and PyPI at setup) with Rust, keeping
+every egress test; a prebuilt image or cached layer
+([#144](https://github.com/cgwalters-forge/agentic-job/issues/144)); then the
+rest of secure-host's Node steps. Those save little time, since hosted images
+ship Node, but take Node out of root's steps. `sandbox timed` replaced
+`setup-timing.mjs --run`. `world-write.mjs` is root's bpftool loader and
+needs a privileged CI run to prove a port. `platform.mjs`, `apt.mjs` and
+`binary.mjs` run before the binary exists, so they wait until fetching it needs no Node.
+
 Done from the gh-aw gaps: the agent reads GitHub with a read-only token
 ([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), a label
 starts a run and is consumed

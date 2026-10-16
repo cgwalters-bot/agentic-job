@@ -20,6 +20,7 @@ pub mod network;
 pub mod root;
 pub(crate) mod session;
 pub mod setup;
+pub mod timed;
 mod view;
 
 #[derive(Debug, Subcommand)]
@@ -30,6 +31,9 @@ pub enum Command {
     Check(check::Args),
     /// Run one command as the sandbox user, with none of this environment
     Exec(exec::Args),
+    /// Run secure-host's setup or probes, and add their time to the job summary
+    #[command(hide = true)]
+    Timed(timed::Args),
     /// Print the local sockets and ports this user connects to; `check` runs it as the sandbox user
     #[command(hide = true)]
     ProbeLocal,
@@ -60,6 +64,7 @@ impl Command {
             Self::Setup(args) => setup::run(args),
             Self::Check(args) => check::run(args),
             Self::Exec(args) => exec::run(args),
+            Self::Timed(args) => timed::run(args),
             Self::ProbeLocal => local::run(),
             Self::NftRules(args) => {
                 let direct = args

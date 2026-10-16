@@ -451,7 +451,8 @@ binary acquisition, loading the world-write policy and the final probes are
 separate.
 
 The action also writes `Secure-host setup: ...` and `Secure-host probes: ...`
-lines to the job summary, including exit status and setup's stage times.
+lines to the job summary, including exit status and setup's stage times
+(`agentic-job sandbox timed`, as the runner's user).
 `create-user-useradd` and `create-user-lookup` subdivide `create-user`; do not
 add them to that parent's time. Summaries are diagnostic only: all probes
 and their success requirements still run.
