@@ -531,6 +531,7 @@ jobs:
       # with the same script, which says why no cache is used.
       - name: Get the binary
         env:
+          GH_TOKEN: ${{ github.token }}
           BUILD: ${{ inputs.build-binary }}
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           # Read the new ref field at runtime: pinned actionlint's job schema

@@ -13,7 +13,11 @@ export async function fetchTagged({ repository, ref, commit, source, out, fetchF
   // Resolve the tag, including annotated tags, rather than trusting a release's
   // target_commitish (which may be a moving branch). A moved tag must not make
   // a workflow resolved earlier execute another commit's binary.
-  const resolved = JSON.parse(await fetchFile(`https://api.github.com/repos/${repository}/commits/${tag}`));
+  const api = `https://api.github.com/repos/${repository}`;
+  const refBytes = await fetchFile(`${api}/git/ref/tags/${tag}`, true);
+  const object = refBytes === null ? null : JSON.parse(refBytes).object;
+  const resolved = object?.type === "commit" ? { sha: object.sha }
+    : JSON.parse(await fetchFile(`${api}/commits/${tag}`));
   if (resolved.sha !== commit) throw new Error("release tag does not match the workflow commit");
   const from = `https://github.com/${repository}/releases/download/${tag}`;
   const path = join(out, "release.json");

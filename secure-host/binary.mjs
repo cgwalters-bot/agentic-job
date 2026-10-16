@@ -31,6 +31,7 @@ import { appendFileSync, chmodSync, copyFileSync, lstatSync, mkdirSync, readFile
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { download } from "./github.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -46,7 +47,7 @@ export const REPOSITORY = "cgwalters-forge/agentic-job";
 // decides what a release holds: a release published before that changed
 // lacks a file this one requires, and must not be taken for this source.
 // `skills` and `workflow/review.md` are the agents' skills, built in.
-export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.mjs", "secure-host/tagged.mjs"];
+export const BUILT_FROM = ["Cargo.lock", "Cargo.toml", "crates", "egress", "skills", "workflow/review.md", "secure-host/binary.mjs", "secure-host/tagged.mjs", "secure-host/github.mjs"];
 
 // The scripted agent too: a run with `agent: fake` needs it.
 export const NAMES = ["agentic-job", "fake-agent"];
@@ -60,8 +61,6 @@ export const TARGET = "x86_64-unknown-linux-musl";
 export const OBJECT = "world_write.bpf.o";
 const OBJECT_SOURCE = "crates/agentic-job/bpf/world_write.bpf.c";
 
-const FETCH_TRIES = 3;
-const FETCH_TIMEOUT_MS = 120_000;
 const OWNER_EXECUTE = 0o100;
 const MODE_PROGRAM = 0o755;
 const MODE_FILE = 0o644;
@@ -105,19 +104,6 @@ export function checked(pin, name, bytes) {
   const found = sha256(bytes);
   if (found !== pin.sha256[name]) throw new Error(`${name} of ${pin.release} has SHA-256 ${found}, and the pin says ${pin.sha256[name]}: refusing it`);
   return bytes;
-}
-
-async function download(url, missing = false) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-      if (missing && response.status === 404) return null;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return Buffer.from(await response.arrayBuffer());
-    } catch (err) {
-      if (attempt === FETCH_TRIES) throw new Error(`fetching ${url}: ${err.message}`);
-    }
-  }
 }
 
 export function validateManifest(pin, source) {

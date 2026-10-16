@@ -116,6 +116,12 @@ runs:
     # A release's, by its attested source-matching checksums, when
     # that release was built from this commit's source; a build of that
     # source otherwise (binary.mjs).
+    - name: Prepare GitHub CLI
+      if: ${{ inputs.binary == '' }}
+      shell: bash
+      env:
+        ACTION: ${{ github.action_path }}
+      run: node "$ACTION/github.mjs"
     - name: Get the binary
       id: binary
       if: ${{ inputs.binary == '' }}
@@ -123,6 +129,7 @@ runs:
       env:
         ACTION: ${{ github.action_path }}
         BUILD: ${{ inputs.build }}
+        GH_TOKEN: ${{ github.token }}
       run: |
         [ "$BUILD" != true ] || set -- --build
         node "$ACTION/binary.mjs" get --out "$RUNNER_TEMP/secure-host/bin" "$@"

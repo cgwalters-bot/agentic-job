@@ -12,7 +12,8 @@ test("tagged releases check identity and bytes and fail closed", async () => {
   const bytes = Buffer.from("binary");
   const manifest = { repository, commit, source, release: "v1.2.3", target: TARGET,
     sha256: Object.fromEntries([...NAMES, OBJECT].map(name => [name, createHash("sha256").update(bytes).digest("hex")])) };
-  for (const bad of [null, "tag", "attestation", "repository", "commit", "source", "release", "target", "sha256", "bytes", "missing"]) {
+  for (const bad of [null, "annotated", "absent-ref", "tag", "attestation", "repository", "commit", "source", "release", "target", "sha256", "bytes", "missing"]) {
+    const fallback = ["annotated", "absent-ref"].includes(bad);
     const out = mkdtempSync(join(tmpdir(), "tagged-"));
     const verified = [];
     const options = { repository, commit, source, out,
@@ -23,12 +24,17 @@ test("tagged releases check identity and bytes and fail closed", async () => {
       },
       fetchFile: async url => {
         if (bad === "missing") throw new Error("download failed");
-        if (url.startsWith("https://api.github.com/")) return JSON.stringify({ sha: bad === "tag" ? "wrong" : commit });
+        if (url.includes("/git/ref/tags/")) return bad === "absent-ref" ? null : JSON.stringify({ object: { type: fallback ? "tag" : "commit", sha: bad === "tag" ? "wrong" : commit } });
+        if (url.startsWith("https://api.github.com/")) {
+          assert.ok(fallback, "lightweight tags must not need commits API");
+          assert.ok(url.endsWith("/commits/v1.2.3"));
+          return JSON.stringify({ sha: commit });
+        }
         assert.ok(url.startsWith(`https://github.com/${repository}/releases/download/v1.2.3/`));
         if (url.endsWith("release.json")) return JSON.stringify({ ...manifest, ...(bad ? { [bad]: "wrong" } : {}) });
         return bad === "bytes" ? Buffer.from("altered") : bytes;
       } };
-    if (bad) await assert.rejects(fetchTagged(options), undefined, bad);
+    if (bad && !fallback) await assert.rejects(fetchTagged(options), undefined, bad);
     else {
       assert.equal(await fetchTagged(options), true);
       assert.deepEqual(verified, [`gh attestation verify ${join(out, "release.json")} --bundle ${join(out, "provenance.jsonl")} --repo ${repository} --cert-identity https://github.com/${repository}/.github/workflows/release.yml@refs/heads/main --source-ref refs/heads/main --source-digest ${commit} --deny-self-hosted-runners`]);

@@ -17,6 +17,11 @@ Tagged downloads avoid the roughly 1.5-minute per-run compile described in
 issue #606; actual savings depend on download and runner setup time, not measured
 by the local tests.
 
+Bootstrap requests use `gh` with the job's read-only token. Tag refs resolve
+lightweight tags directly; annotated or unavailable refs use the commits API.
+Rate-limited 403/429 responses retry within two minutes, respecting GitHub's
+retry and reset headers; ordinary permission denials fail immediately.
+
 [`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml)
 is one agent run as a workflow another repository calls. It is a thin
 wrapper: the `agentic-job` binary decides what a run may ask for, runs
