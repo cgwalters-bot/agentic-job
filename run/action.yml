@@ -178,9 +178,15 @@ runs:
         name='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
         [[ "$REPO" =~ $name ]] || { echo '::error::run requires a public target repository name'; exit 1; }
         refuse() { echo "::error::$1 cannot be confirmed to be public; private runs are refused unless the target is the calling repository and the bounds set private = true, because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"; exit 1; }
+        # The REST API with curl, not gh, which a runner need not have (RHEL
+        # has it only in EPEL). The token goes on stdin, not on a command
+        # line other users could read; -q leaves out any ~/.curlrc.
         visibility() {
-          gh api "repos/$1" --jq 'if .private == false and .visibility == "public" then "public"
-            elif .private == true and .visibility == "private" then "private" else "unknown" end' || echo unknown
+          printf 'Authorization: Bearer %s\n' "$GH_TOKEN" |
+            curl -q --fail --silent --show-error --max-time 60 -H @- \
+              -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1" |
+            jq -r 'if .private == false and .visibility == "public" then "public"
+              elif .private == true and .visibility == "private" then "private" else "unknown" end' || echo unknown
         }
         target=$(visibility "$REPO")
         private=$(jq -r --arg repo "$REPO" 'if .private == true and .repo == $repo then "true" else "false" end' "$JOB_DIR/policy.json")

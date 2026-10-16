@@ -224,14 +224,20 @@ const NSSWITCH: &str = "/etc/nsswitch.conf";
 /// which `su` would ask nothing.
 const NO_PASSWORD: &str = "NP";
 
-/// Some images leave this group-writable, and ssh refuses to run with a
-/// group-writable included configuration: plain ssh and git over ssh then
-/// fail for every user but the one the image was built for.
-const SSH_CRYPTO_POLICY: &str = "/etc/crypto-policies/back-ends/openssh.config";
+/// The system crypto policy, which ssh, TLS libraries and others read.
+/// Some images leave its files group- or world-writable (RHEL 10's runner
+/// image has `back-ends/openssh.config` mode 0646): ssh then refuses its
+/// included configuration, so plain ssh and git over ssh fail for every
+/// user but the one the image was built for, and any user could weaken
+/// what every program on the host accepts.
+pub const CRYPTO_POLICIES: &str = "/etc/crypto-policies";
+
+/// Most entries looked at under [`CRYPTO_POLICIES`]; a real one has tens.
+const MAX_CRYPTO_POLICY_ENTRIES: usize = 4096;
 
 const GROUP_WRITE: u32 = 0o020;
 
-const OTHER_WRITE: u32 = 0o002;
+pub const OTHER_WRITE: u32 = 0o002;
 
 /// The permission bits of a mode, without the file type.
 const MODE_BITS: u32 = 0o7777;
@@ -525,7 +531,7 @@ fn setup(args: &Args) -> Result<Exit> {
         install_file(Path::new(WORLD_WRITE_PROBE_FILE), b"", 0o666, None)
     })?;
     timed_setup("ssh-and-ptrace", || {
-        fix_ssh_crypto_policy()?;
+        fix_crypto_policies(Path::new(CRYPTO_POLICIES))?;
         restrict_ptrace()
     })?;
     println!(
@@ -1229,14 +1235,80 @@ fn root_processes_in_our_cgroup() -> Result<Vec<String>> {
     Ok(found)
 }
 
-fn fix_ssh_crypto_policy() -> Result<()> {
-    let path = Path::new(SSH_CRYPTO_POLICY);
-    let Ok(metadata) = fs::metadata(path) else {
-        return Ok(());
-    };
-    let mode = metadata.permissions().mode() & MODE_BITS;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode & !GROUP_WRITE))
-        .with_context(|| format!("setting the mode of {SSH_CRYPTO_POLICY}"))
+/// What under ROOT, ROOT included, is a file or directory that its
+/// group or other users may write, with its mode. A symbolic link counts
+/// by what it points to, which is what a reader opens (the back-ends are
+/// links into `/usr/share/crypto-policies` on Fedora and RHEL), and is not
+/// descended into. An absent ROOT has none.
+pub fn writable_crypto_policies(root: &Path) -> Result<Vec<(PathBuf, u32)>> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    let mut seen = 0;
+    while let Some(path) = pending.pop() {
+        seen += 1;
+        ensure!(
+            seen <= MAX_CRYPTO_POLICY_ENTRIES,
+            "more than {MAX_CRYPTO_POLICY_ENTRIES} entries under {}",
+            root.display()
+        );
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound && path == root => return Ok(found),
+            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        };
+        let meta = if meta.is_symlink() {
+            // A dangling link has nothing to write.
+            let Ok(target) = fs::metadata(&path) else {
+                continue;
+            };
+            target
+        } else {
+            if meta.is_dir() {
+                for entry in
+                    fs::read_dir(&path).with_context(|| format!("listing {}", path.display()))?
+                {
+                    pending.push(entry?.path());
+                }
+            }
+            meta
+        };
+        let mode = meta.permissions().mode() & MODE_BITS;
+        if (meta.is_file() || meta.is_dir()) && mode & (GROUP_WRITE | OTHER_WRITE) != 0 {
+            found.push((path, mode));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Takes group and other write off every file and directory of the
+/// crypto policy under ROOT. Through a link this changes its target.
+/// The mode is changed on what is opened, from that file's own mode, so
+/// a link swapped since the walk gets write taken away and nothing else
+/// (a mode read before the swap could set a planted file's setuid bit on
+/// the new target).
+fn fix_crypto_policies(root: &Path) -> Result<()> {
+    for (path, _) in writable_crypto_policies(root)? {
+        // Non-blocking, so that a FIFO swapped in does not hang setup.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags((rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOCTTY).bits() as i32)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        let meta = file.metadata()?;
+        if !(meta.is_file() || meta.is_dir()) {
+            continue;
+        }
+        let mode = meta.permissions().mode() & MODE_BITS;
+        let wanted = mode & !(GROUP_WRITE | OTHER_WRITE);
+        file.set_permissions(fs::Permissions::from_mode(wanted))
+            .with_context(|| format!("setting the mode of {}", path.display()))?;
+        println!(
+            "Made {} writable by its owner only (mode {mode:o} to {wanted:o})",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Hardening only (the uid split is the boundary): some images let any
@@ -1593,6 +1665,84 @@ fn install_file(path: &Path, content: &[u8], mode: u32, validate: Option<&[&str]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crypto_policies_are_left_writable_by_their_owner_only() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("crypto-policies");
+        let outside = dir.path().join("share");
+        fs::create_dir_all(root.join("back-ends")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        // Path under ROOT (or beside it), its mode, and whether it is found.
+        let files = [
+            ("back-ends/openssh.config", 0o646, true),
+            ("back-ends/gnutls.config", 0o664, true),
+            ("config", 0o644, false),
+            ("../share/opensslcnf.txt", 0o666, true),
+            ("../share/nss.txt", 0o644, false),
+        ];
+        for (name, mode, _) in files {
+            let path = root.join(name);
+            fs::write(&path, "").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        symlink(
+            "../../share/opensslcnf.txt",
+            root.join("back-ends/opensslcnf.config"),
+        )
+        .unwrap();
+        symlink("../../share/nss.txt", root.join("back-ends/nss.config")).unwrap();
+        symlink("absent", root.join("back-ends/dangling.config")).unwrap();
+        // A linked directory counts itself, and is not walked into.
+        let linked = dir.path().join("linked");
+        fs::create_dir(&linked).unwrap();
+        fs::write(linked.join("inside"), "").unwrap();
+        fs::set_permissions(linked.join("inside"), fs::Permissions::from_mode(0o666)).unwrap();
+        symlink(&linked, root.join("linked")).unwrap();
+        for (path, mode) in [
+            (&root, 0o755),
+            (&root.join("back-ends"), 0o777),
+            (&linked, 0o775),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        let mut want: Vec<(PathBuf, u32)> = files
+            .iter()
+            .filter(|(name, _, found)| *found && !name.starts_with(".."))
+            .map(|(name, mode, _)| (root.join(name), *mode))
+            .chain([
+                (root.join("back-ends"), 0o777),
+                (root.join("back-ends/opensslcnf.config"), 0o666),
+                (root.join("linked"), 0o775),
+            ])
+            .collect();
+        want.sort();
+        assert_eq!(writable_crypto_policies(&root).unwrap(), want);
+
+        fix_crypto_policies(&root).unwrap();
+        assert_eq!(writable_crypto_policies(&root).unwrap(), []);
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & MODE_BITS;
+        assert_eq!(mode(&root.join("back-ends/openssh.config")), 0o644);
+        assert_eq!(mode(&outside.join("opensslcnf.txt")), 0o644);
+        assert_eq!(mode(&root.join("back-ends")), 0o755);
+        assert_eq!(mode(&linked), 0o755);
+        assert_eq!(mode(&linked.join("inside")), 0o666);
+
+        // A host without a crypto policy has nothing to fix; one that is
+        // too large to look at is refused, not passed.
+        assert_eq!(
+            writable_crypto_policies(&dir.path().join("absent")).unwrap(),
+            []
+        );
+        let large = dir.path().join("large");
+        fs::create_dir(&large).unwrap();
+        for index in 0..MAX_CRYPTO_POLICY_ENTRIES {
+            fs::write(large.join(index.to_string()), "").unwrap();
+        }
+        assert!(writable_crypto_policies(&large).is_err());
+    }
 
     #[test]
     fn systemd_versions() {

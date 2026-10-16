@@ -398,7 +398,7 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.match(job, /agentic-job sandbox check --record/);
   assert.match(job, /probe\.mjs confined run-step/);
   // After setup, so its main and post steps run under the lock.
-  assert.ok(job.indexOf('sudo agentic-job sandbox setup') < job.indexOf(local));
+  assert.ok(job.indexOf('sudo /usr/local/bin/agentic-job sandbox setup') < job.indexOf(local));
   assert.ok(job.indexOf(local) < job.indexOf('uses: actions/upload-artifact@'));
   assert.doesNotMatch(job, /actions\/github-script@/);
   assert.match(job, /- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions\/upload-artifact@/);

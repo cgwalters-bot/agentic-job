@@ -564,6 +564,31 @@ impl Checker<'_> {
             ),
             scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
         );
+
+        // Any user could weaken what ssh and TLS accept host-wide. Setup
+        // also takes group write off, which ssh refuses but is no one's.
+        let writable = match setup::writable_crypto_policies(Path::new(setup::CRYPTO_POLICIES)) {
+            Ok(found) => found
+                .into_iter()
+                .filter(|(_, mode)| mode & setup::OTHER_WRITE != 0)
+                .map(|(path, mode)| format!("{} ({mode:o})", path.display()))
+                .collect(),
+            Err(err) => vec![format!("{err:#}")],
+        };
+        self.report.expect(
+            Want::Fail,
+            "crypto-policies",
+            format!(
+                "no file or directory under {} is world-writable{}",
+                setup::CRYPTO_POLICIES,
+                if writable.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", writable.join(", "))
+                }
+            ),
+            !writable.is_empty(),
+        );
         Ok(())
     }
 

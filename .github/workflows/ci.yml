@@ -1539,7 +1539,7 @@ jobs:
       - name: "Load the checkout's world-write object"
         run: sudo node secure-host/world-write.mjs "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
       - name: Secure the host
-        run: sudo agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
+        run: sudo /usr/local/bin/agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
       - run: agentic-job sandbox exec -- id -un
       - run: agentic-job sandbox check --record
       - name: A run step is confined

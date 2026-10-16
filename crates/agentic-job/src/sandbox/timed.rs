@@ -21,6 +21,10 @@ use crate::exit::Exit;
 
 /// The summary GitHub Actions shows for the step; unset or empty for none.
 const SUMMARY: &str = "GITHUB_STEP_SUMMARY";
+/// Where secure-host installs this program. Root's is called by this
+/// path: sudo searches its own `secure_path`, which on RHEL leaves out
+/// `/usr/local/bin`.
+const INSTALLED: &str = "/usr/local/bin/agentic-job";
 /// Where secure-host writes the configuration setup takes.
 const RUNNER_TEMP: &str = "RUNNER_TEMP";
 /// Longest output line that is still looked at for a stage's timing;
@@ -38,7 +42,7 @@ static STAGE: LazyLock<Regex> = LazyLock::new(|| {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Label {
-    /// `sudo agentic-job sandbox setup` with secure-host's configuration
+    /// `sudo /usr/local/bin/agentic-job sandbox setup` with secure-host's configuration
     Setup,
     /// `agentic-job sandbox check --record`
     Probes,
@@ -62,7 +66,7 @@ impl Label {
                 let config = PathBuf::from(temp).join("secure-host/config.toml");
                 let mut command = Command::new("sudo");
                 command
-                    .args(["agentic-job", "sandbox", "setup", "--config"])
+                    .args([INSTALLED, "sandbox", "setup", "--config"])
                     .arg(config);
                 command
             }
@@ -257,7 +261,7 @@ mod tests {
             argv(&setup),
             [
                 "sudo",
-                "agentic-job",
+                "/usr/local/bin/agentic-job",
                 "sandbox",
                 "setup",
                 "--config",

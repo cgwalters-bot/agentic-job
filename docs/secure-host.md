@@ -853,7 +853,7 @@ itself:
 
 ```sh
 sudo install -m 0755 agentic-job /usr/local/bin/agentic-job
-sudo agentic-job sandbox setup --config host.toml
+sudo /usr/local/bin/agentic-job sandbox setup --config host.toml
 agentic-job sandbox check
 ```
 

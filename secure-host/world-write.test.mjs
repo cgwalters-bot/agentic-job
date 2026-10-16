@@ -115,7 +115,7 @@ test("the action always loads the policy, before setup takes root away", () => {
   const step = action.split("    - name: Load the world-write policy\n")[1].split("\n    - ")[0];
   assert.doesNotMatch(step, /\bif:/);
   assert.match(step, /sudo node "\$ACTION\/world-write.mjs"/);
-  // `sandbox timed setup` runs `sudo agentic-job sandbox setup` (sandbox/timed.rs).
+  // `sandbox timed setup` runs `sudo /usr/local/bin/agentic-job sandbox setup` (sandbox/timed.rs).
   const setup = action.indexOf("run: agentic-job sandbox timed setup\n");
   assert.ok(setup >= 0, "the action must invoke setup through the timing wrapper");
   assert.ok(action.indexOf('sudo node "$ACTION/world-write.mjs"') < setup);

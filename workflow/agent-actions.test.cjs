@@ -127,6 +127,24 @@ test('agent exit is captured before uploads and partial result gate is unchanged
 // A mock of `gh api`: the target's answer for REPO, OTHER for the rest,
 // each as the step's own jq would print it.
 const gh = 'gh() { if [ "$2" = "repos/$REPO" ]; then printf "%s\\n" "$TARGET"; else printf "%s\\n" "$OTHER"; fi; return "${API_EXIT:-0}"; };\n';
+// A mock of the REST API by curl, for run's step: the same answers as
+// the API's JSON, refused unless the token comes on stdin and nowhere
+// in the arguments.
+const curl = `curl() {
+  local header answer
+  read -r header
+  [ "$header" = "Authorization: Bearer $GH_TOKEN" ] || return 9
+  case " $* " in *"$GH_TOKEN"*) return 9 ;; esac
+  if [ "\${*: -1}" = "https://api.github.com/repos/$REPO" ]; then answer=$TARGET; else answer=$OTHER; fi
+  case "$answer" in
+    public) echo '{"private": false, "visibility": "public"}' ;;
+    private) echo '{"private": true, "visibility": "private"}' ;;
+    unknown) echo '{"private": false, "visibility": "internal"}' ;;
+  esac
+  return "\${API_EXIT:-0}"
+};
+`;
+const api = { GH_TOKEN: 'test-token-not-secret' };
 
 test('public visibility refusal blocks publication and repository names are data', (t) => {
   const script = step(run, 'Check again that the repositories are public');
@@ -152,12 +170,14 @@ test('public visibility refusal blocks publication and repository names are data
     ['owner/repo', 'invalid', 'public', 'public', false, 'owner/repo', 'owner/caller', 1],
   ]) {
     policyFile(policyRepo, isPrivate);
-    const result = shell(gh + script, {
-      REPO: repo, REPOS: repos, TARGET: target, OTHER: other, JOB_DIR: dir, GITHUB_REPOSITORY: caller,
+    const result = shell(curl + script, {
+      ...api, REPO: repo, REPOS: repos, TARGET: target, OTHER: other, JOB_DIR: dir, GITHUB_REPOSITORY: caller,
     });
     assert.equal(result.status, expected, `${repo} ${target} ${isPrivate}: ${result.stdout}${result.stderr}`);
   }
   assert.ok(run.indexOf('Check again that') < run.indexOf('uses: actions/upload-artifact'));
+  // A runner need not have gh: run's own steps do without it.
+  assert.doesNotMatch(run, /^\s*(?:[^#\n]*[|;&(]\s*)?gh\s/m);
 });
 
 test('admission and upload gates refuse unknown visibility with private-run guidance', (t) => {
@@ -166,13 +186,13 @@ test('admission and upload gates refuse unknown visibility with private-run guid
   const dir = mkdtempSync(join(homedir(), 'visibility-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'policy.json'), JSON.stringify({ repo: 'owner/repo' }));
-  for (const script of [admission, step(run, 'Check again that the repositories are public')]) {
+  for (const [mock, script] of [[gh, admission], [curl, step(run, 'Check again that the repositories are public')]]) {
     assert.match(script, /\.private == false and \.visibility == "public"/);
     for (const [answer, apiExit, expected] of [
       ['public', 0, 0], ['private', 0, 1], ['unknown', 0, 1], ['', 0, 1], ['public', 1, 1],
     ]) {
-      const result = shell(gh + script, {
-        REPO: 'owner/repo', REPOS: 'owner/config owner/item', TARGET: answer, OTHER: answer,
+      const result = shell(mock + script, {
+        ...api, REPO: 'owner/repo', REPOS: 'owner/config owner/item', TARGET: answer, OTHER: answer,
         API_EXIT: String(apiExit), JOB_DIR: dir, GITHUB_REPOSITORY: 'owner/caller', GITHUB_OUTPUT: join(dir, 'output'),
       });
       assert.equal(result.status, expected, result.stdout + result.stderr);

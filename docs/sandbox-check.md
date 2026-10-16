@@ -98,6 +98,7 @@ matches on them.
 | `filesystem-view-pam` | ptrace, write memory, open `/proc/PID/mem` or use `/proc/PID/root` of same-uid PAM handlers | attach to and write memory of a child | credential change makes the trusted handler nondumpable |
 | `filesystem-view-userns`, `filesystem-view-kvm`, `container-build`, `container-built-run` | compatibility controls: Podman user/mount namespaces, KVM API, rootless build and run | existing container pull/network controls | no blanket namespace, device or privilege-elevation prohibition |
 | `ptrace-scope` | (none: reads the kernel setting) | | setup raises it to 1 |
+| `crypto-policies` | (none: lists what under `/etc/crypto-policies`, or a link's target, is world-writable) | | setup takes group and other write off it |
 | `cron`, `at` | install a crontab; use `at` | the runner's user may | `/etc/cron.deny`, `/etc/at.deny` |
 | `service:UNIT` | (none: asks systemd that the unit is inactive and masked, or not on the host) | journald is active | `sandbox.stop-services` |
 | `resolved-bus`, `resolved-varlink` | resolve a name through systemd-resolved, over the system bus (`busctl`) and its Varlink socket (`varlinkctl`) | the runner's user resolves it over the bus; the sandbox user calls the bus itself, and PID 1 over Varlink | `sandbox.close-resolved`: a bus policy and the sockets' modes; without it, or without resolved, a note |
