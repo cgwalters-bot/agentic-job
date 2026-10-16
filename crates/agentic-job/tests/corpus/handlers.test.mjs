@@ -746,3 +746,103 @@ test('a checked comment is hidden only on the triggering item, for a pinned reas
     }
   }
 });
+
+test('checked review comments, replies and resolved threads stay on the triggering pull request', async () => {
+  const repo = 'owner/source';
+  const itemRepo = 'owner/item';
+  const { createPrReviewBufferRegistry } = require(join(js, 'pr_review_buffer.cjs'));
+  // Review threads by node ID: on the triggering pull request #64, on #65,
+  // and on #64 of another repository.
+  const threads = {
+    PRRT_64: { __typename: 'PullRequestReviewThread', id: 'PRRT_64', isResolved: false, pullRequest: { number: 64, repository: { nameWithOwner: itemRepo } } },
+    PRRT_65: { __typename: 'PullRequestReviewThread', id: 'PRRT_65', isResolved: false, pullRequest: { number: 65, repository: { nameWithOwner: itemRepo } } },
+    PRRT_other: { __typename: 'PullRequestReviewThread', id: 'PRRT_other', isResolved: false, pullRequest: { number: 64, repository: { nameWithOwner: 'owner/other' } } },
+  };
+  const create = { type: 'create_pull_request_review_comment', path: 'src/lib.rs', line: 3, body: 'This could overflow.' };
+  const reply = { type: 'reply_to_pull_request_review_comment', comment_id: 1001, body: 'Fixed.' };
+  const resolve = { type: 'resolve_pull_request_review_thread', thread_id: 'PRRT_64' };
+  for (const [name, line, target, ok, call] of [
+    ['a comment', create, '64', true, ['comment', itemRepo, 64, 'src/lib.rs', 3]],
+    ['a comment naming the pull request', { ...create, pull_request_number: 64 }, '64', true, ['comment', itemRepo, 64, 'src/lib.rs', 3]],
+    ['a reply', reply, '64', true, ['reply', itemRepo, 64, 1001]],
+    ['a resolved thread', resolve, '64', true, ['resolve', 'PRRT_64']],
+    ['a comment on another pull request', { ...create, pull_request_number: 65 }, '64', false],
+    ['a reply on another pull request', { ...reply, pull_request_number: 65 }, '64', false],
+    ['a comment in another repository', { ...create, repo: 'owner/other' }, '64', false],
+    ['a comment without a triggering item', create, '*', false],
+    ['a reply without a triggering item', reply, '*', false],
+    ['a resolve without a triggering item', resolve, '*', false],
+    // Only the handler can look a thread up: it refuses these.
+    ['a thread on another pull request', { ...resolve, thread_id: 'PRRT_65' }, '64', true, null],
+    ['a thread in another repository', { ...resolve, thread_id: 'PRRT_other' }, '64', true, null],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'handler-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}", "${itemRepo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs]\n${line.type} = { max = 1 }\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', line.type,
+        '--max-outputs', '1', '--item-repo', itemRepo], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
+      // As check.yml passes the triggering item, and nothing for `*`.
+      const destination = target === '*' ? [] : ['--comment-repo', itemRepo, '--comment-target', target];
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json'), ...destination], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      if (!ok) continue;
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), GITHUB_REPOSITORY: repo, REPO: repo, OUTPUT_REPO: repo,
+        ITEM_REPO: itemRepo, BASE: 'main', BRANCH_PREFIX: '', READY: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: target,
+        PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const config = JSON.parse(readFileSync(file('handler-config.json')))[line.type];
+      assert.deepEqual(config, { max: 1, 'target-repo': itemRepo, target: '64' });
+      const calls = [];
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, startGroup() {}, endGroup() {} },
+        // Started by an event on another item, which the handlers must not take.
+        context: { repo: { owner: 'owner', repo: 'source' }, eventName: 'issue_comment', payload: { issue: { number: 9, pull_request: {} } } },
+        github: {
+          rest: { pulls: {
+            get: async ({ owner, repo: name, pull_number }) => ({ data: { number: pull_number, head: { sha: `head-of-${owner}/${name}#${pull_number}` } } }),
+            createReplyForReviewComment: async ({ owner, repo: name, pull_number, comment_id }) => {
+              calls.push(['reply', `${owner}/${name}`, pull_number, comment_id]);
+              return { data: { id: 2002, html_url: 'https://forge/reply' } };
+            },
+          } },
+          graphql: async (query, variables) => {
+            if (/\bresolveReviewThread\b/.test(query)) {
+              calls.push(['resolve', variables.threadId]);
+              return { resolveReviewThread: { thread: { id: variables.threadId, isResolved: true } } };
+            }
+            return { node: threads[variables.threadId] ?? null };
+          },
+        },
+      });
+      const registry = createPrReviewBufferRegistry();
+      const module = { create_pull_request_review_comment: 'create_pr_review_comment.cjs',
+        reply_to_pull_request_review_comment: 'reply_to_pr_review_comment.cjs',
+        resolve_pull_request_review_thread: 'resolve_pr_review_thread.cjs' }[line.type];
+      const handler = await require(join(js, module)).main({ ...config, _prReviewBufferRegistry: registry });
+      const result = await handler(verdict.items[0], {});
+      assert.equal(result.success, call !== null, `${name}: ${JSON.stringify(result)}`);
+      // A comment waits in its pull request's review until the handlers are done.
+      for (const { repo: bufferRepo, prNumber, buffer } of registry.getAllEntries()) {
+        assert.equal(buffer.getBufferedCount(), 1, name);
+        calls.push(['comment', bufferRepo, prNumber, result.metadata.path, result.metadata.line]);
+      }
+      assert.deepEqual(calls, call === null ? [] : [call], name);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});

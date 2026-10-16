@@ -1,0 +1,14 @@
+# CI's e2e-threads only: the scratch pull request e2e-threads-scratch opens,
+# from a branch of its own that is the run's base, and the run's item.
+# No patch.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["e2e-threads/*"]
+max_outputs = 3
+max_patch_bytes = 1048576
+max_patch_files = 1
+
+[outputs]
+create_pull_request_review_comment = { max = 1 }
+reply_to_pull_request_review_comment = { max = 1 }
+resolve_pull_request_review_thread = { max = 1 }

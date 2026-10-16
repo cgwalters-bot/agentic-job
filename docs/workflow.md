@@ -906,7 +906,9 @@ cannot [create check runs](safe-outputs.md#posting-a-check-run).
 `create_discussion` needs `discussions: write` for the job token when it
 applies. `hide_comment`, which moderates other people's comments on the
 run's item, needs `issues: write` or `pull-requests: write`, as that item is
-an issue or a pull request.
+an issue or a pull request. `create_pull_request_review_comment`,
+`reply_to_pull_request_review_comment` and
+`resolve_pull_request_review_thread` need `pull-requests: write`.
 Nothing needs
 `contents: write`: a new pull request's branch, and a push to it, go to a
 fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
@@ -1115,7 +1117,8 @@ its `target-repo` is fixed by the caller: pull requests, comments and new issues
 go to `output-repo` (or the calling repository when omitted), while issue actions
 and project updates use the run's `repo`. A hidden comment is one on the run's
 item, in the repository its comments go to; an event-triggered run may hide
-one only when `output-repo` is the calling repository.
+one only when `output-repo` is the calling repository. So are review
+comments, replies and resolved threads: on the run's pull request.
 Unlike gh-aw's `allowed-repos`, which permits the agent to select write destinations,
 `repos` in our bounds file validates only the run's target `repo`, not `output-repo`.
 Output destinations are caller-fixed, are not bounded by that list, and cannot be

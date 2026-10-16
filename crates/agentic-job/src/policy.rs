@@ -69,6 +69,9 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "create_issue",
     "create_discussion",
     HIDE_COMMENT,
+    CREATE_REVIEW_COMMENT,
+    REPLY_TO_REVIEW_COMMENT,
+    RESOLVE_REVIEW_THREAD,
     "close_issue",
     "add_labels",
     "remove_labels",
@@ -126,6 +129,20 @@ const MAX_DISCUSSION_CATEGORY: usize = 64;
 /// what other people wrote there, so it is listed in bounds only by callers
 /// who want an agent to do that.
 pub const HIDE_COMMENT: &str = "hide_comment";
+
+/// Inline review comments on the run's triggering pull request, without a
+/// verdict: a new comment on a line of its diff, a reply to one, and
+/// resolving a thread. Check and apply hold each to that pull request, so
+/// text an agent read cannot steer it to comment on, or resolve the
+/// threads of, another one.
+pub const CREATE_REVIEW_COMMENT: &str = "create_pull_request_review_comment";
+pub const REPLY_TO_REVIEW_COMMENT: &str = "reply_to_pull_request_review_comment";
+pub const RESOLVE_REVIEW_THREAD: &str = "resolve_pull_request_review_thread";
+pub const REVIEW_THREAD_OUTPUTS: &[&str] = &[
+    CREATE_REVIEW_COMMENT,
+    REPLY_TO_REVIEW_COMMENT,
+    RESOLVE_REVIEW_THREAD,
+];
 
 /// The reasons gh-aw's collector lets a `hide_comment` give (its enum,
 /// which it normalizes requests to), and so all `allowed_reasons` may name.
@@ -2464,12 +2481,77 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         assert!(intersect(policy, compiled(&["ABUSE"])).is_err());
     }
 
+    /// The review thread outputs take a `max` and nothing else: gh-aw's
+    /// own `target` and `commit_id` would choose the pull request or the
+    /// commit, which are the run's, and `side` and `footer` are left at
+    /// the handlers' defaults.
+    #[test]
+    fn review_threads_take_only_a_max() {
+        let accepts = |output: &str, text: &str| {
+            toml::from_str::<OutputLimit>(text).is_ok_and(|limit| limit.validate(output).is_ok())
+        };
+        for output in REVIEW_THREAD_OUTPUTS {
+            for (text, ok) in [
+                ("max = 3", true),
+                ("max = 3\ntarget = '*'", false),
+                ("max = 3\ntarget = 'triggering'", false),
+                ("max = 3\ncommit_id = 'abc'", false),
+                ("max = 3\nside = 'LEFT'", false),
+                ("max = 3\nfooter = false", false),
+                ("max = 3\nallowed = ['x']", false),
+                ("max = 3\nallowed_reasons = ['SPAM']", false),
+                ("max = 3\nfields = ['body']", false),
+            ] {
+                assert_eq!(accepts(output, text), ok, "{output}: {text}");
+            }
+        }
+
+        let mut bounds = bounds();
+        for output in REVIEW_THREAD_OUTPUTS {
+            bounds.outputs.insert(
+                (*output).to_owned(),
+                OutputLimit {
+                    max: 2,
+                    ..Default::default()
+                },
+            );
+        }
+        bounds.validate().unwrap();
+        let outputs = REVIEW_THREAD_OUTPUTS.join(",");
+        let policy = bounds
+            .compile(&Request {
+                outputs: &outputs,
+                ..request()
+            })
+            .unwrap();
+        policy.validate().unwrap();
+        for output in REVIEW_THREAD_OUTPUTS {
+            assert_eq!(
+                serde_json::to_value(&policy.safe_outputs).unwrap()[output],
+                serde_json::json!({"max": 2}),
+                "{output}"
+            );
+        }
+        // Off unless the bounds list them.
+        assert!(
+            super::tests::bounds()
+                .compile(&Request {
+                    outputs: CREATE_REVIEW_COMMENT,
+                    ..request()
+                })
+                .is_err()
+        );
+    }
+
     /// gh-aw's per-type `target-repo`, `allowed-repos` and protected-file
     /// policies are not bounds keys: destinations are the caller's, and a
     /// protected file is always refused (docs/safe-outputs.md).
     #[test]
     fn per_type_destinations_and_protection_are_not_offered() {
-        for output in [CREATE_PULL_REQUEST, "add_comment", HIDE_COMMENT] {
+        for output in [CREATE_PULL_REQUEST, "add_comment", HIDE_COMMENT]
+            .into_iter()
+            .chain(REVIEW_THREAD_OUTPUTS.iter().copied())
+        {
             for key in [
                 // The table parses without one of them.
                 "",

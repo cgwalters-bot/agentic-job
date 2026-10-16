@@ -102,7 +102,7 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
     /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
     'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items', 'e2e-threads',
   ]);
   for (const [, name, caller] of callers) {
     assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
@@ -232,6 +232,28 @@ test('a comment is hidden only on the triggering item, for the pinned reasons', 
       assert.equal(result.status, 0, `${target}: ${result.stderr}`);
       const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
       assert.deepEqual(config.hide_comment, expected, target);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+// Review comments, replies and resolved threads: on the run's pull request
+// in the item repository, or, without one, no handler at all.
+test('review threads are held to the triggering pull request', () => {
+  const types = ['create_pull_request_review_comment', 'reply_to_pull_request_review_comment', 'resolve_pull_request_review_thread'];
+  for (const [target, expected] of [['64', { max: 2, 'target-repo': 'owner/item', target: '64' }], ['*', undefined], ['', undefined], ['0', undefined]]) {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      writeFileSync(join(root, 'config.json'), JSON.stringify(Object.fromEntries(types.map(type => [type, { max: 2 }]))));
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
+        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), GITHUB_REPOSITORY: 'owner/caller', REPO: 'owner/source',
+        OUTPUT_REPO: 'owner/output', ITEM_REPO: 'owner/item', BASE: 'main', BRANCH_PREFIX: '',
+        READY: 'false', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: target, PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      });
+      assert.equal(result.status, 0, `${target}: ${result.stderr}`);
+      const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+      for (const type of types) assert.deepEqual(config[type], expected, `${type} ${target}`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -944,7 +966,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Runs the guard against a forge holding `posted`, by whoever posted it,
 // with the job token or, with `pat`, a PAT that /user names as `me`.
-async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false, itemRepo = 'owner/repo', commentRepo = itemRepo, open = [], issueData = {} } = {}) {
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo', parents = 'head', tree = 'checked', checkedTree = 'checked', replacement = false, itemRepo = 'owner/repo', commentRepo = itemRepo, open = [], issueData = {}, reviewComments = {} } = {}) {
   const dir = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
@@ -975,6 +997,10 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
         pulls: { list: params => { queries.push(['pulls', params.head]); return posted.filter(p => p.head === params.head); },
           get: async params => { queries.push(['pull', params.pull_number]);
             return { data: { state: open.includes(params.pull_number) ? 'open' : 'closed' } }; },
+          // A review comment a reply names, by its pull request's API URL.
+          getReviewComment: async params => { queries.push(['review comment', `${params.owner}/${params.repo}`, params.comment_id]);
+            if (!(params.comment_id in reviewComments)) throw new Error('Not Found');
+            return { data: { pull_request_url: reviewComments[params.comment_id] } }; },
           update: async params => { assert.equal(`${params.owner}/${params.repo}`, 'owner/source');
             queries.push(['update', params.pull_number, params.state]); return { data: {} }; } },
         search: { issuesAndPullRequests: async params => { queries.push(['search', params.q]);
@@ -1565,6 +1591,21 @@ test('a close_issue naming a pull request refuses the run before anything is app
   }
   const cased = await leaveOutApplied([issue], [], { commentRepo: 'owner/source', open: [12], issueData: { 12: { repository_url: 'https://api.github.com/repos/Owner/Source' } } });
   assert.equal(cased.kept.length, 1);
+});
+
+test('a reply to a review comment off the run\'s pull request refuses the run before anything is applied', async () => {
+  const comment = { type: 'add_comment', body: 'Replied.' };
+  const reply = { type: 'reply_to_pull_request_review_comment', comment_id: 1001, body: 'Fixed.' };
+  const reviewComments = { 1001: 'https://api.github.com/repos/Owner/Item/pulls/64', 1002: 'https://api.github.com/repos/owner/item/pulls/65',
+    1003: 'https://api.github.com/repos/owner/other/pulls/64', 1004: 'https://api.github.com/repos/owner/item/pulls/640' };
+  const options = { itemRepo: 'owner/item', reviewComments };
+  const ok = await leaveOutApplied([reply], [], options);
+  assert.deepEqual(ok.kept, [reply]);
+  assert.deepEqual(ok.queries, [['review comment', 'owner/item', 1001]]);
+  for (const id of [1002, 1003, 1004, 1005]) {
+    await assert.rejects(leaveOutApplied([comment, { ...reply, comment_id: id }], [], options),
+      id === 1005 ? /Not Found/ : new RegExp(`names comment ${id}, which is not on pull request #64 of owner/item`), String(id));
+  }
 });
 
 for (const [state, merged, left] of [['open', null, true], ['closed', '2026-10-01T00:00:00Z', true], ['closed', null, false]]) {

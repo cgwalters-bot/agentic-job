@@ -733,10 +733,11 @@ jobs:
           fi
           # An event's item is in the calling repository, but check and apply
           # take a comment's repository to be `output-repo`: there the event's
-          # number is another item, whose comments a run is not to hide.
+          # number is another item, whose comments a run is not to hide, nor
+          # comment on, reply to or resolve as a pull request.
           if [ "$EVENT" = true ] && [ -n "$OUTPUT_REPO" ] && [ "${OUTPUT_REPO,,}" != "${GITHUB_REPOSITORY,,}" ] &&
-            jq -e '.safe_outputs | has("hide_comment")' "$JOB_DIR/policy.json" > /dev/null; then
-            echo "::error::hide_comment is for an event-triggered run only when output-repo is the calling repository, where the event's item is"
+            type=$(jq -re '.safe_outputs | [keys[] | select(IN("hide_comment", "create_pull_request_review_comment", "reply_to_pull_request_review_comment", "resolve_pull_request_review_thread"))][0]' "$JOB_DIR/policy.json"); then
+            echo "::error::$type is for an event-triggered run only when output-repo is the calling repository, where the event's item is"
             exit 1
           fi
           # The top-level domains by their count: over a thousand.

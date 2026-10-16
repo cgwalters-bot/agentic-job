@@ -112,6 +112,8 @@ The types a run can be allowed are `create_pull_request`, `create_issue`, `creat
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
 `mark_pull_request_as_ready_for_review`, `create_check_run`, `update_project`, `push_to_pull_request_branch`,
 `add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`, `hide_comment`,
+`create_pull_request_review_comment`, `reply_to_pull_request_review_comment`,
+`resolve_pull_request_review_thread`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -437,6 +439,44 @@ Apply needs `issues: write` for an issue's comments, or `pull-requests: write`
 for a pull request's, for the job token, or a `SAFE_OUTPUTS_PAT` that can
 moderate comments there. A re-run hides the comments again, including one
 a maintainer unhid in between.
+
+### Review comments on the pull request
+
+`create_pull_request_review_comment` comments on a line of the run's
+triggering pull request's diff, `reply_to_pull_request_review_comment`
+replies to a review comment there, and `resolve_pull_request_review_thread`
+resolves a thread. They give a review inline comments without a verdict:
+the comments go in one review of event `COMMENT`, and
+`submit_pull_request_review` is not offered. Each is off unless listed in
+bounds, with a `max` and nothing else:
+
+```toml
+[outputs]
+create_pull_request_review_comment = { max = 10 }
+reply_to_pull_request_review_comment = { max = 5 }
+resolve_pull_request_review_thread = { max = 5 }
+```
+
+They are held to the run's item as `hide_comment` is, for the same
+reason: an agent misled by text it read could otherwise comment on, or
+resolve the threads of, another pull request. Check refuses a request whose
+`pull_request_number` is not the item's, one naming another repository
+than the item's, and every request of a run without one item; policy
+refuses the types to an event-triggered run whose `output-repo` is another
+repository. Apply gives each handler the item's number as its `target` and
+its repository as `target-repo`, so a comment goes on that pull request's
+diff, and the resolve handler looks the thread up and refuses one
+elsewhere. The reply handler does not look its comment up, so apply looks
+it up first and refuses the run, before applying anything, when it is on
+another pull request. An item that is an issue has no diff: the handlers
+fail there.
+
+Resolving a thread is the agent's to decide: a ruleset requiring
+conversation resolution before merging counts a thread the agent resolved,
+a maintainer's included. Bounds list the type only where that is wanted.
+Apply needs `pull-requests: write` for the job token, or a
+`SAFE_OUTPUTS_PAT` that can review the pull request. A re-run posts the
+comments and replies again, and leaves a thread resolved before as it is.
 
 ### Pushing to a pull request's branch
 
@@ -920,7 +960,8 @@ output repository, where [its owner applies](workflow.md#a-repository-the-applyi
 requires of a `head-repo`; the agent cannot name it, since check refuses
 a request's `repo`. Without a fork there is no `create_pull_request`
 handler ([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
-`add_comment` and `hide_comment` get `target-repo` and `target`. They list what they made in
+`add_comment`, `hide_comment` and the [review comment
+types](#review-comments-on-the-pull-request) get `target-repo` and `target`. They list what they made in
 `/tmp/gh-aw/safe-output-items.jsonl`. Where the forge refuses a pull
 request, the upstream handler would open a fallback issue despite
 `fallback_as_issue: false`; the workflow lets no handler open more

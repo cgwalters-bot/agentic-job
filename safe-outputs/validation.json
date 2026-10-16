@@ -191,6 +191,74 @@
       }
     }
   },
+  "create_pull_request_review_comment": {
+    "defaultMax": 1,
+    "fields": {
+      "body": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "line": {
+        "required": true,
+        "positiveInteger": true
+      },
+      "path": {
+        "required": true,
+        "type": "string"
+      },
+      "pull_request_number": {
+        "optionalPositiveInteger": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "side": {
+        "type": "string",
+        "enum": [
+          "LEFT",
+          "RIGHT"
+        ]
+      },
+      "start_line": {
+        "optionalPositiveInteger": true
+      }
+    },
+    "customValidation": "startLineLessOrEqualLine"
+  },
+  "reply_to_pull_request_review_comment": {
+    "defaultMax": 10,
+    "fields": {
+      "body": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "comment_id": {
+        "required": true,
+        "positiveInteger": true
+      },
+      "pull_request_number": {
+        "optionalPositiveInteger": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
+  "resolve_pull_request_review_thread": {
+    "defaultMax": 10,
+    "fields": {
+      "thread_id": {
+        "required": true,
+        "type": "string"
+      }
+    }
+  },
   "close_issue": {
     "defaultMax": 1,
     "fields": {

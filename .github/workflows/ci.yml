@@ -1103,6 +1103,78 @@ jobs:
       budget: '100'
       artifact-prefix: items-
 
+  # A scratch draft pull request for e2e-threads, from a branch of this run
+  # whose one commit adds the line of e2e-threads.txt, and a review comment
+  # on that line: the thread the run replies to and resolves.
+  # e2e-verify closes the pull request and deletes the branch.
+  e2e-threads-scratch:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # the scratch branch
+      pull-requests: write # the scratch pull request and its review comment
+    outputs:
+      branch: ${{ steps.open.outputs.branch }}
+      pull-request: ${{ steps.open.outputs.pull-request }}
+      comment: ${{ steps.open.outputs.comment }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: e2e-threads/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Open the scratch pull request and its review thread
+        id: open
+        run: |
+          set -o pipefail
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          base=$(gh api "repos/$GH_REPO/git/commits/$main" --jq .tree.sha)
+          tree=$(jq -n --arg base "$base" --arg content "Scratch line of end-to-end run $GITHUB_RUN_ID." \
+            '{base_tree: $base, tree: [{path: "e2e-threads.txt", mode: "100644", type: "blob", content: $content}]}' |
+            gh api "repos/$GH_REPO/git/trees" --input - --jq .sha)
+          commit=$(gh api "repos/$GH_REPO/git/commits" -f message='e2e scratch: review threads' -f tree="$tree" -f "parents[]=$main" --jq .sha)
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$commit" > /dev/null
+          pr=$(gh api "repos/$GH_REPO/pulls" -f title="Scratch pull request of end-to-end run $GITHUB_RUN_ID" -f head="$BRANCH" -f base=main -F draft=true -f body='Closed by the run that opened it.' --jq .number)
+          echo "pull-request=$pr" >> "$GITHUB_OUTPUT"
+          comment=$(gh api "repos/$GH_REPO/pulls/$pr/comments" -f body="Scratch review comment of end-to-end run actions/runs/$GITHUB_RUN_ID, replied to and resolved by it." \
+            -f commit_id="$commit" -f path=e2e-threads.txt -F line=1 -f side=RIGHT --jq .id)
+          echo "comment=$comment" >> "$GITHUB_OUTPUT"
+
+  # create_pull_request_review_comment, reply_to_pull_request_review_comment
+  # and resolve_pull_request_review_thread with the job token, on the pull
+  # request e2e-threads-scratch opened, which is the run's item.
+  e2e-threads:
+    needs: [changes, e2e-threads-scratch]
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      pull-requests: write # the review comment, the reply and resolving the thread
+      issues: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the agent job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-threads-${{ github.run_id }}
+      build-binary: true
+      repo: ${{ github.repository }}
+      base: ${{ needs.e2e-threads-scratch.outputs.branch }}
+      kind: analysis
+      task: Comment on the scratch pull request's line, reply to its review comment and resolve that thread.
+      outputs: create_pull_request_review_comment,reply_to_pull_request_review_comment,resolve_pull_request_review_thread
+      max-outputs: '3'
+      comment-target: ${{ needs.e2e-threads-scratch.outputs.pull-request }}
+      notify: none
+      allow: .github/agentic-job/threads.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/threads.sh
+      timeout: '5'
+      max-requests: '0'
+      budget: '100'
+      artifact-prefix: threads-
+
   # Proposed verifier code may read dispatch results, and the full run's
   # apply guard the forge, but never gets cleanup's write token. Cleanup
   # waits for this job even when verification fails.
@@ -1202,7 +1274,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1369,6 +1441,23 @@ jobs:
           gh api graphql -F number="$SUB" -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { parent { number } } } }' --jq .data.repository.issue.parent.number | grep -qx "$ISSUE"
           gh api graphql -f id="$COMMENT" -f query='query($id: ID!) { node(id: $id) { ... on IssueComment { isMinimized minimizedReason } } }' |
             jq -e '.data.node.isMinimized == true and (.data.node.minimizedReason | ascii_downcase) == "outdated"'
+      # The new comment is on the line the agent named, the reply under the
+      # scratch comment, and the scratch comment's thread is resolved.
+      - name: The scratch pull request was commented on, and its review thread replied to and resolved
+        env:
+          RESULT: ${{ needs.e2e-threads.result }}
+          PR: ${{ needs.e2e-threads-scratch.outputs.pull-request }}
+          COMMENT: ${{ needs.e2e-threads-scratch.outputs.comment }}
+        run: |
+          set -o pipefail
+          test "$RESULT" = success
+          comments=$(gh api --paginate "repos/$GH_REPO/pulls/$PR/comments" | jq -s add)
+          jq -e '[.[] | select(.user.login == "github-actions[bot]" and .path == "e2e-threads.txt" and .line == 1 and .in_reply_to_id == null
+            and (.body | startswith("Review comment of the scripted agent of an end-to-end run.")))] | length == 1' <<< "$comments"
+          jq -e --argjson comment "$COMMENT" '[.[] | select(.user.login == "github-actions[bot]" and .in_reply_to_id == $comment
+            and (.body | startswith("Reply of the scripted agent of an end-to-end run.")))] | length == 1' <<< "$comments"
+          gh api graphql -F number="$PR" -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 20) { nodes { isResolved comments(first: 1) { nodes { databaseId } } } } } } }' |
+            jq -e --argjson comment "$COMMENT" '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].databaseId == $comment) | .isResolved] == [true]'
       # Whatever happened before: these ask the forge what this run left
       # and need no artifact, and each is tried whatever became of the one
       # before it. A comment that cannot be deleted fails the job, so that
@@ -1409,6 +1498,26 @@ jobs:
             fi
             gh api -X PATCH "repos/$GH_REPO/issues/$SUB" -f state=closed > /dev/null || failed=1
           fi
+          if [ -n "$PR" ]; then
+            gh api -X PATCH "repos/$GH_REPO/pulls/$PR" -f state=closed > /dev/null || failed=1
+          fi
+          if [ -n "$BRANCH" ]; then
+            if refs=$(gh api "repos/$GH_REPO/git/matching-refs/heads/$BRANCH" --jq '.[].ref'); then
+              if grep -qxF "refs/heads/$BRANCH" <<< "$refs"; then
+                gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$BRANCH" || failed=1
+              fi
+            else
+              failed=1
+            fi
+          fi
+          exit "$failed"
+      - name: Remove the scratch review thread pull request
+        if: ${{ always() && needs.e2e-threads-scratch.result != 'skipped' }}
+        env:
+          BRANCH: ${{ needs.e2e-threads-scratch.outputs.branch }}
+          PR: ${{ needs.e2e-threads-scratch.outputs.pull-request }}
+        run: |
+          failed=0
           if [ -n "$PR" ]; then
             gh api -X PATCH "repos/$GH_REPO/pulls/$PR" -f state=closed > /dev/null || failed=1
           fi
@@ -1567,7 +1676,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1591,7 +1700,7 @@ jobs:
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
             ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "confined"))) or
-            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))
         run: >-

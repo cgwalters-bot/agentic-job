@@ -36,7 +36,7 @@ use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
     CREATE_PULL_REQUEST, HIDE_COMMENT, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
-    update_fields,
+    REVIEW_THREAD_OUTPUTS, update_fields,
 };
 use crate::redact;
 
@@ -306,7 +306,9 @@ fn redirections_to(
             .filter(|value| !value.as_str().is_some_and(same))
             .map(|value| format!("a {output} with {key} {value}, which is not the policy's"))
     };
-    let repo = if matches!(output, "add_comment" | HIDE_COMMENT) {
+    let repo = if matches!(output, "add_comment" | HIDE_COMMENT)
+        || REVIEW_THREAD_OUTPUTS.contains(&output)
+    {
         comment.map_or(policy.repo.as_str(), |(repo, _)| repo)
     } else {
         &policy.repo
@@ -377,6 +379,28 @@ fn redirections_to(
                 item.get("reason")
                     .map_or_else(|| "SPAM (none given)".to_owned(), Value::to_string)
             ));
+        }
+    }
+    if REVIEW_THREAD_OUTPUTS.contains(&output) {
+        // On the run's triggering pull request only: apply gives the
+        // handlers its number as their target, so a request cannot name
+        // another, and the handlers (and apply, for a reply) refuse a
+        // comment or thread on any other, which only they can look up.
+        // Without a fixed item (`*`) there is no pull request to hold them
+        // to; one that is an issue the forge refuses at apply.
+        match comment {
+            None => problems.push(format!(
+                "a {output} needs the run's triggering pull request as its comment target"
+            )),
+            Some((_, target)) => {
+                if let Some(value) = item.get("pull_request_number")
+                    && value.as_u64() != Some(target)
+                {
+                    problems.push(format!(
+                        "a {output} with pull_request_number {value}, which is not the run's pull request #{target}"
+                    ));
+                }
+            }
         }
     }
     if output == CREATE_PULL_REQUEST {
@@ -2076,6 +2100,104 @@ mod tests {
                 redirections_to(&request, &policy, comment).is_empty(),
                 ok,
                 "{fields} {comment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_threads_stay_on_the_triggering_pull_request() {
+        let mut policy = policy();
+        for output in REVIEW_THREAD_OUTPUTS {
+            policy.safe_outputs.others.insert(
+                (*output).to_owned(),
+                crate::policy::OutputLimit {
+                    max: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        let item = Some(("tracker/items", 64));
+        for (output, fields, comment, ok) in [
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "src/lib.rs", "line": 3, "body": "b"}),
+                item,
+                true,
+            ),
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "a", "line": 3, "body": "b", "pull_request_number": 64, "repo": "Tracker/Items"}),
+                item,
+                true,
+            ),
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "a", "line": 3, "body": "b", "pull_request_number": 65}),
+                item,
+                false,
+            ),
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "a", "line": 3, "body": "b", "repo": "bootc-dev/bootc"}),
+                item,
+                false,
+            ),
+            (
+                "reply_to_pull_request_review_comment",
+                json!({"comment_id": 1001, "body": "b"}),
+                item,
+                true,
+            ),
+            (
+                "reply_to_pull_request_review_comment",
+                json!({"comment_id": 1001, "body": "b", "pull_request_number": 64}),
+                item,
+                true,
+            ),
+            (
+                "reply_to_pull_request_review_comment",
+                json!({"comment_id": 1001, "body": "b", "pull_request_number": 63}),
+                item,
+                false,
+            ),
+            (
+                "reply_to_pull_request_review_comment",
+                json!({"comment_id": 1001, "body": "b", "repo": "other/repo"}),
+                item,
+                false,
+            ),
+            (
+                "resolve_pull_request_review_thread",
+                json!({"thread_id": "PRRT_kwDOABCD123456"}),
+                item,
+                true,
+            ),
+            // No triggering pull request to hold the handlers to.
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "a", "line": 3, "body": "b", "pull_request_number": 64}),
+                None,
+                false,
+            ),
+            (
+                "reply_to_pull_request_review_comment",
+                json!({"comment_id": 1001, "body": "b"}),
+                None,
+                false,
+            ),
+            (
+                "resolve_pull_request_review_thread",
+                json!({"thread_id": "PRRT_kwDOABCD123456"}),
+                None,
+                false,
+            ),
+        ] {
+            let mut request = fields.as_object().unwrap().clone();
+            request.insert("type".into(), json!(output));
+            assert_eq!(
+                redirections_to(&request, &policy, comment).is_empty(),
+                ok,
+                "{output} {fields} {comment:?}"
             );
         }
     }

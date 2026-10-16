@@ -280,6 +280,28 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 [handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
 `a checked comment is hidden only on the triggering item, for a pinned reason`.
 
+**RC-027 — Review threads on the triggering pull request.** Bounds MAY list
+`create_pull_request_review_comment`, `reply_to_pull_request_review_comment`
+and `resolve_pull_request_review_thread` with a `max` and no other key.
+Check MUST refuse a request naming another pull request or repository than
+the run's item, and every request of a run without one item. Policy MUST
+refuse the types for an event-triggered run whose `output-repo` is not the
+calling repository. Apply MUST give the handlers that item's number and
+repository as their target, and MUST refuse the run before applying anything
+when a reply names a comment on another pull request.
+Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs) test
+`review_threads_take_only_a_max`,
+[check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
+`review_threads_stay_on_the_triggering_pull_request`,
+[apply.test.cjs](../workflow/apply.test.cjs)
+`review threads are held to the triggering pull request` and
+`a reply to a review comment off the run's pull request refuses the run before anything is applied`,
+[proposals.test.cjs](../workflow/proposals.test.cjs)
+`… is refused before the agent for an event's item elsewhere`,
+[handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
+`checked review comments, replies and resolved threads stay on the triggering pull request`,
+and CI's `e2e-threads`.
+
 **RC-013 — Re-run application.** A re-run of apply MUST NOT post an accepted
 comment, issue or pull request that an earlier attempt of the same run posted,
 and MUST apply the comments and issues it did not. Apply names each by run
@@ -294,6 +316,8 @@ own token's principal: `github-actions[bot]` for the job token, the user
 field are left to be repeated: done twice they leave the forge as once, as
 the handlers apply them here (closing with no comment, labels only that
 exist, the issue's item found or added and its field set).
+Review comments and replies (RC-027) are not looked for, and a re-run posts
+them again; a resolved thread stays resolved.
 Conclude, which a re-run of apply runs again, MUST post its status or
 refusal comment once per run and call: named `agentic-job-concluded:
 RUNID/DIGEST16` (over the artifact prefix), hidden last in the body, and

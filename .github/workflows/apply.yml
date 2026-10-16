@@ -473,6 +473,17 @@ jobs:
         # every request of it, and the policy allowing the type is no reason
         # to fail the run's other outputs.
         #
+        # Review comments, replies and resolved threads are held the same
+        # way to the run's item, as a pull request of the item repository.
+        # With a number for its target, the create handler comments on that
+        # pull request's diff whatever a request names, and the resolve
+        # handler looks the thread up and refuses one on another pull
+        # request or in another repository. The reply handler posts to the
+        # forge's replies URL under that number, and the guard below
+        # refuses a reply to a comment on another pull request first.
+        # Without a submit_pull_request_review the comments go in one
+        # review of event COMMENT: no verdict.
+        #
         # The check run handler names the run from `name`, which the bounds
         # pinned, and with `target: "*"` posts on the head of the pull
         # request check held to one number. It posts in the calling
@@ -503,6 +514,10 @@ jobs:
             | if has("hide_comment") | not then .
               elif $target | test("^[1-9][0-9]*$") then .hide_comment += {"target-repo": $item_repo, target: $target}
               else del(.hide_comment) end
+            | reduce ("create_pull_request_review_comment", "reply_to_pull_request_review_comment", "resolve_pull_request_review_thread") as $type (.;
+                if has($type) | not then .
+                elif $target | test("^[1-9][0-9]*$") then .[$type] += {"target-repo": $item_repo, target: $target}
+                else del(.[$type]) end)
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("create_discussion")).create_discussion) += {"target-repo": $action_repo, fallback_to_issue: false, close_older_discussions: false}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: true}
@@ -582,6 +597,8 @@ jobs:
       # left alone.
       # A discussion is not looked for, and a re-run posts it again.
       # A comment is hidden again, even one a maintainer unhid since.
+      # Review comments and replies are posted again; a thread resolved
+      # before is left as it is.
       - name: Leave out what an earlier attempt applied
         id: applied
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
@@ -643,6 +660,19 @@ jobs:
                 throw new Error(`a close_issue names #${item.issue_number}, which is not an issue of ${process.env.REPO}`);
               }
               issues.set(item.issue_number, data);
+            }
+            // gh-aw's reply handler posts to the replies URL of the run's
+            // pull request without looking up the comment it names, which
+            // check cannot either. So a reply to a comment on another pull
+            // request, or in another repository, refuses the run here,
+            // before anything is applied, whatever the forge would make of it.
+            for (const item of output.items.filter(item => item.type === 'reply_to_pull_request_review_comment')) {
+              const [itemOwner, itemRepo] = process.env.ITEM_REPO.split('/');
+              const pull = `${process.env.GITHUB_API_URL}/repos/${process.env.ITEM_REPO}/pulls/${process.env.COMMENT_TARGET}`;
+              const { data } = await github.rest.pulls.getReviewComment({ owner: itemOwner, repo: itemRepo, comment_id: Number(item.comment_id) });
+              if (String(data.pull_request_url).toLowerCase() !== pull.toLowerCase()) {
+                throw new Error(`a reply_to_pull_request_review_comment names comment ${item.comment_id}, which is not on pull request #${process.env.COMMENT_TARGET} of ${process.env.ITEM_REPO}`);
+              }
             }
             const kept = [], skipped = [];
             for (const [index, item] of output.items.entries()) {
