@@ -64,9 +64,36 @@ static SECRET_SHAPED: LazyLock<BytesRegex> = LazyLock::new(|| {
         .expect("the built-in patterns are valid")
 });
 
+/// Each pattern by itself, to name the one that matched.
+static EACH_SHAPE: LazyLock<Vec<(&'static str, BytesRegex)>> = LazyLock::new(|| {
+    PATTERNS
+        .iter()
+        .map(|&pattern| {
+            let regex = BytesRegex::new(&format!("(?-u){pattern}"))
+                .expect("the built-in patterns are valid");
+            (pattern, regex)
+        })
+        .collect()
+});
+
 /// Whether `bytes` holds a string shaped like a credential.
 pub fn is_secret_shaped(bytes: &[u8]) -> bool {
     SECRET_SHAPED.is_match(bytes)
+}
+
+/// The patterns that match in `bytes`, for telling an agent what to fix:
+/// the pattern names the shape and not the string, which may be real.
+pub fn secret_shapes(bytes: &[u8]) -> Vec<&'static str> {
+    EACH_SHAPE
+        .iter()
+        .filter(|(_, regex)| regex.is_match(bytes))
+        .map(|(pattern, _)| *pattern)
+        .collect()
+}
+
+/// The 1-based line of `bytes` that byte `offset` is on.
+fn line_of(bytes: &[u8], offset: usize) -> usize {
+    1 + bytes[..offset].iter().filter(|&&b| b == b'\n').count()
 }
 
 /// Replaces secrets in text: the literal values it was given, and the
@@ -112,6 +139,14 @@ impl Redactor {
     /// cannot be redacted, a patch or a file that is not text.
     pub fn finds(&self, bytes: &[u8]) -> bool {
         self.bytes.is_match(bytes)
+    }
+
+    /// The line of the first secret [`Redactor::finds`] in `bytes`: a
+    /// location to report where the string itself may not be shown.
+    pub fn find_line(&self, bytes: &[u8]) -> Option<usize> {
+        self.bytes
+            .find(bytes)
+            .map(|found| line_of(bytes, found.start()))
     }
 
     /// `text` with every secret replaced by [`REPLACEMENT`].
@@ -220,6 +255,12 @@ mod tests {
         for (name, text, secret) in cases {
             let text = format!("before {text} after");
             assert_eq!(is_secret_shaped(text.as_bytes()), *secret, "{name}");
+            // A secret is named by at least one pattern, and nothing else is.
+            assert_eq!(
+                !secret_shapes(text.as_bytes()).is_empty(),
+                *secret,
+                "{name}"
+            );
             let before = redactor.count();
             let redacted = redactor.redact(&text);
             assert_eq!(redactor.count() - before, usize::from(*secret), "{name}");
@@ -338,6 +379,9 @@ mod tests {
         assert!(redactor.finds(&bytes));
         assert!(!is_secret_shaped(&bytes));
         assert!(redactor.finds(format!("x {} y", token("ghp_")).as_bytes()));
+        let lines = format!("one\ntwo {} y\nthree hunter2-and-more\n", token("ghp_"));
+        assert_eq!(redactor.find_line(lines.as_bytes()), Some(2));
+        assert_eq!(redactor.find_line(b"one\ntwo\n"), None);
         assert!(!redactor.finds(b"a short word, a.b*c(d)X"));
         assert_eq!(redactor.count(), 3);
     }

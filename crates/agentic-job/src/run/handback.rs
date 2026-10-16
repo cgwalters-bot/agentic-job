@@ -41,7 +41,7 @@ pub const AGENT_OUTPUTS: &str = "out/safe-outputs.jsonl";
 pub const AGENT_OUTCOME: &str = "out/outcome.json";
 /// Under the sandbox user's home: a whole series of commits that replaces
 /// a pull request's branch.
-const REPLACEMENT_PATH: &str = "out/replacement.json";
+pub(crate) const REPLACEMENT_PATH: &str = "out/replacement.json";
 /// The largest of each that is taken. `check` refuses a bigger requests
 /// file as well.
 pub const MAX_OUTPUTS_BYTES: usize = 1 << 20;

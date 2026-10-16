@@ -57,7 +57,13 @@ any host anyway, links to github.com pass the filter too, and GitHub
 fetches images through its own proxy. The filter is not secret
 redaction: check refuses a credential-shaped string anywhere in the
 outputs, code included, and `run` refuses to upload outputs holding one
-or the run's own secrets.
+or the run's own secrets. That refusal comes only after the session, so
+the brief tells the agent to build fake keys at run time from parts. It
+also tells the agent to run `agentic-job handback scan --base BASE_SHA`
+first. The scan applies the same patterns, a line at a time, to the
+change's diff and to `out/`, and lists each match by file, line and
+pattern, never by the string. The final refusal names the file and line
+too.
 
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the

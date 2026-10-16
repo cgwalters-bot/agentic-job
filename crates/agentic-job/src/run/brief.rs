@@ -87,8 +87,8 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
 }
 
 /// The text for a run of POLICY whose agent has the home HOME and works
-/// in CHECKOUT. It ends with an empty line.
-pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
+/// in CHECKOUT, from the commit BASE. It ends with an empty line.
+pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> String {
     let outputs = &policy.safe_outputs;
     let carrier = outputs
         .patch_carrier()
@@ -209,6 +209,20 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
         home.join(AGENT_OUTCOME).display(),
         MAX_OUTCOME_BYTES / KIB,
     );
+    // Two runs lost all their work to a fake key in a test fixture, found
+    // by the final gate only after their sessions had ended (#720).
+    let _ = writeln!(
+        text,
+        "- Secret-shaped strings: one shaped like a credential (a `ghp_`, `sk-` or `AKIA` \
+         token, a JWT, a private key) anywhere in the change or in these files gets \
+         everything this run hands back refused after your session ends, a fake one in a \
+         test included. Never write one literally: build a test value at run time from parts \
+         that do not match by themselves (`\"gh\" + \"p_\" + \"a1B2\" * 10`, say). Before \
+         you finish, run `agentic-job handback scan --base {base}` in your checkout: it lists \
+         the file, line and pattern of each such string in your change and in `{}`, and \
+         exits 1 while there is one.",
+        home.join("out").display(),
+    );
     text.push_str(
         "\nContainers in this sandbox. If Podman is installed and the egress proxy is enabled, \
          networked build RUN steps and container commands need the host network and the proxy's \
@@ -250,6 +264,7 @@ mod tests {
             policy,
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
+            "0123abcd",
         )
     }
 
@@ -295,6 +310,9 @@ mod tests {
             "`/home/agent/out/outcome.json`: your report",
             "one JSON object of at most 64 KiB",
             "\"stopped_early\": null}`",
+            "Never write one literally",
+            "`agentic-job handback scan --base 0123abcd`",
+            "in `/home/agent/out`",
         ] {
             assert!(branch.contains(want), "{want}\n{branch}");
         }

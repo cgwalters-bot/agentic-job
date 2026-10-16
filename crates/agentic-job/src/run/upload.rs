@@ -177,15 +177,17 @@ impl Staging {
         ] {
             for (name, path) in Self::files(&dir)? {
                 let content = Self::read(&path)?;
-                ensure!(
-                    !redactor.with(|redactor| redactor.finds(&content)),
-                    "a secret-shaped string {} {label}/{name}",
-                    if label == SAFE_OUTPUTS_DIR {
-                        "is in what the agent handed back,"
-                    } else {
-                        "survived redaction in"
-                    }
-                );
+                // The line and not the string: this error is published.
+                if let Some(line) = redactor.with(|redactor| redactor.find_line(&content)) {
+                    bail!(
+                        "a secret-shaped string {} {label}/{name}, line {line}",
+                        if label == SAFE_OUTPUTS_DIR {
+                            "is in what the agent handed back,"
+                        } else {
+                            "survived redaction in"
+                        }
+                    );
+                }
             }
         }
         ensure!(
@@ -426,10 +428,15 @@ mod tests {
             ),
             (
                 "a secret in the hand-back",
-                |out| out.hand_back("aw-agent-run-1.patch", &format!("+key = {}\n", token())),
+                |out| {
+                    out.hand_back(
+                        "aw-agent-run-1.patch",
+                        &format!("@@ -1 +1 @@\n+key = {}\n", token()),
+                    );
+                },
                 OPEN,
                 1,
-                "is in what the agent handed back, safe-outputs/aw-agent-run-1.patch",
+                "is in what the agent handed back, safe-outputs/aw-agent-run-1.patch, line 2",
             ),
             (
                 "a secret in bytes that are not text",
