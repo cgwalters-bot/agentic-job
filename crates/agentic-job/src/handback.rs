@@ -345,6 +345,14 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
                     fix: GUIDE_FIX.to_owned(),
                 });
             }
+            if let Some(why) = change.memory_dropped {
+                report.problems.push(Problem {
+                    at: format!("~/{}", capture::MEMORY_DIR),
+                    what: why,
+                    fix: "keep only plain text files there, within the policy's [memory] bounds"
+                        .to_owned(),
+                });
+            }
             if outputs.is_dir() {
                 let collected = scratch.path().join("collected.json");
                 let text = as_collected(&outputs)?;
@@ -838,6 +846,7 @@ mod tests {
             commit_author: None,
             private: false,
             allowed_domains: crate::policy::link_domains().to_vec(),
+            memory: None,
         };
         let run = RunFile {
             policy,

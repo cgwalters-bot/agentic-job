@@ -610,6 +610,26 @@ the conditions of [private repositories](private-repositories.md); it is
 off by default. A top-level `allowed_domains` is accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 
+A `[memory]` table lets a run hand back the agent's notes
+([below](#what-the-agent-does)); without it none is handed back, and
+`check` refuses one. Its keys, all optional, and their ceilings, which are
+gh-aw's repo-memory defaults:
+
+```toml
+[memory]
+max_files = 20              # at most 100
+max_file_bytes = 16384      # at most 102400 (100 KiB)
+max_bytes = 65536           # all files together; at least max_file_bytes, at most 1 MiB
+extensions = ["md", "txt", "json"] # from md, txt, json, jsonl, csv
+```
+
+With organization bounds, memory is allowed only where both files allow
+it, within the smaller of each limit and the extensions both list.
+Storing the memory (apply) and giving it back to the next run (the agent
+job) are not implemented yet; both are tracked in
+[#119](https://github.com/cgwalters-forge/agentic-job/issues/119). Until
+then the brief does not mention memory.
+
 Some things no bounds file can change. A run hands back one patch, so at
 most one pull request. A pull request is a draft unless it is complete
 work under `ready_when_complete`. An `analysis` run may
@@ -727,6 +747,18 @@ hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
+Where the policy has `[memory]`, `run` also packs the flat directory
+`~/memory/` into `memory.json`, `{"files": {"NAME": "text", ...}}`,
+for an analysis run as for a branch run. Like `replacement.json`, it is
+agentic-job's file, not a gh-aw request type, and gh-aw's collector never
+reads it. Each file is read as the sandbox user, without following links.
+No directory hands back no `memory.json`, which leaves the memory as it
+was; an empty one hands back `{"files": {}}`. A link, a subdirectory, a
+secret-shaped string or any file `check` would refuse drops the whole memory, with a warning in
+the run's summary (`memory_dropped`); the change and the requests are
+handed back all the same. A hand-back of memory alone is uploaded like
+any other.
+
 The brief tells the agent to leave a part of a change that check would
 refuse out and say so, except when it is the whole task: then the agent
 makes it anyway, so that the run fails with check naming the file rather
@@ -779,6 +811,16 @@ a draft, or does not come with exactly its patch; and, under
 holding `agentic-job-applied`, the name apply hides in what it posts
 so that a re-run leaves it out
 ([running apply again](workflow.md#running-apply-again)).
+
+It refuses a `memory.json` where the policy has no `[memory]`, and
+otherwise holds it to those bounds, beside a patch or a replacement: no
+unknown field, no name given twice, no more files or bytes than the bounds allow, names that
+match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` without `..` and end in one of
+the listed extensions as written (`.MD` is not `md`), and UTF-8 text with
+no control character but newline, carriage return and tab. A
+secret-shaped string is refused in the names and text as JSON decodes
+them, not only in the file as written. The report and
+the summary count its files and bytes and never show what they say.
 
 The workflow also supplies `--comment-repo OWNER/REPO --comment-target NUMBER`
 when the caller fixes a comment destination. These paired options bind comments

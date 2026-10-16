@@ -58,6 +58,8 @@ pub struct Measured {
     pub files: Vec<String>,
     /// `{base, bytes}`, `{base, error}` or null.
     pub patch: Value,
+    /// Why the memory directory was not handed back.
+    pub memory_dropped: Option<String>,
     /// Requests the egress proxy refused, per host.
     pub egress_denied: Vec<Value>,
     /// What of the agent's own logs the transcript has
@@ -274,6 +276,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert("aic_pricing".into(), json!(measured.aic_pricing));
     s.insert("files".into(), json!(measured.files));
     s.insert("patch".into(), measured.patch.clone());
+    if let Some(why) = &measured.memory_dropped {
+        s.insert("memory_dropped".into(), json!(why));
+    }
     if let Some(omitted) = inputs.outcome.get(OMITTED_BINARY_FILES) {
         s.insert(OMITTED_BINARY_FILES.into(), omitted.clone());
     }
@@ -519,6 +524,12 @@ pub fn markdown(s: &Value) -> String {
             format!("No change handed back: {}", code(&json!(cut(error)))),
         ]);
     }
+    if let Some(error) = s["memory_dropped"].as_str() {
+        out.extend([
+            String::new(),
+            format!("No memory handed back: {}", code(&json!(cut(error)))),
+        ]);
+    }
     let p = &s["praxis"];
     if p.is_object() {
         out.extend([
@@ -661,6 +672,7 @@ mod tests {
             aic_pricing: "mock",
             files: vec!["FAKE.md".into()],
             patch: json!({"base": "abc", "bytes": 10}),
+            memory_dropped: None,
             egress_denied: Vec::new(),
             agent_logs: json!({"dir": "~/logs", "files": 1, "omitted_files": 0, "truncated": false}),
             child_logs: Value::Null,

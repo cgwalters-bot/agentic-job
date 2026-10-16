@@ -77,7 +77,8 @@ private repositories ([#115](https://github.com/cgwalters-forge/agentic-job/issu
 egress allowlists ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)),
 workflow-integrated run guards and organization bounds
 ([#118](https://github.com/cgwalters-forge/agentic-job/issues/118)), memory
-([#119](https://github.com/cgwalters-forge/agentic-job/issues/119)), MCP integrations
+([#119](https://github.com/cgwalters-forge/agentic-job/issues/119): memory hand-back
+and check exist; store and restore remain), MCP integrations
 beyond [one remote server](mcp.md) (stdio servers, more secrets, Playwright;
 [#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), a conclusion job and
 maintenance ([#121](https://github.com/cgwalters-forge/agentic-job/issues/121)).

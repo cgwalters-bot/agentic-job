@@ -147,6 +147,17 @@ const MAX_OUTPUTS: &str = "max";
 /// gh-aw states a patch's size cap in units of this many bytes.
 const KB: u64 = 1024;
 
+/// The ceilings of `[memory]`: gh-aw's repo-memory defaults, 100 files of
+/// 100 KB each (docs/src/content/docs/reference/repo-memory.md in
+/// github/gh-aw), and a total that keeps the hand-back small.
+pub const MAX_MEMORY_FILES: u32 = 100;
+pub const MAX_MEMORY_FILE_BYTES: u64 = 100 * KB;
+pub const MAX_MEMORY_BYTES: u64 = 1024 * KB;
+/// What a memory file may be named with: text an agent writes notes in,
+/// and nothing a later reader would execute (`.sh`) or render as markup
+/// that runs (`.html`, `.svg`).
+pub const MEMORY_EXTENSIONS: &[&str] = &["md", "txt", "json", "jsonl", "csv"];
+
 /// The one top-level dot-folder bounds may exempt from protection, for
 /// repositories they name exactly.
 pub const EXEMPTABLE_DOT_FOLDER: &str = ".github";
@@ -406,6 +417,77 @@ pub struct Bounds {
     /// reads: links to every public host are kept ([`link_domains`]).
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+    /// The agent's notes across runs (#119): `run` hands back `~/memory/`
+    /// as `memory.json` and `check` holds it to these bounds. Absent, no
+    /// memory is handed back, and `check` refuses one.
+    #[serde(default)]
+    pub memory: Option<Memory>,
+}
+
+/// `[memory]`: how much of the agent's memory directory is handed back,
+/// and what its files may be. Each bound has a default and a ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Memory {
+    #[serde(default = "Memory::default_max_files")]
+    pub max_files: u32,
+    #[serde(default = "Memory::default_max_file_bytes")]
+    pub max_file_bytes: u64,
+    /// Of all files' contents together.
+    #[serde(default = "Memory::default_max_bytes")]
+    pub max_bytes: u64,
+    /// File name extensions, without the dot, from [`MEMORY_EXTENSIONS`].
+    #[serde(default = "Memory::default_extensions")]
+    pub extensions: Vec<String>,
+}
+
+impl Memory {
+    fn default_max_files() -> u32 {
+        20
+    }
+
+    fn default_max_file_bytes() -> u64 {
+        16 * KB
+    }
+
+    fn default_max_bytes() -> u64 {
+        64 * KB
+    }
+
+    fn default_extensions() -> Vec<String> {
+        ["md", "txt", "json"].map(str::to_owned).to_vec()
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=MAX_MEMORY_FILES).contains(&self.max_files),
+            "memory.max_files must be from 1 to {MAX_MEMORY_FILES}"
+        );
+        ensure!(
+            (1..=MAX_MEMORY_FILE_BYTES).contains(&self.max_file_bytes),
+            "memory.max_file_bytes must be from 1 to {MAX_MEMORY_FILE_BYTES}"
+        );
+        ensure!(
+            (self.max_file_bytes..=MAX_MEMORY_BYTES).contains(&self.max_bytes),
+            "memory.max_bytes must be from max_file_bytes to {MAX_MEMORY_BYTES}"
+        );
+        ensure!(
+            !self.extensions.is_empty(),
+            "memory.extensions lists no extension"
+        );
+        for (i, extension) in self.extensions.iter().enumerate() {
+            ensure!(
+                MEMORY_EXTENSIONS.contains(&extension.as_str()),
+                "memory.extensions may only name {}, not {extension:?}",
+                MEMORY_EXTENSIONS.join(", ")
+            );
+            ensure!(
+                !self.extensions[..i].contains(extension),
+                "memory.extensions names {extension:?} twice"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
@@ -684,6 +766,9 @@ pub struct Policy {
     /// [`GH_AW_LINK_DOMAINS`], in a policy written by hand.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_domains: Vec<String>,
+    /// The bounds' `[memory]`, where every bounds file has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<Memory>,
 }
 
 /// Reference context admitted before the agent starts. The workflow resolves
@@ -941,6 +1026,9 @@ impl Policy {
             self.context.is_empty() || self.repo.rsplit('/').next() != Some("context"),
             "target name conflicts with the context directory"
         );
+        if let Some(memory) = &self.memory {
+            memory.validate()?;
+        }
         for output in self.safe_outputs.others.keys() {
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str())
@@ -1086,6 +1174,9 @@ impl Bounds {
         ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
+        }
+        if let Some(memory) = &self.memory {
+            memory.validate()?;
         }
         for repo in &self.unprotected_files.repos {
             ensure!(
@@ -1495,6 +1586,7 @@ impl Bounds {
             commit_author: self.commit_author.clone(),
             private,
             allowed_domains: link_domains().to_vec(),
+            memory: self.memory.clone(),
         })
     }
 }
@@ -1603,6 +1695,23 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             )]);
         }
         (own, other) => own.or(other),
+    };
+    // Memory only where both files allow it, within the tighter of each.
+    policy.memory = match (policy.memory, other.memory) {
+        (Some(mut own), Some(bound)) => {
+            own.max_files = own.max_files.min(bound.max_files);
+            own.max_file_bytes = own.max_file_bytes.min(bound.max_file_bytes);
+            own.max_bytes = own.max_bytes.min(bound.max_bytes);
+            own.extensions
+                .retain(|extension| bound.extensions.contains(extension));
+            if own.extensions.is_empty() {
+                return Err(vec![
+                    "memory has no extension allowed by both bounds files".to_owned(),
+                ]);
+            }
+            Some(own)
+        }
+        _ => None,
     };
     policy.max_outputs = policy.max_outputs.min(other.max_outputs);
     policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
@@ -3751,6 +3860,38 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             ["create_pull_request", "noop"]
         );
 
+        // `[memory]` reaches the policy with its defaults, within its
+        // ceilings; without it there is none, and no key for it.
+        assert_eq!(all.memory, None);
+        assert!(!serde_json::to_string(&all).unwrap().contains("memory"));
+        let memory = |table: &str| {
+            let bounds: Bounds = toml::from_str(&format!("{BOUNDS}\n[memory]\n{table}")).unwrap();
+            bounds.validate().unwrap();
+            let policy = bounds.compile(&request()).unwrap();
+            policy.validate().unwrap();
+            policy.memory.unwrap()
+        };
+        for (table, want) in [
+            ("", (20, 16 * KB, 64 * KB, &["md", "txt", "json"][..])),
+            (
+                "max_files = 100\nmax_file_bytes = 102400\nmax_bytes = 1048576\n\
+                 extensions = [\"md\", \"txt\", \"json\", \"jsonl\", \"csv\"]",
+                (100, 100 * KB, 1024 * KB, MEMORY_EXTENSIONS),
+            ),
+            (
+                "max_files = 1\nmax_file_bytes = 1\nmax_bytes = 1\nextensions = [\"csv\"]",
+                (1, 1, 1, &["csv"]),
+            ),
+        ] {
+            let got = memory(table);
+            assert_eq!(
+                (got.max_files, got.max_file_bytes, got.max_bytes),
+                (want.0, want.1, want.2),
+                "{table}"
+            );
+            assert_eq!(got.extensions, want.3, "{table}");
+        }
+
         let pr = policy().safe_outputs.create_pull_request.unwrap();
         assert!(pr.draft);
         assert!(pr.protect_top_level_dot_folders);
@@ -3776,6 +3917,41 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         };
         let a = local.compile(&request).unwrap();
         let b = org.compile(&request).unwrap();
+        // Memory only where both files have it, within the tighter bounds.
+        let with_memory = |memory: Memory| Policy {
+            memory: Some(memory),
+            ..b.clone()
+        };
+        let defaults: Memory = toml::from_str("").unwrap();
+        let tight = Memory {
+            max_files: 3,
+            extensions: vec!["txt".into(), "csv".into()],
+            ..defaults.clone()
+        };
+        let both = Policy {
+            memory: Some(defaults.clone()),
+            ..a.clone()
+        };
+        assert_eq!(intersect(both.clone(), b.clone()).unwrap().memory, None);
+        assert_eq!(
+            intersect(a.clone(), with_memory(defaults.clone()))
+                .unwrap()
+                .memory,
+            None
+        );
+        let memory = intersect(both.clone(), with_memory(tight.clone()))
+            .unwrap()
+            .memory
+            .unwrap();
+        assert_eq!(
+            (memory.max_files, memory.extensions),
+            (3, vec!["txt".to_owned()])
+        );
+        let disjoint = Memory {
+            extensions: vec!["csv".into()],
+            ..tight
+        };
+        assert!(intersect(both, with_memory(disjoint)).is_err());
         for (left, right) in [(a.clone(), b.clone()), (b, a)] {
             let policy = intersect(left, right).unwrap();
             assert_eq!(policy.max_outputs, 2);
@@ -3943,6 +4119,66 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 ),
                 "fields are supported only",
             ),
+            (
+                "an unknown memory key",
+                format!("{BOUNDS}\n[memory]\nbranch = \"x\"\n"),
+                "unknown field `branch`",
+            ),
+            (
+                "no memory files",
+                format!("{BOUNDS}\n[memory]\nmax_files = 0\n"),
+                "memory.max_files must be from 1 to 100",
+            ),
+            (
+                "too many memory files",
+                format!("{BOUNDS}\n[memory]\nmax_files = 101\n"),
+                "memory.max_files must be from 1 to 100",
+            ),
+            (
+                "empty memory files",
+                format!("{BOUNDS}\n[memory]\nmax_file_bytes = 0\n"),
+                "memory.max_file_bytes must be from 1 to 102400",
+            ),
+            (
+                "a memory file too big",
+                format!("{BOUNDS}\n[memory]\nmax_file_bytes = 102401\nmax_bytes = 200000\n"),
+                "memory.max_file_bytes must be from 1 to 102400",
+            ),
+            (
+                "a memory too big",
+                format!("{BOUNDS}\n[memory]\nmax_bytes = 1048577\n"),
+                "memory.max_bytes must be from max_file_bytes to 1048576",
+            ),
+            (
+                "a memory smaller than one file",
+                format!("{BOUNDS}\n[memory]\nmax_file_bytes = 2048\nmax_bytes = 1024\n"),
+                "memory.max_bytes must be from max_file_bytes",
+            ),
+            (
+                "no memory extensions",
+                format!("{BOUNDS}\n[memory]\nextensions = []\n"),
+                "memory.extensions lists no extension",
+            ),
+            (
+                "a script as memory",
+                format!("{BOUNDS}\n[memory]\nextensions = [\"md\", \"sh\"]\n"),
+                "memory.extensions may only name md, txt, json, jsonl, csv, not \"sh\"",
+            ),
+            (
+                "a dotted memory extension",
+                format!("{BOUNDS}\n[memory]\nextensions = [\".md\"]\n"),
+                "not \".md\"",
+            ),
+            (
+                "an upper-case memory extension",
+                format!("{BOUNDS}\n[memory]\nextensions = [\"MD\"]\n"),
+                "not \"MD\"",
+            ),
+            (
+                "a memory extension twice",
+                format!("{BOUNDS}\n[memory]\nextensions = [\"md\", \"md\"]\n"),
+                "memory.extensions names \"md\" twice",
+            ),
         ];
         for (name, text, want) in cases {
             let err = toml::from_str::<Bounds>(&text)
@@ -4089,11 +4325,32 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 ..OutputLimit::default()
             },
         );
+        let memory = |memory: Memory| Policy {
+            memory: Some(memory),
+            ..good.clone()
+        };
+        let defaults: Memory = toml::from_str("").unwrap();
         let cases = [
             (
                 "a type with no configuration here",
                 other_type,
                 "create_discussion",
+            ),
+            (
+                "memory over its ceiling",
+                memory(Memory {
+                    max_files: 1000,
+                    ..defaults.clone()
+                }),
+                "memory.max_files",
+            ),
+            (
+                "memory of scripts",
+                memory(Memory {
+                    extensions: vec!["sh".into()],
+                    ..defaults
+                }),
+                "memory.extensions",
             ),
             (
                 "a pull request that is not a draft",

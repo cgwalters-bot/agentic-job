@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use super::clone::{self, Checkout};
 use super::enter::Runner;
 use crate::check::checkpoint::{self, Checkpoint};
+use crate::check::memory::{self, MemoryFiles};
 use crate::check::{BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, patch_file_name};
 use crate::config;
 use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
@@ -42,6 +43,12 @@ pub const AGENT_OUTCOME: &str = "out/outcome.json";
 /// Under the sandbox user's home: a whole series of commits that replaces
 /// a pull request's branch.
 pub(crate) const REPLACEMENT_PATH: &str = "out/replacement.json";
+/// Under the sandbox user's home: the agent's notes across runs (#119),
+/// handed back as `memory.json` where the policy has `[memory]`.
+pub(crate) const MEMORY_DIR: &str = "memory";
+/// The most one entry of the memory directory's listing takes: its type,
+/// a space, the longest name `check` takes, and the NUL that ends it.
+const MEMORY_ENTRY_BYTES: usize = 2 + 64 + 1;
 /// The largest of each that is taken. `check` refuses a bigger requests
 /// file as well.
 pub const MAX_OUTPUTS_BYTES: usize = 1 << 20;
@@ -658,6 +665,9 @@ pub struct Change {
     pub patch: Value,
     /// Why a change was not handed back.
     pub dropped: Option<String>,
+    /// Why the memory directory was not handed back. Apart from the
+    /// change: either goes without the other.
+    pub memory_dropped: Option<String>,
 }
 
 impl Change {
@@ -1064,14 +1074,129 @@ fn missing(
 }
 
 /// Collects what the agent left: its outcome into the run's results, and
-/// its requests and its change into the hand-back.
+/// its requests, its change and its memory into the hand-back.
 ///
 /// An error is this machine's (a directory that cannot be written).
 /// Whatever is wrong with what the agent left is not: a file that is
 /// missing, too big or not what it should be counts as not written, and
-/// a change that cannot be made a patch is dropped, with the reason in
-/// the result.
+/// a change or a memory that cannot be handed back is dropped, with the
+/// reason in the result.
 pub fn collect(request: &Request<'_>) -> Result<Change> {
+    let mut change = collect_change(request)?;
+    // Collected whatever became of the change, of an analysis run too.
+    if let Some(rules) = &request.policy.memory {
+        match pack_memory(request.runner, &request.home.join(MEMORY_DIR), rules) {
+            Ok(None) => {}
+            Ok(Some(json)) => {
+                create_dir(request.safe_outputs)?;
+                write(&request.safe_outputs.join(memory::MEMORY_FILE), &json)?;
+            }
+            Err(why) => change.memory_dropped = Some(why),
+        }
+    }
+    Ok(change)
+}
+
+/// The memory directory DIR as `memory.json`, read by RUNNER as the
+/// agent's change is; `Ok(None)` where there is none, which leaves the
+/// memory as it was, where an empty directory empties it. `Err` is why
+/// it is not handed back: anything but flat regular files `check` takes.
+fn pack_memory(
+    runner: &dyn Runner,
+    dir: &Path,
+    rules: &crate::policy::Memory,
+) -> Result<Option<Vec<u8>>, String> {
+    let shown = format!("~/{MEMORY_DIR}");
+    let text = dir
+        .to_str()
+        .ok_or_else(|| format!("{shown} is not UTF-8"))?;
+    let test = |flag: &str| {
+        runner
+            .run(&["test", flag, text], b"", MAX_GIT_OUTPUT)
+            .map(|out| out.success())
+            .map_err(|_| format!("{shown} could not be inspected"))
+    };
+    if test("-L")? {
+        return Err(format!("{shown} is a symbolic link"));
+    }
+    if !test("-e")? {
+        return Ok(None);
+    }
+    if !test("-d")? {
+        return Err(format!("{shown} is not a directory"));
+    }
+    // Listed, not followed: a link is an entry like any other, and refused.
+    // Cut at the limit, as `Git::limited` cuts, so that too much is said
+    // to be so and not taken for a listing that failed.
+    let limit = (rules.max_files as usize + 1) * MEMORY_ENTRY_BYTES;
+    let cut_at = (limit + 1).to_string();
+    let argv = [
+        "sh",
+        "-c",
+        LIMIT_SCRIPT,
+        "sh",
+        &cut_at,
+        "timeout",
+        READ_TIMEOUT_S,
+        "find",
+        text,
+        "-mindepth",
+        "1",
+        "-maxdepth",
+        "1",
+        "-printf",
+        "%y %f\\0",
+    ];
+    let out = runner
+        .run(&argv, b"", limit + 1)
+        .map_err(|_| format!("{shown} could not be listed"))?;
+    if out.stdout.len() > limit {
+        return Err(format!(
+            "{shown} has more than {} entries, or names too long",
+            rules.max_files
+        ));
+    }
+    let listed = String::from_utf8_lossy(&out.stderr).lines().last() == Some("0");
+    if !out.success() || !listed {
+        return Err(format!("{shown} could not be listed"));
+    }
+    let listing = out.stdout;
+    let mut files = MemoryFiles::default();
+    for entry in listing.split(|&b| b == 0).filter(|entry| !entry.is_empty()) {
+        let entry = String::from_utf8_lossy(entry);
+        let (kind, name) = entry.split_at_checked(2).unwrap_or(("", &entry));
+        // Every rejection below may quote the name, even when no file is read.
+        if crate::redact::is_secret_shaped(name.as_bytes()) {
+            return Err(format!("a secret-shaped string in {shown}"));
+        }
+        if kind != "f " {
+            return Err(format!("{shown}/{name:?} is not a regular file"));
+        }
+        memory::check_name(name, rules).map_err(|err| format!("{err:#}"))?;
+        let max = usize::try_from(rules.max_file_bytes).unwrap_or(usize::MAX - 1);
+        let content = read_agent_file(runner, &dir.join(name), max).ok_or_else(|| {
+            format!("{shown}/{name:?} is not a regular file of at most {max} bytes")
+        })?;
+        let content =
+            String::from_utf8(content).map_err(|_| format!("{shown}/{name:?} is not UTF-8"))?;
+        files.files.insert(name.to_owned(), content);
+    }
+    let json = serde_json::to_vec(&files).map_err(|err| err.to_string())?;
+    // `check` takes it again on another machine; this names the reason
+    // in the agent job, not after.
+    memory::check(&json, rules).map_err(|err| format!("{err:#}"))?;
+    if json.len() as u64 > memory::max_json_bytes(rules) {
+        return Err(format!("{} is too big", memory::MEMORY_FILE));
+    }
+    // The upload gate and `check` would refuse the whole hand-back for it,
+    // change and all: the notes alone go.
+    if crate::redact::is_secret_shaped(&json) {
+        return Err(format!("a secret-shaped string in {shown}"));
+    }
+    Ok(Some(json))
+}
+
+fn collect_change(request: &Request<'_>) -> Result<Change> {
     let Request {
         runner,
         checkout,
@@ -1125,8 +1250,7 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
         write(&request.run_dir.join(OUTCOME_FILE), &text)?;
         let mut change = Change {
             files,
-            patch: Value::Null,
-            dropped: None,
+            ..Change::default()
         };
         let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
         let content = read_agent_file(runner, &replacement_path, max);
@@ -1225,8 +1349,7 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
     let has_changes = changed && !only_litter && policy.kind == Kind::Branch;
     let mut change = Change {
         files,
-        patch: Value::Null,
-        dropped: None,
+        ..Change::default()
     };
     // Said, as the old tree did, so that work the brief did not ask for is
     // not lost without a word.
@@ -1327,6 +1450,7 @@ mod tests {
             commit_author: None,
             private: false,
             allowed_domains: Vec::new(),
+            memory: None,
         }
     }
 
@@ -2413,13 +2537,17 @@ mod tests {
 
     #[test]
     fn a_replacement_preserves_the_series_and_checkout() {
-        let (home, policy, mail) = replacement_home();
+        let (home, mut policy, mail) = replacement_home();
+        // Memory goes with a replacement too.
+        policy.memory = Some(toml::from_str("").unwrap());
+        sh(home.dir.path(), "mkdir memory && echo note > memory/a.md");
         let head = sh(&home.checkout.dir, "git rev-parse HEAD");
         let series =
             json!({"base_commit": home.checkout.base_commit, "commits": [mail]}).to_string();
         std::fs::write(home.path("out/replacement.json"), &series).unwrap();
         let change = home.collect(&policy, &config::Commit::default());
-        assert_eq!(change.dropped, None);
+        assert_eq!((change.dropped, change.memory_dropped), (None, None));
+        assert!(home.path("safe-outputs/memory.json").exists());
         assert_eq!(sh(&home.checkout.dir, "git rev-parse HEAD"), head);
         assert_eq!(
             std::fs::read_to_string(home.path("safe-outputs/replacement.json")).unwrap(),
@@ -2845,6 +2973,198 @@ mod tests {
         assert!(why.contains("leave the tree as it was"), "{why}");
         assert_eq!(change.patch["error"], why.as_str());
         assert!(!home.path("safe-outputs").exists());
+    }
+
+    /// `~/memory` is handed back as `memory.json` beside the change, and
+    /// dropped whole, with the change kept, for anything `check` refuses.
+    #[test]
+    fn memory_is_handed_back_apart_from_the_change() {
+        let mut branch = policy(Kind::Branch, pull_requests());
+        branch.memory = Some(crate::policy::Memory {
+            max_file_bytes: 8,
+            max_bytes: 8,
+            ..toml::from_str("").unwrap()
+        });
+        let mut roomy = branch.clone();
+        roomy.memory = Some(toml::from_str("").unwrap());
+        let mut analysis = policy(Kind::Analysis, json!({"noop": {"max": 1}}));
+        analysis.memory.clone_from(&branch.memory);
+        let two = "mkdir memory && printf 'one\\n' > memory/a.md && printf 'two' > memory/b.txt";
+        let token = "gh".to_owned() + "p_" + &"a1B2".repeat(10);
+        let secret = format!("mkdir memory && printf {token} > memory/a.md");
+        let many = |name: &str| {
+            format!("mkdir memory && cd memory && for i in $(seq 21); do touch {name}$i.md; done")
+        };
+        let (many, long) = (many("a"), many(&"a".repeat(200)));
+        // (the case, the agent's script in its home, the policy, the
+        // memory.json handed back, or why it was dropped)
+        type Case<'a> = (&'a str, &'a str, &'a Policy, Result<Option<Value>, &'a str>);
+        let cases: &[Case] = &[
+            (
+                "two files",
+                two,
+                &branch,
+                Ok(Some(json!({"files": {"a.md": "one\n", "b.txt": "two"}}))),
+            ),
+            (
+                "two files of an analysis",
+                two,
+                &analysis,
+                Ok(Some(json!({"files": {"a.md": "one\n", "b.txt": "two"}}))),
+            ),
+            (
+                "no [memory]",
+                two,
+                &self::policy(Kind::Branch, pull_requests()),
+                Ok(None),
+            ),
+            ("no directory", "true", &branch, Ok(None)),
+            (
+                "an empty one",
+                "mkdir memory",
+                &branch,
+                Ok(Some(json!({"files": {}}))),
+            ),
+            (
+                "a link in it",
+                "mkdir memory && ln -s ../work/r/a.txt memory/a.md",
+                &branch,
+                Err("~/memory/\"a.md\" is not a regular file"),
+            ),
+            (
+                "a directory in it",
+                "mkdir -p memory/sub",
+                &branch,
+                Err("~/memory/\"sub\" is not a regular file"),
+            ),
+            (
+                "a link for it",
+                "mkdir elsewhere && ln -s elsewhere memory",
+                &branch,
+                Err("~/memory is a symbolic link"),
+            ),
+            (
+                "a file for it",
+                "touch memory",
+                &branch,
+                Err("~/memory is not a directory"),
+            ),
+            (
+                "a file too big",
+                "mkdir memory && printf 123456789 > memory/a.md",
+                &branch,
+                Err("~/memory/\"a.md\" is not a regular file of at most 8 bytes"),
+            ),
+            (
+                "a script",
+                "mkdir memory && touch memory/run.sh",
+                &branch,
+                Err("has none of the extensions"),
+            ),
+            (
+                "a hidden file",
+                "mkdir memory && touch memory/.a.md",
+                &branch,
+                Err("\".a.md\" is not a plain file name"),
+            ),
+            (
+                "too many files",
+                &many,
+                &branch,
+                Err("21 memory files, over 20"),
+            ),
+            (
+                "too many long names to list",
+                &long,
+                &branch,
+                Err("~/memory has more than 20 entries, or names too long"),
+            ),
+            (
+                "too much in all",
+                "mkdir memory && printf 12345 > memory/a.md && printf 12345 > memory/b.md",
+                &branch,
+                Err("memory is 10 bytes, over 8"),
+            ),
+            ("a secret", &secret, &roomy, Err("secret-shaped string")),
+            (
+                "not UTF-8",
+                "mkdir memory && printf '\\377' > memory/a.md",
+                &branch,
+                Err("~/memory/\"a.md\" is not UTF-8"),
+            ),
+            (
+                "an escape",
+                "mkdir memory && printf '\\033[2J' > memory/a.md",
+                &branch,
+                Err("control character"),
+            ),
+        ];
+        for (name, script, policy, want) in cases {
+            let home = Home::new();
+            sh(home.dir.path(), script);
+            let branch_run = policy.kind == Kind::Branch;
+            if branch_run {
+                sh(&home.checkout.dir, "echo two >> a.txt");
+            }
+            let change = home.collect(policy, &config::Commit::default());
+            assert_eq!(change.dropped, None, "{name}");
+            assert_eq!(change.patch["bytes"].is_u64(), branch_run, "{name}");
+            let handed_back = std::fs::read(home.path("safe-outputs/memory.json"))
+                .ok()
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap());
+            match want {
+                Ok(want) => {
+                    assert_eq!(change.memory_dropped, None, "{name}");
+                    assert_eq!(&handed_back, want, "{name}");
+                }
+                Err(want) => {
+                    let why = change.memory_dropped.unwrap_or_default();
+                    assert!(why.contains(want), "{name}: {why}");
+                    assert_eq!(handed_back, None, "{name}");
+                }
+            }
+            let verdict = home.verdict(policy);
+            assert!(verdict.ok, "{name}: {:?}", verdict.errors);
+            assert_eq!(
+                verdict.memory.is_some(),
+                matches!(want, Ok(Some(_))),
+                "{name}"
+            );
+        }
+        // Memory alone is a hand-back: the directory `run` uploads.
+        let home = Home::new();
+        sh(home.dir.path(), "mkdir memory");
+        home.collect(&analysis, &config::Commit::default());
+        let names: Vec<_> = std::fs::read_dir(home.path("safe-outputs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["memory.json"]);
+    }
+
+    #[test]
+    fn secret_names_are_not_quoted_in_memory_rejections() {
+        let mut policy = policy(Kind::Branch, pull_requests());
+        policy.memory = Some(crate::policy::Memory {
+            max_file_bytes: 8,
+            ..toml::from_str("").unwrap()
+        });
+        let token = "gh".to_owned() + "p_" + &"a1B2".repeat(10);
+        for command in [
+            format!("mkdir memory/{token}.md"),
+            format!("ln -s ../work/r/a.txt memory/{token}.md"),
+            format!("touch memory/{token}.sh"),
+            format!("printf 123456789 > memory/{token}.md"),
+            format!("touch memory/{token}.md && chmod 000 memory/{token}.md"),
+        ] {
+            let home = Home::new();
+            sh(home.dir.path(), &format!("mkdir memory && {command}"));
+            let change = home.collect(&policy, &config::Commit::default());
+            let why = change.memory_dropped.expect("memory must be dropped");
+            assert!(!why.contains(&token), "rejection disclosed the name");
+            assert!(why.contains("secret-shaped string"), "{why}");
+            assert!(!home.path("safe-outputs/memory.json").exists());
+        }
     }
 
     /// A link where a hand-back file should be is not read, whatever it

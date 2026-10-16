@@ -151,6 +151,8 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
             checkout.display()
         ),
     };
+    // #119: brief line comes with restore. Until a run is given its memory
+    // back, telling the agent of `~/memory` would promise what is not so.
     let types: Vec<String> = outputs
         .types()
         .filter(|&name| {
@@ -417,6 +419,7 @@ mod tests {
             commit_author: None,
             private: false,
             allowed_domains: Vec::new(),
+            memory: None,
         }
     }
 
@@ -695,6 +698,7 @@ mod brief_tests {
             commit_author: None,
             private: false,
             allowed_domains: Vec::new(),
+            memory: None,
         }
     }
 

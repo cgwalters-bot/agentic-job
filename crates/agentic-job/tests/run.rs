@@ -130,6 +130,7 @@ impl Job {
             commit_author: None,
             private: false,
             allowed_domains: Vec::new(),
+            memory: None,
         };
         serde_json::to_string(&policy).unwrap()
     }

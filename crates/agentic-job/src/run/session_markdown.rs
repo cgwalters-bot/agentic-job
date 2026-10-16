@@ -778,6 +778,7 @@ mod tests {
                 aic_pricing: "mock",
                 files: vec!["MOCK.md".into()],
                 patch: Value::Null,
+                memory_dropped: None,
                 egress_denied: Vec::new(),
                 agent_logs: Value::Null,
                 child_logs: Value::Null,

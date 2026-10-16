@@ -67,7 +67,8 @@ pub fn run(args: &Args) -> Result<Exit> {
     for entry in std::fs::read_dir(&args.checked)? {
         let entry = entry?;
         if entry.path().extension().is_some_and(|ext| ext == "patch")
-            || entry.file_name() == "replacement.json"
+            || entry.file_name() == crate::check::replacement::REPLACEMENT_FILE
+            || entry.file_name() == crate::check::memory::MEMORY_FILE
         {
             ensure!(patches.len() < 50, "too many detector patches");
             patches.push(evidence_file(&entry.path(), &mut remaining)?);

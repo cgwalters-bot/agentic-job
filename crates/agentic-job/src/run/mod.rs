@@ -920,7 +920,7 @@ impl Plan {
             eprintln!("warning: no change handed back: the session ended in an internal error");
             handback::Change::default()
         } else {
-            let change = handback::collect(&handback::Request {
+            let mut change = handback::collect(&handback::Request {
                 runner: &runner,
                 home: &self.sandbox.home,
                 checkout: &session.checkout,
@@ -933,6 +933,11 @@ impl Plan {
             })?;
             if let Some(why) = &change.dropped {
                 eprintln!("warning: no change handed back: {}", enter::one_line(why));
+            }
+            if let Some(why) = &mut change.memory_dropped {
+                // This reason also enters accounting after staged-file redaction.
+                *why = session.redactor.with(|r| r.redact(why).into_owned());
+                eprintln!("warning: no memory handed back: {}", enter::one_line(why));
             }
             change
         };
@@ -1062,6 +1067,7 @@ impl Plan {
                 })
                 .collect(),
             patch: change.patch,
+            memory_dropped: change.memory_dropped,
             egress_denied: egress::denied_in(&access_log),
             agent_logs,
             child_logs,

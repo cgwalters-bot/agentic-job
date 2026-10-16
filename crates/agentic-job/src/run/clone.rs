@@ -566,6 +566,7 @@ mod tests {
             commit_author: None,
             private: false,
             allowed_domains: Vec::new(),
+            memory: None,
         }
     }
 

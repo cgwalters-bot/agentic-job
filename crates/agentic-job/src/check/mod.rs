@@ -17,6 +17,7 @@
 
 pub mod checkpoint;
 pub mod links;
+pub mod memory;
 mod patch;
 pub mod replacement;
 
@@ -46,6 +47,9 @@ pub const BASE_FILE: &str = "base.json";
 
 const MAX_OUTPUTS_BYTES: u64 = 1 << 20;
 const MAX_BASE_BYTES: u64 = 4096;
+/// How much of a `memory.json` is read where the policy allows none: it
+/// is refused whatever it holds, but read with a bound like the rest.
+const MAX_UNEXPECTED_MEMORY_BYTES: u64 = 4096;
 
 /// The collector's result is the requests again, sanitized, as one JSON
 /// value: a little more than the requests themselves.
@@ -105,6 +109,9 @@ pub struct Verdict {
     /// its own, which `run` refuses before anything is uploaded.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// What an accepted `memory.json` holds, in counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<memory::MemoryInfo>,
 }
 
 /// The patch of an accepted pull request.
@@ -153,6 +160,7 @@ impl Verdict {
             patch,
             checkpoint: None,
             warnings: Vec::new(),
+            memory: None,
         }
     }
 
@@ -191,6 +199,12 @@ impl Verdict {
             lines.push(format!(
                 "- patch `{}` ({} bytes) against {commit}",
                 patch.file, patch.bytes
+            ));
+        }
+        if let Some(memory) = &self.memory {
+            lines.push(format!(
+                "- memory: {} file(s), {} bytes",
+                memory.files, memory.bytes
             ));
         }
         lines.extend(
@@ -732,6 +746,7 @@ fn is_handback_file(name: &str) -> bool {
     name == OUTPUTS_FILE
         || name == BASE_FILE
         || name == replacement::REPLACEMENT_FILE
+        || name == memory::MEMORY_FILE
         || PATCH_FILE_RE.is_match(name)
 }
 
@@ -740,6 +755,10 @@ fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
     match name {
         OUTPUTS_FILE => MAX_OUTPUTS_BYTES,
         BASE_FILE => MAX_BASE_BYTES,
+        memory::MEMORY_FILE => policy
+            .memory
+            .as_ref()
+            .map_or(MAX_UNEXPECTED_MEMORY_BYTES, memory::max_json_bytes),
         _ => policy.max_patch_bytes,
     }
 }
@@ -761,7 +780,7 @@ pub fn patch_file_name(branch: &str) -> String {
 }
 
 /// Checks the hand-back in `dir` (`outputs.jsonl`, `base.json`, one
-/// `aw-*.patch`) and the collector's result for it against `policy`.
+/// `aw-*.patch` or `replacement.json`, `memory.json`) and the collector's result for it against `policy`.
 ///
 /// An error is something wrong with the check's own inputs, the
 /// directory or the collector's result; whatever is wrong with the
@@ -935,6 +954,17 @@ fn check_outputs_to(
             Err(err) => errors.push(format!("the {output}'s {key}: {err:#}")),
         }
     }
+    // Before the replacement's early return: memory goes with either.
+    let mut memory = None;
+    if let Some(content) = contents.get(memory::MEMORY_FILE) {
+        match &policy.memory {
+            None => errors.push(format!("{} without a [memory] bound", memory::MEMORY_FILE)),
+            Some(rules) => match memory::check(content, rules) {
+                Ok(info) => memory = Some(info),
+                Err(error) => errors.push(format!("memory: {error:#}")),
+            },
+        }
+    }
     let mut patch = None;
     if let Some(content) = contents.get(replacement::REPLACEMENT_FILE) {
         if request.is_none() || policy.safe_outputs.push_to_pull_request_branch.is_none() {
@@ -950,6 +980,7 @@ fn check_outputs_to(
         return Ok(Verdict {
             checkpoint,
             warnings,
+            memory,
             ..Verdict::new(errors, items, patch)
         });
     }
@@ -1025,6 +1056,7 @@ fn check_outputs_to(
     Ok(Verdict {
         checkpoint,
         warnings,
+        memory,
         ..Verdict::new(errors, items, patch)
     })
 }
@@ -2555,15 +2587,19 @@ mod tests {
         )
         .unwrap();
         symlink(&secret, out.join(OUTPUTS_FILE)).unwrap();
+        symlink(&secret, out.join(memory::MEMORY_FILE)).unwrap();
         std::fs::create_dir(out.join(BASE_FILE)).unwrap();
         let collected = dir.path().join("agent_output.json");
         std::fs::write(&collected, r#"{"items":[],"errors":[]}"#).unwrap();
 
-        let verdict = check_outputs(&out, &collected, &policy()).unwrap();
+        let mut with_memory = policy();
+        with_memory.memory = Some(memory_rules());
+        let verdict = check_outputs(&out, &collected, &with_memory).unwrap();
         assert_eq!(
             verdict.errors,
             [
                 "base.json is not a regular file",
+                "memory.json is not a regular file",
                 "outputs.jsonl is not a regular file"
             ]
         );
@@ -2579,6 +2615,126 @@ mod tests {
             );
         }
         assert!(check_outputs(&out, &dir.path().join("missing"), &policy()).is_err());
+    }
+
+    fn memory_rules() -> crate::policy::Memory {
+        toml::from_str("").unwrap()
+    }
+
+    /// `memory.json` is held to the policy's `[memory]`, beside a patch or
+    /// a replacement, and refused without one; a report counts it.
+    #[test]
+    fn memory_is_checked_where_the_policy_allows_it() {
+        let notes = json!({"files": {"notes.md": "Ran the tests.\n"}}).to_string();
+        let token = "gh".to_owned() + "p_" + &"a1B2".repeat(10);
+        let secret = json!({"files": {"notes.md": token}}).to_string();
+        let script = json!({"files": {"run.sh": "x"}}).to_string();
+        let without = policy();
+        let mut with_memory = policy();
+        with_memory.memory = Some(memory_rules());
+        let mut push = crate::policy::tests::push_policy();
+        let config = push
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        config.replacement_max_commits = 1;
+        config.replacement_base = Some(BASE.into());
+        push.memory = Some(memory_rules());
+        let mail = patch_of("src/a.rs").replace(&format!("{BASE_COMMIT_HEADER}: {BASE}\n"), "");
+        let replacing = |memory: &str| Handback {
+            items: vec![
+                json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "Fix\n\nWhy.", "branch": "agent-run-12"}),
+            ],
+            files: vec![
+                (
+                    replacement::REPLACEMENT_FILE,
+                    json!({"base_commit": BASE, "commits": [mail]}).to_string(),
+                ),
+                (memory::MEMORY_FILE, memory.to_owned()),
+            ],
+            ..Handback::default()
+        };
+        let only =
+            |memory: &str| Handback::default().with(memory::MEMORY_FILE, Some(memory.to_owned()));
+        // (the case, the hand-back, the policy, what refuses it)
+        let cases: Vec<(&str, Handback, &Policy, Option<&str>)> = vec![
+            ("memory alone", only(&notes), &with_memory, None),
+            (
+                "memory and a patch",
+                Handback::pull_request().with(memory::MEMORY_FILE, Some(notes.clone())),
+                &with_memory,
+                None,
+            ),
+            ("memory and a replacement", replacing(&notes), &push, None),
+            (
+                "no [memory]",
+                only(&notes),
+                &without,
+                Some("memory.json without a [memory] bound"),
+            ),
+            (
+                "a script",
+                only(&script),
+                &with_memory,
+                Some("memory: memory file \"run.sh\" has none of the extensions"),
+            ),
+            (
+                "a script beside a replacement",
+                replacing(&script),
+                &push,
+                Some("memory: memory file \"run.sh\""),
+            ),
+            (
+                "a secret",
+                only(&secret),
+                &with_memory,
+                Some("memory: a memory file holds a secret-shaped string"),
+            ),
+            (
+                "too big to read",
+                only(&format!(
+                    "{{\"files\": {{\"a.md\": \"{}\"}}}}",
+                    " ".repeat(5000)
+                )),
+                &without,
+                Some("memory.json is 50"),
+            ),
+        ];
+        for (name, handback, policy, want) in cases {
+            let verdict = handback.check_against(policy);
+            match want {
+                None => {
+                    assert_eq!(verdict.errors, Vec::<String>::new(), "{name}");
+                    assert_eq!(
+                        verdict.memory,
+                        Some(memory::MemoryInfo {
+                            files: 1,
+                            bytes: 15
+                        }),
+                        "{name}"
+                    );
+                    let report = serde_json::to_value(&verdict).unwrap();
+                    assert_eq!(report["memory"], json!({"files": 1, "bytes": 15}), "{name}");
+                    assert!(
+                        verdict
+                            .markdown(policy)
+                            .contains("- memory: 1 file(s), 15 bytes\n"),
+                        "{name}"
+                    );
+                }
+                Some(want) => {
+                    assert!(
+                        verdict.errors.iter().any(|error| error.contains(want)),
+                        "{name}: {:?}",
+                        verdict.errors
+                    );
+                    assert_eq!(verdict.memory, None, "{name}");
+                }
+            }
+        }
+        let report = serde_json::to_value(Handback::pull_request().check()).unwrap();
+        assert!(report.get("memory").is_none());
     }
 
     #[test]
