@@ -706,6 +706,150 @@ mod tests {
         }
     }
 
+    /// Runs of the real agents (claude-agent-acp and opencode) that the old
+    /// tree's `bot-harness run` recorded against a scripted Messages API
+    /// mock, and two over its timeout and tool-call budget. Fake agents
+    /// only imitate what real adapters send; these are what they sent.
+    /// `tests/data/transcripts` is cgwalters-forge/cgwalters-devspace-sandbox
+    /// at df1e867bb551ed8e36bd535f6d304a0861f54913, `harness/tests/fixtures`,
+    /// without the old runner proxy's `token-usage.jsonl`, which nothing
+    /// reads now.
+    #[test]
+    fn recorded_runs() {
+        use crate::run::summary::{Inputs, Measured, read_jsonl, summarize};
+        use crate::session::RunResult;
+        // The mock run's command prints `ghp_` and this as a GitHub token;
+        // the recording already has its output redacted, so only the
+        // command's text holds it.
+        const CANARY: &str = "MOCKREDACTIONCANARY0123456789abcdef";
+        struct Case {
+            dir: &'static str,
+            result: &'static str,
+            /// (tool, calls, errors)
+            tools: &'static [(&'static str, u64, u64)],
+            /// The failure other than tool errors.
+            failure: Option<(&'static str, &'static str)>,
+        }
+        let cases = [
+            Case {
+                dir: "claude",
+                result: "success",
+                tools: &[("Bash", 4, 2), ("Read", 1, 0), ("Write", 2, 0)],
+                failure: None,
+            },
+            Case {
+                dir: "opencode",
+                result: "success",
+                tools: &[("bash", 4, 2), ("read", 1, 0), ("write", 2, 0)],
+                failure: None,
+            },
+            Case {
+                dir: "claude-timeout",
+                result: "timeout",
+                tools: &[("Bash", 1, 0)],
+                failure: Some(("timeout", "hit the timeout")),
+            },
+            Case {
+                dir: "claude-budget",
+                result: "budget",
+                tools: &[("Bash", 2, 0), ("Read", 1, 0)],
+                failure: Some(("budget", "over budget: more than 2 tool calls")),
+            },
+        ];
+        for c in cases {
+            let dir = c.dir;
+            let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/transcripts")
+                .join(dir);
+            let records: Vec<Record> = read_jsonl(&base.join(crate::session::ACP_LOG)).unwrap();
+            let result = RunResult::load(&base).unwrap();
+            let measured = Measured {
+                context: Vec::new(),
+                meta: json!({"run_id": 1, "run_attempt": 1, "item": "PVTI_x", "cores": 4}),
+                repo: "o/r".into(),
+                base: "main".into(),
+                workflow: "branch",
+                agent: result.agent.clone(),
+                model: None,
+                started_at: result.started_at.clone(),
+                finished_at: result.finished_at.clone(),
+                duration_s: result.duration_s,
+                aic_budget: result.limits.budget_aic,
+                aic_pricing: "mock",
+                files: vec!["MOCK.md".into()],
+                patch: Value::Null,
+                egress_denied: Vec::new(),
+                agent_logs: Value::Null,
+                child_logs: Value::Null,
+                redactions: 0,
+            };
+            let s = summarize(&Inputs {
+                records: &records,
+                result: Some(&result),
+                measured: &measured,
+                outcome: &json!({}),
+                usage: None,
+            });
+            assert_eq!(s["result"], c.result, "{dir}: {s:#}");
+            assert_eq!(s["stop_reason"], json!(result.stop_reason), "{dir}");
+            assert_eq!(s["acp_protocol"], 1, "{dir}");
+            assert_eq!(s["stopped_early"], c.failure.is_some(), "{dir}");
+            assert!(s["agent_first_step_at"].is_number(), "{dir}");
+            let tools: Vec<_> = s["tools"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    let n = |key: &str| v[key].as_u64().unwrap();
+                    (k.as_str(), n("calls"), n("errors"))
+                })
+                .collect();
+            assert_eq!(tools, c.tools, "{dir}");
+            let other: Vec<_> = s["failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| f["kind"] != "tool_error")
+                .map(|f| (f["kind"].as_str().unwrap(), f["message"].as_str().unwrap()))
+                .collect();
+            assert_eq!(other, Vec::from_iter(c.failure), "{dir}");
+            // No proxy record: the counts are the agent's word only.
+            assert_eq!(s["tokens_source"], "unverified", "{dir}");
+            assert!(s["tokens"]["output"].as_u64().unwrap() > 0, "{dir}: {s:#}");
+            let md = summary::markdown(&s);
+            assert!(md.contains(&format!("**{}**", c.result)), "{dir}: {md}");
+            assert!(md.contains("(agent-reported, unverified)"), "{dir}");
+
+            // The session: one block per tool call, and the canary, which
+            // only the finished runs hold, redacted.
+            let redactor = Shared::new(crate::redact::Redactor::new([CANARY]).unwrap());
+            let session = render(&records, &redactor);
+            let calls: u64 = c.tools.iter().map(|(_, calls, _)| calls).sum();
+            assert_eq!(
+                session.full.matches("\n<details><summary>").count() as u64
+                    - session.full.matches("<summary>Reasoning</summary>").count() as u64,
+                calls,
+                "{dir}"
+            );
+            assert!(session.full.contains("\n### User\n"), "{dir}");
+            // The timeout cancelled its run before the agent said anything.
+            assert_eq!(
+                session
+                    .full
+                    .contains("\n### Assistant\n\nDone&#58; the mock run finished&#46;\n"),
+                c.failure.is_none(),
+                "{dir}"
+            );
+            assert_eq!(
+                session.full.matches("</details>").count(),
+                session.full.matches("<details>").count(),
+                "{dir}"
+            );
+            assert!(!session.full.contains(CANARY), "{dir}");
+            assert_eq!(redactor.count() > 0, c.failure.is_none(), "{dir}");
+        }
+    }
+
     #[test]
     fn oversized_accounting_cannot_exhaust_the_session_budget() {
         let dir = tempfile::tempdir().unwrap();
