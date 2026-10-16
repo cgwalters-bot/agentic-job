@@ -8,6 +8,11 @@
 #   conclude  edits the opted-in status comment, including check's
 #             refusal to the policy's comment target
 #
+# With `apply-staged`, apply writes nothing: each step that holds
+# SAFE_OUTPUTS_PAT or could write with the job token is skipped, and the
+# checked outputs are shown in the job's summary and applied.json
+# instead, for trying a new caller before it may write.
+#
 # Its inputs are the caller's `needs` of the other pieces, as JSON: the
 # settings come from policy.yml's outputs, so that what is applied is
 # what that call decided. The agent's exit state decides only whether
@@ -143,7 +148,7 @@ jobs:
       # the fork step names: the checkout's own default is taken, and that
       # branch fetched below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
           repository: ${{ env.OUTPUT_REPO }}
           ref: ${{ fromJSON(inputs.policy).push-item == '' && fromJSON(inputs.policy).base || '' }}
@@ -162,7 +167,7 @@ jobs:
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # The fork step checks where a patch goes with workflow/push.cjs.
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -175,7 +180,7 @@ jobs:
       # conflict, where `git am --3way` would look for the file by content
       # and could change another path than the patch names.
       - name: Configure git
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -220,7 +225,7 @@ jobs:
       # fetched from it.
       - name: Fork the output repository for the pull request
         id: fork
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REPLACEMENT: ${{ steps.replacement.outputs.enabled }}
@@ -322,7 +327,7 @@ jobs:
       # request's branch, in the repository the step above checked, and nothing
       # here pushes for it.
       - name: Fetch the target's base branch
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
           FORK: ${{ steps.fork.outputs.repo }}
         run: |
@@ -356,7 +361,7 @@ jobs:
       # process substitutions would hide them. check rejects control
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
       - name: Apply the patch on its own base, and compare what changed with what was checked
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         id: trial
         env:
           CURRENT_BASE: ${{ steps.fork.outputs.current-base }}
@@ -544,6 +549,7 @@ jobs:
       # setting a project field are the same done twice and are left alone.
       - name: Leave out what an earlier attempt applied
         id: applied
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
@@ -673,6 +679,7 @@ jobs:
       # says what that means for the job.
       - name: Apply the outputs with gh-aw's handlers
         id: apply
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -813,29 +820,57 @@ jobs:
               core.setOutput("project-refused", "true");
               throw new Error("a project write was refused by the apply bounds");
             }
+      # A staged run's preview of what the handlers would have taken. The
+      # requests and paths are the agent's text: escaped into one <pre>,
+      # so that a link or image in them is not rendered in the summary
+      # (an image there is fetched by whoever opens it). The patch itself
+      # is in the checked-outputs artifact.
+      - name: Show what would be applied
+        id: staged
+        if: ${{ fromJSON(inputs.policy).apply-staged == 'true' }}
+        run: |
+          # Pretty JSON alone in the log: each line starts with a quote or a
+          # bracket, so no agent-chosen line is read as a workflow command.
+          jq .items "$GH_AW_TMP/agent_output.json"
+          {
+            echo '### Staged: nothing was applied'
+            echo
+            echo 'The outputs check accepted, as the handlers would have taken them:'
+            echo
+            jq .items "$GH_AW_TMP/agent_output.json" | jq -Rrs '@html "<pre>\(.)</pre>"'
+            if jq -e '.patch.files | length > 0' "$REPORT" > /dev/null; then
+              echo
+              echo "The patch's files:"
+              echo
+              jq -r '.patch.files | join("\n")' "$REPORT" | jq -Rrs '@html "<pre>\(.)</pre>"'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       # What was made, for whoever reads the run: `pull_request` is null
-      # when none was opened, and `fork` names where its branch went.
+      # when none was opened, and `fork` names where its branch went. A
+      # staged run made nothing and says so with `staged`.
       - name: Write applied.json
-        if: ${{ always() && steps.apply.outcome != 'skipped' }}
+        if: ${{ always() && (steps.apply.outcome != 'skipped' || steps.staged.outcome != 'skipped') }}
         env:
           PR: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
           PR_URL: ${{ steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
           FORK: ${{ steps.fork.outputs.repo }}
           EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
           CHECKPOINT: ${{ steps.complete.outputs.checkpoint }}
+          STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
         run: |
           touch "$MADE"
+          [ "$STAGED" != true ] || echo '[]' > "$GH_AW_TMP/skipped.json"
           jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
             --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --arg fork "$FORK" \
-            --arg checkpoint "$CHECKPOINT" '
-            {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made,
+            --arg checkpoint "$CHECKPOINT" --arg staged "$STAGED" '
+            {schema: "agentic-job-applied/v1", repo: $repo, staged: ($staged == "true"), partial: ($exit != "0"), made: $made,
              checkpoint: (if $checkpoint == "" then null else $checkpoint end),
              fork: (if $fork == "" then null else $fork end),
              already_applied: $skipped[0],
              pull_request: (if $pr == "" then null else {number: ($pr | tonumber), url: $url} end),
              handlers: $handlers[0]}' | tee "$GH_AW_TMP/applied.json"
       - id: upload
-        if: ${{ always() && steps.apply.outcome != 'skipped' }}
+        if: ${{ always() && (steps.apply.outcome != 'skipped' || steps.staged.outcome != 'skipped') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ fromJSON(inputs.policy).artifact-prefix }}applied
@@ -890,6 +925,7 @@ jobs:
       # A run that asked for a pull request and has none did not do what
       # it was for, and neither did one of whose outputs a handler failed.
       - name: Every output was applied
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
           OUTCOME: ${{ steps.apply.outcome }}
           FAILED: ${{ steps.apply.outputs.items_failed }}
@@ -928,6 +964,7 @@ jobs:
       # request, and the review job remains the merge gate. A partial run's
       # push is not applied at all (above).
       - name: Mark a continued pull request ready, or a draft at a checkpoint
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           READY: ${{ steps.complete.outputs.ready }}
@@ -991,6 +1028,7 @@ jobs:
           MISSING_DATA: ${{ needs.apply.outputs.missing-data }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
+          STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ && ( -z "$PR_REPO" || "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ) ]]
           case "$RESULTS" in
@@ -1013,6 +1051,7 @@ jobs:
           fi
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
+          [ "${STAGED:-}" != true ] || [ "$reaction" != rocket ] || text="$text Staged: nothing was applied; the apply job's summary shows what would have been."
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
           # Numbers alone: the agent reported the cost they come from.
           [[ ! "$OVER_BUDGET" =~ ^[0-9]+(\.[0-9]+)?\ of\ [0-9]+(\.[0-9]+)?\ AIC$ ]] || [ "$reaction" != rocket ] ||

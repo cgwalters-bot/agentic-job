@@ -1396,6 +1396,22 @@ the patch. `outcome.json` and `summary.json` name them in
 line saying how many. A changed binary file that git tracks, or one the
 agent staged, stays in the patch, and `check` refuses it.
 
+### Trying a caller without writes
+
+With `apply-staged: true` (off by default) a run goes through policy,
+agent and check as any other, and the apply job writes nothing: it does
+not fork, push, post or look for what an earlier attempt posted, and no
+step of it holds `SAFE_OUTPUTS_PAT`. Its summary shows the outputs check
+accepted, escaped so that nothing in them renders, and the files of the
+patch; `applied.json` has `staged: true` and an empty `made`, and its
+`handlers` leave out a pull request's or push's, which need the fork. Like
+gh-aw's `staged:`, it is for trying a new caller or bounds before they
+may write. The patch is not tried on the target's base, which needs
+apply's checkout; check's own checks still ran. `notify` is left as it
+is: with `comment` the status comment is still posted and edited, and
+says the run was staged. Use `notify: none` for a run that writes
+nothing at all.
+
 ## What a run leaves
 
 Jobs of a called workflow are named `CALLER JOB / JOB`: for the example,
@@ -1412,7 +1428,7 @@ and `applied` (`applied.json`, 90 days); and `agentic-job-binary` for a
 day. `applied.json` names what the apply job made:
 
 ```json
-{"schema": "agentic-job-applied/v1", "repo": "OWNER/NAME", "partial": false,
+{"schema": "agentic-job-applied/v1", "repo": "OWNER/NAME", "staged": false, "partial": false,
  "made": [{"type": "create_pull_request", "number": 12, "url": "..."}],
  "refused": false, "already_applied": [],
  "pull_request": {"number": 12, "url": "..."}, "handlers": {}}

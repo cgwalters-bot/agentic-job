@@ -219,6 +219,10 @@ on:
         description: Apply what a run stopped at a limit handed back, as a draft that says it is partial
         type: boolean
         default: false
+      apply-staged:
+        description: Show what apply would do in its summary and applied.json (`staged` true) without writing anything
+        type: boolean
+        default: false
       expect-check-refusal:
         description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
         type: boolean
@@ -369,6 +373,7 @@ jobs:
       item-repo: ${{ inputs.item-repo }}
       apply-environment: ${{ inputs.apply-environment }}
       apply-partial: ${{ inputs.apply-partial }}
+      apply-staged: ${{ inputs.apply-staged }}
       expect-check-refusal: ${{ inputs.expect-check-refusal }}
       comment-target: ${{ inputs.comment-target }}
       issue: ${{ inputs.issue }}

@@ -638,8 +638,8 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
 
 // Item-scoped status upserts are exercised in status.test.cjs.
 
-// How conclude says the run ended: [results, pull request, no result, text, result URL, over budget, pull request's repository].
-for (const [results, pr, none, text, url = '', over = '', prRepo = ''] of [
+// How conclude says the run ended: [results, pull request, no result, text, result URL, over budget, pull request's repository, staged].
+for (const [results, pr, none, text, url = '', over = '', prRepo = '', staged = ''] of [
   ['success/success/success', '', '', '✅ [w](u) ended well.'],
   ['success/success/success', '39', '', '✅ [w](u) ended well and opened pull request #39.'],
   // Said on an item of another repository (`item-repo`).
@@ -654,13 +654,16 @@ for (const [results, pr, none, text, url = '', over = '', prRepo = ''] of [
   ['success/success/success', '', '', '✅ [w](u) ended well. Its last reply took the agent over budget: it spent 565.9 of 500 AIC.', '', '565.9 of 500 AIC'],
   ['success/success/success', '', '', '✅ [w](u) ended well.', '', '565.9 of 500 AIC $(exit 9)'],
   ['success/success/failure', '', '', '❌ [w](u) failed (agent, check, apply: success/success/failure; the agent\'s exit state: 0).', '', '565.9 of 500 AIC'],
+  // A staged run applied nothing, and one that failed says only that.
+  ['success/success/success', '', '', "✅ [w](u) ended well. Staged: nothing was applied; the apply job's summary shows what would have been.", '', '', '', 'true'],
+  ['success/success/failure', '', '', '❌ [w](u) failed (agent, check, apply: success/success/failure; the agent\'s exit state: 0).', '', '', '', 'true'],
 ]) {
   test(`conclude says ${text}`, () => {
     const dir = mkdtempSync(join(homedir(), 'ended-'));
     try {
       const output = join(dir, 'output');
       const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('How the run ended')], {
-        RESULTS: results, EXIT: '0', PR: pr, PR_REPO: prRepo, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, OVER_BUDGET: over, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
+        RESULTS: results, EXIT: '0', PR: pr, PR_REPO: prRepo, NO_RESULT: none, REFUSAL: '', RESULT_URL: url, OVER_BUDGET: over, STAGED: staged, WORKFLOW: 'w', RUN_URL: 'u', GITHUB_OUTPUT: output });
       assert.equal(ran.status, 0, ran.stderr);
       assert.equal(readFileSync(output, 'utf8').split('\n')[0], `text=${text}`);
     } finally {
@@ -671,7 +674,7 @@ for (const [results, pr, none, text, url = '', over = '', prRepo = ''] of [
 
 test('comment-only apply skips every repository step, including checkout', () => {
   const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
-  const gate = "if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}";
+  const gate = "if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}";
   assert.match(apply, new RegExp(`uses: actions/checkout@[^\\n]+\\n        ${gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   for (const name of ['Configure git', "Fetch the target's base branch",
     'Apply the patch on its own base, and compare what changed with what was checked']) {
@@ -687,6 +690,68 @@ test('comment-only apply skips every repository step, including checkout', () =>
     // No .git exists and the output repository need not contain the topic base.
     const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Apply the patch on its own base, and compare what changed with what was checked')], { REPORT: report });
     assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A staged apply is for trying a caller that may not write yet: no step
+// holding a credential runs in it but one that only reads.
+test('a staged apply skips every step that holds a credential, but one that only reads', () => {
+  const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
+  const steps = apply.split('\n    steps:\n')[1].split(/\n      - (?=name:|uses:|id:)/).slice(1);
+  const readOnly = ["name: The checked outputs are this run's check's\n"];
+  let skipped = 0;
+  for (const body of steps) {
+    if (!/secrets\.SAFE_OUTPUTS_PAT|github\.token|gh api|git push/.test(body) || readOnly.some(name => body.startsWith(name))) continue;
+    const condition = body.match(/^        if: (.*)$/m)?.[1] ?? '';
+    assert.ok(!condition.includes('||') && (condition.includes("fromJSON(inputs.policy).apply-staged != 'true'") ||
+      condition.includes("steps.apply.outcome != 'skipped'")), body.split('\n')[0]);
+    skipped++;
+  }
+  assert.ok(skipped >= 6, `${skipped}`);
+  assert.match(apply, /- name: Apply the outputs with gh-aw's handlers\n        id: apply\n        if: \$\{\{ fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n/);
+  // The setting reaches apply only from the policy call, off unless the caller sets it.
+  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+  assert.match(policy, /\n        value: \$\{\{ jobs.policy.outputs.apply-staged \}\}\n/);
+  for (const caller of [policy, wrapper]) {
+    assert.match(caller, /\n      apply-staged: \$\{\{ inputs.apply-staged \}\}\n/);
+    assert.match(caller, /\n      apply-staged:\n        description: [^\n]+\n        type: boolean\n        default: false\n/);
+  }
+});
+
+test('a staged apply shows the checked outputs escaped, and applied.json says it made nothing', () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    const summary = join(root, 'summary.md');
+    const report = join(root, 'report.json');
+    writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [{ ...pull, body: 'see <img src="https://example.invalid/x.png"> & [a](https://example.invalid)' }] }));
+    writeFileSync(report, JSON.stringify({ patch: { files: ['src/<b>.rs', 'README.md', '::error title=Approved::x'] } }));
+    const shown = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Show what would be applied')],
+      { GH_AW_TMP: root, REPORT: report, GITHUB_STEP_SUMMARY: summary });
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.match(shown.stdout, /agent-run-7/);
+    // No line of the log is the agent's own, which the runner would read as a command.
+    assert.ok(shown.stdout.split('\n').every(line => /^\s*(?:["[\]{}]|$)/.test(line)), shown.stdout);
+    const text = readFileSync(summary, 'utf8');
+    assert.match(text, /^### Staged: nothing was applied\n/);
+    assert.match(text, /&lt;img src=\\&quot;https:\/\/example.invalid\/x.png\\&quot;&gt; &amp;/);
+    assert.match(text, /src\/&lt;b&gt;.rs\nREADME.md/);
+    // The only markup is the workflow's own.
+    assert.equal(text.match(/</g).length, text.match(/<\/?pre>/g).length);
+    // Nothing made, nothing found applied before: the guard and the handlers did not run.
+    writeFileSync(join(root, 'handler-config.json'), JSON.stringify({ create_pull_request: { max: 1 } }));
+    const written = staged => {
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Write applied.json')], {
+        GH_AW_TMP: root, MADE: join(root, 'made.jsonl'), OUTPUT_REPO: 'owner/repo', PR: '', PR_URL: '', FORK: '', EXIT: '0', CHECKPOINT: '', STAGED: staged });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(readFileSync(join(root, 'applied.json'), 'utf8'));
+    };
+    const applied = written('true');
+    assert.deepEqual([applied.staged, applied.made, applied.already_applied, applied.pull_request, applied.fork],
+      [true, [], [], null, null]);
+    assert.deepEqual(applied.handlers, { create_pull_request: { max: 1 } });
+    assert.equal(written('false').staged, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1245,7 +1310,7 @@ test('a pull request is opened from a fork the token owns, made if missing and r
   // Fork isolation is established before fetching and applying the patch.
   assert.ok(workflow.indexOf('- name: Fork the output repository for the pull request\n') <
     workflow.indexOf("- name: Fetch the target's base branch\n"));
-  assert.match(workflow, /- name: Fork the output repository for the pull request\n {8}id: fork\n {8}if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' \}\}\n/);
+  assert.match(workflow, /- name: Fork the output repository for the pull request\n {8}id: fork\n {8}if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n/);
 });
 
 // An owner has no fork of its own repository. Only where the repository
@@ -1346,7 +1411,7 @@ test("a push goes to its pull request's head repository, the identity's fork as 
     assert.equal(forked.length, forks, name);
   }
   // A push's checks are the trusted source's, checked out for any patch.
-  assert.match(workflow, /\n {8}if: \$\{\{ fromJSON\(inputs\.check\)\.outputs\.has-patch == 'true' \}\}\n {8}with:\n {10}repository: \$\{\{ job\.workflow_repository \}\}\n/);
+  assert.match(workflow, /\n {8}if: \$\{\{ fromJSON\(inputs\.check\)\.outputs\.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n {8}with:\n {10}repository: \$\{\{ job\.workflow_repository \}\}\n/);
   // The pull request's branch is the fork's: the checkout is of the output
   // repository's default branch, by policy's own output, and the base is
   // fetched from the fork the step above checked.

@@ -87,9 +87,10 @@ runs require explicit opt-in and are marked before apply.
 
 gh-aw can run model-based threat detection before apply. There is no
 equivalent here ([#114](https://github.com/cgwalters-forge/agentic-job/issues/114)).
-Memory, staged mode and maintenance are also absent
-([#119](https://github.com/cgwalters-forge/agentic-job/issues/119),
-[#121](https://github.com/cgwalters-forge/agentic-job/issues/121)).
+Memory, a conclusion job reporting failures as issues, and maintenance
+are also absent ([#119](https://github.com/cgwalters-forge/agentic-job/issues/119),
+[#121](https://github.com/cgwalters-forge/agentic-job/issues/121)); staged
+mode is `apply-staged` ([workflow.md](workflow.md#trying-a-caller-without-writes)).
 
 ## Operations
 

@@ -207,6 +207,10 @@ on:
         description: Apply what a run stopped at a limit handed back, as a draft that says it is partial
         type: boolean
         default: false
+      apply-staged:
+        description: Show what apply would do in its summary and applied.json (`staged` true) without writing anything
+        type: boolean
+        default: false
       expect-check-refusal:
         description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
         type: boolean
@@ -326,6 +330,9 @@ on:
       apply-partial:
         description: The `apply-partial` input, `true` or `false`
         value: ${{ jobs.policy.outputs.apply-partial }}
+      apply-staged:
+        description: The `apply-staged` input, `true` or `false`
+        value: ${{ jobs.policy.outputs.apply-staged }}
       title-prefix:
         description: The `title-prefix` input
         value: ${{ jobs.policy.outputs.title-prefix }}
@@ -413,6 +420,7 @@ jobs:
       proposals-artifact: ${{ inputs.proposals-artifact }}
       apply-environment: ${{ inputs.apply-environment }}
       apply-partial: ${{ inputs.apply-partial }}
+      apply-staged: ${{ inputs.apply-staged }}
       title-prefix: ${{ inputs.title-prefix }}
       branch-prefix: ${{ inputs.branch-prefix }}
       artifact-prefix: ${{ inputs.artifact-prefix }}

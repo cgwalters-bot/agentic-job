@@ -55,7 +55,7 @@ egress allowlists ([#116](https://github.com/cgwalters-forge/agentic-job/issues/
 workflow-integrated run guards and organization bounds
 ([#118](https://github.com/cgwalters-forge/agentic-job/issues/118)), memory
 ([#119](https://github.com/cgwalters-forge/agentic-job/issues/119)), MCP integrations
-([#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), staged mode and
+([#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), a conclusion job and
 maintenance ([#121](https://github.com/cgwalters-forge/agentic-job/issues/121)).
 Per-author or per-window limits on admitted runs need a fresh design under
 [#118](https://github.com/cgwalters-forge/agentic-job/issues/118): the unwired
