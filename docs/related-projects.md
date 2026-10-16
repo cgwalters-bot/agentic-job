@@ -93,9 +93,10 @@ about sandboxing, review of each change and forge-native state in
 [discussion #4955](https://github.com/hivecommons/hive/discussions/4955).
 
 Hive is a scheduler and agentic-job is not, so the overlap is with what
-calls agentic-job. Its filter, classify and gate pipeline is worth a
-closer look as part of a coordinator agent:
-[agentic-job#2](https://github.com/cgwalters-forge/agentic-job/issues/2).
+calls agentic-job. [Hive's pipeline](hive.md) describes its filter,
+classify and gate stages, its queue-depth cadence and token tiers, and
+compares each idea with agent-board's coordinator
+([agentic-job#2](https://github.com/cgwalters-forge/agentic-job/issues/2)).
 
 ## devaipod
 
