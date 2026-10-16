@@ -289,6 +289,28 @@ jobs:
         env:
           AGENTIC_JOB_TEST_VIBE_PYTHON: ${{ runner.temp }}/vibe/bin/python3
 
+  # Real pinned Claude Code ACP adapter, driven by the session against a
+  # loopback stub of the Messages API: it must offer Read, Edit and Write
+  # in the session's working directory. Read-only job token; no model key,
+  # no managed settings and no privileged setup.
+  claude-acp:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just@1.58.0
+      - run: just claude-acp-test
+
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left
   # running takes a second user and root, which the tests of the rust job
@@ -1534,7 +1556,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

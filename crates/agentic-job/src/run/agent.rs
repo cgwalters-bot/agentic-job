@@ -103,7 +103,7 @@ pub const PLACEHOLDER_CREDENTIAL: &str = "praxis-substitute:anthropic";
 pub const RUN_TOKEN_HEADER: &str = "x-run-token";
 /// The switches that would send inference to another provider's
 /// endpoint, which `ANTHROPIC_BASE_URL` does not govern; pinned empty.
-const PROVIDER_SWITCHES: &[&str] = &[
+pub const PROVIDER_SWITCHES: &[&str] = &[
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",

@@ -17,7 +17,7 @@ const githubScript = id => ci.split(`      - id: ${id}\n`)[1].split(/\n {6}(?! )
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
-  full: ['lint', 'rust', 'vibe', 'corpus', 'static'],
+  full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static'],
   host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'confined'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],

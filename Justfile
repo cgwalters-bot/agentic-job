@@ -62,3 +62,18 @@ workflow-lint source:
     git -C "$checkout" fetch --quiet --depth 1 "${GITHUB_SERVER_URL:-https://github.com}/$repository" "$commit"
     git -C "$checkout" checkout --quiet --detach FETCH_HEAD
     {{ just_executable() }} --justfile "$checkout/lint/Justfile" --working-directory . check
+
+# The real Claude Code ACP adapter, at the version the reusable workflow
+# installs, against a loopback stub: it must offer its own Read, Edit and
+# Write (tests/claude.rs). Needs node, npm and the registry; no model key.
+# A host with Claude Code's managed settings fails it: they would send
+# the requests elsewhere.
+claude-acp-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    spec=$(grep -o -m1 '@agentclientprotocol/claude-agent-acp@[0-9][0-9.]*' .github/workflows/policy.yml)
+    prefix=$(mktemp -d)
+    trap 'rm -rf "$prefix"' EXIT
+    npm install --prefix "$prefix" --no-audit --no-fund --no-save -- "$spec"
+    AGENTIC_JOB_TEST_CLAUDE_ACP="$prefix/node_modules/@agentclientprotocol/claude-agent-acp" \
+        cargo test --locked --test claude -- --nocapture

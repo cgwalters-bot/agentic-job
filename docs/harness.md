@@ -27,6 +27,12 @@ its provider settings.
 It sends the task as one prompt and advertises no filesystem or
 terminal capability, so the agent uses its own tools inside the
 sandbox. Every message in both directions is recorded as it passes.
+That limits no tool: Claude Code still offers its own Read, Edit and
+Write, in the working directory the session names, which
+`just claude-acp-test` checks against the pinned adapter and a loopback
+stub. The run's prompt tells every agent to change files with its edit
+tools, and `shell_edits` in `summary.json` flags a change made without
+one call of them.
 
 It answers permission requests from a policy: allow, except a `git
 push` and an edit, delete or move outside the sandbox user's home. An

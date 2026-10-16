@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 
 use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
-use crate::session::digest::{Digest, Dir, cut};
+use crate::session::digest::{Digest, Dir, EDIT_KINDS, cut};
 use crate::session::{Outcome, Record, RunResult};
 
 pub const SCHEMA: &str = "agent-run-summary/v1";
@@ -319,6 +319,18 @@ pub fn summarize(inputs: &Inputs) -> Value {
         json!(inputs.result.is_some_and(|r| r.reminded)),
     );
     s.insert("notices".into(), json!(digest.notices));
+    // A change made without one finished call of an edit kind that did not fail
+    // (ACP's for Claude Code's Edit/Write, opencode's edit and Vibe's
+    // write_file) was made through the shell: slower, harder to review in
+    // the transcript, and a sign the agent's prompt or tools have drifted
+    // (#853). It is a hint, not a verdict: a run whose files a child agent
+    // or a code generator changed is flagged too.
+    let shell_edits = !measured.files.is_empty()
+        && !digest
+            .calls
+            .iter()
+            .any(|call| EDIT_KINDS.contains(&call.kind.as_str()) && call.error == Some(false));
+    s.insert("shell_edits".into(), json!(shell_edits));
     s.insert("limits".into(), json!(inputs.result.map(|r| &r.limits)));
     let denied: Vec<Value> = digest
         .denied
@@ -454,6 +466,14 @@ pub fn markdown(s: &Value) -> String {
         out.extend([
             String::new(),
             "The agent ended its turn without its required output and was reminded once."
+                .to_owned(),
+        ]);
+    }
+    if s["shell_edits"] == true {
+        out.extend([
+            String::new(),
+            "Warning: edited through the shell. The agent changed files without one call \
+             of its edit tools."
                 .to_owned(),
         ]);
     }
@@ -1135,5 +1155,52 @@ Redacted 1 string(s).
         assert_eq!(s["slowest"][0]["duration_s"], 3);
         assert_eq!(s["failures"][0]["kind"], "tool_error");
         assert!(markdown(&s).contains("(agent-reported, unverified)"));
+    }
+
+    /// A change with no finished call of an edit kind that did not fail is
+    /// flagged; a change made with one, or no change at all, is not.
+    #[test]
+    fn shell_edits_are_flagged() {
+        const WARNING: &str = "edited through the shell";
+        const OK: &str = "completed";
+        const FAILED: &str = "failed";
+        const PENDING: &str = "in_progress";
+        for (calls, files, flagged) in [
+            (&[("execute", OK)][..], &["a.rs"][..], true),
+            (&[], &["a.rs"], true),
+            (&[("read", OK), ("execute", OK)], &["a.rs"], true),
+            (&[("edit", FAILED), ("execute", OK)], &["a.rs"], true),
+            (&[("execute", OK), ("edit", PENDING)], &["a.rs"], true),
+            (&[("execute", OK), ("edit", OK)], &["a.rs"], false),
+            (&[("edit", FAILED), ("edit", OK)], &["a.rs"], false),
+            (&[("edit", OK)], &["a.rs", "b.rs"], false),
+            (&[("delete", OK)], &["a.rs"], false),
+            (&[("move", OK)], &["a.rs", "b.rs"], false),
+            (&[("execute", OK)], &[], false),
+            (&[], &[], false),
+        ] {
+            let mut records = Vec::from(initialize());
+            records.extend(calls.iter().enumerate().map(|(i, (kind, status))| {
+                rec(
+                    1.0,
+                    Dir::Recv,
+                    json!({"jsonrpc": "2.0", "method": "session/update",
+                    "params": {"sessionId": "s", "update": {"sessionUpdate": "tool_call",
+                    "toolCallId": format!("t{i}"), "title": "T", "kind": kind,
+                    "status": status}}}),
+                )
+            }));
+            let mut measured = measured();
+            measured.files = files.iter().map(|f| (*f).to_owned()).collect();
+            let s = summarize(&Inputs {
+                records: &records,
+                result: Some(&result(Outcome::Success, None, false)),
+                measured: &measured,
+                outcome: &json!({}),
+                usage: None,
+            });
+            assert_eq!(s["shell_edits"], flagged, "{calls:?} {files:?}");
+            assert_eq!(markdown(&s).contains(WARNING), flagged, "{calls:?}");
+        }
     }
 }

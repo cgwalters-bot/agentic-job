@@ -103,6 +103,15 @@ const MAX_RUN_ID_CHARS: usize = 64;
 /// A variable of this process named like this holds a credential, whose
 /// value is replaced wherever the run would log or publish it.
 const TOKEN_VAR_SUFFIX: &str = "_TOKEN";
+/// Told to the run's agent in its task, whatever instructions a
+/// configuration repository gives it: a run whose agent changed every file
+/// with `python3` heredocs had all its edit tools available and never used
+/// them (#853), and such edits are slow, easy to get wrong and hard to
+/// review in the transcript. Claude Code's Edit also refuses a file its
+/// Read has not seen.
+const EDIT_TOOLS: &str = "Change files with your edit and write tools, reading a file with your \
+     read tool first where the edit tool requires it, not with shell scripts, heredocs or sed; \
+     formatters, code generators and `git mv` are fine.";
 /// The file of the run's results that holds the condensed transcript.
 pub const CONDENSED_FILE: &str = "condensed.log";
 
@@ -618,7 +627,7 @@ impl Plan {
             )
         });
         let prompt = format!(
-            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{child}{context}{}",
+            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{EDIT_TOOLS}\n\n{child}{context}{}",
             cwd.display(),
             self.prompt(&checkout)?
         );

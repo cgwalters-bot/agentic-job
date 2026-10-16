@@ -12,7 +12,7 @@ use super::permission::{self, PATH_KEYS};
 /// Free text in log lines and the summary is cut to this many characters.
 pub const MAX_TEXT: usize = 200;
 /// Tool kinds whose calls the log shows as edits.
-const EDIT_KINDS: &[&str] = &["edit", "delete", "move"];
+pub const EDIT_KINDS: &[&str] = &["edit", "delete", "move"];
 /// The tools that start a subagent, lowercase: opencode's `task`, and
 /// Claude Code's `Task`, since renamed `Agent`.
 const TASK_TOOLS: &[&str] = &["task", "agent"];
