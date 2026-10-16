@@ -123,9 +123,11 @@ caller's `SAFE_OUTPUTS_PAT`). Otherwise the run stays green and status remains
 opt-in. The run summary also holds the reason. Reviews normally have no status
 comment, except for missing-data failures.
 
-Partial implement results also get the primary closing reference, but remain
-drafts: review must resolve the unfinished work before merging, or remove the
-closing line if merging only an incremental part.
+An agent whose change does only part of the issue starts a line of the PR
+body with `Part of #N` (or `Refs #N`), and apply then adds no closing line.
+Partial implement results without one still get the primary closing reference,
+but remain drafts: review must resolve the unfinished work before merging, or
+remove the closing line if merging only an incremental part.
 
 For a batched implement run, put the primary issue in `item` and name the
 small sibling issues and their requested work explicitly in `task`. The

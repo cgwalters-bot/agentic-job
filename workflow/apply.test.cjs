@@ -1724,6 +1724,22 @@ test('examples and comments cannot suppress the generated closing reference', ()
   assert.equal(refs([{ ...pull, body }])[0].body, `${body}\n\nCloses #64`);
 });
 
+test('a pull request that says it is only part of its issue does not close it', () => {
+  for (const line of ['Part of #64', 'Part of #64 (item 5)', 'Refs #64', 'Refs #64\tthe parser']) {
+    for (const body of [`${line}\n\nDid item 5; items 1 to 4 are left.`, `Did item 5.\r\n\r\n${line}\r\n`]) {
+      assert.equal(refs([{ ...pull, body }])[0].body, body, line);
+    }
+  }
+  // Only the run's own issue, on a line of its own, outside examples.
+  for (const body of ['Part of #640', 'Refs #6', 'Part of #65', 'See Part of #64', 'Refs owner/repo#64',
+    '```text\nPart of #64\n```', '<!-- Refs #64 -->']) {
+    assert.equal(refs([{ ...pull, body }])[0].body, `${body}\n\nCloses #64`, body);
+  }
+  // An item elsewhere is only referenced: its line is added as before.
+  assert.equal(refs([{ ...pull, body: 'Part of #64' }], '64', 'owner/tracker')[0].body,
+    'Part of #64\n\nRefs owner/tracker#64');
+});
+
 // A step's `if`, as Actions evaluates the few forms apply's steps use.
 function runs(name, contexts) {
   const condition = workflow.split(`- name: ${name}\n`)[1].split('\n')[0].match(/^ +if: \$\{\{ (.*) \}\}$/)?.[1];
@@ -1795,6 +1811,9 @@ test("an implement run's pull request ends with its item's closing line, through
   // Partial work says so first, and still closes its item.
   const partial = visible((await applyImplement('Half.', { exit: '3' })).sent);
   assert.match(partial, /^\*\*Partial work\.\*\* [^\n]*\n\nHalf\.\n\nCloses #64$/);
+  // Work the agent says is part of the issue references it, done or not (#974).
+  assert.equal(visible((await applyImplement('Part of #64 (item 5)\n\nItems 1 to 4 are left.')).sent),
+    'Part of #64 (item 5)\n\nItems 1 to 4 are left.');
 });
 
 test('a pull request of a caller that passes no issue links nothing, and the run says so', async () => {

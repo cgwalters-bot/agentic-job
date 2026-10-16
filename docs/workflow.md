@@ -1512,7 +1512,9 @@ The workflow's outputs are `exit` (the exit state of `run`),
 `pull-request`, `applied-artifact-id` and `result-url`: the URL of the pull
 request, or else of the first comment or issue apply made or found made, also
 in the run summary. With `issue` set to a number of the output repository, a
-new pull request gets `Closes #N` unless that line is already present;
+new pull request gets `Closes #N` unless that line is already present,
+or a line of the body starts with `Part of #N` or `Refs #N`: the agent's
+word that its change does only part of the issue, which merging must not close;
 an item in another repository gets `Refs OWNER/NAME#N` instead. Existing batch
 references are preserved, and fix runs leave the PR body alone. Without
 `issue` a pull request links nothing, and apply warns that it does: a

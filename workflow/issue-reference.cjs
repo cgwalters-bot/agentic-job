@@ -1,5 +1,6 @@
 // Only a standalone prose line counts: examples must not suppress the real link.
-function ensureReference(body, reference) {
+// A line ACCEPTS also takes for the reference is left as it is, and none added.
+function ensureReference(body, reference, accepts = () => false) {
   let fence = null;
   let comment = false;
   let found = false;
@@ -21,7 +22,7 @@ function ensureReference(body, reference) {
       comment = !line.slice(line.indexOf('<!--') + 4).includes('-->');
       continue;
     }
-    if (line === reference) found = true;
+    if (line === reference || accepts(line)) found = true;
   }
   if (found) return body;
   // A truncated example must not swallow the generated line either.
@@ -29,11 +30,18 @@ function ensureReference(body, reference) {
   return `${body}${close}\n\n${reference}`;
 }
 
+// An agent whose change does only part of its issue says so with a line of
+// its own that starts `Refs #N` or `Part of #N`: merging must not close the
+// issue with the rest of it left (#974), so no `Closes #N` is added. It can
+// only withhold the closing line, never add one, and a cross-repository item
+// is only referenced anyway.
 function linkIssues(output, itemRepo, outputRepo, issue) {
-  const reference = itemRepo.toLowerCase() === outputRepo.toLowerCase()
-    ? `Closes #${issue}` : `Refs ${itemRepo}#${issue}`;
+  const same = itemRepo.toLowerCase() === outputRepo.toLowerCase();
+  const reference = same ? `Closes #${issue}` : `Refs ${itemRepo}#${issue}`;
+  const accepts = line => same && [`Refs #${issue}`, `Part of #${issue}`].some(marker =>
+    line.startsWith(marker) && /^(?:\s|$)/.test(line.slice(marker.length)));
   for (const item of output.items) {
-    if (item.type === 'create_pull_request') item.body = ensureReference(item.body ?? '', reference);
+    if (item.type === 'create_pull_request') item.body = ensureReference(item.body ?? '', reference, accepts);
   }
   return output;
 }

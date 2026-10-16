@@ -314,7 +314,9 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
              message of the commit. Put no line in either that credits a tool or a model \
              (\"Generated with ...\", `Co-Authored-By:`): the run's own configuration adds the \
              commit's trailers. Without one, a pull request is made from the `summary` \
-             below.\n",
+             below. A run for issue N gets `Closes #N` added to the body; if your change \
+             does only part of the issue, start a line of the body with `Part of #N` \
+             instead, and merging leaves the issue open.\n",
         );
     }
     let checkpoint = asks_for_checkpoint(policy);
@@ -471,6 +473,7 @@ mod tests {
             "This run allows: `create_pull_request` (at most 1), `noop` (at most 1).",
             "{\"type\": \"create_pull_request\", \"title\": \"...\", \"body\": \"...\"}",
             "the message of the commit",
+            "start a line of the body with `Part of #N`",
             "`/home/agent/out/outcome.json`: your report",
             "one JSON object of at most 64 KiB",
             "\"stopped_early\": null}`",
