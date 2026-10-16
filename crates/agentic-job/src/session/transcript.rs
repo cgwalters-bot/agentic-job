@@ -59,6 +59,8 @@ pub(super) struct Tap {
     provider_error: Option<String>,
     /// How many compactions of the agent's context have finished.
     compacted: watch::Sender<u64>,
+    /// How many messages have come from the agent.
+    heard: watch::Sender<u64>,
 }
 
 struct Inner {
@@ -131,6 +133,7 @@ impl Tap {
             clients,
             provider_error,
             compacted: watch::Sender::new(0),
+            heard: watch::Sender::new(0),
         })
     }
 
@@ -162,6 +165,7 @@ impl Tap {
             set_stop(&self.stop, stop);
         }
         if dir == Dir::Recv {
+            self.heard.send_modify(|n| *n = n.wrapping_add(1));
             if msg["method"] == "session/update" {
                 let update = &msg["params"]["update"];
                 if inner
@@ -180,6 +184,17 @@ impl Tap {
     /// changes with each.
     pub fn compactions(&self) -> watch::Receiver<u64> {
         self.compacted.subscribe()
+    }
+
+    /// The count of messages from the agent, which changes with each.
+    pub fn heard(&self) -> watch::Receiver<u64> {
+        self.heard.subscribe()
+    }
+
+    /// Whether a tool call the agent started has not finished: a quiet
+    /// agent may be waiting for it rather than for its model.
+    pub fn tool_running(&self) -> bool {
+        self.inner().digest.tool_running()
     }
 
     /// A line of the agent's standard error.

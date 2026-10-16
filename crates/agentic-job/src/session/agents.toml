@@ -38,7 +38,12 @@ notices = true
 # No notices until mid-turn prompt behavior is established. Its log file,
 # which the run collects into the transcript, is turned on as its ACP
 # entrypoint does (capped by Vibe at 10 MiB).
+# Vibe has no read timeout on its model requests: one has waited six
+# minutes on idle connections before going on. A turn with nothing from it
+# for two minutes, and no tool call running, is cancelled and sent again
+# once on the same session (driver.rs).
 [vibe]
+stall-timeout = 120
 command = ["/opt/agentic-job/vibe/bin/python3", "-I", "-c", '''
 import sys
 from vibe.core.paths import LOG_FILE, bootstrap_vibe_home

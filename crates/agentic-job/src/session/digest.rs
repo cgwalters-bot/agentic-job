@@ -612,6 +612,12 @@ impl Digest {
         }
     }
 
+    /// Whether a tool call has started and not yet completed or failed.
+    /// One the agent never reports finished counts as running.
+    pub fn tool_running(&self) -> bool {
+        self.calls.iter().any(|call| call.end.is_none())
+    }
+
     /// The first line of the agent's last message in the current turn,
     /// unless a tool call came after it: what the turn ended with.
     pub fn last_message(&self) -> Option<&str> {

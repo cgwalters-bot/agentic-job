@@ -114,9 +114,12 @@ pub const LABEL_REMINDER: &str = "reminder";
 /// The label of the prompt that restates the task after a compaction of
 /// the agent's context (`session::Restate`), queued like a notice.
 pub const LABEL_COMPACTION: &str = "compaction";
+/// The label of the task's turn sent again after it stalled
+/// (`AgentSpec::stall_timeout`).
+pub const LABEL_STALLED: &str = "stalled";
 /// The labels of the session's prompts that start a turn of their own,
 /// rather than being queued behind the running one.
-pub const TURN_LABELS: [&str; 2] = [LABEL_HAND_BACK, LABEL_REMINDER];
+pub const TURN_LABELS: [&str; 3] = [LABEL_HAND_BACK, LABEL_REMINDER, LABEL_STALLED];
 
 /// Why the session was stopped.
 #[derive(Debug, Clone, PartialEq)]

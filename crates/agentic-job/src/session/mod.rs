@@ -47,7 +47,8 @@ pub use agents::AgentSpec;
 pub use budget::Limits;
 pub use clients::Clients;
 pub use driver::{
-    HttpMcp, Options, Outcome, OutputCheck, RESULT_FILE, RESULT_SCHEMA, Restate, RunResult, run,
+    HttpMcp, Options, Outcome, OutputCheck, RESULT_FILE, RESULT_SCHEMA, Restate, RunResult,
+    STALLED, run,
 };
 pub use permission::Policy;
 pub use process::Launch;

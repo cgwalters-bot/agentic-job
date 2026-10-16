@@ -304,6 +304,19 @@ error as the reason; if it doesn't, the run fails with the error. A
 limit the run reaches meanwhile stops it as any other time, and a bridge
 client's prompts meanwhile are refused.
 
+Nor is a task's turn that stalls left to the timeout. Vibe has no read
+timeout on its model requests, and one waited six minutes on idle
+connections before going on (#983). An agent entry with
+`stall-timeout` (seconds; Vibe's is 120, no other has one) has a turn in
+which nothing comes from the agent for that long, with no tool call
+running, cancelled and the task sent again once on the same session,
+labelled `stalled`, behind a note that the last turn stalled. A second
+stall, or a cancel the agent does not answer, fails the run with a
+message that starts `the agent stalled`, and `summary.json` files it as
+a `stall` failure rather than `agent_exit`. `stalls` and `stall_retries`
+in `harness.json` and `summary.json` count both. Only the task's turn is
+watched; the hand-back, reminder and client turns are not.
+
 Nor is a task's turn that ends well without the output the run requires.
 A run whose policy allows any output requires one: a request in
 `out/safe-outputs.jsonl`, a replacement, or, where the policy carries a

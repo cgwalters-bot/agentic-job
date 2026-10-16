@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
 use crate::session::digest::{Digest, Dir, EDIT_KINDS, cut};
-use crate::session::{Outcome, Record, RunResult};
+use crate::session::{Outcome, Record, RunResult, STALLED};
 
 pub const SCHEMA: &str = "agent-run-summary/v1";
 pub const SUMMARY_FILE: &str = "summary.json";
@@ -216,6 +216,11 @@ pub fn summarize(inputs: &Inputs) -> Value {
         Outcome::Budget => {
             failures.push(json!({"kind": "budget", "message": why("the agent went over budget")}));
         }
+        // A stalled turn is the agent's model request hanging, not the
+        // agent's own mistake: a retry may do.
+        Outcome::Failure if inputs.result.is_some_and(RunResult::failed_stalled) => {
+            failures.push(json!({"kind": "stall", "message": why(STALLED)}));
+        }
         Outcome::Failure | Outcome::Cancelled => {
             failures.push(json!({"kind": "agent_exit", "message": why("the agent failed")}));
         }
@@ -326,6 +331,15 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert(
         "reminded".into(),
         json!(inputs.result.is_some_and(|r| r.reminded)),
+    );
+    // How often the task's turn stalled, and was sent again after one.
+    s.insert(
+        "stalls".into(),
+        json!(inputs.result.map_or(0, |r| r.stalls)),
+    );
+    s.insert(
+        "stall_retries".into(),
+        json!(inputs.result.map_or(0, |r| r.stall_retries)),
     );
     s.insert("notices".into(), json!(digest.notices));
     // The links of the updates of the run's item the agent was sent.
@@ -493,6 +507,16 @@ pub fn markdown(s: &Value) -> String {
             String::new(),
             "The agent ended its turn without its required output and was reminded once."
                 .to_owned(),
+        ]);
+    }
+    if let Some(stalls) = s["stalls"].as_u64().filter(|n| *n > 0) {
+        out.extend([
+            String::new(),
+            format!(
+                "The agent's turn stalled {stalls} time(s), with nothing from it for its stall \
+                 timeout; the task was sent again {} time(s).",
+                s["stall_retries"].as_u64().unwrap_or(0)
+            ),
         ]);
     }
     if let Some(updates) = s["updates"].as_array().filter(|u| !u.is_empty()) {
@@ -731,6 +755,8 @@ mod tests {
             },
             handed_back,
             reminded: false,
+            stalls: 0,
+            stall_retries: 0,
         }
     }
 
@@ -988,6 +1014,25 @@ Redacted 1 string(s).
                 false,
                 Some(("agent_exit", "refusal")),
             ),
+            (
+                RunResult {
+                    stalls: 2,
+                    stall_retries: 1,
+                    ..result(Outcome::Failure, Some("the agent stalled: twice"), false)
+                },
+                false,
+                Some(("stall", "the agent stalled: twice")),
+            ),
+            // A failure after a stall that a retry got past is the agent's.
+            (
+                RunResult {
+                    stalls: 1,
+                    stall_retries: 1,
+                    ..result(Outcome::Failure, Some("the agent stopped: refusal"), false)
+                },
+                false,
+                Some(("agent_exit", "the agent stopped: refusal")),
+            ),
         ];
         for (result, stopped_early, failure) in cases {
             let s = summarize(&Inputs {
@@ -1006,6 +1051,23 @@ Redacted 1 string(s).
             assert_eq!(s["stopped_early"], stopped_early, "{name}");
             assert_eq!(s["handed_back"], result.handed_back, "{name}");
             assert_eq!(s["limits"]["timeout_s"], 600, "{name}");
+            assert_eq!(
+                (s["stalls"].as_u64(), s["stall_retries"].as_u64()),
+                (
+                    Some(result.stalls.into()),
+                    Some(result.stall_retries.into())
+                ),
+                "{name}"
+            );
+            assert_eq!(
+                markdown(&s).contains(&format!(
+                    "stalled {} time(s), with nothing from it for its stall timeout; the task \
+                     was sent again {} time(s).",
+                    result.stalls, result.stall_retries
+                )),
+                result.stalls > 0,
+                "{name}"
+            );
             let failures: Vec<_> = s["failures"]
                 .as_array()
                 .unwrap()

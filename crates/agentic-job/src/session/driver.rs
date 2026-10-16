@@ -35,6 +35,14 @@
 //! an agent that takes it and otherwise as a notice is; never as a prompt
 //! that would end the turn, and never to start one.
 //!
+//! An agent whose entry has a `stall-timeout` (`AgentSpec::stall_timeout`)
+//! and sends nothing for that long during the task's turn, with no tool
+//! call of its running, is taken to be stuck in a model request that will
+//! not end soon: Vibe has waited minutes on idle connections, with no
+//! timeout of its own, and runs ended there on the job's timeout. The turn
+//! is cancelled and the task sent again, once, on the same session, so the
+//! work so far is kept; a second stall fails the run, saying so (`Stalls`).
+//!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
 //! agent runs in a login session of that user's, where a signal to the
@@ -43,7 +51,7 @@
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,7 +61,7 @@ use agent_client_protocol::schema::v1::{
     McpServerHttp, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionConfigKind, SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest,
-    TextContent,
+    StopReason, TextContent,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Dispatch, Handled, Lines, UntypedMessage,
@@ -68,8 +76,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::agents::AgentSpec;
 use super::bridge::{Bridge, FromClient};
 use super::budget::{
-    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_REMINDER, Limits, Signal, Stop, Usage,
-    hand_back_text,
+    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_REMINDER, LABEL_STALLED, Limits, Signal, Stop,
+    Usage, hand_back_text,
 };
 use super::clients::Clients;
 use super::digest::{self, Dir};
@@ -112,6 +120,16 @@ const REMINDER: &str = "You ended your turn without the output this run requires
                         hand back, say why in a request the brief allows.";
 const NO_OUTPUT: &str = "the agent ended its turn without the output the run requires, even \
                          after a reminder";
+/// What a run that failed on a stalled turn says first, which tells it
+/// from a run whose agent failed by itself.
+pub const STALLED: &str = "the agent stalled";
+/// What the agent is told ahead of its task, sent again after its turn
+/// stalled.
+const STALLED_NOTE: &str = "Your previous turn was cancelled because nothing came from you for \
+                            too long, as when a model request hangs. The task follows again. \
+                            What you did so far is still in this session and the working \
+                            directory: check where you were and carry on from there, without \
+                            redoing finished work.";
 
 /// Why the agent has not left the output its run requires; `None` when done. It runs
 /// commands (as the sandbox user), so it is called off the runtime, and
@@ -176,6 +194,12 @@ pub struct RunResult {
     /// requires, and was reminded once.
     #[serde(default)]
     pub reminded: bool,
+    /// How many times the task's turn stalled (`AgentSpec::stall_timeout`),
+    /// and how many times it was sent again after one.
+    #[serde(default)]
+    pub stalls: u32,
+    #[serde(default)]
+    pub stall_retries: u32,
 }
 
 impl RunResult {
@@ -209,7 +233,19 @@ impl RunResult {
             limits,
             handed_back: false,
             reminded: false,
+            stalls: 0,
+            stall_retries: 0,
         }
+    }
+
+    /// Whether the run failed because its task's turn stalled, rather than
+    /// by anything the agent did.
+    pub fn failed_stalled(&self) -> bool {
+        self.result == Outcome::Failure
+            && self
+                .message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(STALLED))
     }
 }
 
@@ -445,11 +481,13 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         notices: spec.notices,
         steering: spec.steering,
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
+        stall: spec.stall_timeout.map(Duration::from_secs),
         output,
         restate: restate.filter(|_| spec.notices),
         mcp_servers: &mcp_servers,
     };
     let started = chrono::Utc::now();
+    let stalls = Arc::new(Stalls::default());
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
     let item_watcher = watch.map(|watch| {
         let nudges = nudge_tx.clone();
@@ -481,6 +519,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
                 session_id,
                 after_error: Arc::default(),
                 conversation,
+                stalls: stalls.clone(),
             };
             let (ended, exited) = drive(
                 &mut agent,
@@ -565,6 +604,8 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         // A transcript that couldn't be written fails the run all the same.
         handed_back: handed_back && outcome != Outcome::Failure,
         reminded,
+        stalls: stalls.seen.load(Ordering::Relaxed),
+        stall_retries: stalls.retried.load(Ordering::Relaxed),
     };
     let path = out.join(RESULT_FILE);
     std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
@@ -596,6 +637,8 @@ struct Task<'a> {
     /// How long the agent gets to hand back after its turn ended on an
     /// error: as long as near a limit.
     hand_back_window: Duration,
+    /// `AgentSpec::stall_timeout`.
+    stall: Option<Duration>,
     output: Option<OutputCheck>,
     /// `Options::restate`, for an agent that takes notices.
     restate: Option<Restate>,
@@ -688,12 +731,19 @@ async fn drive(
     // last words say more than the request that happened to be waiting.
     // Not so for an agent that answered its reminder: the session failed
     // it, and it exits only because its standard input closed.
+    // Nor for a stalled one, which is alive and only stuck.
     let answered_reminder = ended.reminded && ended.stop_reason.is_some();
+    let stalled = ended
+        .message
+        .as_deref()
+        .is_some_and(|m| m.starts_with(STALLED));
     let exited = match ended.outcome {
-        Outcome::Failure if !answered_reminder => tokio::time::timeout(EXIT_GRACE, agent.wait())
-            .await
-            .ok()
-            .and_then(Result::ok),
+        Outcome::Failure if !answered_reminder && !stalled => {
+            tokio::time::timeout(EXIT_GRACE, agent.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
+        }
         _ => None,
     };
     (ended, exited)
@@ -817,6 +867,15 @@ struct Signals {
     /// back after it (`after_error`).
     after_error: Arc<Mutex<Option<String>>>,
     conversation: Option<Conversation>,
+    stalls: Arc<Stalls>,
+}
+
+/// The stalls of the task's turn, for the run's result.
+#[derive(Default)]
+struct Stalls {
+    seen: AtomicU32,
+    /// The times the task was sent again after one: no more than once.
+    retried: AtomicU32,
 }
 
 /// What the session goes on to after the task's turn, with a bridge.
@@ -863,6 +922,35 @@ fn notice_prompt(sid: &SessionId, label: &str, text: String) -> PromptRequest {
     .meta(meta(json!({"notice": label})))
 }
 
+/// The task's prompt sent again after its turn stalled, with a note that
+/// it did ahead of it.
+fn stalled_prompt(sid: &SessionId, task: &str) -> PromptRequest {
+    PromptRequest::new(
+        sid.clone(),
+        vec![
+            ContentBlock::Text(TextContent::new(STALLED_NOTE)),
+            ContentBlock::Text(TextContent::new(task.to_owned())),
+        ],
+    )
+    .meta(meta(json!({"notice": LABEL_STALLED})))
+}
+
+/// Waits until UNTIL, or forever without one.
+async fn quiet(until: Option<tokio::time::Instant>) {
+    match until {
+        Some(until) => tokio::time::sleep_until(until).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// What ends the task's turn as the session waits on it.
+enum Next<R> {
+    /// The turn's answer.
+    Answered(R),
+    /// Near a limit: the agent is to hand back.
+    HandBack(Stop, String, Duration),
+}
+
 /// Asks the agent to stop its turn, and gives it a moment to answer the
 /// prompt (with stopReason "cancelled"); permission requests are cancelled
 /// meanwhile. The turn's answer, if it came.
@@ -892,6 +980,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         session_id,
         after_error: pending_error,
         mut conversation,
+        stalls,
     } = signals;
     let sid = tokio::select! {
         r = setup(&cx, task) => match r {
@@ -930,46 +1019,17 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         notices: task.notices,
         steering: task.steering,
     };
-    let (why, text, window) = loop {
+    // Until when the agent may send nothing before its turn is taken for
+    // stalled; none without a stall timeout.
+    let mut heard = tap.heard();
+    let quiet_for = |limit: Duration| tokio::time::Instant::now() + limit;
+    let mut quiet_until = task.stall.map(quiet_for);
+    let next = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
             // which would start another.
             biased;
-            // A task run ends with its turn; with a bridge, a turn that
-            // ended well, or that the client cancelled, is followed by the
-            // client's.
-            r = &mut response => {
-                cancelling.store(false, Ordering::Relaxed);
-                let ended = prompt_result(r, tap);
-                // A turn the client cancelled is the client's to go on from.
-                if ended.errored && !client_cancelled {
-                    // The session ends with the hand-back: a client's
-                    // prompt meanwhile is refused, not left unanswered.
-                    if let Some(talk) = conversation.take() {
-                        tokio::spawn(refuse_prompts(talk));
-                    }
-                    *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = ended.message.clone();
-                    return after_error(&link, &mut stop, ended, task.hand_back_window).await;
-                }
-                let goes_on = ended.outcome == Outcome::Success
-                    || (client_cancelled && ended.outcome == Outcome::Cancelled);
-                let Some(talk) = conversation.take().filter(|_| goes_on) else {
-                    // A conversation's client sees for itself what the
-                    // agent left; a task run's turn is the run.
-                    return match &task.output {
-                        Some(check) if ended.outcome == Outcome::Success => {
-                            remind(&link, &mut stop, &mut nudges, check, ended).await
-                        }
-                        _ => ended,
-                    };
-                };
-                return match converse(&link, &mut stop, &mut nudges, talk).await {
-                    Talked::Ended(ended) => ended,
-                    Talked::HandBack { why, text, window } => {
-                        hand_back(&link, &mut stop, &why, text, window).await
-                    }
-                };
-            }
+            r = &mut response => break Next::Answered(r),
             why = wait_stop(&mut stop) => {
                 return stop_turn(&cx, tap, &sid, &cancelling, why, response.as_mut()).await;
             }
@@ -987,7 +1047,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                         let _ = answer.await;
                     });
                 }
-                Nudge::HandBack { why, text, window } => break (why, text, window),
+                Nudge::HandBack { why, text, window } => break Next::HandBack(why, text, window),
                 Nudge::Item(seen) => from_item(&link, seen, true),
             },
             // What to restate is read off this loop, which goes on
@@ -1028,6 +1088,77 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     conversation = None;
                 }
             },
+            Ok(()) = heard.changed(), if quiet_until.is_some() => {
+                quiet_until = task.stall.map(quiet_for);
+            }
+            () = quiet(quiet_until) => {
+                let Some(limit) = task.stall else { continue };
+                quiet_until = Some(quiet_for(limit));
+                // A tool may run for longer than the limit, and only the
+                // model is waited for here; nor is a turn the client is
+                // cancelling taken for stalled.
+                if tap.tool_running() || cancelling.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let first = stalls.seen.fetch_add(1, Ordering::Relaxed) == 0;
+                let silent = format!("{STALLED}: nothing from it for {}s in its turn", limit.as_secs());
+                tap.log(&[format!(
+                    "⚠ {silent}: {}",
+                    if first { "cancelling it to send the task again" } else { "cancelling it" }
+                )]);
+                let answer = cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await;
+                match answer {
+                    // The turn ended by itself as the cancel went: that
+                    // answer stands.
+                    Some(r) if !matches!(&r, Ok(resp) if resp.stop_reason == StopReason::Cancelled) => {
+                        break Next::Answered(r);
+                    }
+                    Some(_) if first => {
+                        stalls.retried.fetch_add(1, Ordering::Relaxed);
+                        response.set(cx.send_request(stalled_prompt(&sid, task.prompt)).block_task());
+                    }
+                    Some(_) => return Ended::failure(format!("{silent}, and again after the task was sent again")),
+                    None => return Ended::failure(format!("{silent}; {NO_CANCEL_ANSWER}")),
+                }
+            }
+        }
+    };
+    let (why, text, window) = match next {
+        Next::HandBack(why, text, window) => (why, text, window),
+        // A task run ends with its turn; with a bridge, a turn that
+        // ended well, or that the client cancelled, is followed by the
+        // client's.
+        Next::Answered(r) => {
+            cancelling.store(false, Ordering::Relaxed);
+            let ended = prompt_result(r, tap);
+            // A turn the client cancelled is the client's to go on from.
+            if ended.errored && !client_cancelled {
+                // The session ends with the hand-back: a client's
+                // prompt meanwhile is refused, not left unanswered.
+                if let Some(talk) = conversation.take() {
+                    tokio::spawn(refuse_prompts(talk));
+                }
+                *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = ended.message.clone();
+                return after_error(&link, &mut stop, ended, task.hand_back_window).await;
+            }
+            let goes_on = ended.outcome == Outcome::Success
+                || (client_cancelled && ended.outcome == Outcome::Cancelled);
+            let Some(talk) = conversation.take().filter(|_| goes_on) else {
+                // A conversation's client sees for itself what the
+                // agent left; a task run's turn is the run.
+                return match &task.output {
+                    Some(check) if ended.outcome == Outcome::Success => {
+                        remind(&link, &mut stop, &mut nudges, check, ended).await
+                    }
+                    _ => ended,
+                };
+            };
+            return match converse(&link, &mut stop, &mut nudges, talk).await {
+                Talked::Ended(ended) => ended,
+                Talked::HandBack { why, text, window } => {
+                    hand_back(&link, &mut stop, &why, text, window).await
+                }
+            };
         }
     };
 

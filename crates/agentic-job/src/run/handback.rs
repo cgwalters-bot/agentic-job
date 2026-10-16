@@ -1488,6 +1488,8 @@ mod tests {
             },
             handed_back: false,
             reminded: false,
+            stalls: 0,
+            stall_retries: 0,
         }
     }
 

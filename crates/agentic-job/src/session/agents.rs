@@ -16,6 +16,8 @@
 //! session config option (ACP's `session/set_config_option`). One with
 //! `notices = true` is sent the budget's notices during its turn, and one
 //! with `steering = true` the run's item's updates by `_session/steering`.
+//! One with `stall-timeout` (seconds) has a turn in which it says nothing
+//! for that long cancelled and sent again, once (`driver`).
 
 use std::collections::BTreeMap;
 
@@ -26,6 +28,8 @@ use serde::Deserialize;
 const BUILTIN: &str = include_str!("agents.toml");
 /// Sets the wrapped command's environment: a wrapper passes none on.
 const ENV: &str = "env";
+/// The longest `stall-timeout`, in seconds: a day, longer than any run.
+const MAX_STALL_TIMEOUT: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -58,6 +62,12 @@ pub struct AgentSpec {
     /// One that answers such a turn with an error, as opencode and Vibe
     /// do, needs none.
     pub provider_error: Option<String>,
+    /// How long, in seconds, the agent may send nothing during its task's
+    /// turn, with no tool call running, before the session takes the turn
+    /// for stalled: for an agent whose model request can hang on a
+    /// connection that went quiet, with no read timeout of its own (Vibe
+    /// 2.26.1 waited six minutes on one). None to wait for the turn.
+    pub stall_timeout: Option<u64>,
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -85,6 +95,12 @@ pub fn parse(text: &str, name: &str) -> Result<AgentSpec> {
         .is_some_and(|p| p.trim().is_empty())
     {
         bail!("agent '{name}' has an empty provider-error");
+    }
+    // Zero would take every turn for stalled before it began.
+    if let Some(secs) = spec.stall_timeout
+        && !(1..=MAX_STALL_TIMEOUT).contains(&secs)
+    {
+        bail!("agent '{name}' has a stall-timeout of {secs}s, not 1 to {MAX_STALL_TIMEOUT}");
     }
     for var in spec.env.keys().chain(&spec.model_env) {
         if !valid_env_name(var) {
@@ -219,6 +235,9 @@ command = ["opencode", "acp"]
             assert_eq!(spec.steering, steering, "{agent}");
             // Only Claude Code answers a turn it gave up on as done.
             assert_eq!(spec.provider_error.is_some(), agent == "claude", "{agent}");
+            // Only Vibe is known to stall in a model request.
+            let stall = (agent == "vibe").then_some(120);
+            assert_eq!(spec.stall_timeout, stall, "{agent}");
         }
         assert!(!parse(REGISTRY, "opencode").unwrap().notices);
     }
@@ -272,6 +291,21 @@ command = ["opencode", "acp"]
                 "[a]\ncommand = [\"x\"]\nprovider-error = \" \"",
                 "a",
                 "empty provider-error",
+            ),
+            (
+                "[a]\ncommand = [\"x\"]\nstall-timeout = 0",
+                "a",
+                "stall-timeout of 0s",
+            ),
+            (
+                "[a]\ncommand = [\"x\"]\nstall-timeout = 86401",
+                "a",
+                "stall-timeout of 86401s",
+            ),
+            (
+                "[a]\ncommand = [\"x\"]\nstall-timeout = -1",
+                "a",
+                "invalid value",
             ),
         ];
         for (text, name, want) in cases {

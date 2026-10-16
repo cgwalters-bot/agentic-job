@@ -95,6 +95,8 @@ struct Setup<'a> {
     /// What the session tells the agent after a compaction; none for
     /// nothing.
     restate: Option<&'a str>,
+    /// The registry's `stall-timeout` for the agent, in seconds.
+    stall_s: Option<u64>,
 }
 
 /// What a test's client does on its end of the connection.
@@ -343,6 +345,9 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     );
     if let Some(prefix) = setup.provider_error {
         registry.push_str(&format!("provider-error = {}\n", json!(prefix)));
+    }
+    if let Some(secs) = setup.stall_s {
+        registry.push_str(&format!("stall-timeout = {secs}\n"));
     }
     let log = Captured::default();
     // As in run's registration, accounting starts at a known count.
@@ -1664,6 +1669,93 @@ fn a_turn_that_ends_without_the_required_output() {
         if c.status != 3 {
             assert_eq!(r.result["stop_reason"], "end_turn", "{name}");
         }
+        assert!(
+            r.elapsed < Duration::from_secs(30),
+            "{name}: took {:?}",
+            r.elapsed
+        );
+    }
+}
+
+/// A task's turn in which the agent sends nothing for its stall timeout,
+/// with no tool call running, is cancelled and the task sent again once on
+/// the same session; a second stall fails the run, saying so. A quiet tool
+/// call is no stall.
+#[test]
+fn a_stalled_turn_is_sent_again_once() {
+    const STALL: &str = r#"[{"say": "Working."}, {"sleep": 60}]"#;
+    const DONE: &str = r#"[{"say": "Done."}]"#;
+    const QUIET_TOOL: &str =
+        r#"[{"execute": {"title": "Bash", "command": "sleep 3"}}, {"say": "Done."}]"#;
+    // (name, first turn, later turns, result, the message's start, stalls, retries)
+    let cases = [
+        ("one stall, then done", STALL, DONE, "success", None, 1, 1),
+        (
+            "two stalls",
+            STALL,
+            STALL,
+            "failure",
+            Some("the agent stalled: nothing from it for 1s in its turn, and again"),
+            2,
+            1,
+        ),
+        ("a quiet tool call", QUIET_TOOL, DONE, "success", None, 0, 0),
+    ];
+    for (name, script, later, result, message, stalls, retries) in cases {
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                files: &[("script.json", script), ("later.json", later)],
+                timeout_s: 60,
+                stall_s: Some(1),
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, u8::from(result != "success"), result);
+        let said = r.result["message"].as_str();
+        match message {
+            Some(start) => assert!(
+                said.is_some_and(|m| m.starts_with(start)),
+                "{name}: {said:?}"
+            ),
+            None => assert_eq!(said, None, "{name}"),
+        }
+        assert_eq!(
+            (
+                r.result["stalls"].as_u64(),
+                r.result["stall_retries"].as_u64()
+            ),
+            (Some(stalls), Some(retries)),
+            "{name}"
+        );
+        // The task again, behind a note, on the agent's one session.
+        let resent: Vec<&Value> = r
+            .records
+            .iter()
+            .filter(|record| {
+                record["dir"] == "send"
+                    && record["msg"]["params"]["_meta"][session::permission::META_KEY]["notice"]
+                        == "stalled"
+            })
+            .collect();
+        assert_eq!(resent.len() as u64, retries, "{name}");
+        for record in resent {
+            let params = &record["msg"]["params"];
+            assert_eq!(params["sessionId"], "fake-session", "{name}");
+            assert_eq!(params["prompt"][1]["text"], "Do the fake task.\n", "{name}");
+        }
+        let sessions = r
+            .records
+            .iter()
+            .filter(|record| record["msg"]["method"] == "session/new")
+            .count();
+        assert_eq!(sessions, 1, "{name}");
+        assert_eq!(
+            r.log.contains("the agent stalled: nothing from it for 1s"),
+            stalls > 0,
+            "{name}: {}",
+            r.log
+        );
         assert!(
             r.elapsed < Duration::from_secs(30),
             "{name}: took {:?}",
