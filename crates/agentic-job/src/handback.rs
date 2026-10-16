@@ -1,16 +1,27 @@
 //! Producer-side convenience only: trusted capture and check still enforce policy.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Subcommand;
 
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
 use crate::check::replacement::Replacement;
+use crate::check::{self, OUTPUTS_FILE};
+use crate::config;
 use crate::exit::Exit;
 use crate::files::ReadError;
+use crate::policy::Policy;
 use crate::redact;
-use crate::run::handback::{AGENT_OUTCOME, AGENT_OUTPUTS, REPLACEMENT_PATH};
+use crate::run::brief;
+use crate::run::clone::Checkout;
+use crate::run::enter::Unconfined;
+use crate::run::handback::{
+    self as capture, AGENT_OUTCOME, AGENT_OUTPUTS, MAX_OUTCOME_BYTES, REPLACEMENT_PATH,
+};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -28,6 +39,11 @@ pub enum Command {
         #[arg(long, default_value = "HEAD")]
         base: String,
     },
+    /// Check what this run would hand back now, as the run checks it after
+    /// the session: name each problem and how to fix it
+    Check,
+    /// Print this run's rules for handing back, in full
+    Guide,
 }
 
 impl Command {
@@ -56,9 +72,399 @@ impl Command {
                 }
                 eprintln!("No secret-shaped string in the change or in {}", OUT_DIR);
             }
+            Self::Check => {
+                let home = std::env::var_os("HOME").context("HOME is not set")?;
+                let home = Path::new(&home);
+                let report = validate(home, &RunFile::read(home)?)?;
+                for note in &report.notes {
+                    println!("note: {note}");
+                }
+                for problem in &report.problems {
+                    println!("{problem}");
+                }
+                if !report.problems.is_empty() {
+                    eprintln!(
+                        "{} problem(s): the run refuses this hand-back, or loses part of it. \
+                         Fix each, then run `agentic-job handback check` again.",
+                        report.problems.len()
+                    );
+                    return Ok(Exit::Failure);
+                }
+                eprintln!("No problem found in what this run would hand back now.");
+            }
+            Self::Guide => {
+                let home = std::env::var_os("HOME").context("HOME is not set")?;
+                let home = Path::new(&home);
+                let run = RunFile::read(home)?;
+                print!(
+                    "{}",
+                    brief::guide(&run.policy, home, &run.checkout, &run.base)
+                );
+            }
         }
         Ok(Exit::Success)
     }
+}
+
+/// Where `run` tells `handback check` and `handback guide`, under the
+/// agent's home, what they need of the run.
+pub const RUN_FILE: &str = ".config/agentic-job/handback.json";
+
+/// Far bigger than a run file: a policy is a few KiB.
+const MAX_RUN_FILE_BYTES: u64 = 1 << 20;
+
+/// What [`RUN_FILE`] holds. The agent may change it, and so mislead only
+/// itself: `check` reads the policy the run's policy job printed, never
+/// this copy.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunFile {
+    policy: Policy,
+    checkout: PathBuf,
+    /// The commit the change is against.
+    base: String,
+    run_id: String,
+    commit: config::Commit,
+}
+
+impl RunFile {
+    fn read(home: &Path) -> Result<Self> {
+        let path = home.join(RUN_FILE);
+        let bytes = crate::files::read_regular(&path, MAX_RUN_FILE_BYTES).map_err(|err| {
+            anyhow::anyhow!(
+                "{} {err}: `agentic-job run` writes it for its agent, and only there do \
+                 `handback check` and `handback guide` work",
+                path.display()
+            )
+        })?;
+        serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))
+    }
+}
+
+/// The content of [`RUN_FILE`] for the run of POLICY that started its
+/// agent in CHECKOUT. Its clone URLs are no business of the agent's, and
+/// nothing of the check reads them.
+pub fn run_file(
+    policy: &Policy,
+    checkout: &Checkout,
+    run_id: &str,
+    commit: &config::Commit,
+) -> Result<String> {
+    let policy = Policy {
+        clone_url: String::new(),
+        context: Vec::new(),
+        ..policy.clone()
+    };
+    let text = serde_json::to_string(&json!({
+        "policy": policy,
+        "checkout": checkout.dir,
+        "base": checkout.base_commit,
+        "run_id": run_id,
+        "commit": commit,
+    }))?;
+    Ok(text + "\n")
+}
+
+/// Something in the hand-back the run would refuse or lose.
+#[derive(Debug, PartialEq, Eq)]
+struct Problem {
+    /// The file, line or request it is in.
+    at: String,
+    what: String,
+    fix: String,
+}
+
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}; {}", self.at, self.what, self.fix)
+    }
+}
+
+#[derive(Debug, Default)]
+struct Report {
+    problems: Vec<Problem>,
+    /// What is not a problem but changes what is handed back.
+    notes: Vec<String>,
+}
+
+/// How to fix what `check` refuses, by a phrase of its reason (in
+/// `check` and `check::patch`). A reason none of them names is pointed at
+/// the guide.
+const FIXES: &[(&str, &str)] = &[
+    (
+        "protected",
+        "restore each as it was (`git checkout HEAD -- PATH`, or delete it if you added it), \
+         and say in your report what you left out",
+    ),
+    (
+        "files, over",
+        "change fewer files: restore those the task does not need",
+    ),
+    (
+        "mode change",
+        "restore the file's mode (`chmod`), and add no executable",
+    ),
+    (
+        "special file",
+        "make it a regular file that is not executable, or restore it",
+    ),
+    (
+        "secret-shaped",
+        "remove it, or build it at run time from parts that do not match",
+    ),
+    (
+        "checkpoint",
+        "write at most one checkpoint, exactly as `agentic-job handback guide` shows",
+    ),
+    (
+        "which the policy does not allow",
+        "remove that request: only the types the brief lists are allowed",
+    ),
+    (
+        "outputs of type",
+        "remove requests of that type to its limit",
+    ),
+    ("over max_outputs", "make fewer requests in all"),
+];
+const GUIDE_FIX: &str = "fix what it names: `agentic-job handback guide` gives the rule";
+
+fn fix_for(reason: &str) -> &'static str {
+    FIXES
+        .iter()
+        .find(|(phrase, _)| reason.contains(phrase))
+        .map_or(GUIDE_FIX, |(_, fix)| fix)
+}
+
+/// What the run would refuse or lose of what the agent of RUN, whose
+/// home is HOME, would hand back now. It is the run's own code: `run`'s
+/// `collect`, on a copy of the checkout, since it commits there, then
+/// `check`'s `check_outputs`, then the scan of the final gate's patterns.
+/// gh-aw's collector is not here to validate each request's fields
+/// (docs/safe-outputs.md): the requests go to `check` as given, so a
+/// field the collector refuses is found only after the session.
+fn validate(home: &Path, run: &RunFile) -> Result<Report> {
+    let mut report = Report::default();
+    let policy = &run.policy;
+    let outcome = home.join(AGENT_OUTCOME);
+    let outcome_fix = "write one JSON object: `{\"summary\": \"...\", \"tests\": [...], \
+                       \"stopped_early\": null}`";
+    let outcome_problem = |what: String| Problem {
+        at: outcome.display().to_string(),
+        what,
+        fix: outcome_fix.to_owned(),
+    };
+    // `collect` takes an unreadable report for none; the pull request is
+    // then made from no summary, as partial work.
+    match crate::files::read_regular(&outcome, MAX_OUTCOME_BYTES as u64) {
+        Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            report
+                .problems
+                .push(outcome_problem("there is no report".to_owned()));
+        }
+        Err(err) => report.problems.push(outcome_problem(err.to_string())),
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(object)) => {
+                if object
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .is_none_or(|summary| summary.trim().is_empty())
+                {
+                    report.problems.push(outcome_problem(
+                        "there is no `summary`, so what you hand back is taken for partial work"
+                            .to_owned(),
+                    ));
+                }
+            }
+            _ => report
+                .problems
+                .push(outcome_problem("it is not one JSON object".to_owned())),
+        },
+    }
+
+    let checkout = Checkout {
+        dir: run.checkout.clone(),
+        base_commit: run.base.clone(),
+    };
+    if capture::requires_output(policy)
+        && let Some(why) = capture::output_missing(&Unconfined, home, &checkout, policy)
+    {
+        report.problems.push(Problem {
+            at: "the hand-back".to_owned(),
+            what: why,
+            fix: "leave a change or a request, as the brief says".to_owned(),
+        });
+    }
+
+    let scratch = tempfile::tempdir()?;
+    let copy = scratch.path().join("checkout");
+    match snapshot(&run.checkout, &copy) {
+        Err(err) => report.problems.push(Problem {
+            at: run.checkout.display().to_string(),
+            what: format!("{err:#}"),
+            fix: "fix what it names: the check copies the checkout under $TMPDIR".to_owned(),
+        }),
+        Ok(nested) => {
+            for path in nested {
+                report.problems.push(Problem {
+                    at: path,
+                    what: "a nested repository, which the run stages as a submodule and \
+                           `check` refuses with the whole change"
+                        .to_owned(),
+                    fix: "delete it, or move it out of the checkout".to_owned(),
+                });
+            }
+            let (results, outputs) = (scratch.path().join("run"), scratch.path().join("outputs"));
+            std::fs::create_dir(&results)?;
+            let change = capture::collect(&capture::Request {
+                runner: &Unconfined,
+                home,
+                checkout: &Checkout {
+                    dir: copy,
+                    base_commit: run.base.clone(),
+                },
+                policy,
+                commit: &run.commit,
+                run_id: &run.run_id,
+                harness: None,
+                run_dir: &results,
+                safe_outputs: &outputs,
+            })?;
+            if let Some(why) = change.dropped {
+                report.problems.push(Problem {
+                    at: "the change".to_owned(),
+                    what: why,
+                    fix: GUIDE_FIX.to_owned(),
+                });
+            }
+            if outputs.is_dir() {
+                let collected = scratch.path().join("collected.json");
+                std::fs::write(&collected, as_collected(&outputs)?)?;
+                let verdict = check::check_outputs(&outputs, &collected, policy)?;
+                report
+                    .problems
+                    .extend(verdict.errors.iter().map(|error| Problem {
+                        at: "check".to_owned(),
+                        what: error.clone(),
+                        fix: fix_for(error).to_owned(),
+                    }));
+                if let Some(checkpoint) = verdict.checkpoint {
+                    report.notes.push(format!(
+                        "the change is handed back as a draft to be continued, at a checkpoint \
+                         ({}): when the work is done, set `complete` to true in {}'s checkpoint, \
+                         and leave none in your request",
+                        checkpoint.reason,
+                        outcome.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    for finding in scan(&run.checkout, &run.base, home)? {
+        report.problems.push(Problem {
+            at: finding.location,
+            what: format!("a secret-shaped string, matching `{}`", finding.pattern),
+            fix: fix_for("secret-shaped").to_owned(),
+        });
+    }
+    Ok(report)
+}
+
+/// The collector's result for the `outputs.jsonl` in OUTPUTS, as `check`
+/// reads it, were the collector to pass every request on as it is: a
+/// line that is not a JSON object is the one thing it surely refuses.
+fn as_collected(outputs: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(outputs.join(OUTPUTS_FILE)).unwrap_or_default();
+    let (mut items, mut errors) = (Vec::new(), Vec::new());
+    for (number, line) in text.lines().enumerate() {
+        match serde_json::from_str::<Value>(line) {
+            Ok(Value::Object(item)) => items.push(item),
+            _ => errors.push(format!(
+                "{AGENT_OUTPUTS}, line {}: not one JSON object",
+                number + 1
+            )),
+        }
+    }
+    Ok(serde_json::to_string(
+        &json!({"items": items, "errors": errors}),
+    )?)
+}
+
+/// A repository at TO that `collect` can commit in as it does in the
+/// checkout REPO, which is left as it is: REPO's HEAD, REPO's index, and
+/// a working tree of what `git add --all` would stage in REPO, files that
+/// are not in its index as well. Its objects are REPO's, by reference;
+/// those `git add` writes are what `run` writes there too. It returns the
+/// nested repositories that `git add --all` stages as new submodules,
+/// which `check` refuses: the copy holds an empty directory for each, so
+/// `collect` there would not see them.
+fn snapshot(repo: &Path, to: &Path) -> Result<Vec<String>> {
+    let scratch = tempfile::tempdir()?;
+    let index = copy_index(repo, &scratch.path().join("index"))?;
+    let indexed = git_with_index(repo, &index, &["write-tree"])
+        .context("writing the index as a tree: are there unresolved conflicts?")?;
+    git_with_index(repo, &index, &["add", "--all"])?;
+    let staged = git_with_index(repo, &index, &["write-tree"])?;
+    let gitlinks = |tree: &[u8]| -> Result<Vec<String>> {
+        let tree = String::from_utf8_lossy(tree).trim().to_owned();
+        let list = git(repo, &["ls-tree", "-r", "-z", &tree])?;
+        Ok(list
+            .split(|&b| b == 0)
+            .filter_map(|entry| {
+                let (meta, path) = std::str::from_utf8(entry).ok()?.split_once('\t')?;
+                meta.starts_with("160000 ").then(|| path.to_owned())
+            })
+            .collect())
+    };
+    let known = gitlinks(&indexed)?;
+    let nested: Vec<String> = gitlinks(&staged)?
+        .into_iter()
+        .filter(|path| !known.contains(path))
+        .collect();
+    let head = git(repo, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let objects = git(repo, &["rev-parse", "--git-path", "objects"])?;
+    let objects = repo.join(String::from_utf8(objects)?.trim());
+    let objects = objects
+        .canonicalize()
+        .with_context(|| format!("finding {}", objects.display()))?;
+
+    std::fs::create_dir(to)?;
+    git(to, &["init", "--quiet"])?;
+    let alternates = format!("{}\n", objects.display());
+    std::fs::write(to.join(".git/objects/info/alternates"), alternates)?;
+    git(to, &["update-ref", "HEAD", String::from_utf8(head)?.trim()])?;
+    let tree = scratch.path().join("tree");
+    git_with_index(to, &tree, &["read-tree", String::from_utf8(staged)?.trim()])?;
+    git_with_index(to, &tree, &["checkout-index", "--all"])?;
+    git(to, &["read-tree", String::from_utf8(indexed)?.trim()])?;
+    Ok(nested)
+}
+
+/// A copy at TO of the index of the checkout REPO, so that REPO's own
+/// stays as it is.
+fn copy_index(repo: &Path, to: &Path) -> Result<PathBuf> {
+    let own = String::from_utf8(git(repo, &["rev-parse", "--git-path", "index"])?)?;
+    match std::fs::copy(repo.join(own.trim()), to) {
+        Ok(_) => {}
+        // No index yet: `git add` starts an empty one.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).context("copying the index"),
+    }
+    Ok(to.to_owned())
+}
+
+fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = git_command(repo)
+        .env("GIT_INDEX_FILE", index)
+        .args(args)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output.stdout)
 }
 
 /// Where under the agent's home `run` takes its requests and report from.
@@ -99,29 +505,9 @@ fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
             &format!("{base}^{{commit}}"),
         ],
     )?)?;
-    // A copy of the index, so that the checkout's own stays as it is.
     let scratch = tempfile::tempdir()?;
-    let index = scratch.path().join("index");
-    let own = String::from_utf8(git(repo, &["rev-parse", "--git-path", "index"])?)?;
-    match std::fs::copy(repo.join(own.trim()), &index) {
-        Ok(_) => {}
-        // No index yet: `git add` starts an empty one.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err).context("copying the index"),
-    }
-    let with_index = |args: &[&str]| -> Result<Vec<u8>> {
-        let output = git_command(repo)
-            .env("GIT_INDEX_FILE", &index)
-            .args(args)
-            .output()?;
-        ensure!(
-            output.status.success(),
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(output.stdout)
-    };
+    let index = copy_index(repo, &scratch.path().join("index"))?;
+    let with_index = |args: &[&str]| git_with_index(repo, &index, args);
     // As `run` stages it; the patch holds the same lines, context included.
     with_index(&["add", "--all"])?;
     let diff = with_index(&[
@@ -354,6 +740,326 @@ fn replace(repo: &Path, base: &str, range: Option<&str>, output: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::Kind;
+
+    fn sh(dir: &Path, script: &str) -> String {
+        let out = Process::new("sh")
+            .args(["-ec", script])
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// An agent's home with its checkout, and the run file `run` leaves.
+    fn home(outputs: Value) -> (tempfile::TempDir, RunFile) {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("work/r");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::create_dir(dir.path().join("out")).unwrap();
+        sh(
+            &checkout,
+            "git init -q -b main . && echo one > a.txt && git add . && \
+             git -c user.name=t -c user.email=t@example.invalid commit -q -m Base",
+        );
+        let base = sh(&checkout, "git rev-parse HEAD").trim().to_owned();
+        let policy = Policy {
+            context: Vec::new(),
+            repo: "o/r".into(),
+            clone_url: "https://example.invalid/o/r".into(),
+            base: "main".into(),
+            kind: Kind::Branch,
+            max_outputs: 3,
+            max_patch_bytes: 1 << 20,
+            safe_outputs: serde_json::from_value(outputs).unwrap(),
+            commit_author: None,
+            private: false,
+        };
+        let run = RunFile {
+            policy,
+            checkout,
+            base,
+            run_id: "7".into(),
+            commit: config::Commit::default(),
+        };
+        (dir, run)
+    }
+
+    fn pull_requests() -> Value {
+        json!({
+            "create_pull_request": {
+                "max": 1, "protected_files": ["CODEOWNERS"], "protect_top_level_dot_folders": true,
+                "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024,
+                "max_patch_files": 3, "ready_when_complete": true,
+            },
+            "noop": {"max": 1},
+        })
+    }
+
+    /// What `check` refuses of what `run` hands back of the agent's work
+    /// in HOME: `collect` on the checkout itself, as `run` does after the
+    /// session, on a copy, since it commits there.
+    fn after_the_session(home: &Path, run: &RunFile) -> Vec<String> {
+        let copy = tempfile::tempdir().unwrap();
+        sh(
+            copy.path(),
+            &format!("cp -a {}/. checkout", run.checkout.display()),
+        );
+        std::fs::create_dir(copy.path().join("run")).unwrap();
+        let outputs = copy.path().join("outputs");
+        capture::collect(&capture::Request {
+            runner: &Unconfined,
+            home,
+            checkout: &Checkout {
+                dir: copy.path().join("checkout"),
+                base_commit: run.base.clone(),
+            },
+            policy: &run.policy,
+            commit: &run.commit,
+            run_id: &run.run_id,
+            harness: None,
+            run_dir: &copy.path().join("run"),
+            safe_outputs: &outputs,
+        })
+        .unwrap();
+        if !outputs.is_dir() {
+            return Vec::new();
+        }
+        let collected = copy.path().join("collected.json");
+        std::fs::write(&collected, as_collected(&outputs).unwrap()).unwrap();
+        check::check_outputs(&outputs, &collected, &run.policy)
+            .unwrap()
+            .errors
+    }
+
+    /// Each kind of refusal is reported in the session, as `check` gives
+    /// it after the session, with how to fix it; and the checkout is left
+    /// as it was, however often it is checked.
+    #[test]
+    fn the_session_is_told_what_check_would_refuse() {
+        let token = format!("gh{}_{}", "p", "a1B2".repeat(10));
+        let pull = |body: &str| {
+            json!({"type": "create_pull_request", "title": "Fix it", "body": body}).to_string()
+        };
+        let done = r#"{"summary": "Fixed it.", "tests": [], "stopped_early": null}"#;
+        struct Case<'a> {
+            name: &'a str,
+            script: String,
+            requests: String,
+            outcome: Option<&'a str>,
+            /// In a problem; none for a hand-back with none.
+            want: Option<&'a str>,
+            note: bool,
+            /// Found before `collect`, which cannot see it in the copy.
+            nested: bool,
+        }
+        let case = |name, script: &str, requests: String| Case {
+            name,
+            script: script.to_owned(),
+            requests,
+            outcome: Some(done),
+            want: None,
+            note: false,
+            nested: false,
+        };
+        let cases = [
+            case("clean", "echo two >> a.txt", pull("Why.")),
+            Case {
+                name: "untracked binary litter is left out",
+                ..case(
+                    "",
+                    "echo two >> a.txt && printf '\\000\\001' > litter.bin",
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("protected files: .github/x.yml"),
+                ..case(
+                    "protected path",
+                    "mkdir .github && echo x > .github/x.yml",
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("protected files: sub/CODEOWNERS"),
+                ..case(
+                    "protected name",
+                    "mkdir sub && echo x > sub/CODEOWNERS",
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("the patch touches 4 files, over 3"),
+                ..case(
+                    "too many files",
+                    "for f in b c d e; do echo $f > $f.txt; done",
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("a new symlink, submodule, executable or special file"),
+                ..case(
+                    "an executable",
+                    "echo x > run.sh && chmod +x run.sh",
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("which the policy does not allow"),
+                ..case(
+                    "a type not allowed",
+                    "",
+                    json!({"type": "add_labels", "labels": ["x"]}).to_string(),
+                )
+            },
+            Case {
+                want: Some("2 outputs of type \"noop\", over 1"),
+                ..case(
+                    "over a type's count",
+                    "",
+                    format!("{0}\n{0}", json!({"type": "noop", "message": "m"})),
+                )
+            },
+            Case {
+                want: Some("more than one checkpoint"),
+                ..case(
+                    "two checkpoints",
+                    "echo two >> a.txt",
+                    pull(&format!(
+                        "Why.\n\n{0}\n{1}\n```\n\n{0}\n{1}\n```",
+                        crate::check::checkpoint::FENCE,
+                        r#"{"reason": "budget", "done": "a", "left": "b", "next": "c"}"#
+                    )),
+                )
+            },
+            Case {
+                want: Some("line 1: not one JSON object"),
+                ..case("a line that is not JSON", "", "noop please".to_owned())
+            },
+            Case {
+                want: Some("a secret-shaped string"),
+                ..case(
+                    "a secret-shaped string",
+                    &format!("echo 'key = \"{token}\"' > key.txt"),
+                    pull("Why."),
+                )
+            },
+            Case {
+                outcome: None,
+                want: Some("there is no report"),
+                ..case("no report", "echo two >> a.txt", pull("Why."))
+            },
+            Case {
+                outcome: Some(r#"{"tests": []}"#),
+                want: Some("there is no `summary`"),
+                ..case("no summary", "echo two >> a.txt", pull("Why."))
+            },
+            Case {
+                want: Some("a nested repository"),
+                nested: true,
+                ..case(
+                    "a nested repository",
+                    "echo two >> a.txt && git init -q sub && echo x > sub/x && git -C sub add x && \
+                     git -C sub -c user.name=t -c user.email=t@example.invalid commit -qm x",
+                    pull("Why."),
+                )
+            },
+            Case {
+                want: Some("No hand-back was left."),
+                ..case("nothing", "", String::new())
+            },
+            Case {
+                outcome: Some(
+                    r#"{"summary": "Half.", "checkpoint": {"complete": false, "done": "a",
+                        "left": "b", "next": "c"}}"#,
+                ),
+                note: true,
+                ..case("an open checkpoint", "echo two >> a.txt", pull("Why."))
+            },
+        ];
+        for case in cases {
+            let (dir, run) = home(pull_requests());
+            let home = dir.path();
+            if !case.script.is_empty() {
+                sh(&run.checkout, &case.script);
+            }
+            std::fs::write(home.join(AGENT_OUTPUTS), &case.requests).unwrap();
+            if let Some(outcome) = case.outcome {
+                std::fs::write(home.join(AGENT_OUTCOME), outcome).unwrap();
+            }
+            let state = "git status --porcelain=v1 --untracked-files=all && git rev-parse HEAD \
+                         && git diff --cached --name-status && git stash list";
+            let before = sh(&run.checkout, state);
+            let report = validate(home, &run).unwrap();
+            let again = validate(home, &run).unwrap();
+            assert_eq!(report.problems, again.problems, "{}", case.name);
+            assert_eq!(sh(&run.checkout, state), before, "{}", case.name);
+
+            let shown: Vec<String> = report.problems.iter().map(ToString::to_string).collect();
+            match case.want {
+                None => assert!(shown.is_empty(), "{}: {shown:#?}", case.name),
+                Some(want) => assert!(
+                    shown
+                        .iter()
+                        .any(|problem| problem.contains(want) && problem.contains("; ")),
+                    "{}: {want} in {shown:#?}",
+                    case.name
+                ),
+            }
+            assert_eq!(!report.notes.is_empty(), case.note, "{}", case.name);
+            // The same refusals as after the session, in the same words.
+            let checked: Vec<&str> = report
+                .problems
+                .iter()
+                .filter(|problem| problem.at == "check")
+                .map(|problem| problem.what.as_str())
+                .collect();
+            let after = after_the_session(home, &run);
+            if case.nested {
+                assert!(checked.is_empty(), "{}: {checked:?}", case.name);
+                assert!(
+                    after.iter().any(|error| error.contains("submodule")),
+                    "{}: {after:?}",
+                    case.name
+                );
+            } else {
+                assert_eq!(checked, after, "{}", case.name);
+            }
+            assert!(
+                shown.iter().all(|problem| !problem.contains(&token)),
+                "{}: {shown:#?}",
+                case.name
+            );
+        }
+    }
+
+    /// What `run` leaves its agent names no clone URL, and is what the
+    /// validator reads.
+    #[test]
+    fn the_run_file_is_the_policy_without_its_clone_urls() {
+        let (dir, run) = home(pull_requests());
+        let checkout = Checkout {
+            dir: run.checkout.clone(),
+            base_commit: run.base.clone(),
+        };
+        let text = run_file(&run.policy, &checkout, "7", &run.commit).unwrap();
+        std::fs::create_dir_all(dir.path().join(".config/agentic-job")).unwrap();
+        std::fs::write(dir.path().join(RUN_FILE), &text).unwrap();
+        let read = RunFile::read(dir.path()).unwrap();
+        assert!(!text.contains("example.invalid"), "{text}");
+        assert_eq!(read.policy.safe_outputs, run.policy.safe_outputs);
+        assert_eq!(
+            (read.checkout, read.base, read.run_id),
+            (run.checkout, run.base, run.run_id)
+        );
+    }
 
     #[test]
     fn preserves_mail_and_rejects_a_wrong_base_without_overwriting() {

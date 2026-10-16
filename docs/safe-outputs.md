@@ -58,9 +58,9 @@ fetches images through its own proxy. The filter is not secret
 redaction: check refuses a credential-shaped string anywhere in the
 outputs, code included, and `run` refuses to upload outputs holding one
 or the run's own secrets. That refusal comes only after the session, so
-the brief tells the agent to build fake keys at run time from parts. It
-also tells the agent to run `agentic-job handback scan --base BASE_SHA`
-first. The scan applies the same patterns, a line at a time, to the
+the brief tells the agent to build fake keys at run time from parts.
+`agentic-job handback check` (below) runs the scan of
+`agentic-job handback scan --base BASE_SHA` too. The scan applies the same patterns, a line at a time, to the
 change's diff and to `out/`, and lists each match by file, line and
 pattern, never by the string. The final refusal names the file and line
 too.
@@ -699,10 +699,28 @@ hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
-The brief also lists what check would refuse, and tells the agent to leave
-such a part out of a change and say so, except when it is the whole task: then
-the agent makes it anyway, so that the run fails with check naming the file
-rather than ending well with nothing handed back.
+The brief tells the agent to leave a part of a change that check would
+refuse out and say so, except when it is the whole task: then the agent
+makes it anyway, so that the run fails with check naming the file rather
+than ending well with nothing handed back.
+
+The brief holds only what every run needs: where it hands back, its
+limits, and the validator. `agentic-job handback guide` prints the rest
+for the agent that needs it: the formats, the protected paths, the
+checkpoint, replacing a branch's commits and containers behind the proxy.
+`agentic-job handback check` tells the agent, while it can still fix it,
+what the run would refuse or lose of what it would hand back now. It runs
+`run`'s own capture, on a copy of the checkout, since capture commits
+there; then `check`'s own checks on the result; then the final gate's
+secret scan. It also reports a missing or unreadable `outcome.json`, and a
+change left as a draft by its checkpoint. Each problem is a line,
+`WHERE: WHAT; HOW TO FIX`, and the command exits 1 while there is one. It
+reads the run's policy, checkout and base from
+`~/.config/agentic-job/handback.json`, which `run` writes without the
+clone URLs. The agent can change that file, and so mislead only itself:
+the check job reads the policy the policy job printed. gh-aw's collector is
+not on the agent's machine, so the requests reach `check` as written. A
+field it would refuse is still found only after the session.
 
 For a `push_to_pull_request_branch` request without `message`, `run` fills
 that field from the outcome summary (or its default run description), the

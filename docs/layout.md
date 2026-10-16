@@ -56,7 +56,8 @@ notification tap, but no client can attach to a running task yet.
 `run/launch.rs` clears inherited provider settings and starts the agent.
 `run/probe.rs` checks where the run token is, not the whole host sandbox.
 
-`run/brief.rs` tells the agent how to hand back. `run/handback.rs` reads
+`run/brief.rs` tells the agent how to hand back, and `handback.rs`
+lets it check what it would hand back during the session. `run/handback.rs` reads
 the outcome and requests and makes one patch from the uncommitted tree.
 `run/log.rs`, `run/egress.rs` and `run/summary.rs` build redacted evidence;
 `run/upload.rs` gates publication. Failed cleanup or remaining secrets

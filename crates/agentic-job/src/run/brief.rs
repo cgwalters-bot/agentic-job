@@ -97,9 +97,119 @@ pub fn asks_for_checkpoint(policy: &Policy) -> bool {
         && policy.safe_outputs.ready_when_complete()
 }
 
-/// The text for a run of POLICY whose agent has the home HOME and works
-/// in CHECKOUT, from the commit BASE. It ends with an empty line.
-pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> String {
+/// What a run of POLICY is told before its task, as [`guide`] is: where
+/// it hands back, its limits, and the validator that names what `check`
+/// would refuse while the session can still fix it. The rest of the
+/// guide is reference that most runs never need, and was most of the
+/// first prompt of every run (#854): `handback guide` prints it, and
+/// `handback check` points at the part a problem needs.
+pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
+    let outputs = &policy.safe_outputs;
+    let carrier = outputs
+        .patch_carrier()
+        .filter(|_| policy.kind == Kind::Branch);
+    let push = outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .filter(|_| carrier.is_some_and(|(kind, _)| kind == PUSH_TO_PULL_REQUEST_BRANCH));
+    let mut text = String::from(
+        "How this run hands back its results. All of it is published; nothing else leaves \
+         this machine.\n\n",
+    );
+    let _ = match (&carrier, push) {
+        (Some((_, rules)), _) => writeln!(
+            text,
+            "- Change: what you change, add or delete in `{}` (ignored files excepted), left \
+             uncommitted and unpushed, is {} as one patch against the commit you started \
+             from, of at most {} KiB and {} files. A protected path or a refused kind of file \
+             gets the whole change refused: leave that part out and say so, unless it is all \
+             the task asks for.",
+            checkout.display(),
+            match push {
+                Some(push) => format!("pushed to pull request #{}'s branch", push.target),
+                None => "proposed as a pull request".to_owned(),
+            },
+            policy.max_patch_bytes / (KIB as u64),
+            rules.max_patch_files,
+        ),
+        _ => writeln!(
+            text,
+            "- Change: none; nothing you change in `{}` is handed back.",
+            checkout.display()
+        ),
+    };
+    let types: Vec<String> = outputs
+        .types()
+        .filter(|&name| {
+            carrier.is_some_and(|(kind, _)| kind == name)
+                || ![CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH].contains(&name)
+        })
+        .map(|name| match outputs.max_of(name) {
+            Some(max) => format!("`{name}` ({max})"),
+            None => format!("`{name}`"),
+        })
+        .collect();
+    let requests = home.join(AGENT_OUTPUTS);
+    if types.is_empty() {
+        let _ = writeln!(
+            text,
+            "- Requests: none; leave `{}` unwritten.",
+            requests.display()
+        );
+    } else {
+        let wording = match (&carrier, push) {
+            (_, Some(_)) => {
+                " A `push_to_pull_request_branch` line's `message` is the commit's; credit no tool or model in it."
+            }
+            (Some(_), None) => {
+                " A `create_pull_request` line's `title` and `body` are the pull request's and \
+                 its commit's; credit no tool or model in them."
+            }
+            _ => "",
+        };
+        let _ = writeln!(
+            text,
+            "- Requests (optional): `{}`, one gh-aw safe output a line, at most {} in all: {}.{}",
+            requests.display(),
+            policy.max_outputs,
+            types.join(", "),
+            wording,
+        );
+    }
+    let _ = write!(
+        text,
+        "- Report: `{}`, `{{\"summary\": \"...\", \"tests\": [{{\"command\": \"...\", \
+         \"exit_code\": 0, \"duration_s\": 12}}], \"stopped_early\": null}}`: what you did and \
+         why, the checks you ran with their real exit codes, and null or why you stopped early.",
+        home.join(AGENT_OUTCOME).display(),
+    );
+    // As in the guide: an early checkpoint, kept current, is what brought
+    // back the hand-back of an agent whose context was compacted (#813).
+    if asks_for_checkpoint(policy) {
+        let _ = write!(
+            text,
+            " Write it as soon as you have read the task, with `\"{OUTCOME_CHECKPOINT}\": \
+             {{\"complete\": false, \"done\": \"...\", \"left\": \"...\", \"next\": \
+             \"...\"}}`; keep both current, and set `complete` to true last: until then the \
+             change is a draft to be continued."
+        );
+    }
+    text.push_str(
+        "\n- Never write a secret-shaped string (a `ghp_`, `sk-` or `AKIA` token, a JWT, a \
+         private key), a fake one in a test included: build it at run time from parts.\n\n\
+         Before you end your turn, run `agentic-job handback check` and fix what it reports \
+         until it exits 0. It makes the checks the run makes after your session, on your \
+         change, requests, report and checkpoint, and says how to fix each problem; run it as \
+         often as you like. `agentic-job handback guide` prints these rules in full: formats, \
+         protected paths, checkpoints, replacing a branch's commits, containers.\n\n",
+    );
+    text
+}
+
+/// The whole of what a run of POLICY whose agent has the home HOME and
+/// works in CHECKOUT, from the commit BASE, is told of its hand-back,
+/// which `handback guide` prints. It ends with an empty line.
+pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> String {
     let outputs = &policy.safe_outputs;
     let carrier = outputs
         .patch_carrier()
@@ -253,7 +363,7 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> S
          that do not match by themselves (`\"gh\" + \"p_\" + \"a1B2\" * 10`, say). Before \
          you finish, run `agentic-job handback scan --base {base}` in your checkout: it lists \
          the file, line and pattern of each such string in your change and in `{}`, and \
-         exits 1 while there is one.",
+         exits 1 while there is one; `agentic-job handback check` runs it with the other checks.",
         home.join("out").display(),
     );
     text.push_str(
@@ -295,7 +405,7 @@ mod tests {
     }
 
     fn text(policy: &Policy) -> String {
-        hand_back(
+        guide(
             policy,
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
@@ -516,5 +626,145 @@ mod tests {
                 "{brief}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod brief_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::policy::{DEFAULT_PROTECTED_FILES, SafeOutputs};
+
+    /// The most bytes of the brief of an implement run of the dispatch
+    /// caller. It was the guide, 5,863 bytes, before it was cut to 1,840 (#854): what
+    /// is added to it, every run reads.
+    const MAX_BRIEF_BYTES: usize = 2_000;
+
+    /// An implement run of the dispatch caller, whose bounds open
+    /// complete work ready.
+    fn implement() -> Policy {
+        let outputs = json!({
+            "create_pull_request": {
+                "max": 1, "protected_files": DEFAULT_PROTECTED_FILES,
+                "protect_top_level_dot_folders": true, "unprotected_dot_folders": [".github"],
+                "protected_files_policy": "blocked", "draft": true, "ready_when_complete": true,
+                "max_patch_size": 1024, "max_patch_files": 50,
+            },
+            "noop": {"max": 1}, "missing_tool": {"max": 1}, "missing_data": {"max": 1},
+        });
+        Policy {
+            context: Vec::new(),
+            repo: "o/r".into(),
+            clone_url: "https://example.invalid/o/r".into(),
+            base: "main".into(),
+            kind: Kind::Branch,
+            max_outputs: 3,
+            max_patch_bytes: 1 << 20,
+            safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
+            commit_author: None,
+            private: false,
+        }
+    }
+
+    fn brief(policy: &Policy) -> String {
+        hand_back(
+            policy,
+            Path::new("/home/agent"),
+            Path::new("/home/agent/work/r"),
+        )
+    }
+
+    /// The brief says where the run hands back, its limits and the
+    /// validator, and leaves the rest to the guide; and it stays small.
+    #[test]
+    fn the_brief_is_the_essentials_and_stays_small() {
+        let policy = implement();
+        let text = brief(&policy);
+        for want in [
+            "`/home/agent/work/r`",
+            "left uncommitted and unpushed",
+            "proposed as a pull request",
+            "at most 1024 KiB and 50 files",
+            "leave that part out and say so, unless it is all the task asks for",
+            "`/home/agent/out/safe-outputs.jsonl`",
+            "at most 3 in all: `create_pull_request` (1), `missing_data` (1), \
+             `missing_tool` (1), `noop` (1).",
+            "`title` and `body`",
+            "credit no tool or model",
+            "`/home/agent/out/outcome.json`",
+            "\"exit_code\": 0",
+            "\"checkpoint\": {\"complete\": false",
+            "set `complete` to true last",
+            "a `ghp_`, `sk-` or `AKIA` token",
+            "run `agentic-job handback check` and fix what it reports until it exits 0",
+            "`agentic-job handback guide` prints these rules in full",
+        ] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+        assert!(text.ends_with(".\n\n"), "{text:?}");
+        let full = guide(
+            &policy,
+            Path::new("/home/agent"),
+            Path::new("/home/agent/work/r"),
+            "0",
+        );
+        assert!(
+            text.len() <= MAX_BRIEF_BYTES && text.len() * 10 <= full.len() * 6,
+            "the brief is {} bytes, the guide {}: keep reference in the guide\n{text}",
+            text.len(),
+            full.len()
+        );
+
+        let without = Policy {
+            safe_outputs: SafeOutputs {
+                create_pull_request: policy.safe_outputs.create_pull_request.clone().map(|pr| {
+                    crate::policy::PullRequest {
+                        ready_when_complete: false,
+                        ..pr
+                    }
+                }),
+                ..policy.safe_outputs.clone()
+            },
+            ..policy.clone()
+        };
+        assert!(!brief(&without).contains("\"checkpoint\":"));
+
+        let push = brief(&crate::policy::tests::push_policy());
+        assert!(
+            push.contains("pushed to pull request #42's branch"),
+            "{push}"
+        );
+        assert!(
+            push.contains("`push_to_pull_request_branch` line's `message`"),
+            "{push}"
+        );
+        assert!(!push.contains("create_pull_request"), "{push}");
+
+        let analysis = brief(&Policy {
+            kind: Kind::Analysis,
+            ..policy
+        });
+        assert!(analysis.contains("- Change: none;"), "{analysis}");
+        assert!(!analysis.contains("create_pull_request"), "{analysis}");
+        let nothing = brief(&Policy {
+            safe_outputs: SafeOutputs::default(),
+            ..implement()
+        });
+        assert!(nothing.contains("- Requests: none;"), "{nothing}");
+    }
+
+    /// Measures for the pull request: run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "prints the sizes of the brief and the guide"]
+    fn sizes() {
+        let policy = implement();
+        let full = guide(
+            &policy,
+            Path::new("/home/agent"),
+            Path::new("/home/agent/work/r"),
+            "0",
+        );
+        println!("brief {} guide {}", brief(&policy).len(), full.len());
     }
 }

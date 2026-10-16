@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Where `sandbox setup` puts the root-owned copy.
 pub const ROOT_COPY: &str = "/etc/agentic-job/config.toml";
@@ -612,7 +612,7 @@ impl Setup {
 
 /// The commit a run's change is handed back as. Step 6b;
 /// `run::handback` checks it.
-#[derive(Debug, Default, Deserialize, PartialEq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Commit {
     /// Who the commit is by, as `Name <address>`. Without it,
