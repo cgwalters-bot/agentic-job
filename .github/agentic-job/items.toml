@@ -1,12 +1,14 @@
-# CI's e2e-items only: the scratch pull request and sub-issue e2e-items-scratch
-# opens on a branch of its own, which is the run's base. No patch.
+# CI's e2e-items only: the scratch pull request, sub-issue and comment
+# e2e-items-scratch opens, from a branch of its own that is the run's base.
+# No patch.
 hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
 bases = ["e2e-items/*"]
-max_outputs = 2
+max_outputs = 3
 max_patch_bytes = 1048576
 max_patch_files = 1
 
 [outputs]
 close_pull_request = { max = 1 }
 link_sub_issue = { max = 1 }
+hide_comment = { max = 1, allowed_reasons = ["OUTDATED"] }

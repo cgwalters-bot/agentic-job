@@ -980,10 +980,12 @@ jobs:
       artifact-prefix: review-
 
   # Scratch items for e2e-items: a sub-issue to link under the scratch
-  # issue, and a draft pull request to close, from a branch of this run
-  # whose one commit names the sub-issue and is e2e-items' base.
+  # issue, a draft pull request to close, and a comment on the scratch
+  # issue to hide, from a branch of this run whose one commit names the
+  # sub-issue and the comment and is e2e-items' base.
   # Pull requests and issues the job token opens start no workflow.
-  # e2e-verify closes and removes all three. Not e2e-scratch's pull
+  # e2e-verify closes and removes the first three, and deletes the comment
+  # with this run's others on the scratch issue. Not e2e-scratch's pull
   # request: e2e-people needs that one open while e2e-items closes this.
   e2e-items-scratch:
     needs: changes
@@ -998,6 +1000,7 @@ jobs:
       branch: ${{ steps.open.outputs.branch }}
       pull-request: ${{ steps.open.outputs.pull-request }}
       sub-issue: ${{ steps.open.outputs.sub-issue }}
+      comment: ${{ steps.open.outputs.comment }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -1010,6 +1013,8 @@ jobs:
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           sub=$(gh api "repos/$GH_REPO/issues" -f title="Scratch sub-issue of end-to-end run $GITHUB_RUN_ID" -f body='Linked and closed by the run that opened it.' --jq .number)
           echo "sub-issue=$sub" >> "$GITHUB_OUTPUT"
+          comment=$(gh api "repos/$GH_REPO/issues/64/comments" -f body="Scratch comment of end-to-end run actions/runs/$GITHUB_RUN_ID, hidden by it." --jq .node_id)
+          echo "comment=$comment" >> "$GITHUB_OUTPUT"
           main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
           base=$(gh api "repos/$GH_REPO/git/commits/$main" --jq .tree.sha)
           # The forge opens no pull request without a change, so add a file;
@@ -1017,19 +1022,20 @@ jobs:
           tree=$(jq -n --arg base "$base" --arg content "Scratch file of end-to-end run $GITHUB_RUN_ID." \
             '{base_tree: $base, tree: [{path: "e2e-scratch.txt", mode: "100644", type: "blob", content: $content}]}' |
             gh api "repos/$GH_REPO/git/trees" --input - --jq .sha)
-          commit=$(gh api "repos/$GH_REPO/git/commits" -f message="e2e scratch: link #$sub under #64" -f tree="$tree" -f "parents[]=$main" --jq .sha)
+          commit=$(gh api "repos/$GH_REPO/git/commits" -f message="$(printf 'e2e scratch: link #%s under #64\n\nhide %s' "$sub" "$comment")" -f tree="$tree" -f "parents[]=$main" --jq .sha)
           gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$commit" > /dev/null
           pr=$(gh api "repos/$GH_REPO/pulls" -f title="Scratch pull request of end-to-end run $GITHUB_RUN_ID" -f head="$BRANCH" -f base=main -F draft=true -f body='Closed by the run that opened it.' --jq .number)
           echo "pull-request=$pr" >> "$GITHUB_OUTPUT"
 
-  # close_pull_request and link_sub_issue with the job token, on the items
-  # e2e-items-scratch opened; the agent finds them from its base.
+  # close_pull_request, link_sub_issue and hide_comment with the job token,
+  # on the items e2e-items-scratch opened; the agent finds them from its
+  # base. The scratch issue is the run's item, which a hidden comment is on.
   e2e-items:
     needs: [changes, e2e-items-scratch]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
-      issues: write # link_sub_issue
+      issues: write # link_sub_issue, hide_comment
       pull-requests: write # close_pull_request, and its comment
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # the agent job asks for it, for a proxy this run has none of
@@ -1040,9 +1046,10 @@ jobs:
       repo: ${{ github.repository }}
       base: ${{ needs.e2e-items-scratch.outputs.branch }}
       kind: analysis
-      task: Close the scratch pull request and link the scratch sub-issue.
-      outputs: close_pull_request,link_sub_issue
-      max-outputs: '2'
+      task: Close the scratch pull request, link the scratch sub-issue and hide the scratch comment.
+      outputs: close_pull_request,link_sub_issue,hide_comment
+      max-outputs: '3'
+      comment-target: '64'
       allow: .github/agentic-job/items.toml
       config: .github/agentic-job/hosted.toml
       agent: fake
@@ -1304,17 +1311,20 @@ jobs:
         run: |
           gh api "repos/$GH_REPO/issues?state=all&sort=created&direction=desc&per_page=50" \
             --jq "[.[] | select(.pull_request == null and .user.login == \"github-actions[bot]\" and ((.body // \"\") | contains(\"$RUN\"))).html_url]" | tee /dev/stderr | jq -e '. == []'
-      - name: The scratch pull request was closed with its comment, and the sub-issue linked
+      - name: The scratch pull request was closed with its comment, the sub-issue linked and the comment hidden
         env:
           RESULT: ${{ needs.e2e-items.result }}
           PR: ${{ needs.e2e-items-scratch.outputs.pull-request }}
           SUB: ${{ needs.e2e-items-scratch.outputs.sub-issue }}
+          COMMENT: ${{ needs.e2e-items-scratch.outputs.comment }}
         run: |
           set -o pipefail
           test "$RESULT" = success
           test "$(gh api "repos/$GH_REPO/pulls/$PR" --jq .state)" = closed
           gh api --paginate "repos/$GH_REPO/issues/$PR/comments" | jq -se --arg run "$RUN" '[ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run)) and (.body | startswith("Closed by the scripted agent of an end-to-end run."))) ] | length == 1'
           gh api graphql -F number="$SUB" -f owner="${GH_REPO%/*}" -f name="${GH_REPO#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { parent { number } } } }' --jq .data.repository.issue.parent.number | grep -qx "$ISSUE"
+          gh api graphql -f id="$COMMENT" -f query='query($id: ID!) { node(id: $id) { ... on IssueComment { isMinimized minimizedReason } } }' |
+            jq -e '.data.node.isMinimized == true and (.data.node.minimizedReason | ascii_downcase) == "outdated"'
       # Whatever happened before: these ask the forge what this run left
       # and need no artifact, and each is tried whatever became of the one
       # before it. A comment that cannot be deleted fails the job, so that

@@ -68,6 +68,7 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "add_comment",
     "create_issue",
     "create_discussion",
+    HIDE_COMMENT,
     "close_issue",
     "add_labels",
     "remove_labels",
@@ -120,6 +121,22 @@ const MAX_CHECK_RUN_NAME: usize = 64;
 /// The longest discussion category bounds may pin, as for a check run's
 /// name: room for a readable name, slug or node ID.
 const MAX_DISCUSSION_CATEGORY: usize = 64;
+
+/// Hides (minimizes) a comment on the run's triggering item: moderation of
+/// what other people wrote there, so it is listed in bounds only by callers
+/// who want an agent to do that.
+pub const HIDE_COMMENT: &str = "hide_comment";
+
+/// The reasons gh-aw's collector lets a `hide_comment` give (its enum,
+/// which it normalizes requests to), and so all `allowed_reasons` may name.
+pub const HIDE_REASONS: &[&str] = &[
+    "SPAM",
+    "ABUSE",
+    "OFF_TOPIC",
+    "OUTDATED",
+    "RESOLVED",
+    "LOW_QUALITY",
+];
 
 /// `--outputs all`: every type the bounds list.
 const ALL_OUTPUTS: &str = "all";
@@ -410,6 +427,12 @@ pub struct OutputLimit {
     /// refuses another and apply refuses what the pin does not name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// The reasons a comment may be hidden for, from [`HIDE_REASONS`].
+    /// Required and nonempty for `hide_comment`, and only for it: gh-aw's
+    /// handler takes an empty list for any reason, so the bounds always
+    /// pin one, and check refuses a request outside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_reasons: Vec<String>,
     /// For the two outputs that carry a patch: open complete work ready
     /// for review, and only a checkpoint (`check::checkpoint`) or a run
     /// stopped at a limit as a draft. Off, every pull request is a draft.
@@ -552,6 +575,17 @@ impl OutputLimit {
                     && category == category.trim()
                     && !category.chars().any(char::is_control),
                 "outputs.{output}: invalid discussion category {category:?}"
+            );
+        }
+        ensure!(
+            (output == HIDE_COMMENT) != self.allowed_reasons.is_empty(),
+            "outputs.{output}: `allowed_reasons` is required for {HIDE_COMMENT}, and only for it"
+        );
+        for reason in &self.allowed_reasons {
+            ensure!(
+                HIDE_REASONS.contains(&reason.as_str()),
+                "outputs.{output}: unsupported reason {reason:?}, not one of {}",
+                HIDE_REASONS.join(", ")
             );
         }
         Ok(())
@@ -1336,6 +1370,10 @@ impl Bounds {
                 .outputs
                 .get(output)
                 .and_then(|bound| bound.category.clone()),
+            allowed_reasons: self
+                .outputs
+                .get(output)
+                .map_or_else(Vec::new, |bound| bound.allowed_reasons.clone()),
             ready_when_complete: false,
         };
         let ready = |output: &str| {
@@ -1526,6 +1564,9 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             if limit.category != bound.category {
                 limit.category = None;
             }
+            limit
+                .allowed_reasons
+                .retain(|reason| bound.allowed_reasons.contains(reason));
             true
         } else {
             false
@@ -1583,6 +1624,16 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
         return Err(vec![
             "create_discussion has different categories in the two bounds files".to_owned(),
         ]);
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get(HIDE_COMMENT)
+        .is_some_and(|limit| limit.allowed_reasons.is_empty())
+    {
+        return Err(vec![format!(
+            "{HIDE_COMMENT} has no reason allowed by both bounds files"
+        )]);
     }
     policy.safe_outputs.create_pull_request = match (
         policy.safe_outputs.create_pull_request,
@@ -2170,6 +2221,115 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 logins(&["octocat"])
             );
             assert!(intersect(compiled(&["octocat"]), compiled(&["hubot"])).is_err());
+        }
+    }
+
+    #[test]
+    fn hidden_comments_name_their_reasons() {
+        let accepts = |output: &str, text: &str| {
+            toml::from_str::<OutputLimit>(text).is_ok_and(|limit| limit.validate(output).is_ok())
+        };
+        for (output, text, ok) in [
+            (HIDE_COMMENT, "max = 1\nallowed_reasons = ['SPAM']", true),
+            (
+                HIDE_COMMENT,
+                "max = 1\nallowed_reasons = ['OUTDATED', 'RESOLVED']",
+                true,
+            ),
+            (HIDE_COMMENT, "max = 1", false),
+            (HIDE_COMMENT, "max = 1\nallowed_reasons = []", false),
+            // As the collector normalizes them, and no other.
+            (HIDE_COMMENT, "max = 1\nallowed_reasons = ['spam']", false),
+            (
+                HIDE_COMMENT,
+                "max = 1\nallowed_reasons = ['DUPLICATE']",
+                false,
+            ),
+            (
+                HIDE_COMMENT,
+                "max = 1\nallowed_reasons = ['SPAM']\nallowed = ['x']",
+                false,
+            ),
+            ("add_comment", "max = 1\nallowed_reasons = ['SPAM']", false),
+        ] {
+            assert_eq!(accepts(output, text), ok, "{output}: {text}");
+        }
+
+        let compiled = |reasons: &[&str]| {
+            let mut bounds = bounds();
+            bounds.outputs.insert(
+                HIDE_COMMENT.to_owned(),
+                OutputLimit {
+                    max: 2,
+                    allowed_reasons: reasons.iter().map(|r| (*r).to_owned()).collect(),
+                    ..Default::default()
+                },
+            );
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs: HIDE_COMMENT,
+                    ..request()
+                })
+                .unwrap()
+        };
+        let policy = compiled(&["SPAM", "OUTDATED"]);
+        policy.validate().unwrap();
+        // The handler reads `allowed_reasons` as it is written here.
+        assert_eq!(
+            serde_json::to_value(&policy.safe_outputs).unwrap()[HIDE_COMMENT],
+            serde_json::json!({"max": 2, "allowed_reasons": ["SPAM", "OUTDATED"]})
+        );
+        let both = intersect(policy.clone(), compiled(&["OUTDATED", "ABUSE"])).unwrap();
+        assert_eq!(
+            both.safe_outputs.others[HIDE_COMMENT].allowed_reasons,
+            ["OUTDATED"]
+        );
+        // None in common would be the handler's "any reason".
+        assert!(intersect(policy, compiled(&["ABUSE"])).is_err());
+    }
+
+    /// gh-aw's per-type `target-repo`, `allowed-repos` and protected-file
+    /// policies are not bounds keys: destinations are the caller's, and a
+    /// protected file is always refused (docs/safe-outputs.md).
+    #[test]
+    fn per_type_destinations_and_protection_are_not_offered() {
+        for output in [CREATE_PULL_REQUEST, "add_comment", HIDE_COMMENT] {
+            for key in [
+                // The table parses without one of them.
+                "",
+                "target-repo = 'evil/repo'",
+                "target_repo = 'evil/repo'",
+                "allowed-repos = ['evil/repo']",
+                "allowed_repos = ['evil/repo']",
+                "protected-files = 'request-review'",
+                "protected_files_policy = 'fallback-to-issue'",
+                "protected_files = []",
+            ] {
+                let text = format!(
+                    "{BOUNDS}\n[outputs.{output}]\nmax = 1\nallowed_reasons = ['SPAM']\n{key}\n"
+                )
+                .replace(&format!("{output} = {{ max = 1 }}\n"), "")
+                .replace(&format!("{output} = {{ max = 3 }}\n"), "");
+                match toml::from_str::<Bounds>(&text) {
+                    Ok(_) => assert!(key.is_empty(), "{output} {key}"),
+                    Err(error) => assert!(
+                        !key.is_empty() && error.to_string().contains("unknown field"),
+                        "{output} {key}: {error}"
+                    ),
+                }
+            }
+        }
+        // Nor can a policy carry another protected-file policy than refusal.
+        let mut policy = serde_json::to_value(policy()).unwrap();
+        for value in ["blocked", "request-review", "fallback-to-issue"] {
+            policy["safe_outputs"]["create_pull_request"]["protected_files_policy"] =
+                serde_json::json!(value);
+            assert_eq!(
+                serde_json::from_value::<Policy>(policy.clone()).is_ok(),
+                value == "blocked",
+                "{value}"
+            );
         }
     }
 

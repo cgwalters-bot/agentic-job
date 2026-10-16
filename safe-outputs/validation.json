@@ -165,6 +165,32 @@
       }
     }
   },
+  "hide_comment": {
+    "defaultMax": 5,
+    "fields": {
+      "comment_id": {
+        "required": true,
+        "type": "string",
+        "typeHint": "GraphQL node ID string (e.g. 'IC_kwDOABCD123456'); numeric REST comment IDs are accepted but may not resolve for all comment types (e.g. PR review comments)",
+        "maxLength": 256
+      },
+      "reason": {
+        "type": "string",
+        "enum": [
+          "SPAM",
+          "ABUSE",
+          "OFF_TOPIC",
+          "OUTDATED",
+          "RESOLVED",
+          "LOW_QUALITY"
+        ]
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
   "close_issue": {
     "defaultMax": 1,
     "fields": {

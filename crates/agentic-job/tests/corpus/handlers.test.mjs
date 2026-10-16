@@ -650,3 +650,88 @@ test('a checked discussion is posted only in the category the bounds pin', async
     }
   }
 });
+
+test('a checked comment is hidden only on the triggering item, for a pinned reason', async () => {
+  const repo = 'owner/source';
+  const itemRepo = 'owner/item';
+  // Comments by node ID: on the triggering issue #64, on #65, and on #64 of
+  // another repository; and by REST ID, which the handler looks up in the
+  // item repository: 1001 is on #64, 1002 on #65.
+  const comments = {
+    IC_64: { issue: { number: 64, repository: { nameWithOwner: itemRepo } } },
+    IC_65: { issue: { number: 65, repository: { nameWithOwner: itemRepo } } },
+    IC_other: { issue: { number: 64, repository: { nameWithOwner: 'owner/other' } } },
+  };
+  const item = { type: 'hide_comment', comment_id: 'IC_64' };
+  for (const [name, line, target, ok, hidden] of [
+    ['the triggering item', item, '64', true, ['IC_64', 'SPAM']],
+    ['a pinned reason', { ...item, reason: 'outdated' }, '64', true, ['IC_64', 'OUTDATED']],
+    ['by REST ID', { ...item, comment_id: '1001' }, '64', true, ['IC_rest', 'SPAM']],
+    ['another reason', { ...item, reason: 'ABUSE' }, '64', false],
+    ['another repository named', { ...item, repo: 'owner/other' }, '64', false],
+    ['no triggering item', item, '*', false],
+    // Only the handler can look a comment up: it refuses these.
+    ['another item', { ...item, comment_id: 'IC_65' }, '64', true, null],
+    ['another repository', { ...item, comment_id: 'IC_other' }, '64', true, null],
+    ['another item by REST ID', { ...item, comment_id: '1002' }, '64', true, null],
+    ['no such comment', { ...item, comment_id: 'IC_missing' }, '64', true, null],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'handler-test-'));
+    try {
+      const file = name => join(work, name);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}", "${itemRepo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.hide_comment]\nmax = 1\nallowed_reasons = ["SPAM", "OUTDATED"]\n`);
+      const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'hide_comment',
+        '--max-outputs', '1', '--item-repo', itemRepo], { encoding: 'utf8' });
+      assert.equal(policyResult.status, 0, policyResult.stderr);
+      writeFileSync(file('policy.json'), policyResult.stdout);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
+      // As check.yml passes the triggering item, and nothing for `*`.
+      const destination = target === '*' ? [] : ['--comment-repo', itemRepo, '--comment-target', target];
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json'), ...destination], { encoding: 'utf8' });
+      const verdict = JSON.parse(readFileSync(file('report.json')));
+      assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)} ${checked.stderr}`);
+      if (!ok) continue;
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), GITHUB_REPOSITORY: repo, REPO: repo, OUTPUT_REPO: repo,
+        ITEM_REPO: itemRepo, BASE: 'main', BRANCH_PREFIX: '', READY: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: target,
+        PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const config = JSON.parse(readFileSync(file('handler-config.json')));
+      assert.deepEqual(config.hide_comment, { max: 1, allowed_reasons: ['SPAM', 'OUTDATED'], 'target-repo': itemRepo, target: '64' });
+      const calls = [];
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, startGroup() {}, endGroup() {} },
+        // Started by an event on another item, which the handler must not take.
+        context: { repo: { owner: 'owner', repo: 'source' }, eventName: 'issue_comment', payload: { issue: { number: 9 } } },
+        github: {
+          rest: { issues: { getComment: async ({ owner, repo: name, comment_id }) => {
+            calls.push(['get', `${owner}/${name}`, comment_id]);
+            return { data: { node_id: 'IC_rest', issue_url: `https://api.github.com/repos/${owner}/${name}/issues/${comment_id === 1001 ? 64 : 65}` } };
+          } } },
+          graphql: async (query, variables) => {
+            if (/\bminimizeComment\b/.test(query)) {
+              calls.push(['hide', variables.nodeId, variables.classifier]);
+              return { minimizeComment: { minimizedComment: { isMinimized: true } } };
+            }
+            return { node: comments[variables.nodeId] ?? null };
+          },
+        },
+      });
+      const handler = await require(join(js, 'hide_comment.cjs')).main(config.hide_comment);
+      const result = await handler(verdict.items[0], {});
+      assert.equal(result.success, hidden !== null, `${name}: ${JSON.stringify(result)}`);
+      assert.deepEqual(calls.filter(call => call[0] === 'hide'), hidden === null ? [] : [['hide', ...hidden]], name);
+      if (line.comment_id === '1001') assert.deepEqual(calls[0], ['get', itemRepo, 1001], name);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});

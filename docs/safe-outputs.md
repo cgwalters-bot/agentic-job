@@ -76,7 +76,7 @@ the pinned commit gives.
 The types a run can be allowed are `create_pull_request`, `create_issue`, `create_discussion`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,
 `mark_pull_request_as_ready_for_review`, `create_check_run`, `update_project`, `push_to_pull_request_branch`,
-`add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`,
+`add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`, `hide_comment`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -360,6 +360,39 @@ needs `discussions: write` for the job token, or a `SAFE_OUTPUTS_PAT` that
 can post discussions there. A re-run of apply posts a discussion again: unlike
 an issue, it is not looked for under its name first.
 
+### Hiding a comment
+
+`hide_comment` minimizes a comment on the run's triggering issue or pull
+request. That is moderating what other people wrote, a maintainer's
+included: a reader sees it folded under the reason, and an agent misled by
+the item's text could fold the comments that argue with it. It is off
+unless listed in bounds, which pin the reasons it may give:
+
+```toml
+[outputs.hide_comment]
+max = 3
+allowed_reasons = ["SPAM", "OFF_TOPIC"]
+```
+
+The reasons are those of gh-aw's collector, `SPAM`, `ABUSE`, `OFF_TOPIC`,
+`OUTDATED`, `RESOLVED` and `LOW_QUALITY`; the list is nonempty, since the
+handler takes an empty one for any reason, and two bounds files keep the
+reasons they share. Check refuses a request for another reason (none given
+is `SPAM`, as the handler takes it), one naming another repository than the
+item's, and every request of a run without one item: the event's, or a
+numeric `comment-target`, which takes the event's place, never `*`. The
+item's repository is a comment's: `item-repo`, else `output-repo`, else the
+calling one; an event-triggered run whose `output-repo` is another
+repository is refused the type before its agent starts, since the event's
+item is in the calling one. Only the handler can look a comment up, so it
+is given that item's number as its `target` and the repository as
+`target-repo`, as gh-aw's `target: triggering` would from the event, and
+refuses a comment anywhere else; a run without one item gets no handler.
+Apply needs `issues: write` for an issue's comments, or `pull-requests: write`
+for a pull request's, for the job token, or a `SAFE_OUTPUTS_PAT` that can
+moderate comments there. A re-run hides the comments again, including one
+a maintainer unhid in between.
+
 ### Pushing to a pull request's branch
 
 #### Replacing the complete series
@@ -635,6 +668,14 @@ on, so the handler still refuses every other dot-folder before and after it
 applies the patch. `protected_files_policy` stays `blocked`, so protected
 basenames remain refused.
 
+gh-aw's per-type `target-repo` and `allowed-repos`, and its other
+`protected-files` policies (`request-review`, `fallback-to-issue`), are
+deliberately not offered: a bounds file that names one is refused as an
+unknown key. Destinations stay fixed by the caller
+([target repositories](workflow.md#the-apply-job-and-its-token)), never
+chosen per type or by the agent, and a patch that touches a protected file
+is refused rather than sent for review or turned into an issue.
+
 ## What the agent does
 
 The producer need not be an agent. Any caller job can upload `outputs.jsonl`
@@ -772,7 +813,7 @@ output repository, where [its owner applies](workflow.md#a-repository-the-applyi
 requires of a `head-repo`; the agent cannot name it, since check refuses
 a request's `repo`. Without a fork there is no `create_pull_request`
 handler ([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
-`add_comment` gets `target-repo` and `target`. They list what they made in
+`add_comment` and `hide_comment` get `target-repo` and `target`. They list what they made in
 `/tmp/gh-aw/safe-output-items.jsonl`. Where the forge refuses a pull
 request, the upstream handler would open a fallback issue despite
 `fallback_as_issue: false`; the workflow lets no handler open more

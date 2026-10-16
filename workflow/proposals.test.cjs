@@ -250,3 +250,30 @@ for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token
     }
   });
 }
+
+// An event's item is in the calling repository; with outputs going to
+// another one, check and apply would hold a hidden comment to the event's
+// number there, on an item the event was not about.
+for (const [extra, ok] of [[{}, true], [{ EVENT: 'true' }, true], [{ EVENT: 'true', OUTPUT_REPO: 'O/R' }, true],
+  [{ OUTPUT_REPO: 'x/y' }, true], [{ EVENT: 'true', OUTPUT_REPO: 'x/y' }, false]]) {
+  test(`hide_comment is refused before the agent for an event's item elsewhere: ${JSON.stringify(extra)}`, () => {
+    const dir = mkdtempSync(join(homedir(), 'request-'));
+    try {
+      mkdirSync(join(dir, 'workflow'));
+      writeFileSync(join(dir, 'workflow/policy-command.cjs'),
+        'process.stdout.write(JSON.stringify({safe_outputs: {hide_comment: {max: 1, allowed_reasons: ["SPAM"]}}}))');
+      const script = policy.split("- name: Check the request against the caller's bounds\n")[1]
+        .split('        run: |\n')[1].split(/\n      [^ ]/)[0]
+        .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+        encoding: 'utf8', env: { ...process.env, SOURCE_DIR: dir, JOB_DIR: dir, GITHUB_OUTPUT: join(dir, 'output'),
+          GITHUB_REPOSITORY: 'o/r', ALLOW: 'allow', REPO: 'o/r', BASE: 'main', KIND: 'analysis', OUTPUTS: 'all',
+          MAX_OUTPUTS: '1', TARGET: '', APPLY_ENVIRONMENT: 'apply', ISSUE: '', ...extra },
+      });
+      assert.equal(result.status, ok ? 0 : 1, result.stderr);
+      if (!ok) assert.match(result.stdout, /::error::hide_comment is for an event-triggered run only when output-repo is the calling repository/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

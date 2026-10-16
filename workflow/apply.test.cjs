@@ -216,6 +216,28 @@ test('a discussion goes to the run repository, never to an issue in its place', 
   }
 });
 
+// Without one item check refused every hide_comment, so the handler is left
+// out rather than failing the run's other outputs.
+test('a comment is hidden only on the triggering item, for the pinned reasons', () => {
+  for (const [target, expected] of [['64', { max: 1, allowed_reasons: ['SPAM'], 'target-repo': 'owner/item', target: '64' }],
+    ['*', undefined], ['', undefined], ['0', undefined]]) {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      writeFileSync(join(root, 'config.json'), JSON.stringify({ hide_comment: { max: 1, allowed_reasons: ['SPAM'] } }));
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
+        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), GITHUB_REPOSITORY: 'owner/caller', REPO: 'owner/source',
+        OUTPUT_REPO: 'owner/output', ITEM_REPO: 'owner/item', BASE: 'main', BRANCH_PREFIX: '',
+        READY: 'false', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: target, PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      });
+      assert.equal(result.status, 0, `${target}: ${result.stderr}`);
+      const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+      assert.deepEqual(config.hide_comment, expected, target);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 // The settings a push is applied with, as the workflow states them.
 function stepEnv(name, key) {
   const section = workflow.split(`- name: ${name}\n`)[1].split('        run: |\n')[0];

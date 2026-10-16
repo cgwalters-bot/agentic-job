@@ -460,6 +460,18 @@ jobs:
         # an issue, which create_issue's bounds would not cover, nor close
         # earlier discussions.
         #
+        # A comment is hidden only on the run's triggering issue or pull
+        # request in the item repository: its number is the handler's
+        # target, as for gh-aw's `target: triggering`, which reads the
+        # event apply was started by and so misses a dispatched run's item.
+        # The handler looks the comment up and refuses one on another item
+        # (with a number for its target it does not ask which kind of item
+        # that is: issues, pull requests and discussions share their
+        # numbers) or in another repository; no `allowed_repos` widens that.
+        # A run without one item gets no handler, never `*`: check refused
+        # every request of it, and the policy allowing the type is no reason
+        # to fail the run's other outputs.
+        #
         # The check run handler names the run from `name`, which the bounds
         # pinned, and with `target: "*"` posts on the head of the pull
         # request check held to one number. It posts in the calling
@@ -487,6 +499,9 @@ jobs:
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push
               + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork], checkout_mapping: {($repo | ascii_downcase): "."}}
             | (select(has("add_comment")).add_comment) += {"target-repo": $item_repo, target: $target}
+            | if has("hide_comment") | not then .
+              elif $target | test("^[1-9][0-9]*$") then .hide_comment += {"target-repo": $item_repo, target: $target}
+              else del(.hide_comment) end
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("create_discussion")).create_discussion) += {"target-repo": $action_repo, fallback_to_issue: false, close_older_discussions: false}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
@@ -556,6 +571,7 @@ jobs:
       # a comment: `allow_body` is false), adding labels and
       # setting a project field are the same done twice and are left alone.
       # A discussion is not looked for, and a re-run posts it again.
+      # A comment is hidden again, even one a maintainer unhid since.
       - name: Leave out what an earlier attempt applied
         id: applied
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}

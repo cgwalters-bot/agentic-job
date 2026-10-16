@@ -257,6 +257,28 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 [handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
 `a checked discussion is posted only in the category the bounds pin`.
 
+**RC-026 — Hidden comment bounds.** Hiding a comment moderates other
+people's text, so bounds MUST pin a nonempty `hide_comment` list of
+`allowed_reasons`. Check MUST refuse a request for another reason, one
+naming another repository than the item's, and every request of a run
+without one triggering item. Policy MUST refuse the type for an
+event-triggered run whose `output-repo` is not the calling repository.
+Apply MUST give the handler that item's number
+and repository as its target, so that it hides only comments on that item;
+bounds MUST NOT take gh-aw's per-type `target-repo`, `allowed-repos` or a
+`protected-files` policy other than `blocked`.
+Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
+`hidden_comments_stay_on_the_triggering_item_for_pinned_reasons`,
+[policy.rs](../crates/agentic-job/src/policy.rs) tests
+`hidden_comments_name_their_reasons` and
+`per_type_destinations_and_protection_are_not_offered`,
+[apply.test.cjs](../workflow/apply.test.cjs)
+`a comment is hidden only on the triggering item, for the pinned reasons`,
+[proposals.test.cjs](../workflow/proposals.test.cjs)
+`hide_comment is refused before the agent for an event's item elsewhere`, and
+[handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
+`a checked comment is hidden only on the triggering item, for a pinned reason`.
+
 **RC-013 — Re-run application.** A re-run of apply MUST NOT post an accepted
 comment, issue or pull request that an earlier attempt of the same run posted,
 and MUST apply the comments and issues it did not. Apply names each by run

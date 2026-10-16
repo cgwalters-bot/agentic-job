@@ -29,7 +29,8 @@ pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy, update_fields,
+    CREATE_PULL_REQUEST, HIDE_COMMENT, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
+    update_fields,
 };
 use crate::redact;
 
@@ -275,7 +276,7 @@ fn redirections_to(
             .filter(|value| !value.as_str().is_some_and(same))
             .map(|value| format!("a {output} with {key} {value}, which is not the policy's"))
     };
-    let repo = if output == "add_comment" {
+    let repo = if matches!(output, "add_comment" | HIDE_COMMENT) {
         comment.map_or(policy.repo.as_str(), |(repo, _)| repo)
     } else {
         &policy.repo
@@ -320,6 +321,32 @@ fn redirections_to(
                     "an add_comment with {key}, outside the caller's fixed destination"
                 ));
             }
+        }
+    }
+    if output == HIDE_COMMENT {
+        // Hiding moderates what other people wrote, so only on the item
+        // the run was started for: apply gives the handler that number as
+        // its target, and the handler refuses a comment on any other item,
+        // which only it can look up. Without a fixed item (`*`) there is
+        // none to hold it to.
+        if comment.is_none() {
+            problems.push(format!(
+                "a {output} needs the run's triggering issue or pull request as its comment target"
+            ));
+        }
+        // The handler hides as spam a request without a reason.
+        let reason = item.get("reason").map_or(Some("SPAM"), Value::as_str);
+        let allowed = policy
+            .safe_outputs
+            .others
+            .get(output)
+            .map_or(&[][..], |limit| &limit.allowed_reasons[..]);
+        if !reason.is_some_and(|reason| allowed.iter().any(|allowed| allowed == reason)) {
+            problems.push(format!(
+                "a {output} for reason {}, which the policy does not allow",
+                item.get("reason")
+                    .map_or_else(|| "SPAM (none given)".to_owned(), Value::to_string)
+            ));
         }
     }
     if output == CREATE_PULL_REQUEST {
@@ -1899,6 +1926,46 @@ mod tests {
             }
             policy.safe_outputs.others.remove(output);
             assert!(!redirections(plain.as_object().unwrap(), &policy).is_empty());
+        }
+    }
+
+    #[test]
+    fn hidden_comments_stay_on_the_triggering_item_for_pinned_reasons() {
+        let mut policy = policy();
+        policy.safe_outputs.others.insert(
+            HIDE_COMMENT.to_owned(),
+            crate::policy::OutputLimit {
+                max: 1,
+                allowed_reasons: vec!["SPAM".to_owned(), "OUTDATED".to_owned()],
+                ..Default::default()
+            },
+        );
+        let item = Some(("tracker/items", 64));
+        for (fields, comment, ok) in [
+            (json!({}), item, true),
+            (json!({"reason": "OUTDATED"}), item, true),
+            (
+                json!({"repo": "TRACKER/ITEMS", "reason": "SPAM"}),
+                item,
+                true,
+            ),
+            (json!({"reason": "ABUSE"}), item, false),
+            (json!({"reason": "outdated"}), item, false),
+            (json!({"reason": null}), item, false),
+            (json!({"reason": ["SPAM"]}), item, false),
+            (json!({"repo": "bootc-dev/bootc"}), item, false),
+            (json!({"repo": "other/repo"}), item, false),
+            // No triggering item to hold the handler to.
+            (json!({}), None, false),
+        ] {
+            let mut request = fields.as_object().unwrap().clone();
+            request.insert("type".into(), json!(HIDE_COMMENT));
+            request.insert("comment_id".into(), json!("IC_kwDOABCD123456"));
+            assert_eq!(
+                redirections_to(&request, &policy, comment).is_empty(),
+                ok,
+                "{fields} {comment:?}"
+            );
         }
     }
 

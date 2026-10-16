@@ -721,6 +721,14 @@ jobs:
             jq --arg base "$REPLACEMENT_BASE" '.safe_outputs.push_to_pull_request_branch.replacement_base = $base' "$JOB_DIR/policy.json" > "$JOB_DIR/policy-base.json"
             mv "$JOB_DIR/policy-base.json" "$JOB_DIR/policy.json"
           fi
+          # An event's item is in the calling repository, but check and apply
+          # take a comment's repository to be `output-repo`: there the event's
+          # number is another item, whose comments a run is not to hide.
+          if [ "$EVENT" = true ] && [ -n "$OUTPUT_REPO" ] && [ "${OUTPUT_REPO,,}" != "${GITHUB_REPOSITORY,,}" ] &&
+            jq -e '.safe_outputs | has("hide_comment")' "$JOB_DIR/policy.json" > /dev/null; then
+            echo "::error::hide_comment is for an event-triggered run only when output-repo is the calling repository, where the event's item is"
+            exit 1
+          fi
           jq . "$JOB_DIR/policy.json"
           printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
       - id: binary
