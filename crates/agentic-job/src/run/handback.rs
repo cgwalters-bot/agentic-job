@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use super::clone::{self, Checkout};
 use super::enter::Runner;
+use crate::check::checkpoint::Checkpoint;
 use crate::check::{BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, patch_file_name};
 use crate::config;
 use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
@@ -318,6 +319,32 @@ pub fn default_pull_request(outcome: &Object, run_id: &str) -> PullRequest {
     }
 }
 
+/// The checkpoint of a pull request made up from OUTCOME, for work that
+/// [`default_pull_request`] calls partial: under `ready_when_complete`
+/// that work would otherwise open ready for review.
+fn fallback_checkpoint(outcome: &Object) -> Option<Checkpoint> {
+    let summary = outcome.text("summary").unwrap_or_default().trim();
+    let left = match outcome.get("stopped_early") {
+        Some(early) if truthy(early) => early
+            .as_str()
+            .map(|why| cut(&squeeze(why), MAX_REASON_CHARS))
+            .filter(|why| !why.is_empty())
+            .unwrap_or_else(|| "the run stopped early".to_owned()),
+        _ if summary.is_empty() => NO_SUMMARY.to_owned(),
+        _ => return None,
+    };
+    Some(Checkpoint {
+        reason: "incomplete".to_owned(),
+        done: if summary.is_empty() {
+            "unknown: the agent wrote no summary".to_owned()
+        } else {
+            "what the description above says".to_owned()
+        },
+        left,
+        next: "read this change and its description, then continue the task".to_owned(),
+    })
+}
+
 /// The `outputs.jsonl` to hand back, and what goes with it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Outputs {
@@ -364,7 +391,12 @@ pub fn build_outputs(
 ) -> Outputs {
     let (kind, branch) = carrier(policy, run_id);
     let push = kind == PUSH_TO_PULL_REQUEST_BRANCH;
-    let fallback = default_pull_request(outcome, run_id);
+    let mut fallback = default_pull_request(outcome, run_id);
+    if policy.safe_outputs.ready_when_complete()
+        && let Some(checkpoint) = fallback_checkpoint(outcome)
+    {
+        fallback.body = format!("{}\n\n{}", fallback.body, checkpoint.markdown());
+    }
     let mut message = None;
     let mut lines: Vec<String> = agent_text
         .lines()
@@ -1289,6 +1321,36 @@ mod tests {
         let many = "{\"type\":\"noop\"}\n".repeat(MAX_LINES + 5);
         let got = build_outputs(&many, &policy, false, &outcome, RUN_ID);
         assert_eq!(got.text.lines().count(), MAX_LINES);
+    }
+
+    /// Under `ready_when_complete`, a pull request made up for work the
+    /// fallback calls partial carries a checkpoint, so that apply keeps
+    /// it a draft; complete work, or a policy without it, carries none.
+    #[test]
+    fn made_up_partial_work_is_a_checkpoint_where_complete_work_opens_ready() {
+        let mut ready = pull_requests();
+        ready["create_pull_request"]["ready_when_complete"] = json!(true);
+        let ready = policy(Kind::Branch, ready);
+        let off = policy(Kind::Branch, pull_requests());
+        let cases = [
+            (json!({"summary": "Fixed it."}), &ready, None),
+            (
+                json!({"summary": "Half of it.", "stopped_early": "out of time"}),
+                &ready,
+                Some("out of time"),
+            ),
+            (json!({}), &ready, Some(NO_SUMMARY)),
+            (json!({"stopped_early": "out of time"}), &off, None),
+        ];
+        for (outcome, policy, left) in cases {
+            let got = build_outputs("", policy, true, &object(outcome.clone()), RUN_ID);
+            let (_, body) = got.message.unwrap();
+            let request: Value = serde_json::from_str(got.text.trim()).unwrap();
+            assert_eq!(request["body"], body.as_str(), "{outcome}");
+            let found = crate::check::checkpoint::find(&body).unwrap();
+            assert_eq!(found.as_ref().map(|c| c.left.as_str()), left, "{outcome}");
+            assert!(found.is_none_or(|c| c.reason == "incomplete"));
+        }
     }
 
     /// A run that fixes a pull request asks for a push to its branch,

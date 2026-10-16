@@ -10,6 +10,7 @@ use std::path::Path;
 use super::handback::{
     AGENT_OUTCOME, AGENT_OUTPUTS, MAX_LINES, MAX_OUTCOME_BYTES, MAX_OUTPUTS_BYTES,
 };
+use crate::check::checkpoint::{FENCE, REASONS};
 use crate::policy::{
     CREATE_PULL_REQUEST, EXEMPTABLE_DOT_FOLDER, Kind, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules,
     Policy,
@@ -180,6 +181,24 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
              below.\n",
         );
     }
+    if carrier.is_some() && outputs.ready_when_complete() {
+        let (what, field) = if push.is_some() {
+            ("pull request is marked", "message")
+        } else {
+            ("pull request opens", "body")
+        };
+        let _ = writeln!(
+            text,
+            "  Complete work: the {what} ready for review. If your work is not complete, \
+             because you are near a limit or know it is unfinished, end the {field} with a \
+             checkpoint, and it is a draft to be continued instead: a line `{FENCE}`, one JSON \
+             object `{{\"reason\": \"...\", \"done\": \"...\", \"left\": \"...\", \
+             \"next\": \"...\"}}` (`reason` one of {}; the others what is done, what is left \
+             and how to continue), and a line of three backticks. A malformed checkpoint, or \
+             two, gets all of your requests refused.",
+            REASONS.join(", ")
+        );
+    }
     let _ = writeln!(
         text,
         "- `{}`: your report, written last, as one JSON object of at most {} KiB: \
@@ -281,6 +300,19 @@ mod tests {
         }
         assert!(branch.ends_with(".\n\n"), "{branch:?}");
         assert!(branch.contains("credits a tool or a model"), "{branch}");
+        // Only a policy that opens complete work ready asks for checkpoints.
+        assert!(!branch.contains("checkpoint"), "{branch}");
+        let mut ready = pull.clone();
+        ready["create_pull_request"]["ready_when_complete"] = json!(true);
+        let ready = text(&policy(Kind::Branch, ready));
+        for want in [
+            "Complete work: the pull request opens ready for review.",
+            "end the body with a checkpoint",
+            "a line ````checkpoint`",
+            "one of budget, runtime, cap, incomplete",
+        ] {
+            assert!(ready.contains(want), "{want}\n{ready}");
+        }
 
         // An analysis run is offered no pull request, whatever the policy
         // file says; a run with no outputs is told to write none.

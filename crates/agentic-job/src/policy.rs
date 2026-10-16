@@ -27,8 +27,9 @@ pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
 pub const PUSH_TO_PULL_REQUEST_BRANCH: &str = "push_to_pull_request_branch";
 
 /// The output type that takes a pull request out of draft. Off unless a
-/// bounds file lists it: apply opens every pull request as a draft, and
-/// this, like `draft: false` in an update, would undo that.
+/// bounds file lists it: apply opens a pull request as a draft unless its
+/// work is complete under `ready_when_complete`, and this, like `draft:
+/// false` in an update, would take one out of draft on the agent's word.
 pub const MARK_READY: &str = "mark_pull_request_as_ready_for_review";
 
 /// The fields an update may change, of those gh-aw's rules let a request
@@ -349,10 +350,19 @@ pub struct OutputLimit {
     /// `create_check_run`, and only for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// For the two outputs that carry a patch: open complete work ready
+    /// for review, and only a checkpoint (`check::checkpoint`) or a run
+    /// stopped at a limit as a draft. Off, every pull request is a draft.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ready_when_complete: bool,
 }
 
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl OutputLimit {
@@ -361,6 +371,11 @@ impl OutputLimit {
             self.replacement_max_commits <= MAX_REPLACEMENT_COMMITS
                 && (output == PUSH_TO_PULL_REQUEST_BRANCH || self.replacement_max_commits == 0),
             "outputs.{output}: replacement_max_commits is supported only for a push, at most 50"
+        );
+        ensure!(
+            !self.ready_when_complete
+                || matches!(output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH),
+            "outputs.{output}: ready_when_complete is supported only for {CREATE_PULL_REQUEST} and {PUSH_TO_PULL_REQUEST_BRANCH}"
         );
         ensure!(
             output == "update_project" || self.projects.is_empty(),
@@ -579,7 +594,13 @@ pub struct PullRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprotected_dot_folders: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
+    /// What gh-aw's handler is given; apply sets it false only for
+    /// complete work under [`OutputLimit::ready_when_complete`].
     pub draft: bool,
+    /// The bounds' [`OutputLimit::ready_when_complete`]; apply reads it,
+    /// and takes it out of the handler's configuration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ready_when_complete: bool,
     /// The largest patch, in KB.
     pub max_patch_size: u64,
     pub max_patch_files: u32,
@@ -603,6 +624,10 @@ pub struct Push {
     /// The target base head resolved by the read-only policy job, not the producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_base: Option<String>,
+    /// As [`PullRequest::ready_when_complete`]: apply marks the pull
+    /// request ready after a complete push, a draft after a checkpoint.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ready_when_complete: bool,
     pub protected_files: Vec<String>,
     pub protect_top_level_dot_folders: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -676,6 +701,18 @@ impl SafeOutputs {
                     .map(|_| PUSH_TO_PULL_REQUEST_BRANCH),
             )
             .chain(self.others.keys().map(String::as_str))
+    }
+
+    /// Whether the patch's carrier has complete work opened or marked
+    /// ready, so that a checkpoint is what keeps it a draft.
+    pub fn ready_when_complete(&self) -> bool {
+        self.create_pull_request
+            .as_ref()
+            .is_some_and(|pr| pr.ready_when_complete)
+            || self
+                .push_to_pull_request_branch
+                .as_ref()
+                .is_some_and(|push| push.ready_when_complete)
     }
 
     /// The output that carries the run's patch, and the patch's rules: a
@@ -1155,6 +1192,12 @@ impl Bounds {
                 .outputs
                 .get(output)
                 .and_then(|bound| bound.name.clone()),
+            ready_when_complete: false,
+        };
+        let ready = |output: &str| {
+            self.outputs
+                .get(output)
+                .is_some_and(|bound| bound.ready_when_complete)
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -1164,6 +1207,7 @@ impl Bounds {
                 unprotected_dot_folders: self.dot_folders(repo),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 draft: true,
+                ready_when_complete: ready(CREATE_PULL_REQUEST),
                 max_patch_size: self.max_patch_bytes / KB,
                 max_patch_files: self.max_patch_files,
             }),
@@ -1176,6 +1220,7 @@ impl Bounds {
                     .get(PUSH_TO_PULL_REQUEST_BRANCH)
                     .map_or(0, |bound| bound.replacement_max_commits),
                 replacement_base: None,
+                ready_when_complete: ready(PUSH_TO_PULL_REQUEST_BRANCH),
                 protected_files: self.protected_files(repo),
                 protect_top_level_dot_folders: true,
                 unprotected_dot_folders: self.dot_folders(repo),
@@ -1375,6 +1420,7 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
                 .retain(|name| bound.unprotected_dot_folders.contains(name));
             pr.max_patch_size = pr.max_patch_size.min(bound.max_patch_size);
             pr.max_patch_files = pr.max_patch_files.min(bound.max_patch_files);
+            pr.ready_when_complete &= bound.ready_when_complete;
             for name in bound.protected_files {
                 if !pr.protected_files.contains(&name) {
                     pr.protected_files.push(name);
@@ -1402,6 +1448,7 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             push.replacement_max_commits = push
                 .replacement_max_commits
                 .min(bound.replacement_max_commits);
+            push.ready_when_complete &= bound.ready_when_complete;
             push.max_patch_size = push.max_patch_size.min(bound.max_patch_size);
             push.max_patch_files = push.max_patch_files.min(bound.max_patch_files);
             for name in bound.protected_files {
@@ -2880,6 +2927,83 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             };
             assert_eq!(limit.validate(output).is_ok(), accepted);
         }
+    }
+
+    /// Off unless bounds say so, for the patch's carriers alone, and on
+    /// only where every bounds file turns it on.
+    #[test]
+    fn ready_when_complete_is_explicit_and_only_tightens() {
+        type Ready = fn(&Policy) -> Option<bool>;
+        type Carrier = (
+            &'static str,
+            fn() -> Bounds,
+            fn() -> Request<'static>,
+            Ready,
+        );
+        let carriers: [Carrier; 2] = [
+            (CREATE_PULL_REQUEST, bounds, request, |policy| {
+                policy
+                    .safe_outputs
+                    .create_pull_request
+                    .as_ref()
+                    .map(|pr| pr.ready_when_complete)
+            }),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                push_bounds,
+                push_request,
+                |policy| {
+                    policy
+                        .safe_outputs
+                        .push_to_pull_request_branch
+                        .as_ref()
+                        .map(|push| push.ready_when_complete)
+                },
+            ),
+        ];
+        for (output, bounds, request, ready) in carriers {
+            let compile = |on| {
+                let mut bounds = bounds();
+                bounds.outputs.get_mut(output).unwrap().ready_when_complete = on;
+                bounds.validate().unwrap();
+                bounds.compile(&request()).unwrap()
+            };
+            for (caller, organization, want) in [
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (true, true, true),
+            ] {
+                let both = intersect(compile(caller), compile(organization)).unwrap();
+                assert_eq!(ready(&both), Some(want), "{output} {caller} {organization}");
+                assert_eq!(both.safe_outputs.ready_when_complete(), want);
+            }
+            // policy.json says nothing of it when off, as before.
+            let off = serde_json::to_string(&compile(false)).unwrap();
+            assert!(!off.contains("ready_when_complete"), "{off}");
+        }
+        for (output, accepted) in [
+            (CREATE_PULL_REQUEST, true),
+            (PUSH_TO_PULL_REQUEST_BRANCH, true),
+            ("add_comment", false),
+            (MARK_READY, false),
+        ] {
+            let limit = OutputLimit {
+                max: 1,
+                ready_when_complete: true,
+                branches: if output == PUSH_TO_PULL_REQUEST_BRANCH {
+                    vec!["agent-run-*".into()]
+                } else {
+                    Vec::new()
+                },
+                ..OutputLimit::default()
+            };
+            assert_eq!(limit.validate(output).is_ok(), accepted, "{output}");
+        }
+        let toml = "hosts = []\nrepos = []\nbases = []\nmax_outputs = 1\nmax_patch_bytes = 1\n\
+                    max_patch_files = 1\n[outputs]\ncreate_pull_request = { max = 1, ready_when_complete = true }\n";
+        let parsed: Bounds = toml::from_str(toml).unwrap();
+        assert!(parsed.outputs[CREATE_PULL_REQUEST].ready_when_complete);
     }
 
     #[test]

@@ -310,7 +310,8 @@ pub fn hand_back_text(used: &str, window: Duration) -> String {
         "{NOTICE_PREFIX} This run has {used}, so your work was interrupted. Hand back now: \
          start nothing new and run no more builds or tests. Leave the working tree as the \
          partial change you want collected, write your outcome as your task brief says (what \
-         is done, what is not, how to continue, and why you stopped early), then stop. The \
+         is done, what is not, how to continue, and why you stopped early, with the checkpoint \
+         the brief describes if it describes one), then stop. The \
          session ends in {}; whatever isn't written by then is lost.",
         human(window)
     )

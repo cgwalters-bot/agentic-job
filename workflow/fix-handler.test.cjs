@@ -64,7 +64,7 @@ test('scripted fix from a different caller layout reaches the target checkout an
       writeFileSync(join(outputs, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head } }));
       const configResult = spawnSync('bash', ['-euo', 'pipefail', '-c', shell], { cwd: work, encoding: 'utf8',
         env: { ...process.env, GITHUB_ENV: join(root, 'env'), OUTPUT_REPO: 'Owner/Target', ITEM_REPO: 'Owner/Target', REPO: 'Owner/Target', BASE: 'agent-run-7',
-          FORK: 'bot/target', BRANCH_PREFIX: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}',
+          FORK: 'bot/target', BRANCH_PREFIX: '', READY: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}',
           BASH_ENV: '',
           PUSH: '{"signed_commits":false,"fallback_as_pull_request":false,"if_no_changes":"error"}' } });
       assert.equal(configResult.status, 0, configResult.stderr);

@@ -377,6 +377,27 @@ jobs:
           diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"
           echo "tree=$(git -C "$RUNNER_TEMP/trial" rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
           git worktree remove --force "$RUNNER_TEMP/trial"
+      # Whether the work is complete, which only a policy whose bounds set
+      # `ready_when_complete` acts on (docs/safe-outputs.md#ready-or-draft).
+      # A run stopped at a limit is not, whatever it handed back, and
+      # neither is one whose pull request or push holds the checkpoint
+      # check reported. The reason is check's word or this file's, chosen
+      # by the exit state, which does not tell a request, task or spending
+      # limit apart: `cap` is all three.
+      - name: Decide whether the work is complete
+        id: complete
+        env:
+          EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
+        run: |
+          case "${EXIT:-0}" in
+            0) checkpoint=$(jq -r '.checkpoint.reason // ""' "$REPORT") ;;
+            124) checkpoint=runtime ;;
+            *) checkpoint=cap ;;
+          esac
+          case "$checkpoint" in ''|budget|runtime|cap|incomplete) ;; *) echo '::error::check reported an unknown checkpoint reason'; exit 1 ;; esac
+          ready=$(jq --arg checkpoint "$checkpoint" \
+            '$checkpoint == "" and ([.create_pull_request, .push_to_pull_request_branch] | any(.ready_when_complete == true))' "$GH_AW_TMP/config.json")
+          printf '%s\n' "checkpoint=$checkpoint" "ready=$ready" | tee -a "$GITHUB_OUTPUT"
       # The collector's configuration with how to apply added: an unsigned
       # push keeps the author (a signed one is made through the API, as the
       # token's owner), a pull request that fails is not to become an
@@ -398,6 +419,7 @@ jobs:
       - name: Write the handlers' configuration
         env:
           FORK: ${{ steps.fork.outputs.repo }}
+          READY: ${{ steps.complete.outputs.ready }}
           BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
           PARTIAL: >-
             ${{ fromJSON(inputs.agent).outputs.exit == '124' && '[partial: stopped at the timeout] '
@@ -424,6 +446,9 @@ jobs:
         # bounds' `fields` where the pinned handlers honor them; they do
         # not for an issue's title and status, or a request's `draft` and
         # `update_branch`, so check refuses every field the bounds leave out.
+        # A pull request opens ready only for complete work, decided above
+        # (unset, as in a test of this step alone, means a draft);
+        # gh-aw's handler takes `draft` from here, never from the request.
         #
         # The check run handler names the run from `name`, which the bounds
         # pinned, and with `target: "*"` posts on the head of the pull
@@ -435,9 +460,11 @@ jobs:
             echo "::error::create_check_run posts in the calling repository, $GITHUB_REPOSITORY, not the run's repository $REPO"
             exit 1
           fi
-          jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
+          jq --arg ready "${READY:-}" --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
+            | (select(has("create_pull_request")).create_pull_request) |= (.draft = ($ready != "true") | del(.ready_when_complete))
+            | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |= del(.ready_when_complete)
             | (select(has("create_pull_request")).create_pull_request) |=
                 ((.unprotected_dot_folders // [] | map(select(. == ".github"))) as $excludes | del(.unprotected_dot_folders)
                  | if $excludes != [] then .protected_dot_folder_excludes = $excludes else . end)
@@ -795,11 +822,14 @@ jobs:
           PR_URL: ${{ steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
           FORK: ${{ steps.fork.outputs.repo }}
           EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
+          CHECKPOINT: ${{ steps.complete.outputs.checkpoint }}
         run: |
           touch "$MADE"
           jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
-            --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --arg fork "$FORK" '
+            --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --arg fork "$FORK" \
+            --arg checkpoint "$CHECKPOINT" '
             {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made,
+             checkpoint: (if $checkpoint == "" then null else $checkpoint end),
              fork: (if $fork == "" then null else $fork end),
              already_applied: $skipped[0],
              pull_request: (if $pr == "" then null else {number: ($pr | tonumber), url: $url} end),
@@ -890,6 +920,31 @@ jobs:
           if [ "$OUTCOME" != success ] || { [ "$asked" != 0 ] && [ "$opened" != true ]; }; then
             echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1
           fi
+      # A continuation under `ready_when_complete`: once its push is on the
+      # branch, the pull request is marked ready if the work is complete,
+      # and made a draft again at a checkpoint. This is the one place apply
+      # takes a pull request out of draft. It needs no bound of its own:
+      # what decides is the run's exit state and check's report, not a
+      # request, and the review job remains the merge gate. A partial run's
+      # push is not applied at all (above).
+      - name: Mark a continued pull request ready, or a draft at a checkpoint
+        env:
+          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          READY: ${{ steps.complete.outputs.ready }}
+        run: |
+          jq -e '.push_to_pull_request_branch.ready_when_complete == true' "$GH_AW_TMP/config.json" > /dev/null || exit 0
+          jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+            jq -e 'any(.already_applied[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/applied.json" > /dev/null || exit 0
+          target=$(jq -r '.push_to_pull_request_branch.target' "$GH_AW_TMP/config.json")
+          [[ "$target" =~ ^[1-9][0-9]*$ ]] || { echo "::error::the push names no pull request"; exit 1; }
+          pr=$(gh api "repos/$OUTPUT_REPO/pulls/$target" --jq '"\(.node_id) \(.draft)"')
+          read -r id draft <<< "$pr"
+          case "${READY:-}/$draft" in
+            true/true) mutation=markPullRequestReadyForReview ;;
+            false/false) mutation=convertPullRequestToDraft ;;
+            *) exit 0 ;;
+          esac
+          gh api graphql -f query="mutation(\$id: ID!) { $mutation(input: {pullRequestId: \$id}) { pullRequest { isDraft } } }" -f id="$id"
 
   # How an opted-in run ended, for whoever started it: the status
   # comment `notify` posted is edited to say so, or a reaction says it

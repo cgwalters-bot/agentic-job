@@ -12,6 +12,7 @@
 //! request comes with exactly its patch, against the policy's repository
 //! and base; and the patch passes the rules of [`patch`].
 
+pub mod checkpoint;
 mod patch;
 pub mod replacement;
 
@@ -90,6 +91,10 @@ pub struct Verdict {
     /// The requests, as the collector sanitized them.
     pub items: Vec<Map<String, Value>>,
     pub patch: Option<PatchInfo>,
+    /// Where the policy has complete work opened ready, the checkpoint the
+    /// pull request or push says the work stopped at: apply keeps it a draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<checkpoint::Checkpoint>,
 }
 
 /// The patch of an accepted pull request.
@@ -136,6 +141,7 @@ impl Verdict {
             errors,
             items,
             patch,
+            checkpoint: None,
         }
     }
 
@@ -835,6 +841,21 @@ fn check_outputs_to(
         .map(|push| push.head.as_str());
     let request =
         carrier.and_then(|(output, _)| items.iter().find(|item| item_type(item) == output));
+    // Read only where it decides something: a policy without
+    // `ready_when_complete` opens every pull request as a draft anyway.
+    let mut checkpoint = None;
+    if let Some(item) = request.filter(|_| policy.safe_outputs.ready_when_complete()) {
+        let output = item_type(item);
+        let key = if output == PUSH_TO_PULL_REQUEST_BRANCH {
+            "message"
+        } else {
+            "body"
+        };
+        match checkpoint::find(item.get(key).and_then(Value::as_str).unwrap_or_default()) {
+            Ok(found) => checkpoint = found,
+            Err(err) => errors.push(format!("the {output}'s {key}: {err:#}")),
+        }
+    }
     let mut patch = None;
     if let Some(content) = contents.get(replacement::REPLACEMENT_FILE) {
         if request.is_none() || policy.safe_outputs.push_to_pull_request_branch.is_none() {
@@ -847,7 +868,10 @@ fn check_outputs_to(
                 Err(error) => errors.push(format!("replacement: {error}")),
             }
         }
-        return Ok(Verdict::new(errors, items, patch));
+        return Ok(Verdict {
+            checkpoint,
+            ..Verdict::new(errors, items, patch)
+        });
     }
     match (request, carrier) {
         (Some(request), Some((output, rules))) => {
@@ -918,7 +942,10 @@ fn check_outputs_to(
         // count above has refused it.
         _ => {}
     }
-    Ok(Verdict::new(errors, items, patch))
+    Ok(Verdict {
+        checkpoint,
+        ..Verdict::new(errors, items, patch)
+    })
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -1029,7 +1056,7 @@ mod tests {
     }
 
     /// A hand-back and the collector's result for it.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct Handback {
         /// The collector's items; also written as `outputs.jsonl`.
         items: Vec<Value>,
@@ -1085,6 +1112,63 @@ mod tests {
             std::fs::write(&collected, result.to_string()).unwrap();
             check_outputs(&out, &collected, policy).unwrap()
         }
+    }
+
+    /// Under `ready_when_complete` the check reports the checkpoint that
+    /// keeps a pull request a draft, and refuses a malformed one rather
+    /// than let apply take it for complete work. Without it, a body's
+    /// checkpoint is text like any other.
+    #[test]
+    fn a_checkpoint_is_reported_where_complete_work_opens_ready() {
+        let checkpoint = checkpoint::Checkpoint {
+            reason: "budget".into(),
+            done: "the parser".into(),
+            left: "its tests".into(),
+            next: "write the tests".into(),
+        };
+        let mut ready = policy();
+        ready
+            .safe_outputs
+            .create_pull_request
+            .as_mut()
+            .unwrap()
+            .ready_when_complete = true;
+        let with_body = |body: String| {
+            let mut handback = Handback::pull_request();
+            handback.items[0]["body"] = json!(body);
+            handback
+        };
+        let saved = with_body(format!("Why.\n\n{}", checkpoint.markdown()));
+        let malformed = with_body(format!("Why.\n\n{}\n{{}}\n```", checkpoint::FENCE));
+        for (name, handback, policy, want) in [
+            ("complete", Handback::pull_request(), &ready, Ok(None)),
+            ("a checkpoint", saved.clone(), &ready, Ok(Some(&checkpoint))),
+            (
+                "malformed",
+                malformed.clone(),
+                &ready,
+                Err("create_pull_request's body"),
+            ),
+            ("not opted in", saved, &policy(), Ok(None)),
+            ("malformed, not opted in", malformed, &policy(), Ok(None)),
+        ] {
+            let verdict = handback.check_against(policy);
+            match want {
+                Ok(want) => {
+                    assert_eq!(verdict.errors, Vec::<String>::new(), "{name}");
+                    assert_eq!(verdict.checkpoint.as_ref(), want, "{name}");
+                }
+                Err(want) => {
+                    assert!(
+                        verdict.errors.iter().any(|error| error.contains(want)),
+                        "{name}: {:?}",
+                        verdict.errors
+                    );
+                }
+            }
+        }
+        let report = serde_json::to_value(Handback::pull_request().check_against(&ready)).unwrap();
+        assert!(report.get("checkpoint").is_none());
     }
 
     #[test]
@@ -1285,6 +1369,27 @@ mod tests {
                 ],
                 ..Handback::default()
             }
+        }
+
+        /// A push's message holds its checkpoint, as a pull request's body does.
+        #[test]
+        fn a_push_reports_its_checkpoint() {
+            let mut policy = push_policy();
+            policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .ready_when_complete = true;
+            let verdict = handback().check_against(&policy);
+            assert_eq!((verdict.errors, verdict.checkpoint), (Vec::new(), None));
+            let message = format!(
+                "Fix the thing\n\n{}\n{{\"reason\": \"runtime\", \"done\": \"a\", \"left\": \"b\", \"next\": \"c\"}}\n```",
+                checkpoint::FENCE
+            );
+            let verdict = with_item(json!({"message": message})).check_against(&policy);
+            assert_eq!(verdict.errors, Vec::<String>::new());
+            assert_eq!(verdict.checkpoint.unwrap().reason, "runtime");
         }
 
         fn with_item(fields: Value) -> Handback {

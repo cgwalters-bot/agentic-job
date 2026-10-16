@@ -158,7 +158,7 @@ The sandbox must hold when that review is absent or wrong.
 ### R16. The agent's writes are capped, checked outputs applied elsewhere
 
 Policy caps output types, counts and patch size before the agent starts.
-Pull requests are drafts; analysis runs cannot request one. Collector and
+Pull requests are drafts unless bounds open complete work ready; analysis runs cannot request one. Collector and
 policy checks run on a clean VM before apply. Apply credentials are the
 job token or an environment secret, not tokens minted per run.
 Event bounds restrict actors and forks, and can end at a deadline. See

@@ -140,7 +140,7 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
       GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source',
       OUTPUT_REPO: 'owner/other', ITEM_REPO: 'owner/tracker', BASE: 'main', BRANCH_PREFIX: '',
-      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      READY: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
@@ -184,7 +184,7 @@ test('a check run keeps its pinned name and posts only in the run repository', (
     const run = repository => command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
       GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), GITHUB_REPOSITORY: repository, REPO: 'Owner/Source',
       OUTPUT_REPO: 'owner/source', ITEM_REPO: 'owner/source', BASE: 'main', BRANCH_PREFIX: '',
-      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
+      READY: 'false', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
     });
     const result = run('owner/source');
     assert.equal(result.status, 0, result.stderr);
@@ -215,7 +215,7 @@ for (const carrier of ['create_pull_request', 'push_to_pull_request_branch']) {
         const name = "Write the handlers' configuration";
         const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
           GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo', ITEM_REPO: 'owner/repo',
-          BASE: 'main', BRANCH_PREFIX: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '',
+          BASE: 'main', BRANCH_PREFIX: '', READY: '', PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '',
           PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'), FORK: 'bot/repo',
         });
         assert.equal(result.status, 0, result.stderr);
@@ -250,7 +250,7 @@ test("a push is applied to the policy pull request from apply's fork, never as a
     const handlers = fork => {
       const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
         GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'Owner/Repo', OUTPUT_REPO: 'Owner/Repo', ITEM_REPO: 'Owner/Repo',
-        BASE: 'dispatch/implement/agent-run-12', BRANCH_PREFIX: 'dispatch/fix/', PARTIAL: '', TITLE_PREFIX: '[bot] ', COMMENT_TARGET: '42',
+        BASE: 'dispatch/implement/agent-run-12', BRANCH_PREFIX: 'dispatch/fix/', READY: '', PARTIAL: '', TITLE_PREFIX: '[bot] ', COMMENT_TARGET: '42',
         PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'), FORK: fork,
       });
       assert.equal(result.status, 0, result.stderr);
@@ -348,6 +348,106 @@ test('a push is verified on the branch it went to: one commit on the pinned head
     const wrong = run('pushed', skipped, true); // Same tree, different series.
     assert.equal(wrong.status, 1);
     assert.match(wrong.out, /replacement head changed/);
+  }
+});
+
+// Under `ready_when_complete`, complete work opens ready for review; a
+// checkpoint check reported, or a run stopped at a limit, opens a draft
+// and names why. Without it, every pull request is a draft.
+test('complete work opens ready; a checkpoint or a stopped run opens a draft', () => {
+  for (const [exit, reported, opted, checkpoint, draft] of [
+    ['0', undefined, true, '', false],
+    ['', undefined, true, '', false],
+    ['0', 'budget', true, 'budget', true],
+    ['0', 'incomplete', true, 'incomplete', true],
+    ['124', undefined, true, 'runtime', true],
+    // The exit state wins over what the agent said.
+    ['3', 'budget', true, 'cap', true],
+    ['0', undefined, false, '', true],
+    ['0', 'budget', false, 'budget', true],
+  ]) {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      const pr = { max: 1, draft: true, ...(opted ? { ready_when_complete: true } : {}) };
+      writeFileSync(join(root, 'config.json'), JSON.stringify({ create_pull_request: pr }));
+      writeFileSync(join(root, 'report.json'), JSON.stringify({ ok: true, ...(reported ? { checkpoint: { reason: reported } } : {}) }));
+      const decided = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Decide whether the work is complete')], {
+        GH_AW_TMP: root, REPORT: join(root, 'report.json'), GITHUB_OUTPUT: join(root, 'output'), EXIT: exit,
+      });
+      assert.equal(decided.status, 0, decided.stderr);
+      const outputs = Object.fromEntries(readFileSync(join(root, 'output'), 'utf8').trim().split('\n').map(line => line.split('=')));
+      const label = `${exit} ${reported} ${opted}`;
+      assert.deepEqual(outputs, { checkpoint, ready: String(!draft) }, label);
+      const name = "Write the handlers' configuration";
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo', ITEM_REPO: 'owner/repo',
+        BASE: 'main', BRANCH_PREFIX: '', READY: outputs.ready, PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '',
+        PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: '{}', FORK: 'bot/repo',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8')).create_pull_request;
+      assert.equal(config.draft, draft, label);
+      assert.ok(!Object.hasOwn(config, 'ready_when_complete'), label);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  // Only check's own words name a checkpoint.
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    writeFileSync(join(root, 'config.json'), '{}');
+    writeFileSync(join(root, 'report.json'), JSON.stringify({ checkpoint: { reason: 'x\nready=true' } }));
+    const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Decide whether the work is complete')], {
+      GH_AW_TMP: root, REPORT: join(root, 'report.json'), GITHUB_OUTPUT: join(root, 'output'), EXIT: '0',
+    });
+    assert.equal(result.status, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A continuation's push is followed by the pull request's draft state:
+// ready once complete, a draft again at a checkpoint, untouched without
+// `ready_when_complete` or a push.
+test('a continuation that completes marks its pull request ready; one at a checkpoint makes it a draft', () => {
+  const step_ = step('Mark a continued pull request ready, or a draft at a checkpoint');
+  for (const [opted, pushed, ready, draft, mutation] of [
+    [true, true, 'true', 'true', 'markPullRequestReadyForReview'],
+    [true, true, 'true', 'false', null],
+    [true, true, 'false', 'false', 'convertPullRequestToDraft'],
+    [true, true, 'false', 'true', null],
+    [false, true, 'true', 'true', null],
+    [true, false, 'true', 'true', null],
+  ]) {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      const bin = join(root, 'bin');
+      mkdirSync(bin);
+      // A stand-in for gh: it logs its arguments and answers the lookup.
+      writeFileSync(join(bin, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${root}/gh.log"\n[ "$2" = graphql ] || echo "PR_node ${draft}"\n`, { mode: 0o755 });
+      writeFileSync(join(root, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { max: 1, target: '42', ...(opted ? { ready_when_complete: true } : {}) } }));
+      writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: pushed ? [{ type: 'push_to_pull_request_branch' }] : [{ type: 'noop' }] }));
+      writeFileSync(join(root, 'applied.json'), JSON.stringify({ already_applied: [] }));
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step_], {
+        GH_AW_TMP: root, OUTPUT_REPO: 'owner/repo', READY: ready, PATH: `${bin}:${process.env.PATH}`,
+      });
+      const label = `${opted} ${pushed} ${ready} ${draft}`;
+      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+      let log = '';
+      try { log = readFileSync(join(root, 'gh.log'), 'utf8'); } catch { /* gh not called */ }
+      if (!opted || !pushed) assert.equal(log, '', label);
+      else assert.match(log, /^api repos\/owner\/repo\/pulls\/42 /, label);
+      const calls = log.split('\n').filter(line => line.startsWith('api graphql'));
+      if (mutation) {
+        assert.equal(calls.length, 1, label);
+        assert.match(calls[0], new RegExp(`${mutation}\\(input: \\{pullRequestId: \\$id\\}\\)`), label);
+        assert.match(calls[0], /-f id=PR_node$/, label);
+      } else {
+        assert.deepEqual(calls, [], label);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1263,7 +1363,7 @@ test("a pull request's handler pushes only to the fork, and there is none withou
     const handlers = (forked, { partial = '', title = '', branch = 'p/' } = {}) => {
       const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
         GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source', OUTPUT_REPO: 'owner/other', ITEM_REPO: 'owner/other', BASE: 'main',
-        BRANCH_PREFIX: branch, PARTIAL: partial, TITLE_PREFIX: title, COMMENT_TARGET: '',
+        BRANCH_PREFIX: branch, READY: '', PARTIAL: partial, TITLE_PREFIX: title, COMMENT_TARGET: '',
         PULL_REQUEST: workflow.match(/PULL_REQUEST: '([^'\n]+)'/)[1], PUSH: '{}', FORK: forked,
       });
       assert.equal(result.status, 0, result.stderr);

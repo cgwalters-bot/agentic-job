@@ -223,7 +223,7 @@ rather than be silently filtered or changed. `update_issue`,
 the repository and number the same way, and hold no key but their target, the
 fields the policy lists for the type (with `operation` for a listed body) and
 mark-ready's `reason`; so a pull request leaves draft only where bounds list
-`draft` or mark-ready.
+`draft` or mark-ready, or RC-024 marks complete work ready.
 Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
 `bounded_issue_actions`, `updates_change_only_the_fields_the_policy_lists`,
 `issue_action_payloads_are_not_silently_changed`,
@@ -421,6 +421,30 @@ Enforcement: [replacement.rs](../crates/agentic-job/src/check/replacement.rs),
 Run MUST fetch the policy base snapshot into the producer checkout. Check
 MUST validate a full commit ID; apply MUST bind it to one of these trusted
 heads before reconstruction. Live forge application remains unverified locally.
+
+**RC-024 — Ready only when complete.** A pull request MUST open as a draft,
+and a continuation MUST leave its pull request's draft state alone, unless
+every bounds file sets `ready_when_complete` for the output carrying the
+patch. Under it, apply MUST open (or, after a verified push, mark) the pull
+request ready only when the run's exit state is 0 and check reported no
+checkpoint, and MUST otherwise open it as a draft (or convert it to one),
+recording the reason (`runtime` or `cap` from the exit state, else the
+checkpoint's). Check MUST refuse a checkpoint block in the pull request's
+body or push's message that is malformed, oversized, or one of two, rather
+than treat the work as complete. A run whose agent leaves neither the
+output its run requires nor a checkpoint MUST still fail.
+Enforcement: [checkpoint.rs](../crates/agentic-job/src/check/checkpoint.rs),
+`checkpoints_are_read_strictly`; [check/mod.rs](../crates/agentic-job/src/check/mod.rs),
+`a_checkpoint_is_reported_where_complete_work_opens_ready` and
+`a_push_reports_its_checkpoint`; [policy.rs](../crates/agentic-job/src/policy.rs),
+`ready_when_complete_is_explicit_and_only_tightens`;
+[handback.rs](../crates/agentic-job/src/run/handback.rs),
+`made_up_partial_work_is_a_checkpoint_where_complete_work_opens_ready`;
+[apply.test.cjs](../workflow/apply.test.cjs), `complete work opens ready; a
+checkpoint or a stopped run opens a draft` and `a continuation that completes
+marks its pull request ready; one at a checkpoint makes it a draft`;
+[session.rs](../crates/agentic-job/tests/session.rs),
+`a_turn_that_ends_without_the_required_output`.
 
 **RC-021 — Pull requests from a fork.** Apply MUST NOT push an agent's commit
 to a branch of the output repository, except as the last paragraph of this

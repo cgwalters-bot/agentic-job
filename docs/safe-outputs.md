@@ -182,7 +182,9 @@ Requests name the run's exact `repo` and a positive integer `issue_number`, or
 numbers issues and pull requests together, so an `update_issue` can edit a pull
 request's title, body or state through the issues API.
 
-Apply opens every pull request as a draft. Taking one out of draft, with
+Apply opens a pull request as a draft unless the bounds set
+`ready_when_complete` and the work is complete ([ready or draft](#ready-or-draft)).
+An agent taking one out of draft, with
 `draft: false` or `mark_pull_request_as_ready_for_review`, is refused unless
 the bounds list `draft` or that type; no shipped bounds file does. Mark-ready
 requests take only `repo`, `pull_request_number` and the `reason` the handler
@@ -191,6 +193,56 @@ branch with the apply credential, which needs push access to it.
 
 Apply needs `issues: write` for `update_issue`, and `pull-requests: write`
 for the other two. No producer or check token gains write access.
+
+### Ready or draft
+
+By default every pull request is a draft, so "draft" says nothing about
+the work. A bounds file can make it mean "a checkpoint, not finished":
+
+```toml
+[outputs]
+create_pull_request = { max = 1, ready_when_complete = true }
+# and for a continuation of a pull request:
+# push_to_pull_request_branch = { max = 1, branches = ["agent-run-*"], ready_when_complete = true }
+```
+
+Organization bounds can only turn it off. With it, apply opens a pull
+request ready for review when the work is complete, and as a draft when it
+is not: when the run was stopped at a limit (exit state 124 or 3, applied
+only with `apply-partial`), or when the pull request's body holds a
+checkpoint. The agent writes one when it nears a limit, as the hand-back
+notice says, or knows the work is unfinished; a pull request made up from
+an outcome whose `stopped_early` is set, or that has no summary, gets one
+too. A checkpoint is shown, not hidden:
+
+````markdown
+```checkpoint
+{"reason": "budget", "done": "the parser", "left": "its tests", "next": "add tests for the new cases"}
+```
+````
+
+`reason` is `budget`, `runtime`, `cap` or `incomplete`; the other three are
+nonempty strings. `check` refuses the hand-back for a malformed checkpoint,
+a second one, a line starting like the fence with more on it, or one over
+8 KiB, rather than take it for complete work. Apply records the reason in
+`applied.json`'s `checkpoint`: the exit state's (`runtime` for 124, `cap`
+for 3, which does not tell a request, task or spending limit apart) when
+the run was stopped, the checkpoint's otherwise, and null for complete work.
+
+A push to a pull request (a continuation) works the same way, its commit
+message holding the checkpoint. Once the push is verified, apply marks the
+pull request ready for complete work and converts it to a draft at a
+checkpoint, with the apply credential, which then needs pull-request write
+access. It is the one place apply takes a pull request out of draft, and
+needs no bound of its own: what decides is the exit state and check's
+report, not a request, and the [review](review.md) job remains the merge
+gate. A run stopped at a limit still pushes nothing (RC-020). A run that
+ends with neither complete work nor a checkpoint, nor any output its run
+requires, fails as before.
+
+What the checks stop is unfinished work opening ready for review, where a
+reader or a poller would take it for finished: a stopped run cannot claim
+to be complete, and a checkpoint check cannot read is refused, not ignored.
 
 ### Requesting reviewers and assigning users
 
@@ -457,7 +509,8 @@ their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
 
 Some things no bounds file can change. A run hands back one patch, so at
-most one pull request. A pull request is a draft. An `analysis` run may
+most one pull request. A pull request is a draft unless it is complete
+work under `ready_when_complete`. An `analysis` run may
 not ask for one. gh-aw's default list of protected file names, less
 `README.md`, and every top-level dot-folder are protected by default; a bounds file can take names off
 that list and exempt the `.github` folder for repositories it names exactly
@@ -578,8 +631,9 @@ agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE]
 takes the collector's result and does none of it again, except to
 count. It refuses a hand-back holding any other file, a file over its
 size or a string shaped like a credential; a request naming another
-repository or base than the policy's; and a pull request that is not a
-draft, or does not come with exactly its patch. It refuses any request
+repository or base than the policy's; a pull request that asks not to be
+a draft, or does not come with exactly its patch; and, under
+`ready_when_complete`, a malformed [checkpoint](#ready-or-draft). It refuses any request
 holding `agentic-job-applied`, the name apply hides in what it posts
 so that a re-run leaves it out
 ([running apply again](workflow.md#running-apply-again)).
