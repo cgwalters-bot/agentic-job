@@ -34,7 +34,9 @@ from this repository that still needs human review.
 The checker accepts block-style steps with `- uses:` or `- name:`/`- id:` followed
 by `uses:`, with a plain single-line name/id, an unquoted or single-/double-quoted
 local path and an optional reason after the directive. The exception requires
-LF line endings and quotes closed on their line, including in script bodies.
+LF line endings and YAML quoted scalars closed on their line. Quotes within
+plain scalar values and indented `|`/`>` block bodies do not open YAML quoting.
+Structural refusals report the source line and reason when an ignore is refused.
 Other spellings and placements fail closed.
 Ignores already on the base branch keep working. Every other new or changed
 exemption is refused, including additional audit names on a local step.

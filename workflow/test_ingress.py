@@ -1,6 +1,8 @@
 """Real analyzer tests: findings are never grandfathered, newly ignored or executed."""
 
 from pathlib import Path
+from contextlib import redirect_stdout
+import io
 import tempfile
 import unittest
 
@@ -8,6 +10,29 @@ from ingress import check, git, local_step_ignores
 
 
 class IngressTests(unittest.TestCase):
+    def test_scalar_quotes(self):
+        step = "jobs:\n  test:\n    steps:\n      - uses: ./local # zizmor: ignore[self-repository]\n"
+        cases = [
+            ("name: Open this run's scratch pull request\n", True),
+            ('name: A plain "quote\n', True),
+            ("run: |\n  printf '%s\\n' 'first\n  second'\n", True),
+            ("run: >-\n  a 'quoted\n  body\n", True),
+            ("steps:\n  - run: |\n      printf 'first\n      second'\n", True),
+            ('name: "real multiline\ncontinued"\n', False),
+            ("name: 'real multiline\ncontinued'\n", False),
+            ('"multiline:\ncontinued": value\n', False),
+            ('run: |\nname: "real multiline\ncontinued"\n', False),
+            ('steps:\n  - run: |\n    name: "real multiline\ncontinued"\n', False),
+        ]
+        for prefix, expected in cases:
+            with self.subTest(prefix=prefix):
+                diagnostics = []
+                allowed = local_step_ignores(prefix + step, diagnostics)
+                self.assertEqual(bool(allowed), expected)
+                self.assertEqual(bool(diagnostics), not expected)
+                if diagnostics:
+                    self.assertIn("does not close", diagnostics[0][1])
+
     def test_local_ignore_syntax(self):
         prefix = "jobs:\n  test:\n    steps:\n"
         cases = [
@@ -108,6 +133,8 @@ class IngressTests(unittest.TestCase):
             (".github/workflows/test.yml", ignored, False, good),
             (".github/workflows/test.yml", ignored.replace("intentional test", "reworded"), False, ignored),
             (".github/workflows/test.yml", local, True, good),
+            (".github/workflows/test.yml", local.replace("name: test", "name: Open this run's scratch pull request"), True, good),
+            (".github/workflows/test.yml", local + "      - run: |\n          printf '%s\\n' 'first\n          second'\n", True, good),
             (".github/workflows/test.yml", local.replace("reviewed", "new reason"), True, local),
             (".github/workflows/test.yml", local.replace("- name: Local\n        uses:", "- uses:"), True, good),
             (".github/workflows/test.yml", local.replace("./local", "'./local'"), True, good),
@@ -158,7 +185,13 @@ class IngressTests(unittest.TestCase):
                 git(repo, "add", ".")
                 git(repo, "commit", "-qm", "head")
                 head = git(repo, "rev-parse", "HEAD").decode().strip()
-                self.assertEqual(check(repo, base, head), expected)
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(check(repo, base, head), expected)
+                if 'name: "multiline\n' in content:
+                    self.assertIn("at line 1: quoted YAML scalar does not close", output.getvalue())
+                if "# first\r" in content:
+                    self.assertIn("at line 1: non-LF YAML line break", output.getvalue())
                 self.assertFalse((repo / "executed").exists())
 
 

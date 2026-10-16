@@ -21,21 +21,49 @@ LOCAL_WORKFLOW_IGNORE = re.compile(
     r" +# zizmor: ignore\[self-repository\](?: +[^\r\n]*)?")
 
 
-def local_step_ignores(text):
+def local_step_ignores(text, diagnostics=None):
     """Recognize a conservative block-style subset, not arbitrary YAML syntax."""
     allowed = set()
     parents = []
     # Git's hunk coordinates count LF, not Python/YAML's other line breaks.
     # Refuse other YAML line breaks rather than normalize them.
-    if any(char in text for char in "\r\x85\u2028\u2029"):
-        return allowed
+    def refuse(number, reason):
+        if diagnostics is not None:
+            diagnostics.append((number, reason))
+        return set()
+
+    for number, line in enumerate(text.split("\n"), 1):
+        if any(char in line for char in "\r\x85\u2028\u2029"):
+            return refuse(number, "non-LF YAML line break")
     # A multiline quoted scalar can contain unindented, YAML-looking text.
     # Do not mistake it for structure. Conservatively require quotes to close
-    # on their line, even in script bodies; the analyzers handle full YAML.
-    for line in text.split("\n"):
-        unquoted = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"", "", line)
+    # on their line; script bodies and plain scalar values are not YAML quotes.
+    block_indent = None
+    for number, line in enumerate(text.split("\n"), 1):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if block_indent is not None:
+            if not stripped or indent > block_indent:
+                continue
+            block_indent = None
+        if not stripped or stripped.startswith("#"):
+            continue
+        item = stripped.removeprefix("- ")
+        if item.startswith(("'", '"')):
+            # Quoted keys can span lines too; do not split at their colons.
+            value = item
+        else:
+            value = re.split(r":(?: +|$)", item, maxsplit=1)[-1].lstrip(" ")
+        # Only a value's leading quote opens YAML quoting. Keep properties
+        # and flow syntax conservative rather than interpreting arbitrary YAML.
+        if re.fullmatch(r"[|>](?:[1-9][+-]?|[+-][1-9]?)? *(?:#.*)?", value):
+            block_indent = indent + (2 if stripped.startswith("- ") else 0)
+            continue
+        if not value.startswith(("'", '"', "!", "&", "[", "{")):
+            continue
+        unquoted = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"", "", value)
         if any(quote in unquoted.split("#", 1)[0] for quote in "'\""):
-            return allowed
+            return refuse(number, "quoted YAML scalar does not close on its line")
     for number, line in enumerate(text.split("\n"), 1):
         stripped = line.lstrip(" ")
         if not stripped or stripped.startswith("#"):
@@ -99,7 +127,8 @@ def check(repo, base, head):
             print(f"Checking {name!r}", flush=True)
             # A PR must not silence unrelated findings. Local action steps and
             # local workflow calls still need human review of their code.
-            allowed = local_step_ignores(source.read_bytes().decode(errors="replace"))
+            diagnostics = []
+            allowed = local_step_ignores(source.read_bytes().decode(errors="replace"), diagnostics)
             patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--text", "--no-renames",
                          "-U0", ancestor, head, "--", name).decode(errors="replace")
             new_line = 0
@@ -114,6 +143,8 @@ def check(repo, base, head):
                 elif line.startswith(" "):
                     new_line += 1
             if refused:
+                for number, reason in diagnostics:
+                    print(f"Ignore recognition refused in {name!r} at line {number}: {reason}.")
                 print(f"New or changed zizmor ignore in {name!r}: only self-repository on a local action step or local workflow call is allowed.")
                 failed = True
             commands = [[os.environ.get("ZIZMOR", "zizmor"), "--offline", "--no-config",
