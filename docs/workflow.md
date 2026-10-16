@@ -887,8 +887,8 @@ fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 **Limits that fit the agent.** The workflow's defaults are for a real
 agent behind a proxy. A cap on model requests that nothing counts is
 refused by the policy job's `agentic-job config`, before an agent machine
-starts; the message names the configuration keys `limits.max-requests` and
-`limits.uncapped`, which the input `max-requests` sets. A run without an
+starts; the message names the input `max-requests`, which sets
+`limits.max-requests`, and its default of 150. A run without an
 inference proxy, the scripted agent's for one, passes `max-requests:
 "0"` and keeps `budget`.
 

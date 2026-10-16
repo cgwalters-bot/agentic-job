@@ -64,7 +64,8 @@ fn limits(table: &LimitsTable, endpoint: Option<&Endpoint>) -> Result<Limits> {
         bail!(
             "limits.max-requests = {cap} would not bind: nothing counts this run's model \
              requests ({why}). Remove it and cap the run with limits.budget, or say \
-             limits.uncapped = true"
+             limits.uncapped = true; from the reusable workflow, whose max-requests input \
+             defaults to 150, pass max-requests: \"0\" with budget instead"
         );
     }
     Ok(limits)
@@ -564,7 +565,7 @@ model = \"m\"
         let counted = endpoint(Mode::Plain);
         // (limits, endpoint, the cap kept or the refusal)
         type Case<'a> = (&'a str, Option<&'a Endpoint>, Result<Option<u64>, &'a str>);
-        let cases: [Case; 8] = [
+        let cases: [Case; 9] = [
             ("max-requests = 150", Some(&counted), Ok(Some(150))),
             (
                 "max-requests = 150\nbudget = 500",
@@ -578,6 +579,12 @@ model = \"m\"
                 Err("register = \"token-file\" has no run API"),
             ),
             ("max-requests = 150", None, Err("no inference proxy")),
+            (
+                "max-requests = 150",
+                None,
+                Err("max-requests input \
+                 defaults to 150, pass max-requests: \"0\" with budget"),
+            ),
             ("budget = 500", Some(&given), Ok(None)),
             ("uncapped = true", Some(&given), Ok(None)),
             ("", Some(&given), Err("neither max-requests nor budget")),

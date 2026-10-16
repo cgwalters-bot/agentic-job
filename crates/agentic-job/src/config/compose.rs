@@ -560,6 +560,26 @@ mod tests {
         }
     }
 
+    /// The shipped runner configuration commits as GitHub's Actions bot,
+    /// whose noreply address GitHub attributes to it, for any caller:
+    /// an address of an unregistered login is attributed to no one.
+    #[test]
+    fn shipped_hosted_config_commits_as_an_attributed_author() {
+        let hosted = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/agentic-job/hosted.toml"
+        );
+        let config = composed(&args(Some(hosted), RUN, LIMITS, &[]));
+        let (name, address) = crate::run::handback::author(&config.commit).unwrap();
+        assert_eq!(
+            (name.as_str(), address.as_str()),
+            (
+                "github-actions[bot]",
+                "41898282+github-actions[bot]@users.noreply.github.com"
+            )
+        );
+    }
+
     /// A host's file needs no agent and no limits, which a run's does;
     /// what `sandbox setup` would refuse is refused for it all the same.
     #[test]

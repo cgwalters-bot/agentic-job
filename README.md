@@ -416,11 +416,6 @@ the issue that tracks it, where one is filed.
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
   after the agent has run, unless the call sets `require-safe-outputs-pat`
   ([checking the token first](docs/workflow.md#checking-the-token-before-the-agent)).
-- `hosted.toml`'s commit author, `agentic-job@users.noreply.github.com`,
-  is the no-reply address of an unregistered GitHub login (no issue yet).
-- The refusal of `max-requests` without a broker names the TOML keys
-  `limits.max-requests` and `limits.uncapped`, not the workflow input
-  (no issue yet).
 - A push to a stale fork with a PAT lacking the `workflow` scope is
   untried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
 - A run at a version tag may still compile the binary ([#606](https://github.com/cgwalters-forge/agentic-job/issues/606)),

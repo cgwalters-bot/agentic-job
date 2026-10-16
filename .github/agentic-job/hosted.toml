@@ -60,5 +60,8 @@ packages = ["python3-venv", "nftables", "podman", "uidmap"]
 "cgwalters-forge/agentic-job" = ["cargo"]
 
 [commit]
-author = "agentic-job <agentic-job@users.noreply.github.com>"
+# GitHub's own Actions bot, whose noreply address it attributes for any
+# caller; a caller wanting another author sets it in its own config or
+# pins it in a bounds file (docs/safe-outputs.md#the-bounds-and-the-policy).
+author = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 trailers = ["Generated-by: AI"]
