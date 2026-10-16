@@ -382,6 +382,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             Arc::new(move |_: &std::sync::atomic::AtomicBool| Some(text.clone()))
                 as session::Restate
         }),
+        mcp_servers: Vec::new(),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -807,6 +808,7 @@ fn a_cap_nothing_counts_is_refused() {
         log: Box::new(std::io::sink()),
         output: None,
         restate: None,
+        mcp_servers: Vec::new(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

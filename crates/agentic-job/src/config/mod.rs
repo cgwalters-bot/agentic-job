@@ -34,6 +34,9 @@ pub struct Config {
     pub setup: Setup,
     pub commit: Commit,
     pub session: Session,
+    /// Remote MCP servers `run` serves the agent, by name, with a
+    /// credential the agent never holds (`run::mcp`). At most one.
+    pub mcp: BTreeMap<String, Mcp>,
 }
 
 impl Config {
@@ -642,6 +645,21 @@ pub struct Commit {
     /// Lines put at the end of the commit's message, each `Key: value`:
     /// `Generated-by: AI`, for one.
     pub trailers: Vec<String>,
+}
+
+/// A remote MCP server, `[mcp.NAME]`: `run` serves it to the agent on
+/// loopback, forwards only the ALLOWED tools, and puts the credential in
+/// the workflow's secret SECRET in place of the run's own token.
+/// `run::mcp::Server::from_config` checks it.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Mcp {
+    /// Where the server speaks MCP's streamable HTTP: https only.
+    pub url: String,
+    /// The name of the workflow's secret that holds its credential.
+    pub secret: String,
+    /// The names of the tools the agent may call, exactly.
+    pub allowed: Vec<String>,
 }
 
 /// A conversation with an operator after the task's turn

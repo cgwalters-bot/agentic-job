@@ -308,6 +308,14 @@ on:
       INFERENCE_API_KEY:
         description: For `inference-register` api-key, the provider's API key
         required: false
+      # For an `[mcp.NAME]` server of the caller's configuration with
+      # `secret = "MCP_TOKEN"`: its credential. Only the agent job's `run`
+      # step gets it, and the sandbox user never does: `run` serves the
+      # agent a proxy that puts it in place of a token of the run's
+      # (docs/mcp.md).
+      MCP_TOKEN:
+        description: For an `[mcp.NAME]` server of the configuration, its credential
+        required: false
     outputs:
       session-endpoint:
         description: >-
@@ -486,6 +494,7 @@ jobs:
         with:
           github-token: ${{ inputs.github-reads && github.token || '' }}
           inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
+          mcp-token: ${{ secrets.MCP_TOKEN }}
 
   check:
     needs: [policy, agent]

@@ -44,10 +44,11 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
-    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest, TextContent,
+    CancelNotification, ContentBlock, HttpHeader, Implementation, InitializeRequest, McpServer,
+    McpServerHttp, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest,
+    TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Handled, Lines};
 use anyhow::{Context, Result, ensure};
@@ -217,6 +218,16 @@ enum Nudge {
     },
 }
 
+/// An MCP server the session gives the agent in `session/new`, over
+/// streamable HTTP: its name, its URL and the headers that go with every
+/// request to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpMcp {
+    pub name: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
 /// One session: which agent, on what, within which limits.
 pub struct Options {
     /// The agent's name, for the record.
@@ -260,6 +271,9 @@ pub struct Options {
     /// What the agent is told after each compaction of its context during
     /// the task's turn, if it takes notices; none to tell it nothing.
     pub restate: Option<Restate>,
+    /// The MCP servers the agent is given, which it must take over HTTP;
+    /// none for a run without.
+    pub mcp_servers: Vec<HttpMcp>,
 }
 
 /// Watches the budget for the whole run, from before the session exists:
@@ -366,6 +380,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         log,
         output,
         restate,
+        mcp_servers,
     } = opts;
     // A cap that nothing counts would be no cap, and silently: the
     // caller drops it, knowing so, or supplies the count.
@@ -417,6 +432,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
         output,
         restate: restate.filter(|_| spec.notices),
+        mcp_servers: &mcp_servers,
     };
     let started = chrono::Utc::now();
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
@@ -557,6 +573,7 @@ struct Task<'a> {
     output: Option<OutputCheck>,
     /// `Options::restate`, for an agent that takes notices.
     restate: Option<Restate>,
+    mcp_servers: &'a [HttpMcp],
 }
 
 /// Speaks ACP with a started agent, over its standard input and output,
@@ -1438,12 +1455,41 @@ async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, E
     // their own tools inside the sandbox; ACP v2 drops them anyway.
     let init = InitializeRequest::new(ProtocolVersion::V1)
         .client_info(Implementation::new(CLIENT_NAME, env!("CARGO_PKG_VERSION")));
-    cx.send_request(init)
+    let initialized = cx
+        .send_request(init)
         .block_task()
         .await
         .map_err(|e| fail("initialize", e))?;
+    // An agent that cannot take them would run without the tools the
+    // task is about, or reach for them some other way.
+    if !task.mcp_servers.is_empty() && !initialized.agent_capabilities.mcp_capabilities.http {
+        return Err(Ended::failure(format!(
+            "the agent does not take MCP servers over HTTP (mcpCapabilities.http), which the \
+             run's MCP server {} needs",
+            task.mcp_servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let servers = task
+        .mcp_servers
+        .iter()
+        .map(|server| {
+            McpServer::Http(
+                McpServerHttp::new(&server.name, &server.url).headers(
+                    server
+                        .headers
+                        .iter()
+                        .map(|(name, value)| HttpHeader::new(name, value))
+                        .collect(),
+                ),
+            )
+        })
+        .collect();
     let new = cx
-        .send_request(NewSessionRequest::new(task.cwd))
+        .send_request(NewSessionRequest::new(task.cwd).mcp_servers(servers))
         .block_task()
         .await
         .map_err(|e| fail("session/new", e))?;

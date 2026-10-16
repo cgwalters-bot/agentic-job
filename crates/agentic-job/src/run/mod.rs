@@ -45,6 +45,7 @@ pub mod inference;
 pub mod key_check;
 pub mod launch;
 pub mod log;
+pub mod mcp;
 pub mod probe;
 mod session_markdown;
 pub mod summary;
@@ -172,6 +173,10 @@ struct Plan {
     /// The configuration, when `[sandbox.check] before-agent` asks for
     /// its probes again before the agent starts.
     recheck: Option<Config>,
+    /// The remote MCP server `run` serves the agent, if any, and its
+    /// credential as `run`'s environment has it.
+    mcp: Option<mcp::Server>,
+    mcp_credential: Option<String>,
 }
 
 /// What the preparation leaves for the session.
@@ -183,6 +188,8 @@ struct Prepared {
     /// The session config options it sets after the model.
     options: Vec<(&'static str, String)>,
     prompt: String,
+    /// The MCP server the agent is given, as `session/new` names it.
+    mcp: Option<session::HttpMcp>,
 }
 
 /// Real reviewers discover instructions from the base, not the hostile head.
@@ -224,11 +231,21 @@ struct Shared {
     /// the probes of `[sandbox.check] before-agent`, whose refusals are
     /// not the agent's (and with them the clone's requests before them).
     egress_from: AtomicU64,
+    /// The MCP proxy, as soon as it serves, so that it is ended with the
+    /// run.
+    mcp: Mutex<Option<Arc<mcp::Local>>>,
 }
 
 impl Shared {
     fn run(&self) -> Option<Arc<Run>> {
         self.run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn mcp(&self) -> Option<Arc<mcp::Local>> {
+        self.mcp
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -396,15 +413,23 @@ fn own_tokens() -> impl Iterator<Item = String> {
 }
 
 /// The run's own secrets, which every log and file of the run is redacted
-/// of: the run token, which the agent can read, and what only this process
-/// holds, should the agent ever come by it: the request for the job's
-/// identity token, and the provider's key.
-fn secrets(token: Option<&inference::Token>, identity: &Identity) -> impl Iterator<Item = String> {
+/// of: the run token and the MCP proxy's, which the agent can read, and
+/// what only this process holds, should the agent ever come by it: the
+/// request for the job's identity token, the provider's key and the MCP
+/// server's credential.
+fn secrets(
+    token: Option<&inference::Token>,
+    identity: &Identity,
+    mcp: Option<(&inference::Token, &str)>,
+) -> impl Iterator<Item = String> {
     token
         .map(|token| token.expose().to_owned())
         .into_iter()
         .chain(identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
         .chain(identity.api_key.iter().map(|key| key.trim().to_owned()))
+        .chain(mcp.into_iter().flat_map(|(token, credential)| {
+            [token.expose().to_owned(), credential.trim().to_owned()]
+        }))
 }
 
 impl Plan {
@@ -418,6 +443,7 @@ impl Plan {
             limits,
             host,
             child,
+            mcp,
         } = config.check()?;
         if limits.max_requests.is_none() && limits.budget_aic.is_none() {
             eprintln!(
@@ -479,6 +505,8 @@ impl Plan {
         )
         .then(ApiKey::from_env)
         .flatten();
+        // And the MCP server's credential.
+        let mcp_credential = mcp.is_some().then(mcp::Credential::from_env).flatten();
         let exe = std::env::current_exe().context("finding this program's own path")?;
         let work = args.out.join(WORK_DIR);
         // Private to the runner's user: the transcript is not redacted
@@ -520,6 +548,8 @@ impl Plan {
             agent,
             child,
             recheck: config.sandbox.check.before_agent.then_some(config),
+            mcp,
+            mcp_credential,
         })
     }
 
@@ -568,6 +598,19 @@ impl Plan {
         // Here, not in planning: like a missing or refused key, a key
         // that is also the agent's token is a run that never started.
         separate_tokens(self.identity.api_key.as_deref(), github_token()?.as_deref())?;
+        // Checked with the server first, in seconds, as the provider's key
+        // is: a refused credential is a run that never started.
+        let mcp_server = self
+            .mcp
+            .as_ref()
+            .map(|server| {
+                let credential = mcp::Credential::new(self.mcp_credential.as_deref())?;
+                mcp::check(server, &credential, Retry::default(), &|| {
+                    shared.stopped.load(Ordering::SeqCst)
+                })?;
+                Ok::<_, anyhow::Error>((server, credential))
+            })
+            .transpose()?;
         let sandbox = &self.sandbox;
         if self.kind != Kind::Fake {
             // The session starts this binary as the sandbox user.
@@ -627,8 +670,9 @@ impl Plan {
                 crate::acp_drive::COMMAND
             )
         });
+        let tools = self.mcp.as_ref().map_or_else(String::new, brief::mcp);
         let prompt = format!(
-            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{EDIT_TOOLS}\n\n{child}{context}{}",
+            "You start at the target repository root: {}. Use relative paths from there; do not repeatedly cd back to it.\n\n{EDIT_TOOLS}\n\n{child}{tools}{context}{}",
             cwd.display(),
             self.prompt(&checkout)?
         );
@@ -714,12 +758,34 @@ impl Plan {
         if let Some(key) = &self.identity.api_key {
             probe::require_absent(sandbox, key)?;
         }
+        // Served from here, after the probes of the sandbox that would
+        // take its port for one the sandbox user left listening.
+        let mcp = match mcp_server {
+            Some((server, credential)) => {
+                shared.go_on()?;
+                let local = Arc::new(mcp::Local::start(server.clone(), credential)?);
+                *shared.mcp.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(Arc::clone(&local));
+                shared.go_on()?;
+                probe::require_mcp(sandbox, self.mcp_credential.as_deref(), local.token())?;
+                Some(session::HttpMcp {
+                    name: server.name.clone(),
+                    url: local.url(),
+                    headers: vec![(
+                        "Authorization".to_owned(),
+                        format!("Bearer {}", local.token().expose()),
+                    )],
+                })
+            }
+            None => None,
+        };
         Ok(Prepared {
             cwd,
             checkout,
             model: configuration.model,
             options: configuration.options,
             prompt,
+            mcp,
         })
     }
 
@@ -729,6 +795,7 @@ impl Plan {
         &self,
         prepared: Prepared,
         run: Option<&Arc<Run>>,
+        mcp: Option<&mcp::Local>,
     ) -> Result<(Options, Option<inference::Counter>, log::Shared)> {
         let mut spec = session::agents::builtin(self.kind.as_str())?;
         if self.kind != Kind::Fake {
@@ -739,7 +806,13 @@ impl Plan {
             .unzip();
         // The agent can read its token, and its words are in these lines
         // and in every file of the session.
-        let secrets = secrets(run.map(|run| run.token()), &self.identity).chain(own_tokens());
+        let mcp = mcp.zip(self.mcp_credential.as_deref());
+        let secrets = secrets(
+            run.map(|run| run.token()),
+            &self.identity,
+            mcp.map(|(local, credential)| (local.token(), credential)),
+        )
+        .chain(own_tokens());
         let redactor = log::Shared::new(
             Redactor::new(secrets).context("building the redaction of the run's secrets")?,
         );
@@ -815,6 +888,7 @@ impl Plan {
             )),
             output,
             restate,
+            mcp_servers: prepared.mcp.into_iter().collect(),
         };
         Ok((options, counter, redactor))
     }
@@ -1169,7 +1243,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         Ok(Ok(Err(err))) => Stage::NotStarted(err),
         Ok(Ok(Ok(prepared))) => {
             let (checkout, model) = (prepared.checkout.clone(), prepared.model.clone());
-            match plan.session(prepared, shared.run().as_ref()) {
+            match plan.session(prepared, shared.run().as_ref(), shared.mcp().as_deref()) {
                 Err(err) => Stage::Broken(err),
                 // Dropped on a signal, the session kills the wrapper it
                 // started; the agent itself is the sandbox user's, below.
@@ -1217,6 +1291,15 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     // every other case something of that user's may still run: a clone,
     // or the agent.
     shared.stopped.store(true, Ordering::SeqCst);
+    // The MCP proxy takes nothing more, whatever else is still running.
+    if let Some(mcp) = shared.mcp() {
+        mcp.end();
+        eprintln!(
+            "Ended the MCP proxy of {}: {} tool call(s) forwarded",
+            mcp.server().name,
+            mcp.calls()
+        );
+    }
     let mut reaped = match &stage {
         Stage::Ended(session) if !session.internal_error => Ok(()),
         _ => user.reap().await,
@@ -1233,6 +1316,10 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         // the grace, and it starts no other once it is told to stop.
         let _ = tokio::time::timeout(STOP_GRACE, &mut preparing).await;
         reaped = reaped.and(user.reap().await);
+        // A proxy it started after the first look is ended now.
+        if let Some(mcp) = shared.mcp() {
+            mcp.end();
+        }
         if let (None, Some(run)) = (&settled, shared.run()) {
             settled = Some(end_run(run, &plan.work).await);
         }
@@ -1461,12 +1548,29 @@ mod tests {
             api_key: Some(format!("{key}\n")),
             ..Identity::default()
         };
-        let mut redactor = Redactor::new(secrets(Some(&token), &identity)).unwrap();
-        let line = format!("the key {key} and the token {}", token.expose());
+        let credential = format!("{}-{}", "test-mcp-not-secret", "fedcba9876543210");
+        let mcp_token = inference::Token::new("agentic-job-mcp-0123456789abcdef").unwrap();
+        let mut redactor = Redactor::new(secrets(
+            Some(&token),
+            &identity,
+            Some((&mcp_token, &format!("{credential}\n"))),
+        ))
+        .unwrap();
+        let line = format!(
+            "the key {key} and the token {}, the MCP credential {credential} and its token {}",
+            token.expose(),
+            mcp_token.expose()
+        );
         let redacted = redactor.redact(&line).into_owned();
-        assert!(!redacted.contains(&key), "{redacted}");
-        assert!(!redacted.contains(token.expose()), "{redacted}");
-        assert_eq!(redactor.count(), 2);
+        for secret in [
+            key.as_str(),
+            token.expose(),
+            &credential,
+            mcp_token.expose(),
+        ] {
+            assert!(!redacted.contains(secret), "{redacted}");
+        }
+        assert_eq!(redactor.count(), 4);
     }
 
     /// The token that pays for inference is never also the agent's.

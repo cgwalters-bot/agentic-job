@@ -20,6 +20,7 @@ use super::{Config, Limits as LimitsTable, Provider};
 use crate::run::agent::{self, Kind};
 use crate::run::handback;
 use crate::run::inference::{Endpoint, Mode};
+use crate::run::mcp::Server;
 use crate::sandbox::network::{self, Direct};
 use crate::session::Limits;
 use crate::session::bridge::Listen;
@@ -47,6 +48,8 @@ pub struct Checked {
     pub limits: Limits,
     /// The model of the run's child agent, Vibe, if it has one.
     pub child: Option<String>,
+    /// The remote MCP server `run` serves the agent, if any.
+    pub mcp: Option<Server>,
 }
 
 /// The limits, with the proxy's part in them checked: a cap on model
@@ -187,8 +190,8 @@ impl Config {
 
     /// The whole configuration, checked: [`Config::check_host`], and
     /// that it names an agent `run` can configure, an inference proxy if
-    /// that agent has a model behind it, limits that bind, and a commit
-    /// git will take.
+    /// that agent has a model behind it, limits that bind, a commit git
+    /// will take, and at most one MCP server, which `run` can serve.
     pub fn check(&self) -> Result<Checked> {
         let host = self.check_host()?;
         let kind = Kind::parse(&self.agent.name)?;
@@ -214,12 +217,14 @@ impl Config {
         let child = self.check_child(endpoint.as_ref(), &host.direct, &limits)?;
         handback::author(&self.commit)?;
         handback::check_trailers(&self.commit.trailers)?;
+        let mcp = Server::from_config(&self.mcp)?;
         Ok(Checked {
             host,
             kind,
             endpoint,
             limits,
             child,
+            mcp,
         })
     }
 }
@@ -241,6 +246,12 @@ mod tests {
                           register = \"api-key\"\nprovider = \"github\"\n";
     const API_KEY: &str = "[inference]\nurl = \"https://api.anthropic.example\"\n\
                            register = \"api-key\"\nprovider = \"anthropic\"\n";
+
+    /// `[mcp.NAME]` with URL, the secret's name SECRET and the tools
+    /// ALLOWED, as TOML values.
+    fn mcp(name: &str, url: &str, secret: &str, allowed: &str) -> String {
+        format!("[mcp.{name}]\nurl = {url:?}\nsecret = {secret:?}\nallowed = {allowed}\n")
+    }
 
     fn direct(url: &str) -> String {
         format!("[egress]\ndirect = [{url:?}]\n")
@@ -355,6 +366,39 @@ mod tests {
             "[agent]\nname = \"opencode\"\nmodel = \"m\"\n{CHILD}{PROXY}{OIDC}{REQUESTS}{DIRECT}"
         );
         assert_eq!(checked(&text).unwrap().child.as_deref(), Some("glm"));
+
+        // A remote MCP server, at most one, held to its bounds.
+        assert_eq!(fake.mcp, None);
+        let longest = format!("https://mcp.example/{}", "x".repeat(2048 - 20));
+        let tools = format!(
+            "[{}]",
+            (0..64)
+                .map(|n| format!("\"t{n}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        for (name, url, allowed, want) in [
+            (
+                "github",
+                "https://mcp.example/mcp",
+                "[\"get_issue\", \"search\"]",
+                2,
+            ),
+            ("a", "https://127.0.0.1:8080/mcp", "[\"x\"]", 1),
+            (&"a".repeat(32), longest.as_str(), "[\"x\"]", 1),
+            (
+                "a-b_1",
+                "https://mcp.example/mcp?x=1",
+                &format!("[{:?}, \"A.b-c_9\"]", "x".repeat(64)),
+                2,
+            ),
+            ("a", "https://mcp.example", &tools, 64),
+        ] {
+            let text = format!("{FAKE}{CAPPED}{}", mcp(name, url, "MCP_TOKEN", allowed));
+            let server = checked(&text).unwrap().mcp.unwrap();
+            assert_eq!((server.name.as_str(), server.url.as_str()), (name, url));
+            assert_eq!(server.allowed.len(), want, "{text}");
+        }
     }
 
     /// One row for each table a command used to check by itself: the
@@ -524,6 +568,192 @@ model = \"m\"
             (
                 format!("{FAKE}{CAPPED}[child-agent]\nmodel = \"glm\"\n"),
                 "child-agent.model means nothing without child-agent.name",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}{}",
+                    mcp("a", "https://a.example", "MCP_TOKEN", "[\"x\"]"),
+                    mcp("b", "https://b.example", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "2 servers are configured, and a run serves at most 1 for now",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example", "OTHER_TOKEN", "[\"x\"]")
+                ),
+                "mcp.a.secret: \"OTHER_TOKEN\" is not a secret the workflow passes on",
+            ),
+            (
+                format!("{FAKE}{CAPPED}[mcp.a]\nurl = \"https://a.example\"\nallowed = [\"x\"]\n"),
+                "mcp.a.secret: \"\" is not a secret",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("A", "https://a.example", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "a server's name is a lower-case letter",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("1a", "https://a.example", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "a server's name is a lower-case letter",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp(&"a".repeat(33), "https://a.example", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "a server's name is a lower-case letter",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "http://mcp.example/mcp", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "would carry MCP_TOKEN in the clear",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "http://127.0.0.1.example/", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "would carry MCP_TOKEN in the clear",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "http://127.0.0.1:8080/mcp", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "would carry MCP_TOKEN in the clear",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "http://localhost:8080", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "would carry MCP_TOKEN in the clear",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "http://[::1]:8080/", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "would carry MCP_TOKEN in the clear",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "ftp://a.example", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "is not an https URL",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "has no host",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://u:p@a.example/", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "names a user",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example/#x", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "has a fragment",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example/ x", "MCP_TOKEN", "[\"x\"]")
+                ),
+                "has a space",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp(
+                        "a",
+                        &format!("https://mcp.example/{}", "x".repeat(2048 - 19)),
+                        "MCP_TOKEN",
+                        "[\"x\"]"
+                    )
+                ),
+                "is over 2048 bytes",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example", "MCP_TOKEN", "[]")
+                ),
+                "mcp.a.allowed is empty",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp(
+                        "a",
+                        "https://a.example",
+                        "MCP_TOKEN",
+                        &format!(
+                            "[{}]",
+                            (0..65)
+                                .map(|n| format!("\"t{n}\""))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    )
+                ),
+                "names 65 tools, over 64",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example", "MCP_TOKEN", "[\"*\"]")
+                ),
+                "is not a tool's name",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example", "MCP_TOKEN", "[\"\"]")
+                ),
+                "is not a tool's name",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp(
+                        "a",
+                        "https://a.example",
+                        "MCP_TOKEN",
+                        &format!("[{:?}]", "x".repeat(65))
+                    )
+                ),
+                "is not a tool's name",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}{}",
+                    mcp("a", "https://a.example", "MCP_TOKEN", "[\"x\", \"x\"]")
+                ),
+                "\"x\" is named twice",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}[mcp.a]\nurl = \"https://a.example\"\nsecret = \"MCP_TOKEN\"\nallowed = [\"x\"]\ncommand = \"npx server\"\n"
+                ),
+                "unknown field `command`",
             ),
             (
                 format!(

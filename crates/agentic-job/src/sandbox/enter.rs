@@ -174,7 +174,7 @@ impl Entry {
             .iter()
             .chain(OIDC_REQUEST_VARS)
             // `run`'s alone, as the identity token's request is.
-            .chain(&[crate::run::api_key::API_KEY_VAR])
+            .chain(&[crate::run::api_key::API_KEY_VAR, crate::run::mcp::TOKEN_VAR])
             .flat_map(|name| ["-u".to_owned(), (*name).to_owned()]);
         let properties = if self.filesystem_view {
             super::view::properties(&self.user)?
@@ -641,6 +641,8 @@ mod tests {
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
                 "-u",
                 "AGENTIC_JOB_INFERENCE_KEY",
+                "-u",
+                "AGENTIC_JOB_MCP_TOKEN",
                 "--",
                 "git",
                 "status",

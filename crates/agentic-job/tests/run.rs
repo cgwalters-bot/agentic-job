@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use agentic_job::config::Provider;
 use agentic_job::policy::{Kind, Policy, SafeOutputs};
 use agentic_job::run::api_key::API_KEY_VAR;
+use agentic_job::run::mcp::TOKEN_VAR as MCP_TOKEN_VAR;
 use serde_json::{Value, json};
 use support::{Fault, MockProvider, Proxy, key};
 
@@ -791,6 +792,47 @@ fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
     assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
     assert!(got.stderr.contains(API_KEY_VAR), "{}", got.all());
     assert_eq!(provider.seen().len(), 1);
+}
+
+/// `[mcp.NAME]`: without its credential, or with one no server takes,
+/// the run does not start, and says which variable it wanted.
+#[test]
+fn a_run_with_an_mcp_server_needs_its_credential() {
+    let Some((user, _turn)) = sandbox_user() else {
+        return;
+    };
+    // Nothing listens there: the check before the run cannot reach it.
+    let gone = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mcp = format!(
+        "[mcp.tracker]\nurl = \"https://{gone}/mcp\"\nsecret = \"MCP_TOKEN\"\nallowed = [\"search\"]\n"
+    );
+    let credential = format!("{}-{}", "test-mcp-not-secret", "0123456789abcdef");
+    let proxy = Proxy::start();
+    for (name, given, want) in [
+        ("nomcp", None, MCP_TOKEN_VAR),
+        (
+            "mcpgone",
+            Some(credential.as_str()),
+            "cannot reach the MCP server tracker",
+        ),
+    ] {
+        let job = Job::new(name);
+        job.repository(&user);
+        let mut command = job.command(&format!("{}{mcp}", config(&user, &plain(&proxy))));
+        match given {
+            Some(credential) => command.env(MCP_TOKEN_VAR, credential),
+            None => command.env_remove(MCP_TOKEN_VAR),
+        };
+        let got = Finished::of(command.output().unwrap());
+        assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
+        assert!(got.stderr.contains(want), "{}", got.all());
+        assert!(!got.all().contains(&credential), "{}", got.all());
+    }
+    // Refused before the run was registered.
+    assert!(proxy.requests().is_empty());
 }
 
 fn api_key(mock: &MockProvider, provider: Provider) -> String {

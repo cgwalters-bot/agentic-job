@@ -65,7 +65,10 @@ Done from the gh-aw gaps: the agent reads GitHub with a read-only token
 starts a run and is consumed
 ([#117](https://github.com/cgwalters-forge/agentic-job/issues/117)), and the
 offline audit and cost summary exist
-([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)).
+([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)), and one
+remote MCP server is served with a credential the agent never holds
+([mcp.md](mcp.md), the first part of
+[#120](https://github.com/cgwalters-forge/agentic-job/issues/120)).
 The remaining gh-aw gaps have separate issues: more output
 types and bounds ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)),
 threat detection ([#114](https://github.com/cgwalters-forge/agentic-job/issues/114)),
@@ -74,7 +77,8 @@ egress allowlists ([#116](https://github.com/cgwalters-forge/agentic-job/issues/
 workflow-integrated run guards and organization bounds
 ([#118](https://github.com/cgwalters-forge/agentic-job/issues/118)), memory
 ([#119](https://github.com/cgwalters-forge/agentic-job/issues/119)), MCP integrations
-([#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), a conclusion job and
+beyond [one remote server](mcp.md) (stdio servers, more secrets, Playwright;
+[#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), a conclusion job and
 maintenance ([#121](https://github.com/cgwalters-forge/agentic-job/issues/121)).
 Per-author or per-window limits on admitted runs need a fresh design under
 [#118](https://github.com/cgwalters-forge/agentic-job/issues/118): the unwired

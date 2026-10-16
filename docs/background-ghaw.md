@@ -68,7 +68,11 @@ the [host-user decision below](#host-user-integration-decision) chose the
 token instead.
 The [pinned-source investigation below](#github-cli-proxy-reuse) describes
 the reusable artifacts and what still needs verification.
-Other MCP integrations and browser tooling are
+One remote MCP server whose credential the agent never holds is
+`[mcp.NAME]` ([docs/mcp.md](mcp.md)): `run` serves it through a loopback
+proxy that forwards only the allowed tools, where gh-aw's gateway holds
+the secrets of its `mcp-servers:`. Servers started from a command, more
+than one secret, `mcp-scripts` and Playwright remain
 [#120](https://github.com/cgwalters-forge/agentic-job/issues/120).
 
 gh-aw validates safe-output tool calls as the agent makes them.

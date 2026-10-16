@@ -87,6 +87,19 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
     text
 }
 
+/// What the agent is told of the MCP server SERVER the run gives it: its
+/// name and the tools it may call, so that it neither looks for others
+/// nor takes the refusal of one for a fault.
+pub fn mcp(server: &crate::run::mcp::Server) -> String {
+    let tools: Vec<&str> = server.allowed.iter().map(String::as_str).collect();
+    format!(
+        "This run gives you the MCP server `{}`, through a proxy that holds its credential; \
+         you may call only its tools {}.\n\n",
+        server.name,
+        tools.join(", ")
+    )
+}
+
 /// Whether the agent of a run of POLICY keeps a checkpoint in its outcome
 /// from the start: where its change is proposed and the bounds open
 /// complete work ready for review (`ready_when_complete`), so that a
@@ -636,6 +649,19 @@ mod tests {
 #[cfg(test)]
 mod brief_tests {
     use serde_json::json;
+
+    #[test]
+    fn the_brief_names_the_mcp_server_and_its_tools() {
+        let server = crate::run::mcp::Server {
+            name: "tracker".into(),
+            url: "https://mcp.example".into(),
+            allowed: ["search".to_owned(), "get_issue".to_owned()].into(),
+        };
+        let text = super::mcp(&server);
+        assert!(text.contains("MCP server `tracker`"), "{text}");
+        assert!(text.contains("only its tools get_issue, search."), "{text}");
+        assert!(!text.contains("mcp.example"), "{text}");
+    }
 
     use super::*;
     use crate::policy::{DEFAULT_PROTECTED_FILES, SafeOutputs};

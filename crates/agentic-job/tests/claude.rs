@@ -135,6 +135,7 @@ fn pinned_claude_acp_offers_file_tools() {
             log: Box::new(std::io::sink()),
             output: None,
             restate: None,
+            mcp_servers: Vec::new(),
         }))
         .unwrap();
     stop.store(true, Ordering::SeqCst);

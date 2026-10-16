@@ -245,17 +245,22 @@ fn forwarded(provider: Provider, method: &str, path: &str) -> bool {
 /// A token for the run: what the agent shows the proxy in place of the
 /// key. Fresh for each run, and good only while the run lasts.
 fn run_token() -> Result<Token> {
+    token_with(RUN_TOKEN_PREFIX)
+}
+
+/// A fresh token of PREFIX and 32 random bytes in hex.
+pub(super) fn token_with(prefix: &str) -> Result<Token> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut bytes))
         .context("reading /dev/urandom for the run's token")?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Token::new(&format!("{RUN_TOKEN_PREFIX}{hex}"))
+    Token::new(&format!("{prefix}{hex}"))
 }
 
 /// Compares in time that does not depend on where the two differ: any
 /// local user can try tokens at the port.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -323,7 +328,7 @@ pub struct Local {
 }
 
 /// A refusal of the proxy's own: a status and why.
-struct Refusal(u16, String);
+pub(super) struct Refusal(pub(super) u16, pub(super) String);
 
 impl Local {
     /// Listens on loopback and serves the run, forwarding to the provider
@@ -466,7 +471,7 @@ fn serve(state: &State, mut stream: TcpStream, held: usize) {
     let _ = stream.shutdown(Shutdown::Both);
 }
 
-fn reason(status: u16) -> &'static str {
+pub(super) fn reason(status: u16) -> &'static str {
     ureq::http::StatusCode::from_u16(status)
         .ok()
         .and_then(|status| status.canonical_reason())
@@ -475,14 +480,14 @@ fn reason(status: u16) -> &'static str {
 
 /// The agent's request: its method, target and headers, names in lower
 /// case.
-struct Head {
-    method: String,
-    target: String,
-    headers: Vec<(String, String)>,
+pub(super) struct Head {
+    pub(super) method: String,
+    pub(super) target: String,
+    pub(super) headers: Vec<(String, String)>,
 }
 
 impl Head {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(n, _)| n == name)
@@ -494,7 +499,7 @@ fn bad(why: impl Into<String>) -> Refusal {
     Refusal(400, why.into())
 }
 
-fn read_head(reader: &mut impl BufRead) -> Result<Head, Refusal> {
+pub(super) fn read_head(reader: &mut impl BufRead) -> Result<Head, Refusal> {
     let mut limited = reader.take(MAX_HEAD_BYTES);
     let mut line = || -> Result<String, Refusal> {
         let mut bytes = Vec::new();
@@ -541,7 +546,7 @@ fn read_head(reader: &mut impl BufRead) -> Result<Head, Refusal> {
     })
 }
 
-fn ensure_ok(held: bool, refusal: impl FnOnce() -> Refusal) -> Result<(), Refusal> {
+pub(super) fn ensure_ok(held: bool, refusal: impl FnOnce() -> Refusal) -> Result<(), Refusal> {
     if held { Ok(()) } else { Err(refusal()) }
 }
 

@@ -461,6 +461,26 @@ test('review.yml runs the caller\'s network step once, if any, before secure-hos
   for (const action of pinned) assert.match(action, /^[-\w]+\/[-\w./]+@[0-9a-f]{40}$/, action);
 });
 
+// An MCP server's credential reaches one step of agentic-job.yml's agent
+// job, `run`, through the run action's input, and the action gives it to
+// the step that runs `agentic-job run` alone.
+test('agentic-job.yml gives the MCP credential to run alone', () => {
+  const source = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+  assert.equal([...source.matchAll(/secrets\.MCP_TOKEN/g)].length, 1);
+  const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+  const run = agent.split('\n      - id: run\n')[1];
+  assert.match(run, /\n {10}mcp-token: \$\{\{ secrets\.MCP_TOKEN \}\}\n/);
+  assert.match(source, /^      MCP_TOKEN:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
+  const action = readFileSync(join(__dirname, '../run/action.yml'), 'utf8');
+  const uses = [...action.matchAll(/inputs\.mcp-token/g)];
+  assert.equal(uses.length, 1);
+  const steps = action.split('\n    - ');
+  const holder = steps.filter(step => step.includes('inputs.mcp-token'));
+  assert.equal(holder.length, 1);
+  assert.match(holder[0], /AGENTIC_JOB_MCP_TOKEN: \$\{\{ inputs\.mcp-token \}\}/);
+  assert.match(holder[0], /agentic-job run --policy/);
+});
+
 // The provider's key, with `api-key`, reaches two steps of the agent job
 // and nothing else: its check before secure-host, which fails a bad key
 // before the minutes of setup, and `run`, outside the sandbox. In

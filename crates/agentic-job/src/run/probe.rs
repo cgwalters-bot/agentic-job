@@ -299,6 +299,35 @@ pub fn require_absent(sandbox: &Sandbox, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Probes, before the agent starts, that the MCP server's CREDENTIAL,
+/// which only `run` holds, is in no process the sandbox user can read
+/// (not searched for in files, as the provider's key is not), and that
+/// the MCP proxy's TOKEN, which the agent gets in `session/new` and in no
+/// file, is in no file or process of that user's yet. Prints what was
+/// found, and fails unless all held.
+pub fn require_mcp(sandbox: &Sandbox, credential: Option<&str>, token: &Token) -> Result<()> {
+    let mut probes = Vec::new();
+    if let Some(credential) = credential {
+        probes.push(in_no_process(
+            sandbox,
+            "the MCP server's credential",
+            credential.trim(),
+        )?);
+    }
+    probes.extend(elsewhere(
+        sandbox,
+        "the MCP proxy's token",
+        token.expose(),
+        &[],
+    )?);
+    ensure!(
+        report(&probes),
+        "the MCP server's credential or its proxy's token is where the sandbox user can read \
+         it: see the failed probes above"
+    );
+    Ok(())
+}
+
 /// Probes where TOKEN is, prints what was found, and fails unless every
 /// probe passed: what `run` does before it starts an agent that holds
 /// the token.

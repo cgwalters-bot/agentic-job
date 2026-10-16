@@ -17,6 +17,8 @@
 //!                          play the session in FILE, and for every prompt
 //!                          turn after the first the one in LATER (default:
 //!                          one line of text)
+//! fake-agent no-mcp FILE   play the session in FILE as an agent that does
+//!                          not take MCP servers over HTTP
 //! fake-agent fs            send fs/* and terminal/* requests the client
 //!                          doesn't advertise, expecting each answered
 //! fake-agent flood N       send N agent_message_chunk notifications
@@ -42,7 +44,8 @@
 //!  {"stop": "refusal"},
 //!  {"exit": 7},
 //!  {"fail": "message"},
-//!  {"finish": 0}]
+//!  {"finish": 0},
+//!  {"mcp": {"tool": "search", "arguments": {"q": "x"}}}]
 //! ```
 //!
 //! A `task` is a subagent's tool call as opencode reports one, done at
@@ -56,7 +59,10 @@
 //! turn, when it ends, answered with a JSON-RPC error of that message,
 //! as an agent whose model request failed. A `finish` ends
 //! the turn as done and then the process with that status, as an agent
-//! that doesn't wait for its client to hang up. As real agents do,
+//! that doesn't wait for its client to hang up. An `mcp` step lists the
+//! tools of the first MCP server `session/new` gave it over HTTP, with the
+//! headers it was given, calls the one named, and says what it got. As
+//! real agents do,
 //! it takes a `session/prompt` that arrives during a turn without
 //! starting another one, and answers it when the turn ends.
 //!
@@ -145,11 +151,17 @@ enum Step {
     Exit(i32),
     Fail(String),
     Finish(i32),
+    Mcp {
+        tool: String,
+        arguments: Value,
+    },
 }
 
 enum Mode {
     /// The first prompt turn's steps, and every later one's.
     Script(Vec<Step>, Vec<Step>),
+    /// A script, played by an agent without HTTP MCP servers.
+    NoMcp(Vec<Step>),
     Fs,
     Flood(usize),
     Grace,
@@ -165,11 +177,15 @@ fn parse_mode(args: &[String]) -> Result<Mode> {
         }
         ["script", file] => Mode::Script(read_script(file)?, later_default()),
         ["script", file, later] => Mode::Script(read_script(file)?, read_script(later)?),
+        ["no-mcp", file] => Mode::NoMcp(read_script(file)?),
         ["fs"] => Mode::Fs,
         ["flood", n] => Mode::Flood(n.parse().with_context(|| format!("flood: bad count {n}"))?),
         ["grace"] => Mode::Grace,
         ["slow-init"] => Mode::SlowInit,
-        _ => bail!("usage: {NAME} demo | script FILE [LATER] | fs | flood N | grace | slow-init"),
+        _ => bail!(
+            "usage: {NAME} demo | script FILE [LATER] | no-mcp FILE | fs | flood N | grace | \
+             slow-init"
+        ),
     })
 }
 
@@ -228,6 +244,8 @@ struct Conn {
     finish: Option<i32>,
     /// The error the turn is answered with (a `fail` step).
     fail: Option<String>,
+    /// The MCP servers `session/new` gave it.
+    mcp_servers: Vec<Value>,
 }
 
 impl Conn {
@@ -254,6 +272,7 @@ impl Conn {
             queued: Vec::new(),
             finish: None,
             fail: None,
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -342,9 +361,11 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                 if matches!(mode, Mode::SlowInit) {
                     continue;
                 }
+                let http = !matches!(mode, Mode::NoMcp(_));
                 conn.respond(
                     &id,
                     json!({"protocolVersion": 1,
+                        "agentCapabilities": {"mcpCapabilities": {"http": http}},
                         "agentInfo": {"name": NAME, "version": env!("CARGO_PKG_VERSION")}}),
                 );
             }
@@ -352,6 +373,10 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                 if let Some(c) = msg["params"]["cwd"].as_str() {
                     cwd = PathBuf::from(c);
                 }
+                conn.mcp_servers = msg["params"]["mcpServers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 conn.respond(
                     &id,
                     json!({"sessionId": SESSION, "configOptions": model_options(DEFAULT_MODEL)}),
@@ -406,8 +431,12 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
 /// Runs prompt turn number TURN (from 0); returns its stop reason.
 fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<String> {
     match mode {
-        Mode::Script(first, later) => {
-            let steps = if turn == 0 { first } else { later };
+        Mode::Script(..) | Mode::NoMcp(_) => {
+            let steps = match mode {
+                Mode::Script(first, _) | Mode::NoMcp(first) if turn == 0 => first,
+                Mode::Script(_, later) => later,
+                _ => &later_default(),
+            };
             let home = std::env::var("HOME").unwrap_or_default();
             let fill = |s: &str| {
                 s.replace("{cwd}", &cwd.to_string_lossy())
@@ -532,6 +561,16 @@ fn play(
             conn.update(json!({"sessionUpdate": "usage_update", "used": used, "size": size}));
             return Ok(());
         }
+        Step::Mcp { tool, arguments } => {
+            let text = match conn.mcp_servers.iter().find(|s| s["type"] == "http") {
+                Some(server) => mcp_call(server, tool, arguments)
+                    .unwrap_or_else(|e| format!("MCP failed: {e:#}")),
+                None => "MCP failed: no HTTP server was given".to_owned(),
+            };
+            conn.update(json!({"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}));
+            return Ok(());
+        }
         Step::Sleep(secs) => {
             let end = Instant::now() + Duration::try_from_secs_f64(*secs)?;
             while !conn.cancelled {
@@ -636,7 +675,8 @@ fn play(
         | Step::Stop(_)
         | Step::Exit(_)
         | Step::Fail(_)
-        | Step::Finish(_) => {
+        | Step::Finish(_)
+        | Step::Mcp { .. } => {
             unreachable!("handled above")
         }
     };
@@ -647,6 +687,77 @@ fn play(
     }
     conn.update(done);
     Ok(())
+}
+
+/// Lists the tools of the MCP SERVER, as `session/new` named it, and
+/// calls TOOL with ARGUMENTS: what it said, as one line.
+fn mcp_call(server: &Value, tool: &str, arguments: &Value) -> Result<String> {
+    let url = server["url"]
+        .as_str()
+        .context("an MCP server without a url")?;
+    let http: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .proxy(None)
+        .build()
+        .into();
+    let mut session: Option<String> = None;
+    let mut post = |id: Option<u64>, method: &str, params: Value| -> Result<(u16, Value)> {
+        let mut message = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        if let Some(id) = id {
+            message["id"] = json!(id);
+        }
+        let mut request = http
+            .post(url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
+        for header in server["headers"].as_array().into_iter().flatten() {
+            if let (Some(name), Some(value)) = (header["name"].as_str(), header["value"].as_str()) {
+                request = request.header(name, value);
+            }
+        }
+        if let Some(id) = &session {
+            request = request.header("mcp-session-id", id);
+        }
+        let mut answer = request.send(message.to_string())?;
+        if let Some(id) = answer.headers().get("mcp-session-id") {
+            session = Some(id.to_str()?.to_owned());
+        }
+        let status = answer.status().as_u16();
+        let text = answer.body_mut().read_to_string()?;
+        // The answer as JSON, or the last event of a stream.
+        let json = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .next_back()
+            .unwrap_or(&text);
+        Ok((
+            status,
+            serde_json::from_str(json.trim()).unwrap_or(json!(text)),
+        ))
+    };
+    let init = json!({"protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": NAME, "version": env!("CARGO_PKG_VERSION")}});
+    post(Some(1), "initialize", init)?;
+    post(None, "notifications/initialized", json!({}))?;
+    let (_, list) = post(Some(2), "tools/list", json!({}))?;
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    let (status, called) = post(
+        Some(3),
+        "tools/call",
+        json!({"name": tool, "arguments": arguments}),
+    )?;
+    let said = called["result"]["content"][0]["text"]
+        .as_str()
+        .map_or_else(|| called.to_string(), str::to_owned);
+    Ok(format!(
+        "MCP tools: {}; {tool}: HTTP {status}: {said}",
+        names.join(", ")
+    ))
 }
 
 fn main() {

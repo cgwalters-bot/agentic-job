@@ -337,7 +337,7 @@ impl Default for Retry {
 }
 
 /// One try of something that may be worth another.
-enum Attempt<T> {
+pub(super) enum Attempt<T> {
     Done(T),
     Again(String),
     Failed(String),
@@ -354,7 +354,11 @@ impl Retry {
     /// STOPPED says to go no further: a registration that is retried for
     /// minutes after its run was told to stop would leave a run at the
     /// proxy that nobody ends.
-    fn run<T>(self, stopped: Stopped, mut attempt: impl FnMut(u32) -> Attempt<T>) -> Result<T> {
+    pub(super) fn run<T>(
+        self,
+        stopped: Stopped,
+        mut attempt: impl FnMut(u32) -> Attempt<T>,
+    ) -> Result<T> {
         let mut last = String::from("no attempt was made");
         for n in 0..self.attempts.max(1) {
             if n > 0 {

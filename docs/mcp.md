@@ -1,0 +1,113 @@
+# A remote MCP server with a credential
+
+An agent may start any MCP server it likes inside the sandbox, but it has
+no credential to give one. `[mcp.NAME]` names a remote MCP server whose
+credential the caller holds as a secret. `run` serves the server to the
+agent through a proxy that holds the credential, and the agent never does.
+This is the first part of
+[#120](https://github.com/cgwalters-forge/agentic-job/issues/120): one
+server, reached over MCP's streamable HTTP, with one secret.
+
+## Configuration
+
+In the caller's configuration file (the `config` input of the reusable
+workflow):
+
+```toml
+[mcp.tracker]
+url = "https://mcp.example.com/mcp"
+secret = "MCP_TOKEN"
+allowed = ["search_issues", "get_issue"]
+```
+
+- `NAME` is a lower-case letter, then up to 31 lower-case letters, digits,
+  `_` and `-`. A run takes one `[mcp.*]` table; a second is refused.
+- `url` is https, even to this machine's loopback, which the sandbox
+  shares: over plain http the credential would go to whatever process
+  holds the port. It has no user, password or fragment, and is at most
+  2048 bytes.
+- `secret` is the name of the workflow's secret that holds the credential.
+  The reusable workflow declares each secret it takes and cannot look one
+  up by name, so the only name it takes is `MCP_TOKEN`.
+- `allowed` names, exactly, each tool the agent may call: 1 to 64 names of
+  letters, digits and `_.-`, without wildcards.
+
+The caller passes the secret to the reusable workflow:
+
+```yaml
+    secrets:
+      MCP_TOKEN: ${{ secrets.TRACKER_MCP_TOKEN }}
+```
+
+Only the agent job's `run` step gets it, as `run`'s input `mcp-token` and
+the variable `AGENTIC_JOB_MCP_TOKEN` of `agentic-job run`. The sandbox
+user's commands are started without that variable. A run with `[mcp.*]`
+and no credential does not start, and says which variable it wanted.
+
+## What `run` does
+
+Before the agent starts, `run` checks the credential with the server, as
+it checks a provider's key: it initializes a session, lists the tools, and
+ends that session. The run does not start, and nothing is spent, if the
+server refuses the credential, cannot be reached after a few tries, or
+lists no tool of a name that `allowed` names. The error quotes the
+server's refusal with the credential cut out.
+
+Then `run` serves a proxy on a port of the loopback address, as the
+runner's user, with a token made for the run. The agent gets the proxy's
+address and that token in ACP's `session/new`, as an HTTP MCP server
+named `NAME`. Its brief names the server and the allowed tools. An agent
+that does not take HTTP MCP servers (`mcpCapabilities.http`) fails before
+its first prompt. `run` does not fall back to anything else.
+
+Before the agent starts, probes check two things. No process of the
+sandbox user's holds the credential. The run's token for the proxy is in
+no file or process of that user's.
+
+The proxy takes only the run's token, as `Authorization: Bearer`, and
+only while the run lasts. It answers only `POST` and `DELETE` on its one
+path. `GET`, which would open a stream from the server, gets 405, as
+streamable HTTP allows. It forwards one JSON-RPC message at a time, and
+refuses a batch. The message must be one of these:
+
+- `initialize`, `notifications/initialized`, `notifications/cancelled` or
+  `ping`;
+- `tools/list`;
+- `tools/call` of a tool `allowed` names;
+- the answer to a ping the server sent.
+
+Anything else is refused with HTTP 403, and with a JSON-RPC error where it
+is one message, and never reaches the server. That includes resources,
+prompts, completions, logging, and answers to the server's other requests,
+such as sampling. A body that is not JSON, or JSON that is neither a
+JSON-RPC 2.0 message nor a batch, is refused with 400.
+
+Upstream, the proxy sends the credential as `Authorization: Bearer`, and
+passes on `Mcp-Session-Id` and `MCP-Protocol-Version` and no other header
+of the agent's. It does not go through a proxy of the job's environment,
+and it does not follow a redirect. It reads each answer whole, up to
+8 MiB, and refuses a larger one. It replaces the credential where the
+answer quotes it as it is or escaped in a JSON string. In an answer to
+`tools/list` it removes every tool `allowed` does not name. It passes back
+only the answer's content type and session id. It logs the name and HTTP status of each
+tool call, not the arguments or the result. The run's logs, transcripts
+and hand-back are redacted of the credential and of the proxy's token.
+
+## What it does not give
+
+- The server is reached from the runner's side, outside the egress filter,
+  as the inference provider is. Whatever the agent puts in an allowed
+  tool's arguments reaches the server, whatever the filter allows the
+  sandbox. So `allowed` should hold only tools the caller would let any
+  run use, with anything the agent read.
+- Answers from the server, tool results included, go to the agent
+  unchecked but for the tool list. A server's text can be a prompt
+  injection like any other content the agent reads.
+- The credential's authority is the server's to bound. If the credential
+  can write, then an allowed tool that writes is a write the
+  [safe outputs](safe-outputs.md) never see. Give it read access only
+  where the server allows that.
+- Detection does not see tool traffic.
+- One server and one secret. Servers started from a command (stdio) by a
+  confined runner, more than one secret, and Playwright with its browsers
+  remain under [#120](https://github.com/cgwalters-forge/agentic-job/issues/120).

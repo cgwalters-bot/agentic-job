@@ -17,6 +17,11 @@ inputs:
       a GitHub token with Copilot access, never the one passed as `github-token`. Only
       `agentic-job run` gets it, which keeps it from the agent; empty for a broker
     default: ""
+  mcp-token:
+    description: >-
+      For an `[mcp.NAME]` server of the configuration, its credential. Only `agentic-job run`
+      gets it, which keeps it from the agent; empty for a run without one
+    default: ""
 outputs:
   exit:
     description: Exit state of agentic-job run
@@ -120,6 +125,9 @@ runs:
         # Held by `run` alone, outside the sandbox: its proxy puts the key
         # in place of the run's token on the agent's requests.
         AGENTIC_JOB_INFERENCE_KEY: ${{ inputs.inference-api-key }}
+        # Likewise the MCP server's credential: `run`'s proxy for the
+        # server puts it in place of the run's token.
+        AGENTIC_JOB_MCP_TOKEN: ${{ inputs.mcp-token }}
       run: |
         echo '::group::agent (condensed)'
         state=0

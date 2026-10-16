@@ -69,8 +69,8 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 
 | Where | What it holds |
 | --- | --- |
-| The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run; with an [`[mcp.NAME]` server](docs/mcp.md), the token of `run`'s proxy for it. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
+| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; with an `[mcp.NAME]` server, its credential `MCP_TOKEN`, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
@@ -505,6 +505,8 @@ the issue that tracks it, where one is filed.
 - [specs/run-contract-spec.md](specs/run-contract-spec.md): the run contract
   and its enforcement evidence.
 - [docs/inference.md](docs/inference.md): the broker, and what it needs.
+- [docs/mcp.md](docs/mcp.md): a remote MCP server whose credential the
+  agent never holds.
 - [docs/events.md](docs/events.md): starting runs from events.
 - [docs/dispatch.md](docs/dispatch.md): fixed operator dispatch profiles and setup.
 - [docs/skills.md](docs/skills.md): the skills and subagents a run installs
