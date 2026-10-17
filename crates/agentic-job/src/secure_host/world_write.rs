@@ -9,6 +9,13 @@
 //! world-writable file or non-sticky directory on the root filesystem
 //! (docs/secure-host.md). Every refusal leaves the step failed; nothing
 //! falls back to running without the policy.
+//!
+//! The same object holds the runner-read rule, which stays off unless
+//! `--deny-runner-reads` asks for it: no task of the runner's user reads
+//! (`/proc/PID/environ` and the like) another of that user's tasks that it
+//! is not an ancestor of, Runner.Worker excepted. The threat is a step
+//! reading the tokens in the environment of a process an earlier step of
+//! the job left running.
 
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -38,6 +45,17 @@ const PROBE_USER: &str = "nobody";
 /// the policy covers, and root's alone but for them.
 const PROBE_PREFIX: &str = ".agentic-world-write-";
 
+/// The runner's process that runs each step, and ends the job's orphans
+/// by reading their environments: an ancestor of this loader.
+const WORKER: &str = "Runner.Worker";
+/// How many ancestors are looked through for it.
+const MAX_ANCESTORS: usize = 32;
+/// How long the read probe's target may take to become `sleep`.
+const TARGET_TRIES: u32 = 50;
+const TARGET_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+/// The read probe's target lives no longer than this, in seconds.
+const TARGET_SECONDS: &str = "120";
+
 /// One command, its program looked up on root's fixed path; what it
 /// printed, or an error with its status and standard error.
 pub type Run<'a> = &'a mut dyn FnMut(&str, &[String]) -> Result<String>;
@@ -63,6 +81,94 @@ pub fn root_config(dev: u64) -> Result<[u8; 8]> {
     value[..4].copy_from_slice(&kernel.to_ne_bytes());
     value[4..].copy_from_slice(&1u32.to_ne_bytes());
     Ok(value)
+}
+
+/// The ancestor of this loader the runner-read rule exempts, and the
+/// user and group it runs as: the runner's.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Worker {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// A `/proc/PID/status`'s name, parent and real uid and gid.
+fn status_fields(status: &str) -> Result<(&str, u32, u32, u32)> {
+    let field = |key: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+            .map(str::trim)
+            .with_context(|| format!("no {key} in the process status"))
+    };
+    let first = |key: &str| -> Result<u32> {
+        field(key)?
+            .split_whitespace()
+            .next()
+            .and_then(|id| id.parse().ok())
+            .with_context(|| format!("unexpected {key} in the process status"))
+    };
+    let ppid = field("PPid")?
+        .parse()
+        .context("unexpected PPid in the process status")?;
+    Ok((field("Name")?, ppid, first("Uid")?, first("Gid")?))
+}
+
+/// The nearest ancestor of PID named [`WORKER`], by the status STATUS
+/// reads of each, at most [`MAX_ANCESTORS`] up. Its uid must not be
+/// root's: that would make every root process a runner's. The action's
+/// steps before this one are the job's own, so nothing untrusted has run
+/// that could have named itself so.
+pub fn find_worker(pid: u32, status: &mut dyn FnMut(u32) -> Result<String>) -> Result<Worker> {
+    let mut pid = pid;
+    for _ in 0..MAX_ANCESTORS {
+        let text = status(pid)?;
+        let (name, ppid, uid, gid) = status_fields(&text)?;
+        if name == WORKER {
+            ensure!(uid != 0, "{WORKER} runs as root");
+            return Ok(Worker { pid, uid, gid });
+        }
+        ensure!(ppid > 0, "no {WORKER} among this process's ancestors");
+        pid = ppid;
+    }
+    bail!("no {WORKER} within {MAX_ANCESTORS} ancestors of this process")
+}
+
+/// The runner-read map's value: the runner's kuid, the Worker's tgid in
+/// the initial pid namespace (this loader's), then 1 for enabled, each a
+/// u32 in this machine's byte order.
+pub fn runner_config(worker: &Worker) -> [u8; 12] {
+    let mut value = [0; 12];
+    value[..4].copy_from_slice(&worker.uid.to_ne_bytes());
+    value[4..8].copy_from_slice(&worker.pid.to_ne_bytes());
+    value[8..].copy_from_slice(&1u32.to_ne_bytes());
+    value
+}
+
+/// One map's entry 0 set to VALUE, through its pin under PIN/maps.
+fn update_map(map: &str, value: &[u8], run: Run) -> Result<()> {
+    let mut update = strings(&[
+        "map",
+        "update",
+        "pinned",
+        &format!("{WORLD_WRITE_PIN}/maps/{map}"),
+        "key",
+        "hex",
+        "00",
+        "00",
+        "00",
+        "00",
+        "value",
+        "hex",
+    ]);
+    update.extend(value.iter().map(|byte| format!("{byte:02x}")));
+    run("bpftool", &update)?;
+    Ok(())
+}
+
+/// Enables the runner-read rule for WORKER; [`attach`] has checked its link.
+pub fn enable_runner_reads(worker: &Worker, run: Run) -> Result<()> {
+    update_map("runner_reads", &runner_config(worker), run)
 }
 
 /// Loads OBJECT, requires each program to be attached, and only then
@@ -109,23 +215,7 @@ pub fn attach(object: &str, dev: u64, run: Run) -> Result<()> {
             "not a modify-return tracing link: {name}"
         );
     }
-    let mut update = strings(&[
-        "map",
-        "update",
-        "pinned",
-        &format!("{maps}/root_fs"),
-        "key",
-        "hex",
-        "00",
-        "00",
-        "00",
-        "00",
-        "value",
-        "hex",
-    ]);
-    update.extend(root_config(dev)?.iter().map(|byte| format!("{byte:02x}")));
-    run("bpftool", &update)?;
-    Ok(())
+    update_map("root_fs", &root_config(dev)?, run)
 }
 
 /// The command that installs bpftool where the image lacks it. Ubuntu's
@@ -271,7 +361,88 @@ fn probe_write(path: &Path, denied: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn load(object: &Path) -> Result<()> {
+/// The runner's process, with no environment, until it is dropped.
+struct Target(std::process::Child);
+
+impl Drop for Target {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `setpriv`'s arguments to run a command as WORKER's user and group.
+fn as_runner(worker: &Worker) -> Vec<String> {
+    vec![
+        format!("--reuid={}", worker.uid),
+        format!("--regid={}", worker.gid),
+        "--clear-groups".to_owned(),
+        "--".to_owned(),
+    ]
+}
+
+/// A process of the runner's user reading the environment of another of
+/// its processes, a sibling, must fail with EACCES when DENIED and
+/// succeed otherwise; any other failure is a broken probe, not a verdict.
+/// The target's environment holds only PATH, and nothing read is kept.
+/// Before setup's hidepid, which would make the refusal ENOENT.
+fn probe_runner_read(worker: &Worker, denied: bool) -> Result<()> {
+    let target = Target(
+        host::bare("setpriv")
+            .env_clear()
+            .env("PATH", host::root_path())
+            .args(as_runner(worker))
+            .args(["sleep", TARGET_SECONDS])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("starting the read probe's target")?,
+    );
+    let pid = target.0.id();
+    // Until it has exec'd sleep, the uid change has left it undumpable.
+    let comm = format!("/proc/{pid}/comm");
+    let mut tries = 0;
+    while fs::read_to_string(&comm).ok().as_deref() != Some("sleep\n") {
+        tries += 1;
+        ensure!(
+            tries < TARGET_TRIES,
+            "the read probe's target did not start"
+        );
+        std::thread::sleep(TARGET_WAIT);
+    }
+    let environ = format!("/proc/{pid}/environ");
+    let output = host::bare("timeout")
+        .env_clear()
+        .env("PATH", host::root_path())
+        // cat's own message for EACCES, in no other language.
+        .env("LC_ALL", "C")
+        .arg(COMMAND_TIMEOUT)
+        .arg("setpriv")
+        .args(as_runner(worker))
+        .args(["cat", &environ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .context("running the read probe as the runner's user")?;
+    drop(target);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // strerror(EACCES), as cat reports the open it was refused.
+    let refused = !output.status.success() && stderr.contains("Permission denied");
+    ensure!(
+        output.status.success() || refused,
+        "the read probe of {environ} failed for another reason: {}",
+        stderr.trim()
+    );
+    ensure!(
+        refused == denied,
+        "a read by the runner's user of {environ} was {}",
+        if refused { "refused" } else { "allowed" }
+    );
+    Ok(())
+}
+
+pub fn load(object: &Path, deny_runner_reads: bool) -> Result<()> {
     ensure!(
         platform::supported_file(Path::new(platform::OS_RELEASE)),
         platform::REFUSAL
@@ -285,6 +456,19 @@ pub fn load(object: &Path) -> Result<()> {
     let object = object
         .to_str()
         .with_context(|| format!("policy object {} is not UTF-8", object.display()))?;
+    let worker = if deny_runner_reads {
+        let worker = find_worker(std::process::id(), &mut |pid| {
+            fs::read_to_string(format!("/proc/{pid}/status"))
+                .with_context(|| format!("reading the status of process {pid}"))
+        })?;
+        // The rule decides reads only: an attach (`/proc/PID/mem`,
+        // process_vm_readv) is Yama's, which must not be scope 0.
+        crate::sandbox::setup::restrict_ptrace()?;
+        probe_runner_read(&worker, false)?;
+        Some(worker)
+    } else {
+        None
+    };
     let run: Run = &mut run_command;
     let os_release = fs::read_to_string(platform::OS_RELEASE).context("reading os-release")?;
     ensure_bpftool(run, &os_release)?;
@@ -326,7 +510,18 @@ pub fn load(object: &Path) -> Result<()> {
     probe_write(&foreign, true)?;
     probe_write(&owned, false)?;
     probe.close().context("removing the probe directory")?;
-    println!("world-write: enabled root-device policy; four tracing links pinned");
+    println!(
+        "world-write: enabled root-device policy; {} tracing links pinned",
+        WORLD_WRITE_LINKS.len()
+    );
+    if let Some(worker) = worker {
+        enable_runner_reads(&worker, run)?;
+        probe_runner_read(&worker, true)?;
+        println!(
+            "world-write: enabled the runner-read rule for uid {}, {WORKER} {} exempt",
+            worker.uid, worker.pid
+        );
+    }
     Ok(())
 }
 
@@ -367,6 +562,112 @@ mod tests {
         for dev in [1 << 44, 1 << 32] {
             assert!(format!("{:#}", root_config(dev).unwrap_err()).contains("exceeds"));
         }
+    }
+
+    fn status(name: &str, ppid: u32, uid: u32) -> String {
+        format!(
+            "Name:\t{name}\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t9\nPid:\t9\n\
+             PPid:\t{ppid}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t118\t118\t118\t118\n"
+        )
+    }
+
+    /// The loader under sudo under a step's shell under the Worker, and
+    /// what must refuse: no Worker, a root one, a chain too long, a
+    /// status that cannot be read or parsed.
+    #[test]
+    fn the_worker_is_the_nearest_ancestor_of_that_name() {
+        let chain = |names: &[(&str, u32)]| {
+            let names: Vec<(String, u32)> = names
+                .iter()
+                .map(|(name, uid)| ((*name).to_owned(), *uid))
+                .collect();
+            move |pid: u32| -> Result<String> {
+                let index = usize::try_from(pid).unwrap() - 1;
+                let (name, uid) = names.get(index).context("no such process")?;
+                // Each process's parent is the next one; the last is init's child.
+                let ppid = if index + 1 == names.len() { 0 } else { pid + 1 };
+                Ok(status(name, ppid, *uid))
+            }
+        };
+        let hosted = [
+            ("agentic-job", 0),
+            ("sudo", 0),
+            ("sudo", 0),
+            ("bash", 1001),
+            (WORKER, 1001),
+            ("Runner.Listener", 1001),
+            ("systemd", 0),
+        ];
+        assert_eq!(
+            find_worker(1, &mut chain(&hosted)).unwrap(),
+            Worker {
+                pid: 5,
+                uid: 1001,
+                gid: 118
+            }
+        );
+        let deep: Vec<(&str, u32)> = std::iter::repeat_n(("bash", 1001), MAX_ANCESTORS)
+            .chain([(WORKER, 1001)])
+            .collect();
+        let within = &deep[1..];
+        assert_eq!(find_worker(1, &mut chain(within)).unwrap().pid, 32);
+        for (names, refusal) in [
+            (
+                &[("sudo", 0), ("bash", 1001), ("systemd", 0)][..],
+                "no Runner.Worker among",
+            ),
+            (&[("sudo", 0), (WORKER, 0)], "Runner.Worker runs as root"),
+            (
+                &[("sudo", 0), ("Runner.Worke", 1001)],
+                "no Runner.Worker among",
+            ),
+            (&deep, "within 32 ancestors"),
+            (&[], "no such process"),
+        ] {
+            let err = find_worker(1, &mut chain(names)).unwrap_err();
+            assert!(format!("{err:#}").contains(refusal), "{err:#}");
+        }
+        for broken in [
+            "Name:\tbash\nUid:\t1\nGid:\t1\n",
+            "Name:\tbash\nPPid:\tone\nUid:\t1\nGid:\t1\n",
+            "PPid:\t1\nUid:\t1\nGid:\t1\n",
+            "Name:\tbash\nPPid:\t1\nUid:\t\nGid:\t1\n",
+            "Name:\tbash\nPPid:\t1\nUid:\t1\n",
+        ] {
+            assert!(
+                find_worker(1, &mut |_| Ok(broken.to_owned())).is_err(),
+                "{broken}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_runner_read_map_names_the_runner_and_its_worker() {
+        let worker = Worker {
+            pid: 2345,
+            uid: 1001,
+            gid: 118,
+        };
+        let value = runner_config(&worker);
+        let word = |at: usize| u32::from_ne_bytes(value[at..at + 4].try_into().unwrap());
+        assert_eq!([word(0), word(4), word(8)], [1001, 2345, 1]);
+        let mut calls = Vec::new();
+        enable_runner_reads(&worker, &mut |program, args| {
+            calls.push((program.to_owned(), args.to_vec()));
+            Ok(String::new())
+        })
+        .unwrap();
+        let [(program, args)] = &calls[..] else {
+            panic!("{calls:?}")
+        };
+        assert_eq!(program, "bpftool");
+        let map = format!("{WORLD_WRITE_PIN}/maps/runner_reads");
+        let hex: Vec<String> = value.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            args[..8],
+            strings(&["map", "update", "pinned", &map, "key", "hex", "00", "00"])
+        );
+        assert_eq!(args[args.len() - 12..], hex[..]);
     }
 
     #[test]
@@ -425,7 +726,7 @@ mod tests {
         }
     }
 
-    /// Whatever the list says short of four tracing links, the map is
+    /// Whatever the list says short of every tracing link, the map is
     /// never updated.
     #[test]
     fn an_unattached_program_is_never_enabled() {

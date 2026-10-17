@@ -200,6 +200,11 @@ mod tests {
             &["supported"],
             &["apt"],
             &["world-write", "/tmp/bin/world_write.bpf.o"],
+            &[
+                "world-write",
+                "/tmp/bin/world_write.bpf.o",
+                "--deny-runner-reads",
+            ],
             &["inference", "/tmp/secure-host/config.toml"],
             &["image", "/tmp/secure-host/config.toml"],
         ];

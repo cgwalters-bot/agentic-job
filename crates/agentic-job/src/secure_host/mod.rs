@@ -52,6 +52,11 @@ pub enum Host {
     WorldWrite {
         /// The policy object, `world_write.bpf.o`, that came with this binary
         object: PathBuf,
+        /// Also refuse a read (`/proc/PID/environ`) by a process of the runner's
+        /// user of another of its processes that is not its descendant; the
+        /// Runner.Worker this command runs under is exempt
+        #[arg(long)]
+        deny_runner_reads: bool,
     },
     /// As root: `sandbox setup` from a file with only `[sandbox]`, `[egress]` and `[setup]`
     Setup {
@@ -119,7 +124,10 @@ impl Host {
                 Ok(()) => return Ok(Exit::Success),
                 Err(err) => eprintln!("configuring apt for CI: {err:#}"),
             },
-            Self::WorldWrite { object } => match world_write::load(object) {
+            Self::WorldWrite {
+                object,
+                deny_runner_reads,
+            } => match world_write::load(object, *deny_runner_reads) {
                 Ok(()) => return Ok(Exit::Success),
                 Err(err) => {
                     world_write::report_refusal(&err, &mut world_write::run_command, &mut |line| {
@@ -153,6 +161,11 @@ mod tests {
             &["supported"],
             &["apt"],
             &["world-write", "/tmp/bin/world_write.bpf.o"],
+            &[
+                "world-write",
+                "/tmp/bin/world_write.bpf.o",
+                "--deny-runner-reads",
+            ],
             &["setup", "--config", "secure-host/hosted.toml"],
             &["check"],
             &["check", "--record"],

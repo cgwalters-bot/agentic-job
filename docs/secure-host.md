@@ -106,7 +106,7 @@ walk that setup used to make over the whole root filesystem, taking world
 write off every path it found and the setuid bit off setuid-root programs no
 package owned: no user but the owner may change a world-writable file or
 non-sticky directory on the root filesystem, decided when the change is
-attempted. `sandbox setup` refuses a host where the policy's four links are
+attempted. `sandbox setup` refuses a host where the policy's five links are
 not pinned, before it changes anything, and `sandbox check` proves the policy
 by what it does (below). Running `sandbox setup` without the action means
 running the loader first, as CI's `sandbox` job does.
@@ -136,7 +136,7 @@ The dedicated CI job compiles it with `binary.sh object`, the command the
 release build runs.
 
 Loading uses `bpftool prog loadall OBJECT PIN/links autoattach pinmaps PIN/maps`.
-The four program-name pins under `/sys/fs/bpf/agentic-job-world-write/links`
+The five program-name pins under `/sys/fs/bpf/agentic-job-world-write/links`
 must each be **tracing links**, not program pins. Then one map update atomically
 sets the root device and enables the policy. A missing or non-regular object,
 an existing pin directory, load, attachment, inspection, map-update or probe
@@ -147,7 +147,7 @@ must not continue with untrusted code; reuse of that host is unsupported.
 [bpftool v7.6.0's `auto_attach_program`](https://github.com/libbpf/bpftool/blob/v7.6.0/src/prog.c)
 calls `bpf_program__attach` and pins its link, but can fall back to pinning an
 unattached program. That is why the loader checks every link.
-Inspection uses `bpftool -j -f link show` and matches the four exact pin paths:
+Inspection uses `bpftool -j -f link show` and matches the five exact pin paths:
 v7.6.0's single-link `show pinned` path can print valid JSON yet return failure
 because it tests stale `errno`. Enumeration avoids that exit-status bug without
 ignoring command failures. Command output is capped at 1 MiB. Refusals include
@@ -191,7 +191,7 @@ After the action has exited, with root gone:
 - negative control: the sandbox user creates a mode-0666 file of its own in
   its home on the root filesystem and appends to it, which must succeed.
 
-There is no fallback: `sandbox setup` refuses a host without the four links,
+There is no fallback: `sandbox setup` refuses a host without the five links,
 the positive control fails if the policy is switched off in its map, and the
 job is in the `required-checks` chain under the same `host` gate as the
 other privileged jobs. It has read-only contents permission, no secrets and a
@@ -207,6 +207,54 @@ which built from source, spent 384 ms in the action's load step (load, four
 link checks, map update and both loader controls), 158 s getting the binary
 and object, 43 s in setup and 18 s in the final probes. These are one run's
 step durations, not bounds. This is Ubuntu evidence only; RHEL 10 is below.
+
+### Reads between the runner's own processes (opt-in)
+
+Every step runs as the runner's user, so a step can read
+`/proc/PID/environ`, and the tokens in it, of any process an earlier step
+left running. Yama decides only attaches, and `hidepid` alone does not
+separate one user's processes. The object's fifth program,
+`runner_read_check`, is a modify-return hook on
+`security_ptrace_access_check`. It refuses a read (`PTRACE_MODE_READ`
+without `ATTACH`) by a process of the runner's user of another of its
+processes, with two exceptions. A process may still read its own
+descendants, up to 32 generations down, the relationship Yama's scope 1
+allows for attaching. An orphan has been reparented away from every later
+step. Runner.Worker is exempt because it ends the job's orphans by reading
+each one's environment for `RUNNER_TRACKING_ID`.
+
+The kernel decides setup's `hidepid=invisible` with the same check. Under
+the rule, a step therefore does not see in `/proc` at all the runner's
+processes that are not its descendants. `ps`, `pgrep` and `pkill` in a later
+step do not find a server an earlier step started, and a process cannot
+read its parent's `/proc` entries. Nor does `sandbox check`, run from a
+step, see the Worker, so its `worker-diagnostics` probe finds no socket to
+test; CI's confined probes take the Worker's pid from the control instead.
+
+The program is always loaded and pinned, but it is off unless the loader
+gets `--deny-runner-reads`. With that flag, the loader takes the runner's
+uid and gid and the Worker's pid from the nearest ancestor named
+`Runner.Worker`, and refuses if there is none or it is root's. It also
+raises Yama's `ptrace_scope` from 0 to 1, as setup does, because attaches,
+`/proc/PID/mem` among them, are Yama's to refuse. It then proves the rule
+the way the world-write policy is proven. A process of the runner's user,
+started with `setpriv`, reads a sibling's environment, which holds only
+`PATH`. The read must succeed before the map is enabled and fail with
+`EACCES` after it.
+
+The Worker is exempt by its pid, which the pin keeps after the job ends. On a
+reused host, a later job's Worker is not exempt, and its orphan cleanup stops
+working. The rule does not close every route from a step to an earlier
+process. That step can still signal the process: it can raise the process's
+core limit and make it dump core where the host's `core_pattern` leaves the
+dump readable. It can also tamper with later steps, which the job's trust
+model accepts.
+
+The action has no input for the rule yet. CI's `confined` job loads it, and
+every probe there must fail to read the environment of a `sleep` that an
+earlier step left running. That `sleep` must still be running, by a signal
+check, which needs no `/proc` entry. The `confined-cleanup` job then reads
+that job's log for the runner's `Terminate orphan process` line for that pid.
 
 ### Acceptance evidence and remaining host work
 
@@ -662,13 +710,18 @@ the action (the control, in which sudo, `docker info`, writing that root-owned
 [probe action](../.github/actions/confine-probe/action.yml), which the runner
 runs like a downloaded one, its post step after the job's last step).
 Each route must fail, or the step fails the job. A file of the runner's own, also mode 0666,
-must still take a write. Each probe prints its record in its log, and the job
+must still take a write. The job also loads the opt-in
+[runner-read rule](#reads-between-the-runners-own-processes-opt-in), so reading
+the environment of a process that an earlier step left running is one more
+route that must fail. Each probe prints its record in its log, and the job
 uploads the records as an artifact, whether or not a probe failed; the post
-step runs after that upload, so its record is only in its log. The runner's
-own cleanup after the post steps is not probed. The job sets
+step runs after that upload, so its record is only in its log. The
+`confined-cleanup` job checks, from that job's log, that the runner's own
+cleanup after the post steps still ended that process. The job sets
 `sandbox.unlink-worker-diagnostics`, and its probe connects to the
 Worker's diagnostic sockets as well: the control must reach one, each
-step after the action none. The check
+step after the action none. The control records the Worker's pid for
+the later probes, which the rule keeps from seeing their ancestors. The check
 that the action runs adds `runner-metadata` and `runner-metadata-v6`
 ([sandbox-check.md](sandbox-check.md#the-network-probes)). Only hosted Ubuntu
 26.04 runs this proof; RHEL 10 is unverified. A hosted runner serves no

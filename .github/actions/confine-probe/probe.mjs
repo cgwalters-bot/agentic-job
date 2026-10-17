@@ -1,6 +1,7 @@
 // What a step of a job secured by secure-host tries, as the runner's own
 // user: the routes to root (sudo, the container daemon, a root-owned
 // world-writable file), to the cloud metadata service, and to the
+// environment of a process an earlier step left running, and to
 // Runner.Worker's .NET diagnostic sockets (sandbox.unlink-worker-diagnostics),
 // through which a step could have the Worker dump its memory. The job in
 // ci.yml runs it once before the action as the positive control, where
@@ -27,6 +28,16 @@ import { pathToFileURL } from 'node:url';
 // search leave alone: only the access-time policy refuses a write to it.
 export const FIXTURE = '/var/tmp/agentic-job-confine-root-file';
 
+// The pid of `sleep`, which a step before the control started and left
+// running, so that every probe is a later step than it. Its environment
+// is the earlier step's; only whether it can be read is recorded.
+export const ORPHAN = 'confine-orphan.pid';
+
+// The pid of the Worker, which the control finds among its ancestors and
+// records here: after the lock, the runner-read rule and hidepid take
+// every ancestor out of a step's /proc.
+export const WORKER = 'confine-worker.pid';
+
 const METADATA_URL = 'http://169.254.169.254/metadata/instance?api-version=2021-02-01';
 
 const COMMAND_MS = 10_000;
@@ -43,10 +54,10 @@ const CONNECT_MS = 5_000;
 
 export const MODES = {
   // Before the lock: the job's user has each of these.
-  control: ['sudo', 'docker', 'world-write', 'metadata', 'worker-diagnostics'],
+  control: ['sudo', 'docker', 'world-write', 'metadata', 'environ', 'worker-diagnostics'],
   // After it: none, and its own world-writable file still takes a write,
   // so the refusal of the root-owned one is the policy's, not every write's.
-  confined: ['sudo', 'docker', 'world-write', 'metadata', 'worker-diagnostics', 'owner-write'],
+  confined: ['sudo', 'docker', 'world-write', 'metadata', 'environ', 'worker-diagnostics', 'owner-write'],
 };
 
 const WANT_SUCCESS = new Set(['owner-write']);
@@ -74,6 +85,29 @@ export function fixtureProblem(stat) {
   return null;
 }
 
+/**
+ * Why a refused read of the orphan's environment, or connection to the
+ * Worker, would prove nothing, or null, by the error of `kill(pid, 0)`
+ * (null when it succeeded): it must be running and this user's. A signal
+ * needs no ptrace access, so this holds where setup's hidepid and the
+ * runner-read rule hide it from /proc.
+ */
+export function orphanProblem(code) {
+  if (code === null) return null;
+  if (code === 'ESRCH') return 'not running';
+  if (code === 'EPERM') return 'not this user\'s';
+  return `kill(0) failed with ${code}`;
+}
+
+function signalError(pid) {
+  try {
+    process.kill(pid, 0);
+    return null;
+  } catch (error) {
+    return error.code ?? String(error);
+  }
+}
+
 function runs(argv) {
   const result = spawnSync(argv[0], argv.slice(1), { stdio: 'ignore', timeout: COMMAND_MS });
   return result.status === 0;
@@ -87,6 +121,35 @@ function opensForWrite(file) {
     if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
     return false;
   }
+}
+
+// With hidepid=invisible, a process the rule refuses is not in /proc at
+// all for this one: ENOENT, while the signal check says it is running.
+function readsEnviron(pid) {
+  try {
+    fs.readFileSync(`/proc/${pid}/environ`);
+    return true;
+  } catch (error) {
+    if (!['EACCES', 'EPERM', 'ENOENT'].includes(error.code)) throw error;
+    return false;
+  }
+}
+
+/** The pid recorded in `name` under `temp`, refused unless that process is running and this user's. */
+function recordedPid(temp, name) {
+  const pid = fs.readFileSync(path.join(temp, name), 'utf8').trim();
+  if (!/^[1-9][0-9]*$/.test(pid)) throw new Error(`${name}: not a pid`);
+  const problem = orphanProblem(signalError(Number(pid)));
+  if (problem) throw new Error(`process ${pid} of ${name}: ${problem}, so probing it proves nothing`);
+  return Number(pid);
+}
+
+/** Whether this user reads the orphan's environment, which must be running before and after. */
+function readsOrphan(temp) {
+  const pid = recordedPid(temp, ORPHAN);
+  const read = readsEnviron(pid);
+  recordedPid(temp, ORPHAN);
+  return read;
 }
 
 function reachesMetadata() {
@@ -109,7 +172,7 @@ export function diagnosticSockets(netUnix, pid) {
 }
 
 // The Worker that runs this step: the nearest ancestor of that name.
-function workerPid() {
+function ancestorWorker() {
   let pid = process.pid;
   for (let i = 0; i < MAX_ANCESTORS && pid > 1; i++) {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -129,11 +192,19 @@ function connects(file) {
   });
 }
 
+// The Worker's pid: found and recorded by the control, read back once confined.
+function workerPid(mode, temp) {
+  if (mode !== 'control') return recordedPid(temp, WORKER);
+  const pid = ancestorWorker();
+  fs.writeFileSync(path.join(temp, WORKER), `${pid}\n`);
+  return pid;
+}
+
 // Whether this step connects to any diagnostic socket of its Worker. The
 // listing keeps a path after it is unlinked, so the control proves the
 // Worker had one to find.
-export async function reachesWorker() {
-  const sockets = diagnosticSockets(fs.readFileSync('/proc/net/unix', 'utf8'), workerPid());
+export async function reachesWorker(mode, temp) {
+  const sockets = diagnosticSockets(fs.readFileSync('/proc/net/unix', 'utf8'), workerPid(mode, temp));
   const reached = await Promise.all(sockets.map(connects));
   return reached.some(Boolean);
 }
@@ -162,7 +233,8 @@ export async function probe(mode, label) {
     docker: runs(['docker', 'info']),
     'world-write': opensForWrite(fixture()),
     metadata: await reachesMetadata(),
-    'worker-diagnostics': await reachesWorker(),
+    environ: readsOrphan(temp),
+    'worker-diagnostics': await reachesWorker(mode, temp),
   };
   if (mode === 'confined') {
     results['owner-write'] = opensForWrite(ownerFile(temp, label));

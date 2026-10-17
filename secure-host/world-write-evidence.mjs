@@ -67,7 +67,7 @@ export function evidence(out, binary, { run = command, hash = digest, build = co
         `${hash(`${out}/world_write.bpf.o`)}  world_write.bpf.o`].join("\n");
     });
     stage("Baseline: foreign and owner writes succeed", () => run("sudo", ["node", "secure-host/world-write-host.mjs", "before"]));
-    stage("Policy active: four links checked, map enabled, denial and owner control", () =>
+    stage("Policy active: every link checked, map enabled, denial and owner control", () =>
       run("sudo", [binary, "secure-host", "world-write", `${out}/world_write.bpf.o`]));
     stage("After loader exits: foreign write EACCES, owner write succeeds; operation matrix", () =>
       run("sudo", ["node", "secure-host/world-write-host.mjs", "after"]));

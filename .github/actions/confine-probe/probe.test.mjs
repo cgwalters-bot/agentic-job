@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { MODES, diagnosticSockets, failures, fixtureProblem } from './probe.mjs';
+import { MODES, diagnosticSockets, failures, fixtureProblem, orphanProblem } from './probe.mjs';
 
 const all = value => Object.fromEntries(MODES.confined.map(name => [name, value]));
 
@@ -57,6 +57,13 @@ test('only the diagnostic sockets of the Worker are tried', () => {
   ].join('\n');
   assert.deepEqual(diagnosticSockets(listing, 2041), ['/tmp/dotnet-diagnostic-2041-98765-socket']);
   assert.deepEqual(diagnosticSockets(listing, 7), []);
+});
+
+test('an orphan that is gone or not this user\'s proves nothing', () => {
+  assert.equal(orphanProblem(null), null);
+  assert.equal(orphanProblem('ESRCH'), 'not running');
+  assert.equal(orphanProblem('EPERM'), 'not this user\'s');
+  assert.equal(orphanProblem('EINVAL'), 'kill(0) failed with EINVAL');
 });
 
 test('the action probes in both its main and its post step', () => {

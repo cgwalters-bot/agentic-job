@@ -1665,23 +1665,36 @@ jobs:
 
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file, the
-  # cloud metadata service and the Worker's .NET diagnostic sockets, and
-  # each must fail. Read-only token, no id-token, no secrets; probes run
-  # as the runner's user, root only before setup. The action is the checkout's own, so the runner gives
+  # cloud metadata service, an earlier step's process's environment and
+  # the Worker's .NET diagnostic sockets, and each must fail. Read-only
+  # token, no id-token, no secrets; probes run as the runner's user, root
+  # only before setup. The action is the checkout's own, so the runner gives
   # it the runtime token and runs its post step as it would a downloaded one's.
   confined:
     needs: changes
-    if: ${{ needs.changes.outputs.host == 'true' }}
+    # Exercise cleanup on pull requests too, before entering the merge queue.
+    if: ${{ needs.changes.outputs.full == 'true' }}
     name: Confined run step and JavaScript action main and post steps
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      orphan: ${{ steps.orphan.outputs.pid }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: node --test .github/actions/confine-probe/probe.test.mjs
+      # What an earlier step leaves running, with that step's environment:
+      # every probe below is a later step, which may read it in the control
+      # only. The runner's cleanup must still end it (confined-cleanup).
+      - name: Leave a process running
+        id: orphan
+        run: |
+          sleep infinity < /dev/null > /dev/null 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/confine-orphan.pid"
+          echo "pid=$!" >> "$GITHUB_OUTPUT"
       # Run secure-host's entry points from the checkout, not as a local
       # action. Build both artifacts from this checkout, never a release;
       # the build installs its compilers.
@@ -1706,7 +1719,7 @@ jobs:
             --boolean sandbox.deny-runner-metadata=true \
             --boolean sandbox.unlink-worker-diagnostics=true > "$RUNNER_TEMP/secure-host/config.toml"
       - name: "Load the checkout's world-write object"
-        run: sudo /usr/local/bin/agentic-job secure-host world-write "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
+        run: sudo /usr/local/bin/agentic-job secure-host world-write "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o" --deny-runner-reads
       - name: Secure the host
         run: sudo /usr/local/bin/agentic-job sandbox setup --config "$RUNNER_TEMP/secure-host/config.toml"
       - run: agentic-job sandbox exec -- id -un
@@ -1729,9 +1742,46 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # The runner's Worker, exempt from the runner-read rule, still ends the
+  # process confined left running: it finds it by RUNNER_TRACKING_ID in its
+  # environment and logs "Terminate orphan process" when the job completes
+  # (actions/runner src/Runner.Worker/JobExtension.cs). Reads that log, as
+  # data, with a read-only token; runs nothing of confined's.
+  confined-cleanup:
+    needs: [changes, confined]
+    if: ${{ needs.changes.outputs.full == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: The runner ended the orphan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PID: ${{ needs.confined.outputs.orphan }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          NAME: Confined run step and JavaScript action main and post steps
+        run: |
+          [[ "$PID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::no orphan pid from confined"; exit 1; }
+          job=$(gh api --paginate "repos/$REPO/actions/runs/$RUN/attempts/$ATTEMPT/jobs" --jq ".jobs[] | select(.name == env.NAME) | .id")
+          [[ "$job" =~ ^[0-9]+$ ]] || { echo "::error::no single confined job in this attempt"; exit 1; }
+          # A completed job's log can take a moment to be served.
+          for try in 1 2 3 4 5 6; do
+            if gh api --allow-escape-sequences "repos/$REPO/actions/jobs/$job/logs" > "$RUNNER_TEMP/confined.log"; then
+              if grep -qF "Terminate orphan process: pid ($PID) (sleep)" "$RUNNER_TEMP/confined.log"; then
+                echo "orphan ended: yes"; exit 0
+              fi
+              grep -qF 'Cleaning up orphan processes' "$RUNNER_TEMP/confined.log" && break
+            fi
+            [ "$try" = 6 ] || sleep 10
+          done
+          echo "::error::orphan ended: no (pid $PID not terminated by the runner's cleanup)"; exit 1
+
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, confined, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1754,7 +1804,7 @@ jobs:
           FILTER: >-
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
-            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image", "confined"))) or
+            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image"))) or
             ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))

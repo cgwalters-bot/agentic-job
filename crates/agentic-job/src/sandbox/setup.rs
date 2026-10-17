@@ -81,6 +81,8 @@ pub const WORLD_WRITE_LINKS: &[&str] = &[
     "world_write_open",
     "world_write_file_permission",
     "world_write_setattr",
+    // Inert unless the loader's `--deny-runner-reads` enables its map.
+    "runner_read_check",
 ];
 
 /// `[setup] script`, where the sandbox user can read it.
@@ -1325,7 +1327,8 @@ fn fix_crypto_policies(root: &Path) -> Result<()> {
 
 /// Hardening only (the uid split is the boundary): some images let any
 /// process attach to any other of its uid. A stricter setting is left.
-fn restrict_ptrace() -> Result<()> {
+/// The runner-read rule leaves attaches to Yama, so its loader calls it too.
+pub(crate) fn restrict_ptrace() -> Result<()> {
     let scope = fs::read_to_string(PTRACE_SCOPE)
         .with_context(|| format!("reading {PTRACE_SCOPE} (a kernel without Yama?)"))?;
     if scope.trim() == "0" {

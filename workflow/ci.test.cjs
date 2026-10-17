@@ -17,8 +17,8 @@ const githubScript = id => ci.split(`      - id: ${id}\n`)[1].split(/\n {6}(?! )
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
-  full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static'],
-  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'secure-host-image', 'confined'],
+  full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static', 'confined', 'confined-cleanup'],
+  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'secure-host-image'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
@@ -434,7 +434,12 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.equal(job.split('zizmor: ignore').length, 2);
   assert.ok(job.includes(`      - name: The JavaScript action main and post steps are confined\n${local}`));
   assert.match(job, /run: bash secure-host\/binary\.sh get --build --out "\$RUNNER_TEMP\/secure-host\/bin"\n/);
-  assert.match(job, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o"\n/);
+  assert.match(job, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o" --deny-runner-reads\n/);
+  // The orphan is an earlier step than every probe, the control included.
+  const orphan = job.indexOf('      - name: Leave a process running\n        id: orphan\n');
+  assert.ok(orphan >= 0 && orphan < job.indexOf('probe.mjs control before'));
+  assert.match(job, /\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n/);
+  assert.match(job, /echo "\$!" > "\$RUNNER_TEMP\/confine-orphan\.pid"/);
   const supported = job.indexOf('"$RUNNER_TEMP/secure-host/bin/agentic-job" secure-host supported\'\n');
   assert.ok(supported >= 0 && supported < job.indexOf("- name: \"Install the checkout's binary\""));
   assert.ok(supported < job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n'));
@@ -447,6 +452,20 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.ok(job.indexOf(local) < job.indexOf('uses: actions/upload-artifact@'));
   assert.doesNotMatch(job, /actions\/github-script@/);
   assert.match(job, /- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions\/upload-artifact@/);
+});
+
+test('confined-cleanup reads, as data, that the runner ended confined\'s orphan', () => {
+  const job = block('confined-cleanup');
+  assert.match(job, /\n    needs: \[changes, confined\]\n/);
+  assert.match(job, /\n    permissions:\n      actions: read\n    steps:\n/);
+  assert.doesNotMatch(job, /uses:|secrets\.|contents: write/);
+  assert.match(job, /PID: \$\{\{ needs\.confined\.outputs\.orphan \}\}\n/);
+  // The name it looks the job up by is confined's.
+  const name = /\n {10}NAME: (.+)\n/.exec(job)[1];
+  assert.ok(block('confined').includes(`\n    name: ${name}\n`));
+  assert.match(job, /\[\[ "\$PID" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/);
+  assert.match(job, /grep -qF "Terminate orphan process: pid \(\$PID\) \(sleep\)"/);
+  assert.match(job, /gh api --allow-escape-sequences "repos\/\$REPO\/actions\/jobs\/\$job\/logs" > "\$RUNNER_TEMP\/confined.log"/);
 });
 
 test('world-write-runtime proves the policy after the action, with no passing fallback', () => {
