@@ -201,6 +201,7 @@ mod tests {
             &["apt"],
             &["world-write", "/tmp/bin/world_write.bpf.o"],
             &["inference", "/tmp/secure-host/config.toml"],
+            &["image", "/tmp/secure-host/config.toml"],
         ];
         for args in lines {
             Cli::try_parse_from(["agentic-job", "secure-host"].iter().chain(*args))
@@ -210,6 +211,7 @@ mod tests {
             &["secure-host"][..],
             &["secure-host", "world-write"],
             &["secure-host", "inference"],
+            &["secure-host", "image"],
             &["secure-host", "supported", "/etc/os-release"],
         ] {
             assert!(

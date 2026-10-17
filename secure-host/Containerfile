@@ -1,0 +1,14 @@
+# The secure-host image: the static binary and the BPF objects, nothing
+# else, so that what sets the host up is exactly what the release's
+# checksums name. Built by build.yml from its staged dist/ directory:
+#
+#   podman build --file secure-host/Containerfile dist
+#
+# and run by root podman with the host's root at /host (docs/secure-host.md):
+#
+#   sudo podman run --rm --privileged --pid=host --network=none -v /:/host IMAGE@sha256:... CONFIG
+FROM scratch
+LABEL org.opencontainers.image.source=https://github.com/cgwalters-forge/agentic-job
+COPY --chmod=0755 agentic-job-x86_64-unknown-linux-musl /agentic-job
+COPY --chmod=0644 world_write.bpf.o /world_write.bpf.o
+ENTRYPOINT ["/agentic-job", "secure-host", "image"]

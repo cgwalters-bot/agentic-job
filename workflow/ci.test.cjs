@@ -18,7 +18,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
   full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static'],
-  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'confined'],
+  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'secure-host-image', 'confined'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
@@ -463,6 +463,22 @@ test('world-write-runtime proves the policy after the action, with no passing fa
   assert.match(job, /shell: agentic-job sandbox exec --stdin \{0\} -- bash -eo pipefail -s/);
   assert.match(job, /"666 \$\(stat -c %d \/\)"/);
   assert.doesNotMatch(job, /continue-on-error|\|\| true|lock: false|filesystem-view/);
+});
+
+test('secure-host-image runs the saved image as a caller would, and probes after it exits', () => {
+  const job = block('secure-host-image');
+  assert.match(job, /\n    needs: \[changes, static\]\n/);
+  assert.match(job, /\n    runs-on: ubuntu-26\.04\n/);
+  assert.match(job, /\n    permissions:\n      contents: read\n    steps:\n/);
+  // The build's archive, never a registry's image.
+  assert.match(job, /name: secure-host-image\n/);
+  assert.match(job, /sudo podman load --quiet --input "\$RUNNER_TEMP\/image\/secure-host\.tar"/);
+  const run = job.indexOf('sudo podman run --rm --privileged --pid=host --network=none -v /:/host "$id" ');
+  assert.ok(run > 0);
+  assert.doesNotMatch(job, /--pull|ghcr\.io|continue-on-error|\|\| true/);
+  for (const after of ['if sudo -n true; then', 'systemctl is-active --quiet docker.service', 'run: agentic-job sandbox check\n']) {
+    assert.ok(job.indexOf(after) > run, after);
+  }
 });
 
 test('the workflow classifies real Git paths without executing PR scripts', () => {

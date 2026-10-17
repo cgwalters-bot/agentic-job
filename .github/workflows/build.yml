@@ -72,3 +72,15 @@ jobs:
           name: agentic-job
           path: dist/
           if-no-files-found: error
+      # The same binary and object as an image, saved as an archive: ci
+      # runs it from that archive, and release pushes it as it is.
+      - name: The secure-host image
+        run: |
+          podman build --file secure-host/Containerfile --tag localhost/secure-host:build dist
+          mkdir image
+          podman save --format oci-archive --output image/secure-host.tar localhost/secure-host:build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secure-host-image
+          path: image/
+          if-no-files-found: error

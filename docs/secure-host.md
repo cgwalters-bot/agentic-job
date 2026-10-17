@@ -866,6 +866,35 @@ signaled GitHub throttling within two minutes.
 Building needs rustup.
 Pass `build: true` to build even when a prebuilt exists.
 
+## The image
+
+A release also pushes `ghcr.io/cgwalters-forge/secure-host:vVERSION`, an
+image `FROM scratch` with the static binary and `world_write.bpf.o`
+([`Containerfile`](../secure-host/Containerfile)), and attests it by its
+digest from `release.yml` on main. The action does not use it yet
+([tracker#674](https://github.com/cgwalters-forge/tracker/issues/674)).
+Root podman runs it with the host's root at `/host`, the configuration a
+path on the host:
+
+```sh
+sudo podman run --rm --privileged --pid=host --network=none -v /:/host \
+  ghcr.io/cgwalters-forge/secure-host@sha256:DIGEST /path/to/config.toml
+```
+
+The image has no shell or libraries, so it uses the host's: it changes
+its root to `/host`, refuses an unsupported host, installs the binary as
+`/usr/local/bin/agentic-job` (for `sandbox check`, `sandbox exec` and the
+probes) and the object under `/usr/local/lib/agentic-job/`, then runs
+`secure-host apt`, `secure-host world-write` and `sandbox setup` through
+the host's `nsenter -t 1` in init's namespaces. The world-write links are
+pinned in the host's bpffs and the egress proxy is a systemd unit, so both
+outlive the container. `sudo` does not pass `SUDO_USER` into the
+container: name the runner's user with `sandbox.runner-user`. The hosted
+configuration stops docker, which nothing after setup can use. CI's
+`secure-host-image` job runs it this way from the archive the build saved,
+and probes the host after the container has exited. A new package on
+ghcr.io is private until an owner makes it public.
+
 ## Without the action
 
 The action is three commands, and a job on another CI system runs them

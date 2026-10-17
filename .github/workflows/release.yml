@@ -1,6 +1,7 @@
 # Publishes a version for callers to pin: tags main's commit `vVERSION`
 # and releases the static binaries with their SHA-256 checksums, with
-# notes from the pull requests merged since the previous version.
+# notes from the pull requests merged since the previous version, then
+# pushes and attests the secure-host image that holds them.
 # Run by hand on main once the workspace's version has been raised.
 name: release
 
@@ -158,3 +159,65 @@ jobs:
             "fake-agent-$TARGET" "fake-agent-$TARGET.sha256" release.json provenance.jsonl world_write.bpf.o
           # Immutability locks assets at publication, not while still a draft.
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  # The secure-host image, pushed from the archive the build job saved
+  # and attested by its digest, so that a caller pinning that digest can
+  # verify the image was built from main's commit by this workflow. Only
+  # after the release is published: a failed release pushes nothing. It
+  # runs nothing of the build's; the package and identity-token
+  # permissions copy and sign bytes.
+  image:
+    needs: [version, publish]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/secure-host
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: secure-host-image
+      - name: Push
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! command -v skopeo > /dev/null; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -q
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends skopeo
+          fi
+          # Docker's file, the only one the attest action's registry push
+          # reads; the job token stays there until the job ends.
+          mkdir -p ~/.docker
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile ~/.docker/config.json --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          # As with the git tag: a version names one image, not replaced on
+          # a rerun. Best effort: an inspect that fails for another reason
+          # (a registry error) counts as no tag.
+          if skopeo inspect --authfile ~/.docker/config.json --raw "docker://$IMAGE:$TAG" > /dev/null 2>&1; then
+            echo "::error::$IMAGE:$TAG exists already"; exit 1
+          fi
+          skopeo copy --authfile ~/.docker/config.json --digestfile "$RUNNER_TEMP/digest" oci-archive:secure-host.tar "docker://$IMAGE:$TAG"
+          read -r digest < "$RUNNER_TEMP/digest"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      # As a caller pinning the digest would, by the same identity as the
+      # manifest's; with the token, since a new package starts private.
+      - name: Verify the image attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: >-
+          gh attestation verify "oci://$IMAGE@$DIGEST" --repo "$GITHUB_REPOSITORY"
+          --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main"
+          --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners

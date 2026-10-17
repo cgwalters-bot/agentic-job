@@ -1,6 +1,7 @@
 //! `agentic-job secure-host`: the steps of the `secure-host` action that
 //! come after it has fetched this binary and before `sandbox setup`. Each
 //! refuses as the script it replaced did: one message, exit status 1.
+//! `image` is the secure-host image's entrypoint, which runs them.
 
 use std::path::PathBuf;
 
@@ -10,6 +11,7 @@ use clap::Subcommand;
 use crate::exit::Exit;
 
 pub mod apt;
+pub mod image;
 pub mod inference;
 pub mod platform;
 pub mod world_write;
@@ -30,6 +32,12 @@ pub enum Command {
         /// The configuration `agentic-job config --host` wrote
         config: PathBuf,
     },
+    /// The secure-host image's entrypoint: install this binary on the host
+    /// mounted at /host and set the host up through its `nsenter -t 1`
+    Image {
+        /// The configuration `agentic-job config --host` wrote, a path on the host
+        config: PathBuf,
+    },
 }
 
 impl Command {
@@ -48,6 +56,10 @@ impl Command {
             Self::Inference { config } => match inference::run(config) {
                 Ok(()) => return Ok(Exit::Success),
                 Err(err) => eprintln!("error: {err:#}"),
+            },
+            Self::Image { config } => match image::run(config) {
+                Ok(()) => return Ok(Exit::Success),
+                Err(err) => eprintln!("secure-host image: {err:#}"),
             },
             Self::WorldWrite { object } => match world_write::load(object) {
                 Ok(()) => return Ok(Exit::Success),
