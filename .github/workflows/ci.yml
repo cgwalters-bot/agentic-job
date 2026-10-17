@@ -1610,10 +1610,10 @@ jobs:
           grep -qx control owned
 
   # After secure-host, a `run:` step and a JavaScript action's main and
-  # post steps try sudo, docker, a root-owned world-writable file and the
-  # cloud metadata service, and each must fail. Read-only token, no
-  # id-token, no secrets; probes run as the runner's user, root only
-  # before setup. The action is the checkout's own, so the runner gives
+  # post steps try sudo, docker, a root-owned world-writable file, the
+  # cloud metadata service and the Worker's .NET diagnostic sockets, and
+  # each must fail. Read-only token, no id-token, no secrets; probes run
+  # as the runner's user, root only before setup. The action is the checkout's own, so the runner gives
   # it the runtime token and runs its post step as it would a downloaded one's.
   confined:
     needs: changes
@@ -1649,7 +1649,8 @@ jobs:
       - name: Write the confinement configuration
         run: |
           agentic-job config --host --from secure-host/hosted.toml \
-            --boolean sandbox.deny-runner-metadata=true > "$RUNNER_TEMP/secure-host/config.toml"
+            --boolean sandbox.deny-runner-metadata=true \
+            --boolean sandbox.unlink-worker-diagnostics=true > "$RUNNER_TEMP/secure-host/config.toml"
       - name: "Load the checkout's world-write object"
         run: sudo /usr/local/bin/agentic-job secure-host world-write "$RUNNER_TEMP/secure-host/bin/world_write.bpf.o"
       - name: Secure the host

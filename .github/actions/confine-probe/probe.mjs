@@ -1,6 +1,8 @@
 // What a step of a job secured by secure-host tries, as the runner's own
 // user: the routes to root (sudo, the container daemon, a root-owned
-// world-writable file) and to the cloud metadata service. The job in
+// world-writable file), to the cloud metadata service, and to the
+// Runner.Worker's .NET diagnostic sockets (sandbox.unlink-worker-diagnostics),
+// through which a step could have the Worker dump its memory. The job in
 // ci.yml runs it once before the action as the positive control, where
 // each must work, and after it from a `run:` step and from this
 // directory's action, in its main step and its post step, where each must fail
@@ -16,6 +18,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -30,12 +33,20 @@ const COMMAND_MS = 10_000;
 
 const METADATA_MS = 5_000;
 
+const WORKER_COMM = 'Runner.Worker';
+
+// A step's process is the Worker's child (an action's), or its grandchild
+// (a `run:` step's shell's); far more than either, and then no Worker.
+const MAX_ANCESTORS = 32;
+
+const CONNECT_MS = 5_000;
+
 export const MODES = {
   // Before the lock: the job's user has each of these.
-  control: ['sudo', 'docker', 'world-write', 'metadata'],
+  control: ['sudo', 'docker', 'world-write', 'metadata', 'worker-diagnostics'],
   // After it: none, and its own world-writable file still takes a write,
   // so the refusal of the root-owned one is the policy's, not every write's.
-  confined: ['sudo', 'docker', 'world-write', 'metadata', 'owner-write'],
+  confined: ['sudo', 'docker', 'world-write', 'metadata', 'worker-diagnostics', 'owner-write'],
 };
 
 const WANT_SUCCESS = new Set(['owner-write']);
@@ -89,6 +100,44 @@ function reachesMetadata() {
   });
 }
 
+/** The paths in `netUnix` (/proc/net/unix) of the diagnostic sockets the .NET runtime binds for `pid`. */
+export function diagnosticSockets(netUnix, pid) {
+  const name = new RegExp(`/dotnet-diagnostic-${pid}-[0-9]+-socket$`);
+  // The path is the last column, and the only one with a `/` in it.
+  const paths = netUnix.split('\n').filter(line => line.includes(' /')).map(line => line.slice(line.indexOf(' /') + 1));
+  return [...new Set(paths.filter(file => name.test(file)))];
+}
+
+// The Worker that runs this step: the nearest ancestor of that name.
+function workerPid() {
+  let pid = process.pid;
+  for (let i = 0; i < MAX_ANCESTORS && pid > 1; i++) {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const comm = stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')'));
+    if (comm === WORKER_COMM) return pid;
+    pid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+  }
+  throw new Error(`no ${WORKER_COMM} among this step's ancestors`);
+}
+
+function connects(file) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ path: file });
+    socket.setTimeout(CONNECT_MS, () => { socket.destroy(); resolve(false); });
+    socket.on('connect', () => { socket.destroy(); resolve(true); });
+    socket.on('error', () => resolve(false));
+  });
+}
+
+// Whether this step connects to any diagnostic socket of its Worker. The
+// listing keeps a path after it is unlinked, so the control proves the
+// Worker had one to find.
+export async function reachesWorker() {
+  const sockets = diagnosticSockets(fs.readFileSync('/proc/net/unix', 'utf8'), workerPid());
+  const reached = await Promise.all(sockets.map(connects));
+  return reached.some(Boolean);
+}
+
 function fixture() {
   const problem = fixtureProblem(fs.statSync(FIXTURE, { throwIfNoEntry: false }));
   if (problem) throw new Error(`${FIXTURE}: ${problem}, so writing it proves nothing`);
@@ -113,6 +162,7 @@ export async function probe(mode, label) {
     docker: runs(['docker', 'info']),
     'world-write': opensForWrite(fixture()),
     metadata: await reachesMetadata(),
+    'worker-diagnostics': await reachesWorker(),
   };
   if (mode === 'confined') {
     results['owner-write'] = opensForWrite(ownerFile(temp, label));

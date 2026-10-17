@@ -23,6 +23,7 @@ pub(crate) mod session;
 pub mod setup;
 pub mod timed;
 mod view;
+pub mod worker_diagnostics;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

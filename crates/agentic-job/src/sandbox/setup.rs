@@ -28,7 +28,7 @@ use rustix::fs::Mode;
 use super::enter::{Entry, RUN0};
 use super::host::{self, User};
 use super::network::{self, Direct};
-use super::{egress, helper};
+use super::{egress, helper, worker_diagnostics};
 use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
@@ -534,6 +534,9 @@ fn setup(args: &Args) -> Result<Exit> {
         fix_crypto_policies(Path::new(CRYPTO_POLICIES))?;
         restrict_ptrace()
     })?;
+    if config.sandbox.unlink_worker_diagnostics {
+        timed_setup("worker-diagnostics", worker_diagnostics::unlink)?;
+    }
     println!(
         "Sandbox user {} (uid {}, subordinate uids {}), in addition to {} whose home {} is closed to it",
         sandbox.name,

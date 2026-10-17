@@ -98,6 +98,7 @@ matches on them.
 | `filesystem-view-pam` | ptrace, write memory, open `/proc/PID/mem` or use `/proc/PID/root` of same-uid PAM handlers | attach to and write memory of a child | credential change makes the trusted handler nondumpable |
 | `filesystem-view-userns`, `filesystem-view-kvm`, `container-build`, `container-built-run` | compatibility controls: Podman user/mount namespaces, KVM API, rootless build and run | existing container pull/network controls | no blanket namespace, device or privilege-elevation prohibition |
 | `ptrace-scope` | (none: reads the kernel setting) | | setup raises it to 1 |
+| `worker-diagnostics` | (none, as the runner's user: lists `Runner.Worker`'s .NET diagnostic sockets in `/proc/net/unix` that are still linked) | | `sandbox.unlink-worker-diagnostics`; only with it |
 | `crypto-policies` | (none: lists what under `/etc/crypto-policies`, or a link's target, is world-writable) | | setup takes group and other write off it |
 | `cron`, `at` | install a crontab; use `at` | the runner's user may | `/etc/cron.deny`, `/etc/at.deny` |
 | `service:UNIT` | (none: asks systemd that the unit is inactive and masked, or not on the host) | journald is active | `sandbox.stop-services` |

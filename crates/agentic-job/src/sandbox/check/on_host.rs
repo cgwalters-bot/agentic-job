@@ -17,7 +17,7 @@ use crate::config::Sandbox;
 use crate::sandbox::enter::OIDC_REQUEST_VARS;
 use crate::sandbox::local::{ABSTRACT_PREFIX, Reached};
 use crate::sandbox::setup::{self, SELF_COPY, resolved};
-use crate::sandbox::{egress, host, network};
+use crate::sandbox::{egress, host, network, worker_diagnostics};
 
 /// A variable of a process of the runner's, standing in for the tokens in
 /// the environments of real job steps.
@@ -564,6 +564,28 @@ impl Checker<'_> {
             ),
             scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
         );
+        if self.config.sandbox.unlink_worker_diagnostics {
+            // As the Worker's user, which every later step is: setup's
+            // unlinking proved by no path left to connect to.
+            let linked = match worker_diagnostics::linked_sockets() {
+                Ok(found) => found.iter().map(|p| p.display().to_string()).collect(),
+                Err(err) => vec![format!("{err:#}")],
+            };
+            self.report.expect(
+                Want::Fail,
+                "worker-diagnostics",
+                format!(
+                    "no .NET diagnostic socket of {} is linked{}",
+                    worker_diagnostics::WORKER_COMM,
+                    if linked.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", linked.join(", "))
+                    }
+                ),
+                !linked.is_empty(),
+            );
+        }
 
         // Any user could weaken what ssh and TLS accept host-wide. Setup
         // also takes group write off, which ssh refuses but is no one's.

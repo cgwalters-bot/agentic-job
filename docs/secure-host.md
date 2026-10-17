@@ -608,6 +608,14 @@ After it, no later step has root:
   Without this rule the runner's user reaches the service on a hosted
   `ubuntu-26.04` runner after the lock: `metadata-control` passes in
   [main's secure-host job](https://github.com/cgwalters-forge/agentic-job/actions/runs/38334947347/job/115092813921).
+- `sandbox.unlink-worker-diagnostics`, a configuration key with no input
+  yet, unlinks the .NET diagnostic sockets of `Runner.Worker`
+  (`dotnet-diagnostic-PID-KEY-socket` in its temporary directory). The
+  Worker's own user, which every step is, can connect to them and have the
+  Worker dump its memory, every secret of the job in it, or load a library
+  into it; Yama sees no ptrace attach in that. The runtime binds the
+  socket once, when the Worker starts, so the Worker keeps a socket no
+  step can name. Needs `lock`; off by default.
 
 The kernel has no way to change another process's credentials. So the
 runner's processes, and every step they start, keep the supplementary
@@ -626,7 +634,10 @@ Each route must fail, or the step fails the job. A file of the runner's own, als
 must still take a write. Each probe prints its record in its log, and the job
 uploads the records as an artifact, whether or not a probe failed; the post
 step runs after that upload, so its record is only in its log. The runner's
-own cleanup after the post steps is not probed. The check
+own cleanup after the post steps is not probed. The job sets
+`sandbox.unlink-worker-diagnostics`, and its probe connects to the
+Worker's diagnostic sockets as well: the control must reach one, each
+step after the action none. The check
 that the action runs adds `runner-metadata` and `runner-metadata-v6`
 ([sandbox-check.md](sandbox-check.md#the-network-probes)). Only hosted Ubuntu
 26.04 runs this proof; RHEL 10 is unverified. A hosted runner serves no

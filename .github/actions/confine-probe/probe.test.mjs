@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { MODES, failures, fixtureProblem } from './probe.mjs';
+import { MODES, diagnosticSockets, failures, fixtureProblem } from './probe.mjs';
 
 const all = value => Object.fromEntries(MODES.confined.map(name => [name, value]));
 
@@ -41,6 +41,22 @@ test('a fixture that DAC would refuse anyway proves nothing', () => {
     assert.equal(fixtureProblem(stat(overrides)), problem);
   }
   assert.equal(fixtureProblem(undefined), 'missing');
+});
+
+test('only the diagnostic sockets of the Worker are tried', () => {
+  const head = '0000000000000000: 00000002 00000000 00010000 0001 01 12345 ';
+  const listing = [
+    'Num       RefCount Protocol Flags    Type St Inode Path',
+    `${head}/tmp/dotnet-diagnostic-2041-98765-socket`,
+    `${head}/tmp/dotnet-diagnostic-2041-98765-socket`,
+    `${head}/tmp/dotnet-diagnostic-20410-1-socket`,
+    `${head}/tmp/dotnet-diagnostic-204-1-socket`,
+    `${head}/tmp/dotnet-diagnostic-2041-1-socket.bak`,
+    `${head}@dotnet-diagnostic-2041-2-socket`,
+    head.trimEnd(),
+  ].join('\n');
+  assert.deepEqual(diagnosticSockets(listing, 2041), ['/tmp/dotnet-diagnostic-2041-98765-socket']);
+  assert.deepEqual(diagnosticSockets(listing, 7), []);
 });
 
 test('the action probes in both its main and its post step', () => {

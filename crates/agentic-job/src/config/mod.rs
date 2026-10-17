@@ -82,6 +82,13 @@ pub struct Sandbox {
     /// cloud role's credentials. Off by default; needs [`Self::lock_runner`],
     /// since with sudo the runner's user could remove the rule.
     pub deny_runner_metadata: bool,
+    /// Whether `sandbox setup` unlinks the .NET diagnostic sockets of
+    /// GitHub's `Runner.Worker`, through which any step, as the Worker's
+    /// own user, could have it dump its memory and the job's secrets with
+    /// it, around Yama (`sandbox::worker_diagnostics`). Off by default;
+    /// needs [`Self::lock_runner`], since with sudo the runner's user
+    /// reads the Worker's memory anyway.
+    pub unlink_worker_diagnostics: bool,
     /// Whether `sandbox setup` closes systemd-resolved to every user but
     /// root and, on the bus, the runner's. resolved answers any local user over its
     /// Varlink socket and the system bus, as itself, so the uid rules do
@@ -165,6 +172,10 @@ impl Sandbox {
             self.lock_runner || !self.deny_runner_metadata,
             "sandbox.deny-runner-metadata needs sandbox.lock-runner: a runner's user with sudo could remove the rule"
         );
+        ensure!(
+            self.lock_runner || !self.unlink_worker_diagnostics,
+            "sandbox.unlink-worker-diagnostics needs sandbox.lock-runner: a runner's user with sudo reads the Worker's memory anyway"
+        );
         for group in &self.groups {
             ensure!(
                 name_ok(group),
@@ -219,6 +230,7 @@ impl Default for Sandbox {
             lock_runner: true,
             filesystem_view: false,
             deny_runner_metadata: false,
+            unlink_worker_diagnostics: false,
             close_resolved: false,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
@@ -769,6 +781,7 @@ mod tests {
             groups = ["kvm", "render"]
             runner-user = "runner"
             deny-runner-metadata = true
+            unlink-worker-diagnostics = true
             close-resolved = true
             private-dirs = ["/opt/hca"]
             stop-services = ["docker.socket", "docker.service"]
@@ -795,6 +808,7 @@ mod tests {
             "[sandbox]\nuser = \"x) ALL=(ALL) NOPASSWD: ALL #\"",
             "[sandbox]\nuser = \"agent\"\nrunner-user = \"agent\"",
             "[sandbox]\nlock-runner = false\ndeny-runner-metadata = true",
+            "[sandbox]\nlock-runner = false\nunlink-worker-diagnostics = true",
             "[sandbox]\ngroups = [\"docker\"]",
             "[sandbox]\ngroups = [\"wheel\"]",
             "[sandbox]\nprivate-dirs = [\"relative\"]",
