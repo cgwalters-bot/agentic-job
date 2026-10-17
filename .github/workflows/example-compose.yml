@@ -155,7 +155,7 @@ jobs:
       # sends nothing, and skips the scripted agent.
       - name: Check inference proxy reachability
         run: agentic-job secure-host inference .agentic-job/config.toml
-      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+      - uses: ./.agentic-job-source/secure-host/internal # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml

@@ -257,20 +257,19 @@ fn weakened(step: &Map<String, Value>) -> Option<String> {
     None
 }
 
-/// Classified against secure-host/action.yml. Only strengthening booleans
-/// and source-build selection are admitted. Files, identities, service lists
-/// and replacement binaries cannot be verified here; even a config with an
-/// explicit lock can redirect that lock to another account. Refuse them rather
-/// than trusting their contents or an expression that might select them.
+/// Classified against secure-host/action.yml, which forwards to
+/// cgwalters-forge/actions/secure-host, and the old action a commit before
+/// the forward names. Only `check: true` means the same to both: the old
+/// action's `lock`, `egress`, `deny-runner-metadata` and `build` fail the
+/// forwarder, and at an old commit their admitted values were its defaults
+/// or a choice of how to get the binary. Files, identities, service lists,
+/// replacement binaries and images cannot be verified here; even a config
+/// with an explicit lock can redirect that lock to another account. Refuse
+/// them rather than trusting their contents or an expression that might
+/// select them.
 fn safe_hardening_input(key: &str, value: &Value) -> bool {
     let true_value = matches!(value, Value::Bool(true)) || value.as_str() == Some("true");
-    match key.to_ascii_lowercase().as_str() {
-        "lock" | "egress" | "deny-runner-metadata" | "check" => true_value,
-        "build" => {
-            true_value || matches!(value, Value::Bool(false)) || value.as_str() == Some("false")
-        }
-        _ => false,
-    }
+    key.eq_ignore_ascii_case("check") && true_value
 }
 
 /// Execution surfaces from GitHub's workflow syntax. `*` names a service;
@@ -756,6 +755,12 @@ mod tests {
             "script: setup.sh",
             "binary: /tmp/decoy",
             "build: '${{ inputs.build }}'",
+            "lock: true",
+            "egress: true",
+            "deny-runner-metadata: true",
+            "build: true",
+            "build: false",
+            "image-archive: image.tar",
             "unknown: true",
         ] {
             // Both paths, so that neither can come to admit more inputs.
@@ -785,8 +790,7 @@ mod tests {
                 let text = workflow(&format!(
                     "permissions: {{}}\nsteps:\n  - uses: {SECURE_HOST}@PIN\n    with: {{{key}: {value}}}"
                 ));
-                let allowed = ["true", "'true'"].contains(&value)
-                    || (key == "build" && ["false", "'false'"].contains(&value));
+                let allowed = key == "check" && ["true", "'true'"].contains(&value);
                 assert_eq!(
                     check_workflow(&yaml::parse(&text).unwrap()).is_empty(),
                     allowed,
@@ -1030,7 +1034,7 @@ steps:
             &["runs an agent"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: CGWalters-Forge/actions/secure-host@PIN\n    with: {lock: true}\n  - run: make",
+            "permissions: {}\nsteps:\n  - uses: CGWalters-Forge/actions/secure-host@PIN\n    with: {check: true}\n  - run: make",
             &[],
         ),
         (
@@ -1178,7 +1182,7 @@ steps:
             );
         }
         let text = workflow(&format!(
-            "permissions: {{}}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {{PERSIST-CREDENTIALS: false}}\n  - uses: {SECURE_HOST}@PIN\n    with: {{Lock: true}}"
+            "permissions: {{}}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {{PERSIST-CREDENTIALS: false}}\n  - uses: {SECURE_HOST}@PIN\n    with: {{Check: true}}"
         ));
         assert!(check_workflow(&yaml::parse(&text).unwrap()).is_empty());
     }

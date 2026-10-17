@@ -572,7 +572,7 @@ jobs:
         with:
           persist-credentials: false
       - id: host
-        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action under test.
+        uses: ./secure-host/internal # zizmor: ignore[self-repository] Exercise the checked-out action under test.
         with:
           lock: false
           egress: false
@@ -596,25 +596,20 @@ jobs:
 
   # The action as another repository names it, which a pull request
   # cannot do for its own commit: after a push to main, from main. The
-  # runner fetches it as an archive without git, and the binary it gets
-  # is a release's when one is pinned for this source.
+  # runner fetches it as an archive without git; it forwards to
+  # cgwalters-forge/actions/secure-host, which verifies and runs the
+  # pinned, released image and proves the host before it returns.
   secure-host-published:
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - id: host
         uses: cgwalters-forge/agentic-job/secure-host@main # zizmor: ignore[unpinned-uses] Deliberately test the public main-branch action in this fresh-runner integration job.
-      - name: A pinned release of this source was fetched, and nothing was built
-        env:
-          FETCHED: ${{ steps.host.outputs.fetched }}
+      - name: No later step has root
         run: |
-          echo "fetched: $FETCHED"
-          test "$FETCHED" = true || echo "::notice::the prebuilt release is not published yet; the action built from source"
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
+          if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
 
   # The reusable workflow, called as another repository would call it,
   # with the scripted agent: all four jobs, on four machines. The agent
@@ -1583,7 +1578,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Secure the host
-        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action and its object.
+        uses: ./secure-host/internal # zizmor: ignore[self-repository] Exercise the checked-out action and its object.
         with:
           build: true
       # setup's probe file: root's, mode 0666, on the root filesystem, so
@@ -1611,12 +1606,12 @@ jobs:
           grep -qx control owned
 
   # The secure-host image as release.yml pushes it, from the archive the
-  # static job saved, run by root podman the way a caller runs it: it
-  # installs its binary on the host and sets the host up through nsenter.
-  # No container network: setup runs in the host's, and one of podman's
-  # would leave a bridge and firewall rules for the probes to find.
-  # The setup must outlive the container: after it has exited, the
-  # runner's user has no sudo, docker is stopped, and every probe passes.
+  # static job saved, run through the public action, which forwards to
+  # cgwalters-forge/actions/secure-host with `image-archive`: root podman
+  # runs it, and it installs its binary on the host and sets the host up
+  # through nsenter. The setup must outlive the container: after it has
+  # exited, the runner's user has no sudo, docker is stopped, and the
+  # action's probes passed.
   secure-host-image:
     needs: [changes, static]
     if: ${{ needs.changes.outputs.host == 'true' }}
@@ -1642,21 +1637,20 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update -q
           sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends podman
         timeout-minutes: 5
-      # A path on the host, read by setup there; the runner's user is named,
-      # since sudo's SUDO_USER does not reach into the container.
-      - name: Write the configuration
-        run: |
-          binary="$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl"
-          chmod +x "$binary"
-          mkdir -p "$RUNNER_TEMP/secure-host"
-          "$binary" config --host --from secure-host/hosted.toml \
-            --string sandbox.runner-user="$(id -un)" > "$RUNNER_TEMP/secure-host/config.toml"
-      - name: Secure the host from the image archive
+      # Loaded here too, while there is root to ask root's store for its
+      # ID; the action's own load of the same archive is the same image.
+      - name: The archive's image ID
         run: |
           image=$(sudo podman load --quiet --input "$RUNNER_TEMP/image/secure-host.tar" | sed -n 's/^Loaded image: //p')
           id=$(sudo podman image inspect --format '{{.Id}}' "$image")
-          sudo podman run --rm --privileged --pid=host --network=none -v /:/host "$id" "$RUNNER_TEMP/secure-host/config.toml"
           echo "SECURE_HOST_IMAGE=$id" >> "$GITHUB_ENV"
+      # No config: the forwarder's default is this repository's hosted
+      # configuration, not the new action's, which has egress off; the
+      # proxy from the image is what the next step tests.
+      - name: Secure the host from the image archive
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
+        with:
+          image-archive: ${{ runner.temp }}/image/secure-host.tar
       # Setup ran the proxy from the same image in root podman; the
       # runner's user, without root now, can neither stop its unit nor
       # signal it, and the probes below go through it. The unit's
@@ -1680,8 +1674,6 @@ jobs:
           cmp /usr/local/bin/agentic-job "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl"
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
-          agentic-job sandbox exec -- id -un
-      - run: agentic-job sandbox check
 
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file, the

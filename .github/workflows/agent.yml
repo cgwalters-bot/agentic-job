@@ -118,7 +118,7 @@ jobs:
       # `sandbox setup`, which ends by taking root from this job, and
       # `sandbox check`, with the binary and configuration of the policy
       # job. Every step after it is this file's, and none of them has root.
-      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+      - uses: ./.agentic-job-source/secure-host/internal # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml

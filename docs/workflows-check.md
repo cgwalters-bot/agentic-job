@@ -25,7 +25,7 @@ Every job must do one of two things. It can call the reusable workflow
 40-hex commit, which holds the agent, check and apply jobs. Or it can
 have steps that include secure-host, named as
 `cgwalters-forge/agentic-job/secure-host` or by its standalone path
-`cgwalters-forge/actions/secure-host`, which take the same inputs. Each
+`cgwalters-forge/actions/secure-host`, to which the first now forwards. Each
 refusal below names the file, the job and the step (by number, with its
 name, action or first script line), and says what to write instead.
 
@@ -57,10 +57,14 @@ Container shorthand strings are images. Container and Docker fields are
 checked even though secure-host jobs also refuse containers outright.
 
 The hardening boundary must use one of the two secure-host paths at a
-40-hex commit; a local action is not certified. Its only admitted inputs are
-`lock`, `check`, `egress` and `deny-runner-metadata` set to literal `true`, and
-`build` set to literal `true` or `false` (YAML booleans or strings). Omitting
-inputs keeps the action's defaults. All other inputs are refused: `runner-user`
+40-hex commit; a local action is not certified. Its only admitted input is
+`check` set to literal `true` (a YAML boolean or string), the one input that
+means the same to the forwarder and to the old action at a commit before the
+forward. Omitting inputs keeps the action's defaults. All other inputs are
+refused: the forwarder fails on the old action's `lock`, `egress`,
+`deny-runner-metadata` and `build`, and at an old commit their admitted values
+only restated its defaults or chose how to get the binary; `image-archive`
+runs an unverified image; `runner-user`
 and `sandbox-user` redirect identities; `stop-services` replaces the daemon
 list; `binary` replaces trusted code; `egress-policy` and `script` select
 unchecked files. `config` is also refused, even with `lock: true`: this checker

@@ -7,8 +7,42 @@ of a job, like a build script from a pull request or a dependency's
 install hook, and what protects a job from one protects it from the
 others. So the hardening is a step of its own that any job can run
 before untrusted steps, whether or not an agent runs afterwards: the action in
-[`secure-host/`](../secure-host/action.yml). The reusable workflow's
-agent job uses the same action and does not own it.
+[`secure-host/internal/`](../secure-host/internal/action.yml), which this
+page describes. The reusable workflow's agent job uses the same action and
+does not own it. The public path `secure-host/` now forwards to
+`cgwalters-forge/actions/secure-host`
+([below](#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
+
+## The public action forwards to cgwalters-forge/actions/secure-host
+
+[`secure-host/action.yml`](../secure-host/action.yml) forwards to
+`cgwalters-forge/actions/secure-host` at a pinned commit, which runs the
+attested, digest-pinned [image](#the-image)
+([tracker#674](https://github.com/cgwalters-forge/tracker/issues/674)).
+It passes on `config`, `check` and `image-archive`. A caller that names
+`cgwalters-forge/agentic-job/secure-host` at a commit from before the
+forward keeps the old action. At `@main` or a later commit:
+
+- The new action's contract has no second user and no `sandbox exec`. The
+  old action's `sandbox-user`, `sandbox-home` and `fetched` outputs are
+  gone, so a step that reads them gets an empty string. The v0.6.1 image
+  still creates the user, so `sandbox exec` still runs, but nothing
+  promises that it will keep working.
+- Without a `config`, the forwarder passes this repository's
+  [`hosted.toml`](../secure-host/hosted.toml), as the old action did, and
+  not the new action's default, which turns egress filtering off: a step
+  that still runs code through `sandbox exec` keeps writing only through
+  the proxy's rules. A `config` of the caller's own replaces it whole.
+- The floor is ubuntu-26.04, the runner the new action is written for.
+- Setting any other input of the old action fails the step and names the
+  new action: `lock`, `egress`, `deny-runner-metadata`, `egress-policy`,
+  `stop-services`, `sandbox-user`, `runner-user`, `script`, `binary` or
+  `build`. Each asked for a host the new action would not set up, so the
+  step does not ignore it.
+
+agentic-job's own agent job and the CI jobs that use the second user name
+the old action at `secure-host/internal`, unchanged, until the agent job
+no longer needs that user.
 
 The action supports exactly **Ubuntu 26.04** and **RHEL 10** (including
 RHEL 10 minor releases). Once it has the binary, and before installing
@@ -961,8 +995,8 @@ Pass `build: true` to build even when a prebuilt exists.
 A release also pushes `ghcr.io/cgwalters-forge/secure-host:vVERSION`, an
 image `FROM scratch` with the static binary and `world_write.bpf.o`
 ([`Containerfile`](../secure-host/Containerfile)), and attests it by its
-digest from `release.yml` on main. The action does not use it yet
-([tracker#674](https://github.com/cgwalters-forge/tracker/issues/674)).
+digest from `release.yml` on main. The public action runs it through
+`cgwalters-forge/actions/secure-host`; the internal one does not.
 Root podman runs it with the host's root at `/host`, the configuration a
 path on the host:
 
@@ -997,8 +1031,9 @@ since the image holds no mitmproxy. The entrypoint needs root podman's
 `--privileged` image ID even with `[egress]` off. `sudo` does not pass `SUDO_USER` into the
 container: name the runner's user with `sandbox.runner-user`. The hosted
 configuration stops docker, which nothing after setup can use. CI's
-`secure-host-image` job runs it this way from the archive the build saved,
-and probes the host after the container has exited. A new package on
+`secure-host-image` job runs it through the public action, with the
+archive the build saved as `image-archive` and this repository's hosted
+configuration, and probes the host after the container has exited. A new package on
 ghcr.io is private until an owner makes it public.
 
 ## Without the action

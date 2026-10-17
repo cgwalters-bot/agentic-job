@@ -40,7 +40,7 @@ separate jobs on separate machines. The apply job's additional checks are
    depend on its success; removal failure starts neither. Runs not started
    by a command label pass through without writing.
 2. **agent**, on the caller's runner. [The step that secures a host for
-   any job](secure-host.md), the action in `secure-host/`, creates the
+   any job](secure-host.md), the action in `secure-host/internal/`, creates the
    unprivileged user, the network rules and the egress proxy, removes
    general root access and probes access (`agentic-job sandbox setup` and
    `sandbox check`); `run` clones the target, drives the agent and
@@ -217,7 +217,7 @@ agent. The pieces are:
 | Piece | What it is | Its credential |
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
-| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key or GitHub token as `run`'s input `inference-api-key`, and as `AGENTIC_JOB_INFERENCE_KEY` for an optional `agentic-job check-key --config .agentic-job/config.toml` before `secure-host`; with an [`[mcp.NAME]` server](mcp.md), its credential as `run`'s input `mcp-token`; for GitHub billing with this job's own token, `copilot-requests: write` and no GitHub read token |
+| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host/internal`](../secure-host/internal/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key or GitHub token as `run`'s input `inference-api-key`, and as `AGENTIC_JOB_INFERENCE_KEY` for an optional `agentic-job check-key --config .agentic-job/config.toml` before `secure-host`; with an [`[mcp.NAME]` server](mcp.md), its credential as `run`'s input `mcp-token`; for GitHub billing with this job's own token, `copilot-requests: write` and no GitHub read token |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
@@ -301,7 +301,7 @@ jobs:
           audience: ${{ vars.NETWORK_AUDIENCE }}
       # The inference proxy over that network, before setup.
       - run: agentic-job secure-host inference .agentic-job/config.toml
-      - uses: ./.agentic-job-source/secure-host
+      - uses: ./.agentic-job-source/secure-host/internal
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml
@@ -418,6 +418,11 @@ secure-host no longer checks the inference proxy or has a
 after its network join and before secure-host, as
 [above](#the-pieces-and-an-agent-job-of-your-own), and reads
 `session-endpoint` from the run action's step instead.
+
+Its secure-host step now names `./.agentic-job-source/secure-host/internal`:
+the public `secure-host` forwards to `cgwalters-forge/actions/secure-host`,
+which refuses `binary` and has no sandbox user for `run`
+([secure-host.md](secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
 
 ### Migrating a direct call of check.yml
 

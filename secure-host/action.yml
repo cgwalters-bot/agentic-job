@@ -1,145 +1,73 @@
-# Secures the machine a job runs on, for whatever the job does next: a
-# build, a test suite, an agent. docs/secure-host.md says what it does to
-# the host, what a later step can count on and what it cannot, and what
-# has to run before it.
+# Forwards to cgwalters-forge/actions/secure-host, which runs the
+# attested, digest-pinned secure-host image (tracker#674). A caller that
+# names this path at a commit before the forward keeps the old action;
+# docs/secure-host.md says what changes at a later one.
 #
-# It is the last step of the job that has root. Everything that needs
-# root (packages, services, joining a network) comes before it; from here on the
-# job's steps are the runner's user's without sudo, and a step that runs
-# code the job does not trust runs it as the sandbox user:
-#
-#   - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
-#   - run: make check
-#   - shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
-#     run: ./configure && make
+# The old action's other inputs have no counterpart there. A job that set
+# one asked for something (root kept, another sandbox user, a script run
+# as it, a binary of its own) that the new action would not do, so it
+# fails here rather than running a host other than the one it asked for.
 #
 # Every input reaches a step through its environment and is never pasted
-# into a script, and the configuration is written by `agentic-job
-# config`, which takes each as a value and nothing else.
+# into a script.
 name: Secure the CI host
 description: >-
-  Hardens the runner and takes root away from every later step of the job: a second unprivileged
-  user with nothing of the job's, an egress proxy and network rules for it, a kernel policy that
-  keeps every user but the owner from changing a world-writable file, and no sudo for the
-  runner's own user, each proven by a probe before the step returns
+  Forwards to cgwalters-forge/actions/secure-host, which runs the digest-pinned secure-host image:
+  no later step of the job has root or reaches the cloud metadata service, and a world-writable
+  file can be changed only by its owner
 
 inputs:
   config:
     description: >-
-      A configuration file (TOML: the `[sandbox]`, `[egress]` and `[setup]` tables) for what the
-      inputs below do not cover, such as the sockets the image may keep. Empty for the one that
-      comes with the action, written for GitHub's hosted ubuntu-26.04. The inputs below go over it
-    default: ""
-  lock:
-    description: >-
-      Whether the runner's user loses root, so that no later step of the job has it. `false`
-      keeps its sudo and hardens the host for the sandbox user only. Empty for what the
-      configuration says, which is `true` unless it says otherwise
-    default: ""
-  egress:
-    description: >-
-      Whether the sandbox user reaches the network only through the egress proxy (reads anywhere
-      but the threat feed, writes by rule). `false` leaves its network open but for the cloud
-      metadata service and the tailnet. Empty for what the configuration says, `true` by default
-    default: ""
-  deny-runner-metadata:
-    description: >-
-      Whether the runner's user, and so every later step and action of the job, is refused the cloud
-      metadata service as the sandbox user is: no instance identity or cloud role credentials for
-      any step. Needs `lock`. Empty for what the configuration says, `false` by default
-    default: ""
-  egress-policy:
-    description: The egress proxy's write rules, a file, in place of the ones that come with the binary
-    default: ""
-  stop-services:
-    description: >-
-      systemd units to stop, with spaces or newlines between them, in place of the configuration's
-      list: the daemons that listen for every local user, a container daemon first of all
-    default: ""
-  sandbox-user:
-    description: The name of the second unprivileged user, which the step creates (`runner-sandbox` by default)
-    default: ""
-  runner-user:
-    description: The user the job's steps run as, whose root is taken and whose home is closed (the one that runs this step by default)
-    default: ""
-  script:
-    description: A file, a script that setup runs as the sandbox user at its end, for a toolchain in that user's home
+      A host configuration file (TOML: the `[sandbox]`, `[egress]` and `[setup]` tables). Empty for
+      this repository's hosted.toml, with the egress proxy on, rather than the new action's default
     default: ""
   check:
-    description: >-
-      Prove the result with `agentic-job sandbox check` before the step returns; `false` leaves that to the job.
-      A passing check lets the next check in this job, the run action's, skip its probes, unless something
-      entered the sandbox user or checked in between; give `false` when steps of the runner's user
-      (repository code) run between this step and run
+    description: Prove the result with `agentic-job sandbox check` before the step returns; `false` leaves that to the job
     default: "true"
-  binary:
+  image-archive:
     description: >-
-      An `agentic-job` already on this machine, to use in place of fetching or building one: for
-      a job that got it from the job before. The world-write policy object, `world_write.bpf.o`,
-      must be beside it
+      An image archive (as `podman load` takes it) to run in place of the pinned image, for testing
+      an unreleased image. It is not verified: only for a job that built it or trusts its source
+    default: ""
+  # Refused when set: see above.
+  lock:
+    description: Removed; set nothing
+    default: ""
+  egress:
+    description: Removed; set nothing
+    default: ""
+  deny-runner-metadata:
+    description: Removed; set nothing
+    default: ""
+  egress-policy:
+    description: Removed; set nothing
+    default: ""
+  stop-services:
+    description: Removed; set nothing
+    default: ""
+  sandbox-user:
+    description: Removed; set nothing
+    default: ""
+  runner-user:
+    description: Removed; set nothing
+    default: ""
+  script:
+    description: Removed; set nothing
+    default: ""
+  binary:
+    description: Removed; set nothing
     default: ""
   build:
-    description: >-
-      Build the binary from the action's source, also where a release fits its commit and would
-      be fetched by its checksum. A build needs rustup and takes about two minutes
-    default: "false"
-
-outputs:
-  sandbox-user:
-    description: The name of the sandbox user
-    value: ${{ steps.user.outputs.name }}
-  sandbox-home:
-    description: Its home, where `agentic-job sandbox exec` starts a command
-    value: ${{ steps.user.outputs.home }}
-  fetched:
-    description: "`true` when the binary was a release's, taken by its checksum; `false` when it was built; empty with `binary`"
-    value: ${{ steps.binary.outputs.fetched }}
+    description: Removed; set nothing
+    default: ""
 
 runs:
   using: composite
   steps:
-    # A release's, by its attested source-matching checksums, when
-    # that release was built from this commit's source; a build of that
-    # source otherwise (binary.sh, which installs gh where it is missing
-    # and bounds GitHub retries, before the binary exists).
-    - name: Get the binary
-      id: binary
-      if: ${{ inputs.binary == '' }}
+    - name: Refuse the old action's inputs
       shell: bash
       env:
-        ACTION: ${{ github.action_path }}
-        BUILD: ${{ inputs.build }}
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        [ "$BUILD" != true ] || set -- --build
-        bash "$ACTION/binary.sh" get --out "$RUNNER_TEMP/secure-host/bin" "$@"
-    # Before it is installed, and before apt, the policy or setup change
-    # the host: ID and VERSION_ID of os-release, never ID_LIKE.
-    - name: Check supported host
-      shell: bash
-      env:
-        BINARY: ${{ inputs.binary || format('{0}/secure-host/bin/agentic-job', runner.temp) }}
-      run: |
-        "$BINARY" secure-host supported
-    # Where every user can run it: the sandbox user's commands start
-    # through it.
-    - name: Install the binary
-      shell: bash
-      env:
-        BINARY: ${{ inputs.binary || format('{0}/secure-host/bin/agentic-job', runner.temp) }}
-      run: |
-        [ "$BINARY" -ef /usr/local/bin/agentic-job ] || sudo install -m 0755 "$BINARY" /usr/local/bin/agentic-job
-        agentic-job --version
-    # Root's by its path: sudo's secure_path leaves out /usr/local/bin on RHEL.
-    - name: Bound apt network waits and avoid the Azure mirror
-      shell: bash
-      run: sudo /usr/local/bin/agentic-job secure-host apt
-    # An input that was left empty sets nothing, so the file stands.
-    - name: Write the configuration
-      shell: bash
-      env:
-        ACTION: ${{ github.action_path }}
-        CONFIG: ${{ inputs.config }}
         LOCK: ${{ inputs.lock }}
         EGRESS: ${{ inputs.egress }}
         DENY_RUNNER_METADATA: ${{ inputs.deny-runner-metadata }}
@@ -148,42 +76,23 @@ runs:
         SANDBOX_USER: ${{ inputs.sandbox-user }}
         RUNNER_USER: ${{ inputs.runner-user }}
         SCRIPT: ${{ inputs.script }}
+        BINARY: ${{ inputs.binary }}
+        BUILD: ${{ inputs.build }}
       run: |
-        mkdir -p "$RUNNER_TEMP/secure-host"
-        agentic-job config --host --from "${CONFIG:-$ACTION/hosted.toml}" \
-          --boolean sandbox.lock-runner="$LOCK" --boolean sandbox.deny-runner-metadata="$DENY_RUNNER_METADATA" \
-          --boolean egress.proxy="$EGRESS" --string egress.policy="$EGRESS_POLICY" \
-          --list sandbox.stop-services="$STOP_SERVICES" --string sandbox.user="$SANDBOX_USER" \
-          --string sandbox.runner-user="$RUNNER_USER" --string setup.script="$SCRIPT" \
-          > "$RUNNER_TEMP/secure-host/config.toml"
-        cat "$RUNNER_TEMP/secure-host/config.toml"
-    # Before setup, which refuses a host without it: no user but a
-    # world-writable file's or directory's owner may change it, on the root
-    # filesystem, from here on. The object came with the binary, by the
-    # release's checksums or built with it; bpftool is installed where the
-    # image lacks it. Fails closed (docs/secure-host.md).
-    - name: Load the world-write policy
-      shell: bash
-      env:
-        BINARY: ${{ inputs.binary || format('{0}/secure-host/bin/agentic-job', runner.temp) }}
-      run: sudo /usr/local/bin/agentic-job secure-host world-write "$(dirname "$BINARY")/world_write.bpf.o"
-    # The last thing in the job that has root, unless `lock` is off.
-    - name: Secure the host
-      shell: bash
-      run: agentic-job sandbox timed setup
-    # Asked of the sandbox user itself, which also shows that the way in
-    # to it works for the steps after this one. Before the probes: every
-    # `sandbox exec` removes the record that `--record` leaves of a passing
-    # check, which the run action takes in place of probing again.
-    - name: The sandbox user
-      id: user
-      shell: bash
-      run: |
-        # Regular-file capture is exact; piped output has `::` broken up.
-        agentic-job sandbox exec -- id -un > "$RUNNER_TEMP/secure-host/user.txt"
-        read -r name < "$RUNNER_TEMP/secure-host/user.txt"
-        printf '%s\n' "name=$name" "home=$(getent passwd "$name" | cut -d: -f6)" | tee -a "$GITHUB_OUTPUT"
-    - name: Prove it
-      if: ${{ inputs.check != 'false' }}
-      shell: bash
-      run: agentic-job sandbox timed probes
+        set=()
+        for name in LOCK EGRESS DENY_RUNNER_METADATA EGRESS_POLICY STOP_SERVICES SANDBOX_USER RUNNER_USER SCRIPT BINARY BUILD; do
+          if [ -n "${!name}" ]; then name=${name,,}; set+=("${name//_/-}"); fi
+        done
+        if [ "${#set[@]}" != 0 ]; then
+          echo "::error::secure-host now forwards to cgwalters-forge/actions/secure-host, which takes only config, check and image-archive, not ${set[*]}: drop them, or name cgwalters-forge/agentic-job/secure-host at an earlier commit; an agent job of your own names ./.agentic-job-source/secure-host/internal (docs/secure-host.md)"
+          exit 1
+        fi
+    # Without a config, this repository's hosted one, as the old action
+    # had: the new action's own default turns the egress proxy off, and
+    # the v0.6.1 image still runs `sandbox exec`, so a caller that ran
+    # untrusted code through it would silently lose the proxy's rules.
+    - uses: cgwalters-forge/actions/secure-host@5906e6745c4e3e1c68b698dacf409a452c727d08 # main, with secure-host:v0.6.1
+      with:
+        config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}
+        check: ${{ inputs.check }}
+        image-archive: ${{ inputs.image-archive }}

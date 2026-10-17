@@ -44,6 +44,10 @@ jobs:
       - run: cd src && bash ./untrusted.sh < /dev/null   # the sandbox user
 ```
 
+This is the action at a commit from before `secure-host` forwarded to
+`cgwalters-forge/actions/secure-host`, which has no sandbox user or
+`sandbox exec` ([what changes at `@main`](docs/secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
+
 The sandbox user cannot see the checkout, so the job hands it a copy.
 A `run:` step without `shell:` is sandboxed by default; trusted steps opt
 out with `shell: bash`. Forgetting an override fails closed, including before

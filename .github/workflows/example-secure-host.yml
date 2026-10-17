@@ -37,11 +37,13 @@ jobs:
       # Restored here, and saved by its post step when the job ends, long
       # after the lock: a cache is the runner's user's own files.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Another repository names the action by the commit it has read:
-      #   uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+      # agentic-job's internal action, which still has the sandbox user
+      # and `sandbox exec`. A job of another repository that needs neither
+      # names the published one by the commit it has read:
+      #   uses: cgwalters-forge/actions/secure-host@COMMIT
       - name: Secure the host
         id: host
-        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action under test.
+        uses: ./secure-host/internal # zizmor: ignore[self-repository] Exercise the checked-out action under test.
       - name: No step has root from here on
         shell: bash
         run: |

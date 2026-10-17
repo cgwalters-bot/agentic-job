@@ -273,8 +273,8 @@ for (const [file, source, job, policyOutput] of [
     assert.match(agent, new RegExp(`^ {10}ref: ${out('ref')}$`, 'm'));
     const uses = [...agent.matchAll(/^ {6}(?:- |  )uses: ([^\n]+)/gm)].map(([, use]) => use.split(' ')[0]);
     assert.deepEqual(uses.filter(use => !use.startsWith('actions/checkout@')), [
-      './.agentic-job-source/prepare', './.agentic-job-source/secure-host', './.agentic-job-source/run']);
-    for (const use of uses) assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+|actions\/checkout@[0-9a-f]{40})$/);
+      './.agentic-job-source/prepare', './.agentic-job-source/secure-host/internal', './.agentic-job-source/run']);
+    for (const use of uses) assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+(?:\/internal)?|actions\/checkout@[0-9a-f]{40})$/);
     assert.ok(agent.indexOf('source/prepare') < agent.indexOf('source/secure-host'));
     assert.ok(agent.indexOf('source/secure-host') < agent.indexOf('source/run'));
     assert.doesNotMatch(agent, /SAFE_OUTPUTS_PAT|tailscale/i);
@@ -325,7 +325,7 @@ test('the source an agent job takes its actions from is the policy call\'s own',
 // after the host is secured. secure-host knows nothing of inference or
 // sessions: the agent job checks the proxy, and run reads the endpoint.
 test('the agent job installs the trusted binary and checks the proxy before setup', () => {
-  const secure = readFileSync(join(__dirname, '../secure-host/action.yml'), 'utf8');
+  const secure = readFileSync(join(__dirname, '../secure-host/internal/action.yml'), 'utf8');
   assert.doesNotMatch(secure, /inference|session/i);
   assert.match(policy, /"\$JOB_DIR\/bin\/agentic-job" config/);
   assert.ok(policy.split('agentic-job-policy\n')[1].split('\n  activate:')[0].includes('.agentic-job/config.toml'));
@@ -341,7 +341,7 @@ test('the agent job installs the trusted binary and checks the proxy before setu
     assert.doesNotMatch(agent, / config /, file);
     assert.ok(agent.includes('config: .agentic-job/config.toml'), file);
     const expanded = agent.replace('uses: ./.agentic-job-source/prepare', prepare)
-      .replace('uses: ./.agentic-job-source/secure-host', secure)
+      .replace('uses: ./.agentic-job-source/secure-host/internal', secure)
       .replace('uses: ./.agentic-job-source/run', run);
     let position = 0;
     for (const name of ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability',
@@ -542,11 +542,13 @@ test('the wrapper forwards every setting to the policy call as it is', () => {
 test('no workflow or action of this repository joins a network itself', () => {
   const root = join(__dirname, '..');
   const files = [...readdirSync(join(root, '.github/workflows')).map(file => `.github/workflows/${file}`),
-    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml'];
+    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml', 'secure-host/internal/action.yml'];
   for (const file of files) {
     const text = readFileSync(join(root, file), 'utf8');
     assert.doesNotMatch(text, /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);
-    assert.doesNotMatch(text, /cgwalters-forge\/actions/, file);
+    // Of that repository's actions only secure-host, which the public
+    // path forwards to and which joins no network.
+    assert.doesNotMatch(text, /cgwalters-forge\/actions(?!\/secure-host(?![-\w/]))/, file);
   }
 });
 
@@ -573,7 +575,7 @@ test('review.yml runs the caller\'s network step once, if any, before secure-hos
     uses.join('\n'));
   const at = uses.indexOf(step);
   assert.equal(uses[at - 1], './.agentic-job-source/prepare');
-  assert.equal(uses[at + 1], './.agentic-job-source/secure-host');
+  assert.equal(uses[at + 1], './.agentic-job-source/secure-host/internal');
   // Off unless the caller has one.
   assert.match(jobs.agent, /if: \$\{\{ hashFiles\('\.github\/agentic-job\/network\/action\.yml'\) != '' \}\}\n {8}uses: \.\/\.github\/agentic-job\/network /);
   // This repository's own, a composite action whose actions are pinned.
