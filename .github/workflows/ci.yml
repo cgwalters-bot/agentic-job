@@ -1655,6 +1655,25 @@ jobs:
           image=$(sudo podman load --quiet --input "$RUNNER_TEMP/image/secure-host.tar" | sed -n 's/^Loaded image: //p')
           id=$(sudo podman image inspect --format '{{.Id}}' "$image")
           sudo podman run --rm --privileged --pid=host --network=none -v /:/host "$id" "$RUNNER_TEMP/secure-host/config.toml"
+          echo "SECURE_HOST_IMAGE=$id" >> "$GITHUB_ENV"
+      # Setup ran the proxy from the same image in root podman; the
+      # runner's user, without root now, can neither stop its unit nor
+      # signal it, and the probes below go through it. The unit's
+      # never-pull flag is the egress unit tests' to check: this job
+      # names no pull option at all.
+      - name: The egress proxy is root's podman unit
+        run: |
+          exec_start=$(systemctl show --property=ExecStart egress-proxy.service)
+          case "$exec_start" in
+            *podman*"${SECURE_HOST_IMAGE#sha256:}"*) ;;
+            *) echo "::error::egress-proxy.service does not run the image: $exec_start"; exit 1 ;;
+          esac
+          if systemctl stop --no-ask-password egress-proxy.service; then echo "::error::the runner's user stopped the egress proxy"; exit 1; fi
+          pid=$(systemctl show --property=MainPID --value egress-proxy.service)
+          # `kill 0` would signal this step's own process group.
+          if ! [ "${pid:-0}" -gt 1 ] 2> /dev/null; then echo "::error::egress-proxy.service has no main process"; exit 1; fi
+          if kill "$pid"; then echo "::error::the runner's user signalled the egress proxy"; exit 1; fi
+          systemctl is-active --quiet egress-proxy.service
       - name: The setup outlived the container
         run: |
           cmp /usr/local/bin/agentic-job "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl"

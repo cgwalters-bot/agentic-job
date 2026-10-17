@@ -11,7 +11,8 @@
 //! `sandbox check`, the probes and `sandbox exec` after it), and runs the
 //! secure-host steps through the host's `nsenter -t 1`, in the host's
 //! mount, network and other namespaces. The world-write links are pinned
-//! in the host's bpffs and the egress proxy is a systemd unit, so both
+//! in the host's bpffs and the egress proxy is a systemd unit (running
+//! this same image in root podman: `egress::PODMAN`), so both
 //! outlive the container. CONFIG is a path on the host, a configuration
 //! `agentic-job config --host` wrote. Any failed step fails the whole.
 
@@ -24,7 +25,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, ensure};
 
 use super::platform;
-use crate::sandbox::host;
+use crate::sandbox::{egress, host};
 
 /// Where `-v /:/host` puts the host's root.
 pub const HOST_ROOT: &str = "/host";
@@ -43,9 +44,31 @@ const NSENTER: &str = "/usr/bin/nsenter";
 /// namespace, which `--pid=host` shares.
 const NAMESPACES: &[&str] = &["--mount", "--uts", "--ipc", "--net", "--cgroup"];
 
+/// What podman tells a container about itself; with `--privileged`, the
+/// ID of the image it runs, `imageid="…"`.
+const CONTAINERENV: &str = "/run/.containerenv";
+/// A real one is a few hundred bytes.
+const MAX_CONTAINERENV_BYTES: u64 = 64 * 1024;
+const IMAGE_ID_KEY: &str = "imageid=";
+
+/// The ID of the image this container runs, from TEXT, podman's
+/// [`CONTAINERENV`]: setup runs the egress proxy from it too.
+fn image_id(text: &str) -> Result<String> {
+    let id = text
+        .lines()
+        .find_map(|line| line.strip_prefix(IMAGE_ID_KEY))
+        .with_context(|| {
+            format!("{CONTAINERENV} names no image: run the image with root podman --privileged")
+        })?
+        .trim_matches('"');
+    egress::check_image_id(id)?;
+    Ok(id.to_owned())
+}
+
 /// The commands run on the host, in order, as the action runs them:
-/// apt's waits bounded, the world-write policy loaded, then setup.
-pub fn host_steps(config: &Path) -> Result<Vec<Vec<String>>> {
+/// apt's waits bounded, the world-write policy loaded, then setup, with
+/// the egress proxy from IMAGE.
+pub fn host_steps(config: &Path, image: &str) -> Result<Vec<Vec<String>>> {
     let config = config
         .to_str()
         .with_context(|| format!("configuration {} is not UTF-8", config.display()))?;
@@ -58,7 +81,14 @@ pub fn host_steps(config: &Path) -> Result<Vec<Vec<String>>> {
     let steps: [&[&str]; 3] = [
         &["secure-host", "apt"],
         &["secure-host", "world-write", HOST_OBJECT],
-        &["sandbox", "setup", "--config", config],
+        &[
+            "sandbox",
+            "setup",
+            "--config",
+            config,
+            "--egress-image",
+            image,
+        ],
     ];
     Ok(steps
         .iter()
@@ -92,8 +122,11 @@ fn install(source: &mut File, path: &str, mode: u32) -> Result<()> {
 
 pub fn run(config: &Path) -> Result<()> {
     ensure!(host::is_root(), "the secure-host image runs as root");
-    let steps = host_steps(config)?;
-    // Opened before the root changes, which hides the image's files.
+    // Read before the root changes, which hides the image's files.
+    let env = crate::files::read_regular(Path::new(CONTAINERENV), MAX_CONTAINERENV_BYTES)
+        .with_context(|| format!("reading {CONTAINERENV}: run the image with root podman"))?;
+    let image = image_id(&String::from_utf8_lossy(&env))?;
+    let steps = host_steps(config, &image)?;
     let mut binary = File::open(IMAGE_BINARY).with_context(|| format!("opening {IMAGE_BINARY}"))?;
     let mut object = File::open(IMAGE_OBJECT).with_context(|| format!("opening {IMAGE_OBJECT}"))?;
     // The host's root, so that its paths and symbolic links resolve as on
@@ -132,7 +165,8 @@ mod tests {
 
     #[test]
     fn each_step_runs_the_installed_binary_in_the_hosts_namespaces() {
-        let steps = host_steps(Path::new("/tmp/secure-host/config.toml")).unwrap();
+        let image = "0123456789abcdef".repeat(4);
+        let steps = host_steps(Path::new("/tmp/secure-host/config.toml"), &image).unwrap();
         let prefix = [
             "--target",
             "1",
@@ -152,6 +186,8 @@ mod tests {
                 "setup",
                 "--config",
                 "/tmp/secure-host/config.toml",
+                "--egress-image",
+                &image,
             ],
         ];
         assert_eq!(steps.len(), tails.len());
@@ -184,8 +220,40 @@ mod tests {
     #[test]
     fn a_configuration_is_a_host_path() {
         for config in ["config.toml", "./config.toml", ""] {
-            let err = host_steps(Path::new(config)).unwrap_err();
+            let err = host_steps(Path::new(config), &"0".repeat(64)).unwrap_err();
             assert!(format!("{err:#}").contains("absolute path"), "{config:?}");
         }
+    }
+
+    /// The image's own ID, as root podman writes it for a privileged
+    /// container, and nothing that could name another image.
+    #[test]
+    fn the_image_id_is_podmans_own() {
+        let id = "0123456789abcdef".repeat(4);
+        let env = format!(
+            "engine=\"podman-5.4.0\"\nname=\"secure-host\"\nid=\"{}\"\n\
+             image=\"localhost/secure-host:latest\"\nimageid=\"{id}\"\nrootless=0\n",
+            "f".repeat(64)
+        );
+        assert_eq!(image_id(&env).unwrap(), id);
+        for (text, want) in [
+            ("engine=\"podman-5.4.0\"\n".to_owned(), "names no image"),
+            (String::new(), "names no image"),
+            ("imageid=\"\"\n".to_owned(), "not a podman image ID"),
+            (
+                "imageid=\"localhost/secure-host:latest\"\n".to_owned(),
+                "not a podman image ID",
+            ),
+            (
+                format!("imageid=\"{id} --privileged\"\n"),
+                "not a podman image ID",
+            ),
+        ] {
+            let err = image_id(&text).unwrap_err();
+            assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}");
+        }
+        // The setup step passes it as one argument of its own.
+        let steps = host_steps(Path::new("/c.toml"), &id).unwrap();
+        assert_eq!(steps[2].last(), Some(&id));
     }
 }

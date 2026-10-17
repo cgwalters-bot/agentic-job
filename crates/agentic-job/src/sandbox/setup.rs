@@ -44,6 +44,10 @@ pub struct Args {
     /// The run's configuration (TOML); copied to /etc/agentic-job/
     #[arg(long, value_name = "FILE")]
     pub config: PathBuf,
+    /// Run the egress proxy from this podman image ID, in root podman:
+    /// the secure-host image's entrypoint passes its own.
+    #[arg(long, value_name = "ID")]
+    pub egress_image: Option<String>,
     /// Hold the file to [`config::HostConfig`]: `secure-host setup`'s.
     #[arg(skip)]
     pub host_only: bool,
@@ -335,6 +339,13 @@ fn setup(args: &Args) -> Result<Exit> {
             session,
             install_vibe,
         } = config.check_host()?;
+        if let Some(image) = &args.egress_image {
+            egress::check_image_id(image)?;
+            ensure!(
+                !config.egress.proxy || config.egress.rust_proxy,
+                "--egress-image runs the Rust proxy alone: egress.rust-proxy = false cannot run from it"
+            );
+        }
         ensure!(host::is_root(), "`sandbox setup` must run as root");
         ensure!(
             session.is_none() || host::has_program("tailscale"),
@@ -491,7 +502,11 @@ fn setup(args: &Args) -> Result<Exit> {
     let proxy_uid = config
         .egress
         .proxy
-        .then(|| timed_setup("egress-proxy", || egress::start(&config.egress)))
+        .then(|| {
+            timed_setup("egress-proxy", || {
+                egress::start(&config.egress, args.egress_image.as_deref())
+            })
+        })
         .transpose()?;
     timed_setup("network-rules", || {
         let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())

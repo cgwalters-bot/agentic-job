@@ -142,6 +142,110 @@ const UNIT_PROPERTIES: &[&str] = &[
     "UMask=0077",
 ];
 
+/// With `sandbox setup --egress-image`, which the secure-host image's
+/// entrypoint passes with its own ID, the Rust proxy runs from that image
+/// in root podman under the same systemd unit, and not from
+/// [`SELF_COPY`]: what filters the sandbox user's traffic is then the
+/// binary the release attested, from root's image store, which no step
+/// after setup can write; and its container and unit are root's, which
+/// the runner's user, without root after the lock, can neither stop nor
+/// signal. The process inside is still the proxy's user, which the
+/// network rules let out.
+const PODMAN: &str = "podman";
+
+/// The binary in the image (`secure-host/Containerfile`).
+const IMAGE_BINARY: &str = "/agentic-job";
+
+/// A podman image ID: the SHA-256 of its configuration, in hex.
+const IMAGE_ID_LEN: usize = 64;
+
+const LOGS_DIR: &str = "/var/log/egress-proxy";
+
+const STATE_DIR_MODE: u32 = 0o700;
+
+const LOGS_DIR_MODE: u32 = 0o750;
+
+/// The unit around root podman: it cannot drop root or capabilities,
+/// which podman needs; the container's options below do that for the
+/// proxy.
+const CONTAINER_UNIT_PROPERTIES: &[&str] = &["Restart=on-failure"];
+
+/// Fails unless ID is a full podman image ID, which `podman run` takes
+/// for that image alone and never for a name it would look up.
+pub fn check_image_id(id: &str) -> Result<()> {
+    ensure!(
+        id.len() == IMAGE_ID_LEN
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{id:?} is not a podman image ID ({IMAGE_ID_LEN} lowercase hex digits)"
+    );
+    Ok(())
+}
+
+/// `podman run` of the proxy from IMAGE as UID:GID: the host's network,
+/// since the rules key on the uid; no capabilities, no new privileges and
+/// a read-only root; and only its policy (read-only), state and log
+/// directories mounted. `Z` gives each mount the container's private
+/// SELinux label, without which RHEL's policy denies the proxy its own
+/// files; elsewhere podman ignores it. `--pull=never`: the image setup
+/// ran from, or nothing. `--events-backend=none`: podman's journald
+/// events go through go-systemd, which autobinds an unconnected abstract
+/// datagram socket (`@` and five hex digits) for as long as the client,
+/// the unit's main process, lives; on the host's network any user could
+/// send to it, and `sandbox check` refuses that. The proxy's own log
+/// records what it does.
+fn container_args(image: &str, uid: u32, gid: u32, proxy: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        PODMAN,
+        "--events-backend=none",
+        "run",
+        "--rm",
+        "--replace",
+        "--name",
+        EGRESS_USER,
+        "--pull=never",
+        "--network=host",
+        "--cap-drop=all",
+        "--security-opt=no-new-privileges",
+        "--read-only",
+        "--umask=0077",
+        "--env",
+        "HOME=/var/lib/egress-proxy",
+        "--volume",
+        "/opt/egress-proxy:/opt/egress-proxy:ro,Z",
+        "--volume",
+        "/var/lib/egress-proxy:/var/lib/egress-proxy:Z",
+        "--volume",
+        "/var/log/egress-proxy:/var/log/egress-proxy:Z",
+        "--entrypoint",
+        IMAGE_BINARY,
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    args.extend([format!("--user={uid}:{gid}"), image.to_owned()]);
+    // The image's binary is the entrypoint; the rest are its arguments.
+    args.extend(proxy.iter().skip(1).cloned());
+    args
+}
+
+/// What systemd's StateDirectory and LogsDirectory make for the unit
+/// that runs as the proxy's user: its directories, its own.
+fn proxy_dirs(user: &User) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for (path, mode) in [(STATE_DIR, STATE_DIR_MODE), (LOGS_DIR, LOGS_DIR_MODE)] {
+        fs::create_dir_all(path).with_context(|| format!("creating {path}"))?;
+        let meta = fs::symlink_metadata(path).with_context(|| format!("reading {path}"))?;
+        ensure!(meta.is_dir(), "{path} is not a directory");
+        std::os::unix::fs::lchown(path, Some(user.uid), Some(user.gid))
+            .with_context(|| format!("giving {path} to {EGRESS_USER}"))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("setting the mode of {path}"))?;
+    }
+    Ok(())
+}
+
 pub fn proxy_url() -> String {
     format!("http://{PROXY_HOST}:{PROXY_PORT}")
 }
@@ -173,11 +277,12 @@ fn mitmdump_args(denylist: bool) -> Vec<String> {
     .collect()
 }
 
-/// The Rust proxy's command line: the binary's root-owned copy, which
-/// setup installs before it starts the proxy, with mitmdump's settings.
-fn rust_proxy_args(denylist: bool) -> Vec<String> {
+/// The Rust proxy's command line: BINARY, the binary's root-owned copy
+/// that setup installs before it starts the proxy or the image's own,
+/// with mitmdump's settings.
+fn rust_proxy_args(binary: &str, denylist: bool) -> Vec<String> {
     let mut args = vec![
-        SELF_COPY.to_owned(),
+        binary.to_owned(),
         "sandbox".to_owned(),
         "egress-proxy".to_owned(),
         "--listen".to_owned(),
@@ -444,21 +549,35 @@ fn publish_ca(generated: &str) -> Result<()> {
 }
 
 /// Installs and starts the proxy; returns its uid, which the network
-/// rules name.
-pub fn start(egress: &Egress) -> Result<u32> {
+/// rules name. With IMAGE, which setup's preflight checked, the Rust
+/// proxy runs from that image in root podman ([`PODMAN`]).
+pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
     let rust = egress.rust_proxy;
     install(egress.policy.as_deref(), rust)?;
+    let user = User::lookup(EGRESS_USER)?.with_context(|| format!("no user {EGRESS_USER}"))?;
     let denylist = fetch_denylist()?;
-    let (args, ca) = if rust {
-        (rust_proxy_args(denylist), RUST_CA_GENERATED)
-    } else {
-        (mitmdump_args(denylist), CA_GENERATED)
+    let (args, ca, properties) = match (rust, image) {
+        (true, Some(image)) => {
+            proxy_dirs(&user)?;
+            let proxy = rust_proxy_args(IMAGE_BINARY, denylist);
+            (
+                container_args(image, user.uid, user.gid, &proxy),
+                RUST_CA_GENERATED,
+                CONTAINER_UNIT_PROPERTIES,
+            )
+        }
+        (true, None) => (
+            rust_proxy_args(SELF_COPY, denylist),
+            RUST_CA_GENERATED,
+            UNIT_PROPERTIES,
+        ),
+        (false, _) => (mitmdump_args(denylist), CA_GENERATED, UNIT_PROPERTIES),
     };
     let mut run = Command::new("systemd-run");
     run.arg(format!("--unit={UNIT}"))
         .args(["--service-type=exec", "--collect"])
         .args(
-            UNIT_PROPERTIES
+            properties
                 .iter()
                 .map(|property| format!("--property={property}")),
         )
@@ -467,10 +586,13 @@ pub fn start(egress: &Egress) -> Result<u32> {
     host::run(&mut run).context("starting the egress proxy")?;
     wait_started(ca)?;
     publish_ca(ca)?;
-    let user = User::lookup(EGRESS_USER)?.with_context(|| format!("no user {EGRESS_USER}"))?;
     println!(
         "Egress proxy ({}) listening on {} as {EGRESS_USER}; its certificate authority is {CA_CERT}",
-        if rust { "Rust" } else { "mitmproxy" },
+        match (rust, image) {
+            (true, Some(image)) => format!("Rust, root podman from image {image}"),
+            (true, None) => "Rust".to_owned(),
+            (false, _) => "mitmproxy".to_owned(),
+        },
         proxy_url()
     );
     Ok(user.uid)
@@ -592,17 +714,71 @@ mod tests {
                     --policy /opt/egress-proxy/policy/policy.toml \
                     --log /var/log/egress-proxy/access.jsonl --state-dir /var/lib/egress-proxy \
                     --denylist /opt/egress-proxy/denylist.txt";
-        assert_eq!(rust_proxy_args(true).join(" "), want);
-        assert!(!rust_proxy_args(false).contains(&"--denylist".to_owned()));
+        assert_eq!(rust_proxy_args(SELF_COPY, true).join(" "), want);
+        assert!(!rust_proxy_args(SELF_COPY, false).contains(&"--denylist".to_owned()));
         assert_eq!(
             Path::new(STATE_DIR).join(crate::sandbox::proxy::tls::CA_CERT),
             Path::new(RUST_CA_GENERATED)
         );
         let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(
-            std::iter::once("agentic-job")
-                .chain(rust_proxy_args(true)[1..].iter().map(String::as_str)),
+            std::iter::once("agentic-job").chain(
+                rust_proxy_args(SELF_COPY, true)[1..]
+                    .iter()
+                    .map(String::as_str),
+            ),
         );
         assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    /// From the image only, as the proxy's user on the host's network,
+    /// with nothing of the host but its labelled directories.
+    #[test]
+    fn the_container_runs_the_images_proxy_as_the_proxy_user() {
+        let image = "0123456789abcdef".repeat(4);
+        let proxy = rust_proxy_args(IMAGE_BINARY, true);
+        let args = container_args(&image, 991, 992, &proxy);
+        let want = format!(
+            "podman --events-backend=none run --rm --replace --name egress-proxy --pull=never --network=host \
+             --cap-drop=all --security-opt=no-new-privileges --read-only --umask=0077 \
+             --env HOME=/var/lib/egress-proxy \
+             --volume /opt/egress-proxy:/opt/egress-proxy:ro,Z \
+             --volume /var/lib/egress-proxy:/var/lib/egress-proxy:Z \
+             --volume /var/log/egress-proxy:/var/log/egress-proxy:Z \
+             --entrypoint /agentic-job --user=991:992 {image} {}",
+            proxy[1..].join(" ")
+        );
+        assert_eq!(args.join(" "), want);
+        // Every path the proxy is given is under a mount.
+        for path in [POLICY_DIR, DENYLIST, ACCESS_LOG, RUST_CA_GENERATED] {
+            assert!(
+                [INSTALL_DIR, STATE_DIR, LOGS_DIR]
+                    .iter()
+                    .any(|dir| Path::new(path).starts_with(dir)),
+                "{path}"
+            );
+        }
+        assert!(
+            !CONTAINER_UNIT_PROPERTIES
+                .iter()
+                .any(|p| p.starts_with("User="))
+        );
+    }
+
+    #[test]
+    fn only_a_full_image_id_names_the_image() {
+        let id = "0123456789abcdef".repeat(4);
+        assert!(check_image_id(&id).is_ok());
+        for bad in [
+            String::new(),
+            id[1..].to_owned(),
+            format!("{id}0"),
+            id.to_uppercase(),
+            format!("sha256:{}", &id[7..]),
+            "registry.example/secure-host:latest".to_owned(),
+            format!("--{}", &id[2..]),
+        ] {
+            assert!(check_image_id(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -619,6 +795,7 @@ mod tests {
             assert!(UNIT_PROPERTIES.contains(&want.as_str()), "{want}");
         }
         assert!(STATE_DIR.ends_with(EGRESS_USER) && ACCESS_LOG.contains(EGRESS_USER));
+        assert!(Path::new(ACCESS_LOG).starts_with(LOGS_DIR));
     }
 
     #[test]

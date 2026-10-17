@@ -139,6 +139,7 @@ impl Host {
             Self::Setup { config } => {
                 return sandbox::setup::run(&sandbox::setup::Args {
                     config: config.clone(),
+                    egress_image: None,
                     host_only: true,
                 });
             }

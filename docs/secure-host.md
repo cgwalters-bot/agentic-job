@@ -974,7 +974,23 @@ probes) and the object under `/usr/local/lib/agentic-job/`, then runs
 `secure-host apt`, `secure-host world-write` and `sandbox setup` through
 the host's `nsenter -t 1` in init's namespaces. The world-write links are
 pinned in the host's bpffs and the egress proxy is a systemd unit, so both
-outlive the container. `sudo` does not pass `SUDO_USER` into the
+outlive the container.
+
+With `[egress]` on, the proxy runs from the same image: the entrypoint
+reads its image ID from podman's `/run/.containerenv` (written for a
+`--privileged` container) and passes it to `sandbox setup --egress-image`,
+which starts `egress-proxy.service` as `systemd-run … podman run
+--pull=never ID` in root podman. The proxy is then the attested binary
+from root's image store rather than a copy on the host's disk, and its unit
+and container are root's, which the runner's user cannot stop after the
+lock. Inside, it runs as the `egress-proxy` user on the host's network,
+which the network rules key on, with no capabilities, a read-only root and
+only its policy, state and log directories mounted, each with `:Z` for
+the container's SELinux label on RHEL 10 (where CI has no job yet, so this
+is untested). Without the image, setup runs the proxy as before, from the
+binary's copy on the host; with it, `egress.rust-proxy = false` is refused,
+since the image holds no mitmproxy. The entrypoint needs root podman's
+`--privileged` image ID even with `[egress]` off. `sudo` does not pass `SUDO_USER` into the
 container: name the runner's user with `sandbox.runner-user`. The hosted
 configuration stops docker, which nothing after setup can use. CI's
 `secure-host-image` job runs it this way from the archive the build saved,
