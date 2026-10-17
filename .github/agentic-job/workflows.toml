@@ -9,7 +9,8 @@
 # reusable workflow's own jobs; or build, release and test the binaries.
 [exempt]
 "feed.yml" = "Opt-in maintenance on trusted default-branch code only; downloads domain data without executing it, with a dedicated publishing token restricted to the final step."
-"agentic-job.yml" = "The reusable workflow itself: its agent job runs secure-host from the policy-selected source checkout, and policy, check and apply run no untrusted step."
+"agentic-job.yml" = "The reusable workflow itself: its agent job is agent.yml's; register, the only job with id-token, runs the policy job's binary alone; and policy, check and apply run no untrusted step."
+"agent.yml" = "Part of the reusable workflow: its agent job runs secure-host from the policy-selected source checkout, with no id-token, and gives the inference key, MCP credential and run token to run alone."
 "apply.yml" = "Part of the reusable workflow: the apply job, the only one with a write token, runs no untrusted step."
 "check.yml" = "Part of the reusable workflow: reads the agent's outputs as data, with a read-only token."
 "policy.yml" = "Part of the reusable workflow: decides admission and writes policy before any untrusted step."

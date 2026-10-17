@@ -36,7 +36,13 @@ is refused, and so is a key that belongs to another mode:
 
 - `github-oidc` asks GitHub for the job's identity token, made out to
   `audience`, and sends it as the bearer of `POST /v1/runs`. The job
-  needs `id-token: write`. This is the only identity token the binary
+  needs `id-token: write`, or an earlier one with it registers: `agentic-job
+  register` writes the run token to its step's output, and `run` given it
+  in `AGENTIC_JOB_INFERENCE_RUN_TOKEN` takes the run over once `GET
+  /v1/runs/self` says it is active, and counts and ends it as its own
+  ([the run token](workflow.md#the-run-token)). The reusable workflow
+  does that, from a job of `agentic-job.yml`, so the broker's
+  `called_workflows` entries admit it as before. This is the only identity token the binary
   knows how to get; another forge needs another proof. Neither request
   takes the job's `HTTP_PROXY`, since a proxy would see the tokens. On a
   host that reaches the CI system only through a proxy, `identity-proxy`

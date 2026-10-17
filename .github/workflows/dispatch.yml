@@ -212,7 +212,7 @@ jobs:
       issues: write
       pull-requests: write
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # Only the runner, not the agent, registers with the proxy.
+      id-token: write # For the register job alone; the agent job gets none.
     with:
       id: ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}
       repo: ${{ inputs.repo }}

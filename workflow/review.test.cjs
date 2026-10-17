@@ -485,7 +485,11 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(checker, /core.setOutput\('verdict', checkOutputs\(/);
   const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   assert.match(policy, /inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
-  assert.match(workflow, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
+  // agentic-job.yml's agent job is agent.yml's, which takes the policy
+  // call's outputs as check.yml does.
+  const agent = fs.readFileSync(path.join(__dirname, '../.github/workflows/agent.yml'), 'utf8');
+  assert.match(agent, /ref: \$\{\{ fromJSON\(inputs.policy\).ref \}\}/);
+  assert.match(workflow, /\n {4}uses: \.\/\.github\/workflows\/agent\.yml .*\n(?: {4}.*\n)*? {6}policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}\n/);
   const check = workflow.split('\n  check:')[1].split('\n  apply:')[0];
   assert.match(check, /policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}/);
   assert.match(checker, /if: \$\{\{ fromJSON\(inputs.policy\).review == 'true' \}\}/);

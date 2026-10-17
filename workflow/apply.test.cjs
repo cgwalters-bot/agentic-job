@@ -671,8 +671,11 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   for (const [file, source] of [['agentic-job.yml', wrapper],
     ['example-compose.yml', readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8')],
     ['workflow.md', readFileSync(join(__dirname, '../docs/workflow.md'), 'utf8')]]) {
-    const agent = source.split('\n  agent:\n')[1].split('\n    runs-on:')[0];
-    assert.match(agent, /^ {4}needs: policy\n {4}(?:#.*\n {4})*if: \$\{\{ (?:inputs.proposals-artifact == '' && )?needs.policy.outputs.admitted == 'true' \}\}$/, file);
+    const agent = source.split('\n  agent:\n')[1].split(/\n    (?:runs-on|permissions):/)[0];
+    // agentic-job.yml's agent job also needs its register job, which has
+    // the same condition.
+    const needs = file === 'agentic-job.yml' ? '\\[policy, register\\]' : 'policy';
+    assert.match(agent, new RegExp(`^ {4}needs: ${needs}\\n {4}(?:#.*\\n {4})*if: \\$\\{\\{ (?:inputs.proposals-artifact == '' && )?needs.policy.outputs.admitted == 'true' \\}\\}$`), file);
   }
   assert.match(policy, /notified:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.result != 'skipped' \}\}/);
   for (const name of ['An eyes reaction on what started the run', 'A comment that says the run started']) {

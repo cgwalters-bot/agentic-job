@@ -756,11 +756,12 @@ reach. Its network is open apart from the metadata service:
 
 What follows for job design: a job that runs code it does not trust should
 hold no `id-token` permission, and should treat its own artifacts and cache
-writes as that code's output. The reusable workflow's agent job registers
-with the inference broker by identity token today, so that registration has
-to move first. It could be done in a preceding job, or by a broker call that
-secure-host makes before it confines. Until then the agent's untrusted code
-still runs as the sandbox user.
+writes as that code's output. The reusable workflow's agent job holds no
+`id-token`: a `register` job before it registers with the inference broker
+and passes on only the broker's run token, as a secret of the agent's job
+([the run token](workflow.md#the-run-token)). A composed agent job and
+`review.yml`'s still register in the agent's job. The agent's untrusted
+code still runs as the sandbox user.
 
 **What is left**, each its own slice of #503:
 
@@ -772,8 +773,11 @@ still runs as the sandbox user.
    settings only when it starts.
 2. The agent's `run` built on this, with `sandbox exec` and the sandbox
    user optional.
-3. An agent job without tokens: no `id-token`, and inference registration
-   moved out as above.
+
+The agent job without `id-token` is done for the reusable workflow, as
+above. Left from it: the same for `review.yml`'s agent job and the
+composed example, whose agent jobs are written inline and so cannot take
+the run token as a secret.
 
 ## What a job has to know
 

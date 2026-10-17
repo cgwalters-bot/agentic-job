@@ -83,9 +83,10 @@ test('the check runs before the agent, off by default, in the apply environment,
   const notify = policy.split('\n  notify:\n')[1].split('\n    runs-on:')[0];
   assert.match(notify, /needs: \[policy, activate, apply-token\]/);
   assert.match(notify, /needs.apply-token.result != 'failure'/);
-  for (const file of ['agentic-job.yml', 'example-compose.yml']) {
-    const agent = readFileSync(join(workflows, file), 'utf8').split('\n  agent:\n')[1].split('\n    steps:\n')[0];
-    assert.match(agent, /^    needs: policy\n/, file);
+  for (const [file, name, needs] of [['agentic-job.yml', 'register', 'policy'],
+    ['agentic-job.yml', 'agent', '[policy, register]'], ['example-compose.yml', 'agent', 'policy']]) {
+    const agent = readFileSync(join(workflows, file), 'utf8').split(`\n  ${name}:\n`)[1].split(/\n  (?=[-\w]+:\n)/)[0];
+    assert.ok(agent.startsWith(`    needs: ${needs}\n`), `${file} ${name}`);
     assert.doesNotMatch(agent, /always\(\)|cancelled\(\)|failure\(\)/, file);
   }
 });

@@ -9,6 +9,8 @@ const { test } = require('node:test');
 const prepare = readFileSync(join(__dirname, '../prepare/action.yml'), 'utf8');
 const run = readFileSync(join(__dirname, '../run/action.yml'), 'utf8');
 const wrapper = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+// The wrapper's agent job, which it calls so that the run token is a secret.
+const agentCall = readFileSync(join(__dirname, '../.github/workflows/agent.yml'), 'utf8');
 const compose = readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8');
 const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
 
@@ -254,16 +256,21 @@ test('admission marks only the calling repository, private, as a private target'
 // The wrapper's agent job and the example's caller-owned one are the same
 // steps: the caller's repository, the actions of policy's own commit,
 // then prepare, secure-host and run, in that order.
-for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose]]) {
+// agentic-job.yml's is agent.yml's, which takes the policy call's outputs
+// as one input, as check.yml does.
+for (const [file, source, job, policyOutput] of [
+  ['agentic-job.yml', wrapper, agentCall, name => `fromJSON(inputs.policy).${name}`],
+  ['example-compose.yml', compose, compose, name => `needs.policy.outputs.${name}`]]) {
   test(`${file} composes the pinned-source agent job and keeps trusted edges off agent outputs`, () => {
-    const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
-    assert.match(agent, /^    needs: policy$/m);
+    const agent = job.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+    const out = name => `\${{ ${policyOutput(name)} }}`.replace(/[$()[\]{}.]/g, '\\$&');
+    assert.match(source.split('\n  agent:\n')[1], /^    needs: (?:policy|\[policy, register\])$/m);
     assert.match(agent, /safe-outputs-artifact-id: \$\{\{ steps.run.outputs.safe-outputs-artifact-id \}\}/);
     for (const input of ['binary-artifact-id', 'policy-artifact-id']) {
-      assert.ok(agent.includes(`${input}: \${{ needs.policy.outputs.${input} }}`));
+      assert.ok(agent.includes(`${input}: \${{ ${policyOutput(input)} }}`));
     }
-    assert.match(agent, /repository: \$\{\{ needs.policy.outputs.source-repository \}\}\n {10}ref: \$\{\{ needs.policy.outputs.source-sha \}\}\n {10}path: .agentic-job-source\n/);
-    assert.match(agent, /^ {10}ref: \$\{\{ needs.policy.outputs.ref \}\}$/m);
+    assert.match(agent, new RegExp(`repository: ${out('source-repository')}\\n {10}ref: ${out('source-sha')}\\n {10}path: .agentic-job-source\\n`));
+    assert.match(agent, new RegExp(`^ {10}ref: ${out('ref')}$`, 'm'));
     const uses = [...agent.matchAll(/^ {6}(?:- |  )uses: ([^\n]+)/gm)].map(([, use]) => use.split(' ')[0]);
     assert.deepEqual(uses.filter(use => !use.startsWith('actions/checkout@')), [
       './.agentic-job-source/prepare', './.agentic-job-source/secure-host', './.agentic-job-source/run']);
@@ -326,7 +333,7 @@ test('the agent job installs the trusted binary and checks the proxy before setu
   assert.ok(prepare.includes('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job'));
   assert.ok(prepare.indexOf('artifact-ids:') < prepare.indexOf('- name: Install the binary'));
   const review = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
-  for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose], ['review.yml', review]]) {
+  for (const [file, source] of [['agent.yml', agentCall], ['example-compose.yml', compose], ['review.yml', review]]) {
     const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
     assert.equal([...agent.matchAll(/agentic-job secure-host inference/g)].length, 1, file);
     assert.ok(agent.includes('- name: Check inference proxy reachability\n' +
@@ -343,7 +350,8 @@ test('the agent job installs the trusted binary and checks the proxy before setu
       assert.ok(position >= 0, `${file}: ${name}`);
     }
   }
-  assert.ok(wrapper.includes('      session-endpoint: ${{ steps.run.outputs.session-endpoint }}\n'));
+  assert.ok(agentCall.includes('      session-endpoint: ${{ steps.run.outputs.session-endpoint }}\n'));
+  assert.ok(wrapper.includes('        value: ${{ jobs.agent.outputs.session-endpoint }}\n'));
   assert.ok(run.includes('    value: ${{ steps.session.outputs.endpoint }}\n'));
   assert.ok(policy.includes('@agentclientprotocol/claude-agent-acp@0.88.0'));
 });
@@ -404,16 +412,39 @@ test('the composed example marks where a caller\'s own steps go, and its example
 });
 
 // The agent holds its GitHub token and can leak it: every permission of
-// the job that makes it is a read, but the run's own OIDC token.
+// the job that makes it is a read. The identity token is the register
+// job's alone, which runs nothing but the policy job's binary and hands
+// on the run token, which reaches agent.yml as a secret and `run` alone.
 test('the agent job token reads and write credentials stay in deterministic jobs', () => {
   const jobs = wrapper.split('\njobs:\n')[1];
-  const agent = jobs.split('\n  agent:\n')[1].split('\n  check:\n')[0];
-  const permissions = agent.split('    permissions:\n')[1].split('    outputs:\n')[0];
-  // Every line is a permission, a comment, or a permission with one.
-  const lines = permissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean);
-  assert.deepEqual(Object.fromEntries(lines.map(line => line.match(/^([-\w]+): (\w+)$/).slice(1))), {
-    contents: 'read', issues: 'read', 'pull-requests': 'read', actions: 'read', 'id-token': 'write',
-  });
+  // Up to the blank line before the next job's comment.
+  const job = name => jobs.split(`\n  ${name}:\n`)[1].split('\n\n')[0];
+  const granted = (text, end) => Object.fromEntries(text.split('    permissions:\n')[1].split(end)[0].split('\n')
+    // Every line is a permission, a comment, or a permission with one.
+    .map(line => line.replace(/#.*/, '').trim()).filter(Boolean).map(line => line.match(/^([-\w]+): (\w+)$/).slice(1)));
+  const reads = { contents: 'read', issues: 'read', 'pull-requests': 'read', actions: 'read' };
+  const agent = agentCall.split('\n  agent:\n')[1];
+  assert.deepEqual(granted(agent, '    outputs:\n'), reads);
+  assert.deepEqual(granted(job('agent'), '    uses:'), reads);
+  assert.doesNotMatch(agentCall + job('agent'), /^ *id-token:/m);
+  const register = job('register');
+  assert.deepEqual(granted(register, '    outputs:\n'), { 'id-token': 'write' });
+  assert.match(register, /^    runs-on: \$\{\{ fromJSON\(inputs.agent-runner\) \}\}$/m);
+  assert.deepEqual([...register.matchAll(/^ {6}- uses: (\S+)/gm)].map(([, use]) => use),
+    ['actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333']);
+  assert.doesNotMatch(register, /secrets\.|checkout|github\.token/);
+  assert.ok(register.endsWith('\n          "$JOB_DIR/agentic-job" register --config "$JOB_DIR/config.toml" --output "$GITHUB_OUTPUT"'));
+  assert.match(register, /^ {6}run-token: \$\{\{ steps.register.outputs.run-token \}\}$/m);
+  // Out of the register job only as the agent call's secret, and in
+  // agent.yml only to run's input.
+  assert.deepEqual([...wrapper.matchAll(/.*needs\.register\.outputs.*/g)].map(([text]) => text),
+    ['      INFERENCE_RUN_TOKEN: ${{ needs.register.outputs.run-token }}']);
+  assert.match(job('agent'), /^    secrets:\n(?: {6}.*\n)*? {6}INFERENCE_RUN_TOKEN: /m);
+  assert.deepEqual([...agentCall.matchAll(/.*secrets\.INFERENCE_RUN_TOKEN.*/g)].map(([text]) => text),
+    ['          inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}']);
+  const runStep = run.split('- name: Run the agent\n')[1].split('      run: |\n')[0];
+  assert.match(runStep, /^        AGENTIC_JOB_INFERENCE_RUN_TOKEN: \$\{\{ inputs.inference-run-token \}\}$/m);
+  assert.equal([...run.matchAll(/inputs\.inference-run-token/g)].length, 1);
   const line = "github-token: ${{ inputs.github-reads && github.token || '' }}";
   assert.ok(agent.includes(line));
   // Actions expressions allow a hyphen in a property name; JavaScript does not.
@@ -426,7 +457,7 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   }
   assert.match(wrapper, /^      github-reads:\n[\s\S]*?type: boolean\n        default: true$/m);
   // So in the example whose agent job a caller owns, and in the pieces.
-  for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose], ['policy.yml', policy],
+  for (const [file, source] of [['agentic-job.yml', wrapper], ['agent.yml', agentCall], ['example-compose.yml', compose], ['policy.yml', policy],
     ['check.yml', readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8')],
     ['apply.yml', readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8')]]) {
     const named = [...source.split('\njobs:\n')[1].matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
@@ -443,7 +474,8 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   assert.deepEqual(ownedPermissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean).sort(),
     ['actions: read', 'contents: read', 'id-token: write', 'issues: read', 'pull-requests: read']);
   // GitHub refuses a whole called workflow whose job asks for more than
-  // the call was granted, the skipped agent job's included.
+  // the call was granted, a skipped job's included: the identity token
+  // for agentic-job.yml's register job.
   const workflows = join(__dirname, '../.github/workflows');
   for (const file of readdirSync(workflows)) {
     const source = readFileSync(join(workflows, file), 'utf8');
@@ -499,7 +531,7 @@ test('the wrapper forwards every setting to the policy call as it is', () => {
     .matchAll(/^      ([-\w]+):$/gm)].map(([, name]) => name);
   const own = ['agent-runner', 'github-reads'];
   assert.deepEqual(names(wrapper).filter(name => !own.includes(name)), names(policy));
-  const call = wrapper.split('\n  policy:\n')[1].split('\n  agent:\n')[0].split('    with:\n')[1].trimEnd();
+  const call = wrapper.split('\n  policy:\n')[1].split('    with:\n')[1].split('\n\n')[0];
   assert.equal(call, names(policy).map(name => `      ${name}: \${{ inputs.${name} }}`).join('\n'));
 });
 
@@ -556,12 +588,17 @@ test('review.yml runs the caller\'s network step once, if any, before secure-hos
 // job, `run`, through the run action's input, and the action gives it to
 // the step that runs `agentic-job run` alone.
 test('agentic-job.yml gives the MCP credential to run alone', () => {
-  const source = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+  // Passed on once to agent.yml, whose job is agentic-job.yml's.
+  assert.deepEqual([...wrapper.matchAll(/.*secrets\.MCP_TOKEN.*/g)].map(([text]) => text),
+    ['      MCP_TOKEN: ${{ secrets.MCP_TOKEN }}']);
+  const source = agentCall;
   assert.equal([...source.matchAll(/secrets\.MCP_TOKEN/g)].length, 1);
   const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
   const run = agent.split('\n      - id: run\n')[1];
   assert.match(run, /\n {10}mcp-token: \$\{\{ secrets\.MCP_TOKEN \}\}\n/);
-  assert.match(source, /^      MCP_TOKEN:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
+  for (const file of [wrapper, agentCall]) {
+    assert.match(file, /^      MCP_TOKEN:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
+  }
   const action = readFileSync(join(__dirname, '../run/action.yml'), 'utf8');
   const uses = [...action.matchAll(/inputs\.mcp-token/g)];
   assert.equal(uses.length, 1);
@@ -577,7 +614,13 @@ test('agentic-job.yml gives the MCP credential to run alone', () => {
 // before the minutes of setup, and `run`, outside the sandbox. In
 // review.yml the check follows the caller's network step, which never
 // gets it, and the policy call takes the mode from repository variables.
-for (const file of ['agentic-job.yml', 'review.yml']) {
+// agentic-job.yml passes it on once, to agent.yml, whose job is its own.
+test('agentic-job.yml passes the inference API key to its agent job alone', () => {
+  assert.deepEqual([...wrapper.matchAll(/.*secrets\.INFERENCE_API_KEY.*/g)].map(([text]) => text),
+    ['      INFERENCE_API_KEY: ${{ secrets.INFERENCE_API_KEY }}']);
+  assert.match(wrapper.split('\n  agent:\n')[1], /^    secrets:\n(?: {6}.*\n)*? {6}INFERENCE_API_KEY: /m);
+});
+for (const file of ['agent.yml', 'review.yml']) {
   test(`${file} checks the inference API key before secure-host and gives it to run alone`, () => {
     const source = readFileSync(join(__dirname, '../.github/workflows', file), 'utf8');
     const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];

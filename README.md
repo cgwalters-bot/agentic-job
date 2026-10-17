@@ -82,7 +82,7 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 | Where | What it holds |
 | --- | --- |
 | The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run; with an [`[mcp.NAME]` server](docs/mcp.md), the token of `run`'s proxy for it. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the same read-only job token; `ACTIONS_ID_TOKEN_REQUEST_*` (the job has `id-token: write`, to register the run); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; with an `[mcp.NAME]` server, its credential `MCP_TOKEN`, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The runner's user in the agent job | the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; with an `[mcp.NAME]` server, its credential `MCP_TOKEN`, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
@@ -485,7 +485,10 @@ Behaviour that does not match what a new user would expect, each with
 the issue that tracks it, where one is filed.
 
 - Steps after `secure-host` lose root but keep the job's tokens and an open
-  network; the agent job still needs `id-token: write` ([#503](https://github.com/cgwalters-forge/agentic-job/issues/503)).
+  network ([#503](https://github.com/cgwalters-forge/agentic-job/issues/503)).
+  The reusable workflow's agent job has no `id-token`; a composed agent
+  job and `review.yml`'s still register there and need it
+  ([the run token](docs/workflow.md#the-run-token)).
 - The egress proxy has no read allowlist: any host may be read ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)).
 - Names resolve for the sandbox user on hosted runners, so data can leave
   through DNS ([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).

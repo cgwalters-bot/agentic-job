@@ -656,7 +656,7 @@ jobs:
       issues: write # apply may post the allowed comments
       pull-requests: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # GitHub validates the skipped agent job's permission too
+      id-token: write # GitHub validates the skipped register job's permission too
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: board
@@ -675,7 +675,7 @@ jobs:
       issues: write # add_comment
       pull-requests: write # the status comment and reaction on the pull request e2e-event is for
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the agent job asks for it, for a proxy this run has none of
+      id-token: write # the register job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-full-${{ github.run_id }}
@@ -703,7 +703,7 @@ jobs:
       issues: write # add_comment
       pull-requests: write # the status comment and reaction on the pull request e2e-event is for
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the agent job asks for it, for a proxy this run has none of
+      id-token: write # the register job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-limit-${{ github.run_id }}
@@ -740,7 +740,7 @@ jobs:
       issues: write # add_comment
       pull-requests: write # the status comment and reaction on the pull request e2e-event is for
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the agent job asks for it, for a proxy this run has none of
+      id-token: write # the register job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-event-${{ github.run_id }}
@@ -893,7 +893,7 @@ jobs:
       issues: write # assign_to_user
       pull-requests: write # add_reviewer
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the agent job asks for it, for a proxy this run has none of
+      id-token: write # the register job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-people-${{ github.run_id }}
@@ -1082,7 +1082,7 @@ jobs:
       issues: write # link_sub_issue, hide_comment
       pull-requests: write # close_pull_request, and its comment
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the agent job asks for it, for a proxy this run has none of
+      id-token: write # the register job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-items-${{ github.run_id }}
@@ -1153,7 +1153,7 @@ jobs:
       pull-requests: write # the review comment, the reply and resolving the thread
       issues: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the agent job asks for it, for a proxy this run has none of
+      id-token: write # the register job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-threads-${{ github.run_id }}
@@ -1213,7 +1213,8 @@ jobs:
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
               ...context.repo, run_id: context.runId, filter: 'all', per_page: 100,
             });
-            const full = jobs.filter(job => job.name === 'e2e-full / agent')
+            // agentic-job.yml's agent job is agent.yml's, one call deeper.
+            const full = jobs.filter(job => job.name === 'e2e-full / agent / agent')
               .sort((a, b) => b.run_attempt - a.run_attempt);
             if (!full.length) throw new Error('missing hosted end-to-end agent job');
             const seconds = checkJobDuration(full[0], 900);

@@ -320,15 +320,21 @@ fn readme_caller_fits_its_bounds_and_configuration() {
             .nth(1)
             .unwrap()
             .lines()
-            .take_while(|line| line.trim().starts_with('#') || line.trim().contains(": "))
+            .take_while(|line| {
+                let line = line.trim();
+                line.starts_with('#') || [": read", ": write"].iter().any(|v| line.ends_with(v))
+            })
             .filter(|line| !line.trim().starts_with('#'))
             .map(|line| line.trim().to_owned())
             .collect();
         found.sort();
         found
     };
-    let agent_job = workflow.split("\n  agent:\n").nth(1).unwrap();
-    assert_eq!(permissions(caller), permissions(agent_job));
+    // The agent job's reads, and the register job's identity token.
+    let job = |name: &str| workflow.split(&format!("\n  {name}:\n")).nth(1).unwrap();
+    let mut asked = [permissions(job("agent")), permissions(job("register"))].concat();
+    asked.sort();
+    assert_eq!(permissions(caller), asked);
     assert!(!input("apply-environment").is_empty());
     let temp = tempfile::tempdir().unwrap();
     let allow = temp.path().join("allow.toml");

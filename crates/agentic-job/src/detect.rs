@@ -95,8 +95,7 @@ pub fn run(args: &Args) -> Result<Exit> {
                 std::process::id(),
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
             )),
-            api_key: None,
-            max_requests: None,
+            ..Identity::default()
         },
         retry,
         120,

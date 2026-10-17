@@ -17,6 +17,12 @@ inputs:
       a GitHub token with Copilot access, never the one passed as `github-token`. Only
       `agentic-job run` gets it, which keeps it from the agent; empty for a broker
     default: ""
+  inference-run-token:
+    description: >-
+      For `[inference] register = "github-oidc"`, the run token an earlier job's `agentic-job
+      register` got, so that this job needs no `id-token: write`; pass it as a secret, which keeps
+      it out of the log. The agent gets it as its own. Empty for `run` to register itself
+    default: ""
   mcp-token:
     description: >-
       For an `[mcp.NAME]` server of the configuration, its credential. Only `agentic-job run`
@@ -156,6 +162,8 @@ runs:
         # Likewise the MCP server's credential: `run`'s proxy for the
         # server puts it in place of the run's token.
         AGENTIC_JOB_MCP_TOKEN: ${{ inputs.mcp-token }}
+        # Taken over by `run` in place of a registration of its own.
+        AGENTIC_JOB_INFERENCE_RUN_TOKEN: ${{ inputs.inference-run-token }}
       run: |
         echo '::group::agent (condensed)'
         state=0

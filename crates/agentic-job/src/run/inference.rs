@@ -6,7 +6,11 @@
 //! (its INTERNALS.md, "Run tokens"): `POST /v1/runs`, then `GET` and
 //! `DELETE /v1/runs/self` with the token. `github-oidc` sends the job's
 //! identity token, which the sandbox user cannot get, so the agent cannot
-//! register a run of its own. `plain` sends a name and no proof, and is
+//! register a run of its own. Or an earlier job with the identity token
+//! registers (`agentic-job register`, [`super::register`]) and passes on
+//! the run token alone, which `run` takes over after checking the run is
+//! active: the agent's job then holds no identity token to get. `plain`
+//! sends a name and no proof, and is
 //! for a client with no identity token. `token-file` has no run API: the
 //! token is read from a file, nothing counts the run's requests and
 //! nothing ends it. `api-key` has no broker: `run` serves the proxy
@@ -48,6 +52,9 @@ const STATE_ACTIVE: &str = "active";
 /// binary knows of GitHub.
 pub const OIDC_URL_VAR: &str = "ACTIONS_ID_TOKEN_REQUEST_URL";
 pub const OIDC_TOKEN_VAR: &str = "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
+/// A `github-oidc` run token that `agentic-job register` got in an earlier
+/// job, so that the agent's job need not hold `id-token: write`.
+pub const RUN_TOKEN_VAR: &str = "AGENTIC_JOB_INFERENCE_RUN_TOKEN";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of an answer is read: a usage record is a few hundred bytes.
 const MAX_BODY_BYTES: u64 = 1 << 20;
@@ -84,6 +91,17 @@ impl Token {
             TOKEN_LEN.end()
         );
         Ok(Self(text.to_owned()))
+    }
+
+    /// The token an earlier job registered, from [`RUN_TOKEN_VAR`];
+    /// `None` when it is unset or empty.
+    pub fn from_env() -> Result<Option<Self>> {
+        match std::env::var(RUN_TOKEN_VAR) {
+            Ok(text) if !text.trim().is_empty() => Self::new(&text)
+                .with_context(|| format!("in {RUN_TOKEN_VAR}"))
+                .map(Some),
+            _ => Ok(None),
+        }
     }
 
     /// The token itself, for the one file it is written to and the
@@ -310,6 +328,9 @@ impl OidcRequest {
 pub struct Identity {
     /// For `github-oidc`.
     pub oidc: Option<OidcRequest>,
+    /// For `github-oidc`: the token of a run an earlier job registered,
+    /// which is taken in place of registering one with `oidc`.
+    pub run_token: Option<Token>,
     /// For `plain`: the run's identifier, from `--meta`.
     pub name: Option<String>,
     /// For `api-key`: the provider's key, as `run`'s environment has it.
@@ -659,6 +680,56 @@ fn identity_token(http: &ureq::Agent, request: &OidcRequest, audience: &str) -> 
     }
 }
 
+/// The proxy's own lifetime for a run may be shorter than the agent's
+/// timeout.
+fn warn_if_expires_early(record: &Record, timeout_s: u64) {
+    let deadline = unix_now().saturating_add(timeout_s);
+    if record.expires_at_unix().is_some_and(|at| at < deadline) {
+        eprintln!(
+            "warning: the run expires at the proxy before the agent's timeout of {timeout_s}s: \
+             its last model requests will be refused"
+        );
+    }
+}
+
+/// The record of the run an earlier job registered and passed on TOKEN
+/// of, which must still be active: a token the proxy does not know, or
+/// one whose run has ended, starts nothing.
+fn registered_earlier(http: &ureq::Agent, endpoint: &Endpoint, token: &Token) -> Attempt<Record> {
+    let at = format!("the inference proxy at {}", endpoint.url);
+    let answer = match send(
+        http,
+        Method::Get,
+        &format!("{}{RUN_SELF_PATH}", endpoint.url),
+        &[(AUTHORIZATION, &bearer(token.expose()))],
+    ) {
+        Ok(answer) => answer,
+        Err(err) => {
+            return Attempt::Again(format!(
+                "cannot reach {at} ({err}): is this machine on its network?"
+            ));
+        }
+    };
+    match (answer.status, answer.json().and_then(Record::parse)) {
+        (200, Some(record)) if record.state() == STATE_ACTIVE => Attempt::Done(record),
+        (200, Some(record)) => Attempt::Failed(format!(
+            "{at} has the run the earlier job registered as {:?}, not active: a re-run of the \
+             agent's job alone takes the token of a run that has ended; re-run all jobs",
+            record.state()
+        )),
+        (200, None) => Attempt::Failed(format!("{at} answered with no {RECORD_SCHEMA} record")),
+        (401, _) => Attempt::Failed(format!(
+            "{at} does not know the run token the earlier job registered (HTTP 401): it has \
+             ended or expired, or the proxy restarted; re-run all jobs"
+        )),
+        (status, _) if answer.transient() => Attempt::Again(format!("{at}: HTTP {status}")),
+        (status, _) => Attempt::Failed(format!(
+            "{at} refused the run token the earlier job registered (HTTP {status}: {})",
+            answer.detail()
+        )),
+    }
+}
+
 impl Run {
     /// Announces the run and gets its token, or reads the given one.
     ///
@@ -697,10 +768,21 @@ impl Run {
                 audience,
                 identity_proxy,
             } => {
+                if let Some(token) = &identity.run_token {
+                    let record =
+                        retry.run(stopped, |_| registered_earlier(&http, endpoint, token))?;
+                    eprintln!(
+                        "Took over run {} that an earlier job registered at the inference proxy",
+                        record.name()
+                    );
+                    warn_if_expires_early(&record, timeout_s);
+                    return Ok(run(token.clone(), Some(record), None));
+                }
                 let request = identity.oidc.as_ref().with_context(|| {
                     format!(
-                        "register = \"github-oidc\" needs {OIDC_URL_VAR} and {OIDC_TOKEN_VAR}: \
-                         the job needs the permission id-token: write"
+                        "register = \"github-oidc\" needs {OIDC_URL_VAR} and {OIDC_TOKEN_VAR}, \
+                         where the job has the permission id-token: write, or the run token an \
+                         earlier job's `agentic-job register` got, in {RUN_TOKEN_VAR}"
                     )
                 })?;
                 let http = identity_http(identity_proxy.as_deref(), &request.url)?;
@@ -788,15 +870,7 @@ impl Run {
                     record.name(),
                     endpoint.mode.register().as_str()
                 );
-                // The proxy's own lifetime for a run may be shorter than
-                // the agent's timeout.
-                let deadline = unix_now().saturating_add(timeout_s);
-                if record.expires_at_unix().is_some_and(|at| at < deadline) {
-                    eprintln!(
-                        "warning: the run expires at the proxy before the agent's timeout of \
-                         {timeout_s}s: its last model requests will be refused"
-                    );
-                }
+                warn_if_expires_early(record, timeout_s);
             }
             None => eprintln!(
                 "warning: the inference proxy registered the run without a {RECORD_SCHEMA} record"

@@ -4,7 +4,7 @@ self-hosted-runner:
 
 paths:
   # Match both repository paths and ingress's isolated temporary blobs.
-  '**/{apply,check,policy}.yml':
+  '**/{agentic-job,apply,check,policy}.yml':
     ignore:
       # GitHub exposes the executing reusable workflow's source in these job fields.
       - '^property "workflow_(repository|sha)" is not defined in object type \{check_run_id: number; container: .*; status: string\}$'

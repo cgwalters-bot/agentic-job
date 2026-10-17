@@ -36,6 +36,8 @@ pub enum Command {
     Run(run::Args),
     /// Check the provider's API key that `register = "api-key"` needs, before the host is secured
     CheckKey(run::key_check::Args),
+    /// Register a `github-oidc` run at the inference proxy for a later job's `run`, in a job that runs nothing else
+    Register(run::register::Args),
     /// Check handed-back outputs and patch against the policy
     Check(check::Args),
     /// Inspect checked proposals with a bounded model request before apply
@@ -68,6 +70,7 @@ impl Command {
             Self::SecureHost(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::CheckKey(args) => run::key_check::run(args),
+            Self::Register(args) => run::register::run(args),
             Self::Check(args) => check::run(args),
             Self::Detect(args) => crate::detect::run(args),
             Self::Event(args) => event::run(args),
@@ -113,6 +116,7 @@ mod tests {
         &["sandbox", "setup", "--config", "c.toml"],
         &["sandbox", "check"],
         &["check-key", "--config", "c.toml"],
+        &["register", "--config", "c.toml", "--output", "out"],
         &[
             "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out", "out",
         ],

@@ -81,8 +81,10 @@ removes the protection with `hidepid=0` and `hidepid=1` in CI's hosted Ubuntu
 **RC-014 — Forge read credential.** A sandboxed producer MAY hold one GitHub
 token, as `GH_TOKEN`, and it MUST NOT be able to write: the producer can leak
 it. The reusable workflow's agent job MUST request only `contents`, `issues`,
-`pull-requests` and `actions` read, plus `id-token: write` for inference
-registration, and pass only that job token unless the caller turns reads off.
+`pull-requests` and `actions` read, and no `id-token`: a job before it
+holds that permission alone and registers the run for inference, passing on
+only the run token, as a secret of the agent's job. It MUST pass only that
+job token unless the caller turns reads off.
 The standalone run action's supplied classic token naming any scope
 but `read:*` and `user:email` MUST be refused before the agent starts; job,
 App and fine-grained tokens name no scopes and are the caller's to keep
@@ -652,8 +654,8 @@ runner user, outside the sandbox and without sudo, after the hand-back was
 uploaded. They MAY read what the agent left on the machine and MUST treat it
 as hostile: not execute it, nor hand it to a credentialed step. A caller's
 own agent job MUST grant only `contents`, `issues`, `pull-requests` and
-`actions` read, plus `id-token: write`, as RC-014 requires of the reusable
-workflow's. That is the caller's obligation, kept by the job's own
+`actions` read, plus `id-token: write` where the job registers the run
+itself rather than taking a run token from a job before it. That is the caller's obligation, kept by the job's own
 `permissions` block and by nothing here: `run` gives the agent whichever
 token it is passed, the job's included, and cannot see what a job token was
 granted.

@@ -16,8 +16,10 @@ use std::time::{Duration, Instant};
 
 use agentic_job::config::Register;
 use agentic_job::run::inference::{
-    Ended, Endpoint, Identity, Mode, NEVER, OidcRequest, RECORD_SCHEMA, Retry, Run, Token,
+    Ended, Endpoint, Identity, Mode, NEVER, OIDC_TOKEN_VAR, OIDC_URL_VAR, OidcRequest,
+    RECORD_SCHEMA, Retry, Run, Token,
 };
+use agentic_job::run::register::DEBUG_VAR;
 use support::{AUDIENCE, Fault, Proxy, REQUEST_BEARER};
 
 const TIMEOUT_S: u64 = 600;
@@ -50,8 +52,7 @@ fn job(proxy: &Proxy) -> Identity {
             bearer: REQUEST_BEARER.to_owned(),
         }),
         name: Some(NAME.to_owned()),
-        api_key: None,
-        max_requests: None,
+        ..Identity::default()
     }
 }
 
@@ -110,6 +111,132 @@ fn a_run_registers_with_the_jobs_identity_token() {
     assert_eq!(proxy.run_states(), ["finished"]);
     // Ending it again is harmless and gives the same record.
     assert_eq!(run.end(QUICK).unwrap(), Ended::Ended(Some(last)));
+}
+
+/// `github-oidc` registered by an earlier job (`agentic-job register`):
+/// the agent's job has no identity token, only the run token, and takes
+/// the run over once the proxy says it is active. It is counted and ended
+/// as its own; a token whose run has ended, or that the proxy does not
+/// know, starts nothing.
+#[test]
+fn a_run_an_earlier_job_registered_is_taken_over() {
+    let proxy = Proxy::start();
+    let earlier = register(&proxy, oidc_mode()).unwrap();
+    let given = Identity {
+        run_token: Some(earlier.token().clone()),
+        ..Identity::default()
+    };
+    let take_over = || {
+        Run::register(
+            &endpoint(&proxy, oidc_mode()),
+            &given,
+            QUICK,
+            TIMEOUT_S,
+            NEVER,
+        )
+    };
+    let run = take_over().unwrap();
+    assert_eq!(run.token(), earlier.token());
+    assert_eq!(run.register_mode(), Register::GithubOidc);
+    assert_eq!(
+        proxy.seen(),
+        ["GET /oidc", "POST /v1/runs", "GET /v1/runs/self"]
+    );
+    assert_eq!(proxy.run_states(), ["active"]);
+    assert_eq!(run.counted_at_registration(), Some(0));
+    proxy.serve_requests(2);
+    assert_eq!(run.usage().unwrap().model_requests(), Some(2));
+    assert!(matches!(run.end(QUICK).unwrap(), Ended::Ended(Some(_))));
+    assert!(proxy.live_tokens().is_empty());
+
+    // A re-run of the agent's job alone gets the ended run's token.
+    let err = error(take_over());
+    assert!(err.contains("\"finished\", not active"), "{err}");
+    proxy.restart();
+    let err = error(take_over());
+    assert!(err.contains("does not know the run token"), "{err}");
+    // Neither asked for an identity token or registered anew.
+    assert_eq!(
+        proxy
+            .seen()
+            .iter()
+            .filter(|r| r.starts_with("POST") || r.contains("oidc"))
+            .count(),
+        2
+    );
+}
+
+/// `agentic-job register`, as the workflow's register job runs it: the
+/// run token goes to the output file alone, never to its stdout or
+/// stderr; another mode registers nothing and writes nothing; and without
+/// the job's identity token it fails rather than write an empty token.
+/// With step debug logging, where the runner would log the output's
+/// value, it refuses before it registers.
+#[test]
+fn the_register_command_writes_the_token_to_its_output_alone() {
+    let proxy = Proxy::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (config, output) = (dir.path().join("config.toml"), dir.path().join("output"));
+    let command = |register: &str, oidc: bool, debug: Option<&str>| {
+        std::fs::write(
+            &config,
+            format!(
+                "[agent]\nname = \"claude\"\n[limits]\ntimeout-minutes = 10\nuncapped = true\n\
+                 [inference]\nurl = \"{}\"\n{register}\n",
+                proxy.url
+            ),
+        )
+        .unwrap();
+        std::fs::write(&output, "earlier=1\n").unwrap();
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-job"));
+        command
+            .args(["register", "--config"])
+            .arg(&config)
+            .arg("--output")
+            .arg(&output)
+            .env_remove(OIDC_URL_VAR)
+            .env_remove(OIDC_TOKEN_VAR)
+            .env_remove(DEBUG_VAR);
+        if oidc {
+            command
+                .env(OIDC_URL_VAR, proxy.oidc_url())
+                .env(OIDC_TOKEN_VAR, REQUEST_BEARER);
+        }
+        if let Some(debug) = debug {
+            command.env(DEBUG_VAR, debug);
+        }
+        let got = command.output().unwrap();
+        let printed =
+            String::from_utf8(got.stdout).unwrap() + &String::from_utf8(got.stderr).unwrap();
+        (
+            got.status.success(),
+            printed,
+            std::fs::read_to_string(&output).unwrap(),
+        )
+    };
+    let oidc = format!("register = \"github-oidc\"\naudience = \"{AUDIENCE}\"");
+    let (passed, printed, written) = command(&oidc, true, None);
+    assert!(passed, "{printed}");
+    let token = proxy.live_tokens().pop().unwrap();
+    assert_eq!(written, format!("earlier=1\nrun-token={token}\n"));
+    assert!(!printed.contains(&token), "{printed}");
+    assert!(!printed.contains(REQUEST_BEARER), "{printed}");
+
+    let (passed, printed, written) = command(&oidc, false, None);
+    assert!(!passed && printed.contains("id-token: write"), "{printed}");
+    assert_eq!(written, "earlier=1\n");
+    for debug in ["1", "true"] {
+        let (passed, printed, written) = command(&oidc, true, Some(debug));
+        assert!(!passed && printed.contains("debug logging"), "{printed}");
+        assert_eq!(written, "earlier=1\n");
+    }
+    let (passed, printed, written) = command("register = \"plain\"", true, None);
+    assert!(
+        passed && printed.contains("Nothing to register"),
+        "{printed}"
+    );
+    assert_eq!(written, "earlier=1\n");
+    assert_eq!(proxy.run_states(), ["active"]);
 }
 
 /// A proxy that is restarting is tried again, with the same identity
@@ -305,9 +432,7 @@ fn an_identity_proxy_carries_only_a_tunnel_to_the_ci_system() {
             url: url.to_owned(),
             bearer: REQUEST_BEARER.to_owned(),
         }),
-        name: None,
-        api_key: None,
-        max_requests: None,
+        ..Identity::default()
     };
     let register = |identity: &Identity| {
         error(Run::register(
@@ -363,8 +488,7 @@ fn a_run_needs_what_its_mode_sends() {
             bearer: "not-the-jobs".to_owned(),
         }),
         name: Some("a name".to_owned()),
-        api_key: None,
-        max_requests: None,
+        ..Identity::default()
     };
     let err = error(Run::register(
         &endpoint(&proxy, oidc_mode()),

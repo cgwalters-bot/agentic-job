@@ -43,8 +43,8 @@ jobs:
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
-      # The agent job asks for it, to announce the run to the inference
-      # proxy.
+      # The register job asks for it, to announce the run to the inference
+      # proxy; the agent job gets none.
       id-token: write
       # The agent job's GitHub reads, with the reads of the three below.
       actions: read

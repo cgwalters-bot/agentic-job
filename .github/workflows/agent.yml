@@ -1,0 +1,134 @@
+# The agent job of agentic-job.yml, in a file of its own so that the run
+# token of the register job before it arrives as a secret: GitHub masks a
+# secret of a called workflow in every log of its jobs, and nothing but a
+# call's `secrets:` can make a value from another job one
+# (docs/workflow.md#the-run-token). Called only by agentic-job.yml, at its
+# own commit.
+name: agentic-job agent
+
+on:
+  workflow_call:
+    inputs:
+      policy:
+        description: >-
+          `toJSON(needs.policy.outputs)` of the policy.yml call in this run: the caller's commit,
+          the source of the binary and the trusted upload IDs
+        type: string
+        required: true
+      runner:
+        description: The runner the agent runs on, as JSON
+        type: string
+        required: true
+      github-reads:
+        description: Give the agent job's own read-only GitHub token as GH_TOKEN
+        type: boolean
+        required: true
+    secrets:
+      # Only the agent job's `run` step and its check before secure-host
+      # get it, and the sandbox user never does (agentic-job.yml).
+      INFERENCE_API_KEY:
+        required: false
+      # Only the agent job's `run` step gets it (agentic-job.yml).
+      MCP_TOKEN:
+        required: false
+      # The register job's output: the broker's run token for
+      # `github-oidc`, empty for every other mode. Only `run` gets it, and
+      # gives the agent this token, which is the agent's to use anyway.
+      INFERENCE_RUN_TOKEN:
+        required: false
+    outputs:
+      exit:
+        value: ${{ jobs.agent.outputs.exit }}
+      over-budget:
+        value: ${{ jobs.agent.outputs.over-budget }}
+      secret-at:
+        value: ${{ jobs.agent.outputs.secret-at }}
+      safe-outputs-artifact-id:
+        value: ${{ jobs.agent.outputs.safe-outputs-artifact-id }}
+      session-endpoint:
+        value: ${{ jobs.agent.outputs.session-endpoint }}
+
+jobs:
+  agent:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 360
+    # The job token the agent gets for GitHub reads (`gh`, the API): read
+    # only, so that one it leaks cannot write. A caller must grant at least
+    # these to the call, or GitHub refuses the whole workflow. No
+    # `id-token`: the register job registered the run, and with it any
+    # step here, or anything that became the runner's user, could mint
+    # identity tokens for any audience.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    outputs:
+      exit: ${{ steps.run.outputs.exit }}
+      over-budget: ${{ steps.run.outputs.over-budget }}
+      secret-at: ${{ steps.run.outputs.secret-at }}
+      safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      # With `session`: where the operator attaches; also in the job's
+      # summary from when the agent starts.
+      session-endpoint: ${{ steps.run.outputs.session-endpoint }}
+    # The same steps a caller-owned agent job has, with no steps of the
+    # caller's between prepare and secure-host or after run.
+    steps:
+      # The calling repository at the policy job's commit, for the setup
+      # script the configuration names.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(inputs.policy).ref }}
+          persist-credentials: false
+      # The actions from the policy job's own repository and commit, the
+      # binary's: without them the checkout would take the caller's.
+      - name: The policy call's source repository and commit
+        env:
+          SOURCE_REPOSITORY: ${{ fromJSON(inputs.policy).source-repository }}
+          SOURCE_SHA: ${{ fromJSON(inputs.policy).source-sha }}
+        run: |
+          echo "$SOURCE_REPOSITORY at $SOURCE_SHA"
+          [[ "$SOURCE_REPOSITORY" == */* && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(inputs.policy).source-repository }}
+          ref: ${{ fromJSON(inputs.policy).source-sha }}
+          path: .agentic-job-source
+          persist-credentials: false
+      - uses: ./.agentic-job-source/prepare # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          binary-artifact-id: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          policy-artifact-id: ${{ fromJSON(inputs.policy).policy-artifact-id }}
+      # With `api-key`, the key checked with the provider now, in seconds,
+      # rather than by `run` after the minutes of secure-host; nothing to
+      # do otherwise. Only the binary policy's commit built gets it, before
+      # anything of the agent's is on the machine, and never prints it.
+      - name: Check the inference API key
+        env:
+          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
+        run: agentic-job check-key --config .agentic-job/config.toml
+      # Where the configuration names an inference proxy: a TCP connection
+      # to it as the runner's user, before setup, so that a runner off the
+      # proxy's network fails here and says so rather than in a probe of
+      # setup's rules. It sends no HTTP request, run token or model
+      # credential; a configuration without a proxy and the scripted agent
+      # are not checked.
+      - name: Check inference proxy reachability
+        run: agentic-job secure-host inference .agentic-job/config.toml
+      # `sandbox setup`, which ends by taking root from this job, and
+      # `sandbox check`, with the binary and configuration of the policy
+      # job. Every step after it is this file's, and none of them has root.
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          binary: /usr/local/bin/agentic-job
+          config: .agentic-job/config.toml
+      # It takes secure-host's passing sandbox checks from the record they
+      # left in this job, and uploads before reporting a limit.
+      - id: run
+        timeout-minutes: 340
+        uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          github-token: ${{ inputs.github-reads && github.token || '' }}
+          inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
+          inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}
+          mcp-token: ${{ secrets.MCP_TOKEN }}

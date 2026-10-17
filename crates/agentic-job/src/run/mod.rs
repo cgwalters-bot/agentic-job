@@ -47,6 +47,7 @@ pub mod launch;
 pub mod log;
 pub mod mcp;
 pub mod probe;
+pub mod register;
 mod session_markdown;
 pub mod summary;
 pub mod upload;
@@ -476,6 +477,7 @@ fn secrets(
         .map(|token| token.expose().to_owned())
         .into_iter()
         .chain(identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
+        .chain(identity.run_token.iter().map(|t| t.expose().to_owned()))
         .chain(identity.api_key.iter().map(|key| key.trim().to_owned()))
         .chain(mcp.into_iter().flat_map(|(token, credential)| {
             [token.expose().to_owned(), credential.trim().to_owned()]
@@ -549,12 +551,17 @@ impl Plan {
         upload::refuse_earlier_results(&args.out)?;
         // Asked for only where it is used: nothing else holds what lets
         // a process get the job's identity token.
-        let oidc = matches!(
+        let github_oidc = matches!(
             endpoint.as_ref().map(|endpoint| &endpoint.mode),
             Some(inference::Mode::GithubOidc { .. })
-        )
-        .then(OidcRequest::from_env)
-        .flatten();
+        );
+        let oidc = github_oidc.then(OidcRequest::from_env).flatten();
+        // Or the token of the run an earlier job registered with it.
+        let run_token = if github_oidc {
+            inference::Token::from_env()?
+        } else {
+            None
+        };
         // Likewise the provider's key, which only this process holds.
         let api_key = matches!(
             endpoint.as_ref().map(|endpoint| &endpoint.mode),
@@ -588,6 +595,7 @@ impl Plan {
             watch,
             identity: Identity {
                 oidc,
+                run_token,
                 name: run_name(&meta),
                 api_key,
                 max_requests,

@@ -43,9 +43,13 @@ test('workflow refuses discussions before routing and gates agent and notificati
   assert.match(workflow, /ref: \$\{\{ job.workflow_sha \}\}\n          path: activation-source/);
   // An agent job needs the whole policy call, which ends after activate
   // and notify, and goes on only if that call succeeded.
-  for (const file of ['agentic-job.yml', 'example-compose.yml']) {
-    const agent = fs.readFileSync(`.github/workflows/${file}`, 'utf8').split('\n  agent:\n')[1].split('\n    steps:\n')[0];
-    assert.match(agent, /^    needs: policy\n    (#[^\n]*\n    )*if: \$\{\{ [^\n]*needs.policy.outputs.admitted == 'true' \}\}$/m, file);
+  // In agentic-job.yml so does the register job before it, which the
+  // agent job then also needs.
+  for (const [file, name, needs] of [['agentic-job.yml', 'register', 'policy'],
+    ['agentic-job.yml', 'agent', '[policy, register]'], ['example-compose.yml', 'agent', 'policy']]) {
+    const agent = fs.readFileSync(`.github/workflows/${file}`, 'utf8').split(`\n  ${name}:\n`)[1].split(/\n  (?=[-\w]+:\n)/)[0];
+    assert.ok(agent.startsWith(`    needs: ${needs}\n`), `${file} ${name}`);
+    assert.match(agent, /^    needs: [^\n]+\n    (#[^\n]*\n    )*if: \$\{\{ [^\n]*needs.policy.outputs.admitted == 'true' \}\}$/m, file);
     assert.doesNotMatch(agent, /always\(\)|cancelled\(\)/, file);
   }
 });

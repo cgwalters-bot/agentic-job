@@ -118,9 +118,56 @@ Only the workflow's pinned source is checked out in these write-capable jobs,
 with persisted credentials disabled; no agent-produced code is executed.
 
 `policy` and `check` have `contents: read`; `agent` has `contents`,
-`issues`, `pull-requests` and `actions` read and `id-token: write`, not
-repository write permissions, and hands its token to the agent for
-[GitHub reads](#github-reads-from-the-agent).
+`issues`, `pull-requests` and `actions` read, not repository write
+permissions and no `id-token`, and hands its token to the agent for
+[GitHub reads](#github-reads-from-the-agent). `register` has
+`id-token: write` alone ([the run token](#the-run-token)).
+
+## The run token
+
+Under `inference-register: github-oidc` the run registers at the
+inference broker with the job's identity token. With `id-token: write`
+any step of a job, and anything that becomes the runner's user, can
+mint identity tokens for any audience, not only the broker's: a cloud
+whose trust policy admits this repository would take them
+([secure-host.md](secure-host.md#one-trust-level-for-the-rest-of-the-job)).
+So `agentic-job.yml` registers in a job of its own, `register`, before
+the agent's. It has `id-token: write` and no other permission, checks
+out nothing, and runs only the policy job's binary
+(`agentic-job register`), on the agent's runner, which is on the
+broker's network as the agent must be. What leaves it is the broker's
+run token: narrow (inference for this run), capped by the broker,
+expiring, and ended by `run` when the agent is done. The agent's job,
+[`agent.yml`](../.github/workflows/agent.yml), has no `id-token`; `run`
+takes the run over after `GET /v1/runs/self` says it is active. Other
+modes, and no proxy at all, write no token, and `run` registers as
+before.
+
+The token passes as a job output. GitHub has no narrower channel: it
+drops a job output that is masked, so the register job cannot mask it,
+and an artifact or a cache entry could be read by more than this run's
+jobs (an artifact by anyone who can read the repository). The output is
+kept with the run and is read in one place: `agentic-job.yml` gives it
+to `agent.yml` as the secret `INFERENCE_RUN_TOKEN`. That is why the
+agent job is a called workflow: a called workflow's secrets are masked
+in every log of its jobs, and a value from another job becomes one only
+through a call's `secrets:`. A step that took it from `needs` directly
+would print it in its log, with its other inputs. With step debug
+logging, as on a re-run with debug logging, the runner logs each output
+it sets, value included, in the register job's log, so
+`agentic-job register` then refuses before it registers. Within the agent job
+the token reaches `run` alone, and the agent gets it as its own, as it
+always did.
+
+What is left: a run whose agent job never starts stays registered until
+the broker expires it; re-running the agent's job alone hands it the
+token of a run that has ended, which `run` refuses, so re-run all jobs.
+A [composed agent job](#the-pieces-and-an-agent-job-of-your-own) and
+[review.yml](../.github/workflows/review.yml)'s still register in the
+agent's job and keep `id-token: write` there; a composed caller can do
+as `agentic-job.yml` does with a job running `agentic-job register` and
+its agent job in a workflow it calls, passing `run` the secret as
+`inference-run-token`.
 
 ## Context repositories
 
@@ -310,7 +357,8 @@ takes no `agent`.
 
 **Your agent job's permissions** are yours to keep read only: grant
 it `contents`, `issues`, `pull-requests` and `actions` read and
-`id-token: write`, as above, and nothing more. This is your
+`id-token: write`, as above, and nothing more (or no `id-token`, with
+the run registered in a job before it: [the run token](#the-run-token)). This is your
 obligation: declare that `permissions` block on the job. `run` gives
 the agent the token you pass, your job's included, and cannot see
 what a job token was granted; a job that can write gives the agent a
@@ -478,9 +526,10 @@ a merge queue. The queue rollout below gives up that enforcement; it is a
 trust-boundary change, not just a capacity change.
 
 The run action reports setup seconds from GitHub's job start to the first ACP
-`session/prompt` dispatch, including checkout, hardening, clone and registration.
+`session/prompt` dispatch, including checkout, hardening, clone and registration
+(or the takeover of the run the register job registered).
 If the agent never receives a task it reports that timing is unavailable.
-CI asserts that the hosted `e2e-full / agent` job completes within 900 seconds;
+CI asserts that the hosted `e2e-full / agent / agent` job completes within 900 seconds;
 this generous regression bound is not the under-one-minute setup goal.
 Job start and completion use read-only Actions metadata; the first task timestamp
 comes from the harness's outgoing transcript, not an agent-provided timestamp.
@@ -663,7 +712,7 @@ jobs:
       issues: write # apply may post the allowed comments
       pull-requests: read # the agent job's GitHub reads
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # GitHub validates the skipped agent job's permission too
+      id-token: write # GitHub validates the skipped register job's permission too
     with:
       id: board
       repo: OWNER/REPO
@@ -683,8 +732,8 @@ own explicit bounds entry. Set `max-outputs` no higher than your bounds file's
 `max_outputs` (the workflow default is 3).
 
 Keep the permissions above, or configure `apply-environment` as below and
-grant `issues: read`. Even proposals-only callers need `id-token: write`
-and the agent job's reads: GitHub validates the reusable workflow's
+grant `issues: read`. Even proposals-only callers need the register
+job's `id-token: write` and the agent job's reads: GitHub validates the reusable workflow's
 permission requests before deciding which jobs to skip. No OIDC token is requested in proposals mode.
 CI's `e2e-proposals` runs this noop producer and call without a sandbox or model.
 The artifact name selects untrusted data only; it does not select the policy,
@@ -903,11 +952,13 @@ in the calling repository.
 
 **Permissions.** The call needs `contents`, `issues`, `pull-requests`
 and `actions` read, and `id-token: write`: the agent job asks for the
-reads [for the agent](#github-reads-from-the-agent), and for the identity
-token, for the proxy, whether or not the run uses one.
+reads [for the agent](#github-reads-from-the-agent), and the register
+job for the identity token, for the proxy, whether or not the run uses
+one ([the run token](#the-run-token)).
 GitHub refuses the whole call when any of them is missing, even with
-`github-reads: false`. The policy, agent and check jobs take no more than
-that. Activate, notify, conclude and apply name no
+`github-reads: false`. The policy, register, agent and check jobs take
+no more than that, and only register and check's detector the identity
+token. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `issues: write` (comments, issues and
