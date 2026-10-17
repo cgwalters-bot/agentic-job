@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-job"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
