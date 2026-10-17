@@ -71,8 +71,11 @@ jobs:
       review-task: workflow/review.md
       task: ''
       kind: analysis
-      outputs: add_comment,noop
-      max-outputs: '1'
+      # The verdict comment or a noop, and up to ten inline findings beside
+      # a verdict, which check holds to the triggering pull request: submit
+      # puts them in its review, apply in its comment (docs/review.md).
+      outputs: add_comment,noop,create_pull_request_review_comment
+      max-outputs: '11'
       notify: none
       # Any role, forks included, for the automatic events (the `if:` above
       # narrows them to owner, members, collaborators and listed bots); `/review` from
@@ -235,7 +238,9 @@ jobs:
   # accepted output from check's upload in this run, never text read back
   # from the forge, and submitReview checks it again against the verdict
   # check set. An APPROVE is submitted whatever files change, the review's
-  # own included (#540). When nothing is submitted, apply posts the comment.
+  # own included (#540). Inline findings whose lines are in the head's diff
+  # are the review's comments, the rest are in its body. When nothing is
+  # submitted, apply posts the comment, with every inline finding in it.
   submit:
     needs: [policy, agent, check]
     if: >-
@@ -244,7 +249,9 @@ jobs:
           contains(fromJSON('["APPROVE", "CHANGES"]'), needs.check.outputs.verdict) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
-    # `contents: read` only to check out the pinned source.
+    # `contents: read` only to check out the pinned source; the pull
+    # request's files, to place inline comments, are read with
+    # `pull-requests`.
     permissions:
       contents: read
       pull-requests: write

@@ -39,6 +39,13 @@ mistaken for a review of a newer push.
 Return exactly one safe output: add_comment on the triggering pull request,
 or noop if no useful review can be made. Set only type and body on add_comment;
 do not set item_number or other routing fields: the workflow fixes the target.
+With an add_comment, and never with a noop, you may also return up to ten
+create_pull_request_review_comment outputs, one per finding that has a line
+in the diff: path, line (with start_line for a range), side LEFT only for a
+removed line, and body with the finding and its severity. Set no
+pull_request_number or repo. They go into the same review as the verdict,
+or into its comment, so keep each finding once: in the comment or inline,
+not both.
 Report every finding you can see in this one pass, not only the first.
 Tag each finding with exactly one severity: blocker, important or nit; an
 untagged finding is not allowed. A blocker makes the change wrong for its

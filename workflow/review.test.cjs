@@ -78,21 +78,34 @@ test('review admission narrows, never overrides, event authorization', () => {
 });
 
 test('review request has no branch, alternate target/token or notification authority', () => {
-  const env = { EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop',
-    MAX_OUTPUTS: '1', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
+  const env = { EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop,create_pull_request_review_comment',
+    MAX_OUTPUTS: '11', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
     OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
   checkRequest(env);
+  // The verdict alone, as CI's e2e-review asks with the base's bounds.
+  checkRequest({ ...env, OUTPUTS: 'add_comment,noop', MAX_OUTPUTS: '1' });
+  assert.throws(() => checkRequest({ ...env, OUTPUTS: 'add_comment,noop', MAX_OUTPUTS: '11' }), /Review requires/);
+  // review.yml asks for what checkRequest takes, and its bounds allow it.
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
+  assert.match(workflow, new RegExp(`\\n      outputs: ${env.OUTPUTS}\\n      max-outputs: '${env.MAX_OUTPUTS}'\\n`));
+  for (const bounds of ['review.toml', 'review-command.toml']) {
+    const text = fs.readFileSync(path.join(__dirname, bounds), 'utf8');
+    assert.match(text, /\nmax_outputs = 11\n/, bounds);
+    assert.match(text, /\ncreate_pull_request_review_comment = \{ max = 10 \}\n/, bounds);
+  }
   for (const AGENT of ['fake', 'claude', 'opencode', 'vibe']) {
     checkRequest({ ...env, AGENT });
   }
   for (const AGENT of ['', 'unknown']) {
     assert.throws(() => checkRequest({ ...env, AGENT }), /supported agent/);
   }
-  for (const [key, value] of Object.entries({ EVENT: 'false', KIND: 'branch',
-    OUTPUTS: 'all', MAX_OUTPUTS: 'max', NOTIFY: 'comment', TARGET: '*',
-    REPO: 'other/repo', OUTPUT_REPO: 'other/repo', APPLY_ENVIRONMENT: 'write',
-    APPLY_PARTIAL: 'true' })) {
-    assert.throws(() => checkRequest({ ...env, [key]: value }), /Review requires/);
+  for (const [key, value] of [['EVENT', 'false'], ['KIND', 'branch'],
+    ['OUTPUTS', 'all'], ['MAX_OUTPUTS', 'max'], ['NOTIFY', 'comment'], ['TARGET', '*'],
+    // Room for more than ten inline comments, or the two requests mixed.
+    ['MAX_OUTPUTS', '12'], ['MAX_OUTPUTS', '1'], ['OUTPUTS', 'add_comment,noop'],
+    ['REPO', 'other/repo'], ['OUTPUT_REPO', 'other/repo'], ['APPLY_ENVIRONMENT', 'write'],
+    ['APPLY_PARTIAL', 'true']]) {
+    assert.throws(() => checkRequest({ ...env, [key]: value }), /Review requires/, `${key}=${value}`);
   }
 });
 
@@ -146,6 +159,67 @@ test('only a single verdict comment on this PR or noop passes', () => {
   for (const items of [[], [{ type: 'noop' }, { type: 'noop' }]]) {
     assert.throws(() => checkOutputs({ items }, 147), /exactly one/);
   }
+});
+
+test('inline comments come with a verdict comment, bounded and on this pull request', () => {
+  const verdict = { type: 'add_comment', body: 'VERDICT: CHANGES\nOne blocker.' };
+  const inline = (fields = {}) => ({ type: 'create_pull_request_review_comment', path: 'src/a.rs', line: 3, body: 'blocker: x', ...fields });
+  const check = (...comments) => checkOutputs({ items: [verdict, ...comments] }, 147);
+  for (const [name, comments, ok] of [
+    ['one', [inline()], true],
+    ['after the verdict or before it', [inline(), inline({ line: '4' })], true],
+    ['a range on the base side', [inline({ start_line: 1, side: 'LEFT' })], true],
+    ['a range of one line', [inline({ start_line: 3 })], true],
+    ['this pull request', [inline({ pull_request_number: 147 }), inline({ pull_request_number: '147' })], true],
+    ['ten', Array(10).fill(inline()), true],
+    ['eleven', Array(11).fill(inline()), false],
+    ['another pull request', [inline({ pull_request_number: 148 })], false],
+    ['another repository', [inline({ repo: 'o/other' })], false],
+    ['a reply route', [inline({ in_reply_to: 1 })], false],
+    ['no body', [inline({ body: ' ' })], false],
+    ['no path', [inline({ path: '' })], false],
+    ['a path with a newline', [inline({ path: 'a\n@user' })], false],
+    ['a long path', [inline({ path: 'a'.repeat(1025) })], false],
+    ['line zero', [inline({ line: 0 })], false],
+    ['a fractional line', [inline({ line: 1.5 })], false],
+    ['a range ending before it starts', [inline({ start_line: 4 })], false],
+    ['another side', [inline({ side: 'right' })], false],
+    ['folded past the bound', [inline({ body: 'x'.repeat(60000) })], false],
+  ]) {
+    if (ok) assert.equal(check(...comments), 'CHANGES', name);
+    else assert.throws(() => check(...comments), undefined, name);
+  }
+  // A noop is posted nowhere: its findings would be lost.
+  assert.throws(() => checkOutputs({ items: [{ type: 'noop' }, inline()] }, 147), /not a noop/);
+  assert.throws(() => checkOutputs({ items: [inline()] }, 147), /exactly one/);
+});
+
+// apply.yml's fold step, when nothing was submitted.
+test('apply posts inline findings in the verdict comment, not beside it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-fold-'));
+  try {
+    const file = path.join(dir, 'agent_output.json');
+    const items = [{ type: 'create_pull_request_review_comment', path: 'src/[a]_@b.rs', line: 3, body: 'nit: one' },
+      { type: 'add_comment', body: 'VERDICT: APPROVE\nFindings' },
+      { type: 'create_pull_request_review_comment', path: 'b.rs', line: 9, start_line: 7, side: 'LEFT', body: 'important: two' }];
+    fs.writeFileSync(file, JSON.stringify({ items, errors: [] }));
+    execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'fold', file]);
+    const folded = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(folded, { items: [{ type: 'add_comment', body: 'VERDICT: APPROVE\nFindings\n\n### Inline findings\n' +
+      '\n**src/\\[a\\]\\_\\@b.rs, line 3**\n\nnit: one\n' +
+      '\n**b.rs, lines 7-9 of the base**\n\nimportant: two\n' }], errors: [] });
+    assert.equal(checkOutputs(folded, 147), 'APPROVE');
+    // Without inline comments the file is left as it is.
+    fs.writeFileSync(file, '{"items": [{"type": "noop"}]}');
+    execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'fold', file]);
+    assert.equal(fs.readFileSync(file, 'utf8'), '{"items": [{"type": "noop"}]}');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const apply = fs.readFileSync(path.join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
+  const fold = apply.indexOf('review.cjs fold "$GH_AW_TMP/agent_output.json"');
+  assert.ok(fold !== -1 && fold < apply.indexOf('- name: Mark what a partial run opens or posts') &&
+    fold < apply.indexOf('- name: Leave out what an earlier attempt applied'));
 });
 
 test('the review status maps each run to one state, only for the one open pull request', () => {
@@ -286,8 +360,8 @@ test('merge policy comes from one strict base file, person by default', () => {
 
 test('the task command appends the base merge policy to the task', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-task-merge-'));
-  const env = { ...process.env, EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop',
-    MAX_OUTPUTS: '1', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
+  const env = { ...process.env, EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop,create_pull_request_review_comment',
+    MAX_OUTPUTS: '11', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
     OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
   const task = () => execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'task', 'task.md'],
     { cwd: dir, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });

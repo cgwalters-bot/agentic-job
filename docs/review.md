@@ -85,6 +85,26 @@ field that would retarget the comment. A redundant `item_number` equal to the
 fixed pull request number is accepted; other routing fields remain refused.
 The prompts ask for only `type` and `body`.
 
+### Inline findings
+
+Next to a verdict comment, never a noop, `review.yml`'s agent may return up
+to ten `create_pull_request_review_comment` outputs, one per finding with a
+line: the bounds list the type with `max = 10` and `max_outputs = 11`.
+Check holds each to the triggering pull request with the rules every
+review comment has ([safe outputs](safe-outputs.md#review-comments-on-the-pull-request));
+`checkOutputs` also refuses a `repo`, any field a review comment cannot
+carry, a path with control characters or over 1024 characters, a range
+that ends before it starts, and a verdict comment whose body would exceed
+60000 characters with every inline finding folded in. That bound keeps
+whichever body is posted under GitHub's 65536-character limit.
+With real reviews they are the review's comments, as above. Otherwise,
+or when nothing is submitted, apply folds them into the comment's body,
+under "Inline findings" after the verdict, each under its path and line,
+and posts no review comment: gh-aw's handler would put them in a second
+review, of event `COMMENT`, apart from the verdict. A path is shown with Markdown
+characters escaped, as it is the agent's and gh-aw does not sanitize it.
+Dispatch's `review` profile does not offer them.
+
 Each finding is tagged blocker, important or nit, and only a blocker earns
 CHANGES: a finding that makes the change wrong for its main purpose, loses
 data, or opens a security hole with a concrete path the reviewer can state,
@@ -152,8 +172,18 @@ the run, where a runner gives no job ID) from Actions' context, never the
 review text, and gh-aw's run marker (`<!-- gh-aw-agentic-workflow: ... run: URL -->`), as its
 handler ends a comment. As with gh-aw's footer, a body that leaves `<details>`
 or a code fence open can fold the footer away or show it as code. A comment
-apply posts instead keeps gh-aw's own footer, which links the run. Inline findings remain
-file/line citations in the body; no inline review comments are generated.
+apply posts instead keeps gh-aw's own footer, which links the run.
+
+Inline findings ([below](#inline-findings)) are the submitted review's
+own comments, in the same `pulls.createReview` call, so they belong to the
+approval or change request rather than standing beside it. Each needs its
+path and line, and a range's first line in the same hunk, in the diff of
+the head `submit` just read; one that is not, or whose file the API shows
+no patch for, goes in the review's body after the verdict line instead. A
+bad anchor so neither loses the finding nor fails the submission. The
+split depends only on the head, so a re-run at the same head builds the
+same body and reuses the review as above. The files are read only to place
+comments, never to decide whether to approve.
 
 The review is bound to `commit_id`, and a head that already changed is skipped.
 An APPROVE is submitted whatever files the pull request changes, including
@@ -365,12 +395,14 @@ copy is no longer read. The broker entry for it is the
 `node --test workflow/real-review.test.cjs` covers opt-in submission, both
 review states, the checked body with its run marker at the exact commit, stale
 heads, stopped or failed runs and noops, outputs that do not match the
-verdict, and re-runs and lost responses that must not post twice.
+verdict, re-runs and lost responses that must not post twice, and
+inline comments placed in the review or moved to its body.
 The tests use fake APIs; actual forge writes are left to real workflow runs.
 
 `node --test workflow/review.test.cjs` covers the merge policy file and
 the statement the task gets from it, admission, request bounds,
-the verdict grammar, hostile outputs, the status for each combination of
+the verdict grammar, inline findings and their folding into the comment,
+hostile outputs, the status for each combination of
 check, verdict, apply and open pull requests at the head (`reviewStatus` and
 `reportStatus` against a fake API) and, by reading `review.yml`, which job
 holds which token, which authors start automatic reviews and what the status

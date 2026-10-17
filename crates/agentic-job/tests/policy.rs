@@ -642,7 +642,7 @@ fn review_caller_bounds_allow_only_analysis_outputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow");
     for bounds in ["review.toml", "review-command.toml"] {
         let allow = root.join(bounds);
-        let review = |kind: &str, outputs: &str| {
+        let review_with = |kind: &str, outputs: &str, max: &str| {
             Command::new(BIN)
                 .arg("policy")
                 .arg("--allow")
@@ -653,10 +653,35 @@ fn review_caller_bounds_allow_only_analysis_outputs() {
                     "https://github.com/cgwalters-forge/agentic-job",
                 ])
                 .args(["--base", "main", "--kind", kind, "--outputs", outputs])
-                .args(["--max-outputs", "1"])
+                .args(["--max-outputs", max])
                 .output()
                 .expect("running agentic-job")
         };
+        let review = |kind: &str, outputs: &str| review_with(kind, outputs, "1");
+        // review.yml's request: up to ten inline findings beside the verdict.
+        let output = review_with(
+            "analysis",
+            "add_comment,noop,create_pull_request_review_comment",
+            "11",
+        );
+        assert!(
+            output.status.success(),
+            "{bounds}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(policy["max_outputs"], 11, "{bounds}");
+        assert_eq!(
+            policy["safe_outputs"]["create_pull_request_review_comment"],
+            serde_json::json!({"max": 10}),
+            "{bounds}"
+        );
+        let output = review_with(
+            "analysis",
+            "add_comment,noop,create_pull_request_review_comment",
+            "12",
+        );
+        assert_eq!(output.status.code(), Some(1), "{bounds}: 12 outputs");
         let output = review("analysis", "add_comment,noop");
         assert!(
             output.status.success(),
@@ -673,6 +698,12 @@ fn review_caller_bounds_allow_only_analysis_outputs() {
         for (kind, outputs) in [
             ("branch", "create_pull_request,noop"),
             ("analysis", "add_comment,create_issue"),
+            // Inline comments, never replies or resolved threads.
+            (
+                "analysis",
+                "add_comment,reply_to_pull_request_review_comment",
+            ),
+            ("analysis", "add_comment,resolve_pull_request_review_thread"),
         ] {
             let output = review(kind, outputs);
             assert_eq!(output.status.code(), Some(1), "{bounds}: {kind} {outputs}");

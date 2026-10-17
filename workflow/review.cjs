@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -99,25 +100,96 @@ function mergeStatement({ merge, set }) {
     'and those paths.\n';
 }
 
+// Inline findings next to the verdict (#516): at most this many, held to
+// the triggering pull request by check like any review comment. Folded
+// into one body, as apply posts them when nothing was submitted, the
+// verdict and its findings stay under GitHub's 65536-character limit for a
+// comment or review body, with room for the footer and markers added after.
+const REVIEW_COMMENT = 'create_pull_request_review_comment';
+const REVIEW_COMMENTS_MAX = 10;
+const REVIEW_BODY_MAX = 60000;
+const REVIEW_PATH_MAX = 1024;
+
+// review.yml's request, or the verdict alone, which CI's e2e-review still
+// makes: it reads the bounds and scripted agent from the pull request's
+// base, so it moves to inline comments only once they are on main.
 function checkRequest(env) {
-  if (env.EVENT !== 'true' || env.KIND !== 'analysis' || env.OUTPUTS !== 'add_comment,noop' ||
-      env.MAX_OUTPUTS !== '1' || env.NOTIFY !== 'none' || env.TARGET ||
+  const request = `${env.OUTPUTS}/${env.MAX_OUTPUTS}`;
+  if (env.EVENT !== 'true' || env.KIND !== 'analysis' ||
+      ![`add_comment,noop,${REVIEW_COMMENT}/${1 + REVIEW_COMMENTS_MAX}`, 'add_comment,noop/1'].includes(request) ||
+      env.NOTIFY !== 'none' || env.TARGET ||
       env.REPO !== env.GITHUB_REPOSITORY || env.OUTPUT_REPO || env.APPLY_ENVIRONMENT ||
       env.APPLY_PARTIAL !== 'false' || !['fake', 'claude', 'opencode', 'vibe'].includes(env.AGENT)) {
-    throw new Error('Review requires an analysis event run, one comment or noop on the triggering repository, no notifications, alternate token or partial application, and a supported agent');
+    throw new Error('Review requires an analysis event run, one comment or noop and its inline comments on the triggering repository, no notifications, alternate token or partial application, and a supported agent');
   }
+}
+
+const positive = value => ['number', 'string'].includes(typeof value) &&
+  /^[1-9][0-9]*$/.test(String(value)) && Number.isSafeInteger(Number(value));
+
+// One inline finding: a line, or lines, of the triggering pull request's
+// diff. Check (src/check) already holds it to that pull request; here it
+// also names no repository, and has only fields the review can carry.
+function checkInline(item, number) {
+  if (Object.keys(item).some(key => !['type', 'path', 'line', 'start_line', 'side', 'body', 'pull_request_number'].includes(key)) ||
+      typeof item.body !== 'string' || !item.body.trim() ||
+      typeof item.path !== 'string' || !item.path || item.path.length > REVIEW_PATH_MAX ||
+      /[\x00-\x1f\x7f]/.test(item.path) || !positive(item.line) ||
+      (item.start_line !== undefined && (!positive(item.start_line) || Number(item.start_line) > Number(item.line))) ||
+      (item.side !== undefined && !['LEFT', 'RIGHT'].includes(item.side)) ||
+      (item.pull_request_number !== undefined &&
+        (!positive(item.pull_request_number) || String(item.pull_request_number) !== String(number)))) {
+    throw new Error('Review inline comment must be a body on a path and line of the triggering pull request');
+  }
+}
+
+// Where an inline finding was, as plain text: a path is agent text that
+// gh-aw does not sanitize, so it is kept to one inert line, as refusalText
+// keeps a reason, and can neither mention anyone nor become markup.
+function inlineAnchor(item) {
+  const file = item.path.replace(/[\\`*_{}\[\]()<>!#|~@]/g, '\\$&');
+  const lines = item.start_line !== undefined && Number(item.start_line) < Number(item.line)
+    ? `lines ${item.start_line}-${item.line}` : `line ${item.line}`;
+  return `${file}, ${lines}${item.side === 'LEFT' ? ' of the base' : ''}`;
+}
+
+// Inline findings that are not inline comments, appended to the verdict's
+// body after its first line, which stays VERDICT:.
+function inlineSection(items) {
+  if (!items.length) return '';
+  return `\n\n### Inline findings\n${items.map(item => `\n**${inlineAnchor(item)}**\n\n${item.body}\n`).join('')}`;
+}
+
+// What apply posts when nothing was submitted: the verdict comment with
+// every inline finding in its body, and no review comments beside it, so
+// they are neither lost nor posted as a second review without a verdict.
+function foldInline(output) {
+  const inline = output.items.filter(item => item.type === REVIEW_COMMENT);
+  if (!inline.length) return output;
+  return { ...output, items: output.items.filter(item => item.type !== REVIEW_COMMENT)
+    .map(item => item.type === 'add_comment' ? { ...item, body: item.body + inlineSection(inline) } : item) };
 }
 
 // The verdict, for the `review` status: APPROVE or CHANGES, or '' for a
 // noop, which approves nothing. REJECT, which briefs written before
-// CHANGES still ask for, is read as CHANGES.
+// CHANGES still ask for, is read as CHANGES. Inline comments may come
+// with a verdict comment, never with a noop, which apply would not post.
 function checkOutputs(output, number) {
   if (!/^[1-9][0-9]*$/.test(String(number))) throw new Error('Review target must be a pull request number');
-  if (!Array.isArray(output.items) || output.items.length !== 1) {
+  const items = Array.isArray(output.items) ? output.items.filter(item => item?.type !== REVIEW_COMMENT) : [];
+  if (items.length !== 1) {
     throw new Error('Review must return exactly one comment or noop');
   }
-  const item = output.items[0];
-  if (item.type === 'noop') return '';
+  const inline = output.items.filter(item => item?.type === REVIEW_COMMENT);
+  if (inline.length > REVIEW_COMMENTS_MAX) {
+    throw new Error(`Review may return at most ${REVIEW_COMMENTS_MAX} inline comments`);
+  }
+  const item = items[0];
+  if (item.type === 'noop') {
+    if (inline.length) throw new Error('Review inline comments need a verdict comment, not a noop');
+    return '';
+  }
+  for (const comment of inline) checkInline(comment, number);
   // gh-aw recognizes aliases and editing/reply routes. The handler's trusted
   // configuration fixes the target. A redundant item_number cannot redirect
   // the comment; aliases and editing/reply routes remain forbidden.
@@ -135,6 +207,9 @@ function checkOutputs(output, number) {
   const line = item.body.split('\n', 1)[0];
   const verdict = /^VERDICT: (APPROVE|CHANGES|REJECT)(?=$|[\s.,;:])/.exec(line)?.[1];
   if (!verdict || /APPROVE[\s\S]*(CHANGES|REJECT)|(CHANGES|REJECT)[\s\S]*APPROVE/.test(line)) throw new Error('Review comment must start with VERDICT: APPROVE or VERDICT: CHANGES');
+  if ((item.body + inlineSection(inline)).length > REVIEW_BODY_MAX) {
+    throw new Error(`Review comment and inline comments together must be at most ${REVIEW_BODY_MAX} characters`);
+  }
   return verdict === 'APPROVE' ? verdict : 'CHANGES';
 }
 
@@ -202,6 +277,51 @@ function reviewFooter(env, runUrl, run) {
   return `> Generated by [${name}](${job}) for #${run.pull} at ${run.head}`;
 }
 
+// The lines a review comment can sit on, from the pull request's files as
+// the API lists them: for each path and side, each line of the diff with
+// the hunk it is in. A file without a `patch` (binary, or too large for
+// the API to show) has none.
+function diffLines(files) {
+  const lines = new Map();
+  for (const file of files) {
+    if (typeof file.filename !== 'string' || typeof file.patch !== 'string') continue;
+    const sides = { LEFT: new Map(), RIGHT: new Map() };
+    let left = 0, right = 0, hunk = -1;
+    for (const line of file.patch.split('\n')) {
+      const start = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (start) {
+        [left, right] = [Number(start[1]), Number(start[2])];
+        hunk += 1;
+      } else if (hunk < 0 || line === '' || line.startsWith('\\')) {
+        // A context line is never empty (it starts with a space): this is
+        // the end of a patch that ends in a newline.
+        continue;
+      } else if (line.startsWith('+')) {
+        sides.RIGHT.set(right++, hunk);
+      } else if (line.startsWith('-')) {
+        sides.LEFT.set(left++, hunk);
+      } else {
+        sides.LEFT.set(left++, hunk);
+        sides.RIGHT.set(right++, hunk);
+      }
+    }
+    lines.set(file.filename, sides);
+  }
+  return lines;
+}
+
+// The review comment for an inline finding, or null where GitHub would
+// refuse its anchor and with it the whole review: a path or line outside
+// the diff, or lines across hunks.
+function reviewComment(lines, item) {
+  const side = item.side ?? 'RIGHT';
+  const line = Number(item.line);
+  const start = item.start_line === undefined ? line : Number(item.start_line);
+  const hunk = lines.get(item.path)?.[side].get(line);
+  if (hunk === undefined || lines.get(item.path)[side].get(start) !== hunk) return null;
+  return { path: item.path, line, side, ...(start < line ? { start_line: start, start_side: side } : {}), body: item.body };
+}
+
 // With real reviews on, the verdict is posted once, as the pull request's
 // review, and apply posts no comment (#583). The body is check's accepted
 // output, read from check's upload in this run, so what is submitted is
@@ -233,7 +353,24 @@ async function submitReview(env, output, github, core) {
   // one, with its run URL, to tie the review to this run.
   const runUrl = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
   const marker = `<!-- gh-aw-agentic-workflow: review, id: ${env.GITHUB_RUN_ID}, workflow_id: agentic-job, run: ${runUrl} -->`;
-  const body = `${output.items[0].body}\n\n${reviewFooter(env, runUrl, run)}\n\n${marker}`;
+  // Inline findings go in the same review, as its comments, where their
+  // lines are in the diff of the head just read, and the rest in its body,
+  // so a bad anchor loses nothing and fails nothing. The files are read
+  // only to place comments, never to decide whether to approve (#540). At
+  // the same head the split, and so the body, is the same on a re-run.
+  const inline = output.items.filter(item => item.type === REVIEW_COMMENT);
+  const lines = inline.length ? diffLines(await github.paginate(github.rest.pulls.listFiles, { ...target, per_page: 100 })) : new Map();
+  const placed = inline.map(item => reviewComment(lines, item));
+  const verdict = output.items.find(item => item.type === 'add_comment').body;
+  const anchored = placed.filter(Boolean);
+  // The anchored comments are not in the body text, so their digest is, to
+  // make them part of the review's identity below: a re-run at this head
+  // whose verdict is the same but whose inline findings differ is another
+  // review, not the earlier one found again with these findings lost.
+  const digest = anchored.length
+    ? `<!-- agentic-job-review-comments: ${crypto.createHash('sha256').update(JSON.stringify(anchored)).digest('hex')} -->\n\n`
+    : '';
+  const body = `${verdict}${inlineSection(inline.filter((_, i) => !placed[i]))}\n\n${reviewFooter(env, runUrl, run)}\n\n${digest}${marker}`;
   const event = run.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES';
   // A re-run of failed jobs after a failed submission, whose verdict apply
   // then posted as the comment, must not post it again as the review. Apply
@@ -267,7 +404,8 @@ async function submitReview(env, output, github, core) {
   // required ci and workflow-ingress checks stay its deterministic guard.
   let data;
   try {
-    ({ data } = await github.rest.pulls.createReview({ ...target, commit_id: run.head, event, body }));
+    ({ data } = await github.rest.pulls.createReview({ ...target, commit_id: run.head, event, body,
+      ...(anchored.length ? { comments: anchored } : {}) }));
   } catch (error) {
     // Posted all the same, the review is not to be posted again as the comment.
     const posted = await earlier().catch(() => undefined);
@@ -307,13 +445,18 @@ if (require.main === module) {
     process.stdout.write(taskFile(process.cwd(), file) + mergeStatement(mergePolicy(process.cwd())));
   } else if (command === 'check') {
     checkOutputs(JSON.parse(fs.readFileSync(file, 'utf8')), number);
+  } else if (command === 'fold') {
+    // apply.yml, on check's accepted output, in place.
+    const output = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const folded = foldInline(output);
+    if (folded !== output) fs.writeFileSync(file, JSON.stringify(folded));
   } else if (command === 'refusal') {
     execFileSync(process.execPath, [path.join(__dirname, 'status.cjs')], {
       env: { ...process.env, TEXT: refusalText(process.env.REASON) }, stdio: 'inherit',
     });
   } else {
-    throw new Error('Expected task, check or refusal');
+    throw new Error('Expected task, check, fold or refusal');
   }
 }
 
-module.exports = { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };
+module.exports = { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, foldInline, diffLines, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };

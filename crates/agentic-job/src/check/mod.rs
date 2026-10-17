@@ -2130,9 +2130,22 @@ mod tests {
                 item,
                 true,
             ),
+            // A review's inline finding (review.yml): a range, either side.
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "a", "line": 3, "start_line": 1, "side": "LEFT", "body": "b", "pull_request_number": 64}),
+                item,
+                true,
+            ),
             (
                 "create_pull_request_review_comment",
                 json!({"path": "a", "line": 3, "body": "b", "pull_request_number": 65}),
+                item,
+                false,
+            ),
+            (
+                "create_pull_request_review_comment",
+                json!({"path": "a", "line": 3, "start_line": 1, "body": "b", "pull_request_number": "65"}),
                 item,
                 false,
             ),
