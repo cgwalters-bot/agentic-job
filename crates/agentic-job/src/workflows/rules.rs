@@ -758,13 +758,16 @@ mod tests {
             "build: '${{ inputs.build }}'",
             "unknown: true",
         ] {
-            let text = workflow(&format!(
-                "permissions: {{}}\nsteps:\n  - run: sudo useradd --create-home decoy\n  - uses: {SECURE_HOST}@PIN\n    with: {{{input}}}\n  - run: echo untrusted"
-            ));
-            assert!(
-                !check_workflow(&yaml::parse(&text).unwrap()).is_empty(),
-                "{text}"
-            );
+            // Both paths, so that neither can come to admit more inputs.
+            for action in SECURE_HOST_ACTIONS {
+                let text = workflow(&format!(
+                    "permissions: {{}}\nsteps:\n  - run: sudo useradd --create-home decoy\n  - uses: {action}@PIN\n    with: {{{input}}}\n  - run: echo untrusted"
+                ));
+                assert!(
+                    !check_workflow(&yaml::parse(&text).unwrap()).is_empty(),
+                    "{text}"
+                );
+            }
         }
         for key in ["lock", "check", "egress", "deny-runner-metadata", "build"] {
             for value in [
@@ -793,7 +796,6 @@ mod tests {
         }
         for action in [
             "someone/agentic-job/secure-host@PIN",
-            "./secure-host",
             "cgwalters-forge/agentic-job/secure-host@main",
         ] {
             let text = workflow(&format!("permissions: {{}}\nsteps:\n  - uses: {action}"));
@@ -1033,6 +1035,29 @@ steps:
         ),
         (
             "permissions: {}\nsteps:\n  - uses: someone/actions/secure-host@PIN\n  - run: make",
+            &["neither runs secure-host"],
+        ),
+        (
+            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/actions/secure-host@PIN\n  - run: make",
+            &[],
+        ),
+        (
+            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/actions/secure-host@v1\n  - run: make",
+            &["(cgwalters-forge/actions/secure-host@v1) uses"],
+        ),
+        // Lookalikes of the new path: another repository of the owner, a
+        // sibling or nested action, and the repository's root action.
+        (
+            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/actions-fork/secure-host@PIN\n  - uses: cgwalters-forge/actions/secure-host-x@PIN\n  - uses: cgwalters-forge/actions/secure-host/x@PIN\n  - uses: cgwalters-forge/actions@PIN\n  - run: make",
+            &[
+                "neither runs secure-host nor calls the reusable workflow: add a step `uses: cgwalters-forge/actions/secure-host@COMMIT` (or cgwalters-forge/agentic-job/secure-host@COMMIT)",
+            ],
+        ),
+        // The checker is not told which repository it checks, so not even
+        // the repository that defines secure-host may name it by local
+        // path: there it takes an exemption.
+        (
+            "permissions: {}\nsteps:\n  - uses: ./secure-host\n  - run: make",
             &["neither runs secure-host"],
         ),
         (

@@ -69,6 +69,10 @@ unchecked files. `config` is also refused, even with `lock: true`: this checker
 does not validate configuration files, which can redirect the runner lock.
 Unknown inputs, expressions and other values fail closed.
 
+The checker is not told which repository it checks, so even the repository
+that defines secure-host cannot name it as `./secure-host`: it exempts the
+workflow files that do.
+
 | Scope | Field |
 | --- | --- |
 | Step | `run` |
