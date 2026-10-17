@@ -110,6 +110,10 @@ the footer gh-aw adds and apply's own note and marker, and the labels of an issu
 in the handler's words, so the agent can still change it; apply refused
 a comment of 58 links after the session, and it was lost whole
 ([#963](https://github.com/cgwalters-forge/agentic-job/issues/963)).
+It also refuses a `missing_data` with no `reason`, which gh-aw takes and
+the status comment can only quote as "none given"
+([#1102](https://github.com/cgwalters-forge/agentic-job/issues/1102));
+`check` does not, as it would refuse a change handed back with it.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `create_discussion`, `add_comment`,
 `close_issue`, `add_labels`, `remove_labels`, `update_issue`, `update_pull_request`,

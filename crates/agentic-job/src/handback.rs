@@ -428,7 +428,8 @@ fn redacted_links(collected: &str, policy: &Policy) -> Vec<String> {
 
 /// A problem for each request in COLLECTED (as [`as_collected`] writes it)
 /// that gh-aw's handler would refuse at apply, after the session, over a
-/// limit of its own ([`check::handler_limits`]).
+/// limit of its own ([`check::handler_limits`]), or that would be applied
+/// saying nothing ([`unexplained_missing_data`]).
 fn over_handler_limits(collected: &str) -> Vec<Problem> {
     let Ok(Value::Object(result)) = serde_json::from_str::<Value>(collected) else {
         return Vec::new();
@@ -443,17 +444,48 @@ fn over_handler_limits(collected: &str) -> Vec<Problem> {
                 number + 1,
                 item.get("type").and_then(Value::as_str).unwrap_or("?")
             );
-            check::handler_limits::refusals(item)
+            let limits = check::handler_limits::refusals(item)
                 .into_iter()
-                .map(move |what| Problem {
+                .map(|what| Problem {
                     at: at.clone(),
                     what,
                     fix: "change the request to hold within the limit: apply refuses it whole, \
                           when it can no longer be changed"
                         .to_owned(),
-                })
+                });
+            let unexplained = unexplained_missing_data(item).map(|what| Problem {
+                at: at.clone(),
+                what,
+                fix: format!(
+                    "say in `reason` what is missing and why it blocks the task, and name it \
+                     in `data_type`; {MISSING_DATA} takes only `data_type`, `reason`, \
+                     `context` and `alternatives`"
+                ),
+            });
+            limits.chain(unexplained).collect::<Vec<_>>()
         })
         .collect()
+}
+
+const MISSING_DATA: &str = "missing_data";
+
+/// Why ITEM is a `missing_data` that nobody can act on: one with no
+/// `reason`. gh-aw's collector takes it, as none of its fields is
+/// required, and the status comment then cannot say why ("none given"),
+/// so the item stalls until someone reads the session. Such runs wrote
+/// `title` and `body`, which are not its fields and are not quoted (#1102).
+/// Refused in the session only, where the agent can still say why:
+/// `check` would refuse the whole hand-back with it, a change included.
+fn unexplained_missing_data(item: &serde_json::Map<String, Value>) -> Option<String> {
+    let reason = item.get("reason").and_then(Value::as_str);
+    (item.get("type").and_then(Value::as_str) == Some(MISSING_DATA)
+        && reason.is_none_or(|reason| reason.trim().is_empty()))
+    .then(|| {
+        format!(
+            "a {MISSING_DATA} with no `reason`, so the status comment cannot say what was \
+             missing or why it blocks the task"
+        )
+    })
 }
 
 /// The collector's result for the `outputs.jsonl` in OUTPUTS, as `check`
@@ -898,6 +930,7 @@ mod tests {
             },
             "add_comment": {"max": 1},
             "noop": {"max": 1},
+            "missing_data": {"max": 1},
         })
     }
 
@@ -1128,6 +1161,40 @@ mod tests {
                 "a comment at the handler's limit of links",
                 "",
                 json!({"type": "add_comment", "body": "https://example.com/x ".repeat(46)})
+                    .to_string(),
+            ),
+            // Taken by `check`, then quoted as "none given" (#1102): the
+            // fields of tracker's run 39008040937.
+            Case {
+                want: Some("request 1 (missing_data): a missing_data with no `reason`"),
+                ..case(
+                    "missing data in fields it does not have",
+                    "",
+                    json!({"type": "missing_data", "title": "Blocked", "body": "On #1012."})
+                        .to_string(),
+                )
+            },
+            Case {
+                want: Some("request 1 (missing_data): a missing_data with no `reason`"),
+                ..case(
+                    "missing data with a blank reason",
+                    "",
+                    json!({"type": "missing_data", "data_type": "log", "reason": " \n"})
+                        .to_string(),
+                )
+            },
+            Case {
+                want: Some("request 1 (missing_data): a missing_data with no `reason`"),
+                ..case(
+                    "missing data that names only its type",
+                    "",
+                    json!({"type": "missing_data", "data_type": "log"}).to_string(),
+                )
+            },
+            case(
+                "missing data with a reason",
+                "",
+                json!({"type": "missing_data", "reason": "The failing log has expired."})
                     .to_string(),
             ),
         ];

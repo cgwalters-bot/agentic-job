@@ -2052,6 +2052,9 @@ for (const [name, change, , said] of [
     `${quiet} missing_tool. Its reason:\n\n> tla: no TLC\n> alternatives: apalache`],
   ['missing data with context', { items: [{ type: 'missing_data', data_type: 'log', reason: 'gone', context: 'run 5', alternatives: 'rerun' }] }, 64,
     `${quiet} missing_data. Its reason:\n\n> log: gone\n> context: run 5\n> alternatives: rerun`],
+  // The reason alone, as handback check asks for one (#1102).
+  ['missing data with only a reason', { items: [{ type: 'missing_data', reason: 'the failing log has expired' }] }, 64,
+    `${quiet} missing_data. Its reason:\n\n> the failing log has expired`],
   // Status is an existing caller opt-in, independent of add_comment bounds.
   ['a noop under bounds without add_comment', { items: [{ type: 'noop', message: 'ask @maintainer' }], bounds: ['create_pull_request', 'noop'] }, 64,
     `${quiet} noop. Its reason:\n\n> ask \`@maintainer\``],
