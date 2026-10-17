@@ -120,8 +120,10 @@ jobs:
       - name: Require the checked outputs' artifact ID
         env:
           CHECKED: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+          DIGEST: ${{ fromJSON(inputs.check).outputs.artifact-digest }}
         run: |
           [[ "$CHECKED" =~ ^[1-9][0-9]*$ ]] || { echo '::error::a checked artifact ID is required'; exit 1; }
+          [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo '::error::the checked artifact'\''s SHA-256 digest is required'; exit 1; }
       # Nor is the ID check's because the caller says so: one wired from
       # the agent job would apply unchecked proposals. It has to be this
       # run's upload of the name check.yml uploads under this policy
@@ -131,16 +133,20 @@ jobs:
       # of the name with check's. Read with the job token (`actions: read`).
       # This binds the run, not the attempt: the API names no attempt, and
       # a re-run keeps the run ID, so an earlier attempt's upload passes.
-      # That is still check's accepted output under this prefix.
+      # That is still check's accepted output under this prefix. Its
+      # digest, as check's upload step gave it, holds the download below
+      # to the bytes check uploaded, as check holds the agent's.
       - name: The checked outputs are this run's check's
         env:
           GH_TOKEN: ${{ github.token }}
           CHECKED: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+          DIGEST: ${{ fromJSON(inputs.check).outputs.artifact-digest }}
           NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CHECKED" |
-            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null ||
-            { echo "::error::artifact $CHECKED is not $NAME of run $GITHUB_RUN_ID: apply takes check.yml's output of this run, and the call needs \`actions: read\`"; exit 1; }
+            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" --arg digest "sha256:$DIGEST" \
+              '.name == $name and (.workflow_run.id | tostring) == $run and .digest == $digest' > /dev/null ||
+            { echo "::error::artifact $CHECKED is not $NAME of run $GITHUB_RUN_ID with digest sha256:$DIGEST: apply takes check.yml's output of this run, and the call needs \`actions: read\`"; exit 1; }
       # The output repository, whole: the patch is applied on the commit
       # the agent started from, which a shallow clone does not have. The
       # handlers push with this checkout's credentials. Only check's accepted
@@ -164,6 +170,7 @@ jobs:
         with:
           artifact-ids: ${{ fromJSON(inputs.check).outputs.artifact-id }}
           path: ${{ env.GH_AW_TMP }}
+          digest-mismatch: error
       - id: replacement
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -51,6 +51,9 @@ outputs:
   safe-outputs-artifact-id:
     description: Immutable untrusted proposals upload ID; never a policy or checked artifact
     value: ${{ steps.safe-outputs.outputs.artifact-id }}
+  safe-outputs-artifact-digest:
+    description: SHA-256 of that upload, in hex, for check to hold the downloaded proposals to
+    value: ${{ steps.safe-outputs.outputs.artifact-digest }}
 runs:
   using: composite
   steps:

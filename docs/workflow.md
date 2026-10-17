@@ -218,7 +218,7 @@ agent. The pieces are:
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
 | the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host/internal`](../secure-host/internal/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key or GitHub token as `run`'s input `inference-api-key`, and as `AGENTIC_JOB_INFERENCE_KEY` for an optional `agentic-job check-key --config .agentic-job/config.toml` before `secure-host`; with an [`[mcp.NAME]` server](mcp.md), its credential as `run`'s input `mcp-token`; for GitHub billing with this job's own token, `copilot-requests: write` and no GitHub read token |
-| [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `id-token: write` for detect only, no secrets |
+| [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `actions: read` for the proposals' digest, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
 Every setting is an input of `policy.yml` (the same inputs as
@@ -227,8 +227,8 @@ are the agent job's), and check and apply take the policy call's
 outputs as they are, with `toJSON(needs.policy.outputs)`: what is
 checked and applied is what that call decided. The agent job passes
 `prepare` only the policy call's two upload IDs, and check and apply
-take nothing from it but its proposals' upload ID, its result and its
-exit state. Its actions come from the commit of the policy call, by
+take nothing from it but its proposals' upload ID and digest, its
+result and its exit state. Its actions come from the commit of the policy call, by
 the call's `source-repository` and `source-sha` outputs, so that one
 pin covers the binary, the actions and the three workflows: name all
 three by the same commit. Check and apply refuse, as their first step,
@@ -273,6 +273,7 @@ jobs:
       over-budget: ${{ steps.run.outputs.over-budget }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -320,11 +321,13 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
+      actions: read
       id-token: write
     uses: cgwalters-forge/agentic-job/.github/workflows/check.yml@COMMIT
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ needs.agent.outputs.safe-outputs-artifact-digest }}
 
   apply:
     needs: [policy, agent, check]
@@ -366,7 +369,20 @@ token that can write, and no check catches it
 ([RC-017](../specs/run-contract-spec.md#34-the-callers-own-agent-job)).
 Give the `apply` call `actions: read` too: apply looks up the checked
 outputs' upload ID it is given, and takes it only if it is check's
-`checked-outputs` of this run, whatever the `needs` it was wired from.
+`checked-outputs` of this run with the digest check's upload gave,
+whatever the `needs` it was wired from.
+
+**The hand-back** crosses to the trusted jobs by upload ID and digest.
+`run` uploads the patch and the safe outputs as one artifact, and the
+agent job's outputs `safe-outputs-artifact-id` and
+`safe-outputs-artifact-digest` are what `actions/upload-artifact`
+reported for it. Check refuses, before it downloads or reads anything
+of it, a missing or malformed digest, and an upload of that ID whose
+digest on the server is another or that is not of this run; the download
+then fails on bytes that do not hash to it. Only then does it validate
+the hand-back, as data. Check hands apply its own upload's ID and
+digest, `artifact-id` and `artifact-digest`, which apply holds to the
+same way. Check and apply need `actions: read` for these lookups.
 
 **Your privileged steps** go between `prepare` and `secure-host`. They
 run as the runner's user with sudo. They come before anything of the
@@ -428,7 +444,8 @@ which refuses `binary` and has no sandbox user for `run`
 
 `check.yml`'s separate inputs are gone: it takes `policy`, the
 `toJSON(needs.policy.outputs)` of a `policy.yml` call of the same
-commit, and `safe-outputs-artifact-id`. A caller that called it
+commit, `safe-outputs-artifact-id` and `safe-outputs-artifact-digest`,
+the run action's outputs of those names; the call needs `actions: read`. A caller that called it
 directly calls `policy.yml` first, as [above](#the-pieces-and-an-agent-job-of-your-own),
 and `apply.yml` after it. A caller of `agentic-job.yml` changes nothing
 but dropping the `tailscale-*` inputs: a call that still passes them is

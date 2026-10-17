@@ -111,6 +111,7 @@ jobs:
       over-budget: ${{ steps.run.outputs.over-budget }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,11 +189,13 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
+      actions: read
       id-token: write
     uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ needs.agent.outputs.safe-outputs-artifact-digest }}
 
   apply:
     needs: [policy, agent, check]

@@ -266,6 +266,7 @@ for (const [file, source, job, policyOutput] of [
     const out = name => `\${{ ${policyOutput(name)} }}`.replace(/[$()[\]{}.]/g, '\\$&');
     assert.match(source.split('\n  agent:\n')[1], /^    needs: (?:policy|\[policy, register\])$/m);
     assert.match(agent, /safe-outputs-artifact-id: \$\{\{ steps.run.outputs.safe-outputs-artifact-id \}\}/);
+    assert.match(agent, /safe-outputs-artifact-digest: \$\{\{ steps.run.outputs.safe-outputs-artifact-digest \}\}/);
     for (const input of ['binary-artifact-id', 'policy-artifact-id']) {
       assert.ok(agent.includes(`${input}: \${{ ${policyOutput(input)} }}`));
     }
@@ -292,7 +293,8 @@ for (const [file, source, job, policyOutput] of [
       .replace(/^ *#.*$/gm, '').trimEnd();
     assert.equal(call('check'), [
       '      policy: ${{ toJSON(needs.policy.outputs) }}',
-      '      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}'].join('\n'));
+      '      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}',
+      '      safe-outputs-artifact-digest: ${{ needs.agent.outputs.safe-outputs-artifact-digest }}'].join('\n'));
     assert.equal(call('apply'), [
       '      policy: ${{ toJSON(needs.policy.outputs) }}',
       '      agent: ${{ toJSON(needs.agent) }}',

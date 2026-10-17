@@ -45,6 +45,8 @@ on:
         value: ${{ jobs.agent.outputs.secret-at }}
       safe-outputs-artifact-id:
         value: ${{ jobs.agent.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest:
+        value: ${{ jobs.agent.outputs.safe-outputs-artifact-digest }}
       session-endpoint:
         value: ${{ jobs.agent.outputs.session-endpoint }}
 
@@ -68,6 +70,7 @@ jobs:
       over-budget: ${{ steps.run.outputs.over-budget }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
       # With `session`: where the operator attaches; also in the job's
       # summary from when the agent starts.
       session-endpoint: ${{ steps.run.outputs.session-endpoint }}

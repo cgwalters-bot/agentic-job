@@ -74,6 +74,7 @@ test('proposals route retains check and token separation', () => {
   assert.match(check, /permissions:\n      contents: read/);
   assert.match(check, /uses: \.\/\.github\/workflows\/check.yml/);
   assert.match(check, /safe-outputs-artifact-id: \$\{\{ needs.agent.outputs.safe-outputs-artifact-id \}\}/);
+  assert.match(check, /safe-outputs-artifact-digest: \$\{\{ needs.agent.outputs.safe-outputs-artifact-digest \}\}/);
   assert.match(checker, /name: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact \}\}/);
   assert.match(checker, /artifact-ids: \$\{\{ inputs.safe-outputs-artifact-id \}\}/);
   assert.match(checker, /agentic-job" check --policy/);
@@ -96,17 +97,58 @@ test('checker requires explicit trusted IDs and one proposal selector', () => {
     .filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
   for (const [name, change, expected] of [
     ['agent upload', {}, 0],
-    ['legacy proposals', { PROPOSALS: '', NAME: 'board-proposals' }, 0],
+    ['legacy proposals', { PROPOSALS: '', DIGEST: '', NAME: 'board-proposals' }, 0],
     ['missing binary', { BINARY: '' }, 1],
     ['missing policy', { POLICY: '' }, 1],
     ['missing proposals', { PROPOSALS: '' }, 1],
-    ['both selectors', { NAME: 'board-proposals' }, 1],
+    ['missing digest', { DIGEST: '' }, 1],
+    ['prefixed digest', { DIGEST: `sha256:${'c'.repeat(64)}` }, 1],
+    ['short digest', { DIGEST: 'c'.repeat(63) }, 1],
+    ['digest is not shell', { DIGEST: '$(exit 0)' }, 1],
+    ['both selectors', { DIGEST: '', NAME: 'board-proposals' }, 1],
+    ['legacy name with a digest', { PROPOSALS: '', NAME: 'board-proposals' }, 1],
     ['multiple trusted IDs', { POLICY: '2,4' }, 1],
     ['proposal ID is not shell', { PROPOSALS: '$(exit 99)' }, 1],
-    ['legacy name is data', { PROPOSALS: '', NAME: '$(exit 99)' }, 0],
+    ['legacy name is data', { PROPOSALS: '', DIGEST: '', NAME: '$(exit 99)' }, 0],
   ]) {
     const result = spawnSync('bash', ['-eo', 'pipefail', '-c', script], {
-      encoding: 'utf8', env: { ...process.env, BINARY: '1', POLICY: '2', PROPOSALS: '3', NAME: '', ...change },
+      encoding: 'utf8', env: { ...process.env, BINARY: '1', POLICY: '2', PROPOSALS: '3', DIGEST: 'c'.repeat(64), NAME: '', ...change },
+    });
+    assert.equal(result.status, expected, `${name}: ${result.stdout}${result.stderr}`);
+  }
+});
+
+// The agent job hands back by upload ID and digest; check holds the
+// upload to that digest before it downloads or validates any of it.
+test('checker refuses proposals whose upload digest is missing or another', () => {
+  const job = checker.split('\n  check:\n')[1];
+  const verify = "- name: The proposals are the agent job's upload\n";
+  const download = 'artifact-ids: ${{ inputs.safe-outputs-artifact-id }}';
+  assert.ok(job.indexOf('- name: Require explicit artifact contracts\n') < job.indexOf(verify));
+  assert.ok(job.indexOf(verify) < job.indexOf(download));
+  assert.ok(job.indexOf(download) < job.indexOf('- name: Ingest the outputs'));
+  assert.ok(job.includes(`${download}\n          path: .agentic-job/safe-outputs\n          digest-mismatch: error\n`));
+  assert.match(job.split('    steps:')[0], /permissions:\n      contents: read\n      actions: read\n/);
+  const section = job.split(verify)[1].split('\n      - ')[0];
+  assert.match(section, /if: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact == '' \}\}/);
+  assert.match(section, /DIGEST: \$\{\{ inputs.safe-outputs-artifact-digest \}\}/);
+  const script = section.split('        run: |\n')[1].split('\n')
+    .filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+  const digest = 'c'.repeat(64);
+  const artifact = (hash, run = 7) => JSON.stringify({ id: 3, name: 'safe-outputs', digest: hash, workflow_run: { id: run } });
+  // [what the read API says of artifact 3, the digest the agent job gave, status]
+  for (const [name, answer, given, expected] of [
+    ['matching', artifact(`sha256:${digest}`), digest, 0],
+    ['mismatched digest', artifact(`sha256:${'d'.repeat(64)}`), digest, 1],
+    ['missing digest', artifact(`sha256:${digest}`), '', 1],
+    ['no digest on the server', artifact(null), digest, 1],
+    ['unprefixed server digest', artifact(digest), digest, 1],
+    ['another run', artifact(`sha256:${digest}`, 8), digest, 1],
+    ['not found or not readable', '', digest, 1],
+  ]) {
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c',
+      'gh() { [ "$*" = "api repos/o/r/actions/artifacts/3" ] || return 9; [ -n "$ANSWER" ] && printf "%s" "$ANSWER"; }\n' + script], {
+      encoding: 'utf8', env: { ...process.env, PROPOSALS: '3', DIGEST: given, GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7', ANSWER: answer },
     });
     assert.equal(result.status, expected, `${name}: ${result.stdout}${result.stderr}`);
   }
@@ -127,9 +169,10 @@ test('wrapper passes trusted checker inputs directly and exports all checker out
   assert.match(checker, /repository: \$\{\{ job.workflow_repository \}\}/);
   assert.match(checker, /ref: \$\{\{ job.workflow_sha \}\}/);
   assert.doesNotMatch(check, /secrets:|needs.agent.outputs.(binary|policy|comment)/);
-  // Only the proposals' upload ID is not the policy call's.
+  // Only the proposals' upload ID and digest are not the policy call's.
   const inputs = checker.split('    inputs:\n')[1].split('    outputs:\n')[0];
-  assert.deepEqual([...inputs.matchAll(/^ {6}([-\w]+):$/gm)].map(([, name]) => name), ['policy', 'safe-outputs-artifact-id']);
+  assert.deepEqual([...inputs.matchAll(/^ {6}([-\w]+):$/gm)].map(([, name]) => name),
+    ['policy', 'safe-outputs-artifact-id', 'safe-outputs-artifact-digest']);
 });
 
 test('documented proposals caller matches the CI trial and shipped bounds', () => {

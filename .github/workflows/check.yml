@@ -1,7 +1,7 @@
 # Read-only validation on a machine the proposal producer never touched.
 # Trusted artifacts must come directly from policy, never through the producer:
 # their upload IDs and every setting are policy.yml's outputs, and only the
-# proposals' upload ID comes from the producer.
+# proposals' upload ID and digest come from the producer.
 name: Check agentic-job proposals
 
 on:
@@ -17,10 +17,17 @@ on:
         description: Immutable untrusted proposal upload ID; required unless the policy names a proposals artifact
         type: string
         default: ""
+      safe-outputs-artifact-digest:
+        description: The SHA-256, in hex, upload-artifact gave for that upload; required with it
+        type: string
+        default: ""
     outputs:
       artifact-id:
         description: Immutable checked upload ID for apply; absent on refusal
         value: ${{ jobs.detect.outputs.artifact-id }}
+      artifact-digest:
+        description: The checked upload's SHA-256 in hex, which apply holds it to
+        value: ${{ jobs.detect.outputs.artifact-digest }}
       refusal:
         description: Bounded refusal diagnostic, not authorization to apply
         value: ${{ jobs.check.outputs.refusal }}
@@ -56,6 +63,7 @@ jobs:
       id-token: write
     outputs:
       artifact-id: ${{ steps.release.outputs.artifact-id }}
+      artifact-digest: ${{ steps.release.outputs.artifact-digest }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ vars.AGENTIC_JOB_DETECT_MODEL != '' }}
@@ -78,15 +86,21 @@ jobs:
       - id: release
         env:
           ARTIFACT: ${{ needs.check.outputs.artifact-id }}
-        run: echo "artifact-id=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          DIGEST: ${{ needs.check.outputs.artifact-digest }}
+        run: |
+          echo "artifact-id=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "artifact-digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
   check:
+    # `actions: read` for the proposals upload's digest, nothing else.
     permissions:
       contents: read
+      actions: read
     runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
     timeout-minutes: 10
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
       refusal: ${{ steps.refusal.outputs.reason }}
       has-patch: ${{ steps.checked.outputs.has-patch }}
       verdict: ${{ steps.verdict.outputs.verdict }}
@@ -109,14 +123,33 @@ jobs:
           BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           POLICY: ${{ fromJSON(inputs.policy).policy-artifact-id }}
           PROPOSALS: ${{ inputs.safe-outputs-artifact-id }}
+          DIGEST: ${{ inputs.safe-outputs-artifact-digest }}
           NAME: ${{ fromJSON(inputs.policy).proposals-artifact }}
         run: |
           [[ "$BINARY" =~ ^[0-9]+$ && "$POLICY" =~ ^[0-9]+$ ]] || { echo '::error::trusted artifact IDs are required'; exit 1; }
           if [ -z "$NAME" ]; then
             [[ "$PROPOSALS" =~ ^[0-9]+$ ]] || { echo '::error::a proposal artifact ID is required'; exit 1; }
+            [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo '::error::the proposal upload'\''s SHA-256 digest is required'; exit 1; }
           else
-            [ -z "$PROPOSALS" ] || { echo '::error::choose a proposal ID or legacy name, not both'; exit 1; }
+            [ -z "$PROPOSALS$DIGEST" ] || { echo '::error::choose a proposal ID or legacy name, not both'; exit 1; }
           fi
+      # What is checked is byte for byte what the agent job's upload step
+      # hashed as it uploaded: the server's digest for the ID has to be the
+      # one upload-artifact gave that step, and download-artifact below
+      # refuses bytes that do not hash to the server's. An ID alone names
+      # any upload of the run, and says nothing of what is stored under it
+      # by the time check reads it; a missing or other digest fails here,
+      # before anything is downloaded. So does another run's upload.
+      - name: The proposals are the agent job's upload
+        if: ${{ fromJSON(inputs.policy).proposals-artifact == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROPOSALS: ${{ inputs.safe-outputs-artifact-id }}
+          DIGEST: ${{ inputs.safe-outputs-artifact-digest }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROPOSALS" |
+            jq -e --arg digest "sha256:$DIGEST" --arg run "$GITHUB_RUN_ID" '.digest == $digest and (.workflow_run.id | tostring) == $run' > /dev/null ||
+            { echo "::error::artifact $PROPOSALS of run $GITHUB_RUN_ID does not have the digest the agent job gave, sha256:$DIGEST; the call needs \`actions: read\`"; exit 1; }
       # Same source commit as the whole wrapper: a local reusable call is pinned
       # to its caller workflow's commit, not the target repository checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,6 +174,7 @@ jobs:
         with:
           artifact-ids: ${{ inputs.safe-outputs-artifact-id }}
           path: .agentic-job/safe-outputs
+          digest-mismatch: error
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ fromJSON(inputs.policy).proposals-artifact != '' }}
         with:

@@ -502,14 +502,17 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && (inputs.proposals-artifact != '' || needs.agent.outputs.safe-outputs-artifact-id != '') }}
     permissions:
       contents: read
+      # For check to read the proposals upload's digest.
+      actions: read
       # Only check.yml's separate detector job uses OIDC, not the checker.
       id-token: write
     # No secrets cross this read-only boundary; trusted IDs come directly
-    # from policy, and only the proposals' from the agent job.
+    # from policy, and only the proposals' ID and digest from the agent job.
     uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ needs.agent.outputs.safe-outputs-artifact-digest }}
 
   # Also after a cancelled or failed run, for its conclusion; its jobs
   # decide from the results whether anything is applied.

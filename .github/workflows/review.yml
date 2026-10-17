@@ -164,6 +164,7 @@ jobs:
       over-budget: ${{ steps.run.outputs.over-budget }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
       # This job's ID, for the review's footer to link (#592).
       job: ${{ job.check_run_id }}
     steps:
@@ -226,11 +227,13 @@ jobs:
     if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
+      actions: read
       id-token: write
     uses: ./.github/workflows/check.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ needs.agent.outputs.safe-outputs-artifact-digest }}
 
   # With the variable AGENT_REAL_REVIEWS, the verdict as the pull request's
   # review, by the Actions identity rather than the PR-opening PAT, in place

@@ -24,7 +24,7 @@ test('check releases only the detector-gated artifact, with opt-in caller config
   assert.match(workflow, /fromJSON\(inputs.check\).result == 'success'/);
 });
 
-test('every shipped check caller grants the detector OIDC permission', () => {
+test('every shipped check caller grants the digest read and the detector OIDC permission', () => {
   const { readdirSync } = require('node:fs');
   const dir = join(__dirname, '../.github/workflows');
   let count = 0;
@@ -32,7 +32,7 @@ test('every shipped check caller grants the detector OIDC permission', () => {
     for (const job of readFileSync(join(dir, file), 'utf8').split(/\n  (?=[\w-]+:\n)/)) {
       if (!/uses: .*\/workflows\/check\.yml/.test(job)) continue;
       count++;
-      assert.match(job, /permissions:\n      contents: read\n(?:      #[^\n]*\n)*      id-token: write/, file);
+      assert.match(job, /permissions:\n      contents: read\n(?:      #[^\n]*\n)*      actions: read\n(?:      #[^\n]*\n)*      id-token: write/, file);
     }
   }
   assert.equal(count, 3);
@@ -621,9 +621,12 @@ test('check and apply refuse a policy call of another commit, and apply an empty
   }
   const apply = jobs[1][1];
   assert.ok(apply.indexOf("- name: Require the checked outputs' artifact ID\n") < apply.indexOf('uses: actions/download-artifact@'));
-  for (const [id, expected] of [['42', 0], ['', 1], ['0', 1], ['01', 1], ['1,2', 1], ['1\n2', 1]]) {
-    const result = command(homedir(), 'bash', ['-euo', 'pipefail', '-c', step("Require the checked outputs' artifact ID")], { CHECKED: id });
-    assert.equal(result.status, expected, JSON.stringify(id));
+  const digest = 'c'.repeat(64);
+  for (const [id, expected, hash = digest] of [['42', 0], ['', 1], ['0', 1], ['01', 1], ['1,2', 1], ['1\n2', 1],
+    // Check's upload's digest is required with its ID.
+    ['42', 1, ''], ['42', 1, `sha256:${digest}`], ['42', 1, 'C'.repeat(64)], ['42', 1, 'c'.repeat(63)]]) {
+    const result = command(homedir(), 'bash', ['-euo', 'pipefail', '-c', step("Require the checked outputs' artifact ID")], { CHECKED: id, DIGEST: hash });
+    assert.equal(result.status, expected, `${JSON.stringify(id)} ${hash}`);
   }
 });
 
@@ -639,7 +642,9 @@ test("apply takes only this run's check output, whatever the caller wired", () =
   const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
   assert.match(checker, /- id: upload\n {8}if: \$\{\{ success\(\) && [^\n]*\n(?:[^\n]*\n){2} {10}name: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n/);
   assert.match(apply, /NAME: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n/);
-  const artifact = (name, run) => JSON.stringify({ id: 42, name, workflow_run: { id: run, head_sha: 'a'.repeat(40) } });
+  const digest = 'c'.repeat(64);
+  const artifact = (name, run, hash = `sha256:${digest}`) =>
+    JSON.stringify({ id: 42, name, digest: hash, workflow_run: { id: run, head_sha: 'a'.repeat(40) } });
   // [what the read API says of artifact 42, status]
   for (const [answer, expected] of [
     [artifact('p-checked-outputs', 7), 0],
@@ -647,14 +652,22 @@ test("apply takes only this run's check output, whatever the caller wired", () =
     [artifact('p-safe-outputs', 7), 1], [artifact('checked-outputs', 7), 1], [artifact('q-checked-outputs', 7), 1],
     // Another run's.
     [artifact('p-checked-outputs', 8), 1], [artifact('p-checked-outputs', 77), 1], [JSON.stringify({ name: 'p-checked-outputs' }), 1],
+    // Other bytes than check uploaded, or none recorded.
+    [artifact('p-checked-outputs', 7, `sha256:${'d'.repeat(64)}`), 1], [artifact('p-checked-outputs', 7, null), 1],
+    [artifact('p-checked-outputs', 7, digest), 1],
     // Not found, or not readable without `actions: read`.
     ['', 1],
   ]) {
     const result = command(homedir(), 'bash', ['-eo', 'pipefail', '-c',
       'gh() { [ "$*" = "api repos/o/r/actions/artifacts/42" ] || return 9; [ -n "$ANSWER" ] && printf "%s" "$ANSWER"; }\n' + step("The checked outputs are this run's check's")],
-      { CHECKED: '42', NAME: 'p-checked-outputs', GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7', ANSWER: answer });
+      { CHECKED: '42', DIGEST: digest, NAME: 'p-checked-outputs', GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7', ANSWER: answer });
     assert.equal(result.status, expected, `${answer}: ${result.stdout}${result.stderr}`);
   }
+  // The digest is check's own upload's, and the download is held to it.
+  assert.match(checker, /artifact-digest: \$\{\{ steps.upload.outputs.artifact-digest \}\}/);
+  assert.match(checker, /value: \$\{\{ jobs.detect.outputs.artifact-digest \}\}/);
+  assert.match(apply, /DIGEST: \$\{\{ fromJSON\(inputs.check\).outputs.artifact-digest \}\}/);
+  assert.match(apply, /artifact-ids: \$\{\{ fromJSON\(inputs.check\).outputs.artifact-id \}\}\n {10}path: [^\n]*\n {10}digest-mismatch: error\n/);
   // The callers whose apply job names its permissions grant it the read.
   const compose = readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8');
   assert.match(compose.split('\n  apply:\n')[1], /^ {4}permissions:\n(?: {6}[-\w]+: \w+\n)*? {6}actions: read\n/m);
