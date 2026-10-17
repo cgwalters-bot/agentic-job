@@ -114,14 +114,30 @@ impl Checker<'_> {
             // The runner's user is the control everywhere else, and here
             // it is refused too: the probes say less, and say so.
             let runner = self.runner.name.clone();
-            let got = super::runner_reaches(&metadata);
+            // Independent read-only requests with the same timeouts as before.
+            // Overlap the negative metadata probes instead of paying each
+            // dropped packet's timeout in series. No control is omitted.
+            let metadata_v6 = direct(METADATA_V6);
+            let requests = [&metadata, &metadata_v6, &metadata];
+            let results = super::concurrently(&[0, 1, 2], |&index| {
+                let name = ["runner-metadata", "runner-metadata-v6", "metadata"][index];
+                crate::sandbox::timed::stage("check", name, || {
+                    if index == 2 {
+                        self.sandbox_succeeds(requests[index])
+                    } else {
+                        Ok(super::runner_reaches(requests[index]))
+                    }
+                })
+            });
+            let mut results = results.into_iter();
+            let got = results.next().expect("three metadata results")?;
             self.report.expect(
                 Want::Fail,
                 "runner-metadata",
                 format!("{runner} can't reach the instance metadata service (sandbox.deny-runner-metadata)"),
                 got,
             );
-            let got = super::runner_reaches(&direct(METADATA_V6));
+            let got = results.next().expect("three metadata results")?;
             self.report.expect(
                 Want::Fail,
                 "runner-metadata-v6",
@@ -131,7 +147,7 @@ impl Checker<'_> {
             self.report.note(&format!(
                 "{runner} is refused the instance metadata service as well, so the probes of it have no control"
             ));
-            let got = self.sandbox_succeeds(&metadata)?;
+            let got = results.next().expect("three metadata results")?;
             self.report.expect(
                 Want::Fail,
                 "metadata",
@@ -223,10 +239,10 @@ impl Checker<'_> {
             );
         }
         if egress {
-            self.egress()?;
+            self.timed("egress", |this| this.egress())?;
         }
         if !self.config.egress.direct.is_empty() {
-            self.tailnet()?;
+            self.timed("tailnet", |this| this.tailnet())?;
         }
         Ok(())
     }

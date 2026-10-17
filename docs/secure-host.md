@@ -489,11 +489,18 @@ rather than installing every toolchain for every task.
 
 For the fresh password-locked job account, `useradd --no-log-init` avoids
 resetting the UID-indexed lastlog/faillog databases; home creation, groups and
-subordinate IDs are unchanged. Shadow's
+subordinate IDs are unchanged. An empty private `--skel` directory avoids
+copying the hosted image's toolchain trees from `/etc/skel`; useradd still
+sets the home's mode and ownership. Shadow's
 [`useradd` implementation](https://github.com/shadow-maint/shadow/blob/4.19.0/src/useradd.c)
-does those resets in addition to account and home creation. The existing
-whole-stage timings do not distinguish their cost from skeleton copying,
-account-file writes or NSS lookup; the two new substages narrow that down on CI.
+does those resets in addition to account and home creation. The useradd and
+lookup substages distinguish account creation from NSS lookup on CI.
+
+The check uses the same monotonic stage timing in the job summary, including
+probe groups and each independent batched request. Group totals include their
+requests, so overlapping times must not be added. With runner metadata denied,
+the runner's IPv4/IPv6 and sandbox's IPv4 requests run concurrently with their
+original limits; all refusals and the network positive control are retained.
 
 Read-only proc checks through independent entry paths run together. Batched
 network probes overlap the host requests with a single serial container lane,
@@ -835,6 +842,8 @@ keeps rustup and its tool cache in the runner's home, which is closed:
 install what the sandbox user builds with from packages before the
 step, or with the `script` input, which runs as the sandbox user and
 can put a toolchain in its home.
+The sandbox home does not inherit `/etc/skel` toolchains or shell dotfiles.
+Callers relying on those toolchains must install them with the `script` input.
 
 **Time.** On a hosted runner, setup's largest stages are creating the
 user, installing packages and starting the proxy, each under a minute

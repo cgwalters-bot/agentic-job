@@ -33,12 +33,26 @@ const MAX_LINE: usize = 1024;
 /// Most bytes of stage lines kept for the summary; the latest are kept.
 const MAX_STAGES: usize = 16 * 1024;
 
-/// What `sandbox setup` prints for each of its stages (`timed_setup`).
+/// What setup and check print for each timed stage or independent probe.
 /// ASCII digits only: a kept line is ASCII, so trimming cuts no character.
 static STAGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Sandbox setup stage ([a-z-]+): ([0-9]+\.[0-9]{3})s \((?:ok|failed)\)$")
-        .expect("a valid pattern")
+    Regex::new(
+        r"^Sandbox (?:setup|check) stage ([a-z0-9-]+): ([0-9]+\.[0-9]{3})s \((?:ok|failed)\)$",
+    )
+    .expect("a valid pattern")
 });
+
+/// Monotonic elapsed time, including errors; informational, never authorization.
+pub(super) fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    let started = Instant::now();
+    let result = run();
+    println!(
+        "Sandbox {kind} stage {name}: {:.3}s ({})",
+        started.elapsed().as_secs_f64(),
+        if result.is_ok() { "ok" } else { "failed" }
+    );
+    result
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Label {
@@ -239,8 +253,10 @@ mod tests {
                 Label::Probes,
                 2.0,
                 0,
-                String::new(),
-                "Secure-host probes: 2.000s (exit 0).\n",
+                "Sandbox check stage runner-metadata-v6: 0.123s (ok)\n\
+                 Sandbox check stage files: 0.456s (failed)\n"
+                    .into(),
+                "Secure-host probes: 2.000s (exit 0); runner-metadata-v6 0.123s, files 0.456s.\n",
             ),
         ];
         for (label, seconds, status, stages, expected) in cases {

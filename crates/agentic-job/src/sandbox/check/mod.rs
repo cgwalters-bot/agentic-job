@@ -374,24 +374,33 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn run(mut self, token: Option<RunToken<'_>>) -> Result<Report> {
-        self.privileges()?;
+        self.timed("privileges", |this| this.privileges())?;
         if self.config.sandbox.lock_runner {
-            self.runner_privileges()?;
+            self.timed("runner-privileges", |this| this.runner_privileges())?;
         }
-        let environs = self.environments()?;
+        let environs = self.timed("environments", |this| this.environments())?;
         let oidc_token = token.is_some() && from_identity_token(&self.config.inference)?;
-        self.job_variables(&environs, oidc_token)?;
-        self.files()?;
-        self.schedulers()?;
-        self.services();
-        self.local_services()?;
-        self.resolved()?;
-        self.tailscaled()?;
+        self.timed("job-variables", |this| {
+            this.job_variables(&environs, oidc_token)
+        })?;
+        self.timed("files", |this| this.files())?;
+        self.timed("schedulers", |this| this.schedulers())?;
+        self.timed("services", |this| {
+            this.services();
+            Ok(())
+        })?;
+        self.timed("local-services", |this| this.local_services())?;
+        self.timed("resolved", |this| this.resolved())?;
+        self.timed("tailscaled", |this| this.tailscaled())?;
         if let Some(token) = token {
-            self.run_token(token, &environs)?;
+            self.timed("run-token", |this| this.run_token(token, &environs))?;
         }
-        self.network()?;
+        self.timed("network", |this| this.network())?;
         Ok(self.report)
+    }
+
+    fn timed<T>(&mut self, name: &str, run: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        super::timed::stage("check", name, || run(self))
     }
 
     fn user(&self) -> &str {
@@ -539,6 +548,7 @@ fn in_order<R: Send>(
     attempts: &[Attempt],
     make: impl Fn(&Attempt) -> Result<R> + Sync,
 ) -> Result<Vec<R>> {
+    let make = |attempt: &Attempt| super::timed::stage("check", &attempt.id, || make(attempt));
     let together: Vec<&Attempt> = attempts
         .iter()
         .filter(|attempt| attempt.kind != AttemptKind::RefusedInContainer)

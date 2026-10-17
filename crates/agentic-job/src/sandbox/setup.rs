@@ -768,7 +768,15 @@ fn create_user(config: &Config, runner: &User, existing: Option<User>) -> Result
         return Ok(user);
     }
     let name = &config.sandbox.user;
-    let mut useradd = useradd_command(config);
+    // Hosted images seed /etc/skel with hundreds of MB of toolchains. An
+    // empty private skeleton avoids copying them; useradd still sets the
+    // home's mode and owner according to the host's account policy.
+    // Prevent another local user from planting startup files in the skeleton.
+    let skeleton = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .context("creating empty user skeleton")?;
+    let mut useradd = useradd_command(config, skeleton.path());
     timed_setup("create-user-useradd", || {
         host::run(&mut useradd).map(|_| ())
     })?;
@@ -779,7 +787,7 @@ fn create_user(config: &Config, runner: &User, existing: Option<User>) -> Result
     Ok(user)
 }
 
-fn useradd_command(config: &Config) -> Command {
+fn useradd_command(config: &Config, skeleton: &Path) -> Command {
     let mut useradd = Command::new("useradd");
     // This is a fresh, password-locked job account, not a recycled login.
     // Resetting lastlog/faillog can extend sparse per-UID databases; neither
@@ -792,6 +800,7 @@ fn useradd_command(config: &Config) -> Command {
         "--shell",
         "/bin/bash",
     ]);
+    useradd.arg("--skel").arg(skeleton);
     if !config.sandbox.groups.is_empty() {
         useradd.arg("--groups").arg(config.sandbox.groups.join(","));
     }
@@ -1032,14 +1041,7 @@ fn require_world_write_policy(pin: &Path) -> Result<()> {
 
 /// Log monotonic wall time even when a stage fails, without changing its result.
 fn timed_setup<T>(stage: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = Instant::now();
-    let result = run();
-    println!(
-        "Sandbox setup stage {stage}: {:.3}s ({})",
-        started.elapsed().as_secs_f64(),
-        if result.is_ok() { "ok" } else { "failed" }
-    );
-    result
+    super::timed::stage("setup", stage, run)
 }
 
 mod privileged_binaries;
@@ -1984,7 +1986,9 @@ mod tests {
     #[test]
     fn job_user_keeps_home_groups_and_subordinate_ids_without_login_logs() {
         let config = Config::parse("[sandbox]\nuser = 'job-user'\ngroups = ['kvm']").unwrap();
-        let command = useradd_command(&config);
+        let skeleton = tempfile::tempdir().unwrap();
+        assert_eq!(std::fs::read_dir(skeleton.path()).unwrap().count(), 0);
+        let command = useradd_command(&config, skeleton.path());
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_str().unwrap())
@@ -1997,6 +2001,8 @@ mod tests {
                 "--user-group",
                 "--shell",
                 "/bin/bash",
+                "--skel",
+                skeleton.path().to_str().unwrap(),
                 "--groups",
                 "kvm",
                 "--",
