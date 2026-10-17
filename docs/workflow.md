@@ -40,11 +40,15 @@ separate jobs on separate machines. The apply job's additional checks are
    depend on its success; removal failure starts neither. Runs not started
    by a command label pass through without writing.
 2. **agent**, on the caller's runner. [The step that secures a host for
-   any job](secure-host.md), the action in `secure-host/internal/`, creates the
-   unprivileged user, the network rules and the egress proxy, removes
-   general root access and probes access (`agentic-job sandbox setup` and
-   `sandbox check`); `run` clones the target, drives the agent and
-   leaves what may be uploaded.
+   any job](secure-host.md), `cgwalters-forge/actions/secure-host` through
+   the `secure-host/` forwarder, removes general root access and the cloud
+   metadata service and probes that (`agentic-job sandbox setup` and
+   `sandbox check`, in its image); `run --runner-home` clones the target,
+   drives the agent as the runner's user, with no second user, and leaves
+   what may be uploaded. The job holds nothing the agent may not read:
+   read-only permissions, no `id-token`, no secret but the run token.
+   `run` refuses what would need a second user there: `api-key`, an MCP
+   server, a private target, a session.
 3. **check**, on a machine the agent never touched. gh-aw's collector
    validates and sanitizes the producer's requests, then `agentic-job check`
    holds them and the patch to the policy.

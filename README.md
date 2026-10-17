@@ -86,7 +86,7 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 | Where | What it holds |
 | --- | --- |
 | The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run; with an [`[mcp.NAME]` server](docs/mcp.md), the token of `run`'s proxy for it. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; with an `[mcp.NAME]` server, its credential `MCP_TOKEN`, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The runner's user in the agent job | in `agentic-job.yml`'s agent job, the agent itself, with no sandbox user: so that job passes on no model key or MCP credential, and `run` refuses `api-key` and MCP servers there ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; with an `[mcp.NAME]` server, its credential `MCP_TOKEN`, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; `SAFE_OUTPUTS_PAT` only in notify and conclude, only for a status comment in another repository |
@@ -175,6 +175,13 @@ runtime is unverified.
 A real agent needs a model, and never holds the key that pays for it.
 There are three ways to give it one ([docs/inference.md](docs/inference.md)).
 The scripted agent (`agent: fake`) needs none.
+
+For now `agentic-job.yml` itself takes no key: its agent job runs the
+agent as the runner's user, which could read one from `run`, so it
+refuses `api-key` (GitHub's billing included) and MCP credentials. Those
+need an agent job of the caller's own, with the sandbox user
+([the pieces](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)),
+until the host keeps the runner's processes from reading each other.
 
 **GitHub's billing** (`inference-provider: github`) is the simplest,
 as gh-aw's Copilot engine is there. The caller stores a

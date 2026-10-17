@@ -6,7 +6,9 @@
 //!
 //! `run` is the runner's user. Everything it does in the agent's files
 //! (the clone, the configuration, the probes, the hand-back) it does as
-//! the sandbox user, through [`enter`].
+//! the sandbox user, through [`enter`]. With `--runner-home` there is no
+//! sandbox user: the agent is the runner's user too, in that home, and
+//! what needs a uid between them is refused ([`refuse_without_second_user`]).
 //!
 //! Under `--out` a run that ended leaves `run/` (`summary.json`,
 //! `summary.md`, `condensed.log`, `outcome.json`), `transcript.tar.zst`
@@ -77,7 +79,7 @@ use crate::redact::Redactor;
 use crate::session::bridge::{Bridge, Listen};
 use crate::session::process::SandboxUser;
 use crate::session::steer::{self, Watch};
-use crate::session::{self, Clients, Launch, Limits, Options, Policy, RunResult};
+use crate::session::{self, Clients, Limits, Options, Policy, RunResult};
 
 /// Under `--out`: what `run` keeps for itself. Nothing here is redacted,
 /// and nothing here is uploaded: what is, is put together under it and
@@ -148,6 +150,11 @@ pub struct Args {
     /// write is not one the sandbox setup vouched for.
     #[arg(long, value_name = "FILE", hide = true, default_value = config::ROOT_COPY)]
     pub config: PathBuf,
+    /// Run the agent as this program's own user, with DIR as its home, and
+    /// no sandbox user: for a job that holds nothing the agent may not
+    /// read, on a host cgwalters-forge/actions/secure-host secured
+    #[arg(long, value_name = "DIR")]
+    pub runner_home: Option<PathBuf>,
 }
 
 /// Everything a run is, checked before anything is started or spent.
@@ -453,6 +460,74 @@ fn check_private(
     Ok(())
 }
 
+/// What a run asks for that holds only where its agent is a second user.
+#[derive(Debug, Default, Clone, Copy)]
+struct SecondUserAsks {
+    /// The job can ask for identity tokens (`id-token: write`).
+    identity_request: bool,
+    api_key: bool,
+    mcp: bool,
+    private: bool,
+    session: bool,
+    before_agent: bool,
+    tools: bool,
+}
+
+/// Refuses what ASKS needs of a sandbox user, for a run whose agent is
+/// this process's own user (`--runner-home`). That agent can read this
+/// process's environment and memory, as any process of the same uid can,
+/// and what setup did for the sandbox user alone does nothing for it.
+/// The run token is the agent's anyway; each refusal names what it keeps
+/// from the agent otherwise.
+fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
+    let refusals = [
+        (
+            asks.identity_request,
+            "the job can ask for identity tokens (id-token): the agent could take the request \
+             token from run's environment and get one for any audience",
+        ),
+        (
+            asks.api_key,
+            "inference.register = \"api-key\": the agent could take the provider's key from \
+             run's environment",
+        ),
+        (
+            asks.mcp,
+            "an [mcp] server: the agent could take its credential from run's environment",
+        ),
+        (
+            asks.private,
+            "a private target: the egress proxy's rules hold the sandbox user alone, so the \
+             agent could send its source anywhere",
+        ),
+        (
+            asks.session,
+            "session.listen: only the sandbox user is kept off the bridge's port, so the agent \
+             could attach to its own session ahead of the operator",
+        ),
+        (
+            asks.before_agent,
+            "sandbox.check.before-agent: its probes are the sandbox user's, which this run does \
+             not use",
+        ),
+        (
+            asks.tools,
+            "setup.tools: they are installed in the sandbox user's home, which this agent does \
+             not have",
+        ),
+    ];
+    let refused: Vec<&str> = refusals
+        .into_iter()
+        .filter_map(|(asked, why)| asked.then_some(why))
+        .collect();
+    ensure!(
+        refused.is_empty(),
+        "--runner-home runs the agent as this user, with no sandbox user, which this run needs: {}",
+        refused.join("; ")
+    );
+    Ok(())
+}
+
 /// The values of the credentials this process was started with.
 fn own_tokens() -> impl Iterator<Item = String> {
     std::env::vars_os().filter_map(|(name, value)| {
@@ -581,7 +656,26 @@ impl Plan {
             .create(work.join(HARNESS_DIR))
             .with_context(|| format!("creating {}", work.display()))?;
         let staging = Staging::create(&work)?;
-        let sandbox = Sandbox::new(&config)?;
+        let sandbox = match &args.runner_home {
+            Some(home) => {
+                refuse_without_second_user(SecondUserAsks {
+                    identity_request: crate::sandbox::enter::OIDC_REQUEST_VARS
+                        .iter()
+                        .any(|name| std::env::var_os(name).is_some()),
+                    api_key: matches!(
+                        endpoint.as_ref().map(|endpoint| &endpoint.mode),
+                        Some(inference::Mode::ApiKey { .. })
+                    ),
+                    mcp: mcp.is_some(),
+                    private: policy.private,
+                    session: host.session.is_some(),
+                    before_agent: config.sandbox.check.before_agent,
+                    tools: config.setup.tools.is_some(),
+                })?;
+                Sandbox::own(&config, home)?
+            }
+            None => Sandbox::new(&config)?,
+        };
         let (commit, agent) = (
             std::mem::take(&mut config.commit),
             std::mem::take(&mut config.agent),
@@ -806,7 +900,13 @@ impl Plan {
             .files
             .push(agent::child(child, &self.agent.context_windows)?);
         agent::install(sandbox, &configuration)?;
-        if let (Some(run), Some(file)) = (&run, self.kind.token_file()) {
+        // Without a sandbox user the token is in this process's own
+        // environment, which the agent can read: not probed for.
+        let token_file = self
+            .kind
+            .token_file()
+            .filter(|_| sandbox.second_user().is_some());
+        if let (Some(run), Some(file)) = (&run, token_file) {
             let given = match self.endpoint.as_ref().map(|endpoint| &endpoint.mode) {
                 Some(inference::Mode::TokenFile { path }) => Some(path.as_path()),
                 _ => None,
@@ -939,12 +1039,7 @@ impl Plan {
             permissions: Policy::for_task(&self.sandbox.home)?,
             limits: self.limits.clone(),
             requests,
-            launch: Launch::Sandbox {
-                user: self.sandbox.user.clone(),
-                // The agent works where the session tells it to; the
-                // wrapper only needs somewhere that exists.
-                wrapper: self.sandbox.wrapper(&self.sandbox.home)?,
-            },
+            launch: self.sandbox.launch()?,
             clients: Clients::none(),
             bridge,
             log: Box::new(log::Condensed::new(
@@ -1059,9 +1154,13 @@ impl Plan {
         } else {
             Value::Null
         };
-        // What the agent reached, and what it was refused.
+        // What the agent reached, and what it was refused. The proxy's
+        // rules hold the sandbox user alone: without one, its log is none
+        // of the agent's.
         let access_log = transcript.join(egress::TRANSCRIPT_NAME);
-        if !egress::collect(
+        if self.sandbox.second_user().is_none() {
+            eprintln!("No egress log: the agent is not the sandbox user, which the proxy is for.");
+        } else if !egress::collect(
             Path::new(egress::ACCESS_LOG),
             egress_from,
             &access_log,
@@ -1284,21 +1383,36 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
     })
 }
 
+/// Stops everything the sandbox user is running, where there is one.
+async fn reap(user: Option<&SandboxUser>) -> Result<()> {
+    match user {
+        Some(user) => user.reap().await,
+        None => Ok(()),
+    }
+}
+
 /// Runs PLAN, and leaves nothing of it behind: no process of the sandbox
 /// user's, and no run the proxy still takes a token for.
 async fn supervise(plan: Plan) -> Result<Exit> {
     // Refuses root and this process's own user, before anything of
-    // theirs could be killed.
-    let user = SandboxUser::find(&plan.sandbox.user, plan.sandbox.root()).await?;
+    // theirs could be killed. Without a sandbox user there is none to
+    // stop: what the agent leaves behind runs until the job ends.
+    let user = match plan.sandbox.second_user() {
+        Some(name) => Some(SandboxUser::find(name, plan.sandbox.root()).await?),
+        None => None,
+    };
+    let user = user.as_ref();
     let mut signals = Signals::new()?;
     let plan = Arc::new(plan);
     let shared = Arc::new(Shared::default());
     // The egress proxy's log from here on is this run's: what is in it
     // already is `sandbox check`'s probes.
-    shared.egress_from.store(
-        egress::offset(Path::new(egress::ACCESS_LOG), plan.sandbox.root()),
-        Ordering::SeqCst,
-    );
+    if user.is_some() {
+        shared.egress_from.store(
+            egress::offset(Path::new(egress::ACCESS_LOG), plan.sandbox.root()),
+            Ordering::SeqCst,
+        );
+    }
 
     // Its steps block (commands, requests), so it has a thread, which a
     // signal cannot cancel: it ends when its commands are killed, or at
@@ -1378,7 +1492,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     }
     let mut reaped = match &stage {
         Stage::Ended(session) if !session.internal_error => Ok(()),
-        _ => user.reap().await,
+        _ => reap(user).await,
     };
     // A run that is known is ended now, not after waiting for a thread.
     let mut settled = match shared.run() {
@@ -1391,7 +1505,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         // after the reaping may be running. One request is shorter than
         // the grace, and it starts no other once it is told to stop.
         let _ = tokio::time::timeout(STOP_GRACE, &mut preparing).await;
-        reaped = reaped.and(user.reap().await);
+        reaped = reaped.and(reap(user).await);
         // A proxy it started after the first look is ended now.
         if let Some(mcp) = shared.mcp() {
             mcp.end();
@@ -1434,10 +1548,10 @@ async fn supervise(plan: Plan) -> Result<Exit> {
             if finished.is_err() {
                 stopped.store(true, Ordering::SeqCst);
             }
-            reaped = reaped.and(user.reap().await);
+            reaped = reaped.and(reap(user).await);
             if finished.is_err() {
                 let _ = tokio::time::timeout(STOP_GRACE, &mut finishing).await;
-                reaped = reaped.and(user.reap().await);
+                reaped = reaped.and(reap(user).await);
                 // It may have been moving the results out as it was
                 // told: a run that was stopped publishes none.
                 Staging::withdraw(&plan.out);
@@ -1563,6 +1677,82 @@ mod tests {
                 (result, _) => panic!("{name}: {result:?}"),
             }
         }
+    }
+
+    /// Without a sandbox user, each thing that needs one is refused by
+    /// name, and a run that asks for none of them goes ahead.
+    #[test]
+    fn what_needs_a_second_user_is_refused_without_one() {
+        let none = SecondUserAsks::default();
+        let cases = [
+            (none, None),
+            (
+                SecondUserAsks {
+                    identity_request: true,
+                    ..none
+                },
+                Some("id-token"),
+            ),
+            (
+                SecondUserAsks {
+                    api_key: true,
+                    ..none
+                },
+                Some("\"api-key\""),
+            ),
+            (SecondUserAsks { mcp: true, ..none }, Some("[mcp]")),
+            (
+                SecondUserAsks {
+                    private: true,
+                    ..none
+                },
+                Some("a private target"),
+            ),
+            (
+                SecondUserAsks {
+                    session: true,
+                    ..none
+                },
+                Some("session.listen"),
+            ),
+            (
+                SecondUserAsks {
+                    before_agent: true,
+                    ..none
+                },
+                Some("before-agent"),
+            ),
+            (
+                SecondUserAsks {
+                    tools: true,
+                    ..none
+                },
+                Some("setup.tools"),
+            ),
+        ];
+        for (asks, want) in cases {
+            match (refuse_without_second_user(asks), want) {
+                (Ok(()), None) => {}
+                (Err(err), Some(want)) => {
+                    let err = format!("{err:#}");
+                    assert!(err.contains(want), "{asks:?}: {err}");
+                    assert!(err.starts_with("--runner-home "), "{err}");
+                }
+                (result, _) => panic!("{asks:?}: {result:?}"),
+            }
+        }
+        // Everything at once is one refusal that names each.
+        let all = SecondUserAsks {
+            identity_request: true,
+            api_key: true,
+            mcp: true,
+            private: true,
+            session: true,
+            before_agent: true,
+            tools: true,
+        };
+        let err = format!("{:#}", refuse_without_second_user(all).unwrap_err());
+        assert_eq!(err.matches("; ").count(), 6, "{err}");
     }
 
     #[test]

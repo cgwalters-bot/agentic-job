@@ -11,9 +11,15 @@
 //! `run` reads and writes the agent's files only through this: as the
 //! runner's user, a link the agent planted could make it read the
 //! runner's files into an artifact.
+//!
+//! With `run --runner-home` there is no sandbox user: the same commands
+//! run as the runner's user, through `env -i`, in the home given. That is
+//! for a job that is the unit of trust (cgwalters-forge/actions/secure-host),
+//! where the agent can read whatever the runner's user can anyway.
 
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -23,18 +29,37 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::config::Config;
 use crate::sandbox::enter::Entry;
 use crate::sandbox::root::Root;
+use crate::session::Launch;
 
 /// Stands for the command in a command line that is asked for only to
 /// get what comes before it.
 const PLACEHOLDER: &str = "agentic-job-command-placeholder";
 /// How much of a command's standard error is kept, for an error message.
 const MAX_STDERR_BYTES: u64 = 64 << 10;
+/// What clears the environment of a command run as this process's own
+/// user, and moves it to its directory.
+const ENV: &str = "env";
+const LANG: &str = "C.UTF-8";
+/// The agent's home with no second user: private to the runner's user.
+const OWN_HOME_MODE: u32 = 0o700;
+
 /// The sandbox user, and the way in.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     pub user: String,
     pub home: PathBuf,
-    entry: Entry,
+    way: Way,
+}
+
+#[derive(Debug, Clone)]
+enum Way {
+    /// As the sandbox user, through step 5's way in.
+    Entry(Entry),
+    /// As this process's own user, with ENV (`NAME=VALUE`) and nothing
+    /// else of its environment (`run --runner-home`). No uid is between
+    /// the agent and `run`: the agent can read what `run` holds, and
+    /// reading its files this way only keeps `run`'s own variables out.
+    Own { env: Vec<String> },
 }
 
 /// What a command run in the sandbox left.
@@ -113,20 +138,102 @@ impl Sandbox {
         Ok(Self {
             user: entry.user().name.clone(),
             home: entry.home().to_owned(),
-            entry,
+            way: Way::Entry(entry),
         })
+    }
+
+    /// This process's own user, with HOME, which is made private to it,
+    /// as the agent's home: for a job that runs no second user. Commands
+    /// get the variables `[sandbox] env` of CONFIG sets over a fixed
+    /// language, PATH and the user's names, as the sandbox user's do.
+    pub fn own(config: &Config, home: &Path) -> Result<Self> {
+        let user = crate::sandbox::host::User::current()?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(OWN_HOME_MODE)
+            .create(home)
+            .with_context(|| format!("creating {}", home.display()))?;
+        // The mode by itself, not by the umask, and of a directory that
+        // was there already.
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(OWN_HOME_MODE))
+            .with_context(|| format!("making {} private", home.display()))?;
+        let home = home
+            .canonicalize()
+            .with_context(|| format!("resolving {}", home.display()))?;
+        let home_text = home.to_str().context("the agent's home is not UTF-8")?;
+        let fixed = [
+            ("LANG", LANG),
+            ("PATH", &crate::sandbox::host::PATH_DIRS.join(":")),
+            ("HOME", home_text),
+            ("USER", &user.name),
+            ("LOGNAME", &user.name),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let env: std::collections::BTreeMap<String, String> = fixed
+            .into_iter()
+            .chain(config.sandbox.env.clone())
+            .collect();
+        crate::sandbox::check::forget_passed()?;
+        Ok(Self {
+            user: user.name,
+            home,
+            way: Way::Own {
+                env: env
+                    .into_iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect(),
+            },
+        })
+    }
+
+    /// Whether the agent runs as a second user, whose every process the
+    /// run can stop: its name then.
+    pub fn second_user(&self) -> Option<&str> {
+        match self.way {
+            Way::Entry(_) => Some(&self.user),
+            Way::Own { .. } => None,
+        }
     }
 
     /// How root is had for what a run needs of it.
     pub fn root(&self) -> Root {
-        self.entry.root()
+        match &self.way {
+            Way::Entry(entry) => entry.root(),
+            Way::Own { .. } => Root::detect(),
+        }
     }
 
     /// The command line that runs what is appended to it as the sandbox
     /// user, in CWD: for the session, which appends the agent's own.
     pub fn wrapper(&self, cwd: &Path) -> Result<Vec<String>> {
-        let command = self.entry.command(&[PLACEHOLDER.to_owned()], Some(cwd))?;
-        command_line(&command)
+        match &self.way {
+            Way::Entry(entry) => {
+                let command = entry.command(&[PLACEHOLDER.to_owned()], Some(cwd))?;
+                command_line(&command)
+            }
+            Way::Own { env } => {
+                let cwd = cwd.to_str().context("the directory is not UTF-8")?;
+                Ok([ENV, "-i", "-C", cwd]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(env.iter().cloned())
+                    .collect())
+            }
+        }
+    }
+
+    /// How the session starts the agent, in the home.
+    pub fn launch(&self) -> Result<Launch> {
+        // The agent works where the session tells it to; the wrapper only
+        // needs somewhere that exists.
+        let wrapper = self.wrapper(&self.home)?;
+        Ok(match self.way {
+            Way::Entry(_) => Launch::Sandbox {
+                user: self.user.clone(),
+                wrapper,
+            },
+            Way::Own { .. } => Launch::Own { wrapper },
+        })
     }
 
     /// Runs ARGV as the sandbox user in its home, with INPUT on its
@@ -333,6 +440,45 @@ mod tests {
             ),
         }
         assert!(!wrapper.iter().any(|arg| arg == PLACEHOLDER), "{wrapper:?}");
+    }
+
+    /// Without a sandbox user, commands are this user's, in a private
+    /// home, with the fixed variables and the configuration's over them,
+    /// and nothing of this process's own.
+    #[test]
+    fn the_own_way_in_clears_the_environment() {
+        let dir = std::env::temp_dir().join(format!("agentic-job-own-{}", std::process::id()));
+        let home = dir.join("home");
+        let config =
+            Config::parse("[sandbox]\nenv = { LANG = \"en_US.UTF-8\", X = \"1\" }\n").unwrap();
+        let sandbox = Sandbox::own(&config, &home).unwrap();
+        assert_eq!(sandbox.second_user(), None);
+        assert!(matches!(sandbox.launch().unwrap(), Launch::Own { .. }));
+        let home = home.canonicalize().unwrap();
+        assert_eq!(sandbox.home, home);
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, OWN_HOME_MODE);
+        let wrapper = sandbox.wrapper(Path::new("/somewhere")).unwrap();
+        assert_eq!(wrapper[..4], argv(&[ENV, "-i", "-C", "/somewhere"]));
+        let out = sandbox.checked(&["env"], b"", 1 << 16).unwrap().text();
+        let mut got: Vec<&str> = out
+            .lines()
+            .filter(|line| !line.starts_with("PWD="))
+            .collect();
+        got.sort_unstable();
+        let user = crate::sandbox::host::User::current().unwrap().name;
+        let want = [
+            format!("HOME={}", home.display()),
+            "LANG=en_US.UTF-8".to_owned(),
+            format!("LOGNAME={user}"),
+            format!("PATH={}", crate::sandbox::host::PATH_DIRS.join(":")),
+            format!("USER={user}"),
+            "X=1".to_owned(),
+        ];
+        assert_eq!(got, want);
+        let pwd = sandbox.checked(&["pwd"], b"", 1 << 10).unwrap().text();
+        assert_eq!(Path::new(&pwd), home);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Only a command's program and arguments carry over to the session's

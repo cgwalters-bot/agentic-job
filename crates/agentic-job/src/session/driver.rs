@@ -445,7 +445,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         Launch::Sandbox { user, .. } => {
             Some(process::SandboxUser::find(user, Root::detect()).await?)
         }
-        Launch::Direct => None,
+        Launch::Direct | Launch::Own { .. } => None,
     };
     // Listening before the agent starts: a client may come during the
     // task's turn.

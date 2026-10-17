@@ -7,8 +7,8 @@
 #           machine is spent on the agent; builds the binary
 #   register  the run's registration at the inference proxy, with the
 #           identity-token permission the agent's job does not get
-#   agent   agent.yml: the agent, as an unprivileged user on the caller's
-#           machine: prepare, secure-host and run, the actions of this repository
+#   agent   agent.yml: the agent, as the runner's user without root on the
+#           caller's machine: prepare, secure-host and run, the actions of this repository
 #   check   check.yml: what the agent handed back, on a machine it never
 #           touched
 #   apply   apply.yml: the only job with a credential that can write
@@ -295,6 +295,13 @@ on:
           False gives it none
         type: boolean
         default: true
+      secure-host-image-artifact-id:
+        description: >-
+          For testing an unreleased secure-host image: the ID of an artifact of the calling run
+          holding build.yml's secure-host.tar, which the agent job runs as root in place of the
+          pinned, attested image, unverified. Empty for the pinned image
+        type: string
+        default: ""
     secrets:
       # Explicit optional credential for apply and cross-repository status. Never use inherit.
       # Callers must pass this name even for an environment secret;
@@ -302,21 +309,17 @@ on:
       SAFE_OUTPUTS_PAT:
         description: Optional credential for applying safe outputs; defaults to the job token when empty
         required: false
-      # For `inference-register: api-key`: the provider's API key. Only the
-      # agent job's `run` step and its check before secure-host get it, and
-      # the sandbox user never does:
-      # `run` serves the agent a proxy that puts the key in place of a
-      # token of the run's (docs/inference.md).
+      # For `inference-register: api-key` and an `[mcp.NAME]` server: not
+      # passed on. The agent is the runner's user now, with no second user
+      # between it and `run`, so it could read either from `run`'s
+      # environment; `run` refuses both until the host keeps the runner's
+      # processes from reading each other. Kept so that callers that pass
+      # them still parse.
       INFERENCE_API_KEY:
-        description: For `inference-register` api-key, the provider's API key
+        description: Not passed on; `inference-register` api-key is refused for now
         required: false
-      # For an `[mcp.NAME]` server of the caller's configuration with
-      # `secret = "MCP_TOKEN"`: its credential. Only the agent job's `run`
-      # step gets it, and the sandbox user never does: `run` serves the
-      # agent a proxy that puts it in place of a token of the run's
-      # (docs/mcp.md).
       MCP_TOKEN:
-        description: For an `[mcp.NAME]` server of the configuration, its credential
+        description: Not passed on; an `[mcp.NAME]` server is refused for now
         required: false
     outputs:
       session-endpoint:
@@ -475,9 +478,10 @@ jobs:
           chmod +x "$JOB_DIR/agentic-job"
           "$JOB_DIR/agentic-job" register --config "$JOB_DIR/config.toml" --output "$GITHUB_OUTPUT"
 
-  # The agent, as an unprivileged user on the caller's machine: agent.yml,
-  # a call so that the run token is one of its secrets. The permissions
-  # are those of agent.yml's job: the reads of the token the agent gets.
+  # The agent, as the runner's user without root on the caller's machine:
+  # agent.yml, a call so that the run token is one of its secrets, and the
+  # only one. The permissions are those of agent.yml's job: the reads of
+  # the token the agent gets.
   agent:
     needs: [policy, register]
     if: ${{ inputs.proposals-artifact == '' && needs.policy.outputs.admitted == 'true' }}
@@ -488,13 +492,12 @@ jobs:
       actions: read
     uses: ./.github/workflows/agent.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     secrets:
-      INFERENCE_API_KEY: ${{ secrets.INFERENCE_API_KEY }}
-      MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
       INFERENCE_RUN_TOKEN: ${{ needs.register.outputs.run-token }}
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       runner: ${{ inputs.agent-runner }}
       github-reads: ${{ inputs.github-reads }}
+      secure-host-image-artifact-id: ${{ inputs.secure-host-image-artifact-id }}
 
   check:
     needs: [policy, agent]

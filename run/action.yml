@@ -6,6 +6,12 @@ inputs:
   job-dir:
     description: The directory prepare wrote, holding policy.json, task.md, meta.json and the policy job's run.json
     default: ${{ github.workspace }}/.agentic-job
+  runner-home:
+    description: >-
+      Run the agent as the runner's user, with this directory as its home, and no sandbox user
+      (`agentic-job run --runner-home`): after cgwalters-forge/actions/secure-host, in a job that
+      holds no secret and no write token. Empty for the sandbox user of secure-host/internal
+    default: ""
   github-token:
     description: >-
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
@@ -116,16 +122,22 @@ runs:
           { echo '::error::run.json is not one line per setting'; exit 1; }
         jq -r 'to_entries[] | "\(.key)=\(.value)"' "$JOB_DIR/run.json" | tee -a "$GITHUB_OUTPUT"
     # The session comes from this action's pinned source, not target code.
-    # It is installed only as the sandbox user, with no credential in reach.
+    # It is installed only as the agent's user, in the agent's home.
     - name: Install the built-in scripted session
       if: ${{ steps.settings.outputs.fake_profile != '' }}
       shell: bash
       env:
         ACTION: ${{ github.action_path }}
         PROFILE: ${{ steps.settings.outputs.fake_profile }}
+        RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
         case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
-        agentic-job sandbox exec --stdin "$ACTION/../workflow/dispatch-$PROFILE.sh" -- sh -s
+        if [ -n "$RUNNER_HOME" ]; then
+          mkdir -p -m 0700 "$RUNNER_HOME"
+          env -i -C "$RUNNER_HOME" HOME="$RUNNER_HOME" LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin sh -s < "$ACTION/../workflow/dispatch-$PROFILE.sh"
+        else
+          agentic-job sandbox exec --stdin "$ACTION/../workflow/dispatch-$PROFILE.sh" -- sh -s
+        fi
     # The agent holds the token and could leak it, so it must not write.
     # A classic personal access token names its scopes, and one with any
     # but read scopes is refused here. Job, App and fine-grained tokens
@@ -167,12 +179,22 @@ runs:
         AGENTIC_JOB_MCP_TOKEN: ${{ inputs.mcp-token }}
         # Taken over by `run` in place of a registration of its own.
         AGENTIC_JOB_INFERENCE_RUN_TOKEN: ${{ inputs.inference-run-token }}
+        RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
         echo '::group::agent (condensed)'
         state=0
         [ -z "$REVIEW_HEAD" ] || set -- --review-head "$REVIEW_HEAD"
         [ -z "$WATCH_ITEM" ] || set -- "$@" --watch-item "$WATCH_ITEM"
-        agentic-job run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
+        # The policy job's binary, which prepare downloaded: the secure-host
+        # image installs its own in /usr/local/bin over the one prepare put
+        # there, and that is the pinned release's, not this commit's.
+        binary=agentic-job
+        if [ -n "$RUNNER_HOME" ]; then
+          binary=$JOB_DIR/agentic-job
+          chmod 0755 "$binary"
+          set -- "$@" --runner-home "$RUNNER_HOME"
+        fi
+        "$binary" run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"
         [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"

@@ -257,10 +257,11 @@ test('admission marks only the calling repository, private, as a private target'
 // steps: the caller's repository, the actions of policy's own commit,
 // then prepare, secure-host and run, in that order.
 // agentic-job.yml's is agent.yml's, which takes the policy call's outputs
-// as one input, as check.yml does.
-for (const [file, source, job, policyOutput] of [
-  ['agentic-job.yml', wrapper, agentCall, name => `fromJSON(inputs.policy).${name}`],
-  ['example-compose.yml', compose, compose, name => `needs.policy.outputs.${name}`]]) {
+// as one input, as check.yml does, and secures its host with the public
+// forwarder; the example keeps the second user of the internal action.
+for (const [file, source, job, policyOutput, secureHost] of [
+  ['agentic-job.yml', wrapper, agentCall, name => `fromJSON(inputs.policy).${name}`, './.agentic-job-source/secure-host'],
+  ['example-compose.yml', compose, compose, name => `needs.policy.outputs.${name}`, './.agentic-job-source/secure-host/internal']]) {
   test(`${file} composes the pinned-source agent job and keeps trusted edges off agent outputs`, () => {
     const agent = job.split('\n  agent:\n')[1].split('\n  check:\n')[0];
     const out = name => `\${{ ${policyOutput(name)} }}`.replace(/[$()[\]{}.]/g, '\\$&');
@@ -273,9 +274,11 @@ for (const [file, source, job, policyOutput] of [
     assert.match(agent, new RegExp(`repository: ${out('source-repository')}\\n {10}ref: ${out('source-sha')}\\n {10}path: .agentic-job-source\\n`));
     assert.match(agent, new RegExp(`^ {10}ref: ${out('ref')}$`, 'm'));
     const uses = [...agent.matchAll(/^ {6}(?:- |  )uses: ([^\n]+)/gm)].map(([, use]) => use.split(' ')[0]);
-    assert.deepEqual(uses.filter(use => !use.startsWith('actions/checkout@')), [
-      './.agentic-job-source/prepare', './.agentic-job-source/secure-host/internal', './.agentic-job-source/run']);
-    for (const use of uses) assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+(?:\/internal)?|actions\/checkout@[0-9a-f]{40})$/);
+    assert.deepEqual(uses.filter(use => !/^actions\/(?:checkout|download-artifact)@/.test(use)), [
+      './.agentic-job-source/prepare', secureHost, './.agentic-job-source/run']);
+    for (const use of uses) {
+      assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+(?:\/internal)?|actions\/(?:checkout|download-artifact)@[0-9a-f]{40})$/);
+    }
     assert.ok(agent.indexOf('source/prepare') < agent.indexOf('source/secure-host'));
     assert.ok(agent.indexOf('source/secure-host') < agent.indexOf('source/run'));
     assert.doesNotMatch(agent, /SAFE_OUTPUTS_PAT|tailscale/i);
@@ -301,6 +304,89 @@ for (const [file, source, job, policyOutput] of [
       '      check: ${{ toJSON(needs.check) }}'].join('\n'));
   });
 }
+
+// agent.yml runs the configuration's setup script itself, after
+// secure-host, where the image would have run it as its second user:
+// as the runner's user, in the agent's home, with none of the job's
+// variables. `run` then starts the policy job's binary, not the one the
+// image installed, with that home.
+test('agent.yml runs the setup script, and run the agent, as the runner\'s user in the agent\'s home', (t) => {
+  const directory = mkdtempSync(join(homedir(), 'agent-home-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const agent = agentCall.split('\n  agent:\n')[1];
+  const setup = agent.split('- name: The setup script\n')[1].split('        run: |\n')[1].split(/\n {6}[^ ]/)[0]
+    .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+  mkdirSync(join(directory, '.agentic-job'));
+  mkdirSync(join(directory, 'tmp'));
+  const home = join(directory, 'tmp/agent-home');
+  const env = { RUNNER_TEMP: join(directory, 'tmp'), AGENT_HOME: home, AGENTIC_JOB_TEST_JOB: 'the job\'s' };
+  const inDir = script => spawnSync('bash', ['-eo', 'pipefail', '-c', `cd "$1" && ${script.replace('.agentic-job-source/workflow/runner-setup.py', join(__dirname, 'runner-setup.py'))}`, 'bash', directory],
+    { encoding: 'utf8', env: { ...process.env, ...env } });
+  writeFileSync(join(directory, '.agentic-job/config.toml'), '[setup]\npackages = []\n');
+  const admit = agent.split('- name: Admit the runner-user configuration\n')[1]
+    .split('        run: ')[1].split('\n')[0];
+  assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf('- uses: ./.agentic-job-source/secure-host'));
+  assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf('- name: The setup script'));
+  for (const [caller, policy, status] of [
+    ['false', {}, 0], ['false', { private: false }, 0],
+    ['true', {}, 1], ['null', {}, 1], ['false', { private: true }, 1],
+  ]) {
+    env.CALLER_PRIVATE = caller;
+    writeFileSync(join(directory, '.agentic-job/policy.json'), JSON.stringify(policy));
+    const admission = inDir(admit);
+    assert.equal(admission.status, status, admission.stderr);
+    assert.ok(!existsSync(home));
+  }
+  env.CALLER_PRIVATE = 'false';
+  writeFileSync(join(directory, '.agentic-job/policy.json'), '{}');
+  for (const config of [
+    '[inference]\nregister = "api-key"', '[mcp.server]\nurl = "https://example.com"',
+    '[session]\nlisten = true', '[sandbox.check]\nbefore-agent = true',
+    '[setup.tools]\nrust = "stable"',
+  ]) {
+    writeFileSync(join(directory, '.agentic-job/config.toml'), config);
+    assert.equal(inDir(admit).status, 1, config);
+    assert.ok(!existsSync(home));
+  }
+  writeFileSync(join(directory, '.agentic-job/config.toml'), '[setup]\npackages = []\n');
+  let result = inDir(setup);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!existsSync(home));
+  writeFileSync(join(directory, '.agentic-job/config.toml'), '[setup]\nscript = "setup.sh"\n[sandbox.env]\nTOOLCHAIN_OPTION = "configured"\n');
+  writeFileSync(join(directory, 'setup.sh'), '#!/bin/sh\nset -e\npwd > "$HOME/pwd.txt"\nenv > "$HOME/env.txt"\n');
+  result = inDir(setup);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(home, 'pwd.txt'), 'utf8').trim(), home);
+  const seen = readFileSync(join(home, 'env.txt'), 'utf8');
+  assert.match(seen, new RegExp(`^HOME=${home}$`, 'm'));
+  assert.match(seen, /^TOOLCHAIN_OPTION=configured$/m);
+  assert.doesNotMatch(seen, /AGENTIC_JOB_TEST_JOB|RUNNER_TEMP/);
+  writeFileSync(join(directory, 'setup.sh'), '#!/bin/sh\nexit 3\n');
+  assert.equal(inDir(setup).status, 3);
+
+  // The run step: the job directory's binary with --runner-home, or the
+  // installed one, for a caller with a sandbox user.
+  const jobDir = join(directory, 'job');
+  const bin = join(directory, 'bin');
+  mkdirSync(jobDir);
+  mkdirSync(bin);
+  const recorder = '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$RECORD"\n';
+  writeFileSync(join(jobDir, 'agentic-job'), recorder, { mode: 0o644 });
+  writeFileSync(join(bin, 'agentic-job'), recorder, { mode: 0o755 });
+  for (const [runnerHome, binary] of [[home, join(jobDir, 'agentic-job')], ['', join(bin, 'agentic-job')]]) {
+    const record = join(directory, 'record');
+    result = shell(step(run, 'Run the agent'), {
+      JOB_DIR: jobDir, RUNNER_HOME: runnerHome, RECORD: record, REVIEW_HEAD: '', WATCH_ITEM: '',
+      GITHUB_OUTPUT: join(directory, 'output'), GITHUB_STEP_SUMMARY: join(directory, 'summary'),
+      PATH: `${bin}:${process.env.PATH}`,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const args = readFileSync(record, 'utf8').trim().split('\n');
+    assert.equal(args[0], binary);
+    assert.equal(args[1], 'run');
+    assert.deepEqual(args.slice(-2), runnerHome ? ['--runner-home', home] : ['--out', join(jobDir, 'out')]);
+  }
+});
 
 test('apply applies only what check accepted, whatever the caller\'s gate', () => {
   const applier = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
@@ -334,20 +420,31 @@ test('the agent job installs the trusted binary and checks the proxy before setu
   assert.doesNotMatch(policy, /CONFIG_BINARY/);
   assert.ok(prepare.includes('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job'));
   assert.ok(prepare.indexOf('artifact-ids:') < prepare.indexOf('- name: Install the binary'));
+  const forwarder = readFileSync(join(__dirname, '../secure-host/action.yml'), 'utf8');
   const review = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   for (const [file, source] of [['agent.yml', agentCall], ['example-compose.yml', compose], ['review.yml', review]]) {
     const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
     assert.equal([...agent.matchAll(/agentic-job secure-host inference/g)].length, 1, file);
     assert.ok(agent.includes('- name: Check inference proxy reachability\n' +
       '        run: agentic-job secure-host inference .agentic-job/config.toml\n'), file);
-    assert.doesNotMatch(agent, / config /, file);
-    assert.ok(agent.includes('config: .agentic-job/config.toml'), file);
+    // agent.yml's host is the new action's, which takes the policy job's
+    // configuration but for the setup script, and that is all it writes.
+    const own = file === 'agent.yml'
+      ? '        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"\n'
+      : '';
+    assert.doesNotMatch(agent.replace(own, ''), / config /, file);
+    assert.ok(agent.includes(file === 'agent.yml' ? 'config: ${{ runner.temp }}/agentic-job-host.toml' : 'config: .agentic-job/config.toml'), file);
     const expanded = agent.replace('uses: ./.agentic-job-source/prepare', prepare)
       .replace('uses: ./.agentic-job-source/secure-host/internal', secure)
+      .replace('uses: ./.agentic-job-source/secure-host', forwarder)
       .replace('uses: ./.agentic-job-source/run', run);
+    const names = file === 'agent.yml'
+      ? ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability', "The host's configuration",
+        "Refuse the old action's inputs", 'The setup script', "The session's endpoint", 'Prove the host is secured', 'Run the agent']
+      : ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability',
+        'Write the configuration', 'Secure the host', "The session's endpoint", 'Prove the host is secured', 'Run the agent'];
     let position = 0;
-    for (const name of ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability',
-      'Write the configuration', 'Secure the host', "The session's endpoint", 'Prove the host is secured', 'Run the agent']) {
+    for (const name of names) {
       position = expanded.indexOf(`- name: ${name}\n`, position);
       assert.ok(position >= 0, `${file}: ${name}`);
     }
@@ -390,6 +487,23 @@ test('the end-to-end callers run the scripted agent, which needs no proxy', () =
     assert.ok(job.includes('agent: fake'), name);
     assert.ok(!job.includes('inference-url:'), name);
   }
+  // Every agent job of theirs secures its host with this revision's
+  // image, the static job's archive, by the ID build.yml hands on.
+  for (const [, name, job] of ci.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)) {
+    if (!/^    uses: \.\/\.github\/workflows\/agentic-job\.yml/m.test(job) || job.includes('proposals-artifact:')) continue;
+    assert.match(job, /^    needs: \[changes, static(?:, [-\w]+)?\]$/m, name);
+    assert.ok(job.includes('      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}\n'), name);
+  }
+  const build = readFileSync(join(__dirname, '../.github/workflows/build.yml'), 'utf8');
+  assert.ok(build.includes('        value: ${{ jobs.build.outputs.secure-host-image-artifact-id }}\n'));
+  assert.ok(build.includes('      secure-host-image-artifact-id: ${{ steps.image.outputs.artifact-id }}\n'));
+  assert.match(build, /- id: image\n {8}uses: actions\/upload-artifact@[0-9a-f]{40} # [^\n]*\n {8}with:\n {10}name: secure-host-image\n/);
+  // agent.yml downloads it by that ID alone, and hands the archive to
+  // secure-host only then.
+  assert.ok(agentCall.includes("      - if: ${{ inputs.secure-host-image-artifact-id != '' }}\n" +
+    '        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\n' +
+    '        with:\n          artifact-ids: ${{ inputs.secure-host-image-artifact-id }}\n'));
+  assert.ok(agentCall.includes("image-archive: ${{ inputs.secure-host-image-artifact-id != '' && format('{0}/secure-host-image/secure-host.tar', runner.temp) || '' }}\n"));
 });
 
 // example-compose.yml is what a caller copies, with steps of its own in
@@ -429,6 +543,19 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   assert.deepEqual(granted(agent, '    outputs:\n'), reads);
   assert.deepEqual(granted(job('agent'), '    uses:'), reads);
   assert.doesNotMatch(agentCall + job('agent'), /^ *id-token:/m);
+  // The agent is the runner's user, as every step after secure-host is:
+  // the job holds no secret but the run token, no git credential, and
+  // neither the second user's action nor its way in.
+  assert.deepEqual([...agentCall.matchAll(/secrets\.([\w]+)/g)].map(([, name]) => name), ['INFERENCE_RUN_TOKEN']);
+  assert.deepEqual([...agentCall.split('    secrets:\n')[1].split('    outputs:\n')[0].matchAll(/^ {6}([\w]+):$/gm)]
+    .map(([, name]) => name), ['INFERENCE_RUN_TOKEN']);
+  assert.deepEqual([...job('agent').split('    secrets:\n')[1].split('    with:\n')[0].matchAll(/^ {6}([\w]+):/gm)]
+    .map(([, name]) => name), ['INFERENCE_RUN_TOKEN']);
+  const checkouts = agent.split('\n      - ').filter(step => step.startsWith('uses: actions/checkout@'));
+  assert.equal(checkouts.length, 2);
+  for (const step of checkouts) assert.match(step, /^ {10}persist-credentials: false$/m);
+  assert.doesNotMatch(agentCall, /secure-host\/internal|sandbox exec/);
+  assert.match(agent, /^ {10}runner-home: \$\{\{ runner\.temp \}\}\/agent-home$/m);
   const register = job('register');
   assert.deepEqual(granted(register, '    outputs:\n'), { 'id-token': 'write' });
   assert.match(register, /^    runs-on: \$\{\{ fromJSON\(inputs.agent-runner\) \}\}$/m);
@@ -531,7 +658,7 @@ test('the agent gets its GitHub token, and a classic token that can write is ref
 test('the wrapper forwards every setting to the policy call as it is', () => {
   const names = source => [...source.split('    inputs:\n')[1].split(/^    (?:outputs|secrets):\n/m)[0]
     .matchAll(/^      ([-\w]+):$/gm)].map(([, name]) => name);
-  const own = ['agent-runner', 'github-reads'];
+  const own = ['agent-runner', 'github-reads', 'secure-host-image-artifact-id'];
   assert.deepEqual(names(wrapper).filter(name => !own.includes(name)), names(policy));
   const call = wrapper.split('\n  policy:\n')[1].split('    with:\n')[1].split('\n\n')[0];
   assert.equal(call, names(policy).map(name => `      ${name}: \${{ inputs.${name} }}`).join('\n'));
@@ -588,21 +715,19 @@ test('review.yml runs the caller\'s network step once, if any, before secure-hos
   for (const action of pinned) assert.match(action, /^[-\w]+\/[-\w./]+@[0-9a-f]{40}$/, action);
 });
 
-// An MCP server's credential reaches one step of agentic-job.yml's agent
-// job, `run`, through the run action's input, and the action gives it to
-// the step that runs `agentic-job run` alone.
-test('agentic-job.yml gives the MCP credential to run alone', () => {
-  // Passed on once to agent.yml, whose job is agentic-job.yml's.
-  assert.deepEqual([...wrapper.matchAll(/.*secrets\.MCP_TOKEN.*/g)].map(([text]) => text),
-    ['      MCP_TOKEN: ${{ secrets.MCP_TOKEN }}']);
-  const source = agentCall;
-  assert.equal([...source.matchAll(/secrets\.MCP_TOKEN/g)].length, 1);
-  const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
-  const run = agent.split('\n      - id: run\n')[1];
-  assert.match(run, /\n {10}mcp-token: \$\{\{ secrets\.MCP_TOKEN \}\}\n/);
-  for (const file of [wrapper, agentCall]) {
-    assert.match(file, /^      MCP_TOKEN:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
+// An MCP server's credential and the provider's key would be readable by
+// an agent that is the runner's user, as agent.yml's is: agentic-job.yml
+// still takes both, so that callers that pass them parse, and passes on
+// neither (`run --runner-home` refuses the configurations that need them).
+// The run action, as a caller-owned agent job with a second user uses
+// it, gives the MCP credential to the step that runs `agentic-job run`
+// alone.
+test('agentic-job.yml passes no MCP credential or inference key to its agent job', () => {
+  for (const name of ['MCP_TOKEN', 'INFERENCE_API_KEY']) {
+    assert.doesNotMatch(wrapper + agentCall, new RegExp(`secrets\\.${name}`), name);
+    assert.match(wrapper, new RegExp(`^      ${name}:\\n(?: +#[^\\n]*\\n)*? +(?:description: [^\\n]*\\n +)?required: false$`, 'm'), name);
   }
+  assert.doesNotMatch(agentCall, /check-key|mcp-token|inference-api-key/);
   const action = readFileSync(join(__dirname, '../run/action.yml'), 'utf8');
   const uses = [...action.matchAll(/inputs\.mcp-token/g)];
   assert.equal(uses.length, 1);
@@ -610,21 +735,16 @@ test('agentic-job.yml gives the MCP credential to run alone', () => {
   const holder = steps.filter(step => step.includes('inputs.mcp-token'));
   assert.equal(holder.length, 1);
   assert.match(holder[0], /AGENTIC_JOB_MCP_TOKEN: \$\{\{ inputs\.mcp-token \}\}/);
-  assert.match(holder[0], /agentic-job run --policy/);
+  assert.match(holder[0], /"\$binary" run --policy/);
 });
 
-// The provider's key, with `api-key`, reaches two steps of the agent job
-// and nothing else: its check before secure-host, which fails a bad key
-// before the minutes of setup, and `run`, outside the sandbox. In
-// review.yml the check follows the caller's network step, which never
-// gets it, and the policy call takes the mode from repository variables.
-// agentic-job.yml passes it on once, to agent.yml, whose job is its own.
-test('agentic-job.yml passes the inference API key to its agent job alone', () => {
-  assert.deepEqual([...wrapper.matchAll(/.*secrets\.INFERENCE_API_KEY.*/g)].map(([text]) => text),
-    ['      INFERENCE_API_KEY: ${{ secrets.INFERENCE_API_KEY }}']);
-  assert.match(wrapper.split('\n  agent:\n')[1], /^    secrets:\n(?: {6}.*\n)*? {6}INFERENCE_API_KEY: /m);
-});
-for (const file of ['agent.yml', 'review.yml']) {
+// The provider's key, with `api-key`, reaches two steps of review.yml's
+// agent job, which has a second user, and nothing else: its check before
+// secure-host, which fails a bad key before the minutes of setup, and
+// `run`, outside the sandbox. The check follows the caller's network
+// step, which never gets it, and the policy call takes the mode from
+// repository variables.
+for (const file of ['review.yml']) {
   test(`${file} checks the inference API key before secure-host and gives it to run alone`, () => {
     const source = readFileSync(join(__dirname, '../.github/workflows', file), 'utf8');
     const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];

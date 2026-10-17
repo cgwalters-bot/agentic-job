@@ -60,13 +60,21 @@ pub enum Launch {
         /// `sudo run0 --pipe --user=... --`.
         wrapper: Vec<String>,
     },
+    /// As the caller's own user, through a wrapper that clears its
+    /// environment (`env -i`): for a job that is the unit of trust, with
+    /// no second user. Only the agent's process group is killed when the
+    /// session ends: every process of the user would be the caller too.
+    Own {
+        /// The command that runs the agent's argv, such as `env -i HOME=... --`.
+        wrapper: Vec<String>,
+    },
 }
 
 impl Launch {
     pub(super) fn wrapper(&self) -> &[String] {
         match self {
             Self::Direct => &[],
-            Self::Sandbox { wrapper, .. } => wrapper,
+            Self::Sandbox { wrapper, .. } | Self::Own { wrapper } => wrapper,
         }
     }
 }

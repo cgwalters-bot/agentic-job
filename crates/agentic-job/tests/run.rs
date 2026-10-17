@@ -138,12 +138,21 @@ impl Job {
     /// A repository to clone, which the sandbox user owns: git refuses
     /// to serve one of another user's.
     fn repository(&self, user: &str) {
+        self.own_repository();
+        sh(&format!(
+            "sudo -n chown -R {user}: {repo}",
+            repo = self.path("repo").display()
+        ));
+    }
+
+    /// A repository to clone, which this user owns: for a run whose
+    /// agent is this user too.
+    fn own_repository(&self) {
         let repo = self.path("repo");
         sh(&format!(
             "set -e; chmod 0755 {dir}; git init -q -b main {repo}; cd {repo}; \
              echo 'A target for tests.' > README.md; echo 'Read me first.' > AGENTS.md; \
-             git add .; git -c user.name=test -c user.email=test@example.invalid commit -q -m 'Add a target'; \
-             sudo -n chown -R {user}: {repo}",
+             git add .; git -c user.name=test -c user.email=test@example.invalid commit -q -m 'Add a target'",
             dir = self.dir.display(),
             repo = repo.display(),
         ));
@@ -714,6 +723,79 @@ fn a_run_from_clone_to_the_end_of_its_run() {
         got.all()
     );
     assert!(!job.path("out/safe-outputs").exists());
+}
+
+/// With `--runner-home` there is no sandbox user: the fake agent runs as
+/// this user, with that home and only the variables a run gives it, and
+/// the run ends as it does with one. It needs no other user, so it
+/// always runs. What would need one is refused before anything starts.
+#[test]
+fn a_run_as_its_own_user_in_the_home_given() {
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let job = Job::new("own");
+    job.own_repository();
+    let bin = Path::new(env!("CARGO_BIN_EXE_fake-agent"))
+        .parent()
+        .unwrap();
+    let config = format!(
+        "[agent]\nname = \"fake\"\n[sandbox]\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n{LIMITS}{}",
+        bin.display(),
+        plain(&proxy)
+    );
+    // The session the agent plays, in the home before the run: what it
+    // was started with, and a change in its checkout.
+    let home = job.path("home");
+    let script = json!([
+        canary(),
+        {"execute": {"title": "Environment", "command": "id -un > \"$HOME/user.txt\"; env > \"$HOME/env.txt\""}},
+        {"write": {"title": "Change", "path": "{cwd}/FAKE.md", "content": "A change.\n"}},
+    ]);
+    std::fs::create_dir_all(home.join(".config/fake-agent")).unwrap();
+    std::fs::write(home.join(SCRIPT_PATH), script.to_string()).unwrap();
+    let mut command = job.command(&config);
+    command.arg("--runner-home").arg(&home);
+    // A variable of the job's own, which the agent must not inherit.
+    command.env("AGENTIC_JOB_TEST_OWN", "the job's");
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert_eq!(
+        job.json("out/work/harness/harness.json")["result"],
+        "success"
+    );
+    let checkout = home.join("work").join(&job.name);
+    assert!(checkout.join("FAKE.md").is_file(), "{}", got.all());
+    let own = sh("id -un");
+    assert_eq!(job.text("home/user.txt").trim(), own);
+    assert_eq!(sh(&format!("stat -c %a {}", home.display())), "700");
+    let env = job.text("home/env.txt");
+    let home_line = format!("HOME={}", home.canonicalize().unwrap().display());
+    assert!(env.lines().any(|line| line == home_line), "{env}");
+    assert!(!env.contains("AGENTIC_JOB_TEST_OWN"), "{env}");
+    assert!(
+        got.stderr
+            .contains(&format!("Cloned local/{} (main) as {own}", job.name)),
+        "{}",
+        got.all()
+    );
+    assert_eq!(job.json("out/run/summary.json")["result"], "success");
+    assert_eq!(proxy.run_states(), ["finished"]);
+
+    // Asked for by the job's environment, before anything is started.
+    let job = Job::new("own-refused");
+    let mut command = job.command(&config);
+    command
+        .arg("--runner-home")
+        .arg(job.path("home"))
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "stand-in");
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains("--runner-home") && got.stderr.contains("id-token"),
+        "{}",
+        got.all()
+    );
+    assert!(!job.path("home").exists());
 }
 
 /// `register = "api-key"`: the key is checked with the provider, the

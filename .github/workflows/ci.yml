@@ -627,6 +627,11 @@ jobs:
   # so its number is written out three times below), and `e2e-verify`
   # deletes them again.
   #
+  # The agent jobs secure their host with this revision's secure-host image,
+  # the static job's archive (`secure-host-image-artifact-id`), and run the
+  # agent as the runner's user; e2e-dispatch's, through dispatch.yml, runs
+  # the pinned, released image.
+  #
   # Never forward a deployment PAT to proposed workflow code. These callers
   # exercise apply's job-token fallback under their declared permissions.
   # Same noop producer/call as docs/workflow.md; no checkout or producer token.
@@ -663,7 +668,7 @@ jobs:
       artifact-prefix: proposals-
 
   e2e-full:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -674,6 +679,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-full-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       task: Comment on the issue.
       repo: ${{ github.repository }}
       outputs: add_comment,noop
@@ -691,7 +697,7 @@ jobs:
   # the session has it hand back and stops it, `run` ends with the exit
   # state of a limit, and its comment is applied saying it is partial.
   e2e-limit:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -702,6 +708,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-limit-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       task: Start a comment and then too many subagent tasks.
       repo: ${{ github.repository }}
       outputs: add_comment,noop
@@ -728,7 +735,7 @@ jobs:
   # bounds list no such event: the run ends in the policy job, a success
   # with the other jobs skipped. e2e-verify checks both.
   e2e-event:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -739,6 +746,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-event-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       notify: comment
       event: true
       # A base the bounds would refuse, so that e2e-verify's check of the
@@ -762,7 +770,7 @@ jobs:
   # to any issue of this repository (workflow/analysis.toml).
   # No contents write permission: apply must not checkout/fetch/push a base.
   e2e-analysis:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -773,6 +781,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-analysis-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       # Test this checkout, not a published release that may lack fake-agent.
       build-binary: true
       repo: ${{ github.repository }}
@@ -795,7 +804,7 @@ jobs:
   # Same read-only analysis, but hostile output names another item. Check
   # must be refused before the job holding the issue-write token applies anything.
   e2e-analysis-refused:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -806,6 +815,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-analysis-refused-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       build-binary: true
       expect-check-refusal: true
       repo: ${{ github.repository }}
@@ -881,7 +891,7 @@ jobs:
 
   # Both people outputs target the run-owned PR, not the shared scratch issue.
   e2e-people:
-    needs: [changes, e2e-scratch]
+    needs: [changes, static, e2e-scratch]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -892,6 +902,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-people-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       build-binary: true
       repo: ${{ github.repository }}
       base: ${{ needs.e2e-scratch.outputs.branch }}
@@ -915,7 +926,7 @@ jobs:
   # refuses `success`. Apply posts it with the job token: a user's token
   # cannot create check runs. A push has no pull request to post on.
   e2e-check-run:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' && github.event_name != 'push' }}
     permissions:
       contents: read
@@ -927,6 +938,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-check-run-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       build-binary: true
       repo: ${{ github.repository }}
       base: ${{ github.head_ref || needs.changes.outputs.analysis-base }}
@@ -989,7 +1001,7 @@ jobs:
 
   # Pull requests only (see the review step of changes).
   e2e-review:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' && needs.changes.outputs.review == 'true' }}
     permissions:
       contents: read
@@ -1000,6 +1012,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-review-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       repo: ${{ github.repository }}
       event: true
       review: true
@@ -1070,7 +1083,7 @@ jobs:
   # on the items e2e-items-scratch opened; the agent finds them from its
   # base. The scratch issue is the run's item, which a hidden comment is on.
   e2e-items:
-    needs: [changes, e2e-items-scratch]
+    needs: [changes, static, e2e-items-scratch]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -1081,6 +1094,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-items-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       build-binary: true
       repo: ${{ github.repository }}
       base: ${{ needs.e2e-items-scratch.outputs.branch }}
@@ -1141,7 +1155,7 @@ jobs:
   # and resolve_pull_request_review_thread with the job token, on the pull
   # request e2e-threads-scratch opened, which is the run's item.
   e2e-threads:
-    needs: [changes, e2e-threads-scratch]
+    needs: [changes, static, e2e-threads-scratch]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
@@ -1152,6 +1166,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
     with:
       id: e2e-threads-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
       build-binary: true
       repo: ${{ github.repository }}
       base: ${{ needs.e2e-threads-scratch.outputs.branch }}

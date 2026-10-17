@@ -575,7 +575,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.doesNotMatch(apply, /pull_request.head|refs\/pull/);
   const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   // Whether the base has the review files is read from the base commit.
-  assert.match(ci, /e2e-review:\s+needs: changes\n\s+if: \$\{\{ needs\.changes\.outputs\.e2e == 'true' && needs\.changes\.outputs\.review == 'true' \}\}/);
+  assert.match(ci, /e2e-review:\s+needs: \[changes, static\]\n\s+if: \$\{\{ needs\.changes\.outputs\.e2e == 'true' && needs\.changes\.outputs\.review == 'true' \}\}/);
   assert.match(ci, /git cat-file -t "\$BASE:\$file"/);
   assert.match(ci, /Exactly one scripted verdict was posted/);
   assert.match(ci, /HEAD_SHA: \$\{\{ github.event.pull_request.head.sha \}\}/);

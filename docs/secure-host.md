@@ -8,10 +8,10 @@ install hook, and what protects a job from one protects it from the
 others. So the hardening is a step of its own that any job can run
 before untrusted steps, whether or not an agent runs afterwards: the action in
 [`secure-host/internal/`](../secure-host/internal/action.yml), which this
-page describes. The reusable workflow's agent job uses the same action and
-does not own it. The public path `secure-host/` now forwards to
+page describes. The public path `secure-host/` now forwards to
 `cgwalters-forge/actions/secure-host`
-([below](#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
+([below](#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)),
+and the reusable workflow's agent job uses that one.
 
 ## The public action forwards to cgwalters-forge/actions/secure-host
 
@@ -40,9 +40,16 @@ forward keeps the old action. At `@main` or a later commit:
   `build`. Each asked for a host the new action would not set up, so the
   step does not ignore it.
 
-agentic-job's own agent job and the CI jobs that use the second user name
-the old action at `secure-host/internal`, unchanged, until the agent job
-no longer needs that user.
+The reusable workflow's agent job (`agent.yml`) runs the forwarder, with
+the policy job's configuration but `setup.script`, and then the agent as
+the runner's user, with no second user (`run --runner-home`). The image
+would run `setup.script` as its second user, from the host's root, so the
+job runs it itself, after secure-host, in the agent's home. The image
+also installs its own binary in `/usr/local/bin` over the one `prepare`
+put there, so `run` starts the policy job's binary from the job directory.
+The CI jobs that use the second user, and agent jobs of a caller's own
+(`example-compose.yml`, `review.yml`), name the old action at
+`secure-host/internal`, unchanged, until they no longer need that user.
 
 The action supports exactly **Ubuntu 26.04** and **RHEL 10** (including
 RHEL 10 minor releases). Once it has the binary, and before installing

@@ -23,17 +23,22 @@ on:
         description: Give the agent job's own read-only GitHub token as GH_TOKEN
         type: boolean
         required: true
+      secure-host-image-artifact-id:
+        description: >-
+          For testing an unreleased secure-host image: the ID of an artifact of this workflow run
+          holding build.yml's secure-host.tar, which runs as root in place of the pinned, attested
+          image, unverified. Empty for the pinned image
+        type: string
+        default: ""
+    # The agent is the runner's user, as every step after secure-host is,
+    # and can read whatever the job holds: so the job holds nothing but
+    # the run token, which is the agent's to use anyway. No repository
+    # secret comes here; an inference key or MCP credential would need a
+    # second user (`run --runner-home` refuses both).
     secrets:
-      # Only the agent job's `run` step and its check before secure-host
-      # get it, and the sandbox user never does (agentic-job.yml).
-      INFERENCE_API_KEY:
-        required: false
-      # Only the agent job's `run` step gets it (agentic-job.yml).
-      MCP_TOKEN:
-        required: false
       # The register job's output: the broker's run token for
       # `github-oidc`, empty for every other mode. Only `run` gets it, and
-      # gives the agent this token, which is the agent's to use anyway.
+      # gives the agent this token: narrow, capped and expiring.
       INFERENCE_RUN_TOKEN:
         required: false
     outputs:
@@ -102,14 +107,12 @@ jobs:
         with:
           binary-artifact-id: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           policy-artifact-id: ${{ fromJSON(inputs.policy).policy-artifact-id }}
-      # With `api-key`, the key checked with the provider now, in seconds,
-      # rather than by `run` after the minutes of secure-host; nothing to
-      # do otherwise. Only the binary policy's commit built gets it, before
-      # anything of the agent's is on the machine, and never prints it.
-      - name: Check the inference API key
+      # No caller code may run with open egress while private source is in
+      # this checkout, including when the requested target is public.
+      - name: Admit the runner-user configuration
         env:
-          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
-        run: agentic-job check-key --config .agentic-job/config.toml
+          CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+        run: python3 .agentic-job-source/workflow/runner-setup.py admit
       # Where the configuration names an inference proxy: a TCP connection
       # to it as the runner's user, before setup, so that a runner off the
       # proxy's network fails here and says so rather than in a probe of
@@ -118,20 +121,38 @@ jobs:
       # are not checked.
       - name: Check inference proxy reachability
         run: agentic-job secure-host inference .agentic-job/config.toml
-      # `sandbox setup`, which ends by taking root from this job, and
-      # `sandbox check`, with the binary and configuration of the policy
-      # job. Every step after it is this file's, and none of them has root.
-      - uses: ./.agentic-job-source/secure-host/internal # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+      # The policy job's configuration for the host, by its binary, but for
+      # `setup.script`: the image would run that from the host's root as
+      # its second user, and this job runs it itself, below.
+      - name: The host's configuration
+        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"
+      - if: ${{ inputs.secure-host-image-artifact-id != '' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          binary: /usr/local/bin/agentic-job
-          config: .agentic-job/config.toml
-      # It takes secure-host's passing sandbox checks from the record they
-      # left in this job, and uploads before reporting a limit.
+          artifact-ids: ${{ inputs.secure-host-image-artifact-id }}
+          path: ${{ runner.temp }}/secure-host-image
+      # cgwalters-forge/actions/secure-host, through the forwarder of the
+      # policy job's commit, which pins it: its image takes root from this
+      # job and proves it. Every step after it is this file's, as the
+      # runner's user without root, and so is the agent (tracker#674).
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          config: ${{ runner.temp }}/agentic-job-host.toml
+          image-archive: ${{ inputs.secure-host-image-artifact-id != '' && format('{0}/secure-host-image/secure-host.tar', runner.temp) || '' }}
+      # The configuration's `setup.script`, the caller's, for a toolchain:
+      # without root, in the agent's home and with its variables, as the
+      # sandbox user ran it before.
+      - name: The setup script
+        env:
+          AGENT_HOME: ${{ runner.temp }}/agent-home
+        run: |
+          python3 .agentic-job-source/workflow/runner-setup.py setup
+      # The agent as the runner's user, in its own home; `run` uploads
+      # before reporting a limit.
       - id: run
         timeout-minutes: 340
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
+          runner-home: ${{ runner.temp }}/agent-home
           github-token: ${{ inputs.github-reads && github.token || '' }}
-          inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
           inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}
-          mcp-token: ${{ secrets.MCP_TOKEN }}

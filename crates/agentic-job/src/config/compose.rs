@@ -53,6 +53,11 @@ pub struct Args {
     /// Check only what `sandbox setup` reads: for a job that runs no agent
     #[arg(long)]
     pub host: bool,
+    /// Leave `setup.script` out: for the secure-host image, which would
+    /// run it from the host's root as its second user, where an agent job
+    /// with no second user runs it itself
+    #[arg(long)]
+    pub no_script: bool,
     /// The repository the run works on, OWNER/NAME: chooses its entry of
     /// `setup.repo-packages`
     #[arg(long, value_name = "OWNER/NAME")]
@@ -241,6 +246,11 @@ fn compose(args: &Args) -> Result<String> {
         }
     }
     repo_packages(&mut table, args.repo.as_deref())?;
+    if args.no_script
+        && let Some(setup) = table.get_mut("setup").and_then(Value::as_table_mut)
+    {
+        setup.remove("script");
+    }
     // Default only an absent key: an explicit list (even an empty one)
     // is the caller's network policy, not ours to expand.
     let direct_is_set = table
@@ -306,6 +316,7 @@ mod tests {
             list: settings(list),
             boolean: Vec::new(),
             host: false,
+            no_script: false,
             repo: None,
         }
     }
@@ -629,6 +640,21 @@ mod tests {
         assert_eq!(config.agent.name, "");
         let denied = composed(&host_args(&["sandbox.deny-runner-metadata=true"], &[]));
         assert!(denied.sandbox.lock_runner && denied.sandbox.deny_runner_metadata);
+        // For the secure-host image, a run's file without its script and
+        // with all else: the agent job runs the script itself.
+        let run = args(None, &["setup.script=setup.sh", RUN[0]], LIMITS, &[]);
+        assert_eq!(
+            composed(&run).setup.script.as_deref(),
+            Some(std::path::Path::new("setup.sh"))
+        );
+        let image = composed(&Args {
+            host: true,
+            no_script: true,
+            ..run
+        });
+        assert_eq!(image.setup.script, None);
+        assert_eq!(image.agent.name, "fake");
+        assert_eq!(image.limits.budget, 100);
         // The same file, as a run's: `run` could not use it.
         let run = Args {
             host: false,
