@@ -422,6 +422,8 @@ Three smaller differences:
   another machine.
 - There is no compiler and no new workflow language. You write ordinary
   workflow YAML that calls a reusable workflow.
+  The opt-in [workflow checker](docs/workflows-check.md) enforces job shape;
+  this repository runs it in the required base-trusted ingress `vet` job.
 
 gh-aw has much that this does not: a large catalogue of output types,
 threat detection, memory across runs and many triggers. This has a handful of each, or none.

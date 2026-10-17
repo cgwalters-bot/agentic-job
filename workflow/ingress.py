@@ -98,6 +98,46 @@ def git(repo, *args):
                           capture_output=True).stdout
 
 
+def check_workflows(repo, head, binary, exemptions):
+    """Check the complete proposed workflow set, with base-owned policy and code."""
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be a full commit SHA")
+    with tempfile.TemporaryDirectory(dir=os.environ.get("RUNNER_TEMP", Path.home())) as temp:
+        workflows = Path(temp) / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        count = 0
+        # Recursive ls-tree does not traverse symlinks or gitlinks. Inspect the
+        # ancestors too, so replacing the directory cannot hide workflows.
+        entries = git(repo, "ls-tree", "-r", "-t", "-z", head, "--", ".github")
+        for entry in entries.split(b"\0"):
+            if not entry:
+                continue
+            metadata, raw_name = entry.split(b"\t", 1)
+            mode, kind, oid = metadata.split()
+            name = raw_name.decode()
+            if name in (".github", ".github/workflows"):
+                if kind != b"tree":
+                    raise ValueError(f"not a directory: {name!r}")
+                continue
+            if not re.fullmatch(r"\.github/workflows/[^/]*\.(?i:ya?ml)", name):
+                continue
+            if mode not in (b"100644", b"100755") or kind != b"blob":
+                raise ValueError(f"not a regular workflow file: {name!r}")
+            count += 1
+            if count > 500:
+                raise ValueError("more than 500 workflow files")
+            if int(git(repo, "cat-file", "-s", oid.decode())) > 1024 * 1024:
+                raise ValueError(f"workflow exceeds 1 MiB: {name!r}")
+            (workflows / Path(name).name).write_bytes(git(repo, "cat-file", "blob", oid.decode()))
+        result = subprocess.run([str(Path(binary).resolve()), "workflows", "check",
+                                 "--root", temp, "--exemptions", str(Path(exemptions).resolve())],
+                                capture_output=True)
+        # Checker diagnostics contain proposed text; do not emit workflow commands.
+        print(json.dumps({"workflows_stdout": result.stdout.decode(errors="replace"),
+                          "workflows_stderr": result.stderr.decode(errors="replace")}))
+        return result.returncode == 0
+
+
 def check(repo, base, head):
     if not all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in (base, head)):
         raise ValueError("base and head must be full commit SHAs")
@@ -168,8 +208,14 @@ if __name__ == "__main__":
     parser.add_argument("repo", type=Path)
     parser.add_argument("base")
     parser.add_argument("head")
+    parser.add_argument("--workflows-binary", type=Path)
+    parser.add_argument("--exemptions", type=Path)
     args = parser.parse_args()
     try:
-        raise SystemExit(0 if check(args.repo, args.base, args.head) else 1)
+        if bool(args.workflows_binary) != bool(args.exemptions):
+            raise ValueError("--workflows-binary and --exemptions must be given together")
+        shapes = (check_workflows(args.repo, args.head, args.workflows_binary, args.exemptions)
+                  if args.workflows_binary else True)
+        raise SystemExit(0 if check(args.repo, args.base, args.head) and shapes else 1)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Ingress failed: {error}\n")

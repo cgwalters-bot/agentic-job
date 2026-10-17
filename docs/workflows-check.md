@@ -14,11 +14,9 @@ when nothing is refused and 1 when something is, including a workflow
 file it cannot read or parse. It exits 2 when the exemptions file or the
 directory cannot be read (see [interface.md](interface.md)).
 
-This first slice is the command and its rules. Running it as a
-required check from the base branch, as the
-[ingress check](workflow-ingress.md) runs, and the guidance for
-callers come later. Until then it holds no file to anything unless a
-repository runs it itself.
+This repository runs it in the required `vet` job on every pull request and
+merge group, from base-branch code with base exemptions. Callers opt in by
+installing a trusted check; nothing is enabled in their repositories by default.
 
 ## What each job must be
 
@@ -141,6 +139,9 @@ and an entry for a file that does not exist is refused. When the files
 come from a proposal, pass the base branch's list with `--exemptions`
 so that the proposal cannot exempt itself. Without the option, the file
 under `--root` is read, and a missing one exempts nothing.
+Deleting or renaming an exempt workflow is therefore refused, including with
+an explicit `--exemptions` file. A maintainer must land the exemption removal
+first, then delete or rename the workflow in a subsequent proposal.
 
 This repository's own workflow files are all listed, each with its
 reason. They call the reusable workflow and secure-host by local path to
@@ -160,3 +161,64 @@ sharing YAML nodes. Mapping keys must be strings; duplicate keys and multiple
 documents are also refused. Refusals name the line. This deliberately smaller
 YAML subset prevents alias expansion from bypassing the depth bound.
 The command checks workflow files, not action manifests.
+
+## Installing a caller check
+
+The threat is a proposal exempting itself or replacing the checker with code
+that always passes. Keep the checker, script and exemptions outside the proposed
+tree. For example, copy `workflow/ingress.py` from the same source revision as
+this document into the caller's base branch (review and land it there first),
+then use this job. The separate binary pin below supplies the existing CLI;
+it does not supply the ingress script. This example runs only the
+shape checker; this repository's [ingress workflow](../.github/workflows/workflow-ingress.yml)
+also installs and runs pinned actionlint and zizmor.
+
+```yaml
+name: workflow-policy
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+jobs:
+  workflow-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: cgwalters-forge/agentic-job
+          ref: 23e74c719b7a50c9f576a5de4e630eeeb13ea357
+          path: checker
+          persist-credentials: false
+      - run: cargo build --locked --release -p agentic-job
+        working-directory: checker
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$BASE" "$HEAD"
+          PYTHONPATH=workflow python3 -c 'import os; from ingress import check_workflows; raise SystemExit(0 if check_workflows(".", os.environ["HEAD"], "checker/target/release/agentic-job", ".github/agentic-job/workflows.toml") else 1)'
+```
+
+The binary pin above contains the checker command. Fetching commits
+by SHA works for public repositories; for PR heads use `refs/pull/$PR/head` if
+the forge does not allow fetching the head SHA directly. No proposed checkout,
+action, build script or exemption runs. Permissions remain `contents: read`;
+pass no secrets. The temporary workflow tree is limited to 500 regular files
+of 1 MiB each, and analyzer output is quoted against workflow-command injection.
+
+Land this job and the exemptions through maintainer review, run it once, then
+require `workflow-policy` in the branch ruleset for pull requests and merge
+groups. Prefer a ruleset-required trusted workflow: a required status name
+alone can be imitated by a proposal's job. Keep human approval of the current
+head before merge-queue admission; see [ingress limitations](workflow-ingress.md).

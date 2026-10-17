@@ -9,8 +9,7 @@ comes from the base branch too, or from the ref the ruleset names when a
 ruleset runs it.
 
 The job reports as `vet` on every PR, so a ruleset can require that status
-context; it passes at once when no `.github/` or `action.yml`/`action.yaml`
-file changed. It runs when a PR is opened, synchronized, reopened or edited;
+context. It runs when a PR is opened, synchronized, reopened or edited;
 required by a ruleset, GitHub ignores those `types`. Retargeting a PR to another base
 does not run it again, so close and reopen a retargeted PR, or push to it.
 
@@ -20,8 +19,20 @@ changed path under `.github` that is a symlink or submodule. Zizmor runs
 offline, without repository configuration, including its default audits;
 actionlint checks workflows with shellcheck/pyflakes disabled.
 Any finding in a changed file fails, even if it existed before this PR.
-Deleted and unchanged files are not audited. No job digest or finding-identity
+Deleted and unchanged files are not audited by these two analyzers. No job digest or finding-identity
 grandfathering is involved.
+
+The same job builds `agentic-job` with `cargo build --locked --release` only
+from the base checkout (the 30-minute limit allows a cold build). It runs
+[`workflows check`](workflows-check.md) on the complete head workflow set,
+even if no workflow changed, extracted as Git blobs into an empty temporary
+root. Symlinks and submodules are refused, including directory replacements;
+the set is bounded to 500 files of 1 MiB each. Only the base checkout's
+`.github/agentic-job/workflows.toml` supplies exemptions. Missing exempt files
+fail: land the exemption removal first before deleting or renaming a file.
+This stops proposals from exempting themselves, not malicious behavior in an
+already exempt file. Permissions stay `contents: read`, with no secrets and
+no proposed code execution.
 
 An inline `# zizmor: ignore[...]` comment can silence unrelated findings, so
 added or changed ignores in the diff against the merge-base fail, with one

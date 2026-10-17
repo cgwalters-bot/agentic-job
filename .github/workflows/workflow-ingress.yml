@@ -1,6 +1,6 @@
 # Only base-revision code runs here; proposed files are Git blobs, not actions.
 # The main ruleset requires the vet check, so it reports on every PR and merge
-# group, passing at once when no workflow or action file changed.
+# group, checking the whole proposed workflow set against base exemptions.
 name: workflow-ingress
 
 on:
@@ -16,7 +16,8 @@ permissions:
 jobs:
   vet:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # A cold release build of the base-owned checker needs compilation time.
+    timeout-minutes: 30
     # Any fork can trigger this without approval: a new push supersedes the
     # previous head's run.
     concurrency:
@@ -31,6 +32,8 @@ jobs:
           ref: ${{ github.event.merge_group.base_sha || github.sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Build base-owned workflow checker
+        run: cargo build --locked --release -p agentic-job
       - name: Install verified static analyzers
         working-directory: ${{ runner.temp }}
         run: |
@@ -57,4 +60,4 @@ jobs:
             git fetch --no-tags origin "$BASE" "refs/pull/$PR/head"
           fi
           git cat-file -e "$HEAD^{commit}"
-          python3 workflow/ingress.py . "$BASE" "$HEAD"
+          python3 workflow/ingress.py . "$BASE" "$HEAD" --workflows-binary target/release/agentic-job --exemptions .github/agentic-job/workflows.toml

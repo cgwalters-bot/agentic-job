@@ -118,7 +118,9 @@ test('required ingress check reports on every PR and vets merge groups with base
   assert.match(ingress, /BASE: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha \}\}/);
   assert.match(ingress, /HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.event\.merge_group\.head_sha \}\}/);
   assert.match(ingress, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}/);
-  assert.match(ingress, /python3 workflow\/ingress\.py \. "\$BASE" "\$HEAD"\n/);
+  assert.match(ingress, /run: cargo build --locked --release -p agentic-job\n/);
+  assert.match(ingress, /timeout-minutes: 30\n/);
+  assert.match(ingress, /python3 workflow\/ingress\.py \. "\$BASE" "\$HEAD" --workflows-binary target\/release\/agentic-job --exemptions \.github\/agentic-job\/workflows\.toml\n/);
 });
 
 test('privileged jobs and required check remain gated for forks', () => {

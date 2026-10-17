@@ -91,10 +91,10 @@ Until then [review](review.md) starts automatic reviews only for the owner,
 members, collaborators and bots the repository lists by id, and the
 broker's shared cap bounds spending.
 
-[`workflows check`](workflows-check.md) exists as a command
-([#508](https://github.com/cgwalters-forge/agentic-job/issues/508)); running
-it from the base branch as a required check, with the base branch's
-exemptions, and documenting it for callers is the next slice.
+[`workflows check`](workflows-check.md) runs in the required ingress `vet`
+job from base-branch code with base exemptions
+([#508](https://github.com/cgwalters-forge/agentic-job/issues/508)). Callers
+can opt in with the documented pinned job and a required-check ruleset.
 
 Pushing to a pull request's branch
 ([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) is off in
