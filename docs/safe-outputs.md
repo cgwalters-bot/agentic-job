@@ -24,6 +24,33 @@ The applying job's `SAFE_OUTPUTS_PAT` is our equivalent of gh-aw's
 See [the token mapping and setup](workflow.md#the-apply-job-and-its-token)
 for repository bounds, job-token limits and default-branch environment storage.
 
+## Secondary pull request bounds (not yet enabled)
+
+`secondary_pull_request` reserves one independent output destination, rather than
+turning the input `repos` allowlist into permission to write to those repositories.
+It is absent by default. At present admission explicitly refuses a bounds file
+containing it: secondary patch collection, check and apply routing are not yet
+implemented. No additional repository is writable with this configuration yet.
+
+```toml
+[secondary_pull_request]
+repo = "cgwalters-forge/misctool"
+base = "main"
+branch_prefix = "agentic-job/"
+max = 1
+max_patch_bytes = 65536
+max_patch_files = 10
+```
+
+The table admits one exact repository and base, not globs or lists; `max` must
+be 1. Its branch prefix must end in `/` and form an unambiguous branch name.
+Patch budgets must be explicit and positive (at least 1024 bytes). Its optional
+`[secondary_pull_request.unprotected_files]` uses the same `repos`, `files` and
+`dot_folders` keys as the primary exemptions, but may name only the secondary
+repository. No primary exemption is inherited; protected files and `.github`
+remain protected by default. Request routing and handback guide instructions
+will be added before this table can enable writes.
+
 ## What is gh-aw's, and why
 
 Two scripts are run as gh-aw ships them: its collector
