@@ -202,7 +202,9 @@ jobs:
             echo "::error::$IMAGE:$TAG exists already"; exit 1
           fi
           skopeo copy --authfile ~/.docker/config.json --digestfile "$RUNNER_TEMP/digest" oci-archive:secure-host.tar "docker://$IMAGE:$TAG"
-          read -r digest < "$RUNNER_TEMP/digest"
+          # skopeo writes the digest with no trailing newline, so `read`
+          # would return 1 at end of file and end the step under `-e`.
+          digest=$(< "$RUNNER_TEMP/digest")
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
