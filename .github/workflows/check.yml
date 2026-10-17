@@ -146,15 +146,20 @@ jobs:
         with:
           name: ${{ fromJSON(inputs.policy).proposals-artifact }}
           path: .agentic-job/safe-outputs
+      # The collector counts a policy's secondary pull request with the
+      # run's own, as one type: it is given their sum, and check counts each
+      # against its own `max`. Apply's handlers get the policy's own.
       - name: Write the collector's configuration
         run: |
           chmod +x "$JOB_DIR/agentic-job"
           jq .safe_outputs "$JOB_DIR/policy.json" > "$GH_AW_TMP/config.json"
+          jq '.secondary_pull_request.max as $more | .safe_outputs
+            | if $more then .create_pull_request.max += $more else . end' "$JOB_DIR/policy.json" > "$RUNNER_TEMP/collector.json"
       - name: Ingest the outputs with gh-aw's collector
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_SAFE_OUTPUTS: ${{ env.JOB_DIR }}/safe-outputs/outputs.jsonl
-          GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ env.GH_AW_TMP }}/config.json
+          GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ runner.temp }}/collector.json
           GH_AW_VALIDATION_CONFIG_PATH: ${{ env.SOURCE_DIR }}/safe-outputs/validation.json
           # gh-aw's `safe-outputs.urls`. Its default redacts a non-https
           # `scheme://` up to the next space even in code, which ate Cargo's

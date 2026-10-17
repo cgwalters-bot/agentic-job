@@ -94,7 +94,11 @@ impl Side {
         }
         Self {
             home,
-            checkout: Checkout { dir, base_commit },
+            checkout: Checkout {
+                dir,
+                base_commit,
+                secondary: None,
+            },
         }
     }
 

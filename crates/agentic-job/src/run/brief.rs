@@ -14,7 +14,7 @@ use super::handback::{
 use crate::check::checkpoint::{FENCE, REASONS};
 use crate::policy::{
     CREATE_PULL_REQUEST, EXEMPTABLE_DOT_FOLDER, Kind, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules,
-    Policy,
+    Policy, Secondary,
 };
 
 const KIB: usize = 1 << 10;
@@ -110,13 +110,31 @@ pub fn asks_for_checkpoint(policy: &Policy) -> bool {
         && policy.safe_outputs.ready_when_complete()
 }
 
+/// The policy's secondary pull request and the clone of its repository
+/// SECONDARY, where a branch run has both.
+fn secondary_tree<'a>(
+    policy: &'a Policy,
+    secondary: Option<&'a Path>,
+) -> Option<(&'a Secondary, &'a Path)> {
+    policy
+        .secondary_pull_request
+        .as_ref()
+        .filter(|_| policy.kind == Kind::Branch)
+        .zip(secondary)
+}
+
 /// What a run of POLICY is told before its task, as [`guide`] is: where
 /// it hands back, its limits, and the validator that names what `check`
 /// would refuse while the session can still fix it. The rest of the
 /// guide is reference that most runs never need, and was most of the
 /// first prompt of every run (#854): `handback guide` prints it, and
 /// `handback check` points at the part a problem needs.
-pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
+pub fn hand_back(
+    policy: &Policy,
+    home: &Path,
+    checkout: &Path,
+    secondary: Option<&Path>,
+) -> String {
     let outputs = &policy.safe_outputs;
     let carrier = outputs
         .patch_carrier()
@@ -151,6 +169,21 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
             checkout.display()
         ),
     };
+    if let Some((target, dir)) = secondary_tree(policy, secondary) {
+        let _ = writeln!(
+            text,
+            "- Second change (optional): what you change in `{}`, a clone of {} at `{}`, is \
+             proposed there as a draft pull request of its own, of at most {} KiB and {} \
+             files, only with a `create_pull_request` line whose `repo` is `{}`; without one \
+             it is not handed back. It is held to the same refusals.",
+            dir.display(),
+            target.repo,
+            target.base,
+            target.max_patch_bytes / (KIB as u64),
+            target.max_patch_files,
+            target.repo,
+        );
+    }
     // #119: brief line comes with restore. Until a run is given its memory
     // back, telling the agent of `~/memory` would promise what is not so.
     let types: Vec<String> = outputs
@@ -160,7 +193,12 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
                 || ![CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH].contains(&name)
         })
         .map(|name| match outputs.max_of(name) {
-            Some(max) => format!("`{name}` ({max})"),
+            Some(max) => match secondary_tree(policy, secondary) {
+                Some((target, _)) if name == CREATE_PULL_REQUEST => {
+                    format!("`{name}` ({max}, and {} in {})", target.max, target.repo)
+                }
+                _ => format!("`{name}` ({max})"),
+            },
             None => format!("`{name}`"),
         })
         .collect();
@@ -222,9 +260,16 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
 }
 
 /// The whole of what a run of POLICY whose agent has the home HOME and
-/// works in CHECKOUT, from the commit BASE, is told of its hand-back,
+/// works in CHECKOUT, from the commit BASE, and in SECONDARY, the clone of
+/// its secondary pull request's repository, is told of its hand-back,
 /// which `handback guide` prints. It ends with an empty line.
-pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> String {
+pub fn guide(
+    policy: &Policy,
+    home: &Path,
+    checkout: &Path,
+    secondary: Option<&Path>,
+    base: &str,
+) -> String {
     let outputs = &policy.safe_outputs;
     let carrier = outputs
         .patch_carrier()
@@ -258,6 +303,27 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
             .to_owned()
     };
     let _ = writeln!(text, "- The working tree, `{}`: {tree}", checkout.display());
+    let second = secondary_tree(policy, secondary);
+    if let Some((target, dir)) = second {
+        let _ = writeln!(
+            text,
+            "- The second working tree, `{}`, a clone of {} at `{}`: everything you change, \
+             add or delete in it is collected the same way, as a patch of its own of at most {} \
+             KiB against the commit it was cloned at, and proposed as a draft pull request in \
+             {} on a branch under `{}`, only if your requests hold a `create_pull_request` \
+             line whose `repo` is `{}`; a change there without one is not handed back, and \
+             such a line without a change gets all of your requests refused. Leave your changes \
+             uncommitted, and do not push.{}",
+            dir.display(),
+            target.repo,
+            target.base,
+            target.max_patch_bytes / (KIB as u64),
+            target.repo,
+            target.branch_prefix,
+            target.repo,
+            patch_rules(&target.rules()),
+        );
+    }
 
     let types: Vec<String> = outputs
         .types()
@@ -266,7 +332,13 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
                 || ![CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH].contains(&name)
         })
         .map(|name| match outputs.max_of(name) {
-            Some(max) => format!("`{name}` (at most {max})"),
+            Some(max) => match second {
+                Some((target, _)) if name == CREATE_PULL_REQUEST => format!(
+                    "`{name}` (at most {max}, and {} in {})",
+                    target.max, target.repo
+                ),
+                _ => format!("`{name}` (at most {max})"),
+            },
             None => format!("`{name}`"),
         })
         .collect();
@@ -317,6 +389,16 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
              below. A run for issue N gets `Closes #N` added to the body; if your change \
              does only part of the issue, start a line of the body with `Part of #N` \
              instead, and merging leaves the issue open.\n",
+        );
+    }
+    if let Some((target, _)) = second {
+        let _ = writeln!(
+            text,
+            "  For the second working tree's change, write `{{\"type\": \"create_pull_request\", \
+             \"repo\": \"{}\", \"title\": \"...\", \"body\": \"...\"}}` as well: its title and \
+             body are that pull request's and its commit's, under the same rules, and nothing is \
+             made up for it. It is always a draft, and counts toward the requests in all.",
+            target.repo
         );
     }
     let checkpoint = asks_for_checkpoint(policy);
@@ -422,6 +504,7 @@ mod tests {
             private: false,
             allowed_domains: Vec::new(),
             memory: None,
+            secondary_pull_request: None,
         }
     }
 
@@ -430,6 +513,7 @@ mod tests {
             policy,
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
+            None,
             "0123abcd",
         )
     }
@@ -702,6 +786,7 @@ mod brief_tests {
             private: false,
             allowed_domains: Vec::new(),
             memory: None,
+            secondary_pull_request: None,
         }
     }
 
@@ -710,6 +795,7 @@ mod brief_tests {
             policy,
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
+            None,
         )
     }
 
@@ -745,6 +831,7 @@ mod brief_tests {
             &policy,
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
+            None,
             "0",
         );
         assert!(
@@ -792,6 +879,81 @@ mod brief_tests {
         assert!(nothing.contains("- Requests: none;"), "{nothing}");
     }
 
+    /// A run with a secondary pull request is told of its clone, its
+    /// budgets, its rules and the request that proposes it, and that the
+    /// rest of the run's are not its.
+    #[test]
+    fn a_secondary_pull_request_is_explained_where_its_clone_is() {
+        let mut policy = implement();
+        policy.secondary_pull_request = Some(Secondary {
+            repo: "o/tool".into(),
+            clone_url: "https://github.com/o/tool".into(),
+            base: "main".into(),
+            branch_prefix: "agentic-job/".into(),
+            max: 1,
+            max_patch_bytes: 64 << 10,
+            max_patch_files: 10,
+            protected_files: vec!["go.mod".into()],
+            protect_top_level_dot_folders: true,
+            unprotected_dot_folders: Vec::new(),
+        });
+        let (home, own) = (Path::new("/home/agent"), Path::new("/home/agent/work/r"));
+        let tree = Path::new("/home/agent/work/secondary/o/tool");
+        let short = hand_back(&policy, home, own, Some(tree));
+        let full = guide(&policy, home, own, Some(tree), "0");
+        for (text, wants) in [
+            (
+                &short,
+                &[
+                    "- Second change (optional): what you change in \
+                     `/home/agent/work/secondary/o/tool`, a clone of o/tool at `main`",
+                    "of at most 64 KiB and 10 files",
+                    "`create_pull_request` line whose `repo` is `o/tool`",
+                    "`create_pull_request` (1, and 1 in o/tool)",
+                ][..],
+            ),
+            (
+                &full,
+                &[
+                    "- The second working tree, `/home/agent/work/secondary/o/tool`",
+                    "as a patch of its own of at most 64 KiB",
+                    "on a branch under `agentic-job/`",
+                    "a file of one of these names, in any directory: `go.mod`; ",
+                    "So is a change to more than 10 files",
+                    "{\"type\": \"create_pull_request\", \"repo\": \"o/tool\", \"title\"",
+                    "`create_pull_request` (at most 1, and 1 in o/tool)",
+                ][..],
+            ),
+        ] {
+            for want in wants {
+                assert!(text.contains(want), "{want}\n{text}");
+            }
+        }
+        // The run's own exemption of `.github` is not the secondary's.
+        let second = full
+            .lines()
+            .find(|line| line.starts_with("- The second working tree"))
+            .unwrap();
+        assert!(full.contains("exempts for this repository"), "{full}");
+        assert!(!second.contains("exempts for this repository"), "{second}");
+        // Without its clone, or in an analysis run, there is none to tell of.
+        for text in [
+            hand_back(&policy, home, own, None),
+            guide(&policy, home, own, None, "0"),
+            hand_back(
+                &Policy {
+                    kind: Kind::Analysis,
+                    ..policy.clone()
+                },
+                home,
+                own,
+                Some(tree),
+            ),
+        ] {
+            assert!(!text.contains("o/tool"), "{text}");
+        }
+    }
+
     /// Measures for the pull request: run with `--ignored --nocapture`.
     #[test]
     #[ignore = "prints the sizes of the brief and the guide"]
@@ -801,6 +963,7 @@ mod brief_tests {
             &policy,
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
+            None,
             "0",
         );
         println!("brief {} guide {}", brief(&policy).len(), full.len());

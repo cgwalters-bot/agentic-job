@@ -36,7 +36,7 @@ use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
     CREATE_PULL_REQUEST, HIDE_COMMENT, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
-    REVIEW_THREAD_OUTPUTS, update_fields,
+    REVIEW_THREAD_OUTPUTS, Secondary, update_fields,
 };
 use crate::redact;
 
@@ -45,6 +45,9 @@ pub const OUTPUTS_FILE: &str = "outputs.jsonl";
 
 /// Which repository, branch and commit a patch is against.
 pub const BASE_FILE: &str = "base.json";
+
+/// The same, for the policy's secondary pull request's patch.
+pub const SECONDARY_BASE_FILE: &str = "secondary-base.json";
 
 const MAX_OUTPUTS_BYTES: u64 = 1 << 20;
 const MAX_BASE_BYTES: u64 = 4096;
@@ -101,6 +104,10 @@ pub struct Verdict {
     /// The requests, as the collector sanitized them.
     pub items: Vec<Map<String, Value>>,
     pub patch: Option<PatchInfo>,
+    /// The patch of the policy's secondary pull request, in its own
+    /// repository: apply applies it there, and only there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_patch: Option<PatchInfo>,
     /// Where the policy has complete work opened ready, the checkpoint the
     /// pull request or push says the work stopped at: apply keeps it a draft.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,6 +166,7 @@ impl Verdict {
             errors,
             items,
             patch,
+            secondary_patch: None,
             checkpoint: None,
             warnings: Vec::new(),
             memory: None,
@@ -200,6 +208,14 @@ impl Verdict {
             lines.push(format!(
                 "- patch `{}` ({} bytes) against {commit}",
                 patch.file, patch.bytes
+            ));
+        }
+        if let (Some(patch), Some(target)) = (&self.secondary_patch, &policy.secondary_pull_request)
+        {
+            let commit: String = patch.base_commit.chars().take(SHORT_COMMIT).collect();
+            lines.push(format!(
+                "- patch `{}` ({} bytes) against {} @ {commit}",
+                patch.file, patch.bytes, target.repo
             ));
         }
         if let Some(memory) = &self.memory {
@@ -285,6 +301,15 @@ fn map_holds_marker(map: &Map<String, Value>) -> bool {
     })
 }
 
+/// The policy's secondary pull request, if ITEM is the request for it: a
+/// `create_pull_request` whose `repo` is that repository, exactly.
+fn secondary_target<'a>(item: &Map<String, Value>, policy: &'a Policy) -> Option<&'a Secondary> {
+    policy.secondary_pull_request.as_ref().filter(|target| {
+        item_type(item) == CREATE_PULL_REQUEST
+            && item.get("repo").and_then(Value::as_str) == Some(target.repo.as_str())
+    })
+}
+
 /// The fields of a request that would take it out of the policy. gh-aw's
 /// rules let a request name a repository of its own, and a pull request a
 /// base branch and whether it is a draft; whether a handler honours them
@@ -306,6 +331,20 @@ fn redirections_to(
             .filter(|value| !value.as_str().is_some_and(same))
             .map(|value| format!("a {output} with {key} {value}, which is not the policy's"))
     };
+    // The one request that may name another repository, and then only as
+    // the policy writes it, as `run` does: gh-aw's handler compares it so.
+    if let Some(target) = secondary_target(item, policy) {
+        let mut problems: Vec<String> = differs("base", &|base| base == target.base)
+            .into_iter()
+            .collect();
+        if item
+            .get("draft")
+            .is_some_and(|draft| draft != &Value::Bool(true))
+        {
+            problems.push(format!("a {output} that is not a draft"));
+        }
+        return problems;
+    }
     let repo = if matches!(output, "add_comment" | HIDE_COMMENT)
         || REVIEW_THREAD_OUTPUTS.contains(&output)
     {
@@ -789,21 +828,30 @@ fn check_run_names(lines: &[u8], policy: &Policy) -> Vec<String> {
 fn is_handback_file(name: &str) -> bool {
     name == OUTPUTS_FILE
         || name == BASE_FILE
+        || name == SECONDARY_BASE_FILE
         || name == replacement::REPLACEMENT_FILE
         || name == memory::MEMORY_FILE
         || PATCH_FILE_RE.is_match(name)
 }
 
-/// The most a file of a hand-back may hold.
+/// The most a file of a hand-back may hold. Which patch is which is
+/// known only from the requests, so each is read within the larger
+/// budget and held to its own once it is.
 fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
     match name {
         OUTPUTS_FILE => MAX_OUTPUTS_BYTES,
-        BASE_FILE => MAX_BASE_BYTES,
+        BASE_FILE | SECONDARY_BASE_FILE => MAX_BASE_BYTES,
         memory::MEMORY_FILE => policy
             .memory
             .as_ref()
             .map_or(MAX_UNEXPECTED_MEMORY_BYTES, memory::max_json_bytes),
-        _ => policy.max_patch_bytes,
+        replacement::REPLACEMENT_FILE => policy.max_patch_bytes,
+        _ => policy
+            .secondary_pull_request
+            .as_ref()
+            .map_or(policy.max_patch_bytes, |target| {
+                target.max_patch_bytes.max(policy.max_patch_bytes)
+            }),
     }
 }
 
@@ -811,16 +859,41 @@ fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
 /// (`sanitizeForFilename` of `git_patch_utils.cjs`), which its handlers
 /// look for.
 pub fn patch_file_name(branch: &str) -> String {
+    format!("aw-{}.patch", for_file_name(branch))
+}
+
+/// The name of the patch for a pull request's branch in the repository
+/// REPO that a request names as its `repo`: the name gh-aw's handlers look
+/// for first (`getPatchPathForBranchInRepo`), so that the secondary pull
+/// request's patch is never taken for the run's own.
+pub fn patch_file_name_in(repo: &str, branch: &str) -> String {
+    format!("aw-{}-{}.patch", for_file_name(repo), for_file_name(branch))
+}
+
+/// Whether NAME is a patch file name `check` takes at all.
+pub fn is_patch_file_name(name: &str) -> bool {
+    PATCH_FILE_RE.is_match(name)
+}
+
+/// Whether BRANCH is a run's own, as `run` names it (`agent-run-ID`).
+fn is_run_branch(branch: &str) -> bool {
+    branch
+        .strip_prefix("agent-run-")
+        .is_some_and(|id| (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// gh-aw's `sanitizeForFilename`.
+fn for_file_name(value: &str) -> String {
     static UNSAFE_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"[/\\:*?"<>|]"#).expect("a valid pattern"));
     static DASHES_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new("-{2,}").expect("a valid pattern"));
 
-    let name = UNSAFE_RE.replace_all(branch, "-");
+    let name = UNSAFE_RE.replace_all(value, "-");
     let name = DASHES_RE.replace_all(&name, "-");
     let name = name.strip_prefix('-').unwrap_or(&name);
     let name = name.strip_suffix('-').unwrap_or(name);
-    format!("aw-{}.patch", name.to_lowercase())
+    name.to_lowercase()
 }
 
 /// Checks the hand-back in `dir` (`outputs.jsonl`, `base.json`, one
@@ -923,9 +996,24 @@ fn check_outputs_to(
             policy.max_outputs
         ));
     }
+    // A pull request in the secondary repository counts against its own
+    // `max`, apart from the run's own: the collector was given their sum.
     let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut secondary_count = 0;
     for item in &items {
-        *counts.entry(item_type(item)).or_default() += 1;
+        if secondary_target(item, policy).is_some() {
+            secondary_count += 1;
+        } else {
+            *counts.entry(item_type(item)).or_default() += 1;
+        }
+    }
+    if let Some(target) = &policy.secondary_pull_request
+        && secondary_count > target.max
+    {
+        errors.push(format!(
+            "{secondary_count} outputs of type {CREATE_PULL_REQUEST:?} for {}, over {}",
+            target.repo, target.max
+        ));
     }
     for (output, count) in counts {
         match policy.safe_outputs.max_of(output) {
@@ -981,8 +1069,40 @@ fn check_outputs_to(
         .push_to_pull_request_branch
         .as_ref()
         .map(|push| push.head.as_str());
-    let request =
-        carrier.and_then(|(output, _)| items.iter().find(|item| item_type(item) == output));
+    let request = carrier.and_then(|(output, _)| {
+        items
+            .iter()
+            .find(|item| item_type(item) == output && secondary_target(item, policy).is_none())
+    });
+    // Its branch names its patch, so that is the run's under the prefix,
+    // as `run` writes it: never a name that gh-aw's handler could take for
+    // the run's own pull request's patch (`Secondary::branch`).
+    let secondary = policy.secondary_pull_request.as_ref().and_then(|target| {
+        let item = items
+            .iter()
+            .find(|item| secondary_target(item, policy).is_some())?;
+        let branch = item
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let own = request.and_then(|item| item.get("branch").and_then(Value::as_str));
+        let run_branch = branch
+            .strip_prefix(target.branch_prefix.as_str())
+            .filter(|run| is_run_branch(run) && own.is_none_or(|own| own == *run));
+        if run_branch.is_none() {
+            errors.push(format!(
+                "a {CREATE_PULL_REQUEST} for {} on branch {branch:?}, which is not the run's \
+                 branch under {:?}",
+                target.repo, target.branch_prefix
+            ));
+        }
+        Some((target, patch_file_name_in(&target.repo, branch)))
+    });
+    // The run's own patch is any other: a second one is refused below.
+    let patch_names: Vec<&str> = patch_names
+        .into_iter()
+        .filter(|name| secondary.as_ref().is_none_or(|(_, want)| name != want))
+        .collect();
     // Read only where it decides something: a policy without
     // `ready_when_complete` opens every pull request as a draft anyway.
     let mut checkpoint = None;
@@ -1009,11 +1129,69 @@ fn check_outputs_to(
             },
         }
     }
+    // The secondary pull request's patch: against its own repository and
+    // base, within its own budgets and protected files, by the author the
+    // bounds pin for every commit of the run.
+    let mut secondary_patch = None;
+    match &secondary {
+        Some((target, want)) => {
+            let base = contents
+                .get(SECONDARY_BASE_FILE)
+                .and_then(|content| serde_json::from_slice::<Base>(content).ok())
+                .filter(|base| COMMIT_RE.is_match(&base.commit))
+                .filter(|base| base.repo.eq_ignore_ascii_case(&target.repo))
+                .filter(|base| base.r#ref == target.base);
+            if base.is_none() {
+                errors.push(format!(
+                    "{SECONDARY_BASE_FILE} is not {{repo: {}, ref: {}, commit: SHA}}",
+                    target.repo, target.base
+                ));
+            }
+            match (contents.get(want), base) {
+                (Some(content), Some(base)) => {
+                    if content.len() as u64 > target.max_patch_bytes {
+                        errors.push(format!(
+                            "{want} is {} bytes, over {}",
+                            content.len(),
+                            target.max_patch_bytes
+                        ));
+                    }
+                    let rules = PatchRules {
+                        commit_author: policy.commit_author.as_deref(),
+                        ..target.rules()
+                    };
+                    let text = String::from_utf8_lossy(content);
+                    let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
+                    errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
+                    secondary_patch = Some(PatchInfo {
+                        file: want.clone(),
+                        bytes: content.len(),
+                        base_commit: base.commit,
+                        files,
+                        commit_files: None,
+                    });
+                }
+                (Some(_), None) => {}
+                (None, _) => errors.push(format!(
+                    "the {CREATE_PULL_REQUEST} for {} needs its patch, {want}",
+                    target.repo
+                )),
+            }
+        }
+        None if contents.contains_key(SECONDARY_BASE_FILE) => errors.push(format!(
+            "{SECONDARY_BASE_FILE} without a {CREATE_PULL_REQUEST} for the policy's secondary \
+             repository"
+        )),
+        None => {}
+    }
     let mut patch = None;
     if let Some(content) = contents.get(replacement::REPLACEMENT_FILE) {
         if request.is_none() || policy.safe_outputs.push_to_pull_request_branch.is_none() {
             errors.push("a replacement without a push request".into());
-        } else if !patch_names.is_empty() || contents.contains_key(BASE_FILE) {
+        } else if !patch_names.is_empty()
+            || contents.contains_key(BASE_FILE)
+            || secondary_patch.is_some()
+        {
             errors.push("a replacement alongside a patch or base.json".into());
         } else if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
             match replacement::check(content, push, policy.max_patch_bytes) {
@@ -1022,6 +1200,7 @@ fn check_outputs_to(
             }
         }
         return Ok(Verdict {
+            secondary_patch,
             checkpoint,
             warnings,
             memory,
@@ -1063,6 +1242,14 @@ fn check_outputs_to(
             let want = patch_file_name(branch);
             match (patch_names.as_slice(), contents.get(&want), base) {
                 ([_], Some(content), Some(base)) => {
+                    // Read within the larger of the two patches' budgets.
+                    if content.len() as u64 > policy.max_patch_bytes {
+                        errors.push(format!(
+                            "{want} is {} bytes, over {}",
+                            content.len(),
+                            policy.max_patch_bytes
+                        ));
+                    }
                     // What is not UTF-8 in it is in a file's content, where
                     // the rules look only at the first byte of a line.
                     let text = String::from_utf8_lossy(content);
@@ -1098,6 +1285,7 @@ fn check_outputs_to(
         _ => {}
     }
     Ok(Verdict {
+        secondary_patch,
         checkpoint,
         warnings,
         memory,
@@ -1272,6 +1460,206 @@ mod tests {
             std::fs::write(&collected, result.to_string()).unwrap();
             check_outputs(&out, &collected, policy).unwrap()
         }
+    }
+
+    const TOOL_PATCH: &str = "aw-o-tool-agentic-job-agent-run-7.patch";
+
+    /// [`policy`], which may also open one pull request in `o/tool`.
+    fn secondary_policy() -> Policy {
+        Policy {
+            secondary_pull_request: Some(Secondary {
+                repo: "o/tool".into(),
+                clone_url: "https://github.com/o/tool".into(),
+                base: "main".into(),
+                branch_prefix: "agentic-job/".into(),
+                max: 1,
+                max_patch_bytes: 2048,
+                max_patch_files: 1,
+                protected_files: vec!["go.mod".into()],
+                protect_top_level_dot_folders: true,
+                unprotected_dot_folders: Vec::new(),
+            }),
+            ..policy()
+        }
+    }
+
+    fn tool_request() -> Value {
+        json!({"type": "create_pull_request", "repo": "o/tool", "title": "Fix the tool",
+            "body": "Why.", "branch": format!("agentic-job/{BRANCH}")})
+    }
+
+    /// The run's own pull request and the secondary one, each with its
+    /// patch and base.
+    fn both() -> Handback {
+        let mut handback = Handback::pull_request()
+            .with(TOOL_PATCH, Some(patch_of("tool.rs")))
+            .with(
+                SECONDARY_BASE_FILE,
+                Some(json!({"repo": "o/tool", "ref": "main", "commit": BASE}).to_string()),
+            );
+        handback.items.push(tool_request());
+        handback
+    }
+
+    /// The secondary pull request is checked as a destination of its own:
+    /// its exact repository, base and draft, its own patch and base file,
+    /// count, budgets and protected files; a request for any other
+    /// repository, or without the policy's secondary, is refused.
+    #[test]
+    fn a_secondary_pull_request_is_held_to_its_own_bounds() {
+        let policy = secondary_policy();
+        let verdict = both().check_against(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.patch.unwrap().file, PATCH_NAME);
+        let secondary = verdict.secondary_patch.unwrap();
+        assert_eq!(
+            (secondary.file.as_str(), &secondary.files[..]),
+            (TOOL_PATCH, &["tool.rs".to_owned()][..])
+        );
+        assert!(
+            both()
+                .check_against(&policy)
+                .markdown(&policy)
+                .contains(&format!("- patch `{TOOL_PATCH}`")),
+        );
+        let alone = Handback {
+            items: vec![tool_request()],
+            ..both().with(PATCH_NAME, None).with(BASE_FILE, None)
+        };
+        let verdict = alone.check_against(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert!(verdict.patch.is_none() && verdict.secondary_patch.is_some());
+
+        let with_item = |fields: Value| {
+            let mut handback = both();
+            for (key, value) in fields.as_object().unwrap() {
+                handback.items[1][key] = value.clone();
+            }
+            handback
+        };
+        let big = format!("{}+{}\n", patch_of("tool.rs"), "x".repeat(2048));
+        let cases: Vec<(&str, Handback, &Policy, &str)> = vec![
+            (
+                "its base, missing",
+                both().with(SECONDARY_BASE_FILE, None),
+                &policy,
+                "secondary-base.json is not {repo: o/tool, ref: main, commit: SHA}",
+            ),
+            (
+                "its base, of another branch",
+                both().with(
+                    SECONDARY_BASE_FILE,
+                    Some(json!({"repo": "o/tool", "ref": "dev", "commit": BASE}).to_string()),
+                ),
+                &policy,
+                "secondary-base.json is not",
+            ),
+            (
+                "its base, of the run's repository",
+                both().with(SECONDARY_BASE_FILE, Some(base_json())),
+                &policy,
+                "secondary-base.json is not",
+            ),
+            (
+                "its patch, missing",
+                both().with(TOOL_PATCH, None),
+                &policy,
+                "needs its patch, aw-o-tool-agentic-job-agent-run-7.patch",
+            ),
+            // A branch that names its patch as anything but the run's
+            // under the prefix: the name gh-aw's handler could look for
+            // the run's own patch by, in `o/tool-agentic-job`.
+            (
+                "the run's branch, without the prefix",
+                with_item(json!({"branch": BRANCH}))
+                    .with(TOOL_PATCH, None)
+                    .with("aw-o-tool-agent-run-7.patch", Some(patch_of("tool.rs"))),
+                &policy,
+                "on branch \"agent-run-7\", which is not the run's branch under \"agentic-job/\"",
+            ),
+            (
+                "another run's branch",
+                with_item(json!({"branch": "agentic-job/agent-run-8"})),
+                &policy,
+                "which is not the run's branch",
+            ),
+            (
+                "a branch of its own",
+                with_item(json!({"branch": "agentic-job/docs-agent-run-7"})),
+                &policy,
+                "which is not the run's branch",
+            ),
+            (
+                "its patch, over its budget",
+                both().with(TOOL_PATCH, Some(big)),
+                &policy,
+                "bytes, over 2048",
+            ),
+            (
+                "its patch, of a protected file",
+                both().with(TOOL_PATCH, Some(patch_of("go.mod"))),
+                &policy,
+                "protected",
+            ),
+            (
+                "its patch, under .github",
+                both().with(TOOL_PATCH, Some(patch_of(".github/x.yml"))),
+                &policy,
+                "protected",
+            ),
+            (
+                "another base",
+                with_item(json!({"base": "dev"})),
+                &policy,
+                "with base \"dev\", which is not the policy's",
+            ),
+            (
+                "not a draft",
+                with_item(json!({"draft": false})),
+                &policy,
+                "that is not a draft",
+            ),
+            (
+                "its name in another case",
+                with_item(json!({"repo": "O/Tool"})),
+                &policy,
+                "with repo \"O/Tool\", which is not the policy's",
+            ),
+            (
+                "another repository",
+                with_item(json!({"repo": "o/other"})),
+                &policy,
+                "with repo \"o/other\", which is not the policy's",
+            ),
+            (
+                "a base file without its request",
+                Handback::pull_request().with(
+                    SECONDARY_BASE_FILE,
+                    Some(json!({"repo": "o/tool", "ref": "main", "commit": BASE}).to_string()),
+                ),
+                &policy,
+                "secondary-base.json without a create_pull_request for the policy's secondary repository",
+            ),
+        ];
+        for (case, handback, policy, want) in &cases {
+            let verdict = handback.check_against(policy);
+            assert!(
+                verdict.errors.iter().any(|error| error.contains(want)),
+                "{case}: {:?}",
+                verdict.errors
+            );
+        }
+        // Without a secondary in the policy, the request names another
+        // repository like any other.
+        let verdict = both().check_against(&crate::policy::tests::policy());
+        assert!(
+            verdict
+                .errors
+                .iter()
+                .any(|error| error.contains("with repo \"o/tool\", which is not the policy's")),
+            "{:?}",
+            verdict.errors
+        );
     }
 
     /// Under `ready_when_complete` the check reports the checkpoint that

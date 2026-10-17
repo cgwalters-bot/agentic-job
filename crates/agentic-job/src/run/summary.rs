@@ -58,6 +58,8 @@ pub struct Measured {
     pub files: Vec<String>,
     /// `{base, bytes}`, `{base, error}` or null.
     pub patch: Value,
+    /// The same, for the secondary pull request's repository.
+    pub secondary_patch: Value,
     /// Why the memory directory was not handed back.
     pub memory_dropped: Option<String>,
     /// Requests the egress proxy refused, per host.
@@ -281,6 +283,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert("aic_pricing".into(), json!(measured.aic_pricing));
     s.insert("files".into(), json!(measured.files));
     s.insert("patch".into(), measured.patch.clone());
+    if !measured.secondary_patch.is_null() {
+        s.insert("secondary_patch".into(), measured.secondary_patch.clone());
+    }
     if let Some(why) = &measured.memory_dropped {
         s.insert("memory_dropped".into(), json!(why));
     }
@@ -721,6 +726,7 @@ mod tests {
             aic_pricing: "mock",
             files: vec!["FAKE.md".into()],
             patch: json!({"base": "abc", "bytes": 10}),
+            secondary_patch: Value::Null,
             memory_dropped: None,
             egress_denied: Vec::new(),
             agent_logs: json!({"dir": "~/logs", "files": 1, "omitted_files": 0, "truncated": false}),

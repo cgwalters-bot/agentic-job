@@ -28,9 +28,9 @@ for repository bounds, job-token limits and default-branch environment storage.
 
 `secondary_pull_request` reserves one independent output destination, rather than
 turning the input `repos` allowlist into permission to write to those repositories.
-It is absent by default. At present admission explicitly refuses a bounds file
-containing it: secondary patch collection, check and apply routing are not yet
-implemented. No additional repository is writable with this configuration yet.
+It is absent by default. `run`, the hand-back and `check` enforce it, but apply
+has no pass of its own for it yet, so admission still refuses a run that would
+open one. No additional repository is writable with this configuration yet.
 
 ```toml
 [secondary_pull_request]
@@ -48,8 +48,29 @@ Patch budgets must be explicit and positive (at least 1024 bytes). Its optional
 `[secondary_pull_request.unprotected_files]` uses the same `repos`, `files` and
 `dot_folders` keys as the primary exemptions, but may name only the secondary
 repository. No primary exemption is inherited; protected files and `.github`
-remain protected by default. Request routing and handback guide instructions
-will be added before this table can enable writes.
+remain protected by default.
+
+`policy` adds it to `policy.json` only for a branch run that may open its own
+pull request, and refuses one whose run works on, or applies to, that same
+repository. Organization bounds keep it only where both files name the same
+repository, base and prefix, within the tighter budgets. `run` clones the
+repository at its base into `~/work/secondary/OWNER/NAME`, with no credential
+(a run that opens a pull request is public), and tells the agent where it is.
+A change there is handed back as its own patch, with `secondary-base.json`,
+only for a `create_pull_request` whose `repo` names that repository. `run`
+writes that `repo` as the policy does, since the handler compares it as
+written. It puts the request on the run's branch under the prefix,
+`PREFIX/agent-run-ID`, and names the patch for it as gh-aw's handler looks for
+it first when a request names a `repo`. For `agentic-job/`, that is
+`aw-OWNER-NAME-agentic-job-agent-run-ID.patch`. The handler's fallback, the
+plain branch name, is then never the run's own patch. Policy refuses a prefix
+whose patch name would be one the handler looks for in the run's or the output
+repository. Nothing is made up for it: a change there without such a request
+is dropped, with a warning. Check counts that request against the secondary's own `max`; it is
+given the sum of the two maxima as the collector's `create_pull_request.max`.
+Check holds the request to the secondary's base, to being a draft and to that
+branch, the run's own under the prefix. It holds its patch to its own base
+file, budgets and protected files, and to the bounds' `commit_author`.
 
 ## What is gh-aw's, and why
 
@@ -828,7 +849,8 @@ uncommitted. `run` then makes the patch itself, with git running as the
 sandbox user: `git format-patch` of one commit against the commit the
 run started from, with gh-aw's `X-GH-AW-Base-Commit` header. The
 hand-back is `outputs.jsonl`, `base.json` and at most one
-`aw-BRANCH.patch`. gh-aw's agents call an MCP server that validates each
+`aw-BRANCH.patch`, and for a [secondary pull request](#secondary-pull-request-bounds-not-yet-enabled)
+its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
 Where the policy has `[memory]`, `run` also packs the flat directory
@@ -966,7 +988,8 @@ puts its files there afterwards. Each script runs in an
 
 The collector reads three paths from its environment:
 `GH_AW_SAFE_OUTPUTS` (the agent's `outputs.jsonl`),
-`GH_AW_SAFE_OUTPUTS_CONFIG_PATH` (`.safe_outputs` of `policy.json`) and
+`GH_AW_SAFE_OUTPUTS_CONFIG_PATH` (`.safe_outputs` of `policy.json`, with a
+secondary pull request's `max` added to `create_pull_request`'s) and
 `GH_AW_VALIDATION_CONFIG_PATH` (`validation.json`). It writes
 `/tmp/gh-aw/agent_output.json`, `{items, errors}`, and succeeds whatever
 it refused, so the job fails on a non-empty `errors` itself.
