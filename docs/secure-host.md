@@ -505,8 +505,19 @@ Setup totalled 189.592 seconds. Its walk took 126.202 seconds over 732,751
 world-writable paths and package ownership another 4.224. Its next largest
 stages were user creation 30.490, packages 18.073 and proxy startup 9.937. In
 main's `world-write` job, loading and proving the policy took about one second
-by the step timestamps. The after figure is this change's own e2e-full agent
-job, read from its CI; it is not recorded here before that has run.
+by the step timestamps.
+
+After, at commit `19f458bb4b956be2e2a2c519f1611f5ba4f30b12`, the successful
+main merge-queue [CI run 38997639999](https://github.com/cgwalters-forge/agentic-job/actions/runs/38997639999),
+[e2e-full agent job 117294141312](https://github.com/cgwalters-forge/agentic-job/actions/runs/38997639999/job/117294141312),
+records 75 seconds from job start to the run action (03:11:21–03:12:36 UTC),
+against 225 seconds before. Secure-host took 69 seconds
+(03:11:27–03:12:36 UTC), against 218 seconds before. These are one run's
+durations, not bounds, and are Ubuntu 26.04 evidence only, not RHEL 10 evidence.
+The action's setup-timing summary in the log reports setup at 48.372 seconds
+and probes at 19.792 seconds, both exit 0. There is no binary-fetch timing in
+that summary: this job prepared the binary from the policy job's artifact
+before secure-host, rather than fetching it inside the action.
 
 Once it has the binary, before installing setup packages, the action runs
 `agentic-job secure-host apt` ([`apt.rs`](../crates/agentic-job/src/secure_host/apt.rs))
