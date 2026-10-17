@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, ensure};
 
 use super::platform;
-use crate::config::{Config, HostConfig};
+use crate::config::Config;
 use crate::sandbox::{egress, host};
 
 /// Where `-v /:/host` puts the host's root.
@@ -72,8 +72,10 @@ fn image_id(text: &str) -> Result<String> {
 fn deny_runner_reads(config: &Path) -> Result<bool> {
     let text =
         fs::read_to_string(config).with_context(|| format!("reading {}", config.display()))?;
-    let config =
-        Config::from(HostConfig::parse(&text).with_context(|| format!("in {}", config.display()))?);
+    // `config --host --from` preserves run tables in an existing job
+    // configuration. Setup reads that full configuration too; HostConfig
+    // is only for admitting standalone host-only input, not this output.
+    let config = Config::parse(&text).with_context(|| format!("in {}", config.display()))?;
     config.check_host()?;
     Ok(config.sandbox.deny_runner_reads)
 }
@@ -244,7 +246,7 @@ mod tests {
                 "[sandbox]\nlock-runner = false\ndeny-runner-reads = true\n",
                 Err("needs sandbox.lock-runner"),
             ),
-            ("[agent]\nname = \"claude\"\n", Err("unknown field")),
+            ("[agent]\nname = \"claude\"\n", Ok(false)),
             ("[sandbox]\ndeny-runner-read = true\n", Err("unknown field")),
         ] {
             fs::write(&path, text).unwrap();
@@ -264,6 +266,40 @@ mod tests {
             on[1][off[1].len()..],
             ["--deny-runner-reads", "--sole-worker"]
         );
+    }
+
+    #[test]
+    fn the_image_reads_a_full_e2e_job_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // The merge-group agent jobs pass their full config through
+        // `config --host` twice before invoking the image entrypoint.
+        for enabled in [false, true] {
+            let text = format!(
+                r#"[agent]
+name = "fake"
+[commit]
+author = "Test <test@example.com>"
+trailers = ["Generated-by: AI"]
+[limits]
+budget = 100
+max-requests = 0
+max-tasks = 4
+timeout-minutes = 5
+[sandbox]
+runner-user = "runner"
+deny-runner-reads = {enabled}
+close-resolved = true
+[setup]
+packages = ["nftables", "podman", "uidmap", "cargo"]
+"#
+            );
+            fs::write(&path, text).unwrap();
+            let got = deny_runner_reads(&path).unwrap();
+            assert_eq!(got, enabled);
+            let steps = host_steps(&path, &"0".repeat(64), got).unwrap();
+            assert_eq!(steps[1].iter().any(|arg| arg == "--sole-worker"), enabled);
+        }
     }
 
     #[test]
