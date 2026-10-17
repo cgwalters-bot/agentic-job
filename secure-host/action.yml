@@ -91,11 +91,6 @@ outputs:
   sandbox-home:
     description: Its home, where `agentic-job sandbox exec` starts a command
     value: ${{ steps.user.outputs.home }}
-  session-endpoint:
-    description: >-
-      For a session run (`[session] listen`), the `wss://` address its operator connects to on the
-      runner's tailnet name; empty otherwise
-    value: ${{ steps.session.outputs.endpoint }}
   fetched:
     description: "`true` when the binary was a release's, taken by its checksum; `false` when it was built; empty with `binary`"
     value: ${{ steps.binary.outputs.fetched }}
@@ -162,15 +157,6 @@ runs:
           --string sandbox.runner-user="$RUNNER_USER" --string setup.script="$SCRIPT" \
           > "$RUNNER_TEMP/secure-host/config.toml"
         cat "$RUNNER_TEMP/secure-host/config.toml"
-    # Where the configuration names an inference proxy: a TCP connection
-    # to it as the runner's user, before setup, so that a runner off the
-    # proxy's network fails here and says so rather than in a probe of
-    # setup's rules. It sends no HTTP request, identity token or model
-    # credential; a configuration without a proxy, a deterministic job's,
-    # and the scripted agent are not checked.
-    - name: Check inference proxy reachability
-      shell: bash
-      run: agentic-job secure-host inference "$RUNNER_TEMP/secure-host/config.toml"
     # Before setup, which refuses a host without it: no user but a
     # world-writable file's or directory's owner may change it, on the root
     # filesystem, from here on. The object came with the binary, by the
@@ -185,19 +171,6 @@ runs:
     - name: Secure the host
       shell: bash
       run: agentic-job sandbox timed setup
-    # A session run's (`[session] listen`): where its operator connects,
-    # which setup served on the runner's tailnet name. Outputs and the
-    # summary resolve when the job ends; setup's log line is live. Only
-    # the operators the configuration names are let in there.
-    - name: The session's endpoint
-      id: session
-      shell: bash
-      run: |
-        [ -e /etc/agentic-job/session-endpoint ] || exit 0
-        read -r endpoint < /etc/agentic-job/session-endpoint
-        [[ "$endpoint" =~ ^wss://[a-z0-9.-]+/$ ]] || { echo "::error::not a session endpoint: $endpoint"; exit 1; }
-        echo "endpoint=$endpoint" | tee -a "$GITHUB_OUTPUT"
-        printf 'Session: an operator attaches at `%s` (specs/session.md).\n' "$endpoint" >> "$GITHUB_STEP_SUMMARY"
     # Asked of the sandbox user itself, which also shows that the way in
     # to it works for the steps after this one. Before the probes: every
     # `sandbox exec` removes the record that `--record` leaves of a passing

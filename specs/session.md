@@ -60,7 +60,7 @@ the process that already holds the agent's ACP connection
 ([bridge.rs](../crates/agentic-job/src/session/bridge.rs)). It listens on
 loopback port 7790 only. `sandbox setup`, which has root, writes the address
 `wss://NAME/` for the runner's tailnet name to `/etc/agentic-job/session-endpoint`.
-Setup prints it in the job's log. The secure-host action puts it in the job's
+Setup prints it in the job's log. The run action puts it in the job's
 summary and its `session-endpoint` output, and `agentic-job.yml` passes that on
 as a job and workflow output. Summaries and outputs resolve only when the job
 ends. While the session is live, a caller's wrapper names the endpoint from the
@@ -219,7 +219,7 @@ The slice built here has five parts:
   workflow's `session` and `idle-minutes` inputs set the first and the last;
 - the root helper serving the bridge's port with `tailscale serve`, the network
   rules that keep the sandbox user from it, and the endpoint published by
-  secure-host;
+  the run action;
 - the bridge;
 - the conversation loop in the session driver;
 - tests in [session.rs](../crates/agentic-job/tests/session.rs). In them a

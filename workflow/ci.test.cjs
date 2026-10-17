@@ -398,7 +398,6 @@ test('the action admits the host, tunes apt and loads the policy with its binary
   assert.match(steps, /bash "\$ACTION\/binary\.sh" get --out "\$RUNNER_TEMP\/secure-host\/bin" "\$@"\n/);
   const order = ['- name: Get the binary', '"$BINARY" secure-host supported\n', '- name: Install the binary',
     'run: sudo /usr/local/bin/agentic-job secure-host apt\n', '- name: Write the configuration',
-    'run: agentic-job secure-host inference "$RUNNER_TEMP/secure-host/config.toml"\n',
     '- name: Load the world-write policy', 'run: agentic-job sandbox timed setup\n'];
   const at = order.map(text => steps.indexOf(text));
   assert.ok(at.every((index, i) => index >= 0 && (i === 0 || at[i - 1] < index)), JSON.stringify(at));

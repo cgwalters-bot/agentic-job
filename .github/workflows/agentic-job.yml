@@ -442,7 +442,7 @@ jobs:
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
       # With `session`: where the operator attaches; also in the job's
       # summary from when the agent starts.
-      session-endpoint: ${{ steps.secure-host.outputs.session-endpoint }}
+      session-endpoint: ${{ steps.run.outputs.session-endpoint }}
     # The same steps a caller-owned agent job has, with no steps of the
     # caller's between prepare and secure-host or after run.
     steps:
@@ -479,11 +479,18 @@ jobs:
         env:
           AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
         run: agentic-job check-key --config .agentic-job/config.toml
+      # Where the configuration names an inference proxy: a TCP connection
+      # to it as the runner's user, before setup, so that a runner off the
+      # proxy's network fails here and says so rather than in a probe of
+      # setup's rules. It sends no HTTP request, identity token or model
+      # credential; a configuration without a proxy and the scripted agent
+      # are not checked.
+      - name: Check inference proxy reachability
+        run: agentic-job secure-host inference .agentic-job/config.toml
       # `sandbox setup`, which ends by taking root from this job, and
       # `sandbox check`, with the binary and configuration of the policy
       # job. Every step after it is this file's, and none of them has root.
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
-        id: secure-host
         with:
           binary: /usr/local/bin/agentic-job
           config: .agentic-job/config.toml

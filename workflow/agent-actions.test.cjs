@@ -315,30 +315,36 @@ test('the source an agent job takes its actions from is the policy call\'s own',
 // Followed through the composite actions in place: the agent job installs
 // the policy job's binary, writes no configuration of its own, checks the
 // inference proxy with that binary before setup, and runs the agent only
-// after the host is secured.
+// after the host is secured. secure-host knows nothing of inference or
+// sessions: the agent job checks the proxy, and run reads the endpoint.
 test('the agent job installs the trusted binary and checks the proxy before setup', () => {
   const secure = readFileSync(join(__dirname, '../secure-host/action.yml'), 'utf8');
+  assert.doesNotMatch(secure, /inference|session/i);
   assert.match(policy, /"\$JOB_DIR\/bin\/agentic-job" config/);
   assert.ok(policy.split('agentic-job-policy\n')[1].split('\n  activate:')[0].includes('.agentic-job/config.toml'));
   assert.doesNotMatch(policy, /CONFIG_BINARY/);
   assert.ok(prepare.includes('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job'));
   assert.ok(prepare.indexOf('artifact-ids:') < prepare.indexOf('- name: Install the binary'));
-  assert.match(secure.split('- name: Check inference proxy reachability\n')[1].split('- name:')[0],
-    /^ {6}run: agentic-job secure-host inference "\$RUNNER_TEMP\/secure-host\/config\.toml"$/m);
-  for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose]]) {
+  const review = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
+  for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose], ['review.yml', review]]) {
     const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+    assert.equal([...agent.matchAll(/agentic-job secure-host inference/g)].length, 1, file);
+    assert.ok(agent.includes('- name: Check inference proxy reachability\n' +
+      '        run: agentic-job secure-host inference .agentic-job/config.toml\n'), file);
     assert.doesNotMatch(agent, / config /, file);
     assert.ok(agent.includes('config: .agentic-job/config.toml'), file);
     const expanded = agent.replace('uses: ./.agentic-job-source/prepare', prepare)
       .replace('uses: ./.agentic-job-source/secure-host', secure)
       .replace('uses: ./.agentic-job-source/run', run);
     let position = 0;
-    for (const name of ['Install the binary', 'Write what the run is called', 'Write the configuration',
-      'Check inference proxy reachability', 'Secure the host', 'Prove the host is secured', 'Run the agent']) {
+    for (const name of ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability',
+      'Write the configuration', 'Secure the host', "The session's endpoint", 'Prove the host is secured', 'Run the agent']) {
       position = expanded.indexOf(`- name: ${name}\n`, position);
       assert.ok(position >= 0, `${file}: ${name}`);
     }
   }
+  assert.ok(wrapper.includes('      session-endpoint: ${{ steps.run.outputs.session-endpoint }}\n'));
+  assert.ok(run.includes('    value: ${{ steps.session.outputs.endpoint }}\n'));
   assert.ok(policy.includes('@agentclientprotocol/claude-agent-acp@0.88.0'));
 });
 

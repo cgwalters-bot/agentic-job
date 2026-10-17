@@ -252,6 +252,8 @@ jobs:
       - uses: example-org/network-join@0123456789abcdef0123456789abcdef01234567
         with:
           audience: ${{ vars.NETWORK_AUDIENCE }}
+      # The inference proxy over that network, before setup.
+      - run: agentic-job secure-host inference .agentic-job/config.toml
       - uses: ./.agentic-job-source/secure-host
         with:
           binary: /usr/local/bin/agentic-job
@@ -359,6 +361,15 @@ token's `job_workflow_ref` names that file, not `agentic-job.yml`. A
 `called_workflows` entry for `agentic-job.yml` no longer matches it, and
 the broker has to admit the calling repository's own workflows instead
 ([inference admission](inference.md#which-workflows-a-broker-admits)).
+
+### Migrating an agent job of your own off secure-host's agent steps
+
+secure-host no longer checks the inference proxy or has a
+`session-endpoint` output. An agent job that composes the pieces adds
+`agentic-job secure-host inference .agentic-job/config.toml` as a step
+after its network join and before secure-host, as
+[above](#the-pieces-and-an-agent-job-of-your-own), and reads
+`session-endpoint` from the run action's step instead.
 
 ### Migrating a direct call of check.yml
 
@@ -804,8 +815,9 @@ cannot reach a private proxy.
 
 The policy job validates the effective configuration, including overrides
 of the caller's `config`, before starting the agent machine. After the
-caller's own steps, `secure-host` makes a TCP connection to the effective
-proxy URL as the runner user, before sandbox setup. This control sends no credentials
+caller's own steps, the agent job's `Check inference proxy reachability`
+step makes a TCP connection to the effective proxy URL as the runner user,
+before secure-host. This control sends no credentials
 and proves only reachability, not broker admission or model availability.
 A failure names the missing network route rather than blaming sandbox rules.
 

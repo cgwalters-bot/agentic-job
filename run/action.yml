@@ -37,12 +37,31 @@ outputs:
       published, where: the file and line ("safe-outputs/aw-agent-run-1.patch, line 3"), never
       the string; empty otherwise
     value: ${{ steps.run.outputs.secret-at }}
+  session-endpoint:
+    description: >-
+      For a session run (`[session] listen`), the `wss://` address its operator connects to on the
+      runner's tailnet name; empty otherwise
+    value: ${{ steps.session.outputs.endpoint }}
   safe-outputs-artifact-id:
     description: Immutable untrusted proposals upload ID; never a policy or checked artifact
     value: ${{ steps.safe-outputs.outputs.artifact-id }}
 runs:
   using: composite
   steps:
+    # A session run's (`[session] listen`): where its operator connects,
+    # which setup served on the runner's tailnet name. Outputs and the
+    # summary resolve when the job ends; setup's log line is live. Only
+    # the operators the configuration names are let in there. First, as
+    # it was in secure-host, before the probes.
+    - name: The session's endpoint
+      id: session
+      shell: bash
+      run: |
+        [ -e /etc/agentic-job/session-endpoint ] || exit 0
+        read -r endpoint < /etc/agentic-job/session-endpoint
+        [[ "$endpoint" =~ ^wss://[a-z0-9.-]+/$ ]] || { echo "::error::not a session endpoint: $endpoint"; exit 1; }
+        echo "endpoint=$endpoint" | tee -a "$GITHUB_OUTPUT"
+        printf 'Session: an operator attaches at `%s` (specs/session.md).\n' "$endpoint" >> "$GITHUB_STEP_SUMMARY"
     # Do not let a caller accidentally turn this into an unsandboxed runner.
     # Unlocked configurations skip runner privilege probes, so reject them
     # explicitly before checking the root-owned installed configuration.

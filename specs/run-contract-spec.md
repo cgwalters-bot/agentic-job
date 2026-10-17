@@ -603,9 +603,9 @@ the job's steps hold.
 **RC-015 — Composition.** An agent job MUST run, in order: the target
 checkout, the source checkout at the policy call's `source-repository` and
 `source-sha`, refused before the checkout unless they name a repository and
-a full commit, `prepare`, then the caller's privileged steps, `secure-host`
-and `run`. `secure-host` MUST check the inference proxy before it secures the
-host. The job MUST take the binary, policy and configuration only from the
+a full commit, `prepare`, then the caller's privileged steps, the inference
+proxy check (`agentic-job secure-host inference`), `secure-host` and `run`.
+The job MUST take the binary, policy and configuration only from the
 policy call's upload IDs, and hand on only `run`'s outputs: check takes the
 proposals' upload ID, apply the job's result and exit status. Check and
 apply MUST NOT read anything else the job makes. The
