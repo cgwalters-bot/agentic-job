@@ -386,8 +386,8 @@ jobs:
   build:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
       - run: sudo apt-get install -y make         # root: before the step
+      - uses: actions/checkout@v7
       - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
       - run: make check                           # the runner's user, no root
       - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x

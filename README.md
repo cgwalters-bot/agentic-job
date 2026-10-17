@@ -27,8 +27,8 @@ restrictions and fails the job if one does not hold.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v7
   - run: sudo apt-get install -y libfoo-dev   # root: before the step
+  - uses: actions/checkout@v7
   - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
   - run: make check                           # runner's user, no sudo
   - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x

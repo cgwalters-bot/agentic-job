@@ -25,7 +25,9 @@ repository runs it itself.
 Every job must do one of two things. It can call the reusable workflow
 `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml` at a
 40-hex commit, which holds the agent, check and apply jobs. Or it can
-have steps that include `cgwalters-forge/agentic-job/secure-host`. Each
+have steps that include secure-host, named as
+`cgwalters-forge/agentic-job/secure-host` or by its standalone path
+`cgwalters-forge/actions/secure-host`, which take the same inputs. Each
 refusal below names the file, the job and the step (by number, with its
 name, action or first script line), and says what to write instead.
 
@@ -35,6 +37,9 @@ name, action or first script line), and says what to write instead.
 | A secure-host step with `if:` or `continue-on-error:`, or inputs outside the closed allowlist below | A job that goes on without hardening, or redirects hardening so the runner's user keeps root |
 | A post-hardening condition with a status function other than standalone `success()`, or `continue-on-error` other than literal false on the job or a pre-hardening step | Later steps running after an earlier failure skipped hardening, or a hardening failure being silently ignored |
 | A `uses:` before secure-host other than GitHub's `checkout`, `cache`, `cache/restore`, `download-artifact` and `setup-{dotnet,go,java,node,python}`, including a local `./` action | An action running with root before hardening, which can leave a root process or sudo rule behind that secure-host does not undo |
+| Any step after `actions/checkout` and before secure-host, other than another checkout | The checked-out tree, which may be anyone's, run with root before hardening by a script or by an action that reads it |
+| `id-token` other than `none` in the permissions of a job that runs secure-host | Its untrusted steps minting OIDC tokens for any audience; ask for them in a separate job |
+| A `secrets` expression anywhere in a job that runs secure-host, an `if:` or the workflow's `env:` included | A secret readable by every step after secure-host, which all run as one user; use it in a separate job that takes artifacts as data |
 | A `uses:` not pinned to a 40-hex commit (local `./` actions after secure-host are the job's own checkout) | A moved tag or branch that swaps the code a step runs |
 | `container:`, `services:` or a `docker://` action in a job that runs secure-host | Nothing a check needs to stop: secure-host stops the container daemon, so these would fail at run time anyway |
 | A job without its own `permissions:` map | A job token with the workflow's or the repository's default grant, which may be write |
@@ -53,7 +58,7 @@ does not permit expressions and the checker refuses every expression.
 Container shorthand strings are images. Container and Docker fields are
 checked even though secure-host jobs also refuse containers outright.
 
-The hardening boundary must use this repository's secure-host action at a
+The hardening boundary must use one of the two secure-host paths at a
 40-hex commit; a local action is not certified. Its only admitted inputs are
 `lock`, `check`, `egress` and `deny-runner-metadata` set to literal `true`, and
 `build` set to literal `true` or `false` (YAML booleans or strings). Omitting
@@ -101,9 +106,13 @@ Functions, operators, indexing, unknown properties and all other contexts
 are refused, including `env`, `inputs`, `needs`, `secrets`, `vars`, event
 numbers and step outputs. Pass values through step `env:` and read quoted
 shell variables (or `process.env` in github-script); no env taint tracking
-is needed. `run:` steps before secure-host are
+is needed. `run:` steps before secure-host and before any checkout are
 allowed: they are the job's own commands, such as installing packages,
-and run with root. The agent rule is a list of known actions and one
+and run with root. Only `actions/checkout` starts the ordering rule: code
+fetched by a `run:` step, a downloaded artifact or a restored cache before
+secure-host is not recognized, so keep those after it. The `secrets` rule matches the word in any expression,
+from the first `${{` of a value to its end, so one in a string literal or
+after the expression is refused too. The agent rule is a list of known actions and one
 command, not a way to recognize any agent. A `docker` action named through
 `action.yml` and not `docker://` is not detected; it fails at run time
 once the daemon is stopped. After secure-host, conditions without status

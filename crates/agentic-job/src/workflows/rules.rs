@@ -22,8 +22,13 @@ use serde_json::{Map, Value};
 /// The reusable workflow, which a caller names at a commit.
 pub const REUSABLE_WORKFLOW: &str = "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml";
 
-/// The action that hardens a job's host.
-pub const SECURE_HOST: &str = "cgwalters-forge/agentic-job/secure-host";
+/// The action that hardens a job's host, at its old path and at its
+/// standalone path in cgwalters-forge/actions (tracker#674); both take the
+/// same inputs.
+const SECURE_HOST_ACTIONS: &[&str] = &[
+    "cgwalters-forge/agentic-job/secure-host",
+    "cgwalters-forge/actions/secure-host",
+];
 
 /// Actions that may run before secure-host, while the runner's user still
 /// has root: GitHub's own, which the runner image already trusts, for
@@ -98,8 +103,45 @@ static SAFE_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
 static MATRIX_PROPERTY: LazyLock<Regex> =
     LazyLock::new(|| re(r"(?i-u)^matrix\.[a-z_][a-z0-9_-]*$"));
 static AGENT_COMMAND: LazyLock<Regex> = LazyLock::new(|| re(r"(?-u:\b)agentic-job\s+run(?-u:\b)"));
+/// The `secrets` context, as a whole word in an expression.
+static SECRETS: LazyLock<Regex> = LazyLock::new(|| re(r"(?i-u)\bsecrets\b"));
 static STATUS_FUNCTION: LazyLock<Regex> =
     LazyLock::new(|| re(r"(?i-u)\b(always|failure|cancelled|success)\s*\("));
+
+fn is_secure_host(step: &Value) -> bool {
+    step.get("uses")
+        .and_then(Value::as_str)
+        .is_some_and(|u| SECURE_HOST_ACTIONS.contains(&action_of(u).as_str()))
+}
+
+fn is_checkout(step: &Value) -> bool {
+    step.get("uses")
+        .and_then(Value::as_str)
+        .is_some_and(|u| action_of(u) == CHECKOUT)
+}
+
+/// Whether `v` reads the `secrets` context in any expression, including an
+/// `if:`, which is an expression without `${{ }}`. A word `secrets` inside
+/// a string literal of an expression is refused too, rather than parsed,
+/// and so is one anywhere after the first `${{`: a quoted `}}` does not end
+/// an expression, so cutting at the first one would miss
+/// `${{ format('}}', secrets.T) }}`.
+fn reads_secrets(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s
+            .split_once("${{")
+            .is_some_and(|(_, rest)| SECRETS.is_match(rest)),
+        Value::Array(a) => a.iter().any(reads_secrets),
+        Value::Object(o) => map_reads_secrets(o),
+        _ => false,
+    }
+}
+
+fn map_reads_secrets(map: &Map<String, Value>) -> bool {
+    map.iter().any(|(key, value)| {
+        (key == "if" && value.as_str().is_some_and(|s| SECRETS.is_match(s))) || reads_secrets(value)
+    })
+}
 
 /// Inputs and expression-context properties are case-insensitive on GitHub.
 fn folded_get<'a>(value: Option<&'a Value>, name: &str) -> Option<&'a Value> {
@@ -447,17 +489,13 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
             .get("steps")
             .and_then(Value::as_array)
             .map_or(&[], Vec::as_slice);
-        let secure_host = steps.iter().position(|s| {
-            s.get("uses")
-                .and_then(Value::as_str)
-                .is_some_and(|u| action_of(u) == SECURE_HOST)
-        });
+        let secure_host = steps.iter().position(is_secure_host);
         let Some(secure_host) = secure_host else {
             add(
                 job_name,
                 None,
                 "neither runs secure-host nor calls the reusable workflow".into(),
-                "add a step `uses: cgwalters-forge/agentic-job/secure-host@COMMIT` before the job's untrusted steps, or call cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT",
+                "add a step `uses: cgwalters-forge/actions/secure-host@COMMIT` (or cgwalters-forge/agentic-job/secure-host@COMMIT) before the job's untrusted steps, or call cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT",
             );
             continue;
         };
@@ -472,6 +510,35 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     "install and run what it provides in steps of the job",
                 );
             }
+        }
+        // The two-job pattern (tracker#674): the job that runs untrusted
+        // steps holds nothing worth stealing. An OIDC request token mints
+        // tokens for any audience, and a secret in its env or inputs is
+        // readable by every later step, all of which run as one user.
+        if let Some((key, _)) = job
+            .get("permissions")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .find(|(k, v)| k.eq_ignore_ascii_case("id-token") && v.as_str() != Some("none"))
+        {
+            add(
+                job_name,
+                None,
+                format!(
+                    "grants `{key}`, so its untrusted steps can mint OIDC tokens for any audience"
+                ),
+                "request OIDC tokens in a separate job that runs none of this job's code",
+            );
+        }
+        // A workflow-level `env:` reaches every job.
+        if map_reads_secrets(job) || workflow.get("env").is_some_and(reads_secrets) {
+            add(
+                job_name,
+                None,
+                "reads `secrets`, which every step after secure-host can then read".into(),
+                "use secrets only in a separate job that runs none of this job's code, passing it artifacts as data",
+            );
         }
         if job.get("continue-on-error").is_some_and(may_ignore_failure) {
             add(
@@ -491,8 +558,15 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                 );
             }
         }
+        // Once a checkout has fetched the tree, which may be anyone's, any
+        // other step before secure-host could run its code with root and
+        // leave a root process or sudo rule behind that secure-host does
+        // not undo.
+        let first_checkout = steps.iter().position(is_checkout);
         for (i, step) in steps.iter().enumerate() {
             let step_value = step;
+            let checkout = is_checkout(step_value);
+            let after_checkout = first_checkout.is_some_and(|c| c < i) && i < secure_host;
             let Some(step) = step.as_object() else {
                 add(
                     job_name,
@@ -559,10 +633,7 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     "write the key in lowercase",
                 );
             }
-            if step
-                .get("uses")
-                .and_then(Value::as_str)
-                .is_some_and(|u| action_of(u) == SECURE_HOST)
+            if is_secure_host(step_value)
                 && let Some(why) = weakened(step)
             {
                 add(
@@ -570,6 +641,14 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     at,
                     format!("runs secure-host but {why}"),
                     "run it unconditionally; omit inputs or use only lock, egress, deny-runner-metadata and check set to true, and build set to true or false; unchecked config files are refused",
+                );
+            }
+            if after_checkout && !checkout {
+                add(
+                    job_name,
+                    at,
+                    "runs after checkout but before secure-host, with root and the checked-out tree".into(),
+                    "move it after the secure-host step, or before the checkout",
                 );
             }
             let uses = step.get("uses").and_then(Value::as_str);
@@ -659,6 +738,7 @@ mod tests {
     use crate::workflows::yaml;
 
     const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SECURE_HOST: &str = "cgwalters-forge/agentic-job/secure-host";
 
     #[test]
     fn secure_host_inputs_fail_closed() {
@@ -812,10 +892,10 @@ mod tests {
 permissions: {contents: read}
 runs-on: ubuntu-26.04
 steps:
-  - uses: actions/checkout@PIN
-    with: {persist-credentials: false}
   - uses: actions/setup-node@PIN
   - run: sudo apt-get install -y just
+  - uses: actions/checkout@PIN
+    with: {persist-credentials: false}
   - uses: cgwalters-forge/agentic-job/secure-host@PIN
   - uses: Swatinem/rust-cache@PIN
   - uses: ./local-action
@@ -947,6 +1027,37 @@ steps:
             "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - uses: Anthropics/claude-code-action/base@PIN",
             &["runs an agent"],
         ),
+        (
+            "permissions: {}\nsteps:\n  - uses: CGWalters-Forge/actions/secure-host@PIN\n    with: {lock: true}\n  - run: make",
+            &[],
+        ),
+        (
+            "permissions: {}\nsteps:\n  - uses: someone/actions/secure-host@PIN\n  - run: make",
+            &["neither runs secure-host"],
+        ),
+        (
+            "permissions: {}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: false}\n  - run: make deps\n  - uses: actions/setup-go@PIN\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            &[
+                "step 2 (make deps) runs after checkout",
+                "step 3 (actions/setup-go@",
+            ],
+        ),
+        (
+            "permissions: {contents: read, id-token: none}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - run: cat secrets.md",
+            &[],
+        ),
+        (
+            "permissions: {contents: read, id-token: write}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            &["grants `id-token`"],
+        ),
+        (
+            "permissions: {ID-TOKEN: read}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            &["grants `ID-TOKEN`"],
+        ),
+        (
+            "permissions: {id-token: ~}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            &["grants `id-token`"],
+        ),
     ];
 
     #[test]
@@ -1045,6 +1156,61 @@ steps:
             "permissions: {{}}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {{PERSIST-CREDENTIALS: false}}\n  - uses: {SECURE_HOST}@PIN\n    with: {{Lock: true}}"
         ));
         assert!(check_workflow(&yaml::parse(&text).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn secrets_are_refused() {
+        for (workflow_env, step, refused) in [
+            ("", "run: echo ok", false),
+            ("", "run: cat secrets.md", false),
+            ("", "env: {secrets: x}\n    run: echo \"$secrets\"", false),
+            (
+                "",
+                "env: {T: '${{ secrets.TOKEN }}'}\n    run: echo ok",
+                true,
+            ),
+            (
+                "",
+                "env: {T: '${{ SECRETS.token }}'}\n    run: echo ok",
+                true,
+            ),
+            (
+                "",
+                "env: {T: '${{ toJSON(secrets) }}'}\n    run: echo ok",
+                true,
+            ),
+            (
+                "",
+                "uses: someone/x@PIN\n    with: {token: 'x ${{ secrets[''T''] }}'}",
+                true,
+            ),
+            ("", "if: secrets.TOKEN != ''\n    run: echo ok", true),
+            (
+                "",
+                "env: {T: \"${{ format('}}', secrets.TOKEN) }}\"}\n    run: echo ok",
+                true,
+            ),
+            ("env: {T: '${{ secrets.TOKEN }}'}\n", "run: echo ok", true),
+            ("env: {T: '${{ github.sha }}'}\n", "run: echo ok", false),
+        ] {
+            let text = format!(
+                "{workflow_env}{}",
+                workflow(&format!(
+                    "permissions: {{}}\nsteps:\n  - uses: {SECURE_HOST}@PIN\n  - {step}"
+                ))
+            );
+            let problems = check_workflow(&yaml::parse(&text).unwrap());
+            assert_eq!(
+                problems.iter().any(|p| p.what.contains("reads `secrets`")),
+                refused,
+                "{text}: {problems:?}"
+            );
+            assert_eq!(problems.is_empty(), !refused, "{text}: {problems:?}");
+        }
+        let text = workflow(&format!(
+            "permissions: {{}}\nenv: {{T: '${{{{ secrets.T }}}}'}}\nsteps:\n  - uses: {SECURE_HOST}@PIN"
+        ));
+        assert!(!check_workflow(&yaml::parse(&text).unwrap()).is_empty());
     }
 
     #[test]
