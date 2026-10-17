@@ -385,15 +385,28 @@ world-writable object of another user's on the root filesystem.
 jobs:
   build:
     runs-on: ubuntu-26.04
+    defaults:
+      run:
+        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
     steps:
       - run: sudo apt-get install -y make         # root: before the step
+        shell: bash
       - uses: actions/checkout@v7
       - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
       - run: make check                           # the runner's user, no root
+        shell: bash
       - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
-      - shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
-        run: cd src && bash ./untrusted.sh < /dev/null
+        shell: bash
+      - run: cd src && bash ./untrusted.sh < /dev/null
 ```
+
+A `run:` step without `shell:` is untrusted by default; a trusted step opts
+out with `shell: bash`. This fails closed: forgetting the override runs code
+sandboxed rather than with the runner user's files and token. Every trusted
+`run:` step before secure-host also needs the override: the binary does not
+exist yet, so the default would fail there rather than run unsandboxed.
+`uses:` steps are not affected by the shell default: they run as the runner
+user, as described in [One trust level for the rest of the job](#one-trust-level-for-the-rest-of-the-job).
 
 [`example-secure-host.yml`](../.github/workflows/example-secure-host.yml)
 is a runnable example. The template above assumes the repository provides

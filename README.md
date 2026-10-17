@@ -26,19 +26,31 @@ HTTPS go through a filtering proxy. The step ends by probing these
 restrictions and fails the job if one does not hold.
 
 ```yaml
-steps:
-  - run: sudo apt-get install -y libfoo-dev   # root: before the step
-  - uses: actions/checkout@v7
-  - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
-  - run: make check                           # runner's user, no sudo
-  - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
-  - shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
-    run: cd src && bash ./untrusted.sh < /dev/null   # the sandbox user
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    defaults:
+      run:
+        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
+    steps:
+      - run: sudo apt-get install -y libfoo-dev   # root: before the step
+        shell: bash
+      - uses: actions/checkout@v7
+      - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+      - run: make check                           # runner's user, no sudo
+        shell: bash
+      - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
+        shell: bash
+      - run: cd src && bash ./untrusted.sh < /dev/null   # the sandbox user
 ```
 
 The sandbox user cannot see the checkout, so the job hands it a copy.
-Only steps that go through `sandbox exec` are sandboxed: `make check`
-above lost root but still runs as the user that holds the job's token.
+A `run:` step without `shell:` is sandboxed by default; trusted steps opt
+out with `shell: bash`. Forgetting an override fails closed, including before
+secure-host when the binary does not exist yet. `make check` above lost root
+but still runs as the user that holds the job's token. `uses:` steps are not
+affected and run as the runner user; see
+[One trust level for the rest of the job](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
 
 Two limits to know up front. Names still resolve on a hosted runner, so
 a process that wants to can leak data through DNS lookups. And one small

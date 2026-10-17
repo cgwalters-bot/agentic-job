@@ -24,6 +24,9 @@ jobs:
     # systemd 257 or later, for run0: ubuntu-24.04 is too old.
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
     outputs:
       mask-probe: ${{ steps.trusted-log.outputs.mask-probe }}
       masked-control: ${{ steps.trusted-log.outputs.masked-control }}
@@ -40,18 +43,23 @@ jobs:
         id: host
         uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out action under test.
       - name: No step has root from here on
+        shell: bash
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           if docker info > /dev/null 2>&1; then echo "::error::the container daemon still answers"; exit 1; fi
       # An ordinary step: the runner's user, its toolchain, its checkout.
       - name: Build and test
+        shell: bash
         run: cargo test --locked --lib
       # What the job does not trust gets a copy of the source and nothing
       # else: the sandbox user cannot read the checkout where it is.
       - name: Hand the source to the sandbox user
+        shell: bash
         run: git archive --prefix=src/ HEAD egress | agentic-job sandbox exec -- tar -x
+      # No shell override: GitHub must honour the job's sandbox default.
+      - name: The default shell runs as the sandbox user
+        run: test "$(id -un)" != runner
       - name: Test as the sandbox user
-        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
         env:
           RUNNER_HOME: /home/runner
         run: |
@@ -67,6 +75,7 @@ jobs:
           python3 -m unittest discover -s egress 2>&1 | tee ../report.txt
       # Back out as bytes on a pipe. What the sandbox user wrote is data.
       - name: Take the report back
+        shell: bash
         env:
           SANDBOX_USER: ${{ steps.host.outputs.sandbox-user }}
           SANDBOX_HOME: ${{ steps.host.outputs.sandbox-home }}
@@ -81,6 +90,7 @@ jobs:
           echo "tested as $SANDBOX_USER in $SANDBOX_HOME" | tee -a "$GITHUB_STEP_SUMMARY"
       # A command's exit state is the step's.
       - name: A failure in the sandbox fails the step
+        shell: bash
         run: |
           state=0; agentic-job sandbox exec -- sh -c 'exit 7' || state=$?
           test "$state" = 7
@@ -91,7 +101,6 @@ jobs:
       # job has no secrets and a read-only token.
       - name: Sandbox output cannot command the runner
         id: hostile-log
-        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
         env:
           ACTIONS_ALLOW_UNSECURE_COMMANDS: "true" # zizmor: ignore[insecure-commands] Read-only, secret-free positive control for sandbox log escaping; this variable is not passed into the sandbox.
         run: |
@@ -102,6 +111,7 @@ jobs:
       # Filters, reordering and two streams on one log: none of them can
       # reassemble a command from escaped output.
       - name: Filtered and overlapping sandbox output cannot command the runner
+        shell: bash
         id: hostile-overlap
         run: |
           forge='printf "::set-output name=forged_overlap::x\n::add-mask::sandbox-mask-probe\n"'
@@ -112,9 +122,11 @@ jobs:
       # A positive control: without it, the checks below would also pass
       # if the runner stopped honouring set-output at all.
       - name: Trusted output can command the runner
+        shell: bash
         id: control
         run: echo '::set-output name=control::honoured'
       - name: Trusted outputs are unchanged
+        shell: bash
         id: trusted-log
         env:
           CONTROL: ${{ steps.control.outputs.control }}
@@ -137,6 +149,7 @@ jobs:
       # The action ran this already; again at the end, after everything
       # the job did, the host is still what it proved.
       - name: The host is still secure
+        shell: bash
         run: agentic-job sandbox check
 
   # The runner refuses to export a masked job output (the trusted control
