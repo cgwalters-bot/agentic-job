@@ -609,6 +609,21 @@ fn serve_session() -> Result<()> {
         Command::new("tailscale").args(["status", "--json"]),
     )?)
     .context("reading tailscale status")?;
+    let endpoint = format!("wss://{}/", session_name(&status)?);
+    install_file(
+        Path::new(bridge::ENDPOINT_FILE),
+        format!("{endpoint}\n").as_bytes(),
+        MODE_FILE,
+        None,
+    )?;
+    println!("The session's client connects at {endpoint}");
+    Ok(())
+}
+
+/// This machine's tailnet name, which must have a certificate: without
+/// one, `tailscale serve --https` waits for a capability that never comes,
+/// so the run would only time out later with no cause.
+fn session_name(status: &serde_json::Value) -> Result<&str> {
     let name = status["Self"]["DNSName"]
         .as_str()
         .map(|name| name.trim_end_matches('.'))
@@ -619,15 +634,11 @@ fn serve_session() -> Result<()> {
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
         })
         .context("tailscale status names no DNS name for this machine")?;
-    let endpoint = format!("wss://{name}/");
-    install_file(
-        Path::new(bridge::ENDPOINT_FILE),
-        format!("{endpoint}\n").as_bytes(),
-        MODE_FILE,
-        None,
-    )?;
-    println!("The session's client connects at {endpoint}");
-    Ok(())
+    let certified = status["CertDomains"]
+        .as_array()
+        .is_some_and(|domains| domains.iter().any(|domain| domain.as_str() == Some(name)));
+    ensure!(certified, "{}", super::session::HTTPS_DISABLED);
+    Ok(name)
 }
 
 /// The agent's managed settings, root's, from the same configuration
@@ -1702,6 +1713,39 @@ fn install_file(path: &Path, content: &[u8], mode: u32, validate: Option<&[&str]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_name_needs_a_dns_name_with_a_certificate() {
+        let name = "runner.tail1234.ts.net";
+        let status = |dns: &str, certs: serde_json::Value| serde_json::json!({"Self": {"DNSName": dns}, "CertDomains": certs});
+        let disabled = Err("HTTPS certificates disabled");
+        for (status, wanted) in [
+            (
+                status("runner.tail1234.ts.net.", serde_json::json!([name])),
+                Ok(name),
+            ),
+            (
+                status("runner.tail1234.ts.net.", serde_json::Value::Null),
+                disabled,
+            ),
+            (
+                status("runner.tail1234.ts.net.", serde_json::json!(["other"])),
+                disabled,
+            ),
+            (
+                status("Runner!.", serde_json::json!(["Runner!"])),
+                Err("no DNS name"),
+            ),
+        ] {
+            match (session_name(&status), wanted) {
+                (Ok(got), Ok(wanted)) => assert_eq!(got, wanted),
+                (Err(error), Err(wanted)) => {
+                    assert!(format!("{error:#}").contains(wanted), "{error:#}")
+                }
+                (got, wanted) => panic!("{status}: got {got:?}, wanted {wanted:?}"),
+            }
+        }
+    }
 
     #[test]
     fn crypto_policies_are_left_writable_by_their_owner_only() {

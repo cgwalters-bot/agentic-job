@@ -67,14 +67,17 @@ ends. While the session is live, a caller's wrapper names the endpoint from the
 hostname its own join step gave the runner (such as `agentic-job-RUN_ID-ATTEMPT`)
 and the tailnet's DNS name, and posts it to the dispatch issue, where the pane
 finds the session. The tailnet needs HTTPS certificates enabled, and the runner
-must have joined it before secure-host, as for the inference proxy. A
+must have joined it before secure-host, as for the inference proxy. Setup
+refuses a runner whose name is not among `tailscale status`'s `CertDomains`:
+serve would otherwise wait for the HTTPS capability until it timed out. A
 configuration with `listen` and no `agent.name` is refused. Once `run` binds
 the port, its root helper holds a duplicate listener and enables
 `tailscale serve --bg --https=443 http://127.0.0.1:7790`. A private control socket
 ties that helper to the supervisor's lifetime. On normal cleanup or supervisor
 exit, including a crash, it disables that HTTPS mapping before releasing the
-listener. If disabling fails, root retains the port and retries, even when
-reaping the sandbox user's processes failed.
+listener. A mapping that "does not exist" is already off. If disabling fails,
+root retains the port, even when reaping the sandbox user's processes failed,
+and retries ten times before only holding it until the host ends the job.
 
 Each runner's name gets its own certificate. That puts the name and the
 tailnet's in public Certificate Transparency logs, and many sessions in a week
