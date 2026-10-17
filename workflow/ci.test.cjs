@@ -431,28 +431,36 @@ test('the agent job\'s prepare installs the object beside the binary secure-host
 
 test('confined proves the checkout from run steps and a local action main and post step', () => {
   const job = ci.split('\n  confined:\n')[1].split('\n  required-checks:\n')[0];
-  // The one local action is the probe, exempted only from self-repository.
+  assert.match(job, /^ {4}needs: \[changes, static\]\n/);
+  // The local actions are the forwarder and the probe, each exempted only
+  // from self-repository.
   assert.doesNotMatch(job, /uses: cgwalters-forge\/agentic-job/);
   const local = '        uses: ./.github/actions/confine-probe # zizmor: ignore[self-repository] ';
-  assert.equal(job.split('uses: ./').length, 2);
-  assert.equal(job.split('zizmor: ignore').length, 2);
+  const secure = '        uses: ./secure-host # zizmor: ignore[self-repository] ';
+  assert.equal(job.split('uses: ./').length, 3);
+  assert.equal(job.split('zizmor: ignore').length, 3);
   assert.ok(job.includes(`      - name: The JavaScript action main and post steps are confined\n${local}`));
-  assert.match(job, /run: bash secure-host\/binary\.sh get --build --out "\$RUNNER_TEMP\/secure-host\/bin"\n/);
-  assert.match(job, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$RUNNER_TEMP\/secure-host\/bin\/world_write\.bpf\.o" --deny-runner-reads\n/);
+  // The build's image archive, with the runner-read rule from the host file.
+  assert.match(job, /name: secure-host-image\n/);
+  const run = job.indexOf(secure);
+  assert.ok(run > 0);
+  assert.ok(job.slice(run).startsWith(job.slice(run).split('\n')[0] +
+    '\n        with:\n          config: ${{ runner.temp }}/confine-config.toml\n' +
+    '          image-archive: ${{ runner.temp }}/image/secure-host.tar\n'));
+  assert.match(job, /--boolean sandbox\.deny-runner-reads=true > "\$RUNNER_TEMP\/confine-config\.toml"\n/);
+  assert.doesNotMatch(job, /binary\.sh|secure-host world-write|sandbox setup|podman run|continue-on-error|\|\| true/);
   // The orphan is an earlier step than every probe, the control included.
   const orphan = job.indexOf('      - name: Leave a process running\n        id: orphan\n');
   assert.ok(orphan >= 0 && orphan < job.indexOf('probe.mjs control before'));
+  assert.ok(job.indexOf('probe.mjs control before') < run);
   assert.match(job, /\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n/);
   assert.match(job, /echo "\$!" > "\$RUNNER_TEMP\/confine-orphan\.pid"/);
-  const supported = job.indexOf('"$RUNNER_TEMP/secure-host/bin/agentic-job" secure-host supported\'\n');
-  assert.ok(supported >= 0 && supported < job.indexOf("- name: \"Install the checkout's binary\""));
-  assert.ok(supported < job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n'));
-  assert.ok(job.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n') < job.indexOf('- name: Install bpftool'));
   assert.match(job, /--boolean sandbox\.deny-runner-metadata=true/);
   assert.match(job, /agentic-job sandbox check --record/);
   assert.match(job, /probe\.mjs confined run-step/);
   // After setup, so its main and post steps run under the lock.
-  assert.ok(job.indexOf('sudo /usr/local/bin/agentic-job sandbox setup') < job.indexOf(local));
+  assert.ok(run < job.indexOf('probe.mjs confined run-step'));
+  assert.ok(run < job.indexOf(local));
   assert.ok(job.indexOf(local) < job.indexOf('uses: actions/upload-artifact@'));
   assert.doesNotMatch(job, /actions\/github-script@/);
   assert.match(job, /- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions\/upload-artifact@/);

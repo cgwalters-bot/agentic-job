@@ -121,6 +121,14 @@ pub struct Sandbox {
     /// needs [`Self::lock_runner`], since with sudo the runner's user
     /// reads the Worker's memory anyway.
     pub unlink_worker_diagnostics: bool,
+    /// Whether the secure-host image loads the world-write policy with
+    /// its runner-read rule on (`secure-host world-write
+    /// --deny-runner-reads`), so that a step cannot read the environment,
+    /// and the tokens in it, of a process an earlier step left running.
+    /// Off by default; only the image reads it (`secure_host::image`).
+    /// Needs [`Self::lock_runner`], since with sudo the runner's user
+    /// could clear the rule's map.
+    pub deny_runner_reads: bool,
     /// Whether `sandbox setup` closes systemd-resolved to every user but
     /// root and, on the bus, the runner's. resolved answers any local user over its
     /// Varlink socket and the system bus, as itself, so the uid rules do
@@ -208,6 +216,10 @@ impl Sandbox {
             self.lock_runner || !self.unlink_worker_diagnostics,
             "sandbox.unlink-worker-diagnostics needs sandbox.lock-runner: a runner's user with sudo reads the Worker's memory anyway"
         );
+        ensure!(
+            self.lock_runner || !self.deny_runner_reads,
+            "sandbox.deny-runner-reads needs sandbox.lock-runner: a runner's user with sudo could clear the rule"
+        );
         for group in &self.groups {
             ensure!(
                 name_ok(group),
@@ -263,6 +275,7 @@ impl Default for Sandbox {
             filesystem_view: false,
             deny_runner_metadata: false,
             unlink_worker_diagnostics: false,
+            deny_runner_reads: false,
             close_resolved: false,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
@@ -824,6 +837,7 @@ mod tests {
             runner-user = "runner"
             deny-runner-metadata = true
             unlink-worker-diagnostics = true
+            deny-runner-reads = true
             close-resolved = true
             private-dirs = ["/opt/hca"]
             stop-services = ["docker.socket", "docker.service"]
@@ -851,6 +865,7 @@ mod tests {
             "[sandbox]\nuser = \"agent\"\nrunner-user = \"agent\"",
             "[sandbox]\nlock-runner = false\ndeny-runner-metadata = true",
             "[sandbox]\nlock-runner = false\nunlink-worker-diagnostics = true",
+            "[sandbox]\nlock-runner = false\ndeny-runner-reads = true",
             "[sandbox]\ngroups = [\"docker\"]",
             "[sandbox]\ngroups = [\"wheel\"]",
             "[sandbox]\nprivate-dirs = [\"relative\"]",

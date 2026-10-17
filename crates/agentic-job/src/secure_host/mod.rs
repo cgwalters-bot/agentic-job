@@ -57,6 +57,10 @@ pub enum Host {
         /// Runner.Worker this command runs under is exempt
         #[arg(long)]
         deny_runner_reads: bool,
+        /// Exempt the one Runner.Worker on the host, not an ancestor: for a
+        /// loader the Worker did not start, such as the image's
+        #[arg(long, requires = "deny_runner_reads")]
+        sole_worker: bool,
     },
     /// As root: `sandbox setup` from a file with only `[sandbox]`, `[egress]` and `[setup]`
     Setup {
@@ -127,7 +131,8 @@ impl Host {
             Self::WorldWrite {
                 object,
                 deny_runner_reads,
-            } => match world_write::load(object, *deny_runner_reads) {
+                sole_worker,
+            } => match world_write::load(object, *deny_runner_reads, *sole_worker) {
                 Ok(()) => return Ok(Exit::Success),
                 Err(err) => {
                     world_write::report_refusal(&err, &mut world_write::run_command, &mut |line| {
@@ -167,6 +172,12 @@ mod tests {
                 "/tmp/bin/world_write.bpf.o",
                 "--deny-runner-reads",
             ],
+            &[
+                "world-write",
+                "/tmp/bin/world_write.bpf.o",
+                "--deny-runner-reads",
+                "--sole-worker",
+            ],
             &["setup", "--config", "secure-host/hosted.toml"],
             &["check"],
             &["check", "--record"],
@@ -178,6 +189,7 @@ mod tests {
         for bad in [
             &[][..],
             &["setup"],
+            &["world-write", "/tmp/bin/world_write.bpf.o", "--sole-worker"],
             &["inference", "/tmp/secure-host/config.toml"],
             &["image", "/tmp/secure-host/config.toml"],
             &["run", "--policy", "p.json"],

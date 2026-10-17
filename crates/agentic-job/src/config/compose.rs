@@ -677,6 +677,14 @@ mod tests {
                 "sandbox.deny-runner-metadata needs sandbox.lock-runner",
             ),
             (
+                vec![
+                    "sandbox.lock-runner=false",
+                    "sandbox.deny-runner-reads=true",
+                ],
+                vec![],
+                "sandbox.deny-runner-reads needs sandbox.lock-runner",
+            ),
+            (
                 vec![],
                 vec!["sandbox.stop-services=docker"],
                 "sandbox.stop-services: \"docker\" is not a unit name",

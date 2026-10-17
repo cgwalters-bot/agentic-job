@@ -37,7 +37,7 @@ const SOCKET_PREFIX: &str = "dotnet-diagnostic-";
 const SOCKET_SUFFIX: &str = "-socket";
 
 /// The pids of the processes named [`WORKER_COMM`] that this user sees.
-fn worker_pids() -> Result<Vec<u32>> {
+pub fn worker_pids() -> Result<Vec<u32>> {
     let mut pids = Vec::new();
     for entry in fs::read_dir("/proc").context("listing /proc")? {
         let entry = entry.context("listing /proc")?;

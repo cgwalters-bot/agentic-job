@@ -374,7 +374,12 @@ core limit and make it dump core where the host's `core_pattern` leaves the
 dump readable. It can also tamper with later steps, which the job's trust
 model accepts.
 
-The action has no input for the rule yet. CI's `confined` job loads it, and
+The image turns the rule on when the host configuration sets
+`sandbox.deny-runner-reads = true`. The image's loader runs under conmon,
+not under the Worker, so it passes `--sole-worker`. That makes the loader
+take the one non-root `Runner.Worker` on the host instead of an ancestor.
+It refuses if there is none, a root one or more than one. CI's `confined`
+job sets the key through the public action with `image-archive`, and
 every probe there must fail to read the environment of a `sleep` that an
 earlier step left running. That `sleep` must still be running, by a signal
 check, which needs no `/proc` entry. The `confined-cleanup` job then reads
@@ -819,6 +824,11 @@ After it, no later step has root:
   into it; Yama sees no ptrace attach in that. The runtime binds the
   socket once, when the Worker starts, so the Worker keeps a socket no
   step can name. Needs `lock`; off by default.
+- `sandbox.deny-runner-reads`, read only by the [image](#the-image)'s
+  entrypoint, turns on the
+  [runner-read rule](#reads-between-the-runners-own-processes-opt-in)
+  as it loads the world-write policy. Needs `lock`, because with sudo
+  the runner's user could clear the rule's map. Off by default.
 
 The kernel has no way to change another process's credentials. So the
 runner's processes, and every step they start, keep the supplementary
@@ -834,8 +844,10 @@ the action (the control, in which sudo, `docker info`, writing that root-owned
 [probe action](../.github/actions/confine-probe/action.yml), which the runner
 runs like a downloaded one, its post step after the job's last step).
 Each route must fail, or the step fails the job. A file of the runner's own, also mode 0666,
-must still take a write. The job also loads the opt-in
-[runner-read rule](#reads-between-the-runners-own-processes-opt-in), so reading
+must still take a write. The job secures the host through the public
+action with the image archive the build saved, and turns on the opt-in
+[runner-read rule](#reads-between-the-runners-own-processes-opt-in) with
+`sandbox.deny-runner-reads`, so reading
 the environment of a process that an earlier step left running is one more
 route that must fail. Each probe prints its record in its log, and the job
 uploads the records as an artifact, whether or not a probe failed; the post

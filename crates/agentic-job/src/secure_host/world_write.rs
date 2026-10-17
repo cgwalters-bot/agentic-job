@@ -134,6 +134,26 @@ pub fn find_worker(pid: u32, status: &mut dyn FnMut(u32) -> Result<String>) -> R
     bail!("no {WORKER} within {MAX_ANCESTORS} ancestors of this process")
 }
 
+/// The one process named [`WORKER`] of PIDS, by the status STATUS reads
+/// of each, for a loader that is not the Worker's descendant: the
+/// image's, whose parent is conmon. One that ended in between is skipped;
+/// a root one, or a second, is refused, rather than a guess at which is
+/// this job's. As for [`find_worker`], nothing untrusted has run before.
+pub fn sole_worker(pids: &[u32], status: &mut dyn FnMut(u32) -> Result<String>) -> Result<Worker> {
+    let mut found = None;
+    for &pid in pids {
+        let Ok(text) = status(pid) else { continue };
+        let (name, _, uid, gid) = status_fields(&text)?;
+        if name != WORKER {
+            continue;
+        }
+        ensure!(uid != 0, "{WORKER} {pid} runs as root");
+        ensure!(found.is_none(), "more than one {WORKER} runs on this host");
+        found = Some(Worker { pid, uid, gid });
+    }
+    found.with_context(|| format!("no {WORKER} runs on this host"))
+}
+
 /// The runner-read map's value: the runner's kuid, the Worker's tgid in
 /// the initial pid namespace (this loader's), then 1 for enabled, each a
 /// u32 in this machine's byte order.
@@ -442,7 +462,9 @@ fn probe_runner_read(worker: &Worker, denied: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn load(object: &Path, deny_runner_reads: bool) -> Result<()> {
+/// With SOLE_WORKER, the Worker the runner-read rule exempts is
+/// [`sole_worker`] on the host rather than an ancestor.
+pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result<()> {
     ensure!(
         platform::supported_file(Path::new(platform::OS_RELEASE)),
         platform::REFUSAL
@@ -457,10 +479,18 @@ pub fn load(object: &Path, deny_runner_reads: bool) -> Result<()> {
         .to_str()
         .with_context(|| format!("policy object {} is not UTF-8", object.display()))?;
     let worker = if deny_runner_reads {
-        let worker = find_worker(std::process::id(), &mut |pid| {
+        let mut status = |pid| {
             fs::read_to_string(format!("/proc/{pid}/status"))
                 .with_context(|| format!("reading the status of process {pid}"))
-        })?;
+        };
+        let worker = if sole_worker {
+            self::sole_worker(
+                &crate::sandbox::worker_diagnostics::worker_pids()?,
+                &mut status,
+            )?
+        } else {
+            find_worker(std::process::id(), &mut status)?
+        };
         // The rule decides reads only: an attach (`/proc/PID/mem`,
         // process_vm_readv) is Yama's, which must not be scope 0.
         crate::sandbox::setup::restrict_ptrace()?;
@@ -638,6 +668,51 @@ mod tests {
                 find_worker(1, &mut |_| Ok(broken.to_owned())).is_err(),
                 "{broken}"
             );
+        }
+    }
+
+    /// The image's loader, under conmon: the one Worker on the host, by
+    /// pid, whatever its ancestors; anything but exactly one non-root
+    /// Worker refuses.
+    #[test]
+    fn the_sole_worker_is_the_only_one_of_that_name() {
+        let host = |names: &'static [(&'static str, u32)]| {
+            move |pid: u32| -> Result<String> {
+                let (name, uid) = names
+                    .get(usize::try_from(pid).unwrap())
+                    .context("no such process")?;
+                Ok(status(name, 1, *uid))
+            }
+        };
+        let hosted: &[(&str, u32)] = &[
+            ("systemd", 0),
+            ("conmon", 0),
+            (WORKER, 1001),
+            ("sleep", 1001),
+        ];
+        // Pid 9 ended before its status was read.
+        assert_eq!(
+            sole_worker(&[1, 9, 2, 3], &mut host(hosted)).unwrap(),
+            Worker {
+                pid: 2,
+                uid: 1001,
+                gid: 118
+            }
+        );
+        for (names, refusal) in [
+            (
+                &[("systemd", 0), ("bash", 1001)][..],
+                "no Runner.Worker runs",
+            ),
+            (&[("systemd", 0), (WORKER, 0)], "runs as root"),
+            (
+                &[(WORKER, 1001), (WORKER, 1002)],
+                "more than one Runner.Worker",
+            ),
+        ] {
+            let pids: Vec<u32> = (0..u32::try_from(names.len()).unwrap()).collect();
+            let err = sole_worker(&pids, &mut host(names)).unwrap_err();
+            assert!(format!("{err:#}").contains(refusal), "{err:#}");
         }
     }
 

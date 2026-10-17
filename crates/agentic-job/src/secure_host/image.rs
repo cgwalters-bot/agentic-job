@@ -25,6 +25,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, ensure};
 
 use super::platform;
+use crate::config::{Config, HostConfig};
 use crate::sandbox::{egress, host};
 
 /// Where `-v /:/host` puts the host's root.
@@ -65,10 +66,23 @@ fn image_id(text: &str) -> Result<String> {
     Ok(id.to_owned())
 }
 
+/// Whether the host's configuration CONFIG, checked as setup checks it,
+/// asks for the runner-read rule (`sandbox.deny-runner-reads`). Read
+/// here as well as by setup: the rule is the world-write step's.
+fn deny_runner_reads(config: &Path) -> Result<bool> {
+    let text =
+        fs::read_to_string(config).with_context(|| format!("reading {}", config.display()))?;
+    let config =
+        Config::from(HostConfig::parse(&text).with_context(|| format!("in {}", config.display()))?);
+    config.check_host()?;
+    Ok(config.sandbox.deny_runner_reads)
+}
+
 /// The commands run on the host, in order, as the action runs them:
-/// apt's waits bounded, the world-write policy loaded, then setup, with
-/// the egress proxy from IMAGE.
-pub fn host_steps(config: &Path, image: &str) -> Result<Vec<Vec<String>>> {
+/// apt's waits bounded, the world-write policy loaded, with the
+/// runner-read rule if DENY_RUNNER_READS, then setup, with the egress
+/// proxy from IMAGE.
+pub fn host_steps(config: &Path, image: &str, deny_runner_reads: bool) -> Result<Vec<Vec<String>>> {
     let config = config
         .to_str()
         .with_context(|| format!("configuration {} is not UTF-8", config.display()))?;
@@ -78,9 +92,22 @@ pub fn host_steps(config: &Path, image: &str) -> Result<Vec<Vec<String>>> {
         config.starts_with('/'),
         "configuration {config:?} must be an absolute path on the host"
     );
+    // conmon, not the Worker, is this process's parent: the loader
+    // finds the Worker on the host instead of among its ancestors.
+    let world_write: &[&str] = if deny_runner_reads {
+        &[
+            "secure-host",
+            "world-write",
+            HOST_OBJECT,
+            "--deny-runner-reads",
+            "--sole-worker",
+        ]
+    } else {
+        &["secure-host", "world-write", HOST_OBJECT]
+    };
     let steps: [&[&str]; 3] = [
         &["secure-host", "apt"],
-        &["secure-host", "world-write", HOST_OBJECT],
+        world_write,
         &[
             "sandbox",
             "setup",
@@ -126,7 +153,8 @@ pub fn run(config: &Path) -> Result<()> {
     let env = crate::files::read_regular(Path::new(CONTAINERENV), MAX_CONTAINERENV_BYTES)
         .with_context(|| format!("reading {CONTAINERENV}: run the image with root podman"))?;
     let image = image_id(&String::from_utf8_lossy(&env))?;
-    let steps = host_steps(config, &image)?;
+    // Refused before the configuration is read from the host's root.
+    host_steps(config, &image, false)?;
     let mut binary = File::open(IMAGE_BINARY).with_context(|| format!("opening {IMAGE_BINARY}"))?;
     let mut object = File::open(IMAGE_OBJECT).with_context(|| format!("opening {IMAGE_OBJECT}"))?;
     // The host's root, so that its paths and symbolic links resolve as on
@@ -139,6 +167,7 @@ pub fn run(config: &Path) -> Result<()> {
         platform::supported_file(Path::new(platform::OS_RELEASE)),
         platform::REFUSAL
     );
+    let steps = host_steps(config, &image, deny_runner_reads(config)?)?;
     install(&mut binary, HOST_BINARY, 0o755)?;
     fs::create_dir_all(HOST_OBJECT_DIR).with_context(|| format!("creating {HOST_OBJECT_DIR}"))?;
     install(&mut object, HOST_OBJECT, 0o644)?;
@@ -166,7 +195,7 @@ mod tests {
     #[test]
     fn each_step_runs_the_installed_binary_in_the_hosts_namespaces() {
         let image = "0123456789abcdef".repeat(4);
-        let steps = host_steps(Path::new("/tmp/secure-host/config.toml"), &image).unwrap();
+        let steps = host_steps(Path::new("/tmp/secure-host/config.toml"), &image, false).unwrap();
         let prefix = [
             "--target",
             "1",
@@ -201,6 +230,42 @@ mod tests {
         );
     }
 
+    /// `sandbox.deny-runner-reads` is off by default and changes only the
+    /// world-write step; a file setup would refuse is refused here first.
+    #[test]
+    fn the_host_file_turns_on_the_runner_read_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (text, want) in [
+            ("", Ok(false)),
+            ("[sandbox]\ndeny-runner-reads = false\n", Ok(false)),
+            ("[sandbox]\ndeny-runner-reads = true\n", Ok(true)),
+            (
+                "[sandbox]\nlock-runner = false\ndeny-runner-reads = true\n",
+                Err("needs sandbox.lock-runner"),
+            ),
+            ("[agent]\nname = \"claude\"\n", Err("unknown field")),
+            ("[sandbox]\ndeny-runner-read = true\n", Err("unknown field")),
+        ] {
+            fs::write(&path, text).unwrap();
+            match (deny_runner_reads(&path), want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{text:?}"),
+                (Err(err), Err(want)) => assert!(format!("{err:#}").contains(want), "{err:#}"),
+                (got, want) => panic!("{text:?}: {got:?}, not {want:?}"),
+            }
+        }
+        let image = "0".repeat(64);
+        let off = host_steps(&path, &image, false).unwrap();
+        let on = host_steps(&path, &image, true).unwrap();
+        assert_eq!((&off[0], &off[2]), (&on[0], &on[2]));
+        assert_eq!(off[1].last().map(String::as_str), Some(HOST_OBJECT));
+        assert_eq!(on[1][..off[1].len()], off[1]);
+        assert_eq!(
+            on[1][off[1].len()..],
+            ["--deny-runner-reads", "--sole-worker"]
+        );
+    }
+
     #[test]
     fn an_install_replaces_the_file_whole_with_its_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -220,7 +285,7 @@ mod tests {
     #[test]
     fn a_configuration_is_a_host_path() {
         for config in ["config.toml", "./config.toml", ""] {
-            let err = host_steps(Path::new(config), &"0".repeat(64)).unwrap_err();
+            let err = host_steps(Path::new(config), &"0".repeat(64), false).unwrap_err();
             assert!(format!("{err:#}").contains("absolute path"), "{config:?}");
         }
     }
@@ -253,7 +318,7 @@ mod tests {
             assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}");
         }
         // The setup step passes it as one argument of its own.
-        let steps = host_steps(Path::new("/c.toml"), &id).unwrap();
+        let steps = host_steps(Path::new("/c.toml"), &id, false).unwrap();
         assert_eq!(steps[2].last(), Some(&id));
     }
 }
