@@ -204,7 +204,69 @@ pub fn direct(egress: &Egress) -> Result<Vec<Direct>> {
 /// subordinate ranges as `START-END`). Rejected rather than dropped, so
 /// a blocked connection fails at once.
 pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> String {
-    rules_with_resolvers(uids, direct, proxy_uid, &[], &[], None)
+    rules_with_resolvers(uids, direct, proxy_uid, &[], &[], None, &[])
+}
+
+/// The ports whose connections `egress.write-policy` redirects to the
+/// proxy's transparent listener: HTTP and HTTPS.
+const REDIRECTED_PORTS: &str = "80, 443";
+
+/// `egress.write-policy`'s part, for `write_uids` (the runner's user and
+/// its subordinate ranges): the set, the NAT chain and the filter rules.
+///
+/// Runner.Worker reads proxy settings only when it starts, before any
+/// step, so a later process is not asked to use the proxy: its new
+/// connections to a public address on port 80 or 443 are redirected to
+/// the proxy's transparent listener ([`egress::TRANSPARENT_PORT`]),
+/// which decides each request as it does the sandbox user's, with the
+/// runner's own writes added. The addresses the proxy may not connect to
+/// are not redirected, so they meet the filter, where everything of
+/// those uids but loopback, DNS to the configured resolvers and
+/// connections open before setup (the Worker's, made before any
+/// untrusted step) is refused: another port, UDP (QUIC), IPv6, the
+/// tailnet and private addresses, and the metadata service.
+///
+/// NAT runs before the filter at the output hook, so the filter sees a
+/// redirected connection to loopback, never its first address.
+fn write_policy_rules(write_uids: &[String], resolvers: &[IpAddr]) -> (String, String, String) {
+    if write_uids.is_empty() {
+        return (String::new(), String::new(), String::new());
+    }
+    let set = format!(
+        "\n  set write_policy_uids {{ type uid; flags interval; elements = {{ {} }} }}",
+        write_uids.join(", ")
+    );
+    let chain = format!(
+        "
+  chain write_policy {{
+    type nat hook output priority -100; policy accept;
+    meta skuid @write_policy_uids ip daddr != {{ {} }} tcp dport {{ {REDIRECTED_PORTS} }} redirect to :{}
+  }}",
+        PROXY_DENIED_V4.join(", "),
+        egress::TRANSPARENT_PORT
+    );
+    let dns = dns_accepts("@write_policy_uids", resolvers);
+    let filter = format!(
+        "
+    meta skuid @sandbox_uids oifname \"lo\" tcp dport {} counter reject
+    meta skuid @write_policy_uids ct state established,related accept
+    meta skuid @write_policy_uids ip daddr 127.0.0.0/8 accept
+    meta skuid @write_policy_uids ip6 daddr ::1 accept{dns}
+    meta skuid @write_policy_uids counter reject",
+        egress::TRANSPARENT_PORT
+    );
+    (set, chain, filter)
+}
+
+/// SUBJECT's DNS to each of RESOLVERS, accepted.
+fn dns_accepts(subject: &str, resolvers: &[IpAddr]) -> String {
+    resolvers
+        .iter()
+        .map(|address| {
+            let family = if address.is_ipv4() { "ip" } else { "ip6" };
+            format!("\n    meta skuid {subject} {family} daddr {address} meta l4proto {{ tcp, udp }} th dport {DNS_PORT} accept")
+        })
+        .collect()
 }
 
 /// DNS exceptions apply only to these resolver addresses. All other DNS
@@ -222,6 +284,9 @@ pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> Stri
 /// whoever `Tailscale-User-Login` names, and a connection of the agent's
 /// own could otherwise name the operator itself, or come through serve
 /// as the node's owner, and prompt the session it runs in.
+///
+/// `write_uids` (`egress.write-policy`, which needs the proxy) are held
+/// to the proxy's write rules: [`write_policy_rules`].
 pub fn rules_with_resolvers(
     uids: &[String],
     direct: &[Direct],
@@ -229,7 +294,13 @@ pub fn rules_with_resolvers(
     resolvers: &[IpAddr],
     runner_uids: &[String],
     session_port: Option<u16>,
+    write_uids: &[String],
 ) -> String {
+    let (write_set, write_chain, write_rules) = if proxy_uid.is_some() {
+        write_policy_rules(write_uids, resolvers)
+    } else {
+        Default::default()
+    };
     let session_rules = session_port.map_or_else(String::new, |port| {
         format!(
             "
@@ -273,10 +344,7 @@ pub fn rules_with_resolvers(
         )
     };
     let egress_rules = proxy_uid.map_or_else(String::new, |proxy| {
-        let dns = resolvers.iter().map(|address| {
-            let family = if address.is_ipv4() { "ip" } else { "ip6" };
-            format!("\n    meta skuid {proxy} {family} daddr {address} meta l4proto {{ tcp, udp }} th dport {DNS_PORT} accept")
-        }).collect::<String>();
+        let dns = dns_accepts(&proxy.to_string(), resolvers);
         format!(
             "
     meta skuid @sandbox_uids oifname \"lo\" meta l4proto {{ tcp, udp }} th dport {DNS_PORT} counter reject
@@ -298,10 +366,10 @@ pub fn rules_with_resolvers(
         "table inet {TABLE}
 delete table inet {TABLE}
 table inet {TABLE} {{
-  set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{runner_set}{tailnet_set}
+  set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{runner_set}{tailnet_set}{write_set}{write_chain}
   chain output {{
     type filter hook output priority 0; policy accept;
-    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{runner_rules}{session_rules}{tailnet_rules}{egress_rules}
+    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{runner_rules}{write_rules}{session_rules}{tailnet_rules}{egress_rules}
   }}
 }}
 ",
@@ -470,11 +538,18 @@ table inet runner_sandbox {
 }
 "#;
         assert_eq!(
-            rules_with_resolvers(&["1002".to_owned()], &[], None, &[], &runner, None),
+            rules_with_resolvers(&["1002".to_owned()], &[], None, &[], &runner, None, &[]),
             want
         );
-        let proxied =
-            rules_with_resolvers(&["1002".to_owned()], &[], Some(993), &[], &runner, None);
+        let proxied = rules_with_resolvers(
+            &["1002".to_owned()],
+            &[],
+            Some(993),
+            &[],
+            &runner,
+            None,
+            &[],
+        );
         assert_eq!(proxied.matches("@runner_uids").count(), 2);
         assert_eq!(
             proxied.replace(
@@ -486,6 +561,67 @@ table inet runner_sandbox {
                 ""
             ),
             rules(&["1002".to_owned()], &[], Some(993))
+        );
+    }
+
+    /// `egress.write-policy`: the runner's new HTTP and HTTPS connections
+    /// to public addresses go to the transparent listener, and nothing
+    /// else of its uids leaves the host but DNS to the resolvers; the
+    /// sandbox user cannot reach that listener, whose policy is wider
+    /// than its own. Without the proxy there is nothing to redirect to,
+    /// and the rules are as they were.
+    #[test]
+    fn ruleset_holding_the_runner_to_the_write_policy() {
+        let sandbox = ["1002".to_owned()];
+        let runner = ["1001".to_owned(), "100000-165535".to_owned()];
+        let resolvers = resolvers("nameserver 10.0.0.2\n").unwrap();
+        let ruleset =
+            rules_with_resolvers(&sandbox, &[], Some(993), &resolvers, &[], None, &runner);
+        let want = r#"table inet runner_sandbox
+delete table inet runner_sandbox
+table inet runner_sandbox {
+  set sandbox_uids { type uid; flags interval; elements = { 1002 } }
+  set write_policy_uids { type uid; flags interval; elements = { 1001, 100000-165535 } }
+  chain write_policy {
+    type nat hook output priority -100; policy accept;
+    meta skuid @write_policy_uids ip daddr != { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3, 168.63.129.16 } tcp dport { 80, 443 } redirect to :3129
+  }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @sandbox_uids oifname "lo" tcp dport 3129 counter reject
+    meta skuid @write_policy_uids ct state established,related accept
+    meta skuid @write_policy_uids ip daddr 127.0.0.0/8 accept
+    meta skuid @write_policy_uids ip6 daddr ::1 accept
+    meta skuid @write_policy_uids ip daddr 10.0.0.2 meta l4proto { tcp, udp } th dport 53 accept
+    meta skuid @write_policy_uids counter reject
+"#;
+        assert!(ruleset.starts_with(want), "{ruleset}");
+        // Without those uids, the same ruleset less what they added.
+        let between =
+            |from: &str, to: &str| &want[want.find(from).unwrap()..want.find(to).unwrap()];
+        let set_and_chain = between("\n  set write_policy_uids", "\n  chain output");
+        let filter = between(
+            "\n    meta skuid @sandbox_uids oifname",
+            "\n    meta skuid @write_policy_uids counter",
+        );
+        let without = ruleset
+            .replace(set_and_chain, "")
+            .replace(filter, "")
+            .replace("\n    meta skuid @write_policy_uids counter reject", "");
+        assert_eq!(
+            without,
+            rules_with_resolvers(&sandbox, &[], Some(993), &resolvers, &[], None, &[])
+        );
+        // The sandbox's refusal comes before its loopback accept.
+        let refusal = ruleset.find("tcp dport 3129 counter reject").unwrap();
+        let accept = ruleset
+            .find("@sandbox_uids oifname \"lo\" ip daddr")
+            .unwrap();
+        assert!(refusal < accept);
+        assert_eq!(
+            rules_with_resolvers(&sandbox, &[], None, &resolvers, &[], None, &runner),
+            rules(&sandbox, &[], None)
         );
     }
 
@@ -501,7 +637,8 @@ table inet runner_sandbox {
         let direct = [direct_of("http://100.101.102.103:18080")];
         for proxy in [None, Some(993)] {
             for direct in [&direct[..], &[]] {
-                let ruleset = rules_with_resolvers(&sandbox, direct, proxy, &[], &runner, None);
+                let ruleset =
+                    rules_with_resolvers(&sandbox, direct, proxy, &[], &runner, None, &[]);
                 for set in ["@sandbox_uids", "@runner_uids"] {
                     let accept = ruleset
                         .lines()
@@ -546,8 +683,9 @@ table inet runner_sandbox {
         ];
         for proxy in [None, Some(993)] {
             for direct in [&direct[..], &[]] {
-                let task = rules_with_resolvers(&sandbox, direct, proxy, &[], &[], None);
-                let session = rules_with_resolvers(&sandbox, direct, proxy, &[], &[], Some(7790));
+                let task = rules_with_resolvers(&sandbox, direct, proxy, &[], &[], None, &[]);
+                let session =
+                    rules_with_resolvers(&sandbox, direct, proxy, &[], &[], Some(7790), &[]);
                 let first_accept = session
                     .lines()
                     .position(|line| line.contains("@sandbox_uids") && line.ends_with("accept"))
@@ -602,7 +740,8 @@ table inet runner_sandbox {
     #[test]
     fn dns_exceptions_are_scoped_and_below_tailnet_denial() {
         let addresses = resolvers("nameserver 10.0.0.2\nnameserver 2001:db8::53\n").unwrap();
-        let rules = rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses, &[], None);
+        let rules =
+            rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses, &[], None, &[]);
         let tailnet = rules
             .find("ip6 daddr fd7a:115c:a1e0::/48 counter reject")
             .unwrap();
@@ -616,7 +755,7 @@ table inet runner_sandbox {
         }
         assert!(!rules.contains("th dport 53 accept\n    meta skuid 993 ip daddr {"));
         assert!(
-            !rules_with_resolvers(&["1002".into()], &[], None, &addresses, &[], None)
+            !rules_with_resolvers(&["1002".into()], &[], None, &addresses, &[], None, &[])
                 .contains("dport 53")
         );
     }

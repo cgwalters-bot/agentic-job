@@ -298,6 +298,17 @@ Off by default; the
 [confined job](secure-host.md#one-trust-level-for-the-rest-of-the-job)
 makes its control before the action instead.
 
+With `egress.write-policy = true`
+([secure-host.md](secure-host.md#egress-write-policy-opt-in)) the
+runner's user is held to the proxy's write rules too, so most of the
+runner's controls above become notes, and three rows are added:
+
+| Probe | Who tries to | Expected | What makes it so |
+| --- | --- | --- | --- |
+| `write-policy-read` | the runner's user, with no proxy set, reads `https://example.com/` | succeeds | the redirection to the proxy's transparent listener, and its authority in the system's trust store |
+| `write-policy-post` | the runner's user, with no proxy set, POSTs there | the proxy's own 403, with `X-Egress-Denied` | the proxy's policy |
+| `write-policy-listener` | the sandbox user opens a TCP connection to the transparent listener, whose rules are wider than its own | refused; the runner's user is the control | the rule on the sandbox's uids |
+
 The proxy's TCP and UDP port 53 exception now names only the literal
 resolvers in `/etc/resolv.conf` at setup time. Other DNS destinations are
 rejected for new connections before the public-address policy; the existing

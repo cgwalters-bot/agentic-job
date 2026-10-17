@@ -429,19 +429,18 @@ fn setup(args: &Args) -> Result<Exit> {
     if config.sandbox.filesystem_view {
         timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
     }
-    let (subuids, runner_uids) = timed_setup("environment-and-private-dirs", || {
+    let (subuids, runner_uids, write_uids) = timed_setup("environment-and-private-dirs", || {
         let text = fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?;
         let subuids = subuid_ranges(&sandbox, &text)?;
-        let runner_uids: Vec<String> = if config.sandbox.deny_runner_metadata {
-            std::iter::once(runner.uid.to_string())
-                .chain(subordinate_ranges(&runner, &text))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let all_runner: Vec<String> = std::iter::once(runner.uid.to_string())
+            .chain(subordinate_ranges(&runner, &text))
+            .collect();
+        let of = |on: bool| if on { all_runner.clone() } else { Vec::new() };
+        let runner_uids = of(config.sandbox.deny_runner_metadata);
+        let write_uids = of(config.egress.write_policy);
         drop_image_environment()?;
         close_private_dirs(&config, &runner)?;
-        Ok((subuids, runner_uids))
+        Ok((subuids, runner_uids, write_uids))
     })?;
     timed_setup("stop-services", || {
         stop_services(&config.sandbox.stop_services)
@@ -519,11 +518,19 @@ fn setup(args: &Args) -> Result<Exit> {
             &resolvers,
             &runner_uids,
             session.is_some().then_some(bridge::PORT),
+            &write_uids,
         ))
     })?;
     // After the rules, which keep the sandbox user from what it serves.
     if session.is_some() {
         timed_setup("session-serve", serve_session)?;
+    }
+    if !write_uids.is_empty() {
+        println!(
+            "{} (uids {}) writes only where the egress proxy's rules allow: egress.write-policy",
+            runner.name,
+            write_uids.join(", ")
+        );
     }
     if !runner_uids.is_empty() {
         println!(

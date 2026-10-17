@@ -241,6 +241,9 @@ impl Checker<'_> {
         if egress {
             self.timed("egress", |this| this.egress())?;
         }
+        if self.config.egress.write_policy {
+            self.timed("write-policy", |this| this.write_policy())?;
+        }
         if !self.config.egress.direct.is_empty() {
             self.timed("tailnet", |this| this.tailnet())?;
         }
@@ -496,6 +499,61 @@ impl Checker<'_> {
             );
         }
         Ok(())
+    }
+
+    /// `egress.write-policy`: the runner's user, this process, with no
+    /// proxy in its environment, reads a host but is refused a POST to it
+    /// by the proxy itself, whose header an origin's refusal lacks; and
+    /// the sandbox user cannot reach the listener that serves the
+    /// runner, whose rules are wider than its own.
+    fn write_policy(&mut self) -> Result<()> {
+        let runner = self.runner.name.clone();
+        let user = self.user().to_owned();
+        let read = direct(&["--fail", WRITE_URL]);
+        self.report.expect(
+            Want::Succeed,
+            "write-policy-read",
+            format!("{runner} reads {WRITE_URL} with no proxy set (egress.write-policy)"),
+            super::runner_reaches(&read),
+        );
+        let post = [
+            CURL,
+            &[
+                "--noproxy",
+                "*",
+                "-D",
+                "-",
+                "-X",
+                "POST",
+                "-d",
+                "egress-check",
+                WRITE_URL,
+            ],
+        ]
+        .concat();
+        self.report.expect(
+            Want::Succeed,
+            "write-policy-post",
+            format!(
+                "the egress proxy refuses {runner} a POST to {WRITE_URL} (egress.write-policy)"
+            ),
+            refused_by_proxy(&super::runner_stdout(&post)),
+        );
+        let address = egress::PROXY_HOST.to_string();
+        let listener = tcp_probe(&address, egress::TRANSPARENT_PORT);
+        let listener: Vec<&str> = listener.iter().map(String::as_str).collect();
+        let what = format!(
+            "the runner's listener at {address}:{}",
+            egress::TRANSPARENT_PORT
+        );
+        self.attempts(&[
+            Attempt::control("write-policy-listener-control", &what, &listener),
+            Attempt::refused(
+                "write-policy-listener",
+                format!("{user} can't reach {what}"),
+                &listener,
+            ),
+        ])
     }
 
     /// Whether the sandbox user has `program` on its path.

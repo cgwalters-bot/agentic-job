@@ -592,6 +592,15 @@ fn runner_reaches(argv: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// What the runner's user, this process, prints running `argv`: empty
+/// when it could not be run.
+fn runner_stdout(argv: &[&str]) -> String {
+    host::command(argv)
+        .and_then(|mut command| Ok(command.stdin(std::process::Stdio::null()).output()?))
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttemptKind {
     /// The runner's user tries, as a control: see

@@ -1690,6 +1690,51 @@ jobs:
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
 
+  # egress.write-policy through the public action and the build's image
+  # archive: every later process of the runner's user, with no proxy in
+  # its environment, reads an arbitrary host and is refused a POST to it
+  # by the proxy, a run: step and a JavaScript action alike; the runner's
+  # own writes still pass, so the artifact uploads and the job, its logs
+  # and its status with it, ends green.
+  secure-host-write-policy:
+    needs: [changes, static]
+    if: ${{ needs.changes.outputs.host == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: secure-host-image
+          path: ${{ runner.temp }}/image
+      - name: The hosted configuration with egress.write-policy
+        run: |
+          { cat secure-host/hosted.toml; printf '\n[egress]\nwrite-policy = true\n'; } > "$RUNNER_TEMP/write-policy.toml"
+      - name: Secure the host from the image archive
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
+        with:
+          config: ${{ runner.temp }}/write-policy.toml
+          image-archive: ${{ runner.temp }}/image/secure-host.tar
+      - name: A run step reads from anywhere and writes nowhere
+        run: |
+          if env | grep -iE '^(https?|all)_proxy='; then echo "::error::a proxy is set, so this proves nothing"; exit 1; fi
+          curl -fsS -o /dev/null https://example.com/
+          headers=$(curl -sS -o /dev/null -D - -X POST -d probe https://example.com/)
+          if ! grep -qi '^x-egress-denied:' <<< "$headers"; then echo "::error::the POST was not refused by the egress proxy: $headers"; exit 1; fi
+      - name: A JavaScript action reads from anywhere and writes nowhere
+        uses: ./.github/actions/egress-probe # zizmor: ignore[self-repository] The probe under test is this revision's.
+      - name: The runner's own writes pass
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secure-host-write-policy
+          path: ${{ runner.temp }}/write-policy.toml
+          retention-days: 1
+          if-no-files-found: error
+
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file, the
   # cloud metadata service, an earlier step's process's environment and
@@ -1808,7 +1853,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1831,7 +1876,7 @@ jobs:
           FILTER: >-
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
-            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image"))) or
+            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
             ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))

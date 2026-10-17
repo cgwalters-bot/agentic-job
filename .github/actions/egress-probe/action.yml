@@ -1,0 +1,8 @@
+name: Egress write-policy probe
+description: >-
+  CI's stand-in for a third-party JavaScript action, run after secure-host with
+  egress.write-policy: with no proxy in its environment it reads an arbitrary host,
+  and the egress proxy refuses it a POST there (docs/secure-host.md#egress-write-policy-opt-in).
+runs:
+  using: node24
+  main: main.mjs

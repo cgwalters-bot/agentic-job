@@ -137,6 +137,89 @@ Those CI callers now set `build-binary: true` to test this checkout without rely
 on release completeness. Release downloads still fail closed when a manifest
 exists but an asset is missing; repairing that published release is separate.
 
+## Egress write policy (opt-in)
+
+The threat: a later step of the job (a dependency's install script, a
+third-party action, a test) sends the job's secrets or sources to a
+host of its choosing. The runner's user holds the job's token and its
+checkout, and without this it reaches the whole network. With
+
+```toml
+[egress]
+write-policy = true
+```
+
+in the host configuration, every process of the runner's user and its
+subordinate uids after secure-host, external actions and Runner.Worker
+itself included, is held to the egress proxy's policy, as the sandbox
+user is: reads (GET, HEAD and OPTIONS without a body) go anywhere not on
+the threat feed, and writes only where a `[[write]]` rule of
+[`egress/policy.toml`](../egress/policy.toml), or the file
+`egress.policy` names, allows. Off by default. It needs the Rust proxy
+and `sandbox.lock-runner`, since a runner's user with sudo could remove
+the rules; the configuration check refuses it otherwise.
+
+Runner.Worker reads proxy settings only when it starts, before any step,
+so nothing is asked to use the proxy. Instead nftables redirects each
+new TCP connection of those uids to a public address on port 80 or 443
+to the proxy's second listener, `127.0.0.1:3129`
+([`network.rs`](../crates/agentic-job/src/sandbox/network.rs)). It
+decides TLS by the server name the client asks for, and plain HTTP by
+its one `Host` header, and connects where that name resolves, never to
+the address dialed: TLS without a name is refused. Everything else of
+those uids is refused: other ports, UDP (QUIC included), IPv6, private
+and tailnet addresses, the metadata service. Loopback, DNS to the
+resolvers of `/etc/resolv.conf` and connections opened before setup
+stay. The sandbox user cannot reach the second listener.
+
+Setup, as root and before the step returns, puts the proxy's per-job
+authority in the system's trust store (`update-ca-certificates`, or
+`update-ca-trust` on RHEL), which curl, git, OpenSSL, Go and .NET read,
+and writes `/etc/egress-proxy/runner.env` for what does not read it:
+`NODE_EXTRA_CA_CERTS` for Node, and so every JavaScript action, and
+`REQUESTS_CA_BUNDLE` for Python's requests and pip. A step cannot change a later
+step's environment except through `GITHUB_ENV`, so this repository's
+[forwarder](../secure-host/action.yml) appends the same two lines to it
+after the action, when setup wrote the file; a job that names `cgwalters-forge/actions/secure-host`
+directly, or the internal action, runs
+`cat /etc/egress-proxy/runner.env >> "$GITHUB_ENV"` itself. A tool that
+trusts neither fails closed.
+
+The proxy now ends TLS for every request of the runner's user, so it
+sees what those requests carry: the job's token, the runtime and
+identity tokens and any secret a step sends. It already did for the
+sandbox user. A flaw in it reachable from a fetched origin is now worth
+those credentials.
+
+`run`'s own requests go through it too, and nothing allows them: a
+provider's API under `register = "api-key"`, and `egress.direct` on the
+tailnet, which is refused outright. So an agent job cannot use this yet.
+The runner's requests are also logged in the same access log, which an
+agent run reads.
+
+The runner's own writes (job and step status, logs, artifacts, caches,
+summaries) pass by two built-in rules that only the redirected
+connections get
+([`policy.rs`](../crates/agentic-job/src/sandbox/proxy/policy.rs)):
+any write to `actions.githubusercontent.com` and the names under it,
+and PUT to the names under `blob.core.windows.net`, where the results
+service hands out signed upload URLs. Neither can be pinned to exact
+names before the job: GitHub publishes no list of the service's hosts
+(`run-actions-N-azure-REGION`) or of its storage accounts
+(`productionresultssaN`), and only names the account in the URL it
+returns during the job. So the storage rule is a write channel to any
+Azure storage account, an attacker's too, and the service rule one to
+anyone holding a token for it, such as another repository's runtime
+token. This narrows where a step can write; it does not close it.
+
+DNS stays a channel, as for the sandbox user. CI's
+`secure-host-write-policy` job runs this through the forwarder with the
+build's image archive: a `run:` step and a JavaScript action read
+`https://example.com/` and are refused a POST to it by the proxy, and
+the job uploads an artifact and ends green. `sandbox check` probes the
+same ([sandbox-check.md](sandbox-check.md#the-network-probes)). Not in
+this slice: a read allowlist, and a summary of refused writes.
+
 ## Access-time world-write policy
 
 The action always loads `crates/agentic-job/bpf/world_write.bpf.c` through its

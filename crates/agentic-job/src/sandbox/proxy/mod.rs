@@ -103,6 +103,10 @@ const DENY: &str = "deny";
 /// credential for the proxy must not reach every host the client asks.
 const PROXY_HEADERS: &[&str] = &["proxy-connection", "proxy-authorization"];
 
+/// Why redirected TLS that names no server is refused: the proxy would
+/// have no name to decide on or to connect to.
+const NO_SERVER_NAME: &str = "TLS without a server name";
+
 /// The protocol a WebSocket is upgraded to, in `Upgrade`.
 const WEBSOCKET: &str = "websocket";
 
@@ -125,6 +129,11 @@ pub struct Args {
     /// The proxy's own directory, where its authority's key is kept
     #[arg(long)]
     pub state_dir: PathBuf,
+    /// Also take connections the network rules redirect here
+    /// (`egress.write-policy`), decided with the runner's own writes
+    /// added to the policy
+    #[arg(long)]
+    pub transparent: Option<SocketAddr>,
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -146,7 +155,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         authority,
         tls::client_config(tls::mozilla_roots())?,
         log,
-    ));
+    )?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -155,7 +164,19 @@ pub fn run(args: &Args) -> Result<Exit> {
         let listener = TcpListener::bind(args.listen)
             .await
             .with_context(|| format!("listening on {}", args.listen))?;
-        proxy.serve(listener).await
+        // Both bound before either serves, so that setup, which waits
+        // for the first, never finds the proxy up without the second.
+        let Some(transparent) = args.transparent else {
+            return proxy.serve(listener, false).await;
+        };
+        let redirected = TcpListener::bind(transparent)
+            .await
+            .with_context(|| format!("listening on {transparent}"))?;
+        tokio::try_join!(
+            proxy.clone().serve(listener, false),
+            proxy.serve(redirected, true)
+        )
+        .map(|_| ())
     })?;
     Ok(Exit::Success)
 }
@@ -169,6 +190,9 @@ struct Target {
     port: u16,
     /// The TLS server name the client asked for, in a tunnel.
     sni: Option<String>,
+    /// Whether the connection came to the transparent listener, whose
+    /// requests are decided by [`Proxy::runner_policy`].
+    transparent: bool,
     /// The client connection's place among [`MAX_CONNECTIONS`], held
     /// by whatever outlives hyper's serving it: a tunnel, an upgrade.
     slot: Slot,
@@ -426,6 +450,10 @@ type Upstream = Arc<tokio::sync::Mutex<Option<SendRequest<Body>>>>;
 
 struct Proxy {
     policy: Policy,
+    /// The policy with the runner's own writes
+    /// ([`Policy::with_runner_writes`]), for the transparent listener's
+    /// connections alone.
+    runner_policy: Policy,
     authority: Authority,
     upstream_tls: Arc<ClientConfig>,
     log: Option<Mutex<File>>,
@@ -447,8 +475,9 @@ impl Proxy {
         authority: Authority,
         upstream_tls: Arc<ClientConfig>,
         log: Option<File>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
+            runner_policy: policy.with_runner_writes()?,
             policy,
             authority,
             upstream_tls,
@@ -458,10 +487,20 @@ impl Proxy {
             idle_timeout: UPGRADED_IDLE_TIMEOUT,
             #[cfg(test)]
             origins: Vec::new(),
+        })
+    }
+
+    fn policy_for(&self, target: &Target) -> &Policy {
+        if target.transparent {
+            &self.runner_policy
+        } else {
+            &self.policy
         }
     }
 
-    async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+    /// Serves LISTENER's clients: proxy requests, or with TRANSPARENT
+    /// connections redirected to it ([`Self::transparent`]).
+    async fn serve(self: Arc<Self>, listener: TcpListener, transparent: bool) -> Result<()> {
         let slots = Arc::new(Semaphore::new(self.max_connections));
         loop {
             let slot = Arc::new(slots.clone().acquire_owned().await?);
@@ -475,7 +514,11 @@ impl Proxy {
                 }
             };
             let proxy = self.clone();
-            tokio::spawn(proxy.client(stream, slot));
+            if transparent {
+                tokio::spawn(proxy.transparent(stream, slot));
+            } else {
+                tokio::spawn(proxy.client(stream, slot));
+            }
         }
     }
 
@@ -558,6 +601,7 @@ impl Proxy {
             port: uri.port_u16().unwrap_or(default_port),
             sni: None,
             slot,
+            transparent: false,
         };
         self.forward(request, &target, None).await
     }
@@ -596,46 +640,32 @@ impl Proxy {
 
     /// What goes through an allowed CONNECT: TLS, which the proxy ends,
     /// or plain HTTP.
-    async fn tunnel<S>(self: Arc<Self>, mut stream: S, host: String, port: u16, slot: Slot)
+    async fn tunnel<S>(self: Arc<Self>, stream: S, host: String, port: u16, slot: Slot)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let mut first = [0; 1];
-        match timeout(HEADER_READ_TIMEOUT, stream.read(&mut first)).await {
-            Ok(Ok(1)) => {}
-            _ => return,
-        }
-        let stream = Prefixed {
-            byte: Some(first[0]),
-            inner: stream,
+        let Some((first, stream)) = first_byte(stream).await else {
+            return;
         };
-        if first[0] != TLS_HANDSHAKE {
+        if first != TLS_HANDSHAKE {
             let target = Target {
                 scheme: SCHEME_HTTP,
                 host,
                 port,
                 sni: None,
                 slot,
+                transparent: false,
             };
             return self.inner(stream, target).await;
         }
-        let acceptor =
-            tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
-        let Ok(Ok(start)) = timeout(HANDSHAKE_TIMEOUT, acceptor).await else {
+        let Some(start) = start_tls(stream).await else {
             return;
         };
         let sni = start.client_hello().server_name().map(str::to_owned);
-        let config = match self
-            .authority
-            .server_config(sni.as_deref().unwrap_or(&host))
-        {
-            Ok(config) => config,
-            Err(err) => {
-                eprintln!("egress proxy: {err:#}");
-                return;
-            }
-        };
-        let Ok(Ok(tls)) = timeout(HANDSHAKE_TIMEOUT, start.into_stream(config)).await else {
+        let Some(tls) = self
+            .finish_tls(start, sni.as_deref().unwrap_or(&host))
+            .await
+        else {
             return;
         };
         let target = Target {
@@ -644,8 +674,128 @@ impl Proxy {
             port,
             sni,
             slot,
+            transparent: false,
         };
         self.inner(tls, target).await;
+    }
+
+    /// A connection the network rules redirected from one of the runner's
+    /// processes (`egress.write-policy`): TLS, decided by the server name
+    /// it asks for and sent on to that name's port 443, or plain HTTP,
+    /// each request by its Host header, to that host's port (80 unless it
+    /// names one). The address and port the client dialed are not asked
+    /// of the kernel (`SO_ORIGINAL_DST` needs unsafe code): the rules
+    /// redirect only ports 80 and 443, and the proxy connects where the
+    /// name it decided on resolves, never to the address dialed, so a
+    /// name cannot front for an address. TLS without a name, to an
+    /// address, is refused.
+    async fn transparent(self: Arc<Self>, stream: TcpStream, slot: Slot) {
+        let Some((first, stream)) = first_byte(stream).await else {
+            return;
+        };
+        if first != TLS_HANDSHAKE {
+            return self.redirected_http(stream, slot).await;
+        }
+        let Some(start) = start_tls(stream).await else {
+            return;
+        };
+        let host = start.client_hello().server_name().map(bare_host);
+        let decision = host.as_deref().map_or_else(
+            || Decision::deny(NO_SERVER_NAME),
+            |host| self.runner_policy.connect(host),
+        );
+        let (Some(host), true) = (&host, decision.allowed) else {
+            self.record(&Entry {
+                decision: DENY,
+                reason: &decision.reason,
+                method: Method::CONNECT.as_str(),
+                scheme: "",
+                host: host.as_deref().unwrap_or_default(),
+                port: HTTPS_PORT,
+                path: "",
+                status: None,
+                error: None,
+            });
+            return;
+        };
+        let Some(tls) = self.finish_tls(start, host).await else {
+            return;
+        };
+        let target = Target {
+            scheme: SCHEME_HTTPS,
+            sni: Some(host.clone()),
+            host: host.clone(),
+            port: HTTPS_PORT,
+            slot,
+            transparent: true,
+        };
+        self.inner(tls, target).await;
+    }
+
+    /// Plain HTTP redirected from the runner: each request goes where
+    /// its one Host header says.
+    async fn redirected_http<S>(self: Arc<Self>, stream: S, slot: Slot)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let proxy = self.clone();
+        let service = service_fn(move |request: Request<Incoming>| {
+            let (proxy, slot) = (proxy.clone(), slot.clone());
+            async move {
+                let mut hosts = request.headers().get_all(header::HOST).iter();
+                let authority = match (hosts.next(), hosts.next()) {
+                    (Some(host), None) => host
+                        .to_str()
+                        .ok()
+                        .and_then(|host| host.parse::<hyper::http::uri::Authority>().ok()),
+                    _ => None,
+                };
+                let Some(authority) = authority else {
+                    return Ok::<_, Infallible>(text_response(
+                        StatusCode::BAD_REQUEST,
+                        "the egress proxy needs one Host header to know where a redirected request goes\n"
+                            .to_owned(),
+                    ));
+                };
+                let target = Target {
+                    scheme: SCHEME_HTTP,
+                    host: bare_host(authority.host()),
+                    port: authority.port_u16().unwrap_or(HTTP_PORT),
+                    sni: None,
+                    slot,
+                    transparent: true,
+                };
+                Ok(proxy.forward(request, &target, None).await)
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades()
+            .await;
+    }
+
+    /// Ends the TLS that START began with a certificate for NAME.
+    async fn finish_tls<S>(
+        &self,
+        start: tokio_rustls::StartHandshake<S>,
+        name: &str,
+    ) -> Option<tokio_rustls::server::TlsStream<S>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let config = match self.authority.server_config(name) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("egress proxy: {err:#}");
+                return None;
+            }
+        };
+        timeout(HANDSHAKE_TIMEOUT, start.into_stream(config))
+            .await
+            .ok()?
+            .ok()
     }
 
     /// The requests in a tunnel, each to TARGET.
@@ -694,7 +844,7 @@ impl Proxy {
             // policy did not check would be a way to front.
             Decision::deny(policy::OTHER_HOST)
         } else {
-            self.policy.request(&policy::Request {
+            self.policy_for(target).request(&policy::Request {
                 method: &method,
                 host: &target.host,
                 path: &path,
@@ -877,6 +1027,35 @@ impl Proxy {
         }
         Ok(addrs)
     }
+}
+
+/// STREAM's first byte, read within [`HEADER_READ_TIMEOUT`], and STREAM
+/// with it put back.
+async fn first_byte<S>(mut stream: S) -> Option<(u8, Prefixed<S>)>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut first = [0; 1];
+    match timeout(HEADER_READ_TIMEOUT, stream.read(&mut first)).await {
+        Ok(Ok(1)) => Some((
+            first[0],
+            Prefixed {
+                byte: Some(first[0]),
+                inner: stream,
+            },
+        )),
+        _ => None,
+    }
+}
+
+/// The client's hello on STREAM, read within [`HANDSHAKE_TIMEOUT`].
+async fn start_tls<S>(stream: S) -> Option<tokio_rustls::StartHandshake<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let acceptor =
+        tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+    timeout(HANDSHAKE_TIMEOUT, acceptor).await.ok()?.ok()
 }
 
 async fn handshake<S>(stream: S) -> Result<SendRequest<Body>>

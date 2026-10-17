@@ -104,19 +104,65 @@ fn glob_regex(glob: &str) -> Result<Regex> {
     Regex::new(&body).with_context(|| format!("path glob {glob:?}"))
 }
 
-#[derive(Debug)]
+/// The runner's own writes, which `egress.write-policy` sends through the
+/// proxy with every other process of the runner's uid: the Actions
+/// service (job and step status, logs, the results service behind
+/// artifacts, caches and summaries, live logs over a WebSocket), and
+/// the Azure storage it hands out signed upload URLs for. Each covers a
+/// domain and every name under it, which a policy file cannot say: the
+/// service's hosts (`run-actions-N-azure-REGION`, `pipelinesghubeusN`)
+/// and its storage accounts (`productionresultssaN`) are not published,
+/// so exact names cannot be known before the job. Only the transparent
+/// listener's connections get them, never the sandbox user's.
+///
+/// Both are write channels to anyone with a token for them: the Actions
+/// service takes another repository's runtime token, and the storage
+/// domain is every Azure account's, an attacker's too, with a signed URL
+/// of its own. They stop nothing there; they keep the job working.
+const RUNNER_WRITES: &[(&str, &str, &[&str])] = &[
+    (
+        "GitHub Actions service (runner)",
+        "actions.githubusercontent.com",
+        WRITE_METHODS,
+    ),
+    // Azure's block, append and put-blob uploads are all PUTs.
+    (
+        "GitHub Actions results storage (runner)",
+        "blob.core.windows.net",
+        &["PUT"],
+    ),
+];
+
+#[derive(Debug, Clone)]
 struct WriteRule {
     name: String,
     hosts: HashSet<String>,
+    /// Domains whose names, each and all under it, the rule covers: only
+    /// [`RUNNER_WRITES`] has any, a policy file never.
+    domains: Vec<String>,
     methods: HashSet<String>,
     paths: Vec<Regex>,
 }
 
 impl WriteRule {
     fn matches(&self, method: &str, host: &str, path: &str) -> bool {
+        let under = |domain: &String| {
+            host.strip_suffix(domain.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
+        };
         self.methods.contains(method)
-            && self.hosts.contains(host)
+            && (self.hosts.contains(host) || self.domains.iter().any(under))
             && self.paths.iter().any(|glob| glob.is_match(path))
+    }
+
+    fn runner(name: &str, domain: &str, methods: &[&str]) -> Result<Self> {
+        Ok(Self {
+            name: name.to_owned(),
+            hosts: HashSet::new(),
+            domains: vec![domain.to_owned()],
+            methods: methods.iter().map(|method| (*method).to_owned()).collect(),
+            paths: vec![glob_regex("/**")?],
+        })
     }
 
     fn parse(entry: &toml::Value) -> Result<Self> {
@@ -175,6 +221,7 @@ impl WriteRule {
                 .iter()
                 .map(|host| normalize_host(host))
                 .collect(),
+            domains: Vec::new(),
             methods,
             paths: lists["paths"]
                 .iter()
@@ -305,7 +352,7 @@ fn read_denylist(path: &Path) -> Result<HashSet<String>> {
         .collect())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Policy {
     writes: Vec<WriteRule>,
     denylist: HashSet<String>,
@@ -325,6 +372,18 @@ impl Policy {
             loaded.denylist = read_denylist(path)?;
         }
         Ok(loaded)
+    }
+
+    /// This policy with [`RUNNER_WRITES`] after its own rules: what the
+    /// runner's processes are held to under `egress.write-policy`.
+    pub fn with_runner_writes(&self) -> Result<Self> {
+        let mut policy = self.clone();
+        for (name, domain, methods) in RUNNER_WRITES {
+            policy
+                .writes
+                .push(WriteRule::runner(name, domain, methods)?);
+        }
+        Ok(policy)
     }
 
     /// A policy file's TEXT, its ecosystem identifiers from ECOSYSTEMS.
@@ -854,6 +913,62 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The runner's built-in writes reach the Actions service's names and
+    /// the storage domain's, with PUT alone there, and nothing that only
+    /// ends in the same letters; the shipped policy has none of them.
+    #[test]
+    fn runner_writes() {
+        let policy = shipped();
+        let runner = policy.with_runner_writes().unwrap();
+        let write = |method, host| Request {
+            method,
+            host,
+            path: "/twirp/x/CreateArtifact",
+            has_body: true,
+            ..Request::default()
+        };
+        let cases = [
+            (
+                "POST",
+                "results-receiver.actions.githubusercontent.com",
+                true,
+            ),
+            (
+                "PATCH",
+                "run-actions-3-azure-eastus.actions.githubusercontent.com",
+                true,
+            ),
+            ("POST", "Actions.GitHubUserContent.com.", true),
+            ("PUT", "productionresultssa7.blob.core.windows.net", true),
+            ("POST", "productionresultssa7.blob.core.windows.net", false),
+            (
+                "DELETE",
+                "productionresultssa7.blob.core.windows.net",
+                false,
+            ),
+            ("POST", "evilactions.githubusercontent.com", false),
+            ("PUT", "blob.core.windows.net.example", false),
+            ("POST", "raw.githubusercontent.com", false),
+            ("POST", "example.com", false),
+        ];
+        for (method, host, want) in cases {
+            assert_eq!(
+                runner.request(&write(method, host)).allowed,
+                want,
+                "{method} {host}"
+            );
+            assert!(
+                !policy.request(&write(method, host)).allowed,
+                "{method} {host}"
+            );
+        }
+        let socket = Request {
+            websocket: true,
+            ..write("GET", "results-receiver.actions.githubusercontent.com")
+        };
+        assert!(runner.request(&socket).allowed);
     }
 
     #[test]

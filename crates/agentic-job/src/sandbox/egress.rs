@@ -47,6 +47,32 @@ pub const PROXY_HOST: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 pub const PROXY_PORT: u16 = 3128;
 
+/// Where, on [`PROXY_HOST`], the network rules redirect the runner's
+/// connections under `egress.write-policy` (`network::write_policy_rules`).
+pub const TRANSPARENT_PORT: u16 = 3129;
+
+/// Under `egress.write-policy`, the authority goes into the system's
+/// trust store, which OpenSSL, GnuTLS, Go and .NET (Runner.Worker
+/// itself, which rereads the store when it changes) read: Ubuntu's
+/// directory and command, or RHEL's.
+const SYSTEM_TRUST: &[(&str, &str)] = &[
+    (
+        "/usr/local/share/ca-certificates/agentic-job-egress-proxy.crt",
+        "update-ca-certificates",
+    ),
+    (
+        "/etc/pki/ca-trust/source/anchors/agentic-job-egress-proxy.pem",
+        "update-ca-trust",
+    ),
+];
+
+/// What a later step needs in its environment to trust the authority
+/// where the system's store is not read: Node's bundled roots (every
+/// JavaScript action) and Python's requests and pip. Setup cannot set a later
+/// step's environment, so the action appends this file to the job's
+/// `GITHUB_ENV`; it is root's, and holds only these fixed lines.
+pub const RUNNER_ENV: &str = "/etc/egress-proxy/runner.env";
+
 /// Root's: the virtual environment, and a copy of the addon and policy.
 const INSTALL_DIR: &str = "/opt/egress-proxy";
 
@@ -279,8 +305,9 @@ fn mitmdump_args(denylist: bool) -> Vec<String> {
 
 /// The Rust proxy's command line: BINARY, the binary's root-owned copy
 /// that setup installs before it starts the proxy or the image's own,
-/// with mitmdump's settings.
-fn rust_proxy_args(binary: &str, denylist: bool) -> Vec<String> {
+/// with mitmdump's settings; with TRANSPARENT (`egress.write-policy`)
+/// also its listener for the runner's redirected connections.
+fn rust_proxy_args(binary: &str, denylist: bool, transparent: bool) -> Vec<String> {
     let mut args = vec![
         binary.to_owned(),
         "sandbox".to_owned(),
@@ -297,7 +324,42 @@ fn rust_proxy_args(binary: &str, denylist: bool) -> Vec<String> {
     if denylist {
         args.extend(["--denylist".to_owned(), DENYLIST.to_owned()]);
     }
+    if transparent {
+        args.extend([
+            "--transparent".to_owned(),
+            SocketAddr::from((PROXY_HOST, TRANSPARENT_PORT)).to_string(),
+        ]);
+    }
     args
+}
+
+/// The authority's certificate, CA, in the system's trust store and in
+/// [`RUNNER_ENV`], for every process of the runner's user after setup.
+fn trust_for_runner(ca: &str) -> Result<()> {
+    let (path, update) = SYSTEM_TRUST
+        .iter()
+        .find(|(_, update)| host::has_program(update))
+        .with_context(|| {
+            format!(
+                "egress.write-policy needs the system's trust store, and there is no {}",
+                SYSTEM_TRUST
+                    .iter()
+                    .map(|(_, update)| *update)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )
+        })?;
+    let dir = Path::new(path)
+        .parent()
+        .context("a trust store path has a directory")?;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    write(path, ca)?;
+    host::run(&mut Command::new(update)).with_context(|| format!("running {update}"))?;
+    write(RUNNER_ENV, &runner_env())
+}
+
+fn runner_env() -> String {
+    format!("NODE_EXTRA_CA_CERTS={CA_CERT}\nREQUESTS_CA_BUNDLE={CA_BUNDLE}\n")
 }
 
 fn write(path: &str, content: &str) -> Result<()> {
@@ -506,16 +568,20 @@ fn fetch_denylist() -> Result<bool> {
     Ok(true)
 }
 
-fn listening() -> bool {
-    let addr = SocketAddr::from((PROXY_HOST, PROXY_PORT));
+fn listening(port: u16) -> bool {
+    let addr = SocketAddr::from((PROXY_HOST, port));
     TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).is_ok()
 }
 
-/// Waits until the proxy listens and has written its authority to CA.
-fn wait_started(ca: &str) -> Result<()> {
+/// Waits until the proxy listens, on its TRANSPARENT port too, and has
+/// written its authority to CA.
+fn wait_started(ca: &str, transparent: bool) -> Result<()> {
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
-        if Path::new(ca).exists() && listening() {
+        if Path::new(ca).exists()
+            && listening(PROXY_PORT)
+            && (!transparent || listening(TRANSPARENT_PORT))
+        {
             return Ok(());
         }
         if !host::succeeds(Command::new("systemctl").args(["is-active", "--quiet", UNIT])) {
@@ -531,8 +597,9 @@ fn wait_started(ca: &str) -> Result<()> {
 }
 
 /// Publishes the authority's certificate, which the proxy wrote to
-/// GENERATED, alone and after the system bundle.
-fn publish_ca(generated: &str) -> Result<()> {
+/// GENERATED, alone and after the system bundle; for the RUNNER's
+/// processes too under `egress.write-policy`.
+fn publish_ca(generated: &str, runner: bool) -> Result<()> {
     let system = SYSTEM_BUNDLES
         .iter()
         .find(|path| Path::new(path).exists())
@@ -545,21 +612,31 @@ fn publish_ca(generated: &str) -> Result<()> {
     let bundle = fs::read_to_string(system).with_context(|| format!("reading {system}"))?;
     make_dir(PUBLIC_DIR)?;
     write(CA_CERT, &ca)?;
-    write(CA_BUNDLE, &format!("{}\n{ca}", bundle.trim_end()))
+    write(CA_BUNDLE, &format!("{}\n{ca}", bundle.trim_end()))?;
+    if runner {
+        trust_for_runner(&ca)?;
+    }
+    Ok(())
 }
 
 /// Installs and starts the proxy; returns its uid, which the network
 /// rules name. With IMAGE, which setup's preflight checked, the Rust
 /// proxy runs from that image in root podman ([`PODMAN`]).
 pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
-    let rust = egress.rust_proxy;
+    let (rust, transparent) = (egress.rust_proxy, egress.write_policy);
+    // The configuration check's, again where it matters: mitmproxy has
+    // no transparent listener.
+    ensure!(
+        rust || !transparent,
+        "egress.write-policy needs egress.rust-proxy"
+    );
     install(egress.policy.as_deref(), rust)?;
     let user = User::lookup(EGRESS_USER)?.with_context(|| format!("no user {EGRESS_USER}"))?;
     let denylist = fetch_denylist()?;
     let (args, ca, properties) = match (rust, image) {
         (true, Some(image)) => {
             proxy_dirs(&user)?;
-            let proxy = rust_proxy_args(IMAGE_BINARY, denylist);
+            let proxy = rust_proxy_args(IMAGE_BINARY, denylist, transparent);
             (
                 container_args(image, user.uid, user.gid, &proxy),
                 RUST_CA_GENERATED,
@@ -567,7 +644,7 @@ pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
             )
         }
         (true, None) => (
-            rust_proxy_args(SELF_COPY, denylist),
+            rust_proxy_args(SELF_COPY, denylist, transparent),
             RUST_CA_GENERATED,
             UNIT_PROPERTIES,
         ),
@@ -584,8 +661,8 @@ pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
         .arg("--")
         .args(args);
     host::run(&mut run).context("starting the egress proxy")?;
-    wait_started(ca)?;
-    publish_ca(ca)?;
+    wait_started(ca, transparent)?;
+    publish_ca(ca, transparent)?;
     println!(
         "Egress proxy ({}) listening on {} as {EGRESS_USER}; its certificate authority is {CA_CERT}",
         match (rust, image) {
@@ -595,6 +672,11 @@ pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
         },
         proxy_url()
     );
+    if transparent {
+        println!(
+            "egress.write-policy: the runner's connections are redirected to {PROXY_HOST}:{TRANSPARENT_PORT}; the authority is in the system's trust store, and {RUNNER_ENV} is what a later step's environment needs"
+        );
+    }
     Ok(user.uid)
 }
 
@@ -714,20 +796,37 @@ mod tests {
                     --policy /opt/egress-proxy/policy/policy.toml \
                     --log /var/log/egress-proxy/access.jsonl --state-dir /var/lib/egress-proxy \
                     --denylist /opt/egress-proxy/denylist.txt";
-        assert_eq!(rust_proxy_args(SELF_COPY, true).join(" "), want);
-        assert!(!rust_proxy_args(SELF_COPY, false).contains(&"--denylist".to_owned()));
+        assert_eq!(rust_proxy_args(SELF_COPY, true, false).join(" "), want);
+        assert!(!rust_proxy_args(SELF_COPY, false, false).contains(&"--denylist".to_owned()));
+        assert_eq!(
+            rust_proxy_args(SELF_COPY, true, true).join(" "),
+            format!("{want} --transparent 127.0.0.1:3129")
+        );
         assert_eq!(
             Path::new(STATE_DIR).join(crate::sandbox::proxy::tls::CA_CERT),
             Path::new(RUST_CA_GENERATED)
         );
-        let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(
-            std::iter::once("agentic-job").chain(
-                rust_proxy_args(SELF_COPY, true)[1..]
-                    .iter()
-                    .map(String::as_str),
-            ),
+        for transparent in [false, true] {
+            let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(
+                std::iter::once("agentic-job").chain(
+                    rust_proxy_args(SELF_COPY, true, transparent)[1..]
+                        .iter()
+                        .map(String::as_str),
+                ),
+            );
+            assert!(parsed.is_ok(), "{parsed:?}");
+        }
+    }
+
+    /// What a later step appends to its job's environment: the
+    /// authority, for Node and Python's requests, and nothing else.
+    #[test]
+    fn the_runners_environment_names_the_authority() {
+        assert_eq!(
+            runner_env(),
+            "NODE_EXTRA_CA_CERTS=/etc/egress-proxy/ca.pem\nREQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem\n"
         );
-        assert!(parsed.is_ok(), "{parsed:?}");
+        assert_eq!(Path::new(RUNNER_ENV).parent(), Some(Path::new(PUBLIC_DIR)));
     }
 
     /// From the image only, as the proxy's user on the host's network,
@@ -735,7 +834,7 @@ mod tests {
     #[test]
     fn the_container_runs_the_images_proxy_as_the_proxy_user() {
         let image = "0123456789abcdef".repeat(4);
-        let proxy = rust_proxy_args(IMAGE_BINARY, true);
+        let proxy = rust_proxy_args(IMAGE_BINARY, true, false);
         let args = container_args(&image, 991, 992, &proxy);
         let want = format!(
             "podman --events-backend=none run --rm --replace --name egress-proxy --pull=never --network=host \

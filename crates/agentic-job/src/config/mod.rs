@@ -360,6 +360,15 @@ pub struct Egress {
     /// needs Python's venv module (`python3-venv`) in `[setup] packages`,
     /// until it is removed (#919).
     pub rust_proxy: bool,
+    /// Whether every process of the runner's user (and its subordinate
+    /// uids), each later step and action of the job and the runner
+    /// itself, is held to the proxy's write rules too, with the runner's
+    /// own writes added (docs/secure-host.md): a step can then read from
+    /// anywhere but send a job's secrets or sources only where a rule
+    /// allows. Off by default; needs the Rust proxy and
+    /// `sandbox.lock-runner`, without which the runner's user could
+    /// remove the rules.
+    pub write_policy: bool,
 }
 
 impl Default for Egress {
@@ -369,6 +378,7 @@ impl Default for Egress {
             direct: Vec::new(),
             policy: None,
             rust_proxy: true,
+            write_policy: false,
         }
     }
 }

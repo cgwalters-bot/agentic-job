@@ -18,7 +18,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
   full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static', 'confined', 'confined-cleanup'],
-  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'secure-host-image'],
+  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'secure-host-image', 'secure-host-write-policy'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
@@ -505,6 +505,32 @@ test('secure-host-image runs the saved image through the forwarder, and probes a
   }
 });
 
+test('secure-host-write-policy proves egress.write-policy through the forwarder, then uploads', () => {
+  const job = block('secure-host-write-policy');
+  assert.match(job, /\n    needs: \[changes, static\]\n/);
+  assert.match(job, /\n    runs-on: ubuntu-26\.04\n/);
+  assert.match(job, /\n    permissions:\n      contents: read\n    steps:\n/);
+  assert.match(job, /printf '\\n\[egress\]\\nwrite-policy = true\\n'/);
+  assert.match(fs.readFileSync(path.join(__dirname, '../secure-host/hosted.toml'), 'utf8'), /^# The egress proxy and the network rules are on by default: no \[egress\]\.$/m);
+  const run = job.indexOf('        uses: ./secure-host # zizmor: ignore[self-repository] ');
+  assert.ok(run > 0);
+  assert.ok(job.slice(run).startsWith(job.slice(run).split('\n')[0] + '\n        with:\n' +
+    '          config: ${{ runner.temp }}/write-policy.toml\n' +
+    '          image-archive: ${{ runner.temp }}/image/secure-host.tar\n'));
+  // After the lock, in this order: the run step, the JavaScript action, the upload.
+  const order = ['curl -fsS -o /dev/null https://example.com/', "grep -qi '^x-egress-denied:'",
+    'uses: ./.github/actions/egress-probe ', 'uses: actions/upload-artifact@'];
+  let at = run;
+  for (const step of order) {
+    const next = job.indexOf(step);
+    assert.ok(next > at, step);
+    at = next;
+  }
+  assert.doesNotMatch(job, /continue-on-error|\|\| true|\n {6,8}(?:- )?if: |--proxy|-x |sandbox exec|_PROXY: /);
+  const probe = fs.readFileSync(path.join(__dirname, '../.github/actions/egress-probe/action.yml'), 'utf8');
+  assert.match(probe, /\n  using: node24\n  main: main\.mjs\n$/);
+});
+
 // Public callers at main get the new action's contract; agentic-job's own
 // jobs that need the second user keep the old action at its internal path.
 test('the public secure-host forwards to the pinned new action and refuses the old inputs', () => {
@@ -523,9 +549,35 @@ test('the public secure-host forwards to the pinned new action and refuses the o
   assert.match(uses[0], /^cgwalters-forge\/actions\/secure-host@[0-9a-f]{40}$/);
   // Without a config, the hosted one beside it, which keeps the egress proxy
   // on, never the new action's default, which turns it off.
-  assert.ok(forwarder.trimEnd().endsWith(`    - uses: ${forwarder.split(`    - uses: `)[1].split('\n')[0]}\n      with:\n` +
+  const trust = '    - name: Trust the egress proxy in later steps\n';
+  const [front, last] = forwarder.split(trust);
+  assert.ok(front.replace(/(\n {4}#[^\n]*)+\n$/, '').endsWith(`    - uses: ${forwarder.split(`    - uses: `)[1].split('\n')[0]}\n      with:\n` +
     "        config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}\n" +
     forwarded.slice(1).map(name => `        ${name}: \${{ inputs.${name} }}`).join('\n')));
+  // The last step, after the new action: egress.write-policy's fixed lines
+  // into GITHUB_ENV when setup wrote its file, whatever that holds, and
+  // nothing without.
+  assert.doesNotMatch(last, /\n {4}- /);
+  const append = last.split('      run: |\n')[1].replace(/^ {8}/gm, '')
+    .replace('/etc/egress-proxy/runner.env', '"$RUNNER_ENV"');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forwarder-'));
+  try {
+    const githubEnv = path.join(dir, 'github-env');
+    const runnerEnv = path.join(dir, 'runner.env');
+    const appended = () => {
+      fs.writeFileSync(githubEnv, 'A=1\n');
+      const result = spawnSync('bash', ['-e', '-c', append], { encoding: 'utf8',
+        env: { PATH: process.env.PATH, GITHUB_ENV: githubEnv, RUNNER_ENV: runnerEnv } });
+      assert.equal(result.status, 0, result.stderr);
+      return fs.readFileSync(githubEnv, 'utf8');
+    };
+    assert.equal(appended(), 'A=1\n');
+    fs.writeFileSync(runnerEnv, 'LD_PRELOAD=/tmp/x.so\n');
+    assert.equal(appended(), 'A=1\nNODE_EXTRA_CA_CERTS=/etc/egress-proxy/ca.pem\n' +
+      'REQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   assert.doesNotMatch(read('secure-host/hosted.toml'), /^\s*proxy\s*=\s*false/m);
   // The refusal, run with each old input set alone, with all of them and with none.
   const step = forwarder.split("    - name: Refuse the old action's inputs\n")[1].split('\n    - ')[0];

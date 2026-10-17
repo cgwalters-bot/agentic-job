@@ -96,3 +96,17 @@ runs:
         config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}
         check: ${{ inputs.check }}
         image-archive: ${{ inputs.image-archive }}
+    # With egress.write-policy, setup put the proxy's authority in the
+    # system's trust store, which Node (every JavaScript action) and
+    # Python's requests do not read: what they need instead is the lines
+    # setup wrote to /etc/egress-proxy/runner.env, for every later step's
+    # environment. They are written here as literals, not copied from the
+    # file, so that nothing but these two names can reach GITHUB_ENV.
+    # Without the file there is nothing to add.
+    - name: Trust the egress proxy in later steps
+      shell: bash
+      run: |
+        if [ -f /etc/egress-proxy/runner.env ]; then
+          echo "NODE_EXTRA_CA_CERTS=/etc/egress-proxy/ca.pem" >> "$GITHUB_ENV"
+          echo "REQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem" >> "$GITHUB_ENV"
+        fi

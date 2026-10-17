@@ -186,6 +186,13 @@ impl Config {
             !self.session.listen || !self.agent.name.is_empty(),
             "session.listen needs agent.name: only `run` holds the port setup serves"
         );
+        ensure!(
+            !self.egress.write_policy
+                || (self.egress.proxy && self.egress.rust_proxy && self.sandbox.lock_runner),
+            "egress.write-policy needs egress.proxy, egress.rust-proxy and sandbox.lock-runner: \
+             the runner's traffic goes through the Rust proxy's own listener, under rules a \
+             runner's user with sudo could remove"
+        );
         Ok(Host {
             install_vibe: self.agent.name == Kind::Vibe.as_str()
                 || self.child_agent.name == Kind::Vibe.as_str(),
@@ -878,10 +885,16 @@ model = \"m\"
             }
         );
         assert!(config.check().is_err());
+        let write_policy = Config::parse("[egress]\nwrite-policy = true\n").unwrap();
+        assert!(write_policy.check_host().is_ok());
+        assert!(!Config::default().egress.write_policy);
         for bad in [
             "[sandbox]\nuser = \"root\"\n",
             "[setup]\npackages = [\"--installroot=/\"]\n",
             "[egress]\ndirect = [\"http://proxy.example:18080\"]\n",
+            "[egress]\nwrite-policy = true\nproxy = false\n",
+            "[egress]\nwrite-policy = true\nrust-proxy = false\n",
+            "[sandbox]\nlock-runner = false\n[egress]\nwrite-policy = true\n",
         ] {
             let config = Config::parse(bad).unwrap();
             assert!(config.check_host().is_err(), "{bad}");

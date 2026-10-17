@@ -157,6 +157,8 @@ fn roots(der: &CertificateDer<'static>) -> RootCertStore {
 
 struct Fixture {
     proxy: SocketAddr,
+    /// Where the network rules would redirect the runner's connections.
+    transparent: SocketAddr,
     /// The proxy's authority, which the client trusts.
     ca: CertificateDer<'static>,
     log: PathBuf,
@@ -204,7 +206,8 @@ impl Fixture {
             authority,
             tls::client_config(roots(origin_ca.der())).unwrap(),
             Some(File::create(&log).unwrap()),
-        );
+        )
+        .unwrap();
         proxy.origins = vec![
             ("allowed.test".to_owned(), plain_port),
             ("refused.test".to_owned(), refused_port),
@@ -215,9 +218,14 @@ impl Fixture {
         configure(&mut proxy);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(Arc::new(proxy).serve(listener));
+        let redirected = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transparent = redirected.local_addr().unwrap();
+        let proxy = Arc::new(proxy);
+        tokio::spawn(proxy.clone().serve(listener, false));
+        tokio::spawn(proxy.serve(redirected, true));
         Self {
             proxy: addr,
+            transparent,
             ca,
             log,
             plain,
@@ -428,6 +436,85 @@ async fn https_through_a_tunnel() {
     assert_eq!(first["status"], 200);
     assert_eq!(first["error"], serde_json::Value::Null);
     assert_eq!(log[2]["reason"], "test upload");
+}
+
+/// A redirected connection, as the runner's processes make one under
+/// `egress.write-policy`: TLS goes where its server name says and plain
+/// HTTP where its Host header does, both under the same policy with the
+/// runner's own writes added, which the proxy's other listener never
+/// gets. TLS without a server name, and plain HTTP without one Host
+/// header, go nowhere.
+#[tokio::test]
+async fn redirected_connections() {
+    const RUNNER: &str = "results-receiver.actions.githubusercontent.com";
+    let fixture = Fixture::start_with(|proxy| {
+        let allowed = POLICY.replace(
+            "\"stalled.test\"]",
+            "\"stalled.test\", \"actions.githubusercontent.com\"]",
+        );
+        proxy.policy = Policy::parse(&allowed, policy::ECOSYSTEMS).unwrap();
+        let mut origins = std::mem::take(&mut proxy.origins);
+        origins.push(("actions.githubusercontent.com".to_owned(), origins[0].1));
+        proxy.origins = origins;
+        proxy.runner_policy = proxy.policy.with_runner_writes().unwrap();
+    })
+    .await;
+
+    let stream = TcpStream::connect(fixture.transparent).await.unwrap();
+    let mut sender = client(fixture.tls(stream, "secure.test").await).await;
+    let (status, denied, body) = send(&mut sender, request("GET", "/a", "secure.test", "")).await;
+    assert_eq!((status, denied, body.as_str()), (200, None, "hello"));
+    let (status, denied, _) = send(&mut sender, request("POST", "/a", "secure.test", "x")).await;
+    assert_eq!(
+        (status, denied.as_deref()),
+        (403, Some("POST to an endpoint not in the write allowlist"))
+    );
+    assert_eq!(fixture.secure.take(), ["GET /a"]);
+
+    // (listener, method, Host, status)
+    let cases = [
+        (fixture.transparent, "GET", "allowed.test", 200),
+        (fixture.transparent, "POST", "allowed.test", 403),
+        (fixture.transparent, "POST", RUNNER, 200),
+        (fixture.proxy, "POST", RUNNER, 403),
+    ];
+    for (listener, method, host, want) in cases {
+        let mut sender = client(TcpStream::connect(listener).await.unwrap()).await;
+        let uri = if listener == fixture.proxy {
+            format!("http://{host}/up")
+        } else {
+            "/up".to_owned()
+        };
+        let body = if method == "GET" { "" } else { "x" };
+        let (status, _, _) = send(&mut sender, request(method, &uri, host, body)).await;
+        assert_eq!(status, want, "{method} {host} to {listener}");
+    }
+    assert_eq!(fixture.plain.take(), ["GET /up", "POST /up x"]);
+
+    let mut sender = client(TcpStream::connect(fixture.transparent).await.unwrap()).await;
+    let mut two_hosts = request("GET", "/", "allowed.test", "");
+    two_hosts
+        .headers_mut()
+        .append(header::HOST, HeaderValue::from_static("refused.test"));
+    assert_eq!(send(&mut sender, two_hosts).await.0, 400);
+
+    let config = rustls::ClientConfig::builder_with_provider(tls::provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots(&fixture.ca))
+        .with_no_client_auth();
+    let stream = TcpStream::connect(fixture.transparent).await.unwrap();
+    let address = rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::LOCALHOST.into());
+    assert!(
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(address, stream)
+            .await
+            .is_err()
+    );
+    let log = fixture.log_lines();
+    let refused = log.last().unwrap();
+    assert_eq!(refused["decision"], "deny");
+    assert_eq!(refused["reason"], NO_SERVER_NAME);
 }
 
 /// The refusals a tunnel adds: its host, the Host header and the TLS

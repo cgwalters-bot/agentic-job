@@ -86,7 +86,8 @@ impl Command {
                         args.proxy_uid,
                         &args.resolver,
                         &[],
-                        None
+                        None,
+                        &[]
                     )
                 );
                 Ok(Exit::Success)
