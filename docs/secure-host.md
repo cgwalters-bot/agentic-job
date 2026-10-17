@@ -911,3 +911,10 @@ agentic-job sandbox check
 key and never read as TOML. A machine that is not thrown away after the
 job keeps a runner's user without root: `sandbox.lock-runner = false`
 keeps its sudo, at the price of everything above.
+
+Installed or linked under the name `secure-host`, the same binary offers
+only the host's commands (`supported`, `apt`, `world-write`, `setup`,
+`check`), and `secure-host setup --config host.toml` refuses any table but
+`[sandbox]`, `[egress]` and `[setup]`: a run's table in a host's file, such
+as `[agent]` or `[child-agent]`, is an error instead of agent settings or a
+runtime that setup installs as root for a job that runs no agent.

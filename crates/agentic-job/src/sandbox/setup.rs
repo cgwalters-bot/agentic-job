@@ -44,6 +44,9 @@ pub struct Args {
     /// The run's configuration (TOML); copied to /etc/agentic-job/
     #[arg(long, value_name = "FILE")]
     pub config: PathBuf,
+    /// Hold the file to [`config::HostConfig`]: `secure-host setup`'s.
+    #[arg(skip)]
+    pub host_only: bool,
 }
 
 /// Root's: the configuration `run` reads, and what else setup leaves for
@@ -319,8 +322,12 @@ fn setup(args: &Args) -> Result<Exit> {
     } = timed_setup("preflight", || {
         let text = fs::read_to_string(&args.config)
             .with_context(|| format!("reading {}", args.config.display()))?;
-        let config =
-            Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
+        let config = if args.host_only {
+            config::HostConfig::parse(&text).map(Config::from)
+        } else {
+            Config::parse(&text)
+        }
+        .with_context(|| format!("in {}", args.config.display()))?;
         let config::checked::Host {
             direct,
             session,

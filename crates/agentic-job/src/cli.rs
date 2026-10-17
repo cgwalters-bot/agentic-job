@@ -29,7 +29,7 @@ pub enum Command {
     /// Prepare and probe the host the agent runs on
     #[command(subcommand)]
     Sandbox(sandbox::Command),
-    /// The steps of the secure-host action before `sandbox setup`: host admission, apt, the world-write policy
+    /// The steps of the secure-host action: host admission, apt, the world-write policy, setup from a host's file, its probes
     #[command(subcommand)]
     SecureHost(secure_host::Command),
     /// Run the agent in the sandbox and take what it hands back

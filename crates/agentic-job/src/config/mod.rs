@@ -51,6 +51,38 @@ impl Config {
     }
 }
 
+/// The file of a job that secures its host and runs no agent: only the
+/// tables that set up the machine. `secure-host setup` reads it, so that
+/// a run's table in a host's file is refused instead of acted on as root
+/// for a job that has no run: `[agent]` has setup write that agent's
+/// managed settings, and `[child-agent]` has it install the Vibe runtime.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HostConfig {
+    pub sandbox: Sandbox,
+    pub egress: Egress,
+    pub setup: Setup,
+}
+
+impl HostConfig {
+    pub fn parse(text: &str) -> Result<Self> {
+        toml::from_str(text).context("parsing the host configuration")
+    }
+}
+
+/// A host's file is a run's with every run table at its default, so
+/// that `sandbox setup` and `sandbox check` act on it unchanged.
+impl From<HostConfig> for Config {
+    fn from(host: HostConfig) -> Self {
+        Self {
+            sandbox: host.sandbox,
+            egress: host.egress,
+            setup: host.setup,
+            ..Self::default()
+        }
+    }
+}
+
 /// The sandbox user, what is closed to it, and what `sandbox check`
 /// probes with. Step 5.
 #[derive(Debug, Deserialize, PartialEq)]
@@ -838,6 +870,32 @@ mod tests {
                     .is_err(),
                 "{text:?} was accepted"
             );
+        }
+    }
+
+    /// The action's own host file loads as a host's, and as the same
+    /// configuration a run's parser makes of it; a run's table does not.
+    #[test]
+    fn a_host_file_has_only_the_machines_tables() {
+        // Read at test time: secure-host/ is outside crates/.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../secure-host/hosted.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let host = HostConfig::parse(&text).unwrap();
+        assert!(host.sandbox.close_resolved);
+        assert_eq!(Config::from(host), Config::parse(&text).unwrap());
+        assert_eq!(Config::from(HostConfig::default()), Config::default());
+        for text in [
+            "[inference]\nurl = \"http://proxy.example:18080\"",
+            "[agent]\nname = \"claude\"",
+            "[child-agent]\nname = \"vibe\"",
+            "[limits]\ntimeout-minutes = 10",
+            "[commit]\nauthor = \"A Bot <bot@example.com>\"",
+            "[session]\nlisten = true",
+            "[mcp.docs]\nurl = \"https://mcp.example\"",
+            "[sandbx]\nuser = \"x\"",
+            "[sandbox]\nusr = \"x\"",
+        ] {
+            assert!(HostConfig::parse(text).is_err(), "{text:?} parsed");
         }
     }
 
