@@ -98,9 +98,10 @@ result, or names the failed jobs/check refusal. For a run that hands back only
 the same sanitizer as other agent text, limited to 1000 characters and quoted.
 The same reason remains in the run summary; apply posts no separate notice.
 The shipped dispatch caller opts in except for reviews, which remain silent.
-Same-repository comments use the caller's job token. Cross-repository comments
-use the explicitly supplied `SAFE_OUTPUTS_PAT`, in notify and conclude only;
-without it the comment is skipped and the job summary explains why. No new
+Status comments prefer the explicitly supplied `SAFE_OUTPUTS_PAT`, including
+same-repository items, in notify and conclude only. Without it, same-repository
+comments use the caller's job token; cross-repository comments are skipped and
+the job summary explains why. No new
 permission is granted. Status API failures do not fail apply. Composed callers
 must pass that secret to both policy and apply for start and finish updates.
 The supplied token must identify a user through `GET /user`; an unsupported
@@ -111,7 +112,7 @@ Status writes with a supplied credential are not gated by apply's environment
 approval; the credential remains confined to the pinned deterministic helper.
 
 The lookup accepts only the job token's `github-actions[bot]` marker, or the
-cross-repository token's authenticated user and marker, so another user's
+supplied token's authenticated user and marker, so another user's
 copied marker cannot redirect an edit. It stops after 20 pages of 100 comments,
 failing rather than creating a possible duplicate. Notify and conclude serialize
 their lookup/write on the repository/item to avoid simultaneous creates.
@@ -713,7 +714,7 @@ A caller job can upload an artifact containing `outputs.jsonl` in the
 [safe-output format](safe-outputs.md), then call this workflow with
 `proposals-artifact` naming it. The producer needs no write credential.
 Policy still reads the caller's bounds; check still collects and validates
-the requests on a separate read-only machine; apply and opted-in cross-repository
+the requests on a separate read-only machine; apply and opted-in
 status jobs receive the write token. No agent, sandbox setup or inference runs.
 Event admission, review and partial application are not available in this mode. Use a trusted caller ref
 for the bounds, just as for agent runs.
@@ -1161,7 +1162,7 @@ expires when the job ends. The agent can leak it, and that is accepted:
 whoever gets it can read what the agent could, until the job ends, and
 write nothing. The workflow passes no credential that can write to the
 agent job; `SAFE_OUTPUTS_PAT`
-is passed only to deterministic apply and cross-repository status jobs.
+is passed only to deterministic apply and status jobs.
 
 There is no secret override for agent reads: a leaked credential must not
 outlive the job or carry broader permissions than the job grants.

@@ -21,7 +21,7 @@ function upsert(env, api, summary = () => {}) {
     return null;
   }
   // The credential's identity plus the marker prevents copied markers redirecting edits.
-  const author = crossRepo ? api('GET', 'user').login : 'github-actions[bot]';
+  const author = env.STATUS_TOKEN ? api('GET', 'user').login : 'github-actions[bot]';
   if (!author) throw new Error('status token has no authenticated user identity');
   for (let page = 1; page <= MAX_PAGES; page++) {
     const comments = api('GET', `repos/${repo}/issues/${item}/comments?per_page=100&page=${page}`);
@@ -39,10 +39,9 @@ function upsert(env, api, summary = () => {}) {
 }
 
 if (require.main === module) {
-  const crossRepo = process.env.REPO?.toLowerCase() !== process.env.GITHUB_REPOSITORY?.toLowerCase();
   const result = upsert(process.env, (method, path, body) => JSON.parse(execFileSync('gh',
     ['api', '-X', method, path, ...(body === undefined ? [] : ['-f', `body=${body}`])], {
-      encoding: 'utf8', env: { ...process.env, GH_TOKEN: crossRepo ? process.env.STATUS_TOKEN : process.env.GH_TOKEN },
+      encoding: 'utf8', env: { ...process.env, GH_TOKEN: process.env.STATUS_TOKEN || process.env.GH_TOKEN },
     })), message => appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${message}\n`));
   if (result) console.log(`id=${result.id}`);
 }

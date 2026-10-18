@@ -4,7 +4,7 @@
 # machine but the checked outputs.
 #
 #   apply     gh-aw's pinned handlers on check.yml's accepted outputs;
-#             uses SAFE_OUTPUTS_PAT; conclude uses it only for cross-repository status
+#             uses SAFE_OUTPUTS_PAT; conclude prefers it for status comments
 #   conclude  edits the opted-in status comment, including check's
 #             refusal to the policy's comment target
 #
@@ -35,7 +35,7 @@ on:
         type: string
         required: true
     secrets:
-      # Explicit optional credential, consumed only by apply. Never use inherit.
+      # Explicit optional credential for apply and status comments. Never use inherit.
       # Callers must pass this name even for an environment secret;
       # the environment's same-name value takes precedence (docs/workflow.md).
       SAFE_OUTPUTS_PAT:

@@ -280,7 +280,7 @@ on:
         default: ""
     secrets:
       SAFE_OUTPUTS_PAT:
-        description: Optional apply credential, for opted-in cross-repository status comments and `require-safe-outputs-pat`
+        description: Optional apply credential, for opted-in status comments and `require-safe-outputs-pat`
         required: false
     # The whole set goes to check.yml and apply.yml as `toJSON(needs.policy.outputs)`,
     # so that what they check and apply is what this call decided, and the

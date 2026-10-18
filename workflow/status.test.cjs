@@ -91,48 +91,50 @@ test('dispatch and event status use the same trusted helper, opt-in only', () =>
   assert.match(read('apply'), /Edit the status comment\n[^\n]*\n        continue-on-error: true/);
 });
 
-test('cross-repository status uses the authenticated author and keeps one comment', () => {
-  const cross = { ...env, GITHUB_REPOSITORY: 'caller/repo', STATUS_TOKEN: 'supplied' };
-  const comments = [named('mallory'), named('github-actions[bot]')];
-  const writes = [];
-  const api = (method, path, body) => {
-    if (path === 'user') return { login: 'status-bot' };
-    if (method === 'GET') return comments;
-    writes.push(method);
-    if (method === 'POST') comments.push({ id: 99, user: { login: 'status-bot' }, body });
-    else comments.at(-1).body = body;
-    return comments.at(-1);
-  };
-  for (const text of ['running', 'finished', 'rerun']) {
-    upsert({ ...cross, TEXT: text, NO_RESULT_REASON: JSON.stringify('> no data') }, api);
-  }
-  assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
-  assert.match(comments.at(-1).body, /Its reason:\n\n> no data/);
-  assert.equal(upsert({ ...cross, GITHUB_RUN_ID: '99' }, api).id, 99);
-  assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
-  assert.throws(() => upsert(cross, () => ({})), /authenticated user/);
-  let pages = 0;
-  assert.throws(() => upsert(cross, (method, path) => {
-    if (path === 'user') return { login: 'status-bot' };
-    assert.equal(method, 'GET');
-    pages++;
-    return Array(100).fill(named('mallory'));
-  }), /exceeded/);
-  assert.equal(pages, MAX_PAGES);
-});
+for (const caller of ['caller/repo', 'O/R']) {
+  test(`status with a supplied token from ${caller} uses the authenticated author and keeps one comment`, () => {
+    const target = { ...env, GITHUB_REPOSITORY: caller, STATUS_TOKEN: 'supplied' };
+    const comments = [named('mallory'), named('github-actions[bot]')];
+    const writes = [];
+    const api = (method, path, body) => {
+      if (path === 'user') return { login: 'status-bot' };
+      if (method === 'GET') return comments;
+      writes.push(method);
+      if (method === 'POST') comments.push({ id: 99, user: { login: 'status-bot' }, body });
+      else comments.at(-1).body = body;
+      return comments.at(-1);
+    };
+    for (const text of ['running', 'finished', 'rerun']) {
+      upsert({ ...target, TEXT: text, NO_RESULT_REASON: JSON.stringify('> no data') }, api);
+    }
+    assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
+    assert.match(comments.at(-1).body, /Its reason:\n\n> no data/);
+    assert.equal(upsert({ ...target, GITHUB_RUN_ID: '99' }, api).id, 99);
+    assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
+    assert.throws(() => upsert(target, () => ({})), /authenticated user/);
+    let pages = 0;
+    assert.throws(() => upsert(target, (method, path) => {
+      if (path === 'user') return { login: 'status-bot' };
+      assert.equal(method, 'GET');
+      pages++;
+      return Array(100).fill(named('mallory'));
+    }), /exceeded/);
+    assert.equal(pages, MAX_PAGES);
+  });
+}
 
 test('cross-repository status without a supplied token skips without any API call', () => {
   const messages = [];
   assert.equal(upsert({ ...env, GITHUB_REPOSITORY: 'caller/repo' }, () => assert.fail(),
     message => messages.push(message)), null);
   assert.deepEqual(messages, ['Status comment skipped: cross-repository target requires the caller-supplied SAFE_OUTPUTS_PAT.']);
-  upsert({ ...env, GITHUB_REPOSITORY: 'O/R', STATUS_TOKEN: 'unused' }, (method, path) => {
+  upsert({ ...env, GITHUB_REPOSITORY: 'O/R' }, (method, path) => {
     assert.notEqual(path, 'user');
     return method === 'GET' ? [] : { id: 1 };
   });
 });
 
-test('status CLI selects the credential only for cross-repository comments and reports skips', () => {
+test('status CLI prefers the supplied credential, falls back to the job token and reports skips', () => {
   const dir = mkdtempSync(join(tmpdir(), 'status-cli-'));
   try {
     const preload = join(dir, 'mock.cjs');
@@ -143,7 +145,8 @@ test('status CLI selects the credential only for cross-repository comments and r
       return JSON.stringify(args[3] === 'user' ? { login: 'status-bot' } : args[2] === 'GET' ? [] : { id: 42 });
     };`);
     for (const [caller, token, selected] of [
-      ['caller/repo', 'supplied', 'supplied'], ['o/r', 'supplied', 'job-token'], ['caller/repo', '', null],
+      ['caller/repo', 'supplied', 'supplied'], ['o/r', 'supplied', 'supplied'],
+      ['o/r', '', 'job-token'], ['caller/repo', '', null],
     ]) {
       writeFileSync(log, '');
       writeFileSync(summary, '');
@@ -156,6 +159,8 @@ test('status CLI selects the credential only for cross-repository comments and r
       if (selected) {
         assert.ok(calls.length >= 2);
         assert.ok(calls.every(call => call.token === selected));
+        assert.equal(calls.some(call => call.args[3] === 'user'), Boolean(token));
+        assert.equal(calls.at(-1).args[2], 'POST');
         assert.equal(result.stdout, 'id=42\n');
         assert.equal(readFileSync(summary, 'utf8'), '');
       } else {

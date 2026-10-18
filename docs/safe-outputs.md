@@ -150,7 +150,7 @@ Organization project writes require the caller's apply environment token; see
 cannot write organization projects, so a call without `apply-environment` is
 refused `update_project` at admission, before an agent runs, and `outputs: all`
 leaves it out. The token stays in deterministic apply and, when explicitly
-supplied, cross-repository status jobs, never in the proposals producer or check.
+supplied, status jobs, never in the proposals producer or check.
 
 Apply also guards the handler's GraphQL client: it refuses implicit field
 creation and field IDs not read back with an exact allowlisted name. This stops

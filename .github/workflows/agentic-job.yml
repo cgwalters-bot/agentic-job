@@ -303,7 +303,7 @@ on:
         type: string
         default: ""
     secrets:
-      # Explicit optional credential for apply and cross-repository status. Never use inherit.
+      # Explicit optional credential for apply and status comments. Never use inherit.
       # Callers must pass this name even for an environment secret;
       # the environment's same-name value takes precedence (docs/workflow.md).
       SAFE_OUTPUTS_PAT:
