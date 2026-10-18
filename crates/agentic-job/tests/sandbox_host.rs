@@ -1242,31 +1242,9 @@ fn each_probe_fails_when_its_protection_is_removed() {
     let none = BTreeSet::new();
 
     assert_eq!(failed(&config, None), none, "before anything is removed");
+    // There is no `sandbox exec` for a job's steps any more: the run0 way
+    // in is the `filesystem-view` probe's, and the agent's is this one.
     if config.sandbox.filesystem_view {
-        for path in [
-            entry.home().join("exec-view-control"),
-            PathBuf::from(format!("{}/exec-view", setup::VIEW_PROBE_DIR)),
-        ] {
-            let output = Command::new(BIN)
-                .args([
-                    "sandbox",
-                    "exec",
-                    "--",
-                    "sh",
-                    "-c",
-                    "f=$1; : > \"$f\" && rm -f -- \"$f\"",
-                    "sh",
-                    &path.display().to_string(),
-                ])
-                .output()
-                .unwrap();
-            assert_eq!(
-                output.status.success(),
-                path.starts_with(entry.home()),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
         session_view(&config, &entry);
     }
     // Kill only a sacrificial run0 PAM handler, never the manager's. Killing

@@ -276,7 +276,7 @@ fn dns_accepts(subject: &str, resolvers: &[IpAddr]) -> String {
 /// its subordinate ranges) are refused the metadata service and nothing
 /// else; none leaves the ruleset as it was. With them the sandbox's uids
 /// are refused its IPv6 address too, which the runner could otherwise
-/// reach through `sandbox exec` when there is no egress proxy.
+/// reach as the sandbox user when there is no egress proxy.
 ///
 /// `session_port` (a session run's bridge, `session::bridge`) is refused
 /// to the sandbox's uids on loopback, and so is the node's own tailnet

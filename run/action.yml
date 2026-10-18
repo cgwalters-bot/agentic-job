@@ -8,10 +8,10 @@ inputs:
     default: ${{ github.workspace }}/.agentic-job
   runner-home:
     description: >-
-      Run the agent as the runner's user, with this directory as its home, and no sandbox user
-      (`agentic-job run --runner-home`): after cgwalters-forge/actions/secure-host, in a job that
-      holds no secret and no write token. Empty for the sandbox user of secure-host/internal
-    default: ""
+      Run the agent as the runner's user, with this directory as its home (`agentic-job run
+      --runner-home`): after cgwalters-forge/actions/secure-host, in a job that holds no secret,
+      no write token and no `id-token`
+    required: true
   github-token:
     description: >-
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
@@ -82,18 +82,21 @@ runs:
     # explicitly before checking the root-owned installed configuration.
     # The probes are not made twice in a row: secure-host's check, when
     # all passed, left a record in $RUNNER_TEMP naming this job and the
-    # installed configuration, and that directory is closed to the sandbox
-    # user, which those probes proved. Only that check writes one; the next
-    # check in the job consumes it, and `sandbox exec` and `run` remove it,
-    # so a second run in the job, or one after a step of the sandbox
-    # user's, probes again; so does one without it (secure-host ran with
+    # installed configuration, in a directory of the runner's user's. Only
+    # that check writes one; the next
+    # check in the job consumes it, and `run` removes it, so a second run
+    # in the job probes again; so does one without it (secure-host ran with
     # `check: false`, or in another job). Steps of
     # the runner's user between secure-host and this one run unprobed and
     # can write that record themselves: a caller that runs repository code
     # there gives secure-host `check: false`.
     - name: Prove the host is secured
       shell: bash
+      env:
+        RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
+        # A composite action does not enforce `required`.
+        [ -n "$RUNNER_HOME" ] || { echo '::error::run requires runner-home'; exit 1; }
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
         agentic-job sandbox check --unless-passed
     # The policy job's commit must be this action's: a caller that names
@@ -132,12 +135,8 @@ runs:
         RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
         case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
-        if [ -n "$RUNNER_HOME" ]; then
-          mkdir -p -m 0700 "$RUNNER_HOME"
-          env -i -C "$RUNNER_HOME" HOME="$RUNNER_HOME" LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin sh -s < "$ACTION/../workflow/dispatch-$PROFILE.sh"
-        else
-          agentic-job sandbox exec --stdin "$ACTION/../workflow/dispatch-$PROFILE.sh" -- sh -s
-        fi
+        mkdir -p -m 0700 "$RUNNER_HOME"
+        env -i -C "$RUNNER_HOME" HOME="$RUNNER_HOME" LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin sh -s < "$ACTION/../workflow/dispatch-$PROFILE.sh"
     # The agent holds the token and could leak it, so it must not write.
     # A classic personal access token names its scopes, and one with any
     # but read scopes is refused here. Job, App and fine-grained tokens
@@ -168,7 +167,7 @@ runs:
         # The run's item, which `run` polls with GH_TOKEN for the agent
         # only where the installed configuration says (`[session] watch-item`).
         WATCH_ITEM: ${{ steps.settings.outputs.watch_item }}
-        # `agentic-job run` writes it to a file of the sandbox user's and
+        # `agentic-job run` writes it to a file of the agent's and
         # redacts it wherever the run logs or publishes.
         GH_TOKEN: ${{ inputs.github-token }}
         # Held by `run` alone, outside the sandbox: its proxy puts the key
@@ -188,12 +187,9 @@ runs:
         # The policy job's binary, which prepare downloaded: the secure-host
         # image installs its own in /usr/local/bin over the one prepare put
         # there, and that is the pinned release's, not this commit's.
-        binary=agentic-job
-        if [ -n "$RUNNER_HOME" ]; then
-          binary=$JOB_DIR/agentic-job
-          chmod 0755 "$binary"
-          set -- "$@" --runner-home "$RUNNER_HOME"
-        fi
+        binary=$JOB_DIR/agentic-job
+        chmod 0755 "$binary"
+        set -- "$@" --runner-home "$RUNNER_HOME"
         "$binary" run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"

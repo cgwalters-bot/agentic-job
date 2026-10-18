@@ -175,7 +175,7 @@ that condition, and why it stays an opt-in layer.
 The proposal in [#188](https://github.com/cgwalters-forge/agentic-job/issues/188#issuecomment-6081914015)
 would prevent writes to world-writable host paths outside the sandbox's own
 directories without inventorying the image. It must cover every process running
-as the sandbox user, not just the command launched by `sandbox exec`. The
+as the sandbox user, not just the command `run` launches. The
 proposed two-unit guard does not meet that condition.
 
 In systemd **257**, the [execution documentation](https://github.com/systemd/systemd/blob/v257/man/systemd.exec.xml)

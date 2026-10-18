@@ -66,7 +66,7 @@ guarantee. See [the helper and lock](sandbox-check.md#after-setup-nothing-has-ro
 
 ### R5. Nothing of the agent's outlives the run
 
-The supervisor reaps sandbox-user processes before reading the hand-back.
+The supervisor reaps the agent's processes before reading the hand-back.
 Cron, at and lingering are denied. Session and signal-cleanup tests cover
 this; the machine must still be destroyed after one job.
 

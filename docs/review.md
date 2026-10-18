@@ -304,14 +304,22 @@ dispatcher could set:
   `ubuntu-26.04`). Where that runner cannot reach the inference proxy, the
   caller adds a [local composite action](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action)
   at `.github/agentic-job/network/action.yml` in its own repository: a VPN
-  or tailnet join, for example. The agent job runs it as root after
-  `prepare` and before `secure-host`, so before anything of the agent's is
-  on the machine, and skips it when the file is absent, the default. It
-  comes from the agent job's checkout of the trusted base (the commit the
-  policy job decided), never the pull request's head, so a pull request
-  cannot change what runs there: changing it takes a merge to the base
-  branch, like changing `review.yml`. It has the agent job's identity
-  token, for a federated join, and no secret.
+  or tailnet join, for example. The register job runs it before it
+  registers the run, and the agent job (`agent.yml`, called with
+  `network: true`) runs it as root after `prepare` and before
+  `secure-host`, so before anything of the agent's is on the machine;
+  both skip it when the file is absent, the default. It comes from a
+  checkout of the trusted base (the commit the policy job decided), never
+  the pull request's head, so a pull request cannot change what runs
+  there: changing it takes a merge to the base branch, like changing
+  `review.yml`. It gets no repository secret. The register job's identity
+  token is there for a federated join; the agent job has none, since the
+  agent is the runner's user. So the step may leave the agent job a
+  credential of its own minting as its `secret` output: `review.yml`
+  passes it to `agent.yml` as the secret `NETWORK_SECRET`, which gives it
+  to the step there alone, as its `secret` input. It has to be spent by
+  that join, as a single-use key is: whatever is still valid after
+  `secure-host` is the agent's. This repository's step mints such a key.
 - **Inference.** The variables below name the proxy and the agent; nothing
   in `review.yml` defaults to a deployment's.
 
@@ -330,7 +338,7 @@ It needs these repository or organization variables, and with a broker no secret
 | `AGENT` | `claude` or `opencode`; unset fails the run rather than fall back to the scripted agent |
 | `AGENT_MODEL` | the model, as the proxy serves it |
 | `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and the audience of the run's identity token |
-| `INFERENCE_REGISTER`, `INFERENCE_PROVIDER` | optional: `api-key` and the provider (`anthropic` or `openai`) for a provider's API key in place of a broker; `INFERENCE_URL` is then the provider's API root, `INFERENCE_AUDIENCE` stays unset, and the key is the repository secret `INFERENCE_API_KEY` ([inference](inference.md#a-provider-api-key)) |
+| `INFERENCE_REGISTER`, `INFERENCE_PROVIDER` | optional; `api-key`, a provider's API key in place of a broker ([inference](inference.md#a-provider-api-key)), is refused for now, as in `agentic-job.yml`: the agent is the runner's user, which would hold the key |
 | `AGENT_RUNNER` | optional, a runner label as JSON |
 | `AGENT_CONFIG` | optional, the caller's runner configuration file; default this repository's [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit, written for `ubuntu-26.04` |
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
@@ -338,16 +346,10 @@ It needs these repository or organization variables, and with a broker no secret
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the submit job's
-token. With `api-key`, the secret `INFERENCE_API_KEY` goes to the agent
-job's key check before `secure-host` and to `run`, as in `agentic-job.yml`,
-and never to the sandbox. The caller's network step does not get it, but
-what that step leaves running as root could read it, as it could read
-`run`'s environment. A pull request
-cannot reach it: the workflow, its steps and the network step are the base
-branch's, and the head is data inside the sandbox. Without a broker
-nothing caps reviews across runs, so the key's own spending limit at the
-provider is the only bound beyond each review's `max-requests`, `budget`
-and `timeout`. The agent job's identity token names `review.yml` as its
+token. `INFERENCE_API_KEY` is still declared, so that a caller that
+passes it is not refused, and goes to no job. The workflow, its steps
+and the network step are the base branch's, and the head is data the
+agent reads. The register job's identity token names `review.yml` as its
 `job_workflow_ref`, so the broker, and a network step's federated identity,
 have to admit it: here the `any_workflow` entry narrowed to this repository
 ([inference.md](inference.md#which-workflows-a-broker-admits)).
@@ -379,8 +381,6 @@ jobs:
       statuses: write
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
-      # Only with INFERENCE_REGISTER `api-key`:
-      INFERENCE_API_KEY: ${{ secrets.INFERENCE_API_KEY }}
 ```
 
 `COMMIT` is the full SHA of a reviewed commit of this repository. The caller
@@ -419,8 +419,9 @@ running checks or consulting CI, findings tagged blocker, important or nit and
 CHANGES only for a blocker, and that the review agent job has no project
 toolchain installation or build-cache restore. `node --test
 workflow/agent-actions.test.cjs` checks that the caller's network step is
-one optional step of the agent job, from its base checkout, between
-`prepare` and `secure-host`, that no workflow joins a network itself, and
+one optional step of the register job, from its base checkout, and of
+`agent.yml`'s job when review.yml asks for it, between `prepare` and
+`secure-host`, that no workflow joins a network itself, and
 that this repository's network action pins what it uses. In the crate,
 `tests/event.rs` runs the binary against both shipped bounds files as
 `review.yml`'s `allow:` line picks them (`review_caller_bounds_gate_roles`):

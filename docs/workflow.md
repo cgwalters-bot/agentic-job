@@ -167,12 +167,10 @@ always did.
 What is left: a run whose agent job never starts stays registered until
 the broker expires it; re-running the agent's job alone hands it the
 token of a run that has ended, which `run` refuses, so re-run all jobs.
-A [composed agent job](#the-pieces-and-an-agent-job-of-your-own) and
-[review.yml](../.github/workflows/review.yml)'s still register in the
-agent's job and keep `id-token: write` there; a composed caller can do
-as `agentic-job.yml` does with a job running `agentic-job register` and
-its agent job in a workflow it calls, passing `run` the secret as
-`inference-run-token`.
+[review.yml](../.github/workflows/review.yml) does as `agentic-job.yml`
+does, with a register job of its own and a call of `agent.yml`; a
+[composed agent job](#the-pieces-and-an-agent-job-of-your-own) holds no
+`id-token`, and one that needs a run token calls `agent.yml` too.
 
 ## Context repositories
 
@@ -222,7 +220,7 @@ agent. The pieces are:
 | Piece | What it is | Its credential |
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
-| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host/internal`](../secure-host/internal/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token; with `api-key`, the provider's key or GitHub token as `run`'s input `inference-api-key`, and as `AGENTIC_JOB_INFERENCE_KEY` for an optional `agentic-job check-key --config .agentic-job/config.toml` before `secure-host`; with an [`[mcp.NAME]` server](mcp.md), its credential as `run`'s input `mcp-token`; for GitHub billing with this job's own token, `copilot-requests: write` and no GitHub read token |
+| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), the configuration's setup script, [`run`](../run/action.yml) with `runner-home`, the caller's later steps; or [`agent.yml`](../.github/workflows/agent.yml), called as `review.yml` calls it | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, and no `id-token`, since the agent is the runner's user; the optional GitHub read token; under `github-oidc`, the run token of a register job before it, which only `agent.yml`'s call can take as a secret |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `actions: read` for the proposals' digest, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
@@ -242,9 +240,16 @@ own workflow's. `prepare` and `run` refuse, before they use the policy
 upload, one whose commit is not their own: their ref when it is pinned
 by a full commit, otherwise the HEAD of the checkout they run from.
 
-A complete caller, with a network join before the agent and a step
+A complete caller, with a privileged step before the agent and a step
 after it. `example-org/network-join` stands in for whichever action
-joins your proxy's network, pinned by commit:
+of yours needs root, pinned by commit. The agent is the runner's user,
+so this job holds no `id-token`, and it runs the scripted agent, which
+registers nothing. A real agent behind a broker gets its run token from a
+register job before it, as a secret, which GitHub makes of a value only
+through a reusable workflow's call: such a caller calls
+[`agent.yml`](../.github/workflows/agent.yml), with `network: true` for a
+`.github/agentic-job/network` step of its own, as
+[`review.yml`](../.github/workflows/review.yml) does.
 
 ```yaml
 jobs:
@@ -258,9 +263,9 @@ jobs:
       repo: ${{ inputs.repo }}
       allow: .github/agentic-job/allow.toml
       config: .github/agentic-job/runner.toml
-      agent: claude
-      inference-url: ${{ vars.INFERENCE_URL }}
-      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      agent: fake
+      fake-profile: comment
+      max-requests: "0"
 
   agent:
     needs: policy
@@ -272,7 +277,6 @@ jobs:
       issues: read
       pull-requests: read
       actions: read
-      id-token: write
     outputs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
@@ -305,16 +309,23 @@ jobs:
       - uses: example-org/network-join@0123456789abcdef0123456789abcdef01234567
         with:
           audience: ${{ vars.NETWORK_AUDIENCE }}
-      # The inference proxy over that network, before setup.
-      - run: agentic-job secure-host inference .agentic-job/config.toml
-      - uses: ./.agentic-job-source/secure-host/internal
+      # What the runner's user cannot hold for the agent, refused.
+      - env:
+          CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+        run: python3 .agentic-job-source/workflow/runner-setup.py admit
+      # The host's configuration but for the setup script, run below.
+      - run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"
+      - uses: ./.agentic-job-source/secure-host
         with:
-          binary: /usr/local/bin/agentic-job
-          config: .agentic-job/config.toml
+          config: ${{ runner.temp }}/agentic-job-host.toml
+      - env:
+          AGENT_HOME: ${{ runner.temp }}/agent-home
+        run: python3 .agentic-job-source/workflow/runner-setup.py setup
       - id: run
         timeout-minutes: 340
         uses: ./.agentic-job-source/run
         with:
+          runner-home: ${{ runner.temp }}/agent-home
           github-token: ${{ github.token }}
       # Your later steps: the runner's user, without root.
       - env:
@@ -364,9 +375,10 @@ agent job: check runs on `needs.policy.result == 'success'`, and apply
 takes no `agent`.
 
 **Your agent job's permissions** are yours to keep read only: grant
-it `contents`, `issues`, `pull-requests` and `actions` read and
-`id-token: write`, as above, and nothing more (or no `id-token`, with
-the run registered in a job before it: [the run token](#the-run-token)). This is your
+it `contents`, `issues`, `pull-requests` and `actions` read, as above,
+and nothing more. No `id-token`: the agent is the runner's user, and
+could mint identity tokens for any audience with it; a run that needs
+one registers in a job before it ([the run token](#the-run-token)). This is your
 obligation: declare that `permissions` block on the job. `run` gives
 the agent the token you pass, your job's included, and cannot see
 what a job token was granted; a job that can write gives the agent a
@@ -393,17 +405,16 @@ same way. Check and apply need `actions: read` for these lookups.
 run as the runner's user with sudo. They come before anything of the
 agent's is on the machine, and before `secure-host` takes root away.
 Leave alone what `prepare` wrote: `.agentic-job`, `.agentic-job-source`
-and `/usr/local/bin/agentic-job`. Leave no credential where the
-sandbox user can read it: `secure-host` closes the places
-[it lists](secure-host.md), and nothing else. A step that has to undo
+and `/usr/local/bin/agentic-job`. Leave no credential on the machine:
+the agent is the runner's user and can read whatever that user can. A step that has to undo
 itself at the end of the job can do so only without sudo
 ([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
 
-**Your later steps** go after `run`. They run as the runner's user
-without sudo, outside the sandbox, after the agent's outputs were
-uploaded. They can read what the agent left on the machine. Treat it
-as hostile: don't execute it, and run untrusted commands with
-`agentic-job sandbox exec`. Check and apply never read anything these
+**Your later steps** go after `run`. They run as the runner's user, the
+agent's, without sudo, after the agent's outputs were uploaded. They can
+read what the agent left on the machine, and anything it left running
+can reach them. Treat it as hostile: don't execute it, and hand nothing
+of it to a step that holds a credential. Check and apply never read anything these
 steps make. [specs/run-contract-spec.md](../specs/run-contract-spec.md#34-the-callers-own-agent-job)
 is the contract and names the tests that hold it.
 
@@ -440,9 +451,14 @@ after its network join and before secure-host, as
 [above](#the-pieces-and-an-agent-job-of-your-own), and reads
 `session-endpoint` from the run action's step instead.
 
-Its secure-host step now names `./.agentic-job-source/secure-host/internal`:
-the public `secure-host` forwards to `cgwalters-forge/actions/secure-host`,
-which refuses `binary` and has no sandbox user for `run`
+Its secure-host step names `./.agentic-job-source/secure-host`, which
+forwards to `cgwalters-forge/actions/secure-host` and refuses `binary`;
+the old action with a second user is gone. Give it the policy job's
+configuration through `agentic-job config --host --no-script`, run the
+configuration's setup script after it with `workflow/runner-setup.py
+setup`, and give `run` a `runner-home`, which it requires, and drop
+`id-token` from the job, as
+[above](#the-pieces-and-an-agent-job-of-your-own)
 ([secure-host.md](secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
 
 ### Migrating a direct call of check.yml
@@ -1171,8 +1187,8 @@ secret from the call; the reusable workflow no longer declares it. The job
 token cannot read private repositories outside its own repository.
 Set `github-reads: false` to give the agent no token at all.
 
-The runner writes the token to a file in the sandbox user's home that
-only it can read, and the agent launcher sets it as `GH_TOKEN` and
+The runner writes the token to a file in the agent's home that
+only its user can read, and the agent launcher sets it as `GH_TOKEN` and
 drops any other GitHub token variable. A run without one removes the
 file. The token's value is redacted from the transcript, the logs, the
 summary and the proposals, like the run's other tokens. Clone over
@@ -1888,8 +1904,9 @@ the step that turns the run's exit state into the job's result, and the
 post-steps of `actions/checkout` (it removes the credential
 settings of a checkout that kept none), then the caller's own later
 steps and their post-steps, [above](#the-pieces-and-an-agent-job-of-your-own).
-None of them reads the sandbox user's files; the
-uploads take only what `run` put under its own directory after the gate.
+None of them reads the agent's home; the uploads take only what `run`
+put under its own directory after the gate. The agent was the same user,
+so they treat everything else on the machine as its.
 
 **Where the binary comes from.**
 [`secure-host/binary.sh`](../secure-host/binary.sh) hashes the content,

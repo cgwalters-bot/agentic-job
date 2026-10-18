@@ -6,12 +6,12 @@ Agent security is just CI security. An agent is one more untrusted step
 of a job, like a build script from a pull request or a dependency's
 install hook, and what protects a job from one protects it from the
 others. So the hardening is a step of its own that any job can run
-before untrusted steps, whether or not an agent runs afterwards: the action in
-[`secure-host/internal/`](../secure-host/internal/action.yml), which this
-page describes. The public path `secure-host/` now forwards to
-`cgwalters-forge/actions/secure-host`
+before untrusted steps, whether or not an agent runs afterwards:
+`cgwalters-forge/actions/secure-host`, which this repository's
+`secure-host/` forwards to
 ([below](#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)),
-and the reusable workflow's agent job uses that one.
+and which runs the image this repository builds. Every step after it,
+the agent included, is the runner's user's.
 
 ## The public action forwards to cgwalters-forge/actions/secure-host
 
@@ -23,48 +23,45 @@ It passes on `config`, `check` and `image-archive`. A caller that names
 `cgwalters-forge/agentic-job/secure-host` at a commit from before the
 forward keeps the old action. At `@main` or a later commit:
 
-- The new action's contract has no second user and no `sandbox exec`. The
-  old action's `sandbox-user`, `sandbox-home` and `fetched` outputs are
-  gone, so a step that reads them gets an empty string. The v0.6.1 image
-  still creates the user, so `sandbox exec` still runs, but nothing
-  promises that it will keep working.
+- The new action's contract has no second user to run steps as: every
+  step after it is the runner's user's. The old action's outputs are
+  gone, so a step that reads them gets an empty string.
 - Without a `config`, the forwarder passes this repository's
   [`hosted.toml`](../secure-host/hosted.toml), as the old action did, and
-  not the new action's default, which turns egress filtering off: a step
-  that still runs code through `sandbox exec` keeps writing only through
-  the proxy's rules. A `config` of the caller's own replaces it whole.
+  not the new action's default, which turns egress filtering off: the
+  v0.6.1 image's binary still has the old way into its second user, and
+  a step that still runs code that way keeps writing only through the
+  proxy's rules. A `config` of the caller's own replaces it whole.
 - The floor is ubuntu-26.04, the runner the new action is written for.
-- Setting any other input of the old action fails the step and names the
-  new action: `lock`, `egress`, `deny-runner-metadata`, `egress-policy`,
-  `stop-services`, `sandbox-user`, `runner-user`, `script`, `binary` or
-  `build`. Each asked for a host the new action would not set up, so the
-  step does not ignore it.
+- Setting another input of the old action that chose the host fails the
+  step and names the new action: `lock`, `egress`,
+  `deny-runner-metadata`, `egress-policy`, `stop-services`, `runner-user`,
+  `script`, `binary` or `build`. Each asked for a host the new action
+  would not set up, so the step does not ignore it. A configuration file
+  says the same things.
 
-The reusable workflow's agent job (`agent.yml`) runs the forwarder, with
-the policy job's configuration but `setup.script`, and then the agent as
-the runner's user, with no second user (`run --runner-home`). The image
-would run `setup.script` as its second user, from the host's root, so the
-job runs it itself, after secure-host, in the agent's home. The image
-also installs its own binary in `/usr/local/bin` over the one `prepare`
-put there, so `run` starts the policy job's binary from the job directory.
-The CI jobs that use the second user, and agent jobs of a caller's own
-(`example-compose.yml`, `review.yml`), name the old action at
-`secure-host/internal`, unchanged, until they no longer need that user.
+The agent job (`agent.yml`, which `agentic-job.yml` and `review.yml`
+call) runs the forwarder, with the policy job's configuration but
+`setup.script`, and then the agent as the runner's user
+(`run --runner-home`, which the run action requires). The image would run
+`setup.script` as its second user, from the host's root, so the job runs
+it itself, after secure-host, in the agent's home. The image also
+installs its own binary in `/usr/local/bin` over the one `prepare` put
+there, so `run` starts the policy job's binary from the job directory.
+The composed example (`example-compose.yml`) has the same steps, and
+CI's jobs that secure a host run the forwarder with this revision's
+image (`image-archive`).
 
 The action supports exactly **Ubuntu 26.04** and **RHEL 10** (including
-RHEL 10 minor releases). Once it has the binary, and before installing
-it, `agentic-job secure-host supported` reads `/etc/os-release` and refuses
-any other host, or a missing/unreadable release file, with one diagnostic
-before changing apt settings, loading the policy or invoking setup. Getting
-the binary changes nothing but the runner's temporary directory, unless it
-has to build and install a compiler: with `build: true`, or where no release
-exists for the source, an unsupported host can get musl-tools and clang
-before it is refused. It checks
-`ID` and `VERSION_ID`, not `ID_LIKE`: Fedora, CentOS Stream and other
+RHEL 10 minor releases). Before it installs its binary on the host, the
+[image](#the-image) reads the host's `/etc/os-release` and refuses any
+other host, or a missing/unreadable release file, with one diagnostic
+before changing apt settings, loading the policy or invoking setup. It
+checks `ID` and `VERSION_ID`, not `ID_LIKE`: Fedora, CentOS Stream and other
 derivatives are not supported hosts. This admission check does not prove
 kernel features or runtime enforcement; the setup checks and probes still
-have to pass. It applies to the composite action, not direct CLI invocation.
-Container image distributions are independent of the supported host systems.
+have to pass. Container image distributions are independent of the
+supported host systems.
 
 ## Runner outbound observation (opt-in)
 
@@ -181,7 +178,7 @@ and writes `/etc/egress-proxy/runner.env` for what does not read it:
 step's environment except through `GITHUB_ENV`, so this repository's
 [forwarder](../secure-host/action.yml) appends the same two lines to it
 after the action, when setup wrote the file; a job that names `cgwalters-forge/actions/secure-host`
-directly, or the internal action, runs
+directly runs
 `cat /etc/egress-proxy/runner.env >> "$GITHUB_ENV"` itself. A tool that
 trusts neither fails closed.
 
@@ -301,19 +298,20 @@ optional job; the check runs for all changes, including the world-write paths.
 The jobs above load the policy without the action, and `sandbox check`'s
 `world-write` probe tests it inside the action. CI's
 [`world-write-runtime` job](../.github/workflows/ci.yml) tests it from the
-caller's side instead: it runs this checkout's `secure-host` with `build: true`, so
-the binary and `world_write.bpf.o` are compiled from the commit under test
-(`clang -O2 -g -target bpfel` on `crates/agentic-job/bpf/world_write.bpf.c`,
-in [`binary.sh`](../secure-host/binary.sh)), never taken from a release.
-After the action has exited, with root gone:
+caller's side instead: it runs the forwarder with the static job's image
+archive, so the binary and `world_write.bpf.o` are built from the commit
+under test (`clang -O2 -g -target bpfel` on
+`crates/agentic-job/bpf/world_write.bpf.c`, in
+[`binary.sh`](../secure-host/binary.sh)), never taken from a release.
+After the action has exited, with root gone, as the runner's user:
 
-- positive control: the sandbox user appends to setup's probe file
+- positive control: an append to setup's probe file
   `/etc/agentic-job/world-write-probe/file`, root-owned mode 0666 on the root
-  filesystem, and must fail with the shell's "Permission denied" for that path. Ordinary permissions
+  filesystem, must fail with the shell's "Permission denied" for that path. Ordinary permissions
   allow that write and the default configuration has no filesystem view, so
   the refusal is the policy's;
-- negative control: the sandbox user creates a mode-0666 file of its own in
-  its home on the root filesystem and appends to it, which must succeed.
+- negative control: a mode-0666 file of the runner's own in its home on the
+  root filesystem takes an append.
 
 There is no fallback: `sandbox setup` refuses a host without the five links,
 the positive control fails if the policy is switched off in its map, and the
@@ -562,38 +560,19 @@ world-writable object of another user's on the root filesystem.
 jobs:
   build:
     runs-on: ubuntu-26.04
-    defaults:
-      run:
-        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
     steps:
       - run: sudo apt-get install -y make         # root: before the step
-        shell: bash
       - uses: actions/checkout@v7
-      - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+      - uses: cgwalters-forge/actions/secure-host@COMMIT
       - run: make check                           # the runner's user, no root
-        shell: bash
-      - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
-        shell: bash
-      - run: cd src && bash ./untrusted.sh < /dev/null
 ```
 
-A `run:` step without `shell:` is untrusted by default; a trusted step opts
-out with `shell: bash`. This fails closed: forgetting the override runs code
-sandboxed rather than with the runner user's files and token. Every trusted
-`run:` step before secure-host also needs the override: the binary does not
-exist yet, so the default would fail there rather than run unsandboxed.
-`uses:` steps are not affected by the shell default: they run as the runner
+Every step after secure-host, `run:` or `uses:`, runs as the runner's
 user, as described in [One trust level for the rest of the job](#one-trust-level-for-the-rest-of-the-job).
 
 [`example-secure-host.yml`](../.github/workflows/example-secure-host.yml)
-is a runnable example. The template above assumes the repository provides
-`make check` and `untrusted.sh`. The archive transfers tracked files into
-`src` in the sandbox home; the checkout itself is not readable there.
-`sandbox exec` starts in the sandbox home and streams its caller's stdin
-to the command; `--stdin` instead streams the step script opened by the
-runner user. Redirecting `untrusted.sh` from `/dev/null` keeps it from
-consuming that script. CI runs the example on every pull request: it
-builds and tests after the lock, as both users, saves a cache and
+is a runnable example. CI runs it on every pull request, with this
+revision's image: it builds and tests after the lock, saves a cache and
 uploads an artifact, and ends with `sandbox check` passing again.
 
 ## What the step does to the host
@@ -809,7 +788,7 @@ After it, no later step has root:
   user and its subordinate uids: at `169.254.169.254` through the same
   nftables rule that refuses the sandbox user, and at EC2's IPv6 address
   `fd00:ec2::254` as well. The sandbox user's uids, which the runner may
-  still enter through `sandbox exec`, are refused the IPv6 address too, so
+  still enter through setup's helper, are refused the IPv6 address too, so
   that is no way around it. The threat it stops is a step asking the metadata
   service for the instance's identity, or, on a self-hosted cloud runner,
   for the instance role's credentials, which the job never granted.
@@ -895,25 +874,17 @@ hold no `id-token` permission, and should treat its own artifacts and cache
 writes as that code's output. The reusable workflow's agent job holds no
 `id-token`: a `register` job before it registers with the inference broker
 and passes on only the broker's run token, as a secret of the agent's job
-([the run token](workflow.md#the-run-token)). A composed agent job and
-`review.yml`'s still register in the agent's job. The agent's untrusted
-code still runs as the sandbox user.
+([the run token](workflow.md#the-run-token)); `review.yml` calls the same
+agent job, after a `register` job of its own. The composed example runs
+only the scripted agent, which registers nothing, and holds no
+`id-token` either.
 
-**What is left**, each its own slice of #503:
-
-1. Host-wide egress, with the runner's own endpoint list. Today the runner's
-   user reaches every host but the metadata service. #501 found two
-   difficulties. The runner writes logs, artifacts and caches to
-   `*.blob.core.windows.net`, and allowing that suffix allows any storage
-   account, an attacker's included. The Worker also reads its proxy
-   settings only when it starts.
-2. The agent's `run` built on this, with `sandbox exec` and the sandbox
-   user optional.
-
-The agent job without `id-token` is done for the reusable workflow, as
-above. Left from it: the same for `review.yml`'s agent job and the
-composed example, whose agent jobs are written inline and so cannot take
-the run token as a secret.
+**What is left**, its own slice of #503: host-wide egress, with the
+runner's own endpoint list. Today the runner's user reaches every host but
+the metadata service. #501 found two difficulties. The runner writes logs,
+artifacts and caches to `*.blob.core.windows.net`, and allowing that
+suffix allows any storage account, an attacker's included. The Worker
+also reads its proxy settings only when it starts.
 
 ## What a job has to know
 
@@ -928,7 +899,7 @@ with the container daemon. After it:
 | `actions/checkout`, `actions/cache`, `actions/upload-artifact`, a Rust or Node cache | work: they read and write the runner's own files. A cache's post step saves after the lock |
 | `setup-node`, `setup-python`, `setup-go` and the like | work where they install into the runner's tool cache; one that calls `sudo` does not |
 | `sudo` anything, `apt-get`, writing under `/etc` or `/usr` | refused |
-| `docker`, Docker container actions, `services:` and `container:` on the job | gone: the daemon is stopped, since its group is root by another name. A job that needs them is not a job for this step; rootless podman, installed before it, is the container tool the sandbox user has |
+| `docker`, Docker container actions, `services:` and `container:` on the job | gone: the daemon is stopped, since its group is root by another name. A job that needs them is not a job for this step; rootless podman, installed before it, is the container tool later steps have |
 | A post step that calls `sudo` | fails or warns, as that action decides: a network join's logout has to only warn, and leave a node that expires by itself |
 
 CI exercises a `run:` step and a JavaScript action's main step after
@@ -948,7 +919,7 @@ On Ubuntu, install them before `secure-host`:
 With the egress proxy enabled (the default), a container's own network
 cannot reach the host's loopback proxy. Use the host network and mount
 the public CA bundle read-only where the image expects its trust bundle.
-For Alpine and Debian/Ubuntu images, as the sandbox user:
+For Alpine and Debian/Ubuntu images:
 
 ```sh
 podman build --network=host \
@@ -975,8 +946,8 @@ rules; it exposes the same host services the sandbox user can already
 reach. The mount contains public certificates, not the proxy's private
 key. Do not work around TLS failures by disabling certificate checks.
 
-The host proc restriction applies to `sandbox exec`, the agent under `run`,
-and rootless Podman's host processes, regardless of their entry path. A
+The host proc restriction applies to every later step, the agent under `run`
+included, and rootless Podman's host processes, regardless of their entry path. A
 container's own `/proc` shows the processes in its PID namespace, not the
 host's processes. Rootless user namespaces do not grant permission to remount
 the initial PID namespace's proc filesystem without the restriction. The
@@ -986,100 +957,36 @@ step processes. The sandbox user is forbidden from belonging to that group.
 Hosted Ubuntu 26.04 CI exercises setup, probes, rootless containers and later
 runner steps; RHEL 10 compatibility for this restriction remains unverified.
 
-**Running as the sandbox user.** `agentic-job sandbox exec -- COMMAND`
-runs a command as the sandbox user, in its home, and ends with the
-command's exit state. As a step's shell it takes the script by file,
-since the sandbox user could not read it where the runner wrote it:
-
-```yaml
-- shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
-  run: |
-    cd src && make check
-```
-
-The script arrives on standard input, so a command in it that reads its
-own standard input would read the rest of the script: give such a
-command `< /dev/null`. None of the step's `env:` reaches it. Variables
-for the sandbox user are the configuration's (`[sandbox] env`), and the
-egress proxy's are set for it.
-
-Sandbox logs cannot issue workflow commands. Unless it is redirected to a
-regular file, the sandbox's stdout and stderr have both command syntaxes
-broken up wherever they occur (`::` becomes `: :`, `##[` becomes `## [`),
-as do setup/probe diagnostics and `run`'s agent-derived log text. With
-neither left in the output, a filter between `sandbox exec` and the log
-(`| tail`, `| grep`, `| sort`, `| tee`), or another `sandbox exec` writing
-to the same log, cannot turn it back into a command, and nothing is left
-for the runner to undo if the supervisor is killed. Stdout or stderr
-redirected to a regular file gets the exact bytes.
-
-This changes piped output: `$(agentic-job sandbox exec …)` and
-`agentic-job sandbox exec … | tar -x` see `: :` for every `::` (and
-`## [` for `##[`) the command wrote, so `std::io` arrives as `std: :io`.
-Redirect to a file in `$RUNNER_TEMP` and read that for exact bytes.
-
-**Files go in and out through the supervisor**, since neither user reads the
-other's files:
-
-```yaml
-- run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
-- run: agentic-job sandbox exec -- cat src/report.xml > "$RUNNER_TEMP/report.xml"
-```
-
-What comes back is data the sandbox user wrote. Take single files, or
-an archive the job uploads without unpacking; do not unpack one over
-the checkout.
-
-**Toolchains for the sandbox user** are the system's. The hosted image
-keeps rustup and its tool cache in the runner's home, which is closed:
-install what the sandbox user builds with from packages before the
-step, or with the `script` input, which runs as the sandbox user and
-can put a toolchain in its home.
-The sandbox home does not inherit `/etc/skel` toolchains or shell dotfiles.
-Callers relying on those toolchains must install them with the `script` input.
+Setup and probe diagnostics and `run`'s agent-derived log text have both
+workflow-command syntaxes broken up wherever they occur (`::` becomes
+`: :`, `##[` becomes `## [`), so that no filter or reordering of the log
+can turn them into a command to the runner.
 
 **Time.** On a hosted runner, setup's largest stages are creating the
 user, installing packages and starting the proxy, each under a minute
 ([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)).
-Loading the world-write policy takes about a second, and the check under a minute. The binary is fetched in a second when a
-release fits the action's commit, and built in about two minutes when
-none does.
+Loading the world-write policy takes about a second, and the check under a minute.
 
 ## Inputs and outputs
 
-Every input is optional. An empty one leaves what the configuration
-file says, and the file's own default where it says nothing.
+The forwarder's inputs are the new action's; every one is optional.
 
 | Input | What it sets |
 | --- | --- |
-| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables. Default: [the action's own](../secure-host/hosted.toml), for GitHub's hosted `ubuntu-26.04`. Another image listens on other sockets: `sandbox check` names each one left |
-| `lock` | `false` keeps the runner's sudo: the host is hardened for the sandbox user only, and every later step has root. Default `true` |
-| `egress` | `false` starts no proxy and leaves the sandbox user's network open but for the metadata service and the tailnet. Default `true` |
-| `egress-policy` | A proxy policy file replacing [the binary's](../egress/policy.toml): write rules and an optional [domain allowlist](sandbox.md#opt-in-domain-allowlist). Select from trusted caller configuration |
-| `stop-services` | systemd units to stop and mask, with what triggers them, in place of the file's list |
-| `sandbox-user` | The second user's name. Default `runner-sandbox` |
-| `runner-user` | The user the job's steps run as. Default: the one that runs the step |
-| `script` | A file: a script setup runs as the sandbox user at its end |
+| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. Default: [the forwarder's own](../secure-host/hosted.toml), for GitHub's hosted `ubuntu-26.04`, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
 | `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
-| `binary` | An `agentic-job` already on the machine, in place of fetching or building one; the world-write policy's `world_write.bpf.o` must be beside it |
-| `build` | `true` builds the binary even where a release fits |
-| `deny-runner-metadata` | `true` refuses the cloud metadata service to the runner's user and its subordinate uids as well, so to every later step and action. Needs `lock`. Default `false` ([one trust level](#one-trust-level-for-the-rest-of-the-job)) |
+| `image-archive` | An image archive, as `podman load` takes it, run in place of the pinned image, unverified: for a job that built it, as CI's do |
 
-The second user is always created: the network rules and most of the
-probes are about it, and one that is never used costs a line in
-`/etc/passwd`.
-
-Outputs: `sandbox-user` and `sandbox-home`, `fetched` (`true` for a
-release's binary, `false` for a build, empty when `binary` was supplied).
-The action knows nothing of inference or sessions: an agent job checks
-its inference proxy before this step, and the run action reads a
-session's endpoint after it ([workflow](workflow.md)).
+It has no outputs. The action knows nothing of inference or sessions: an
+agent job checks its inference proxy before this step, and the run action
+reads a session's endpoint after it ([workflow](workflow.md)).
 
 ## Where the binary comes from
 
-[`binary.sh`](../secure-host/binary.sh), a shell script since no
-`agentic-job` exists yet, computes the source digest at
-the action's pinned commit and fetches `build-FULL_DIGEST`. It verifies
+The host's binary is the [image](#the-image)'s. The policy job gets the
+one an agent job runs with [`binary.sh`](../secure-host/binary.sh), a
+shell script since no `agentic-job` exists yet, which computes the source
+digest at the pinned commit and fetches `build-FULL_DIGEST`. It verifies
 the release manifest's GitHub attestation before checking the source
 digest and the checksums of the binaries and the world-write policy
 object. A missing release falls back to a source build with a notice; failed verification stops the job. Main publishes
@@ -1090,7 +997,7 @@ for the verification and publishing boundaries. Fetching needs bash,
 where it is missing. It uses the job's read-only token and retries
 signaled GitHub throttling within two minutes.
 Building needs rustup.
-Pass `build: true` to build even when a prebuilt exists.
+The policy job's `build-binary: true` builds even when a prebuilt exists.
 
 ## The image
 
@@ -1098,8 +1005,7 @@ A release also pushes `ghcr.io/cgwalters-forge/secure-host:vVERSION`, an
 image `FROM scratch` with the static binary and `world_write.bpf.o`
 ([`Containerfile`](../secure-host/Containerfile)), and attests it by its
 digest from `release.yml` on main. The public action runs it through
-`cgwalters-forge/actions/secure-host`; the internal one does not.
-Root podman runs it with the host's root at `/host`, the configuration a
+`cgwalters-forge/actions/secure-host`. Root podman runs it with the host's root at `/host`, the configuration a
 path on the host:
 
 ```sh
@@ -1109,7 +1015,7 @@ sudo podman run --rm --privileged --pid=host --network=none -v /:/host \
 
 The image has no shell or libraries, so it uses the host's: it changes
 its root to `/host`, refuses an unsupported host, installs the binary as
-`/usr/local/bin/agentic-job` (for `sandbox check`, `sandbox exec` and the
+`/usr/local/bin/agentic-job` (for `sandbox check` and the
 probes) and the object under `/usr/local/lib/agentic-job/`, then runs
 `secure-host apt`, `secure-host world-write` and `sandbox setup` through
 the host's `nsenter -t 1` in init's namespaces. The world-write links are

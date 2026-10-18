@@ -27,6 +27,11 @@ function shell(script, env) {
   });
 }
 
+// A stand-in for the policy job's binary, which `run` takes from JOB_DIR.
+function binary(directory, script) {
+  writeFileSync(join(directory, 'agentic-job'), `#!/bin/bash\n${script}\n`, { mode: 0o755 });
+}
+
 test('prepare rejects missing and nonnumeric trusted artifact IDs before download', () => {
   for (const [binary, policy, expected] of [
     ['1', '2', 0], ['', '2', 1], ['1', '', 1], ['0', '2', 1],
@@ -80,9 +85,14 @@ test('run rejects unlocked configuration before probing and probes before agent 
     const result = spawnSync('python3', ['-c', code], { encoding: 'utf8' });
     assert.equal(result.status, expected, result.stderr);
   }
-  const result = shell('python3() { return 1; }; agentic-job() { echo unexpected; };\n' + guard);
+  const result = shell('python3() { return 1; }; agentic-job() { echo unexpected; };\n' + guard, { RUNNER_HOME: '/tmp/home' });
   assert.equal(result.status, 1);
   assert.doesNotMatch(result.stdout, /unexpected/);
+  // No agent home, no run: there is no other user to run the agent as.
+  const homeless = shell('python3() { echo unexpected; }; agentic-job() { echo unexpected; };\n' + guard, { RUNNER_HOME: '' });
+  assert.equal(homeless.status, 1);
+  assert.match(homeless.stdout, /^::error::run requires runner-home\n$/);
+  assert.match(run, /\n  runner-home:\n(?: {4}description:[^\n]*\n(?: {6}[^\n]*\n)*)? {4}required: true\n/);
   assert.ok(run.indexOf('name: Prove the host') < run.indexOf('name: Run the agent'));
 });
 
@@ -91,12 +101,12 @@ test('agent exit is captured before uploads and partial result gate is unchanged
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   for (const exit of [0, 1, 3, 4, 124]) {
     const output = join(directory, `output-${exit}`);
-    const result = shell('agentic-job() { printf "%s\\n" "$@"; return "$STATE"; };\n' +
-      step(run, 'Run the agent'), { JOB_DIR: directory, REVIEW_HEAD: 'review-head', STATE: String(exit),
-        GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
+    binary(directory, 'printf "%s\\n" "$@"; exit "$STATE"');
+    const result = shell(step(run, 'Run the agent'), { JOB_DIR: directory, REVIEW_HEAD: 'review-head', STATE: String(exit),
+      RUNNER_HOME: join(directory, 'home'), GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(output, 'utf8'), `exit=${exit}\n`);
-    assert.match(result.stdout, /--review-head\nreview-head/);
+    assert.match(result.stdout, /--review-head\nreview-head\n--runner-home\n/);
     for (const partial of ['false', 'true']) {
       const gate = shell(step(run, "The run's result"), { EXIT: String(exit), PARTIAL: partial });
       const expected = exit === 0 || partial === 'true' && [3, 124].includes(exit) ? 0 : 1;
@@ -116,8 +126,9 @@ test('agent exit is captured before uploads and partial result gate is unchanged
   ]) {
     writeFileSync(join(directory, 'out/run/summary.json'), JSON.stringify(summary));
     const output = join(directory, 'output-over');
-    const result = shell('agentic-job() { return 0; };\n' + step(run, 'Run the agent'), {
-      JOB_DIR: directory, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
+    binary(directory, 'exit 0');
+    const result = shell(step(run, 'Run the agent'), { JOB_DIR: directory, RUNNER_HOME: join(directory, 'home'),
+      GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(output, 'utf8'), `exit=0\n${over && `over-budget=${over}\n`}`);
     assert.equal(result.stdout.includes(`::warning::the agent ended its turn over budget: spent ${over}\n`), over !== '');
@@ -135,8 +146,9 @@ test('agent exit is captured before uploads and partial result gate is unchanged
     writeFileSync(join(directory, 'out/secret-at'), at);
     const output = join(directory, 'output-secret');
     const summary = join(directory, 'summary-secret');
-    const result = shell('agentic-job() { return 1; };\n' + step(run, 'Run the agent'), {
-      JOB_DIR: directory, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary });
+    binary(directory, 'exit 1');
+    const result = shell(step(run, 'Run the agent'), {
+      JOB_DIR: directory, RUNNER_HOME: join(directory, 'home'), GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(output, 'utf8'), `exit=1\n${expected && `secret-at=${expected}\n`}`);
     assert.equal(existsSync(summary) ? readFileSync(summary, 'utf8') : '',
@@ -257,11 +269,11 @@ test('admission marks only the calling repository, private, as a private target'
 // steps: the caller's repository, the actions of policy's own commit,
 // then prepare, secure-host and run, in that order.
 // agentic-job.yml's is agent.yml's, which takes the policy call's outputs
-// as one input, as check.yml does, and secures its host with the public
-// forwarder; the example keeps the second user of the internal action.
-for (const [file, source, job, policyOutput, secureHost] of [
-  ['agentic-job.yml', wrapper, agentCall, name => `fromJSON(inputs.policy).${name}`, './.agentic-job-source/secure-host'],
-  ['example-compose.yml', compose, compose, name => `needs.policy.outputs.${name}`, './.agentic-job-source/secure-host/internal']]) {
+// as one input, as check.yml does, and runs review.yml's network step
+// when asked to. Both secure their host with the public forwarder.
+for (const [file, source, job, policyOutput, network] of [
+  ['agentic-job.yml', wrapper, agentCall, name => `fromJSON(inputs.policy).${name}`, ['./.github/agentic-job/network']],
+  ['example-compose.yml', compose, compose, name => `needs.policy.outputs.${name}`, []]]) {
   test(`${file} composes the pinned-source agent job and keeps trusted edges off agent outputs`, () => {
     const agent = job.split('\n  agent:\n')[1].split('\n  check:\n')[0];
     const out = name => `\${{ ${policyOutput(name)} }}`.replace(/[$()[\]{}.]/g, '\\$&');
@@ -275,9 +287,9 @@ for (const [file, source, job, policyOutput, secureHost] of [
     assert.match(agent, new RegExp(`^ {10}ref: ${out('ref')}$`, 'm'));
     const uses = [...agent.matchAll(/^ {6}(?:- |  )uses: ([^\n]+)/gm)].map(([, use]) => use.split(' ')[0]);
     assert.deepEqual(uses.filter(use => !/^actions\/(?:checkout|download-artifact)@/.test(use)), [
-      './.agentic-job-source/prepare', secureHost, './.agentic-job-source/run']);
-    for (const use of uses) {
-      assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+(?:\/internal)?|actions\/(?:checkout|download-artifact)@[0-9a-f]{40})$/);
+      './.agentic-job-source/prepare', ...network, './.agentic-job-source/secure-host', './.agentic-job-source/run']);
+    for (const use of uses.filter(use => !network.includes(use))) {
+      assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+|actions\/(?:checkout|download-artifact)@[0-9a-f]{40})$/);
     }
     assert.ok(agent.indexOf('source/prepare') < agent.indexOf('source/secure-host'));
     assert.ok(agent.indexOf('source/secure-host') < agent.indexOf('source/run'));
@@ -364,8 +376,8 @@ test('agent.yml runs the setup script, and run the agent, as the runner\'s user 
   writeFileSync(join(directory, 'setup.sh'), '#!/bin/sh\nexit 3\n');
   assert.equal(inDir(setup).status, 3);
 
-  // The run step: the job directory's binary with --runner-home, or the
-  // installed one, for a caller with a sandbox user.
+  // The run step: the job directory's binary with --runner-home, never
+  // the one the image installed on PATH.
   const jobDir = join(directory, 'job');
   const bin = join(directory, 'bin');
   mkdirSync(jobDir);
@@ -373,19 +385,17 @@ test('agent.yml runs the setup script, and run the agent, as the runner\'s user 
   const recorder = '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$RECORD"\n';
   writeFileSync(join(jobDir, 'agentic-job'), recorder, { mode: 0o644 });
   writeFileSync(join(bin, 'agentic-job'), recorder, { mode: 0o755 });
-  for (const [runnerHome, binary] of [[home, join(jobDir, 'agentic-job')], ['', join(bin, 'agentic-job')]]) {
-    const record = join(directory, 'record');
-    result = shell(step(run, 'Run the agent'), {
-      JOB_DIR: jobDir, RUNNER_HOME: runnerHome, RECORD: record, REVIEW_HEAD: '', WATCH_ITEM: '',
-      GITHUB_OUTPUT: join(directory, 'output'), GITHUB_STEP_SUMMARY: join(directory, 'summary'),
-      PATH: `${bin}:${process.env.PATH}`,
-    });
-    assert.equal(result.status, 0, result.stderr);
-    const args = readFileSync(record, 'utf8').trim().split('\n');
-    assert.equal(args[0], binary);
-    assert.equal(args[1], 'run');
-    assert.deepEqual(args.slice(-2), runnerHome ? ['--runner-home', home] : ['--out', join(jobDir, 'out')]);
-  }
+  const record = join(directory, 'record');
+  result = shell(step(run, 'Run the agent'), {
+    JOB_DIR: jobDir, RUNNER_HOME: home, RECORD: record, REVIEW_HEAD: '', WATCH_ITEM: '',
+    GITHUB_OUTPUT: join(directory, 'output'), GITHUB_STEP_SUMMARY: join(directory, 'summary'),
+    PATH: `${bin}:${process.env.PATH}`,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const args = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(args[0], join(jobDir, 'agentic-job'));
+  assert.equal(args[1], 'run');
+  assert.deepEqual(args.slice(-2), ['--runner-home', home]);
 });
 
 test('apply applies only what check accepted, whatever the caller\'s gate', () => {
@@ -413,36 +423,30 @@ test('the source an agent job takes its actions from is the policy call\'s own',
 // after the host is secured. secure-host knows nothing of inference or
 // sessions: the agent job checks the proxy, and run reads the endpoint.
 test('the agent job installs the trusted binary and checks the proxy before setup', () => {
-  const secure = readFileSync(join(__dirname, '../secure-host/internal/action.yml'), 'utf8');
-  assert.doesNotMatch(secure, /inference|session/i);
+  const forwarder = readFileSync(join(__dirname, '../secure-host/action.yml'), 'utf8');
+  assert.doesNotMatch(forwarder, /inference|session/i);
   assert.match(policy, /"\$JOB_DIR\/bin\/agentic-job" config/);
   assert.ok(policy.split('agentic-job-policy\n')[1].split('\n  activate:')[0].includes('.agentic-job/config.toml'));
   assert.doesNotMatch(policy, /CONFIG_BINARY/);
   assert.ok(prepare.includes('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job'));
   assert.ok(prepare.indexOf('artifact-ids:') < prepare.indexOf('- name: Install the binary'));
-  const forwarder = readFileSync(join(__dirname, '../secure-host/action.yml'), 'utf8');
-  const review = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
-  for (const [file, source] of [['agent.yml', agentCall], ['example-compose.yml', compose], ['review.yml', review]]) {
+  // review.yml's agent job is agent.yml's.
+  for (const [file, source] of [['agent.yml', agentCall], ['example-compose.yml', compose]]) {
     const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
     assert.equal([...agent.matchAll(/agentic-job secure-host inference/g)].length, 1, file);
     assert.ok(agent.includes('- name: Check inference proxy reachability\n' +
       '        run: agentic-job secure-host inference .agentic-job/config.toml\n'), file);
-    // agent.yml's host is the new action's, which takes the policy job's
+    // The host is the new action's, which takes the policy job's
     // configuration but for the setup script, and that is all it writes.
-    const own = file === 'agent.yml'
-      ? '        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"\n'
-      : '';
+    const own = '        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"\n';
+    assert.ok(agent.includes(own), file);
     assert.doesNotMatch(agent.replace(own, ''), / config /, file);
-    assert.ok(agent.includes(file === 'agent.yml' ? 'config: ${{ runner.temp }}/agentic-job-host.toml' : 'config: .agentic-job/config.toml'), file);
+    assert.ok(agent.includes('config: ${{ runner.temp }}/agentic-job-host.toml'), file);
     const expanded = agent.replace('uses: ./.agentic-job-source/prepare', prepare)
-      .replace('uses: ./.agentic-job-source/secure-host/internal', secure)
       .replace('uses: ./.agentic-job-source/secure-host', forwarder)
       .replace('uses: ./.agentic-job-source/run', run);
-    const names = file === 'agent.yml'
-      ? ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability', "The host's configuration",
-        "Refuse the old action's inputs", 'The setup script', "The session's endpoint", 'Prove the host is secured', 'Run the agent']
-      : ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability',
-        'Write the configuration', 'Secure the host', "The session's endpoint", 'Prove the host is secured', 'Run the agent'];
+    const names = ['Install the binary', 'Write what the run is called', 'Check inference proxy reachability', "The host's configuration",
+      "Refuse the old action's inputs", 'The setup script', "The session's endpoint", 'Prove the host is secured', 'Run the agent'];
     let position = 0;
     for (const name of names) {
       position = expanded.indexOf(`- name: ${name}\n`, position);
@@ -544,17 +548,18 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   assert.deepEqual(granted(job('agent'), '    uses:'), reads);
   assert.doesNotMatch(agentCall + job('agent'), /^ *id-token:/m);
   // The agent is the runner's user, as every step after secure-host is:
-  // the job holds no secret but the run token, no git credential, and
-  // neither the second user's action nor its way in.
-  assert.deepEqual([...agentCall.matchAll(/secrets\.([\w]+)/g)].map(([, name]) => name), ['INFERENCE_RUN_TOKEN']);
+  // the job holds no secret but the run token and no git credential, and
+  // a network step's, which only that step gets, before secure-host
+  // (review.yml's test). agentic-job.yml passes no network step's.
+  assert.deepEqual([...agentCall.matchAll(/secrets\.([\w]+)/g)].map(([, name]) => name),
+    ['NETWORK_SECRET', 'INFERENCE_RUN_TOKEN']);
   assert.deepEqual([...agentCall.split('    secrets:\n')[1].split('    outputs:\n')[0].matchAll(/^ {6}([\w]+):$/gm)]
-    .map(([, name]) => name), ['INFERENCE_RUN_TOKEN']);
+    .map(([, name]) => name), ['INFERENCE_RUN_TOKEN', 'NETWORK_SECRET']);
   assert.deepEqual([...job('agent').split('    secrets:\n')[1].split('    with:\n')[0].matchAll(/^ {6}([\w]+):/gm)]
     .map(([, name]) => name), ['INFERENCE_RUN_TOKEN']);
   const checkouts = agent.split('\n      - ').filter(step => step.startsWith('uses: actions/checkout@'));
   assert.equal(checkouts.length, 2);
   for (const step of checkouts) assert.match(step, /^ {10}persist-credentials: false$/m);
-  assert.doesNotMatch(agentCall, /secure-host\/internal|sandbox exec/);
   assert.match(agent, /^ {10}runner-home: \$\{\{ runner\.temp \}\}\/agent-home$/m);
   const register = job('register');
   assert.deepEqual(granted(register, '    outputs:\n'), { 'id-token': 'write' });
@@ -601,7 +606,7 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   assert.match(owned, /^          github-token: \$\{\{ github.token \}\}$/m);
   const ownedPermissions = owned.split('    permissions:\n')[1].split('    outputs:\n')[0];
   assert.deepEqual(ownedPermissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean).sort(),
-    ['actions: read', 'contents: read', 'id-token: write', 'issues: read', 'pull-requests: read']);
+    ['actions: read', 'contents: read', 'issues: read', 'pull-requests: read']);
   // GitHub refuses a whole called workflow whose job asks for more than
   // the call was granted, a skipped job's included: the identity token
   // for agentic-job.yml's register job.
@@ -671,7 +676,7 @@ test('the wrapper forwards every setting to the policy call as it is', () => {
 test('no workflow or action of this repository joins a network itself', () => {
   const root = join(__dirname, '..');
   const files = [...readdirSync(join(root, '.github/workflows')).map(file => `.github/workflows/${file}`),
-    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml', 'secure-host/internal/action.yml'];
+    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml'];
   for (const file of files) {
     const text = readFileSync(join(root, file), 'utf8');
     assert.doesNotMatch(text, /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);
@@ -682,46 +687,91 @@ test('no workflow or action of this repository joins a network itself', () => {
 });
 
 // review.yml's network step is the caller's: a local action from the
-// agent job's base checkout, skipped when the caller has none, once and in
-// the agent job only, after prepare and before secure-host, so it runs
-// before anything of the agent's is on the machine.
-test('review.yml runs the caller\'s network step once, if any, before secure-host', () => {
+// base checkout, skipped when the caller has none. It runs in the two
+// jobs that reach the inference proxy: the register job, before it
+// registers, and agent.yml's, which review.yml asks for it, after prepare
+// and admission and before secure-host, so before anything of the
+// agent's is on the machine. agentic-job.yml does not ask for it.
+test('review.yml runs the caller\'s network step once a job, if any, before secure-host', () => {
   const root = join(__dirname, '..');
   const review = readFileSync(join(root, '.github/workflows/review.yml'), 'utf8');
   const step = './.github/agentic-job/network';
   const body = review.split(/^jobs:\n/m)[1];
   const jobs = Object.fromEntries(body.split(/^(?=  [-\w]+:\n)/m)
     .map(text => [text.match(/^  ([-\w]+):\n/)[1], text]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'submit', 'apply', 'status']);
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'register', 'agent', 'check', 'submit', 'apply', 'status']);
   for (const [name, text] of Object.entries(jobs)) {
-    if (name !== 'agent') assert.ok(!text.includes(step), name);
+    if (name !== 'register') assert.ok(!text.includes(step), name);
   }
-  // The base checkout it is read from is the first, at the policy's ref.
-  assert.match(jobs.agent, /steps:\n {6}# [^\n]*\n {6}- uses: actions\/checkout@[0-9a-f]{40} # [^\n]*\n {8}with:\n {10}ref: \$\{\{ needs\.policy\.outputs\.ref \}\}\n {10}persist-credentials: false\n/);
-  const uses = [...jobs.agent.matchAll(/^ {6}(?:- )? *uses: (\S+)/gm)].map(([, action]) => action);
-  assert.equal(uses.filter(action => action === step).length, 1, uses.join('\n'));
-  assert.equal(uses.filter(action => !/^(?:actions\/checkout@[0-9a-f]{40}|\.\/\.agentic-job-source\/)/.test(action)).length, 1,
-    uses.join('\n'));
-  const at = uses.indexOf(step);
-  assert.equal(uses[at - 1], './.agentic-job-source/prepare');
-  assert.equal(uses[at + 1], './.agentic-job-source/secure-host/internal');
-  // Off unless the caller has one.
-  assert.match(jobs.agent, /if: \$\{\{ hashFiles\('\.github\/agentic-job\/network\/action\.yml'\) != '' \}\}\n {8}uses: \.\/\.github\/agentic-job\/network /);
+  const hashed = /if: \$\{\{ (?:inputs\.network && )?hashFiles\('\.github\/agentic-job\/network\/action\.yml'\) != '' \}\}\n {8}uses: \.\/\.github\/agentic-job\/network /;
+  // The register job: its base checkout, at the policy's ref, then the
+  // step, then the policy job's binary alone.
+  const register = jobs.register;
+  assert.match(register, /\n    permissions:\n      contents: read\n      id-token: write\n    #/);
+  const uses = [...register.matchAll(/^ {6}(?:- )? *uses: (\S+)/gm)].map(([, action]) => action);
+  assert.deepEqual(uses.map(use => use.split('@')[0]), ['actions/checkout', step, 'actions/download-artifact']);
+  assert.match(register, /- uses: actions\/checkout@[0-9a-f]{40} # [^\n]*\n {8}with:\n {10}ref: \$\{\{ needs\.policy\.outputs\.ref \}\}\n {10}persist-credentials: false\n/);
+  assert.match(register, hashed);
+  assert.doesNotMatch(register, /secrets\.|github\.token|agentic-job-source/);
+  assert.ok(register.split('\n\n')[0].endsWith('"$JOB_DIR/agentic-job" register --config "$JOB_DIR/config.toml" --output "$GITHUB_OUTPUT"'));
+  // The agent job: agent.yml, with the step, the run token as its secret.
+  assert.match(jobs.agent, /\n    uses: \.\/\.github\/workflows\/agent\.yml # /);
+  assert.match(jobs.agent, /\n    secrets:\n      INFERENCE_RUN_TOKEN: \$\{\{ needs\.register\.outputs\.run-token \}\}\n      NETWORK_SECRET: \$\{\{ needs\.register\.outputs\.network-secret \}\}\n    with:\n/);
+  // The network step's `secret` output, the agent job's join, goes from
+  // the register job to agent.yml's network step and nowhere else.
+  assert.match(register, /\n {6}- name: The caller's network step\n {8}id: network\n/);
+  assert.match(register, /\n    outputs:\n(?: {6}.*\n)*? {6}network-secret: \$\{\{ steps\.network\.outputs\.secret \}\}\n/);
+  assert.deepEqual([...review.matchAll(/.*(?:network-secret|NETWORK_SECRET|steps\.network\.).*/g)].map(([text]) => text.trim()),
+    ['network-secret: ${{ steps.network.outputs.secret }}', 'NETWORK_SECRET: ${{ needs.register.outputs.network-secret }}']);
+  assert.deepEqual([...agentCall.matchAll(/.*secrets\.NETWORK_SECRET.*/g)].map(([text]) => text),
+    ['          secret: ${{ secrets.NETWORK_SECRET }}']);
+  assert.ok(agentCall.includes(`uses: ${step} # zizmor: ignore[self-repository] The caller's own action at the policy-decided commit.\n        with:\n          secret: \${{ secrets.NETWORK_SECRET }}\n`));
+  assert.match(jobs.agent, /\n      network: true\n/);
+  assert.doesNotMatch(jobs.agent, /id-token/);
+  assert.doesNotMatch(wrapper, /\n {6}network:/);
+  const agent = agentCall.split('\n  agent:\n')[1];
+  const agentUses = [...agent.matchAll(/^ {6}(?:- )? *uses: (\S+)/gm)].map(([, action]) => action)
+    .filter(action => !action.startsWith('actions/download-artifact@'));
+  assert.equal(agentUses.filter(action => action === step).length, 1);
+  const at = agentUses.indexOf(step);
+  assert.equal(agentUses[at - 1], './.agentic-job-source/prepare');
+  assert.equal(agentUses[at + 1], './.agentic-job-source/secure-host');
+  assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf(`uses: ${step}`));
+  // Off unless asked for and the caller has one.
+  assert.match(agent, hashed);
+  assert.match(agent, /if: \$\{\{ inputs\.network && hashFiles/);
+  assert.match(agentCall, /\n      network:\n(?: {8}[^\n]*\n)*? {8}type: boolean\n {8}default: false\n/);
   // This repository's own, a composite action whose actions are pinned.
   const own = readFileSync(join(root, '.github/agentic-job/network/action.yml'), 'utf8');
   assert.match(own, /^  using: composite$/m);
   const pinned = [...own.matchAll(/^ +(?:- )?uses: (\S+)/gm)].map(([, action]) => action);
   assert.ok(pinned.length > 0);
   for (const action of pinned) assert.match(action, /^[-\w]+\/[-\w./]+@[0-9a-f]{40}$/, action);
+  // The runner logs each output it sets with step debug logging on, the
+  // minted key's included: the register job refuses that first, before
+  // it requests any credential, as `agentic-job register` does.
+  const steps = [...own.matchAll(/^    - name: (.*)$/gm)].map(([, name]) => name);
+  assert.equal(steps[0], 'Refuse step debug logging');
+  assert.ok(steps.indexOf('Mint the agent job\'s key') > 0);
+  assert.match(own, /- name: Refuse step debug logging\n {6}if: \$\{\{ inputs\.secret == '' \}\}\n/);
+  const guard = own.split('- name: Refuse step debug logging\n')[1].split('      run: |\n')[1]
+    .split(/\n    [^ ]/)[0].split('\n').map(line => line.slice(8)).join('\n');
+  for (const [value, status] of [['1', 1], ['0', 1], ['', 0], [undefined, 0]]) {
+    const env = { ...process.env };
+    delete env.RUNNER_DEBUG;
+    if (value !== undefined) env.RUNNER_DEBUG = value;
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', guard], { encoding: 'utf8', env });
+    assert.equal(result.status, status, `RUNNER_DEBUG=${value}`);
+    if (status) assert.match(result.stdout, /^::error::Refusing to mint/);
+  }
 });
 
 // An MCP server's credential and the provider's key would be readable by
 // an agent that is the runner's user, as agent.yml's is: agentic-job.yml
 // still takes both, so that callers that pass them parse, and passes on
 // neither (`run --runner-home` refuses the configurations that need them).
-// The run action, as a caller-owned agent job with a second user uses
-// it, gives the MCP credential to the step that runs `agentic-job run`
-// alone.
+// The run action gives the MCP credential to the step that runs
+// `agentic-job run` alone, which refuses it with `--runner-home`.
 test('agentic-job.yml passes no MCP credential or inference key to its agent job', () => {
   for (const name of ['MCP_TOKEN', 'INFERENCE_API_KEY']) {
     assert.doesNotMatch(wrapper + agentCall, new RegExp(`secrets\\.${name}`), name);
@@ -738,31 +788,14 @@ test('agentic-job.yml passes no MCP credential or inference key to its agent job
   assert.match(holder[0], /"\$binary" run --policy/);
 });
 
-// The provider's key, with `api-key`, reaches two steps of review.yml's
-// agent job, which has a second user, and nothing else: its check before
-// secure-host, which fails a bad key before the minutes of setup, and
-// `run`, outside the sandbox. The check follows the caller's network
-// step, which never gets it, and the policy call takes the mode from
-// repository variables.
-for (const file of ['review.yml']) {
-  test(`${file} checks the inference API key before secure-host and gives it to run alone`, () => {
-    const source = readFileSync(join(__dirname, '../.github/workflows', file), 'utf8');
-    const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
-    const uses = [...source.matchAll(/secrets\.INFERENCE_API_KEY/g)].length;
-    assert.equal(uses, 2, file);
-    const check = "      - name: Check the inference API key\n        env:\n          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}\n" +
-      '        run: agentic-job check-key --config .agentic-job/config.toml\n';
-    assert.ok(agent.includes(check), file);
-    assert.match(agent, /\n {10}inference-api-key: \$\{\{ secrets\.INFERENCE_API_KEY \}\}\n/);
-    const at = text => { const index = agent.indexOf(text); assert.ok(index >= 0, `${file}: ${text}`); return index; };
-    const order = ['uses: ./.agentic-job-source/prepare',
-      ...(file === 'review.yml' ? ['uses: ./.github/agentic-job/network'] : []),
-      '- name: Check the inference API key', 'uses: ./.agentic-job-source/secure-host', 'uses: ./.agentic-job-source/run'].map(at);
-    assert.deepEqual(order, [...order].sort((a, b) => a - b), file);
-    assert.match(source, /^      INFERENCE_API_KEY:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
-    if (file === 'review.yml') {
-      assert.ok(source.includes("      inference-register: ${{ vars.INFERENCE_REGISTER || 'github-oidc' }}\n"));
-      assert.ok(source.includes('      inference-provider: ${{ vars.INFERENCE_PROVIDER }}\n'));
-    }
-  });
-}
+// review.yml, as agentic-job.yml, still declares the provider's key, so
+// that callers that pass it parse, and passes it to no job: its agent is
+// the runner's user, and agent.yml refuses `api-key`. The policy call
+// takes the mode from repository variables.
+test('review.yml declares the inference API key and passes it to no job', () => {
+  const source = readFileSync(join(__dirname, '../.github/workflows/review.yml'), 'utf8');
+  assert.doesNotMatch(source, /secrets\.INFERENCE_API_KEY|check-key|inference-api-key/);
+  assert.match(source, /^      INFERENCE_API_KEY:\n(?: +#[^\n]*\n)*? +(?:description: [^\n]*\n +)?required: false$/m);
+  assert.ok(source.includes("      inference-register: ${{ vars.INFERENCE_REGISTER || 'github-oidc' }}\n"));
+  assert.ok(source.includes('      inference-provider: ${{ vars.INFERENCE_PROVIDER }}\n'));
+});

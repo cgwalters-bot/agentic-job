@@ -2,8 +2,8 @@
 # token of the register job before it arrives as a secret: GitHub masks a
 # secret of a called workflow in every log of its jobs, and nothing but a
 # call's `secrets:` can make a value from another job one
-# (docs/workflow.md#the-run-token). Called only by agentic-job.yml, at its
-# own commit.
+# (docs/workflow.md#the-run-token). Called only by agentic-job.yml and
+# review.yml, at their own commit.
 name: agentic-job agent
 
 on:
@@ -30,16 +30,30 @@ on:
           image, unverified. Empty for the pinned image
         type: string
         default: ""
+      network:
+        description: >-
+          Run the caller's .github/agentic-job/network action, from the checkout of the policy job's
+          commit, as root before secure-host: review.yml's step for reaching the inference proxy
+        type: boolean
+        default: false
     # The agent is the runner's user, as every step after secure-host is,
     # and can read whatever the job holds: so the job holds nothing but
-    # the run token, which is the agent's to use anyway. No repository
-    # secret comes here; an inference key or MCP credential would need a
-    # second user (`run --runner-home` refuses both).
+    # the run token, which is the agent's to use anyway, and the network
+    # step's key, spent before the agent starts. No repository secret
+    # comes here; an inference key or MCP credential would need a second
+    # user (`run --runner-home` refuses both).
     secrets:
       # The register job's output: the broker's run token for
       # `github-oidc`, empty for every other mode. Only `run` gets it, and
       # gives the agent this token: narrow, capped and expiring.
       INFERENCE_RUN_TOKEN:
+        required: false
+      # With `network`: what the caller's network step left in the job
+      # before this one (review.yml's register job), for a join that needs
+      # no identity token, such as a single-use key; given to that step
+      # alone, as its `secret` input. It has to be spent there: anything
+      # still valid after secure-host is the agent's.
+      NETWORK_SECRET:
         required: false
     outputs:
       exit:
@@ -54,6 +68,8 @@ on:
         value: ${{ jobs.agent.outputs.safe-outputs-artifact-digest }}
       session-endpoint:
         value: ${{ jobs.agent.outputs.session-endpoint }}
+      job:
+        value: ${{ jobs.agent.outputs.job }}
 
 jobs:
   agent:
@@ -79,6 +95,8 @@ jobs:
       # With `session`: where the operator attaches; also in the job's
       # summary from when the agent starts.
       session-endpoint: ${{ steps.run.outputs.session-endpoint }}
+      # This job's ID, for review.yml's footer to link (#592).
+      job: ${{ job.check_run_id }}
     # The same steps a caller-owned agent job has, with no steps of the
     # caller's between prepare and secure-host or after run.
     steps:
@@ -113,6 +131,16 @@ jobs:
         env:
           CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
         run: python3 .agentic-job-source/workflow/runner-setup.py admit
+      # With `network`: the deployment's step for reaching the inference
+      # proxy (a VPN or tailnet join), as root before anything of the
+      # agent's is on the machine. It is the caller's, from the policy
+      # job's commit (review.yml's base, never a pull request's head);
+      # absent, nothing runs.
+      - name: The caller's network step
+        if: ${{ inputs.network && hashFiles('.github/agentic-job/network/action.yml') != '' }}
+        uses: ./.github/agentic-job/network # zizmor: ignore[self-repository] The caller's own action at the policy-decided commit.
+        with:
+          secret: ${{ secrets.NETWORK_SECRET }}
       # Where the configuration names an inference proxy: a TCP connection
       # to it as the runner's user, before setup, so that a runner off the
       # proxy's network fails here and says so rather than in a probe of

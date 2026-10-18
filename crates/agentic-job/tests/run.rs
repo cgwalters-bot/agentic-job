@@ -483,7 +483,7 @@ fn review_refuses_invalid_policy_and_heads_before_starting_or_spending() {
         policy["kind"] = json!(kind);
         job.write("policy.json", &policy.to_string());
         let got = Finished::of(
-            job.command(&config("no-such-sandbox-user", &plain(&proxy)))
+            job.command(&config("no-such-user", &plain(&proxy)))
                 .args(["--review-head", &head])
                 .output()
                 .unwrap(),

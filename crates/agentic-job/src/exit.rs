@@ -22,7 +22,7 @@ pub enum Exit {
     NotStarted,
     /// `run`: the timeout stopped the agent.
     Timeout,
-    /// `sandbox exec`: the exit status of the command it ran, which is
+    /// `sandbox timed`: the exit status of the command it ran, which is
     /// that command's to choose.
     Command(u8),
 }

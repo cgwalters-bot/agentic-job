@@ -4,8 +4,8 @@
 # docs/secure-host.md says what changes at a later one.
 #
 # The old action's other inputs have no counterpart there. A job that set
-# one asked for something (root kept, another sandbox user, a script run
-# as it, a binary of its own) that the new action would not do, so it
+# one asked for something (root kept, another runner user, a script run
+# by setup, a binary of its own) that the new action would not do, so it
 # fails here rather than running a host other than the one it asked for.
 #
 # Every input reaches a step through its environment and is never pasted
@@ -46,9 +46,6 @@ inputs:
   stop-services:
     description: Removed; set nothing
     default: ""
-  sandbox-user:
-    description: Removed; set nothing
-    default: ""
   runner-user:
     description: Removed; set nothing
     default: ""
@@ -73,24 +70,24 @@ runs:
         DENY_RUNNER_METADATA: ${{ inputs.deny-runner-metadata }}
         EGRESS_POLICY: ${{ inputs.egress-policy }}
         STOP_SERVICES: ${{ inputs.stop-services }}
-        SANDBOX_USER: ${{ inputs.sandbox-user }}
         RUNNER_USER: ${{ inputs.runner-user }}
         SCRIPT: ${{ inputs.script }}
         BINARY: ${{ inputs.binary }}
         BUILD: ${{ inputs.build }}
       run: |
         set=()
-        for name in LOCK EGRESS DENY_RUNNER_METADATA EGRESS_POLICY STOP_SERVICES SANDBOX_USER RUNNER_USER SCRIPT BINARY BUILD; do
+        for name in LOCK EGRESS DENY_RUNNER_METADATA EGRESS_POLICY STOP_SERVICES RUNNER_USER SCRIPT BINARY BUILD; do
           if [ -n "${!name}" ]; then name=${name,,}; set+=("${name//_/-}"); fi
         done
         if [ "${#set[@]}" != 0 ]; then
-          echo "::error::secure-host now forwards to cgwalters-forge/actions/secure-host, which takes only config, check and image-archive, not ${set[*]}: drop them, or name cgwalters-forge/agentic-job/secure-host at an earlier commit; an agent job of your own names ./.agentic-job-source/secure-host/internal (docs/secure-host.md)"
+          echo "::error::secure-host now forwards to cgwalters-forge/actions/secure-host, which takes only config, check and image-archive, not ${set[*]}: drop them, or name cgwalters-forge/agentic-job/secure-host at an earlier commit (docs/secure-host.md)"
           exit 1
         fi
     # Without a config, this repository's hosted one, as the old action
     # had: the new action's own default turns the egress proxy off, and
-    # the v0.6.1 image still runs `sandbox exec`, so a caller that ran
-    # untrusted code through it would silently lose the proxy's rules.
+    # the v0.6.1 image's binary still has the old way into its second
+    # user, so a caller that ran untrusted code that way would silently
+    # lose the proxy's rules.
     - uses: cgwalters-forge/actions/secure-host@5906e6745c4e3e1c68b698dacf409a452c727d08 # main, with secure-host:v0.6.1
       with:
         config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}

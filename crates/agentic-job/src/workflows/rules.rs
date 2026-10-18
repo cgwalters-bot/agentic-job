@@ -751,7 +751,6 @@ mod tests {
             "config: host.toml, lock: true",
             "egress-policy: policy.toml",
             "stop-services: ssh",
-            "sandbox-user: runner",
             "script: setup.sh",
             "binary: /tmp/decoy",
             "build: '${{ inputs.build }}'",

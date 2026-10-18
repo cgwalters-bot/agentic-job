@@ -12,7 +12,6 @@ use crate::exit::Exit;
 pub mod check;
 pub mod egress;
 pub mod enter;
-pub mod exec;
 pub mod helper;
 pub mod host;
 pub mod local;
@@ -31,8 +30,6 @@ pub enum Command {
     Setup(setup::Args),
     /// Probe the sandbox as the sandbox user, each probe with a positive control
     Check(check::Args),
-    /// Run one command as the sandbox user, with none of this environment
-    Exec(exec::Args),
     /// Run secure-host's setup or probes, and add their time to the job summary
     #[command(hide = true)]
     Timed(timed::Args),
@@ -68,7 +65,6 @@ impl Command {
         match self {
             Self::Setup(args) => setup::run(args),
             Self::Check(args) => check::run(args),
-            Self::Exec(args) => exec::run(args),
             Self::Timed(args) => timed::run(args),
             Self::ProbeLocal => local::run(),
             Self::EgressProxy(args) => proxy::run(args),

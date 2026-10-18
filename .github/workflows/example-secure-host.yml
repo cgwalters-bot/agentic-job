@@ -3,10 +3,10 @@
 # docs/secure-host.md says what the step does and what a job has to know.
 #
 # The order is the whole of it. Everything that needs root comes before
-# the step, which is the last thing in the job to have it. After it the
-# job's steps are the runner's user's without sudo, and what the job does
-# not trust runs as the sandbox user, which has none of the job's files,
-# tokens or environment.
+# the step, which is the last thing in the job to have it. After it every
+# step is the runner's user's, without sudo, the cloud metadata service or
+# a container daemon, and a world-writable file can be changed only by its
+# owner.
 #
 # CI calls this file on every pull request and push, so what it shows is
 # what runs.
@@ -15,21 +15,23 @@ name: example-secure-host
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      image-artifact:
+        description: >-
+          For testing an unreleased secure-host image: the name of an artifact of this workflow run
+          holding build.yml's secure-host.tar, which runs as root in place of the pinned, attested
+          image, unverified. Empty for the pinned image
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
   build:
-    # systemd 257 or later, for run0: ubuntu-24.04 is too old.
+    # systemd 257 or later: ubuntu-24.04 is too old.
     runs-on: ubuntu-26.04
     timeout-minutes: 30
-    defaults:
-      run:
-        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
-    outputs:
-      mask-probe: ${{ steps.trusted-log.outputs.mask-probe }}
-      masked-control: ${{ steps.trusted-log.outputs.masked-control }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,111 +39,36 @@ jobs:
       # Restored here, and saved by its post step when the job ends, long
       # after the lock: a cache is the runner's user's own files.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # agentic-job's internal action, which still has the sandbox user
-      # and `sandbox exec`. A job of another repository that needs neither
-      # names the published one by the commit it has read:
+      - if: ${{ inputs.image-artifact != '' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.image-artifact }}
+          path: ${{ runner.temp }}/image
+      # The forwarder to cgwalters-forge/actions/secure-host. A job of
+      # another repository names that action by the commit it has read:
       #   uses: cgwalters-forge/actions/secure-host@COMMIT
       - name: Secure the host
-        id: host
-        uses: ./secure-host/internal # zizmor: ignore[self-repository] Exercise the checked-out action under test.
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
+        with:
+          image-archive: ${{ inputs.image-artifact != '' && format('{0}/image/secure-host.tar', runner.temp) || '' }}
       - name: No step has root from here on
-        shell: bash
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           if docker info > /dev/null 2>&1; then echo "::error::the container daemon still answers"; exit 1; fi
       # An ordinary step: the runner's user, its toolchain, its checkout.
       - name: Build and test
-        shell: bash
         run: cargo test --locked --lib
-      # What the job does not trust gets a copy of the source and nothing
-      # else: the sandbox user cannot read the checkout where it is.
-      - name: Hand the source to the sandbox user
-        shell: bash
-        run: git archive --prefix=src/ HEAD egress | agentic-job sandbox exec -- tar -x
-      # No shell override: GitHub must honour the job's sandbox default.
-      - name: The default shell runs as the sandbox user
-        run: test "$(id -un)" != runner
-      - name: Test as the sandbox user
-        env:
-          RUNNER_HOME: /home/runner
+      - name: Test the egress policy
         run: |
-          test "$(id -un)" != runner
-          # Nothing of the job came along: no variable of the step's, no
-          # file of the runner's, no root.
-          test -z "${RUNNER_HOME:-}${GITHUB_WORKSPACE:-}${ACTIONS_RUNTIME_TOKEN:-}"
-          if ls /home/runner > /dev/null 2>&1; then echo "the runner's home is open"; exit 1; fi
-          if sudo -n true 2> /dev/null; then echo "the sandbox user has sudo"; exit 1; fi
-          # Out through the egress proxy, and nowhere else.
+          # The network is open for reads.
           curl --fail --silent --show-error --output /dev/null https://github.com/
-          cd src
-          python3 -m unittest discover -s egress 2>&1 | tee ../report.txt
-      # Back out as bytes on a pipe. What the sandbox user wrote is data.
-      - name: Take the report back
-        shell: bash
-        env:
-          SANDBOX_USER: ${{ steps.host.outputs.sandbox-user }}
-          SANDBOX_HOME: ${{ steps.host.outputs.sandbox-home }}
-        run: |
-          agentic-job sandbox exec -- cat report.txt > "$RUNNER_TEMP/report.txt"
+          python3 -m unittest discover -s egress 2>&1 | tee "$RUNNER_TEMP/report.txt"
           # unittest ends on `OK`, or `OK (skipped=N)`: test_live.py skips
           # here, where mitmproxy is not installed; the lint job runs it.
           if ! grep -Eqx 'OK( \(skipped=[0-9]+\))?' "$RUNNER_TEMP/report.txt"; then
             echo "::error::the egress tests did not end with OK"
             exit 1
           fi
-          echo "tested as $SANDBOX_USER in $SANDBOX_HOME" | tee -a "$GITHUB_STEP_SUMMARY"
-      # A command's exit state is the step's.
-      - name: A failure in the sandbox fails the step
-        shell: bash
-        run: |
-          state=0; agentic-job sandbox exec -- sh -c 'exit 7' || state=$?
-          test "$state" = 7
-      # These are hostile log bytes, not requests to the runner. Exercise
-      # both readers and an unterminated line; no new token is needed.
-      # set-env is honoured here only so that the FORGED_ENV check below
-      # is not vacuous: the variable never reaches the sandbox, and this
-      # job has no secrets and a read-only token.
-      - name: Sandbox output cannot command the runner
-        id: hostile-log
-        env:
-          ACTIONS_ALLOW_UNSECURE_COMMANDS: "true" # zizmor: ignore[insecure-commands] Read-only, secret-free positive control for sandbox log escaping; this variable is not passed into the sandbox.
-        run: |
-          printf '::set-output name=forged::stdout\n::add-mask::sandbox-mask-probe\n'
-          printf '::set-output name=forged_stderr::stderr\n::add-mask::sandbox-mask-probe\n' >&2
-          printf '::set-env name=FORGED_ENV::bad\n##[warning]not an annotation\n' >&2
-          printf 'partial\r'
-      # Filters, reordering and two streams on one log: none of them can
-      # reassemble a command from escaped output.
-      - name: Filtered and overlapping sandbox output cannot command the runner
-        shell: bash
-        id: hostile-overlap
-        run: |
-          forge='printf "::set-output name=forged_overlap::x\n::add-mask::sandbox-mask-probe\n"'
-          agentic-job sandbox exec -- sh -c "sleep 2; $forge" | tee "$RUNNER_TEMP/a.log" & a=$!
-          agentic-job sandbox exec -- sh -c "$forge; $forge >&2" 2>&1 | sort
-          agentic-job sandbox exec -- sh -c "$forge" | tail -n 1
-          wait "$a"
-      # A positive control: without it, the checks below would also pass
-      # if the runner stopped honouring set-output at all.
-      - name: Trusted output can command the runner
-        shell: bash
-        id: control
-        run: echo '::set-output name=control::honoured'
-      - name: Trusted outputs are unchanged
-        shell: bash
-        id: trusted-log
-        env:
-          CONTROL: ${{ steps.control.outputs.control }}
-          FORGED_STDOUT: ${{ steps.hostile-log.outputs.forged }}
-          FORGED_STDERR: ${{ steps.hostile-log.outputs.forged_stderr }}
-          FORGED_OVERLAP: ${{ steps.hostile-overlap.outputs.forged_overlap }}
-        run: |
-          test "$CONTROL" = honoured
-          test -z "$FORGED_STDOUT$FORGED_STDERR$FORGED_OVERLAP${FORGED_ENV:-}"
-          echo 'mask-probe=sandbox-mask-probe' >> "$GITHUB_OUTPUT"
-          # A negative control: a trusted mask does keep a job output out.
-          echo '::add-mask::trusted-mask-probe'
-          echo 'masked-control=trusted-mask-probe' >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: secure-host-report
@@ -151,21 +78,4 @@ jobs:
       # The action ran this already; again at the end, after everything
       # the job did, the host is still what it proved.
       - name: The host is still secure
-        shell: bash
         run: agentic-job sandbox check
-
-  # The runner refuses to export a masked job output (the trusted control
-  # shows it still does). This checks add-mask without fetching logs or
-  # giving either job a write-capable credential.
-  log-commands:
-    needs: build
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - name: Sandbox did not install a mask
-        env:
-          MASK_PROBE: ${{ needs.build.outputs.mask-probe }}
-          MASKED_CONTROL: ${{ needs.build.outputs.masked-control }}
-        run: |
-          test "$MASK_PROBE" = sandbox-mask-probe
-          test -z "$MASKED_CONTROL"

@@ -65,7 +65,7 @@ refused: the forwarder fails on the old action's `lock`, `egress`,
 `deny-runner-metadata` and `build`, and at an old commit their admitted values
 only restated its defaults or chose how to get the binary; `image-archive`
 runs an unverified image; `runner-user`
-and `sandbox-user` redirect identities; `stop-services` replaces the daemon
+and the old action's other user redirect identities; `stop-services` replaces the daemon
 list; `binary` replaces trusted code; `egress-policy` and `script` select
 unchecked files. `config` is also refused, even with `lock: true`: this checker
 does not validate configuration files, which can redirect the runner lock.

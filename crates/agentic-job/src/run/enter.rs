@@ -133,7 +133,7 @@ impl Sandbox {
     /// (`session::process::SandboxUser`).
     pub fn new(config: &Config) -> Result<Self> {
         let entry = Entry::new(config)?;
-        // As `sandbox exec`: after the agent, the next check probes.
+        // After the agent, the next check probes.
         crate::sandbox::check::forget_passed()?;
         Ok(Self {
             user: entry.user().name.clone(),

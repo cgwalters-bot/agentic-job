@@ -381,35 +381,8 @@ test('E2E callers, concurrency and apt safeguards remain wired', () => {
     }
   }
   assert.equal(operations, 3);
-  const action = fs.readFileSync(path.join(__dirname, '../secure-host/internal/action.yml'), 'utf8');
-  const apt = action.indexOf('run: sudo /usr/local/bin/agentic-job secure-host apt\n');
-  assert.ok(action.indexOf('- name: Install the binary') < apt && apt < action.indexOf('- name: Write the configuration'));
   const binary = fs.readFileSync(path.join(__dirname, '../secure-host/binary.sh'), 'utf8');
   assert.match(binary, /sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 \\\n\s+install /);
-});
-
-// The action's steps before setup are the binary's, and a shell script
-// fetches it, so the action runs no Node or Python. The binary admits the
-// host before it is installed.
-test('the action admits the host, tunes apt and loads the policy with its binary, before setup', () => {
-  const action = fs.readFileSync(path.join(__dirname, '../secure-host/internal/action.yml'), 'utf8');
-  const steps = action.slice(action.indexOf('  steps:\n'));
-  assert.match(steps, /^  steps:\n(?:    #[^\n]*\n)*    - name: Get the binary\n/);
-  assert.doesNotMatch(steps, /\bnode\b|\.mjs|\bpython3?\b|\.py\b/);
-  assert.match(steps, /GH_TOKEN: \$\{\{ github.token \}\}/);
-  // binary.sh and hosted.toml stay beside the public action.
-  assert.match(steps, /"\$\{CONFIG:-\$ACTION\/\.\.\/hosted\.toml\}"/);
-  assert.match(steps, /bash "\$ACTION\/\.\.\/binary\.sh" get --out "\$RUNNER_TEMP\/secure-host\/bin" "\$@"\n/);
-  const order = ['- name: Get the binary', '"$BINARY" secure-host supported\n', '- name: Install the binary',
-    'run: sudo /usr/local/bin/agentic-job secure-host apt\n', '- name: Write the configuration',
-    '- name: Load the world-write policy', 'run: agentic-job sandbox timed setup\n'];
-  const at = order.map(text => steps.indexOf(text));
-  assert.ok(at.every((index, i) => index >= 0 && (i === 0 || at[i - 1] < index)), JSON.stringify(at));
-  // Always, with no input to switch it off; root's by path, as RHEL's sudo needs.
-  const step = action.split('    - name: Load the world-write policy\n')[1].split('\n    - ')[0];
-  assert.doesNotMatch(step, /\bif:/);
-  assert.match(step, /run: sudo \/usr\/local\/bin\/agentic-job secure-host world-write "\$\(dirname "\$BINARY"\)\/world_write\.bpf\.o"\n/);
-  assert.doesNotMatch(action, /world-write-bpf/);
 });
 
 test('world-write enforcement feeds the ruleset-required CI aggregate', () => {
@@ -484,16 +457,21 @@ test('world-write-runtime proves the policy after the action, with no passing fa
   const job = block('world-write-runtime');
   assert.match(job, /\n    runs-on: ubuntu-26\.04\n/);
   assert.match(job, /\n    permissions:\n      contents: read\n    steps:\n/);
-  // This checkout's action, binary and object, never a release's.
-  assert.match(job, /uses: \.\/secure-host\/internal # zizmor: ignore\[self-repository\] .*\n        with:\n          build: true\n/);
-  const refused = job.indexOf('      - name: The sandbox user is refused a write to a world-writable file of root\n');
-  const control = job.indexOf('      - name: The sandbox user writes its own world-writable file (control)\n');
-  assert.ok(job.indexOf('uses: ./secure-host/internal') < refused && refused < control);
+  // This revision's image and object, never a release's, through the forwarder.
+  assert.match(job, /\n    needs: \[changes, static\]\n/);
+  assert.match(job, /name: secure-host-image\n/);
+  const secure = '        uses: ./secure-host # zizmor: ignore[self-repository] ';
+  const run = job.indexOf(secure);
+  assert.ok(run > 0);
+  assert.ok(job.slice(run).startsWith(job.slice(run).split('\n')[0] +
+    '\n        with:\n          image-archive: ${{ runner.temp }}/image/secure-host.tar\n'));
+  const refused = job.indexOf("      - name: The runner's user is refused a write to a world-writable file of root\n");
+  const control = job.indexOf("      - name: The runner's user writes its own world-writable file (control)\n");
+  assert.ok(run < refused && refused < control);
   assert.match(job, /"0 666 \$\(stat -c %d \/\)"/);
   assert.match(job, /grep -qF "cannot create \$probe: Permission denied" "\$RUNNER_TEMP\/refused\.txt"/);
-  assert.match(job, /shell: agentic-job sandbox exec --stdin \{0\} -- bash -eo pipefail -s/);
   assert.match(job, /"666 \$\(stat -c %d \/\)"/);
-  assert.doesNotMatch(job, /continue-on-error|\|\| true|lock: false|filesystem-view/);
+  assert.doesNotMatch(job, /continue-on-error|\|\| true|lock-runner|filesystem-view|shell:|config:/);
 });
 
 test('secure-host-image runs the saved image through the forwarder, and probes after it exits', () => {
@@ -507,7 +485,7 @@ test('secure-host-image runs the saved image through the forwarder, and probes a
   assert.ok(run > 0);
   assert.ok(job.slice(run).startsWith(job.slice(run).split('\n')[0] +
     '\n        with:\n          image-archive: ${{ runner.temp }}/image/secure-host.tar\n'));
-  assert.doesNotMatch(job, /--pull|ghcr\.io|continue-on-error|\|\| true|podman run|sandbox exec/);
+  assert.doesNotMatch(job, /--pull|ghcr\.io|continue-on-error|\|\| true|podman run/);
   for (const after of ['if sudo -n true; then', 'systemctl is-active --quiet docker.service', 'egress-proxy.service']) {
     assert.ok(job.indexOf(after) > run, after);
   }
@@ -534,23 +512,23 @@ test('secure-host-write-policy proves egress.write-policy through the forwarder,
     assert.ok(next > at, step);
     at = next;
   }
-  assert.doesNotMatch(job, /continue-on-error|\|\| true|\n {6,8}(?:- )?if: |--proxy|-x |sandbox exec|_PROXY: /);
+  assert.doesNotMatch(job, /continue-on-error|\|\| true|\n {6,8}(?:- )?if: |--proxy|-x |_PROXY: /);
   const probe = fs.readFileSync(path.join(__dirname, '../.github/actions/egress-probe/action.yml'), 'utf8');
   assert.match(probe, /\n  using: node24\n  main: main\.mjs\n$/);
 });
 
-// Public callers at main get the new action's contract; agentic-job's own
-// jobs that need the second user keep the old action at its internal path.
+// Every caller, agentic-job's own jobs included, gets the new action's
+// contract: every step after it is the runner's user's.
 test('the public secure-host forwards to the pinned new action and refuses the old inputs', () => {
   const read = file => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
   const forwarder = read('secure-host/action.yml');
-  const internal = read('secure-host/internal/action.yml');
   const inputs = text => [...text.split('\ninputs:\n')[1].split(/\n(?:outputs|runs):\n/)[0]
     .matchAll(/^  ([-\w]+):\n/gm)].map(([, name]) => name);
   const forwarded = ['config', 'check', 'image-archive'];
-  // Every old input is declared, so that setting one reaches the refusal.
+  // Every old input that asked for another host is declared, so that
+  // setting one reaches the refusal.
   assert.deepEqual(inputs(forwarder).filter(name => !forwarded.includes(name)).sort(),
-    inputs(internal).filter(name => !forwarded.includes(name)).sort());
+    ['binary', 'build', 'deny-runner-metadata', 'egress', 'egress-policy', 'lock', 'runner-user', 'script', 'stop-services']);
   assert.doesNotMatch(forwarder, /\noutputs:/);
   const uses = [...forwarder.matchAll(/^ {4}- uses: (\S+)/gm)].map(([, use]) => use);
   assert.equal(uses.length, 1);
@@ -606,12 +584,17 @@ test('the public secure-host forwards to the pinned new action and refuses the o
   // main's published action is the forwarder: none of the old outputs.
   const published = block('secure-host-published');
   assert.match(published, /uses: cgwalters-forge\/agentic-job\/secure-host@main /);
-  assert.doesNotMatch(published, /\n {8}with:|steps\.host\.outputs|sandbox exec/);
-  // The jobs that need the second user and `sandbox exec` take the internal path.
+  assert.doesNotMatch(published, /\n {8}with:|steps\.host\.outputs/);
+  // This repository's jobs that secure a host take the forwarder with this
+  // revision's image, and none takes a shell other than the runner's.
   for (const job of ['secure-host-options', 'world-write-runtime']) {
-    assert.match(block(job), /uses: \.\/secure-host\/internal # /, job);
+    assert.match(block(job), /uses: \.\/secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}\/image\/secure-host\.tar\n/, job);
+    assert.doesNotMatch(block(job), /shell:/, job);
   }
-  assert.match(read('.github/workflows/example-secure-host.yml'), /uses: \.\/secure-host\/internal # /);
+  const example = read('.github/workflows/example-secure-host.yml');
+  assert.match(example, /uses: \.\/secure-host # [^\n]*\n {8}with:\n {10}image-archive: /);
+  assert.doesNotMatch(example, /shell:|steps\.host\.outputs/);
+  assert.match(block('secure-host'), /\n    needs: \[changes, static\]\n[^]*\n      image-artifact: secure-host-image\n/);
 });
 
 test('the workflow classifies real Git paths without executing PR scripts', () => {

@@ -237,7 +237,7 @@ pub fn run(args: &Args) -> Result<Exit> {
 }
 
 /// Removes this job's record of a passing check, if there is one: what
-/// enters the sandbox user (`sandbox exec`, `run`) calls this first, since
+/// starts the agent (`run`) calls this first, since
 /// what that user leaves behind is what the next check has to probe.
 pub fn forget_passed() -> Result<()> {
     forget(|name| std::env::var(name).ok())
@@ -1003,8 +1003,8 @@ mod tests {
             Fail,
             Err,
         }
-        /// A step of the job: a check, or something entering the sandbox
-        /// user (`sandbox exec`, `run`).
+        /// A step of the job: a check, or something starting the agent
+        /// (`run`).
         #[derive(Debug, Clone, Copy)]
         enum Step {
             Check(Mode, Probes),

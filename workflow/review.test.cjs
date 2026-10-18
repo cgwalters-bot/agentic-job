@@ -486,20 +486,24 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit|pull_request.head|refs\/pull/);
   // Which job holds which token: writes only in apply (the comment) and
-  // status (the status), the identity token in agent and check's detector.
+  // status (the status), the identity token in register and check's
+  // detector, never in the agent's job.
   const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'agent', 'check', 'submit', 'apply', 'status']);
-  for (const [name, writes] of Object.entries({ policy: [], agent: ['id-token'], check: ['id-token'],
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'register', 'agent', 'check', 'submit', 'apply', 'status']);
+  for (const [name, writes] of Object.entries({ policy: [], register: ['id-token'], agent: [], check: ['id-token'],
     refusal: ['pull-requests'], submit: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);
-    // The agent job holds the provider's key, for its check and `run`
-    // alone, as agentic-job.yml's does; no other secret.
-    const secrets = name === 'agent' ? jobs[name].replaceAll('${{ secrets.INFERENCE_API_KEY }}', '') : jobs[name];
+    // The agent job gets the register job's run token, as agentic-job.yml's
+    // does, and its network step's key; no other secret.
+    const secrets = name === 'agent'
+      ? jobs[name].replace('\n    secrets:\n      INFERENCE_RUN_TOKEN: ${{ needs.register.outputs.run-token }}\n' +
+        '      NETWORK_SECRET: ${{ needs.register.outputs.network-secret }}\n', '\n') : jobs[name];
     if (name !== 'apply') assert.doesNotMatch(secrets, /secrets/, name);
   }
-  assert.match(jobs.agent, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
+  assert.match(jobs.register, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
+  assert.match(jobs.agent, /policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}/);
   for (const [, action] of caller.matchAll(/^ +(?:- )?uses: ([^.\s]\S*)/gm)) assert.match(action, /@[0-9a-f]{40}$/, action);
   // The status takes the verdict check.yml set and the head policy
   // admitted, nothing the agent wrote.
@@ -524,7 +528,9 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(jobs.submit, /AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}/);
   // The footer's job link is the agent job's own ID, from Actions.
   assert.match(jobs.submit, /AGENT_JOB: \$\{\{ needs.agent.outputs.job \}\}/);
-  assert.match(jobs.agent, /\n {6}job: \$\{\{ job.check_run_id \}\}\n/);
+  const agentCall = fs.readFileSync(path.join(__dirname, '../.github/workflows/agent.yml'), 'utf8');
+  assert.match(agentCall, /\n {6}job: \$\{\{ job.check_run_id \}\}\n/);
+  assert.match(agentCall, /\n {6}job:\n {8}value: \$\{\{ jobs.agent.outputs.job \}\}\n/);
   assert.doesNotMatch(jobs.submit, /secrets|safe-outputs-artifact-id|pull_request\.head|needs\.policy\.outputs\.ref\b/);
   assert.match(jobs.status, /if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.agent.result != 'cancelled' \}\}/);
   assert.match(jobs.status, /runs-on: ubuntu-26.04/);

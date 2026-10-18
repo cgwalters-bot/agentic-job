@@ -3,8 +3,8 @@
 //! secure-host made a moment before on the same host.
 //!
 //! A record is good for one check: the next check consumes it, whether
-//! it takes it or not, and `sandbox exec` and `run` remove it before they
-//! let the sandbox user run anything, since what that user leaves behind
+//! it takes it or not, and `run` removes it before it lets the agent
+//! run anything, since what the agent leaves behind
 //! (a process, a container) is what the probes would find. No other check
 //! writes one.
 //!

@@ -4,12 +4,13 @@
 # Use it only for such steps: everything else agentic-job.yml takes as
 # inputs, and calling that is simpler.
 #
-# The agent job is this file's, not agentic-job.yml's, so its identity
-# token's `job_workflow_ref` names this file. A broker entry that admits
-# `called_workflows: agentic-job.yml` does not match it, and the broker
-# has to admit this repository's own workflows, which is wider
-# (docs/inference.md#which-workflows-a-broker-admits). Decide that with
-# the broker's operator before copying this for a real agent.
+# The agent is the runner's user, as every step after secure-host is, so
+# the agent job holds no `id-token` and cannot register a run at a broker
+# itself. A real agent behind a broker registers in a job of its own, as
+# agentic-job.yml's `register` does, and gets the run token as a secret
+# of a reusable workflow's call (docs/workflow.md#the-run-token); that
+# job's `job_workflow_ref` names this file, which the broker then has to
+# admit (docs/inference.md#which-workflows-a-broker-admits).
 #
 # It runs the scripted agent, which needs no inference and no secret,
 # for an analysis that comments once on the issue it names. CI's
@@ -97,15 +98,14 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     # Read only, and yours to keep so: the agent may get this job's token
-    # for GitHub reads, and `run` cannot see what it was granted. The
-    # identity token is for the run's registration at the inference proxy,
-    # and `sandbox setup` keeps it from the agent's user.
+    # for GitHub reads, and `run` cannot see what it was granted. No
+    # `id-token`: the agent, the runner's user, could mint identity tokens
+    # for any audience with it.
     permissions:
       contents: read
       issues: read
       pull-requests: read
       actions: read
-      id-token: write
     outputs:
       exit: ${{ steps.run.outputs.exit }}
       over-budget: ${{ steps.run.outputs.over-budget }}
@@ -144,40 +144,46 @@ jobs:
       - name: A caller's privileged step (example)
         run: sudo install -m 0600 -o root -g root /dev/null /var/lib/compose-caller-step
       # ---- End of your privileged steps. ----
-      # With `inference-register: api-key`, declare the secret
-      # INFERENCE_API_KEY and check the key here, before secure-host's
-      # minutes, as agentic-job.yml does:
-      #   - env:
-      #       AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
-      #     run: agentic-job check-key --config .agentic-job/config.toml
-      # As agentic-job.yml does, after your privileged steps: a TCP
-      # connection to the inference proxy, if any, so that a runner off its
-      # network fails here rather than in a probe of setup's rules. It
-      # sends nothing, and skips the scripted agent.
+      # As agent.yml does, after your privileged steps: refuses what the
+      # runner's user cannot hold for the agent (an API key, an MCP
+      # credential, a session) and a private repository.
+      - name: Admit the runner-user configuration
+        env:
+          CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+        run: python3 .agentic-job-source/workflow/runner-setup.py admit
+      # A TCP connection to the inference proxy, if any, so that a runner
+      # off its network fails here rather than in a probe of setup's rules.
+      # It sends nothing, and skips the scripted agent.
       - name: Check inference proxy reachability
         run: agentic-job secure-host inference .agentic-job/config.toml
-      - uses: ./.agentic-job-source/secure-host/internal # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+      # The policy job's configuration for the host, but for
+      # `setup.script`, which the step after secure-host runs.
+      - name: The host's configuration
+        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"
+      # cgwalters-forge/actions/secure-host, through the forwarder of the
+      # policy job's commit, which pins it: the last step with root.
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
-          binary: /usr/local/bin/agentic-job
-          config: .agentic-job/config.toml
+          config: ${{ runner.temp }}/agentic-job-host.toml
+      - name: The setup script
+        env:
+          AGENT_HOME: ${{ runner.temp }}/agent-home
+        run: python3 .agentic-job-source/workflow/runner-setup.py setup
       - id: run
         timeout-minutes: 340
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
+          runner-home: ${{ runner.temp }}/agent-home
           # The job's own read-only token expires when the job ends.
           github-token: ${{ github.token }}
-          # With `api-key`, the provider's key, which `run` holds outside
-          # the sandbox; give it to no step of yours but the check above:
-          #   inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
-      # ---- Your later steps go here. They run as the runner's user outside ----
-      # the sandbox, with no sudo, after the agent's outputs are uploaded;
+      # ---- Your later steps go here. They run as the runner's user, the ----
+      # agent's, with no sudo, after the agent's outputs are uploaded;
       # nothing of the agent's machine is trusted by check or apply. Treat
       # what the agent left as hostile data too: never execute it (no build,
       # script, hook or test from the checkout) and never hand it to a step
-      # that holds a credential. This job's runner user can still request
-      # the job's `id-token: write` OIDC token, so running agent files here
-      # could spend inference (specs/run-contract-spec.md, RC-017). This
-      # example shows the step before had root and this one has none.
+      # that holds a credential, since anything the agent left running can
+      # reach that step (specs/run-contract-spec.md, RC-017). This example
+      # shows the step before had root and this one has none.
       - name: A caller's later step (example)
         run: |
           test "$(stat -c '%U %a' /var/lib/compose-caller-step)" = 'root 600'

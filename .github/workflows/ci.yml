@@ -552,46 +552,51 @@ jobs:
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
   # The step that secures a host, in a job that runs no agent: the
-  # example a caller copies, which builds and tests after the lock, as
-  # the runner's user and as the sandbox user, and proves both.
+  # example a caller copies, which builds and tests after the lock as the
+  # runner's user, with this revision's image (the static job's archive).
   secure-host:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.host == 'true' }}
     uses: ./.github/workflows/example-secure-host.yml # zizmor: ignore[self-repository] Test this revision's reusable workflow, not a remote revision.
+    with:
+      image-artifact: secure-host-image
 
-  # The same step with its switches the other way: root kept, no egress
-  # proxy, another name for the sandbox user. What the lock takes is
-  # still there, and the sandbox user is closed in all the same.
+  # The same step, through the forwarder and this revision's image, with
+  # a configuration that turns its switches the other way: root kept and
+  # no egress proxy. What the lock takes is still there.
   secure-host-options:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - id: host
-        uses: ./secure-host/internal # zizmor: ignore[self-repository] Exercise the checked-out action under test.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          lock: false
-          egress: false
-          sandbox-user: builder
+          name: secure-host-image
+          path: ${{ runner.temp }}/image
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agentic-job
+          path: ${{ runner.temp }}/dist
+      - name: The configuration with its switches off
+        run: |
+          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
+          "$RUNNER_TEMP/agentic-job" config --host --from secure-host/hosted.toml \
+            --boolean sandbox.lock-runner=false --boolean egress.proxy=false > "$RUNNER_TEMP/options.toml"
+      - name: Secure the host from the image archive
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
+        with:
+          config: ${{ runner.temp }}/options.toml
+          image-archive: ${{ runner.temp }}/image/secure-host.tar
       - name: The switches did what they say
-        env:
-          SANDBOX_USER: ${{ steps.host.outputs.sandbox-user }}
-          SANDBOX_HOME: ${{ steps.host.outputs.sandbox-home }}
         run: |
           sudo -n true
-          test "$SANDBOX_USER" = builder
-          agentic-job sandbox exec -- pwd > "$RUNNER_TEMP/sandbox-pwd.txt"
-          read -r actual < "$RUNNER_TEMP/sandbox-pwd.txt"
-          test "$actual" = "$SANDBOX_HOME"
-          # Expanded by the sandbox's shell, not this one.
-          # shellcheck disable=SC2016
-          agentic-job sandbox exec -- sh -c 'echo "${HTTPS_PROXY:-none}"' > "$RUNNER_TEMP/sandbox-proxy.txt"
-          read -r actual < "$RUNNER_TEMP/sandbox-proxy.txt"
-          test "$actual" = none
+          if systemctl is-active --quiet egress-proxy.service; then echo "::error::the egress proxy runs"; exit 1; fi
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
 
   # The action as another repository names it, which a pull request
@@ -1576,13 +1581,13 @@ jobs:
       - name: Publish bounded enforcement and object evidence
         run: just world-write-evidence "$RUNNER_TEMP/world-write"
 
-  # The policy as a caller's job gets it: loaded by the secure-host
-  # action from this checkout's object, then tested after the action has
-  # exited, as the sandbox user. setup refuses a host without the four
-  # links, and the refused write below fails the job if the policy is
-  # switched off; there is no step that passes without it.
+  # The policy as a caller's job gets it: loaded by this revision's image
+  # through the forwarder, then tested after the action has exited, as the
+  # runner's user. setup refuses a host without the four links, and the
+  # refused write below fails the job if the policy is switched off; there
+  # is no step that passes without it.
   world-write-runtime:
-    needs: changes
+    needs: [changes, static]
     if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -1592,33 +1597,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Secure the host
-        uses: ./secure-host/internal # zizmor: ignore[self-repository] Exercise the checked-out action and its object.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          build: true
+          name: secure-host-image
+          path: ${{ runner.temp }}/image
+      - name: Secure the host from the image archive
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder and this revision's object.
+        with:
+          image-archive: ${{ runner.temp }}/image/secure-host.tar
       # setup's probe file: root's, mode 0666, on the root filesystem, so
-      # ordinary permissions allow the append. Without the view (off by
-      # default) nothing else refuses it: dash's own "Permission denied" for
-      # that path is the policy's EACCES.
-      - name: The sandbox user is refused a write to a world-writable file of root
+      # ordinary permissions allow the append. Nothing else refuses it:
+      # dash's own "Permission denied" for that path is the policy's EACCES.
+      - name: The runner's user is refused a write to a world-writable file of root
         run: |
           probe=/etc/agentic-job/world-write-probe/file
           test "$(stat -c '%u %a %d' "$probe")" = "0 666 $(stat -c %d /)"
-          # Expanded by the sandbox's shell, not this one.
+          # Expanded by dash, not this shell.
           # shellcheck disable=SC2016
-          if agentic-job sandbox exec -- sh -c ': >> "$1"' sh "$probe" 2> "$RUNNER_TEMP/refused.txt"; then
-            echo "::error::the sandbox user appended to $probe"; exit 1
+          if sh -c ': >> "$1"' sh "$probe" 2> "$RUNNER_TEMP/refused.txt"; then
+            echo "::error::the runner's user appended to $probe"; exit 1
           fi
           sed 's/::/: :/g' "$RUNNER_TEMP/refused.txt"
           grep -qF "cannot create $probe: Permission denied" "$RUNNER_TEMP/refused.txt"
       # The same kind of file, owned by the writer, still takes the write.
-      - name: The sandbox user writes its own world-writable file (control)
-        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
+      - name: The runner's user writes its own world-writable file (control)
         run: |
-          install -m 0666 /dev/null owned
-          test "$(stat -c '%a %d' owned)" = "666 $(stat -c %d /)"
-          echo control >> owned
-          grep -qx control owned
+          install -m 0666 /dev/null "$HOME/owned"
+          test "$(stat -c '%a %d' "$HOME/owned")" = "666 $(stat -c %d /)"
+          echo control >> "$HOME/owned"
+          grep -qx control "$HOME/owned"
 
   # The secure-host image as release.yml pushes it, from the archive the
   # static job saved, run through the public action, which forwards to
@@ -1800,7 +1807,6 @@ jobs:
         with:
           config: ${{ runner.temp }}/confine-config.toml
           image-archive: ${{ runner.temp }}/image/secure-host.tar
-      - run: agentic-job sandbox exec -- id -un
       - run: agentic-job sandbox check --record
       - name: A run step is confined
         run: node .github/actions/confine-probe/probe.mjs confined run-step

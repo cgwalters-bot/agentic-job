@@ -20,40 +20,26 @@ job can use, and a workflow that runs an agent that way.
 
 **A hardened runner, in one step.** After `secure-host` runs, the
 runner's user can no longer use `sudo` and the container daemon is
-stopped. Untrusted commands run as a second user that cannot read the
-job's tokens, the checkout or the runner's files, and whose HTTP and
-HTTPS go through a filtering proxy. The step ends by probing these
-restrictions and fails the job if one does not hold.
+stopped, and a world-writable file can be changed only by its owner.
+Every later step, the agent included, runs as the runner's user. The
+step ends by probing these restrictions and fails the job if one does
+not hold.
 
 ```yaml
 jobs:
   build:
     runs-on: ubuntu-26.04
-    defaults:
-      run:
-        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
     steps:
       - run: sudo apt-get install -y libfoo-dev   # root: before the step
-        shell: bash
       - uses: actions/checkout@v7
-      - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+      - uses: cgwalters-forge/actions/secure-host@COMMIT
       - run: make check                           # runner's user, no sudo
-        shell: bash
-      - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
-        shell: bash
-      - run: cd src && bash ./untrusted.sh < /dev/null   # the sandbox user
 ```
 
-This is the action at a commit from before `secure-host` forwarded to
-`cgwalters-forge/actions/secure-host`, which has no sandbox user or
-`sandbox exec` ([what changes at `@main`](docs/secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
-
-The sandbox user cannot see the checkout, so the job hands it a copy.
-A `run:` step without `shell:` is sandboxed by default; trusted steps opt
-out with `shell: bash`. Forgetting an override fails closed, including before
-secure-host when the binary does not exist yet. `make check` above lost root
-but still runs as the user that holds the job's token. `uses:` steps are not
-affected and run as the runner user; see
+This repository's `secure-host` forwards to that action
+([what changes at `@main`](docs/secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
+`make check` above lost root but still runs as the user that holds the
+job's token; so does every `uses:` step. See
 [One trust level for the rest of the job](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
 
 Two limits to know up front. Names still resolve on a hosted runner, so
@@ -85,8 +71,8 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 
 | Where | What it holds |
 | --- | --- |
-| The sandbox user (the agent) | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run; with an [`[mcp.NAME]` server](docs/mcp.md), the token of `run`'s proxy for it. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | in `agentic-job.yml`'s agent job, the agent itself, with no sandbox user: so that job passes on no model key or MCP credential, and `run` refuses `api-key` and MCP servers there ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; with `inference-register: api-key` or `inference-provider: github`, the provider's key or GitHub token, in the `run` step only; with an `[mcp.NAME]` server, its credential `MCP_TOKEN`, in the `run` step only; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The agent | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
+| The runner's user in the agent job | the agent itself: so no agent job passes on a model key or MCP credential, and `run` refuses `api-key` and MCP servers ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; notify and conclude prefer `SAFE_OUTPUTS_PAT` for status comments whenever supplied, including same-repository items |
@@ -147,10 +133,10 @@ fenced off as data. See [docs/events.md](docs/events.md).
   away from those steps: they still run as the user that holds them, and
   reach every host but, with `deny-runner-metadata`, the cloud metadata
   service ([secure-host.md](docs/secure-host.md#what-a-later-step-can-count-on-and-what-it-cannot)).
-- **Sandbox execution** applies only to what runs through
-  `agentic-job sandbox exec`, as the agent does: a second user with no
-  file, variable or token of the job's, whose HTTP and HTTPS go through
-  the egress proxy.
+- **Job separation** is what keeps the agent's credentials apart: the
+  agent's job holds no secret, no write token and no `id-token`, and
+  what it hands back is checked on another machine before a job with a
+  write token acts on it ([workflow](docs/workflow.md)).
 
 What each part guarantees today, and what it does not:
 
@@ -176,12 +162,10 @@ A real agent needs a model, and never holds the key that pays for it.
 There are three ways to give it one ([docs/inference.md](docs/inference.md)).
 The scripted agent (`agent: fake`) needs none.
 
-For now `agentic-job.yml` itself takes no key: its agent job runs the
-agent as the runner's user, which could read one from `run`, so it
-refuses `api-key` (GitHub's billing included) and MCP credentials. Those
-need an agent job of the caller's own, with the sandbox user
-([the pieces](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)),
-until the host keeps the runner's processes from reading each other.
+For now no agent job takes a key: the agent is the runner's user, which
+could read one from `run`, so `run` refuses `api-key` (GitHub's billing
+included) and MCP credentials until the host keeps the runner's processes
+from reading each other.
 
 **GitHub's billing** (`inference-provider: github`) is the simplest,
 as gh-aw's Copilot engine is there. The caller stores a
@@ -497,8 +481,7 @@ the issue that tracks it, where one is filed.
 
 - Steps after `secure-host` lose root but keep the job's tokens and an open
   network ([#503](https://github.com/cgwalters-forge/agentic-job/issues/503)).
-  The reusable workflow's agent job has no `id-token`; a composed agent
-  job and `review.yml`'s still register there and need it
+  No agent job has `id-token`: a register job before it registers the run
   ([the run token](docs/workflow.md#the-run-token)).
 - The egress proxy has no read allowlist: any host may be read ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)).
 - Names resolve for the sandbox user on hosted runners, so data can leave

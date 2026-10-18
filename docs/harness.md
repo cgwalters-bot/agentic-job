@@ -223,7 +223,7 @@ The implementation recipe is:
    (0600, directory 0700), never root-owned managed settings, argv or logs.
    If managed settings are needed, provide them through `managed_settings`
    for `sandbox setup`; `run` cannot write them after hardening.
-3. In `run/launch.rs`, add the sandbox-user launch behavior: read the run's
+3. In `run/launch.rs`, add the agent's launch behavior: read the run's
    configuration, set only the required environment, and execute the
    registry command. Extend `KEPT` only for non-secret model settings that
    must survive filtering. In `session/process.rs`, extend

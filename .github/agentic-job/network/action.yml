@@ -1,17 +1,113 @@
-# This repository's own deployment's network step: review.yml's agent job
-# runs it, as root and before secure-host, because it is here, in the base
+# This repository's own deployment's network step: review.yml's register
+# job and its agent job (agent.yml with `network: true`) run it, as root
+# and before anything of the agent's, because it is here, in the base
 # checkout of the repository being reviewed (docs/review.md#configuration).
-# It joins the tailnet the inference proxy is on; the action picks the
-# OAuth client and tags by organization, joins with --accept-dns=false and
-# makes tailscaled's socket root's only. The tailnet's federated identity
-# and the broker have to admit review.yml's job_workflow_ref
-# (docs/inference.md). Another deployment puts its own step here, or none.
+# It joins the tailnet the inference proxy is on, with --accept-dns=false,
+# and makes tailscaled's socket root's only. The tailnet's federated
+# identity and the broker have to admit review.yml's job_workflow_ref
+# (docs/inference.md).
+#
+# The federated join takes the job's identity token, which only the
+# register job has: the agent is the runner's user, so its job has none
+# (tracker#674). So the register job joins with it, through the action
+# that picks the OAuth client and tags by organization, and then mints the
+# key the agent job joins with: the one the Tailscale CLI makes from that
+# token itself (feature/identityfederation), single-use, ephemeral,
+# preauthorized and with the same tags, and expiring in an hour. It goes
+# out as the `secret` output, which review.yml passes to agent.yml as
+# NETWORK_SECRET and agent.yml back here as the `secret` input. Spent on
+# the join, before secure-host, it is worth nothing to the agent.
+# Another deployment puts its own step here, or none.
 name: network
 description: Join this deployment's inference tailnet before secure-host
+inputs:
+  secret:
+    description: The agent job's key, minted by this action in the register job; empty there
+    required: false
+    default: ""
+outputs:
+  secret:
+    description: In the register job, the key for the agent job's join
+    value: ${{ steps.mint.outputs.secret }}
 runs:
   using: composite
   steps:
+    # As `agentic-job register` refuses for the run token, and before any
+    # credential is requested: with step debug logging on, the runner logs
+    # each output it sets, so the minted key would be in the register
+    # job's public log, still unspent and valid for an hour.
+    - name: Refuse step debug logging
+      if: ${{ inputs.secret == '' }}
+      shell: bash
+      run: |
+        if test -n "${RUNNER_DEBUG-}"; then
+          echo "::error::Refusing to mint the agent job's tailnet key: with step debug logging on (RUNNER_DEBUG is set), the runner would log it as it sets the secret output; re-run without debug logging"
+          exit 1
+        fi
     - name: Join the tailnet
+      if: ${{ inputs.secret == '' }}
       uses: cgwalters-forge/actions/tailscale@d7bfa158217182d8c0b0b775189dcf91a6afcdde
       with:
         hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}
+    # The client ID and tags are that action's, at the same commit. Not
+    # masked: GitHub drops a job output holding a masked value, and none
+    # of it is printed.
+    - name: Mint the agent job's key
+      id: mint
+      if: ${{ inputs.secret == '' }}
+      shell: python3 -I {0}
+      env:
+        TAILNETS: https://raw.githubusercontent.com/cgwalters-forge/actions/d7bfa158217182d8c0b0b775189dcf91a6afcdde/tailscale/tailnets.json
+        OWNER: ${{ github.repository_owner }}
+      run: |
+        import json, os, urllib.parse, urllib.request
+
+        def fetch(url, data=None, headers={}):
+            request = urllib.request.Request(url, data=data, headers=headers)
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+
+        tailnet = fetch(os.environ["TAILNETS"])[os.environ["OWNER"]]
+        client = tailnet["oauth-client-id"]
+        audience = urllib.parse.quote(f"api.tailscale.com/{client}", safe="")
+        jwt = fetch(f"{os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']}&audience={audience}",
+                    headers={"Authorization": f"Bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}"})["value"]
+        # As the CLI's oauth2 exchange sends it.
+        form = {"grant_type": "authorization_code", "code": "", "client_id": client, "jwt": jwt}
+        access = fetch("https://api.tailscale.com/api/v2/oauth/token-exchange",
+                       urllib.parse.urlencode(form).encode(),
+                       {"Content-Type": "application/x-www-form-urlencoded"})["access_token"]
+        create = {"reusable": False, "ephemeral": True, "preauthorized": True,
+                  "tags": tailnet["tags"].split(",")}
+        body = {"capabilities": {"devices": {"create": create}}, "expirySeconds": 3600}
+        key = fetch("https://api.tailscale.com/api/v2/tailnet/-/keys", json.dumps(body).encode(),
+                    {"Authorization": f"Bearer {access}", "Content-Type": "application/json"})["key"]
+        if not key.startswith("tskey-") or any(c.isspace() for c in key):
+            raise SystemExit("Tailscale returned no auth key")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"secret={key}\n")
+    # The agent job: the same join as above with the minted key, which
+    # that action does not take, and its hardening after it, as there.
+    - name: Join the tailnet with the register job's key
+      id: join
+      if: ${{ inputs.secret != '' }}
+      uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+      with:
+        authkey: ${{ inputs.secret }}
+        hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}-agent
+        args: --accept-dns=false
+    # From cgwalters-forge/actions/tailscale at the commit above: the
+    # LocalAPI socket is 0666 and does not check who dials through it, so
+    # any later local user could use the node's tailnet access; also on a
+    # failed join, since tailscaled may be running anyway.
+    - name: Make tailscaled's LocalAPI root's only
+      if: ${{ always() && inputs.secret != '' }}
+      shell: bash
+      env:
+        JOINED: ${{ steps.join.outcome == 'success' }}
+      run: |
+        if sudo test -f /usr/local/bin/tailscale; then sudo chmod 0700 /usr/local/bin/tailscale; fi
+        if ! sudo test -d /var/run/tailscale; then echo "tailscaled is not running"; exit 0; fi
+        sudo chmod 0700 /var/run/tailscale
+        echo "/var/run/tailscale: $(sudo stat -c '%a %U:%G' /var/run/tailscale)"
+        if test "$JOINED" = true; then sudo /usr/local/bin/tailscale status --self >/dev/null; fi

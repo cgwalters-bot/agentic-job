@@ -8,16 +8,17 @@
 # (max-requests, budget and timeout below), so only some authors start one
 # automatically (the policy job's `if:`).
 #
-# The agent job is this file's, for its one privileged step of the
-# deployment's: reaching the inference proxy. A caller that needs a step
-# for that (a VPN or tailnet join) puts it in .github/agentic-job/network,
-# a local action in its own repository; the agent job runs it, from the
-# base checkout, before secure-host. Without one, nothing runs, and the
-# runner (AGENT_RUNNER) must already reach INFERENCE_URL. The identity
-# token's `job_workflow_ref` names this file, so whatever admits the run
-# has to admit it (docs/review.md#configuration, docs/inference.md).
-# With a provider's API key instead (INFERENCE_REGISTER `api-key`), only
-# the agent job's key check and `run` get the key, never the sandbox.
+# The deployment has one privileged step of its own: reaching the
+# inference proxy. A caller that needs a step for that (a VPN or tailnet
+# join) puts it in .github/agentic-job/network, a local action in its own
+# repository; the register job and the agent job (agent.yml) run it, from
+# the base checkout, before anything else of theirs. Without one, nothing
+# runs, and the runner (AGENT_RUNNER) must already reach INFERENCE_URL.
+# The identity token's `job_workflow_ref` names this file, so whatever
+# admits the run has to admit it (docs/review.md#configuration,
+# docs/inference.md). A provider's API key (INFERENCE_REGISTER `api-key`)
+# is refused for now, as in agentic-job.yml: the agent is the runner's
+# user, which would hold the key.
 #
 # Another repository calls this file at a pinned commit from the same
 # events, with its own copies of the bounds and the task.
@@ -32,8 +33,8 @@ on:
     secrets:
       SAFE_OUTPUTS_PAT:
         required: false
-      # With INFERENCE_REGISTER `api-key`: the provider's key, for the
-      # agent job's key check and `run` alone, as in agentic-job.yml.
+      # Not passed on, as in agentic-job.yml: `api-key` is refused for
+      # now. Declared so that a caller that passes it is not refused.
       INFERENCE_API_KEY:
         required: false
 permissions: {}
@@ -94,9 +95,9 @@ jobs:
       agent-config-repo: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
       agent-config-path: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       inference-url: ${{ vars.INFERENCE_URL }}
-      # A broker's `github-oidc` unless the repository says `api-key`, with
-      # the provider, and keeps the key as the secret INFERENCE_API_KEY.
-      # Repository variables only: no event or comment chooses them.
+      # A broker's `github-oidc` unless the repository says otherwise
+      # (`api-key` is refused by the agent job for now). Repository
+      # variables only: no event or comment chooses them.
       inference-register: ${{ vars.INFERENCE_REGISTER || 'github-oidc' }}
       inference-provider: ${{ vars.INFERENCE_PROVIDER }}
       inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
@@ -138,89 +139,87 @@ jobs:
           REASON: ${{ needs.policy.outputs.reason }}
         run: node .agentic-job-source/workflow/review.cjs refusal
 
-  # agentic-job.yml's agent job, with the caller's network step, if any,
-  # between prepare and secure-host.
-  agent:
+  # As agentic-job.yml's register job: the run's registration at the
+  # inference proxy under `github-oidc`, out of the agent's job, which
+  # then holds no `id-token`. The agent is the runner's user there, and
+  # with that permission could mint identity tokens for any audience.
+  # This job also runs the caller's network step, from the base commit,
+  # since it has to reach the proxy too.
+  register:
     needs: policy
+    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    runs-on: ${{ fromJSON(vars.AGENT_RUNNER || '"ubuntu-26.04"') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    # Read only by the agent's call below, each as a secret, which masks it
+    # in every log of that job (docs/workflow.md#the-run-token). The network
+    # step's `secret`, empty for a step without one, is what the agent
+    # job's network step joins with, having no identity token.
+    outputs:
+      run-token: ${{ steps.register.outputs.run-token }}
+      network-secret: ${{ steps.network.outputs.secret }}
+    steps:
+      # The policy call is by local path, so of this file's commit; unlike
+      # agentic-job.yml's register job, there is no other pin to compare.
+      - name: The policy call's upload IDs
+        env:
+          BINARY: ${{ needs.policy.outputs.binary-artifact-id }}
+          POLICY: ${{ needs.policy.outputs.policy-artifact-id }}
+        run: |
+          # Empty IDs would make download-artifact take every upload.
+          [[ "$BINARY" =~ ^[1-9][0-9]*$ && "$POLICY" =~ ^[1-9][0-9]*$ ]] ||
+            { echo '::error::register requires binary and policy upload IDs from policy'; exit 1; }
+      # The base commit the policy job decided, never the head, and only
+      # for the network step: a pull request cannot change what runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.policy.outputs.ref }}
+          persist-credentials: false
+      - name: The caller's network step
+        id: network
+        if: ${{ hashFiles('.github/agentic-job/network/action.yml') != '' }}
+        uses: ./.github/agentic-job/network # zizmor: ignore[self-repository] The caller's own action at the policy-decided base commit, not the head.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }},${{ needs.policy.outputs.policy-artifact-id }}
+          path: ${{ runner.temp }}/agentic-job
+          merge-multiple: true
+      - id: register
+        name: Register the run at the inference proxy
+        env:
+          JOB_DIR: ${{ runner.temp }}/agentic-job
+        run: |
+          chmod +x "$JOB_DIR/agentic-job"
+          "$JOB_DIR/agentic-job" register --config "$JOB_DIR/config.toml" --output "$GITHUB_OUTPUT"
+
+  # agentic-job.yml's agent job, agent.yml, with the caller's network
+  # step, if any, before secure-host, given what the register job's left
+  # it, as a secret. The permissions are the reads of the token the agent
+  # gets.
+  agent:
+    needs: [policy, register]
     if: ${{ needs.policy.outputs.admitted == 'true' }}
     # Only admitted runs enter the group. Only automatic PR events
     # supersede a review; a comment must not cancel one.
     concurrency:
       group: review-pull-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
-    runs-on: ${{ fromJSON(vars.AGENT_RUNNER || '"ubuntu-26.04"') }}
-    timeout-minutes: 360
-    # Read only: the agent gets this job's token for GitHub reads. The
-    # identity token is for the network step and the proxy's registration;
-    # `sandbox setup` keeps it from the agent's user.
     permissions:
       contents: read
       issues: read
       pull-requests: read
       actions: read
-      id-token: write
-    outputs:
-      exit: ${{ steps.run.outputs.exit }}
-      over-budget: ${{ steps.run.outputs.over-budget }}
-      secret-at: ${{ steps.run.outputs.secret-at }}
-      safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
-      safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
-      # This job's ID, for the review's footer to link (#592).
-      job: ${{ job.check_run_id }}
-    steps:
-      # The base commit the policy job decided, never the head.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.policy.outputs.ref }}
-          persist-credentials: false
-      - name: The policy call's source repository and commit
-        env:
-          SOURCE_REPOSITORY: ${{ needs.policy.outputs.source-repository }}
-          SOURCE_SHA: ${{ needs.policy.outputs.source-sha }}
-        run: |
-          echo "$SOURCE_REPOSITORY at $SOURCE_SHA"
-          [[ "$SOURCE_REPOSITORY" == */* && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ needs.policy.outputs.source-repository }}
-          ref: ${{ needs.policy.outputs.source-sha }}
-          path: .agentic-job-source
-          persist-credentials: false
-      - uses: ./.agentic-job-source/prepare # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
-        with:
-          binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
-          policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
-      # The deployment's network step, as root before anything of the
-      # agent's is on the machine. It is read from the base checkout above,
-      # never the head, so a pull request cannot change what runs here; a
-      # change to it is a change to the base branch like this file. Absent,
-      # the default, nothing runs.
-      - name: The caller's network step
-        if: ${{ hashFiles('.github/agentic-job/network/action.yml') != '' }}
-        uses: ./.github/agentic-job/network # zizmor: ignore[self-repository] The caller's own action at the policy-decided base commit, not the head.
-      # As in agentic-job.yml: with `api-key`, the key checked with the
-      # provider before secure-host's minutes; nothing to do otherwise.
-      - name: Check the inference API key
-        env:
-          AGENTIC_JOB_INFERENCE_KEY: ${{ secrets.INFERENCE_API_KEY }}
-        run: agentic-job check-key --config .agentic-job/config.toml
-      # As in agentic-job.yml, after the network step: a TCP connection to
-      # the inference proxy, if any, so that a runner off its network fails
-      # here rather than in a probe of setup's rules.
-      - name: Check inference proxy reachability
-        run: agentic-job secure-host inference .agentic-job/config.toml
-      - uses: ./.agentic-job-source/secure-host/internal # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
-        with:
-          binary: /usr/local/bin/agentic-job
-          config: .agentic-job/config.toml
-      - id: run
-        timeout-minutes: 340
-        uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
-        with:
-          github-token: ${{ github.token }}
-          # Held by `run` outside the sandbox; the agent gets a token of
-          # the run's in its place (docs/inference.md).
-          inference-api-key: ${{ secrets.INFERENCE_API_KEY }}
+    uses: ./.github/workflows/agent.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
+    secrets:
+      INFERENCE_RUN_TOKEN: ${{ needs.register.outputs.run-token }}
+      NETWORK_SECRET: ${{ needs.register.outputs.network-secret }}
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      runner: ${{ vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
+      github-reads: true
+      network: true
 
   check:
     needs: [policy, agent]

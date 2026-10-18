@@ -8,7 +8,7 @@
 //! The image holds this binary and the BPF objects and nothing else, so
 //! the host is set up by the host's own tools: the process takes the
 //! host's root as its own, installs the binary and objects there (for
-//! `sandbox check`, the probes and `sandbox exec` after it), and runs the
+//! `sandbox check` and the probes after it), and runs the
 //! secure-host steps through the host's `nsenter -t 1`, in the host's
 //! mount, network and other namespaces. The world-write links are pinned
 //! in the host's bpffs and the egress proxy is a systemd unit (running
