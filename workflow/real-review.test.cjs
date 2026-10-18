@@ -16,18 +16,23 @@ const checked = (body = 'VERDICT: APPROVE\nFindings', extra = {}) => ({ items: [
 
 function fixture({ sha = head, state = 'open', comments = [], reviewed = [], files = null } = {}) {
   const reviews = [];
+  const created = [];
+  const errors = [];
   const github = { rest: { pulls: {
     get: async () => ({ data: { state, head: { sha } } }),
     listReviews: 'listReviews',
     ...(files ? { listFiles: 'listFiles' } : {}),
     createReview: async review => { reviews.push(review); return { data: { id: 5, html_url: 'https://github.com/owner/repo/pull/12#pullrequestreview-5' } }; },
-  }, issues: { listComments: 'listComments' } },
+  }, issues: {
+    listComments: 'listComments',
+    createComment: async comment => { created.push(comment); return { data: { id: 9, html_url: 'https://github.com/owner/repo/issues/12#issuecomment-9' } }; },
+  } },
   paginate: async (route, args) => {
     assert.equal(args.per_page, 100);
     assert.equal(args.issue_number ?? args.pull_number, 12);
     return route === 'listComments' ? comments : route === 'listFiles' ? files : reviewed;
   } };
-  return { github, reviews, core: { notice() {} } };
+  return { github, reviews, created, errors, core: { notice() {}, error: text => errors.push(text) } };
 }
 
 // agent-board's cited_run (board-forge/src/poll.rs): exactly one marker,
@@ -118,6 +123,58 @@ test('a review posted despite an error counts as submitted', async () => {
   reviewed.length = 0;
   f.github.rest.pulls.createReview = async () => { throw new Error('403'); };
   await assert.rejects(submitReview(env, checked(), f.github, f.core), /403/);
+  assert.equal(f.created.length, 0);
+});
+
+// A 422 refusal (a locked conversation, for example) is not silent: the
+// status and GitHub's message and errors are logged as an annotation, and
+// the verdict is posted as the plain comment apply would otherwise post,
+// saying the review could not be submitted and why (#1287).
+test('a 422 refusal posts the verdict as the comment, with why GitHub refused', async () => {
+  const refused = new Error('Request failed with status code 422');
+  refused.status = 422;
+  refused.response = { data: { message: 'lock prevents review',
+    errors: [{ resource: 'PullRequestReview', code: 'custom', message: 'lock prevents review' }] } };
+  const f = fixture();
+  f.github.rest.pulls.createReview = async () => { throw refused; };
+  assert.equal(await submitReview(env, checked(), f.github, f.core),
+    'https://github.com/owner/repo/issues/12#issuecomment-9');
+  assert.equal(f.reviews.length, 0);
+  assert.deepEqual(f.created, [{ owner: 'owner', repo: 'repo', issue_number: 12,
+    body: `VERDICT: APPROVE\nFindings\n\nThe review could not be submitted: GitHub refused it with status 422 (lock prevents review).\n\n${trailer}` }]);
+  assert.match(f.errors[0], /^Submitting the review failed: status 422 \(lock prevents review; errors: \[/);
+  // A 422 whose response body holds no reason still posts the comment.
+  const bare = new Error('Request failed with status code 422');
+  bare.status = 422;
+  bare.response = { data: {} };
+  const empty = fixture();
+  empty.github.rest.pulls.createReview = async () => { throw bare; };
+  assert.equal(await submitReview(env, checked(), empty.github, empty.core),
+    'https://github.com/owner/repo/issues/12#issuecomment-9');
+  assert.match(empty.created[0].body, /The review could not be submitted: GitHub refused it with status 422\./);
+  assert.deepEqual(empty.errors, ['Submitting the review failed: status 422']);
+  // Nor one whose body is not the JSON object octokit usually gives.
+  const plain = new Error('Request failed with status code 422');
+  plain.status = 422;
+  plain.response = { data: 'lock prevents review' };
+  const textual = fixture();
+  textual.github.rest.pulls.createReview = async () => { throw plain; };
+  assert.equal(await submitReview(env, checked(), textual.github, textual.core),
+    'https://github.com/owner/repo/issues/12#issuecomment-9');
+  assert.equal(textual.created.length, 1);
+  assert.deepEqual(textual.errors, ['Submitting the review failed: status 422']);
+});
+
+// Other failures still fail the run, with why they failed in the log.
+test('other submission failures still fail the run, with why in the log', async () => {
+  const denied = new Error('Request failed with status code 403');
+  denied.status = 403;
+  denied.response = { data: { message: 'Resource not accessible by integration' } };
+  const f = fixture();
+  f.github.rest.pulls.createReview = async () => { throw denied; };
+  await assert.rejects(submitReview(env, checked(), f.github, f.core), /403/);
+  assert.equal(f.created.length, 0);
+  assert.match(f.errors[0], /status 403 \(Resource not accessible by integration\)/);
 });
 
 // An empty result is what lets apply post the comment instead.
@@ -221,9 +278,19 @@ test('inline comments are placed in the review where the diff has their lines, e
   await submitReview(changes, { items: [items[1], inline({ path: 'src/a.rs', line: 3 }), inline({ path: 'src/a.rs', line: 2 })], errors: [] }, trailing.github, trailing.core);
   assert.deepEqual(trailing.reviews[0].comments, [{ path: 'src/a.rs', line: 2, side: 'RIGHT', body: 'finding 2' }]);
   assert.match(trailing.reviews[0].body, /\*\*src\/a\.rs, line 3\*\*/);
-  // Should GitHub still refuse an anchor, the submission fails and leaves
-  // the comment to apply, with every finding folded in: nothing is lost.
+  // Should GitHub still refuse an anchor, the verdict is posted as the
+  // comment with every finding folded in, saying why: nothing is lost.
   const refused = fixture({ files });
-  refused.github.rest.pulls.createReview = async () => { throw new Error('422 Line could not be resolved'); };
-  await assert.rejects(submitReview(changes, { items, errors: [] }, refused.github, refused.core), /422/);
+  const unresolved = new Error('Request failed with status code 422');
+  unresolved.status = 422;
+  unresolved.response = { data: { message: 'Line could not be resolved' } };
+  refused.github.rest.pulls.createReview = async () => { throw unresolved; };
+  assert.equal(await submitReview(changes, { items, errors: [] }, refused.github, refused.core),
+    'https://github.com/owner/repo/issues/12#issuecomment-9');
+  assert.ok(refused.created[0].body.startsWith('VERDICT: CHANGES\nFindings\n\n### Inline findings\n'));
+  for (const finding of ['finding 3', 'finding 2', 'finding 4', 'finding 21', 'finding 22', 'finding 5', 'finding 1']) {
+    assert.ok(refused.created[0].body.includes(finding), finding);
+  }
+  assert.match(refused.created[0].body, /The review could not be submitted: GitHub refused it with status 422 \(Line could not be resolved\)\./);
+  assert.ok(refused.created[0].body.endsWith(`\n\n${trailer}`));
 });

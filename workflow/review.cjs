@@ -13,6 +13,19 @@ function refusalText(reason) {
   return `Review refused by policy: ${text || 'no reason supplied'}`;
 }
 
+// Why GitHub refused a submission, from the error octokit raises: the
+// response body's message and errors, never its headers or URL, which
+// hold the credential and the request. One line, bounded: an annotation
+// is one line. The caller escapes the message again for the comment that
+// explains a refusal, where it must stay inert.
+function reviewRefusal(error) {
+  const data = error?.response?.data;
+  if (!Number.isInteger(error?.status) || data === null || typeof data !== 'object') return null;
+  const line = (text, max) => String(text ?? '').replace(/[\x00-\x20\x7f]+/g, ' ').trim().slice(0, max);
+  return { message: line(data.message, 400),
+    errors: Array.isArray(data.errors) ? line(JSON.stringify(data.errors), 250) : '' };
+}
+
 // Run only from the reusable workflow's pinned source, never from the review head.
 function admit(decision, base) {
   if (!decision.admitted) return decision;
@@ -410,6 +423,25 @@ async function submitReview(env, output, github, core) {
     // Posted all the same, the review is not to be posted again as the comment.
     const posted = await earlier().catch(() => undefined);
     if (posted) return posted;
+    const refusal = reviewRefusal(error);
+    if (Number.isInteger(error?.status)) {
+      const why = refusal ? [refusal.message, refusal.errors && `errors: ${refusal.errors}`].filter(Boolean).join('; ') : '';
+      core.error(`Submitting the review failed: status ${error.status}${why ? ` (${why})` : ''}`);
+    }
+    if (Number.isInteger(error?.status) && error.status === 422) {
+      // GitHub refused the submission (a locked conversation, for example):
+      // the verdict is posted as the plain comment apply would otherwise
+      // post, saying the review could not be submitted and why, so the pull
+      // request does not sit blocked with no explanation. Its URL counts as
+      // posted for the status, and apply posts nothing beside it.
+      const folded = foldInline(output);
+      const why = refusal?.message.replace(/[\\`*_{}\[\]()<>!#|~@]/g, '\\$&');
+      const comment = `${folded.items.find(item => item.type === 'add_comment').body}\n\n` +
+        `The review could not be submitted: GitHub refused it with status 422${why ? ` (${why})` : ''}.\n\n` +
+        `${reviewFooter(env, runUrl, run)}\n\n${marker}`;
+      const { data } = await github.rest.issues.createComment({ owner, repo, issue_number: Number(run.pull), body: comment });
+      return data.html_url || `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#issuecomment-${data.id}`;
+    }
     throw error;
   }
   return data.html_url || `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#pullrequestreview-${data.id}`;

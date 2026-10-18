@@ -244,6 +244,8 @@ jobs:
   # own included (#540). Inline findings whose lines are in the head's diff
   # are the review's comments, the rest are in its body. When nothing is
   # submitted, apply posts the comment, with every inline finding in it.
+  # A 422 refusal submits nothing and posts that comment itself, with why
+  # GitHub refused, so the pull request is not left without an explanation.
   submit:
     needs: [policy, agent, check]
     if: >-

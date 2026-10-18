@@ -155,6 +155,14 @@ an `APPROVED` or `CHANGES_REQUESTED` review, and apply then posts no comment.
 When nothing is submitted (a noop, a run stopped at a limit, a head that moved
 or a failed submission, which also leaves the run red), apply posts the comment
 as it does with the variable off, and that comment is what sets the status.
+A refusal is not silent: `submit` logs the status and the response's
+`message` and `errors` (never its headers or URL, which hold the credential)
+as an error annotation. A 422, GitHub refusing the submission (a locked
+conversation, for example), posts the verdict as that plain comment itself,
+saying the review could not be submitted and why; the comment's URL counts
+as posted for the status, and apply posts nothing beside it. Any other
+failure still leaves the comment to apply. A re-run of all jobs posts its
+own.
 A re-run of failed jobs posts nothing twice: `submit` submits nothing where
 this run already has an applied comment, and reuses an identical review at
 the same head. A re-run of all jobs that reaches other findings submits a new
