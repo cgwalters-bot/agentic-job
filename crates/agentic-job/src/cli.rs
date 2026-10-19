@@ -8,7 +8,9 @@ use clap::{Parser, Subcommand};
 
 use crate::config::compose;
 use crate::exit::Exit;
-use crate::{acp_drive, audit, check, event, policy, run, sandbox, secure_host, workflows};
+use crate::{
+    acp_drive, audit, check, collect, event, policy, run, sandbox, secure_host, workflows,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentic-job", version, about, propagate_version = true)]
@@ -38,6 +40,8 @@ pub enum Command {
     CheckKey(run::key_check::Args),
     /// Register a `github-oidc` run at the inference proxy for a later job's `run`, in a job that runs nothing else
     Register(run::register::Args),
+    /// Validate and sanitize handed-back requests as gh-aw's collector does, for `check --collected`
+    Collect(collect::Args),
     /// Check handed-back outputs and patch against the policy
     Check(check::Args),
     /// Inspect checked proposals with a bounded model request before apply
@@ -71,6 +75,7 @@ impl Command {
             Self::Run(args) => run::run(args),
             Self::CheckKey(args) => run::key_check::run(args),
             Self::Register(args) => run::register::run(args),
+            Self::Collect(args) => collect::run(args),
             Self::Check(args) => check::run(args),
             Self::Detect(args) => crate::detect::run(args),
             Self::Event(args) => event::run(args),
@@ -119,6 +124,15 @@ mod tests {
         &["register", "--config", "c.toml", "--output", "out"],
         &[
             "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out", "out",
+        ],
+        &[
+            "collect",
+            "--policy",
+            "p.json",
+            "--outputs",
+            "dir",
+            "--collected",
+            "agent_output.json",
         ],
         &[
             "check",

@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "type": "create_pull_request",
+      "body": "Created docs/t377-budget-test.md with the heading # Budget test and forty UTC timestamps as list items. Ran sleep 3; date -u +%T forty times in separate shell tool calls, appending each result before continuing. Read back the file and confirmed all forty entries. No bot-harness budget notice arrived. Changes are uncommitted.",
+      "branch": "agent-run-37396445799",
+      "title": "Created docs/t377-budget-test.md with the heading # Budget test and forty UTC timestamps as list ite"
+    },
+    {
+      "type": "missing_tool",
+      "reason": "x",
+      "tool": "t"
+    }
+  ],
+  "errors": [
+    "Line 2: Too many items of type 'create_pull_request'. Maximum allowed: 1.",
+    "Line 5: Too many items of type 'missing_tool'. Maximum allowed: 1."
+  ]
+}

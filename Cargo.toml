@@ -47,6 +47,9 @@ tar = { version = "0.4", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1"
+# `collect` normalizes text to NFC and NFKC as gh-aw's sanitizer does
+# with JavaScript's String.prototype.normalize.
+unicode-normalization = "0.1"
 # The session's bridge (specs/session.md): a WebSocket server behind
 # `tailscale serve`, which terminates TLS, so only the handshake and
 # framing, without TLS or a client's connector.

@@ -46,7 +46,7 @@ pub const OUTPUTS_FILE: &str = "outputs.jsonl";
 /// Which repository, branch and commit a patch is against.
 pub const BASE_FILE: &str = "base.json";
 
-const MAX_OUTPUTS_BYTES: u64 = 1 << 20;
+pub const MAX_OUTPUTS_BYTES: u64 = 1 << 20;
 const MAX_BASE_BYTES: u64 = 4096;
 /// How much of a `memory.json` is read where the policy allows none: it
 /// is refused whatever it holds, but read with a bound like the rest.

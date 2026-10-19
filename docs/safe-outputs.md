@@ -32,9 +32,11 @@ requests, and its handlers (`safe_output_handler_manager.cjs`), which
 act on them. Both come from the action `github/gh-aw/actions/setup`,
 pinned at commit `462ed682857c4ab64d40f2c85e3738fa27834839`
 (v0.91.12-7) in every place that uses it. Nothing of gh-aw is copied
-into this repository, and none of it is reimplemented: it is validated,
-maintained code, and a second implementation would only be a second
-reading of the same rules to keep in step.
+into this repository. On GitHub none of it is reimplemented either: it
+is validated, maintained code, and a second implementation would only be
+a second reading of the same rules to keep in step. The one exception is
+[`collect`](#off-github), for callers that cannot run gh-aw's
+collector, held to it by fixtures gh-aw's collector wrote.
 
 The collector adds a `report_incomplete` item of its own to a result
 holding nothing but `missing_tool` and `missing_data`, or nothing at all.
@@ -990,8 +992,38 @@ does it on two fixtures when dispatched. Deployment evidence is in the
 ## Off GitHub
 
 `policy` and `check` need no forge. gh-aw's collector and handlers run
-under `actions/github-script`. A caller that is not on GitHub needs
-gh-aw's collector, or an equivalent that writes the same
-`{items, errors}`, before `check`, and an applier of its own
-([tracker#427](https://github.com/cgwalters-forge/tracker/issues/427)).
-Neither exists here.
+under `actions/github-script`. A caller that is not on GitHub (Forgejo,
+later GitLab) runs instead
+
+```text
+agentic-job collect --policy FILE --outputs DIR --collected FILE
+```
+
+on the checking machine, then `check` with the same `--collected`. It
+reads `outputs.jsonl` (at most 1 MiB, never through a link) and writes
+the `{items, errors}` gh-aw's collector would, given the policy's
+`safe_outputs` and the URL policy and allowed hosts check.yml gives it.
+It exits 1 if it refused a line,
+as check.yml fails when gh-aw's collector did.
+
+It takes `add_comment`, `create_pull_request`, `noop`, `missing_tool`
+and `missing_data`: their fields validated and their text sanitized as
+gh-aw does (HTML comments, tags and link titles, URLs and their hosts,
+entities and hiding characters, template delimiters, unbalanced fences,
+the length limits). Any other type is refused, even where the policy
+allows it, rather than passed on unsanitized. A test compares its
+result with what gh-aw's collector wrote for the same lines and
+configuration (`crates/agentic-job/tests/data/collect`, regenerated with
+`just collect-fixtures GH_AW_JS` when gh-aw's pin moves), and its
+built-in field rules with `safe-outputs/validation.json`. Where they
+differ it mostly refuses more (a line that is not JSON is not
+repaired); the other differences are in characters no renderer takes
+for a line end, listed in `src/collect/mod.rs`.
+
+As gh-aw's collector does, it leaves @-mentions in `add_comment` and
+`create_pull_request` to the applier, which knows who may be mentioned
+where it posts; in `noop`, `missing_tool` and `missing_data` it wraps
+them in code. An applier off GitHub is still to be written
+([tracker#427](https://github.com/cgwalters-forge/tracker/issues/427)),
+and must filter those mentions as gh-aw's handlers do. The GitHub path
+keeps gh-aw's collector.

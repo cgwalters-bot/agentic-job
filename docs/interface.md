@@ -17,6 +17,7 @@ builds that source. `build-binary: true` forces a build.
 | `sandbox setup --config FILE` | root | Prepares the host the agent runs on, and copies the configuration to `/etc/agentic-job/`. |
 | `sandbox check [--record\|--unless-passed]` | the runner's user | Probes the sandbox as the sandbox user, each probe with a positive control. `--record` (secure-host's) leaves a record when all probes pass, and `--unless-passed` (run's) probes nothing when it finds that record, against the same configuration, with nothing having entered the sandbox user since ([sandbox-check.md](sandbox-check.md)). |
 | `run --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent in the sandbox and takes what it hands back. |
+| `collect --policy FILE --outputs DIR --collected FILE` | anyone | Validates and sanitizes the handed-back requests as gh-aw's collector does, for a caller off GitHub ([safe-outputs.md](safe-outputs.md#off-github)). Exit 1 if it refused a line. |
 | `check --policy FILE --outputs DIR --collected FILE [--report FILE]` | anyone | Checks handed-back outputs and patch against the policy. |
 | `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
 | `workflows check [--root DIR] [--exemptions FILE]` | anyone | Refuses workflow files whose jobs neither run secure-host nor call the reusable workflow, and the other shapes in [workflows-check.md](workflows-check.md). Exit 1 names each file, job and step. |
@@ -42,7 +43,7 @@ describes the helper and the lock's limits.
 many of each, and the sanitizing of their text are gh-aw's code, used as
 it is. `--collected` is what gh-aw's collector made of the outputs, and
 is given by path so that it is never taken from what the agent's machine
-uploaded. [safe-outputs.md](safe-outputs.md) has both halves.
+uploaded; off GitHub, `collect` writes it. [safe-outputs.md](safe-outputs.md) has both halves.
 
 `config` exists because a workflow gets a run's settings as strings from
 whoever called it. Each setting is the value of its one key and is never

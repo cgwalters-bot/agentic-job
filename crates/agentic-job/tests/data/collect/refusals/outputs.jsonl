@@ -1,0 +1,19 @@
+{"type":"add_comment"}
+{"type":"add_comment","body":"   "}
+{"type":"add_comment","body":5}
+{"type":"add_comment","body":"x","comment_id":-1}
+{"type":"add_comment","body":"x","comment_id":1.5}
+{"type":"add_comment","body":"x","comment_id":true}
+{"type":"add_comment","body":"x","target":"other"}
+{"type":"add_comment","body":"x","temporary_id":"nope"}
+{"type":"add_comment","body":"x","repo":5}
+{"type":"add_comment","body":"x","item_number":null}
+{"type":"add_comment","body":"x","item_number":[]}
+{"type":"add_comment","body":"x","data":{"a":1}}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x"}
+{"type":""}
+{"body":"no type"}
+{"type":"add_comment","body":"ok one"}
+{"type":"add_comment","body":"ok two"}
+{"type":"noop","message":"first"}
+{"type":"noop","message":"second"}

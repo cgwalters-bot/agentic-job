@@ -1,0 +1,14 @@
+{
+  "add_comment": {
+    "max": 40
+  },
+  "missing_data": {
+    "max": 3
+  },
+  "missing_tool": {
+    "max": 3
+  },
+  "noop": {
+    "max": 1
+  }
+}

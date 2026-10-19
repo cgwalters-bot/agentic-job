@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "type": "add_comment",
+      "body": "ok one"
+    },
+    {
+      "type": "add_comment",
+      "body": "ok two"
+    },
+    {
+      "type": "noop",
+      "message": "first"
+    }
+  ],
+  "errors": [
+    "Line 1: add_comment requires a 'body' field (string)",
+    "Line 2: add_comment requires a 'body' field (string)",
+    "Line 3: add_comment requires a 'body' field (string)",
+    "Line 4: add_comment 'comment_id' must be a valid positive integer (got: -1)",
+    "Line 5: add_comment 'comment_id' must be a valid positive integer (got: 1.5)",
+    "Line 6: add_comment 'comment_id' must be a number or string",
+    "Line 7: add_comment 'target' must be one of: status",
+    "Line 8: add_comment 'temporary_id' must match pattern ^#?aw_[A-Za-z0-9_]{3,12}$",
+    "Line 9: add_comment 'repo' must be a string",
+    "Line 10: add_comment 'item_number' validation (issueOrPRNumber) accepted object but did not produce a normalized value",
+    "Line 11: add_comment 'item_number' must be a number or string",
+    "Line 12: add_comment 'data' is not enabled (set safe-outputs.data in workflow frontmatter)",
+    "Line 13: Unexpected output type 'create_pull_request'. Expected one of: add_comment, noop",
+    "Line 14: Missing required 'type' field",
+    "Line 15: Missing required 'type' field",
+    "Line 19: Too many items of type 'noop'. Maximum allowed: 1."
+  ]
+}

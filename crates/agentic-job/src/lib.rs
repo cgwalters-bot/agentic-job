@@ -10,6 +10,7 @@ pub mod acp_drive;
 pub mod audit;
 pub mod check;
 pub mod cli;
+pub mod collect;
 pub mod config;
 pub mod event;
 pub mod exit;

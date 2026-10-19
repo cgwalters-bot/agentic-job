@@ -20,6 +20,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `policy.rs` | Bounds, per-run policy and gh-aw configuration |
 | `event/` | Event admission, run guards and fenced task context |
 | `check/` | Output policy and strict mail-patch parsing |
+| `collect/` | gh-aw's collector and sanitizer, for callers off GitHub |
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `files.rs`, `redact.rs` | Bounded file reads and secret redaction |
@@ -94,7 +95,8 @@ embedded.
 `safe-outputs/` holds integration scripts, derived validation rules and
 fixtures. gh-aw's collector and handlers come from its pinned setup
 action, not a vendored copy. Regenerate the rules with
-`node safe-outputs/validation.mjs GH_AW_CHECKOUT` when changing that pin.
+`node safe-outputs/validation.mjs GH_AW_CHECKOUT` when changing that pin,
+and `collect`'s parity fixtures with `just collect-fixtures GH_AW_JS`.
 
 ## Tests and CI
 

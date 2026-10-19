@@ -1,0 +1,58 @@
+{
+  "create_pull_request": {
+    "max": 1,
+    "protected_files": [
+      "package.json",
+      "bun.lockb",
+      "bunfig.toml",
+      "deno.json",
+      "deno.jsonc",
+      "deno.lock",
+      "global.json",
+      "NuGet.Config",
+      "Directory.Packages.props",
+      "mix.exs",
+      "mix.lock",
+      "go.mod",
+      "go.sum",
+      "stack.yaml",
+      "stack.yaml.lock",
+      "pom.xml",
+      "build.gradle",
+      "build.gradle.kts",
+      "settings.gradle",
+      "settings.gradle.kts",
+      "gradle.properties",
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      "npm-shrinkwrap.json",
+      "requirements.txt",
+      "Pipfile",
+      "Pipfile.lock",
+      "pyproject.toml",
+      "setup.py",
+      "setup.cfg",
+      "Gemfile",
+      "Gemfile.lock",
+      "uv.lock",
+      "CODEOWNERS",
+      "DESIGN.md",
+      "CONTRIBUTING.md",
+      "SECURITY.md",
+      "CODE_OF_CONDUCT.md",
+      "CLAUDE.md"
+    ],
+    "protect_top_level_dot_folders": true,
+    "protected_files_policy": "blocked",
+    "draft": true,
+    "max_patch_size": 8192,
+    "max_patch_files": 100
+  },
+  "missing_tool": {
+    "max": 1
+  },
+  "noop": {
+    "max": 1
+  }
+}

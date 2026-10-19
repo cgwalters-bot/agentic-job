@@ -1,0 +1,130 @@
+{
+  "items": [
+    {
+      "type": "add_comment",
+      "body": "## Blocked: source access requires authorization\n\nSource verification was **not performed**. The requested research would require retrieving `osbuild/image-builder-cli`, `osbuild/images`, `rhinstaller/anaconda`, and `podman-container-tools/container-libs`. The instruction prohibiting access to any service except fetching build dependencies also prohibits cloning these source repositories; a source-retrieval exception is needed.\n\nThe available workspace contains only the tracker repository at HEAD `ed4283478ed69471921da4b8257593f883b2b1b1`. No target source snapshots are available, and `storage_src.go` was not found in the available cache/local locations. Consequently, this report cannot establish the ISO store layout, write behavior, locking APIs, or exporter behavior, or provide verified commit permalinks.\n\n### Background and conditional evaluation\n\nAs supplied background, the research concerns an Anaconda ISO read-only container store and whether installer workflows could reuse its contents while avoiding tar materialization or problematic locking. This is the question to investigate, not an independently verified description of the implementation.\n\nWith pinned sources available, trace how image-builder produces the store, how the ISO exposes it, and how Anaconda and the container-storage library consume it. Establish the actual paths and configuration, then identify which metadata, indexes, locks, and layer data are read or written during discovery, import, and export. Check whether a separate writable graphroot and runroot can reference the backing store without changing it, and whether references remain valid for the full installer operation.\n\nAvoiding tar materialization or locks requires more than observing that a listing succeeds or that no lock is acquired. Verify that the proposed path performs no graphroot/source writes where read-only reuse is required, preserves backing-store references and metadata stability, and has appropriate layer-exporter streaming semantics. A writable scratch graphroot in an isolated probe does not demonstrate that a production path avoids graphroot writes. Absence of locks alone would not establish correctness under concurrent access.\n\n### Proposed interactive installer experiment — not executed\n\nFirst discover what the installer environment actually provides. The following are prospective commands; binary availability, configuration precedence, and runtime dependencies remain unverified:\n\n```sh\nfindmnt\npodman info --debug\nls /etc/containers /usr/share/containers\n```\n\nUse available read commands to inspect `storage.conf` only at paths found during discovery. Do not infer the store layout from directory names. After identifying the real backing store and a suitable writable scratch location, set `STORE` to that discovered store path and inspect its mount and attributes:\n\n```sh\nfindmnt -T \"$STORE\"\nstat \"$STORE\"\n```\n\nIf Podman is present and its installed version supports the options, an optional isolated listing probe could use newly created, dedicated writable scratch directories under `/run`:\n\n```sh\npodman --root /run/iso-store-probe/root \\\n  --runroot /run/iso-store-probe/runroot \\\n  --storage-opt additionalimagestore=\"$STORE\" images\n```\n\nFlag acceptance and runtime dependencies are unverified. This probe can write to the scratch paths; successful listing would establish only limited discovery compatibility, not import/export correctness or absence of source writes. Inspect before/after metadata and references using tools available in the environment. Do not remount the active store.\n\n### Unblock\n\nProvide offline source snapshots for all four repositories, pinned to identified commits, or explicitly authorize cloning those sources. That enables implementation-specific answers with verified commit permalinks. No network requests, source builds, or installer experiments were performed for this report."
+    },
+    {
+      "type": "add_comment",
+      "body": "Hello @someone and @org/team, thanks @copilot"
+    },
+    {
+      "type": "add_comment",
+      "body": "See https://github.com/owner/repo/pull/1, https://docs.rs/regex and [x](https://example.com/a) and (host.internal/redacted) and (example.com/redacted) and (files.example.org/redacted) and https://GitHub.COM:443/x"
+    },
+    {
+      "type": "add_comment",
+      "body": "https://github.com/x and (evil.internal/redacted) and (evil.internal/redacted)\\x and <https://good.example.org/a|label> (bad.internal/redacted)|lbl (bad.internal/redacted)"
+    },
+    {
+      "type": "add_comment",
+      "body": "(redacted) and (redacted) and (redacted) (redacted) meta(redacted) a:b 100%25 done"
+    },
+    {
+      "type": "add_comment",
+      "body": "(script)alert(1)(/script) <b class=\"y\">bold</b> <img src=\"https://x.example.com/a.png\"> <img src=x> <details><summary>s</summary>t</details> (![CDATA[(x)]]) (custom-tag attr) <span>s</span>"
+    },
+    {
+      "type": "add_comment",
+      "body": "visible  text  end  tail"
+    },
+    {
+      "type": "add_comment",
+      "body": "[text (hidden title)](https://github.com) and [y (single)](<https://docs.rs>) and [z (paren)](https://docs.rs)\n[ref]: https://github.com\n[ref2]: https://docs.rs"
+    },
+    {
+      "type": "add_comment",
+      "body": "Inline `http://kept.internal` and `@user` in code\n```\nhttp://x.internal <b>\n{{ x }}\n```\noutside \\{\\{ y }} \\$\\{z} \\{\\# c #} \\{\\% raw %} \\<%= e %>"
+    },
+    {
+      "type": "add_comment",
+      "body": "@user @other @third @fourth (script) xy &#xFFFFFFFF; <b> z"
+    },
+    {
+      "type": "add_comment",
+      "body": "zerowidth bidi full filigature apple Alpha tagchars é é ... 2 1"
+    },
+    {
+      "type": "add_comment",
+      "body": "ansi red bell tab\tok\nCRLF line\rlone"
+    },
+    {
+      "type": "add_comment",
+      "body": "fixes #1, fixes #2, fixes #3, fixes #4, fixes #5, fixes #6, fixes #7, fixes #8, fixes #9, fixes #10, `fixes #11`, `fixes #12` and `Closes #99`"
+    },
+    {
+      "type": "add_comment",
+      "body": "```js\nconst x = 1;\n```"
+    },
+    {
+      "type": "add_comment",
+      "body": "# Title\n\nBody with (x.internal/redacted)"
+    },
+    {
+      "type": "add_comment",
+      "body": "a\n```js\nb\n```"
+    },
+    {
+      "type": "add_comment",
+      "body": "/deploy now, please"
+    },
+    {
+      "type": "add_comment",
+      "body": "(a.very.long.subdomain.na…es.on.and.on.example.com/redacted) and (redacted) and (redacted)"
+    },
+    {
+      "type": "add_comment",
+      "body": "x",
+      "comment_id": 12,
+      "item_number": "42",
+      "pr": 7,
+      "pr_number": "#3",
+      "reply_to_id": "<b>raw</b>",
+      "repo": "owner/name",
+      "target": "status",
+      "temporary_id": " aw_abc123 "
+    },
+    {
+      "type": "add_comment",
+      "body": "blank optional fields"
+    },
+    {
+      "type": "add_comment",
+      "body": "dash type"
+    },
+    {
+      "type": "add_comment",
+      "body": "~~~\ntilde fence {{ kept }}\n~~~\nafter \\{\\{ esc }}"
+    },
+    {
+      "type": "add_comment",
+      "body": "a ``code with ` inside`` b @x `unclosed"
+    },
+    {
+      "type": "add_comment",
+      "body": "nested <<b>>tag</b> and (a href=\"https://github.com\")link(/a) and <https://github.com/x>"
+    },
+    {
+      "type": "add_comment",
+      "body": "comma,https://x.com,(evil.internal/redacted) ![a](//x.com)![b]((evil.internal/redacted))"
+    },
+    {
+      "type": "missing_tool",
+      "alternatives": "`x ``x ```x ````x `````x ``````x ```````x ````````x `````````x ``````````x ```````````x ````````````x `````````````x ``````````````x ```````````````x ````````````````x <code>@mention</code>",
+      "reason": "needs `@someone`'s approval at (intranet.internal/redacted) and rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\n[Content truncated due to length]",
+      "tool": "`@tool-owner`"
+    },
+    {
+      "type": "missing_data",
+      "alternatives": "none",
+      "context": "see  (logs.internal/redacted)",
+      "data_type": "logs",
+      "reason": "no access, ask `@ops`"
+    },
+    {
+      "type": "noop",
+      "message": "Nothing to do; `@maintainer` can close #5 and fixes #6"
+    }
+  ],
+  "errors": []
+}

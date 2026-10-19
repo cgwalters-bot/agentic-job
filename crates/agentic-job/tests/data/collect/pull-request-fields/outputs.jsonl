@@ -1,0 +1,9 @@
+{"type":"create_pull_request","title":"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT","body":"```md\nbody @user http://x.internal\n```","branch":"feature/@user","base":"main","labels":["bug","@team","<b>x</b>"],"dependencies":[],"draft":true,"stack_position":2,"stack_root":"  ","temporary_id":"#aw_abc","repo":"a/b"}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","labels":["a",1]}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","labels":"bug"}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","draft":"yes"}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","draft":""}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","draft":null}
+{"type":"create_pull_request","title":"t","body":"b"}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","stack_position":"0"}
+{"type":"create_pull_request","title":"t","body":"b","branch":"x","data":{}}

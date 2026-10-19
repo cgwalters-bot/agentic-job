@@ -1,0 +1,5 @@
+{"type":"create_pull_request","title":"Created docs/t377-budget-test.md with the heading # Budget test and forty UTC timestamps as list ite","body":"Created docs/t377-budget-test.md with the heading # Budget test and forty UTC timestamps as list items. Ran sleep 3; date -u +%T forty times in separate shell tool calls, appending each result before continuing. Read back the file and confirmed all forty entries. No bot-harness budget notice arrived. Changes are uncommitted.","branch":"agent-run-37396445799"}
+{"type":"create_pull_request","title":"second","body":"too many","branch":"b"}
+{"type":"noop","message":"  Testing  "}
+{"type":"missing_tool","reason":"x","tool":"t"}
+{"type":"missing_tool","reason":"y"}

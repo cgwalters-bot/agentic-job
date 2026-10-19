@@ -16,6 +16,24 @@ publish-feed-refresh:
 test-safe-output-handlers:
     node --test crates/agentic-job/tests/corpus/handlers.test.mjs
 
+# The parity fixtures of `collect` (crates/agentic-job/tests/data/collect):
+# what gh-aw's collector makes of each case's lines and configuration,
+# with links kept as `policy` keeps them. GH_AW_JS is actions/setup/js of
+# gh-aw at the commit check.yml pins its setup action at.
+collect-fixtures gh-aw-js:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    domains=$(grep -v '^#' crates/agentic-job/src/top-level-domains.txt | tr '[:upper:]' '[:lower:]' | paste -sd, -)
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    for case in crates/agentic-job/tests/data/collect/*/; do
+        env -u GITHUB_SERVER_URL -u GITHUB_API_URL GH_AW_ALLOWED_DOMAINS="$domains" \
+            node crates/agentic-job/tests/corpus/collect.cjs "$1" "$case/outputs.jsonl" "$case/config.json" \
+            safe-outputs/validation.json owner/name "$scratch/collected.json"
+        node -e 'const fs = require("node:fs"); const [from, to] = process.argv.slice(1); fs.writeFileSync(to, JSON.stringify(JSON.parse(fs.readFileSync(from, "utf8")), null, 2) + "\n");' \
+            "$scratch/collected.json" "$case/collected.json"
+    done
+
 runner-egress-test:
     node --test workflow/runner-egress/parse.test.mjs
 
