@@ -123,6 +123,9 @@ pub const PLAIN_HTTP_PREFIX: &str = "http://";
 /// The domain no bounds file may allow plain HTTP for, nor any host under
 /// it: it serves https, so a plain-HTTP URL for it is a downgrade.
 const NEVER_PLAIN_HTTP: &str = "github.com";
+/// The forge whose private-repository rules a bounds file's `push_repo`
+/// leaves as they are (docs/private-repositories.md).
+const GITHUB_HOST: &str = "github.com";
 
 /// The longest check run name bounds may pin: room for a readable name,
 /// none for a page of text in the forge's checks list.
@@ -438,6 +441,13 @@ pub struct Bounds {
     /// See [`check_commit_author`].
     #[serde(default)]
     pub commit_author: Option<String>,
+    /// The fork (OWNER/NAME) Forgejo's `apply` pushes a pull request's
+    /// branch to, never the target repository: the target's CI then runs
+    /// the agent's code as a fork's. Only the bounds name it, never a
+    /// hand-back; it also lets a private run off GitHub open a pull
+    /// request (docs/safe-outputs.md#publishing-to-forgejo).
+    #[serde(default)]
+    pub push_repo: Option<String>,
     /// Whether a run may work on a repository that is not public. Off,
     /// run evidence is published and only public repositories are run;
     /// on, `policy` keeps such a run's outputs in its own repository and
@@ -789,6 +799,10 @@ pub struct Policy {
     /// author `check` lets a patch name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_author: Option<String>,
+    /// The bounds' `push_repo`, where a pull request is asked for: the
+    /// only repository Forgejo's `apply` pushes its branch to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_repo: Option<String>,
     /// A repository that is not public: `run` holds the machine to the
     /// conditions of docs/private-repositories.md before it clones.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1050,6 +1064,16 @@ impl Policy {
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
         }
+        if let Some(push_repo) = &self.push_repo {
+            ensure!(
+                REPO_RE.is_match(push_repo)
+                    && !dotted(push_repo)
+                    && !push_repo.ends_with(".git")
+                    && !same_owner(push_repo, &self.repo),
+                "push_repo {push_repo:?} is not another owner's repository than {:?}",
+                self.repo
+            );
+        }
         ensure!(
             self.allowed_domains.is_empty() || self.allowed_domains == link_domains(),
             "allowed_domains is not the list of top-level domains"
@@ -1219,6 +1243,12 @@ impl Bounds {
         ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
+        }
+        if let Some(push_repo) = &self.push_repo {
+            ensure!(
+                REPO_RE.is_match(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
+                "push_repo requires an exact repository name: {push_repo:?}"
+            );
         }
         if let Some(memory) = &self.memory {
             memory.validate()?;
@@ -1465,13 +1495,31 @@ impl Bounds {
             // Apply pushes a patch through a fork of the output repository
             // and checks that fork without a credential, which a private
             // repository's fork does not answer: refused before an agent
-            // runs, not after.
-            if private && types.contains(&carrier) {
+            // runs, not after. Off GitHub, a pull request whose fork the
+            // bounds name is the exception: Forgejo's apply pushes only
+            // there, and only to a private fork for a private run,
+            // and the run's evidence stays on the same forge.
+            let named_fork =
+                carrier == CREATE_PULL_REQUEST && self.push_repo.is_some() && !on_github(clone_url);
+            if private && types.contains(&carrier) && !named_fork {
                 errors.push(format!(
                     "a private run hands back no patch, so it can't {carrier}: apply's fork is \
                      not supported for private repositories"
                 ));
             }
+        }
+
+        // The fork is never the target: a branch pushed to the target runs
+        // its CI as the repository's own, with its secrets. Nor is it the
+        // target's owner's: Forgejo reads a pull request's head of that
+        // owner as the target's own branch.
+        if let Some(push_repo) = &self.push_repo
+            && types.contains(&CREATE_PULL_REQUEST)
+            && same_owner(push_repo, repo)
+        {
+            errors.push(format!(
+                "push_repo {push_repo:?} is of the owner of {repo:?}, not another owner's fork"
+            ));
         }
 
         // A push goes to the branch the run starts from, which the request
@@ -1641,11 +1689,35 @@ impl Bounds {
             max_patch_bytes: self.max_patch_bytes,
             safe_outputs,
             commit_author: self.commit_author.clone(),
+            push_repo: self
+                .push_repo
+                .clone()
+                .filter(|_| types.contains(&CREATE_PULL_REQUEST)),
             private,
             allowed_domains: link_domains().to_vec(),
             memory: self.memory.clone(),
         })
     }
+}
+
+/// Whether a clone URL is on GitHub, whose apply is gh-aw's and reads no
+/// `push_repo`.
+fn on_github(clone_url: &str) -> bool {
+    let host = clone_url
+        .split_once("://")
+        .map_or(clone_url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    host == GITHUB_HOST || host.ends_with(&format!(".{GITHUB_HOST}"))
+}
+
+/// Whether two OWNER/NAME names have the same owner.
+fn same_owner(one: &str, other: &str) -> bool {
+    let owner = |repo: &str| repo.split('/').next().unwrap_or_default().to_owned();
+    owner(one).eq_ignore_ascii_case(&owner(other))
 }
 
 /// Whether OUTPUT hands back a patch.
@@ -1758,6 +1830,17 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             )]);
         }
         (own, other) => own.or(other),
+    };
+    // A fork to push to only where both files name it: each compile has
+    // already allowed a private pull request on its own file's.
+    policy.push_repo = match (policy.push_repo, other.push_repo) {
+        (Some(own), Some(other)) if !own.eq_ignore_ascii_case(&other) => {
+            return Err(vec![format!(
+                "the bounds files name different push repositories: {own:?} and {other:?}"
+            )]);
+        }
+        (Some(own), Some(_)) => Some(own),
+        _ => None,
     };
     // Memory only where both files allow it, within the tighter of each.
     policy.memory = match (policy.memory, other.memory) {
@@ -3352,6 +3435,168 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         }
         let bounds: Bounds = toml::from_str(&format!("private = true\n{BOUNDS}")).unwrap();
         assert!(bounds.private && !self::bounds().private);
+    }
+
+    /// Off GitHub, a private run may open a pull request when every bounds
+    /// file names the same fork for its branch, which is never the target.
+    #[test]
+    fn push_repo_bounds_private_pull_requests_off_github() {
+        const FORK: &str = "bot/bootc";
+        let forge = Request {
+            private: true,
+            output_repo: Some(REPO),
+            clone_url: "https://forge.example/bootc-dev/bootc",
+            outputs: "create_pull_request,noop",
+            ..request()
+        };
+        let public = Request {
+            private: false,
+            ..forge
+        };
+        // The name, the caller's and the organization's push_repo, the
+        // request, and a part of the refusal if it is refused.
+        type Case<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Option<&'a str>,
+            Request<'a>,
+            Option<&'a str>,
+        );
+        let cases: &[Case<'_>] = &[
+            (
+                "private, named in both",
+                Some(FORK),
+                Some(FORK),
+                forge,
+                None,
+            ),
+            (
+                "private, named in both in another case",
+                Some(FORK),
+                Some("BOT/Bootc"),
+                forge,
+                None,
+            ),
+            (
+                "public, named in both",
+                Some(FORK),
+                Some(FORK),
+                public,
+                None,
+            ),
+            ("public, named in neither", None, None, public, None),
+            (
+                "public, comments only",
+                Some(FORK),
+                Some(FORK),
+                Request {
+                    outputs: "add_comment,noop",
+                    ..public
+                },
+                None,
+            ),
+            (
+                "private, named in neither",
+                None,
+                None,
+                forge,
+                Some("can't create_pull_request"),
+            ),
+            (
+                "private, named by the caller only",
+                Some(FORK),
+                None,
+                forge,
+                Some("can't create_pull_request"),
+            ),
+            (
+                "named differently",
+                Some(FORK),
+                Some("bot/other"),
+                public,
+                Some("different push repositories"),
+            ),
+            (
+                "the target itself",
+                Some("Bootc-Dev/Bootc"),
+                Some("Bootc-Dev/Bootc"),
+                public,
+                Some("is of the owner of \"bootc-dev/bootc\""),
+            ),
+            (
+                "the target's owner's",
+                Some("bootc-dev/fork"),
+                Some("bootc-dev/fork"),
+                public,
+                Some("is of the owner of \"bootc-dev/bootc\""),
+            ),
+            (
+                "private, on GitHub",
+                Some(FORK),
+                Some(FORK),
+                Request {
+                    clone_url: "https://github.com/bootc-dev/bootc",
+                    ..forge
+                },
+                Some("can't create_pull_request"),
+            ),
+        ];
+        let with = |push_repo: Option<&str>| {
+            let mut bounds = Bounds {
+                private: true,
+                push_repo: push_repo.map(str::to_owned),
+                ..bounds()
+            };
+            bounds.hosts.push("forge.example".to_owned());
+            bounds.validate().unwrap();
+            bounds
+        };
+        for (name, caller, org, request, want) in cases {
+            let compiled = with(*caller).compile(request).and_then(|policy| {
+                with(*org)
+                    .compile(request)
+                    .and_then(|other| intersect(policy, other))
+            });
+            match (compiled, want) {
+                (Ok(policy), None) => {
+                    let pull_request = policy.safe_outputs.create_pull_request.is_some();
+                    let want = caller.filter(|_| pull_request);
+                    assert_eq!(policy.push_repo.as_deref(), want, "{name}");
+                    assert_eq!(policy.private, request.private, "{name}");
+                    let loaded: Policy =
+                        serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+                    assert_eq!(loaded, policy, "{name}");
+                }
+                (Err(errors), Some(want)) => {
+                    assert!(
+                        errors.iter().any(|e| e.contains(want)),
+                        "{name}: {errors:?}"
+                    );
+                }
+                (result, _) => panic!("{name}: {result:?}"),
+            }
+        }
+        for push_repo in ["bot", "bot/../x", "bot/..", "a b/c", "bot/bootc.git"] {
+            let bounds = Bounds {
+                push_repo: Some(push_repo.to_owned()),
+                ..bounds()
+            };
+            assert!(bounds.validate().is_err(), "{push_repo}");
+        }
+        // Nor does a policy.json written by hand name the target.
+        for (push_repo, ok) in [
+            (FORK, true),
+            ("Bootc-Dev/Bootc", false),
+            ("bootc-dev/fork", false),
+            ("bot/..", false),
+            ("bot/bootc.git", false),
+        ] {
+            let policy = Policy {
+                push_repo: Some(push_repo.to_owned()),
+                ..policy()
+            };
+            assert_eq!(policy.validate().is_ok(), ok, "{push_repo}");
+        }
     }
 
     #[test]

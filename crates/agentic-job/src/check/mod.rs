@@ -237,7 +237,7 @@ fn one_line(text: &str) -> String {
 const CREATE_ISSUE: &str = "create_issue";
 const ISSUE_LINKS: &[&str] = &["parent", "blocked_by"];
 
-fn item_type(item: &Map<String, Value>) -> &str {
+pub(crate) fn item_type(item: &Map<String, Value>) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or_default()
 }
 
@@ -279,7 +279,7 @@ fn holds_marker(value: &Value) -> bool {
     }
 }
 
-fn map_holds_marker(map: &Map<String, Value>) -> bool {
+pub(crate) fn map_holds_marker(map: &Map<String, Value>) -> bool {
     map.iter().any(|(key, value)| {
         key.to_ascii_lowercase().contains(APPLIED_MARKER) || holds_marker(value)
     })
@@ -295,7 +295,7 @@ fn redirections(item: &Map<String, Value>, policy: &Policy) -> Vec<String> {
     redirections_to(item, policy, None)
 }
 
-fn redirections_to(
+pub(crate) fn redirections_to(
     item: &Map<String, Value>,
     policy: &Policy,
     comment: Option<(&str, u64)>,

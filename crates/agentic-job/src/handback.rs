@@ -907,6 +907,7 @@ mod tests {
             max_patch_bytes: 1 << 20,
             safe_outputs: serde_json::from_value(outputs).unwrap(),
             commit_author: None,
+            push_repo: None,
             private: false,
             allowed_domains: crate::policy::link_domains().to_vec(),
             memory: None,

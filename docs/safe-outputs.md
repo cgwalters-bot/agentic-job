@@ -677,7 +677,10 @@ read and alter the clone, and a private repository's read token crosses
 it unencrypted. It may not name `github.com` or a host under it, and
 `run` lets git use plain HTTP only for a target admitted that way, so no
 other clone can be downgraded by a redirect. With organization bounds,
-both files must name the host. A top-level `allowed_domains` is
+both files must name the host. A top-level `push_repo = "OWNER/NAME"`
+names the fork that [Forgejo's apply](#publishing-to-forgejo) pushes a pull
+request's branch to. It may not be of the target's owner, and with organization
+bounds both files must name it. A top-level `allowed_domains` is
 accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 
@@ -1023,7 +1026,119 @@ for a line end, listed in `src/collect/mod.rs`.
 As gh-aw's collector does, it leaves @-mentions in `add_comment` and
 `create_pull_request` to the applier, which knows who may be mentioned
 where it posts; in `noop`, `missing_tool` and `missing_data` it wraps
-them in code. An applier off GitHub is still to be written
-([tracker#427](https://github.com/cgwalters-forge/tracker/issues/427)),
-and must filter those mentions as gh-aw's handlers do. The GitHub path
-keeps gh-aw's collector.
+them in code. For Forgejo, the applier is `apply`, described below.
+The GitHub path keeps gh-aw's collector.
+
+### Publishing to Forgejo
+
+```text
+FORGEJO_TOKEN=... agentic-job apply --forge forgejo --server URL --repo OWNER/NAME \
+  --policy policy.json --checked DIR --run-url URL [--comment-target NUMBER] \
+  [--push-repo OWNER/NAME] [--recover-pushed-commit SHA]
+```
+
+publishes what `check` accepted to a Forgejo (or Gitea) repository,
+from a job of its own that holds the write token, as the apply job does
+on GitHub. `DIR` is what the check job uploads: check's `report.json`
+and the patch it accepted. The token comes only from `FORGEJO_TOKEN`,
+goes only in an `Authorization` header (to git through its
+environment), and is taken out of any error. Nothing names a host:
+`--server` and `--run-url` are the caller's.
+Remote servers require HTTPS; plain HTTP is accepted only for literal
+loopback addresses used by local fixtures.
+
+It publishes two outputs: `add_comment`, to `--comment-target` in the
+repository, and `create_pull_request`. Any other type is refused by
+name, as is a report check refused. Before anything is written, apply
+holds the report to the policy again: the repository, `max_outputs` and
+each type's count, a request naming another repository, item, base or
+draft state, the applied marker, the handlers' length and link limits,
+and the patch (its name, size, base commit and check's patch rules, read
+again). A same-sized patch changed after check is not caught: the
+upload has to come from the check job, as on GitHub, where apply
+holds it to its digest. The bodies are the collector's, sanitized once;
+gh-aw's handlers' second pass is not repeated. Then the pull request is
+opened, its push making the last checks, and the comments posted after
+it; a failure after a write names what was made.
+
+A pull request's branch goes to a fork, never to the target repository.
+`--push-repo` is required for one and must be the `push_repo` the bounds
+name ([above](#the-bounds-and-the-policy)), never one a hand-back names.
+It must be another owner's repository, since Forgejo reads a head of the
+target's own owner as the target's own branch. `policy` cannot tell a
+Forgejo target from another, so bounds without `push_repo` admit a pull
+request that apply then refuses. Before pushing, apply reads both
+repositories through the API. It refuses a push repository that is not
+a fork of the target, and, unless it is private, one whose target is not
+public: private, internal, under an owner that is not public, or of a
+private run. It also refuses when the forge does not report one of these.
+
+For the pull request, apply fetches the base branch from the target into an empty
+repository, applies the patch on check's base commit with git configured
+only by apply (no hooks, no credential helpers, no redirects), refuses
+it if it changed any path the patch did not name, and pushes it to the
+request's branch in the fork, which must not exist. Then `POST /api/v1/repos/OWNER/NAME/pulls`
+opens it against the target with head `FORK_OWNER:BRANCH`. Forgejo has no draft pull request, so a draft's title starts
+with `WIP:`, which it refuses to merge; under `ready_when_complete`, complete
+work opens ready.
+
+If the push succeeds but opening the pull request fails, the error names
+the fork, branch and full commit SHA. Retry the same checked input
+with `--recover-pushed-commit SHA` to open the PR without another push.
+Recovery requires both the reconstructed checked commit and the remote
+branch to match that exact SHA; it refuses changed inputs or a moved branch.
+The committer date is the patch's author date so retries reconstruct the
+same commit. If the POST's response was lost, first check whether the PR
+already exists; recovery does not detect an already-created PR.
+
+The pushed commit's message is the patch's, verbatim, as `git am`
+reads it; apply adds nothing to it. A pull request's or comment's body
+is the agent's body, then a blank line and the footer
+`> Generated by [agentic-job](RUN)`, where `RUN` is `--run-url`:
+
+```text
+BODY
+
+> Generated by [agentic-job](RUN)
+```
+
+If the body ends with a trailer block, the footer goes before it instead,
+and the block stays the body's last lines byte for byte:
+
+```text
+BODY
+
+> Generated by [agentic-job](RUN)
+
+Generated-by: https://github.com/cgwalters/#llms
+Closes #5
+```
+
+A trailer block is the run of `Key: value` lines and `Closes #N`,
+`Fixes #N` or `Resolves #N` lines (in any case) that ends the body, with
+no blank line among them, after a blank line or at the body's start.
+`BODY` is what comes before it, without trailing whitespace. A trailer-shaped
+line elsewhere stays where it is. apply writes no `agentic-job-applied`
+marker on Forgejo, so nothing else is added.
+
+Because the pull request comes from a fork, the target's CI treats it as
+a fork's pull request. check's protected files keep the patch out of CI
+configuration, but not out of the code a workflow runs, so the agent's
+code runs in the target's `pull_request` workflows. The operator must make
+sure those workflows give a fork's pull request no secrets and no write
+token. That is Forgejo Actions' default: a `pull_request` run from a fork
+gets no repository or organization secrets, and its automatic token can
+only read. To check, read the target's workflow directories
+(`.forgejo/workflows/`, or `.github/workflows/` without it). No
+`pull_request_target` workflow may check out or run the pull request's
+head, since it runs with the target's secrets. No workflow may hand a
+credential to jobs through anything but `secrets` (a runner's own
+environment or files, for example). Runners that take these jobs must hold
+no credential of their own. The fork's own push workflows run the code too,
+so the fork should have Actions disabled or no secrets. Comments involve no
+push.
+
+Not done: re-run detection (a
+re-run with a pull request is refused at its branch; one with only
+comments posts them again),
+reviews, labels and pushes to an open pull request.

@@ -46,6 +46,8 @@ pub enum Command {
     Check(check::Args),
     /// Inspect checked proposals with a bounded model request before apply
     Detect(crate::detect::Args),
+    /// Publish checked comments and a pull request to a Forgejo repository
+    Apply(crate::apply::Args),
     /// Decide whether the event that started the workflow may start a run, and write its task
     Event(event::Args),
     /// Write a run's configuration from a file and settings given one at a time
@@ -78,6 +80,7 @@ impl Command {
             Self::Collect(args) => collect::run(args),
             Self::Check(args) => check::run(args),
             Self::Detect(args) => crate::detect::run(args),
+            Self::Apply(args) => crate::apply::run(args),
             Self::Event(args) => event::run(args),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),
@@ -153,6 +156,25 @@ mod tests {
             "agent_output.json",
             "--report",
             "r.json",
+        ],
+        &[
+            "apply",
+            "--forge",
+            "forgejo",
+            "--server",
+            "https://forge.example",
+            "--repo",
+            "owner/name",
+            "--policy",
+            "p.json",
+            "--checked",
+            "dir",
+            "--run-url",
+            "https://forge.example/owner/name/actions/runs/1",
+            "--comment-target",
+            "5",
+            "--push-repo",
+            "bot/name",
         ],
     ];
 
@@ -331,6 +353,39 @@ mod tests {
             &["check", "--outputs", "dir"],
             &["check", "--policy", "p.json", "--outputs", "dir"],
             &["launch-agent"],
+            // GitHub's apply is still gh-aw's handlers in apply.yml.
+            &[
+                "apply",
+                "--forge",
+                "github",
+                "--server",
+                "s",
+                "--repo",
+                "o/n",
+                "--policy",
+                "p",
+                "--checked",
+                "d",
+                "--run-url",
+                "u",
+            ],
+            &[
+                "apply",
+                "--forge",
+                "forgejo",
+                "--server",
+                "s",
+                "--repo",
+                "o/n",
+                "--policy",
+                "p",
+                "--checked",
+                "d",
+                "--run-url",
+                "u",
+                "--token",
+                "t",
+            ],
         ];
         for args in cases {
             let parsed = Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args));

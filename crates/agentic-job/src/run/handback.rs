@@ -1448,6 +1448,7 @@ mod tests {
             max_patch_bytes: 1 << 20,
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
             commit_author: None,
+            push_repo: None,
             private: false,
             allowed_domains: Vec::new(),
             memory: None,
