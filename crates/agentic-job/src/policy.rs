@@ -117,6 +117,13 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
 const MAX_PULL_REQUESTS: u32 = 1;
 const MAX_REPLACEMENT_COMMITS: u32 = 50;
 
+/// A clone URL over plain HTTP, admitted only for a host the bounds'
+/// `allow_http` names.
+pub const PLAIN_HTTP_PREFIX: &str = "http://";
+/// The domain no bounds file may allow plain HTTP for, nor any host under
+/// it: it serves https, so a plain-HTTP URL for it is a downgrade.
+const NEVER_PLAIN_HTTP: &str = "github.com";
+
 /// The longest check run name bounds may pin: room for a readable name,
 /// none for a page of text in the forge's checks list.
 const MAX_CHECK_RUN_NAME: usize = 64;
@@ -333,7 +340,8 @@ pub struct Args {
     /// The repository the agent works on, as OWNER/NAME
     #[arg(long, value_name = "REPO", allow_hyphen_values = true)]
     pub repo: String,
-    /// Where `run` clones that repository from: https://HOST/OWNER/NAME
+    /// Where `run` clones that repository from: https://HOST/OWNER/NAME,
+    /// or http:// for a host in the bounds' `allow_http`
     #[arg(long, value_name = "URL", allow_hyphen_values = true)]
     pub clone_url: String,
     /// The branch the agent starts from
@@ -395,6 +403,13 @@ pub enum Kind {
 pub struct Bounds {
     /// The hosts a clone URL may name, exactly (`github.com`).
     pub hosts: Vec<String>,
+    /// Hosts of `hosts` a clone URL may name over plain `http://`, for a
+    /// self-hosted forge on a private network without TLS. Empty by
+    /// default: anyone on the path can read and alter a plain-HTTP clone,
+    /// so the agent's base, and a private repository's read token, are
+    /// only as safe as that network. Never [`NEVER_PLAIN_HTTP`].
+    #[serde(default)]
+    pub allow_http: Vec<String>,
     /// Globs of OWNER/NAME; see [`glob`].
     pub repos: Vec<String>,
     /// Globs of base branches.
@@ -1167,6 +1182,19 @@ impl Bounds {
         ] {
             ensure!(!list.is_empty(), "`{name}` is empty, so no run is allowed");
         }
+        for host in &self.allow_http {
+            ensure!(
+                self.hosts.iter().any(|own| own.eq_ignore_ascii_case(host)),
+                "allow_http names {host:?}, which is not in `hosts`"
+            );
+            // `github.com.` is github.com too.
+            let host = host.to_ascii_lowercase();
+            let host = host.trim_end_matches('.');
+            ensure!(
+                host != NEVER_PLAIN_HTTP && !host.ends_with(&format!(".{NEVER_PLAIN_HTTP}")),
+                "allow_http may not name {host:?}: {NEVER_PLAIN_HTTP} serves https"
+            );
+        }
         for pattern in self.repos.iter().chain(&self.bases) {
             glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
         }
@@ -1249,10 +1277,11 @@ impl Bounds {
     /// name that repository on a host of the bounds and nothing more, so
     /// that the bounds on the repository are bounds on what is cloned.
     fn clone_url_problem(&self, url: &str, repo: &str) -> Option<String> {
-        let Some((host, path)) = url
-            .strip_prefix("https://")
-            .and_then(|rest| rest.split_once('/'))
-        else {
+        let (plain, rest) = match url.strip_prefix("https://") {
+            Some(rest) => (false, Some(rest)),
+            None => (true, url.strip_prefix(PLAIN_HTTP_PREFIX)),
+        };
+        let Some((host, path)) = rest.and_then(|rest| rest.split_once('/')) else {
             return Some(format!("clone URL {url:?} is not https://HOST/OWNER/NAME"));
         };
         if !self
@@ -1263,6 +1292,17 @@ impl Bounds {
             return Some(format!(
                 "the host of clone URL {url:?} is not within the bounds ({})",
                 self.hosts.join(", ")
+            ));
+        }
+        if plain
+            && !self
+                .allow_http
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(host))
+        {
+            return Some(format!(
+                "clone URL {url:?} is plain http://, which the bounds' allow_http does not \
+                 name its host for"
             ));
         }
         let path = path.strip_suffix(".git").unwrap_or(path);
@@ -1688,6 +1728,12 @@ pub fn run(args: &Args) -> Result<Exit> {
         });
     match compiled {
         Ok(mut policy) => {
+            if policy.clone_url.starts_with(PLAIN_HTTP_PREFIX) {
+                eprintln!(
+                    "warning: {} is cloned over plain HTTP, as the bounds allow for its host",
+                    policy.repo
+                );
+            }
             policy.context = context;
             let json = serde_json::to_string_pretty(&policy).context("writing the policy")?;
             println!("{json}");
@@ -3071,6 +3117,68 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
         }
     }
 
+    /// Plain HTTP only for a host the bounds name in `allow_http`. Bounds
+    /// without it refuse it for every host, so organization bounds that do
+    /// not opt in refuse the run too: `run` needs both to admit it.
+    #[test]
+    fn plain_http_only_for_the_hosts_the_bounds_name() {
+        let with = |allow_http: &str| {
+            let bounds: Bounds = toml::from_str(&BOUNDS.replace(
+                "hosts = [\"github.com\"]",
+                &format!(
+                    "hosts = [\"github.com\", \"forge.internal\", \"other.internal\"]\n\
+                     allow_http = [{allow_http}]"
+                ),
+            ))
+            .unwrap();
+            bounds.validate().unwrap();
+            bounds
+        };
+        let (opted, default) = (with("\"forge.internal\""), with(""));
+        const PLAIN: Option<&str> = Some("plain http://");
+        const HOST: Option<&str> = Some("host");
+        // The URL, and what bounds with and without the opt-in say of it.
+        let cases = [
+            ("http://forge.internal/bootc-dev/bootc", None, PLAIN),
+            ("https://forge.internal/bootc-dev/bootc", None, None),
+            ("http://forge.internal/bootc-dev/bootc.git", None, PLAIN),
+            ("http://FORGE.internal/bootc-dev/bootc", None, PLAIN),
+            ("http://other.internal/bootc-dev/bootc", PLAIN, PLAIN),
+            ("http://github.com/bootc-dev/bootc", PLAIN, PLAIN),
+            ("http://forge.internal:8080/bootc-dev/bootc", HOST, HOST),
+            ("http://x@forge.internal/bootc-dev/bootc", HOST, HOST),
+            (
+                "http://forge.internal/evil/bootc",
+                Some("does not name"),
+                PLAIN,
+            ),
+            (
+                "httpx://forge.internal/bootc-dev/bootc",
+                Some("is not"),
+                Some("is not"),
+            ),
+        ];
+        for (url, with_opt_in, by_default) in cases {
+            let request = Request {
+                clone_url: url,
+                ..request()
+            };
+            for (bounds, want) in [(&opted, with_opt_in), (&default, by_default)] {
+                match (bounds.compile(&request), want) {
+                    (Ok(policy), None) => {
+                        assert_eq!(policy.clone_url, url);
+                        // And what it admits, `run` can clone.
+                        crate::run::clone::check(&policy).unwrap();
+                    }
+                    (Err(errors), Some(want)) => {
+                        assert!(errors.iter().any(|e| e.contains(want)), "{url}: {errors:?}");
+                    }
+                    (result, _) => panic!("{url} ({want:?}): {result:?}"),
+                }
+            }
+        }
+    }
+
     /// A repository that is not public is admitted only where every bounds
     /// file opts in, and only with its outputs and item in that repository.
     #[test]
@@ -4153,6 +4261,38 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 "no hosts",
                 with("hosts = [\"github.com\"]", ""),
                 "missing field `hosts`",
+            ),
+            (
+                "plain HTTP for a host not in hosts",
+                with(
+                    "hosts = [\"github.com\"]",
+                    "hosts = [\"github.com\"]\nallow_http = [\"forge.internal\"]",
+                ),
+                "not in `hosts`",
+            ),
+            (
+                "plain HTTP for github.com",
+                with(
+                    "hosts = [\"github.com\"]",
+                    "hosts = [\"GitHub.com\"]\nallow_http = [\"github.COM\"]",
+                ),
+                "may not name",
+            ),
+            (
+                "plain HTTP for a host under github.com",
+                with(
+                    "hosts = [\"github.com\"]",
+                    "hosts = [\"api.github.com\"]\nallow_http = [\"api.github.com\"]",
+                ),
+                "may not name",
+            ),
+            (
+                "plain HTTP for github.com spelled with its root",
+                with(
+                    "hosts = [\"github.com\"]",
+                    "hosts = [\"github.com.\"]\nallow_http = [\"github.com.\"]",
+                ),
+                "may not name",
             ),
             (
                 "two pull requests",

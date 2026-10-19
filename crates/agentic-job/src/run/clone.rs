@@ -27,6 +27,10 @@ const GIT_TIMEOUT_S: &str = "120";
 /// and a mirror on the machine. Anything else git knows (`ext::`, which
 /// runs a command, among them) is refused by git itself with these.
 const TRANSPORTS: &[&str] = &["https", "file"];
+/// A target whose clone URL `policy` admitted over plain `http` (a host
+/// in the bounds' `allow_http`) also gets `http`. Nothing else does, so a
+/// redirect cannot downgrade an https clone.
+const PLAIN_HTTP_TRANSPORTS: &[&str] = &["https", "file", "http"];
 const MAX_REF_LEN: usize = 200;
 /// The mode of the work and output directories: the sandbox user's alone.
 const PRIVATE_DIR_MODE: &str = "0700";
@@ -53,14 +57,30 @@ pub fn check_ref(name: &str) -> Result<()> {
 
 /// Whether URL is one a clone may use.
 pub fn check_url(url: &str) -> Result<()> {
+    check_url_in(url, TRANSPORTS)
+}
+
+fn check_url_in(url: &str, transports: &[&str]) -> Result<()> {
     let transport = url.split_once("://").map(|(scheme, _)| scheme);
     ensure!(
-        transport.is_some_and(|scheme| TRANSPORTS.contains(&scheme))
+        transport.is_some_and(|scheme| transports.contains(&scheme))
             && !url.contains(|c: char| c.is_whitespace() || c.is_control()),
         "{url:?} is not an {} URL",
-        TRANSPORTS.join(" or ")
+        transports.join(" or ")
     );
     Ok(())
+}
+
+/// The transports the policy's target is cloned and fetched with.
+fn target_transports(policy: &Policy) -> &'static [&'static str] {
+    if policy
+        .clone_url
+        .starts_with(crate::policy::PLAIN_HTTP_PREFIX)
+    {
+        PLAIN_HTTP_TRANSPORTS
+    } else {
+        TRANSPORTS
+    }
 }
 
 /// The repository's own name, which the checkout is called.
@@ -80,7 +100,7 @@ pub fn check(policy: &Policy) -> Result<()> {
         policy.repo
     );
     check_ref(&policy.base).context("base")?;
-    check_url(&policy.clone_url).context("clone_url")
+    check_url_in(&policy.clone_url, target_transports(policy)).context("clone_url")
 }
 
 /// The clone the agent works in.
@@ -182,9 +202,15 @@ fn context_checkout(
         Ok(output.text())
     };
     check_url(&item.clone_url)?;
-    checked(&[networked_git(None), vec!["init", "--quiet", "--", dir]].concat())?;
+    checked(
+        &[
+            networked_git(None, TRANSPORTS),
+            vec!["init", "--quiet", "--", dir],
+        ]
+        .concat(),
+    )?;
     checked(&["git", "-C", dir, "remote", "add", "origin", &item.clone_url])?;
-    checked(&fetch_args(dir, &item.commit, "1"))?;
+    checked(&fetch_args(dir, &item.commit, "1", TRANSPORTS))?;
     checked(&[
         "timeout",
         GIT_TIMEOUT_S,
@@ -203,17 +229,18 @@ fn context_checkout(
     Ok(())
 }
 
-/// The arguments of a clone of URL into DIR. Only the listed transports,
-/// so that neither the URL nor a redirect can make git run something
-/// else.
+/// The arguments of a clone of URL into DIR. Only the TRANSPORTS given,
+/// [`TRANSPORTS`] or a plain-HTTP target's, so that neither the URL nor
+/// a redirect can make git run something else.
 fn clone_args<'a>(
     url: &'a str,
     branch: Option<&'a str>,
     depth: &'a str,
     dir: &'a str,
     credential: &'a [String],
+    transports: &[&str],
 ) -> Vec<&'a str> {
-    let mut argv = networked_git(None);
+    let mut argv = networked_git(None, transports);
     argv.extend([
         "clone",
         "--quiet",
@@ -228,9 +255,14 @@ fn clone_args<'a>(
 }
 
 /// The arguments of a fetch of COMMIT from the clone in DIR's origin,
-/// with the clone's transports.
-fn fetch_args<'a>(dir: &'a str, commit: &'a str, depth: &'a str) -> Vec<&'a str> {
-    let mut argv = networked_git(Some(dir));
+/// with the clone's TRANSPORTS.
+fn fetch_args<'a>(
+    dir: &'a str,
+    commit: &'a str,
+    depth: &'a str,
+    transports: &[&str],
+) -> Vec<&'a str> {
+    let mut argv = networked_git(Some(dir), transports);
     argv.extend([
         "fetch",
         "--quiet",
@@ -245,14 +277,15 @@ fn fetch_args<'a>(dir: &'a str, commit: &'a str, depth: &'a str) -> Vec<&'a str>
     argv
 }
 
-/// git, in DIR if one is given, with only the listed transports.
-fn networked_git(dir: Option<&str>) -> Vec<&str> {
+/// git, in DIR if one is given, with only the TRANSPORTS given.
+fn networked_git<'a>(dir: Option<&'a str>, transports: &[&str]) -> Vec<&'a str> {
     let mut argv = vec!["timeout", CLONE_TIMEOUT_S, "git"];
     argv.extend(dir.iter().flat_map(|dir| ["-C", dir]));
     argv.extend(["-c", "protocol.allow=never"]);
-    argv.extend(TRANSPORTS.iter().flat_map(|transport| {
+    argv.extend(transports.iter().flat_map(|transport| {
         let allow: &'static str = match *transport {
             "https" => "protocol.https.allow=always",
+            "http" => "protocol.http.allow=always",
             _ => "protocol.file.allow=always",
         };
         ["-c", allow]
@@ -270,11 +303,23 @@ pub fn git_clone(
     dir: &str,
     credential: &[String],
 ) -> Result<()> {
-    check_url(url)?;
+    git_clone_in(sandbox, url, branch, depth, dir, credential, TRANSPORTS)
+}
+
+fn git_clone_in(
+    sandbox: &Sandbox,
+    url: &str,
+    branch: Option<&str>,
+    depth: &str,
+    dir: &str,
+    credential: &[String],
+    transports: &[&str],
+) -> Result<()> {
+    check_url_in(url, transports)?;
     branch.map(check_ref).transpose()?;
     sandbox
         .checked(
-            &clone_args(url, branch, depth, dir, credential),
+            &clone_args(url, branch, depth, dir, credential, transports),
             b"",
             MAX_GIT_OUTPUT,
         )
@@ -344,13 +389,27 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     } else {
         Vec::new()
     };
-    git_clone(
+    let transports = target_transports(policy);
+    if transports.contains(&"http") {
+        eprintln!(
+            "warning: cloning {} over plain HTTP, as the bounds allow for its host: \
+             its content{} cross the network unencrypted",
+            policy.repo,
+            if policy.private {
+                " and the read token"
+            } else {
+                ""
+            }
+        );
+    }
+    git_clone_in(
         sandbox,
         &policy.clone_url,
         push.is_none().then_some(policy.base.as_str()),
         DEPTH,
         dir_text,
         &credential,
+        transports,
     )?;
     // Read as the sandbox user, like everything in the checkout: it is
     // the agent's from here on.
@@ -361,12 +420,16 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     if let Some(push) = push {
         if let Some(base) = &push.replacement_base {
             sandbox
-                .checked(&fetch_args(dir_text, base, DEPTH), b"", MAX_GIT_OUTPUT)
+                .checked(
+                    &fetch_args(dir_text, base, DEPTH, transports),
+                    b"",
+                    MAX_GIT_OUTPUT,
+                )
                 .context("fetching the replacement base snapshot")?;
         }
         sandbox
             .checked(
-                &fetch_args(dir_text, &push.head, DEPTH),
+                &fetch_args(dir_text, &push.head, DEPTH, transports),
                 b"",
                 MAX_GIT_OUTPUT,
             )
@@ -444,19 +507,7 @@ pub fn review_head(
     let dir = utf8(&checkout.dir)?;
     let git = |args: &[&str]| -> Result<String> {
         let argv = [
-            &[
-                "timeout",
-                CLONE_TIMEOUT_S,
-                "git",
-                "-C",
-                dir,
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.https.allow=always",
-                "-c",
-                "protocol.file.allow=always",
-            ],
+            &networked_git(Some(dir), target_transports(policy))[..],
             args,
         ]
         .concat();
@@ -589,7 +640,7 @@ mod tests {
                 "is not an https or file URL",
             ),
             ("o/r", "ssh://git@github.com/o/r", "main", "clone_url"),
-            ("o/r", "http://github.com/o/r", "main", "clone_url"),
+            ("o/r", "http://forge.internal/o/r\n", "main", "clone_url"),
             ("o/r", "github.com/o/r", "main", "clone_url"),
             ("o/r", "--upload-pack=x", "main", "clone_url"),
             ("o/r", "https://github.com/o/r\n", "main", "clone_url"),
@@ -605,9 +656,33 @@ mod tests {
             checkout_name(&policy("bootc-dev/bootc", URL, "main")),
             "bootc"
         );
-        for (url, base) in [(URL, "main"), ("file:///srv/mirror/r.git", "release/1.2_x")] {
+        // Plain HTTP is `policy`'s to admit, for a host the bounds name.
+        for (url, base) in [
+            (URL, "main"),
+            ("file:///srv/mirror/r.git", "release/1.2_x"),
+            ("http://forge.internal/o/r", "main"),
+        ] {
             check(&policy("o/r", url, base)).unwrap();
         }
+    }
+
+    /// Only a target admitted over plain HTTP gets git's `http` transport,
+    /// so that a redirect cannot downgrade any other clone; context and
+    /// agent configuration clones never get it.
+    #[test]
+    fn only_a_plain_http_target_may_use_http() {
+        const HTTP: &str = "protocol.http.allow=always";
+        let plain = policy("o/r", "http://forge.internal/o/r", "main");
+        assert_eq!(target_transports(&plain), PLAIN_HTTP_TRANSPORTS);
+        let argv = fetch_args("d", "x", DEPTH, target_transports(&plain));
+        assert!(argv.contains(&HTTP), "{argv:?}");
+        for url in ["https://forge.internal/o/r", "file:///srv/r.git"] {
+            let transports = target_transports(&policy("o/r", url, "main"));
+            assert_eq!(transports, TRANSPORTS);
+            assert!(!clone_args(url, None, DEPTH, "d", &[], transports).contains(&HTTP));
+        }
+        let err = check_url("http://forge.internal/o/r").unwrap_err();
+        assert!(err.to_string().contains("https or file"), "{err}");
     }
 
     #[test]
@@ -618,6 +693,7 @@ mod tests {
             DEPTH,
             "/home/agent/work/r",
             &[],
+            TRANSPORTS,
         );
         assert_eq!(
             argv,
@@ -644,14 +720,14 @@ mod tests {
             ]
         );
         // Without a branch, the repository's default.
-        let argv = clone_args("file:///srv/r.git", None, "1", "d", &[]);
+        let argv = clone_args("file:///srv/r.git", None, "1", "d", &[], TRANSPORTS);
         assert_eq!(
             argv[argv.len() - 5..],
             ["--depth", "1", "--", "file:///srv/r.git", "d"]
         );
         // A push's head, fetched by its commit into the clone.
         let head = crate::policy::tests::HEAD;
-        let argv = fetch_args("/home/agent/work/r", head, DEPTH);
+        let argv = fetch_args("/home/agent/work/r", head, DEPTH, TRANSPORTS);
         assert_eq!(
             argv,
             [
@@ -735,10 +811,10 @@ mod tests {
         let replacement_base = in_repo(&["rev-parse", "HEAD"]);
         in_repo(&["checkout", "-q", "main"]);
         let url = format!("file://{repo_text}");
-        ok(&clone_args(&url, None, DEPTH, dir_text, &[]));
+        ok(&clone_args(&url, None, DEPTH, dir_text, &[], TRANSPORTS));
         assert!(!run(&["git", "-C", dir_text, "cat-file", "-e", &replacement_base]).0);
-        ok(&fetch_args(dir_text, &replacement_base, DEPTH));
-        ok(&fetch_args(dir_text, &head, DEPTH));
+        ok(&fetch_args(dir_text, &replacement_base, DEPTH, TRANSPORTS));
+        ok(&fetch_args(dir_text, &head, DEPTH, TRANSPORTS));
         let in_clone = |args: &[&str]| ok(&[&["git", "-C", dir_text], args].concat());
         in_clone(&["checkout", "--quiet", "--detach", &head, "--"]);
         assert_eq!(in_clone(&["rev-parse", "--verify", "HEAD"]), head);
@@ -758,7 +834,14 @@ mod tests {
         let credential = credential_config(&url, utf8(&token_file).unwrap()).unwrap();
         let private = temp.path().join("private");
         let private_text = utf8(&private).unwrap();
-        ok(&clone_args(&url, None, DEPTH, private_text, &credential));
+        ok(&clone_args(
+            &url,
+            None,
+            DEPTH,
+            private_text,
+            &credential,
+            TRANSPORTS,
+        ));
         let fill = |for_url: &str| {
             let mut child = Command::new("git")
                 .args(["-C", private_text, "credential", "fill"])
@@ -789,7 +872,7 @@ mod tests {
         assert!(credential_config("https://h/o/r=x", "/t").is_err());
         assert!(credential_config(&url, "/t'; touch /x; '").is_err());
         // A commit the repository does not have is not there to fetch.
-        assert!(!run(&fetch_args(dir_text, &"3".repeat(40), DEPTH)).0);
+        assert!(!run(&fetch_args(dir_text, &"3".repeat(40), DEPTH, TRANSPORTS)).0);
         let context_dir = temp.path().join("context");
         context_checkout(
             &super::super::enter::Unconfined,

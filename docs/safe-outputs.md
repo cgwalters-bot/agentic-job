@@ -668,7 +668,15 @@ their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
 A top-level `private = true` admits a target that is not public, under
 the conditions of [private repositories](private-repositories.md); it is
-off by default. A top-level `allowed_domains` is accepted and ignored:
+off by default. A top-level `allow_http`, empty by default, lists hosts
+of `hosts` whose clone URL may be plain `http://`, for a self-hosted
+forge on a private network without TLS: anyone on that network can then
+read and alter the clone, and a private repository's read token crosses
+it unencrypted. It may not name `github.com` or a host under it, and
+`run` lets git use plain HTTP only for a target admitted that way, so no
+other clone can be downgraded by a redirect. With organization bounds,
+both files must name the host. A top-level `allowed_domains` is
+accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 
 A `[memory]` table lets a run hand back the agent's notes
