@@ -35,6 +35,10 @@ pub struct Host {
     pub install_vibe: bool,
     /// Where the sandbox user connects without the egress proxy.
     pub direct: Vec<Direct>,
+    /// The hosts and ports the egress proxy refuses the sandbox user
+    /// whatever its policy says, and that the policy may not name: under
+    /// `inference.front`, the broker's.
+    pub refused: Vec<(String, u16)>,
     /// `None` for a task run, which no client attaches to; otherwise
     /// setup serves the bridge's port on the tailnet and keeps the
     /// sandbox user from it.
@@ -93,7 +97,43 @@ impl Config {
     /// Under `api-key` the agent uses the proxy `run` serves on loopback,
     /// and the provider at `url` is reached by `run` alone: that proxy
     /// speaks one provider's API, which has to be the agent's.
+    ///
+    /// Under `inference.front` the agent uses that proxy too, and the
+    /// broker must be what the sandbox user cannot reach: one that
+    /// `egress.direct` opens to it is refused. A name is probed by `run`
+    /// instead, once it resolves.
     fn check_reachable(&self, kind: Kind, endpoint: &Endpoint, direct: &[Direct]) -> Result<()> {
+        if endpoint.front {
+            ensure!(
+                self.egress.proxy,
+                "inference.front keeps the sandbox user from the broker by the egress filter, \
+                 which egress.proxy = false turns off"
+            );
+            ensure!(
+                self.egress.rust_proxy,
+                "inference.front needs egress.rust-proxy: the Rust egress proxy refuses the \
+                 sandbox user the broker whatever its policy says, and mitmproxy does not"
+            );
+            // There `run`'s own requests to a broker on 80 or 443 would be
+            // held to the policy, which may not name it.
+            ensure!(
+                !self.egress.write_policy,
+                "inference.front does not go with egress.write-policy: run's own requests to \
+                 the broker would need a write rule for the broker's host, which front refuses"
+            );
+            for url in [&endpoint.url, &endpoint.anthropic_url, &endpoint.openai_url] {
+                let opened = Direct::parse(url)
+                    .ok()
+                    .filter(|address| direct.contains(address));
+                if let Some(Direct { host, port }) = opened {
+                    bail!(
+                        "inference.front keeps the sandbox user from the broker, which \
+                         egress.direct opens to it at {host}:{port}: remove that entry"
+                    );
+                }
+            }
+            return Ok(());
+        }
         if let Mode::ApiKey { provider } = endpoint.mode {
             let serves: &[Kind] = match provider {
                 Provider::Anthropic => &[Kind::Claude],
@@ -193,10 +233,19 @@ impl Config {
              the runner's traffic goes through the Rust proxy's own listener, under rules a \
              runner's user with sudo could remove"
         );
+        // Setup starts the egress proxy with them.
+        let refused = match self.inference.front {
+            true => Endpoint::from_config(&self.inference)?
+                .map(|endpoint| endpoint.hosts())
+                .transpose()?
+                .unwrap_or_default(),
+            false => Vec::new(),
+        };
         Ok(Host {
             install_vibe: self.agent.name == Kind::Vibe.as_str()
                 || self.child_agent.name == Kind::Vibe.as_str(),
             direct: network::direct(&self.egress)?,
+            refused,
             session: Listen::from_config(&self.session)?,
         })
     }
@@ -870,6 +919,80 @@ model = \"m\"
         }
     }
 
+    /// Under `inference.front` the agent needs no way to the broker, and
+    /// is given none: `egress.direct` may not open any of its addresses.
+    #[test]
+    fn a_fronted_broker_is_not_opened_to_the_agent() {
+        const FRONT: &str = "front = true\n";
+        let cases = [
+            (format!("{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}"), None),
+            (
+                format!("{CLAUDE}{PROXY}register = \"plain\"\n{FRONT}{CAPPED}"),
+                None,
+            ),
+            (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}{}",
+                    direct("http://100.64.0.9:1")
+                ),
+                None,
+            ),
+            (
+                format!("{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}{DIRECT}"),
+                Some("egress.direct opens to it at 100.64.0.1:18080"),
+            ),
+            (
+                format!("{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}[egress]\nproxy = false\n"),
+                Some("egress.proxy = false"),
+            ),
+            // mitmproxy would not refuse the broker itself.
+            (
+                format!("{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}[egress]\nrust-proxy = false\n"),
+                Some("inference.front needs egress.rust-proxy"),
+            ),
+            (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}[egress]\nwrite-policy = true\n\
+                     [sandbox]\nlock-runner = true\n"
+                ),
+                Some("does not go with egress.write-policy"),
+            ),
+            (
+                format!(
+                    "{CLAUDE}{PROXY}{OIDC}{FRONT}openai-url = \"http://100.64.0.2:1/v1\"\n\
+                     {CAPPED}{}",
+                    direct("http://100.64.0.2:1")
+                ),
+                Some("100.64.0.2:1"),
+            ),
+        ];
+        for (text, want) in cases {
+            match (checked(&text), want) {
+                (Ok(_), None) => {}
+                (Err(err), Some(want)) => assert!(format!("{err:#}").contains(want), "{err:#}"),
+                (got, want) => panic!("{text}: got {got:?}, wanted {want:?}"),
+            }
+        }
+        // Setup has the egress proxy refuse the broker, at each of its
+        // URLs' hosts and ports; without `front` it refuses nothing.
+        let hosts = |text: &str| Config::parse(text).unwrap().check_host().unwrap().refused;
+        assert_eq!(
+            hosts(&format!(
+                "{CLAUDE}[inference]\nurl = \"https://broker.example\"\n{OIDC}{FRONT}\
+                 openai-url = \"http://[fd7a:115c:a1e0::1]:8080/v1\"\n{CAPPED}"
+            )),
+            [
+                ("broker.example".to_owned(), 443),
+                ("fd7a:115c:a1e0::1".to_owned(), 8080),
+            ]
+        );
+        assert_eq!(
+            hosts(&format!("{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}")),
+            [("100.64.0.1".to_owned(), 18080)]
+        );
+        assert!(hosts(&format!("{CLAUDE}{PROXY}{OIDC}{CAPPED}{DIRECT}")).is_empty());
+    }
+
     /// `sandbox setup` holds a file to the machine's tables alone: it is
     /// also run by itself, on a file that describes no run.
     #[test]
@@ -881,6 +1004,7 @@ model = \"m\"
             Host {
                 install_vibe: false,
                 direct: vec![],
+                refused: vec![],
                 session: None
             }
         );
@@ -912,6 +1036,7 @@ model = \"m\"
             mode,
             anthropic_url: "http://proxy/anthropic".into(),
             openai_url: "http://proxy/v1".into(),
+            front: false,
         };
         let table = |text: &str| {
             Config::parse(&format!("[limits]\ntimeout-minutes = 10\n{text}"))

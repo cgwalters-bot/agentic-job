@@ -165,6 +165,12 @@ struct Plan {
     child: Option<String>,
     limits: Limits,
     endpoint: Option<Endpoint>,
+    /// Where the sandbox user connects around the egress proxy, which
+    /// under `inference.front` may be no address of the broker's.
+    direct: Vec<crate::sandbox::network::Direct>,
+    /// The image `[sandbox.check]` names, which under `inference.front`
+    /// the probes of the broker run a container of.
+    container_image: String,
     /// Who may attach to the session, for a conversation.
     session: Option<Listen>,
     /// The run's item, as the session watches it for the agent.
@@ -466,6 +472,7 @@ struct SecondUserAsks {
     /// The job can ask for identity tokens (`id-token: write`).
     identity_request: bool,
     api_key: bool,
+    front: bool,
     mcp: bool,
     private: bool,
     session: bool,
@@ -490,6 +497,11 @@ fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
             asks.api_key,
             "inference.register = \"api-key\": the agent could take the provider's key from \
              run's environment",
+        ),
+        (
+            asks.front,
+            "inference.front: the agent could take the run token from run's memory, and the \
+             egress filter that keeps the sandbox user from the broker does not hold it",
         ),
         (
             asks.mcp,
@@ -666,6 +678,7 @@ impl Plan {
                         endpoint.as_ref().map(|endpoint| &endpoint.mode),
                         Some(inference::Mode::ApiKey { .. })
                     ),
+                    front: endpoint.as_ref().is_some_and(|endpoint| endpoint.front),
                     mcp: mcp.is_some(),
                     private: policy.private,
                     session: host.session.is_some(),
@@ -685,6 +698,8 @@ impl Plan {
             kind,
             limits,
             endpoint,
+            direct: host.direct,
+            container_image: config.sandbox.check.container_image.clone(),
             session: host.session,
             watch,
             identity: Identity {
@@ -848,6 +863,11 @@ impl Plan {
                     self.limits.timeout_s,
                     &|| shared.stopped.load(Ordering::SeqCst),
                 )
+                .and_then(|run| {
+                    // At the port Claude Code's managed settings pin.
+                    let listen = (std::net::Ipv4Addr::LOCALHOST, api_key::FRONT_PORT).into();
+                    run.front(endpoint, self.limits.max_requests, Some(listen))
+                })
                 .map(Arc::new)
             })
             .transpose()?;
@@ -865,7 +885,8 @@ impl Plan {
                 inference::RECORD_SCHEMA
             );
         }
-        // Under `api-key`, the proxy this process serves, not the provider.
+        // Under `api-key` and `inference.front`, the proxy this process
+        // serves, not the provider or the broker.
         let endpoint = match (&run, &self.endpoint) {
             (Some(run), Some(endpoint)) => Some(run.agent_endpoint(endpoint)),
             _ => self.endpoint.clone(),
@@ -873,7 +894,7 @@ impl Plan {
         let mut configuration = agent::generate(
             self.kind,
             endpoint.as_ref(),
-            run.as_deref().map(Run::token),
+            run.as_deref().map(Run::agent_token),
             self.agent.model.as_deref(),
             &source,
             &self.agent.context_windows,
@@ -893,7 +914,7 @@ impl Plan {
         });
         let child = self.child.as_deref().and_then(|model| {
             let endpoint = endpoint.as_ref()?;
-            Some((endpoint, run.as_deref()?.token(), Some(model)))
+            Some((endpoint, run.as_deref()?.agent_token(), Some(model)))
         });
         let has_child = child.is_some();
         configuration
@@ -919,10 +940,34 @@ impl Plan {
                 .recheck
                 .as_ref()
                 .map(|config| config.sandbox.check.container_image.as_str());
-            probe::require(sandbox, run.token(), &files, given, image)?;
+            probe::require(sandbox, run.agent_token(), &files, given, image)?;
         }
         if let Some(key) = &self.identity.api_key {
-            probe::require_absent(sandbox, key)?;
+            probe::require_absent(sandbox, "the provider's API key", key)?;
+        }
+        // Under `inference.front`, which needs a sandbox user: the agent
+        // holds neither the run token nor a way to the broker, directly
+        // or through the egress proxy, whose policy names none of it.
+        if let (Some(run), Some(endpoint)) =
+            (run.as_deref().filter(|run| run.fronted()), &self.endpoint)
+        {
+            probe::require_absent(sandbox, "the broker's run token", run.token().expose())?;
+            let hosts = endpoint.hosts()?;
+            crate::sandbox::egress::check_installed_front(&hosts)?;
+            let proxy = run
+                .proxy_address()
+                .context("a fronted run has no proxy of its own")?;
+            probe::require_unreachable(
+                sandbox,
+                &probe::Broker {
+                    hosts: &hosts,
+                    addresses: &run.broker_addresses(),
+                    direct: &self.direct,
+                },
+                proxy,
+                &probe::egress_proxy(),
+                Some(&self.container_image),
+            )?;
         }
         // Served from here, after the probes of the sandbox that would
         // take its port for one the sandbox user left listening.
@@ -978,6 +1023,7 @@ impl Plan {
             &self.identity,
             mcp.map(|(local, credential)| (local.token(), credential)),
         )
+        .chain(run.map(|run| run.agent_token().expose().to_owned()))
         .chain(own_tokens());
         let redactor = log::Shared::new(
             Redactor::new(secrets).context("building the redaction of the run's secrets")?,
@@ -1700,6 +1746,13 @@ mod tests {
                 },
                 Some("\"api-key\""),
             ),
+            (
+                SecondUserAsks {
+                    front: true,
+                    ..none
+                },
+                Some("inference.front"),
+            ),
             (SecondUserAsks { mcp: true, ..none }, Some("[mcp]")),
             (
                 SecondUserAsks {
@@ -1745,6 +1798,7 @@ mod tests {
         let all = SecondUserAsks {
             identity_request: true,
             api_key: true,
+            front: true,
             mcp: true,
             private: true,
             session: true,
@@ -1752,7 +1806,7 @@ mod tests {
             tools: true,
         };
         let err = format!("{:#}", refuse_without_second_user(all).unwrap_err());
-        assert_eq!(err.matches("; ").count(), 6, "{err}");
+        assert_eq!(err.matches("; ").count(), 7, "{err}");
     }
 
     #[test]

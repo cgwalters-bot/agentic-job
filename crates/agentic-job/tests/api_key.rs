@@ -31,6 +31,7 @@ fn endpoint(url: &str, provider: Provider) -> Endpoint {
         mode: Mode::ApiKey { provider },
         anthropic_url: url.to_owned(),
         openai_url: url.to_owned(),
+        front: false,
     }
 }
 

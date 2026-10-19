@@ -18,18 +18,24 @@
 //! it calls) would carry what the agent read in the sandbox past the
 //! egress filter. So a model request may offer the model only tools the
 //! agent runs itself.
+//!
+//! With `inference.front`, the same proxy stands in front of a broker
+//! ([`Upstream::Broker`]): the run token takes the key's place, and the
+//! agent, which the egress filter keeps from the broker, holds only this
+//! proxy's token. It then cannot register runs of its own at the broker,
+//! nor send it a request the filters here would refuse.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
 
-use super::agent::RUN_TOKEN_HEADER;
+use super::agent::{PLACEHOLDER_CREDENTIAL, RUN_TOKEN_HEADER};
 use super::inference::Token;
 use crate::config::Provider;
 
@@ -41,6 +47,15 @@ const KEY_LEN: std::ops::RangeInclusive<usize> = 16..=4096;
 /// Where the proxy listens: a port of loopback the kernel picks, which
 /// the sandbox user reaches without the egress proxy (`NO_PROXY`).
 const LISTEN: &str = "127.0.0.1:0";
+/// Where the proxy in front of a broker listens instead: one port of
+/// loopback, the same for every run (beside the egress proxy's), so that
+/// Claude Code's managed settings, which `sandbox setup` writes before
+/// any run, pin the agent to it. A port something else holds stops the
+/// run; it is never moved.
+pub const FRONT_PORT: u16 = 3130;
+/// The ports of a URL that names none.
+pub const HTTP_PORT: u16 = 80;
+pub const HTTPS_PORT: u16 = 443;
 /// Bounds on what the agent sends: a request's head, its body (a long
 /// conversation with its tool results is a few MiB), the connections it
 /// holds at once (subagents in parallel), and how long it may take to
@@ -129,6 +144,13 @@ const PROVIDER_NETWORK_FIELDS: &[&str] = &[
 /// a provider's choice, so this list cannot be complete: see
 /// docs/inference.md.
 const SEARCHING_MODELS: &[&str] = &["search", "sonar", ":online"];
+/// Where the proxy in front of a broker serves each of the broker's APIs:
+/// the agent is given these under the proxy's root, and each leads to the
+/// broker's route for that API ([`Upstream::Broker`]).
+pub const FRONT_ANTHROPIC: &str = "/anthropic";
+pub const FRONT_OPENAI: &str = "/openai";
+/// Vibe's, under the root it is given, as the broker serves it.
+pub const FRONT_MISTRAL: &str = "/mistral/v1";
 
 /// A provider's API key. It is never printed.
 #[derive(Clone, PartialEq, Eq)]
@@ -264,11 +286,176 @@ pub(super) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Where the proxy sends what it admits, and with what credential. Roots
+/// are without a trailing slash.
+pub enum Upstream {
+    /// `register = "api-key"`: the provider's API at its root, with its
+    /// key.
+    Provider {
+        provider: Provider,
+        root: String,
+        key: ApiKey,
+    },
+    /// `inference.front`: the broker's route for each API, with the run's
+    /// token, at the addresses of PINNED alone.
+    Broker {
+        anthropic: String,
+        openai: String,
+        mistral: String,
+        token: Token,
+        pinned: Pinned,
+    },
+}
+
+/// The URL of the proxy in front of a broker, [`FRONT_PORT`]'s.
+pub fn front_url() -> String {
+    format!(
+        "http://{}",
+        SocketAddr::from((Ipv4Addr::LOCALHOST, FRONT_PORT))
+    )
+}
+
+/// The broker's addresses for each of its hosts and ports, as `run`
+/// resolved them once before the agent started: what the probes hold to
+/// the sandbox's boundary, and the only addresses the proxy in front of
+/// it then connects to, however its names resolve later. A host it has
+/// none for is not connected to at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pinned(Vec<((String, u16), Vec<SocketAddr>)>);
+
+impl Pinned {
+    /// Resolves each of HOSTS, which must each have an address.
+    pub fn lookup(hosts: &[(String, u16)]) -> Result<Self> {
+        let mut pinned = Vec::new();
+        for (host, port) in hosts {
+            let mut addresses: Vec<SocketAddr> = (host.as_str(), *port)
+                .to_socket_addrs()
+                .with_context(|| format!("resolving the broker's {host}"))?
+                .collect();
+            addresses.sort_unstable();
+            addresses.dedup();
+            ensure!(!addresses.is_empty(), "the broker's {host} has no address");
+            pinned.push(((host.clone(), *port), addresses));
+        }
+        Ok(Self(pinned))
+    }
+
+    /// Every address, each once.
+    pub fn addresses(&self) -> Vec<SocketAddr> {
+        let mut all: Vec<SocketAddr> = self
+            .0
+            .iter()
+            .flat_map(|(_, addresses)| addresses.clone())
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+}
+
+/// ureq's resolver interface is outside its semver promise
+/// (`unversioned`); the lockfile pins the version this is written for.
+impl ureq::unversioned::resolver::Resolver for Pinned {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let host = uri
+            .host()
+            .unwrap_or_default()
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+            Some("https") => HTTPS_PORT,
+            _ => HTTP_PORT,
+        });
+        let addresses = self
+            .0
+            .iter()
+            .find(|((pinned, pinned_port), _)| pinned == host && *pinned_port == port)
+            .map(|(_, addresses)| addresses)
+            .ok_or(ureq::Error::HostNotFound)?;
+        let mut resolved = self.empty();
+        for address in addresses {
+            // As many as ureq keeps.
+            if resolved.try_push(*address).is_err() {
+                break;
+            }
+        }
+        Ok(resolved)
+    }
+}
+
+/// Where a request goes: the API whose checks it is held to, the root it
+/// is sent under, and its path there.
+struct Route<'a> {
+    api: Provider,
+    root: &'a str,
+    path: &'a str,
+}
+
+impl Upstream {
+    /// The route of PATH, the agent's without its query; `None` for a path
+    /// under none of them.
+    fn route<'a>(&'a self, path: &'a str) -> Option<Route<'a>> {
+        match self {
+            Self::Provider { provider, root, .. } => Some(Route {
+                api: *provider,
+                root,
+                path,
+            }),
+            Self::Broker {
+                anthropic,
+                openai,
+                mistral,
+                ..
+            } => [
+                (FRONT_ANTHROPIC, Provider::Anthropic, anthropic),
+                (FRONT_OPENAI, Provider::Openai, openai),
+                (FRONT_MISTRAL, Provider::Openai, mistral),
+            ]
+            .into_iter()
+            .find_map(|(prefix, api, root)| {
+                let path = path
+                    .strip_prefix(prefix)
+                    .filter(|rest| rest.starts_with('/'))?;
+                Some(Route { api, root, path })
+            }),
+        }
+    }
+
+    /// The headers that carry the credential to a route of API.
+    fn credential(&self, api: Provider) -> Vec<(&'static str, String)> {
+        match self {
+            Self::Provider { provider, key, .. } => credential(*provider, key),
+            // As the agents would send it to the broker themselves: Claude
+            // Code a placeholder with the token in the broker's own header,
+            // the others the token as a bearer.
+            Self::Broker { token, .. } => match api {
+                Provider::Anthropic => vec![
+                    ("authorization", format!("Bearer {PLACEHOLDER_CREDENTIAL}")),
+                    (RUN_TOKEN_HEADER, token.expose().to_owned()),
+                ],
+                Provider::Openai | Provider::Github => {
+                    vec![("authorization", format!("Bearer {}", token.expose()))]
+                }
+            },
+        }
+    }
+
+    /// What refusals and the record call it.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Provider { provider, .. } => provider.as_str(),
+            Self::Broker { .. } => "broker",
+        }
+    }
+}
+
 struct State {
-    provider: Provider,
-    /// The provider's root, without a trailing slash.
-    upstream: String,
-    key: ApiKey,
+    upstream: Upstream,
     token: Token,
     http: ureq::Agent,
     /// The cap on the run's model requests, `limits.max-requests`.
@@ -331,17 +518,21 @@ pub struct Local {
 pub(super) struct Refusal(pub(super) u16, pub(super) String);
 
 impl Local {
-    /// Listens on loopback and serves the run, forwarding to the provider
-    /// at UPSTREAM with KEY at most MAX_REQUESTS model requests.
+    /// Listens on loopback, at LISTEN or else a port the kernel picks,
+    /// and serves the run, forwarding to UPSTREAM at most MAX_REQUESTS
+    /// model requests.
     pub fn start(
-        provider: Provider,
-        upstream: &str,
-        key: ApiKey,
+        upstream: Upstream,
         max_requests: Option<u64>,
+        listen: Option<SocketAddr>,
     ) -> Result<Self> {
-        let listener = TcpListener::bind(LISTEN).context("listening on loopback")?;
+        let listener = match listen {
+            Some(listen) => TcpListener::bind(listen),
+            None => TcpListener::bind(LISTEN),
+        }
+        .context("listening on loopback")?;
         let address = listener.local_addr().context("the proxy's own address")?;
-        let http = ureq::Agent::config_builder()
+        let config = ureq::Agent::config_builder()
             .timeout_global(Some(UPSTREAM_TIMEOUT))
             .http_status_as_error(false)
             // Not through a proxy the job's environment names: the key
@@ -350,12 +541,17 @@ impl Local {
             // The key is not sent after an answer that says to go
             // elsewhere.
             .max_redirects(0)
-            .build()
-            .into();
+            .build();
+        let http = match &upstream {
+            Upstream::Broker { pinned, .. } => ureq::Agent::with_parts(
+                config,
+                ureq::unversioned::transport::DefaultConnector::default(),
+                pinned.clone(),
+            ),
+            Upstream::Provider { .. } => config.into(),
+        };
         let state = Arc::new(State {
-            provider,
-            upstream: upstream.trim_end_matches('/').to_owned(),
-            key,
+            upstream,
             token: run_token()?,
             http,
             max_requests,
@@ -393,6 +589,18 @@ impl Local {
         format!("http://{}", self.address)
     }
 
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    /// In front of a broker, the only addresses it is reached at.
+    pub fn broker_addresses(&self) -> Vec<SocketAddr> {
+        match &self.state.upstream {
+            Upstream::Broker { pinned, .. } => pinned.addresses(),
+            Upstream::Provider { .. } => Vec::new(),
+        }
+    }
+
     pub fn token(&self) -> &Token {
         &self.state.token
     }
@@ -413,7 +621,7 @@ impl Local {
             "schema": schema,
             "proof": "api-key",
             "run": "local",
-            "provider": self.state.provider.as_str(),
+            "provider": self.state.upstream.name(),
             "state": state,
             "requests": self.requests(),
             "unmetered": 0,
@@ -570,17 +778,22 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
     )?;
     // Checked again, with the count, once the body is in.
     state.admit(false)?;
-    let path = head.target.split('?').next().unwrap_or_default();
-    ensure_ok(forwarded(state.provider, &head.method, path), || {
-        Refusal(
-            403,
-            format!(
-                "{} {path} is not a model request of the {} API",
-                head.method,
-                state.provider.as_str()
-            ),
-        )
-    })?;
+    let (path, query) = head
+        .target
+        .split_at(head.target.find('?').unwrap_or(head.target.len()));
+    let route = state
+        .upstream
+        .route(path)
+        .filter(|route| forwarded(route.api, &head.method, route.path))
+        .ok_or_else(|| {
+            Refusal(
+                403,
+                format!(
+                    "{} {path} is not a model request the run's inference proxy forwards",
+                    head.method
+                ),
+            )
+        })?;
     ensure_ok(head.header("transfer-encoding").is_none(), || {
         Refusal(411, "a chunked body: send its length".into())
     })?;
@@ -599,12 +812,12 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
         .map_err(|err| bad(format!("reading the request's body: {err}")))?;
     let counted = head.method == "POST";
     if counted {
-        body = client_tools_only(path, &body)?;
+        body = client_tools_only(route.path, &body)?;
     }
 
     let mut request = ureq::http::Request::builder()
         .method(head.method.as_str())
-        .uri(format!("{}{}", state.upstream, head.target));
+        .uri(format!("{}{}{query}", route.root, route.path));
     for (name, value) in &head.headers {
         if !DROPPED_HEADERS.contains(&name.as_str()) {
             request = request.header(name, value);
@@ -613,7 +826,7 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
     if counted {
         request = request.header("content-type", "application/json");
     }
-    for (name, value) in credential(state.provider, &state.key) {
+    for (name, value) in state.upstream.credential(route.api) {
         request = request.header(name, value);
     }
     // Counted before it is sent: a request whose answer is lost may still
@@ -628,7 +841,11 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
     .map_err(|err| {
         Refusal(
             502,
-            format!("the provider at {} did not answer: {err}", state.upstream),
+            format!(
+                "the {} at {} did not answer: {err}",
+                state.upstream.name(),
+                route.root
+            ),
         )
     })?;
     // From here the answer is the provider's: whatever fails ends the
@@ -964,6 +1181,119 @@ mod tests {
                 "{provider:?} {method} {path}"
             );
         }
+    }
+
+    /// In front of a broker, each API's prefix leads to the broker's route
+    /// for it and is held to that API's paths; nothing else is forwarded,
+    /// the broker's run API least of all.
+    #[test]
+    fn broker_routes() {
+        let broker = Upstream::Broker {
+            anthropic: "http://b/anthropic".into(),
+            openai: "http://b/v1".into(),
+            mistral: "http://b/mistral/v1".into(),
+            token: Token::new("test-run-token-not-secret").unwrap(),
+            pinned: Pinned::default(),
+        };
+        let cases = [
+            (
+                "POST",
+                "/anthropic/v1/messages",
+                Some("http://b/anthropic/v1/messages"),
+            ),
+            (
+                "GET",
+                "/anthropic/v1/models",
+                Some("http://b/anthropic/v1/models"),
+            ),
+            ("POST", "/openai/responses", Some("http://b/v1/responses")),
+            (
+                "POST",
+                "/openai/chat/completions",
+                Some("http://b/v1/chat/completions"),
+            ),
+            (
+                "POST",
+                "/mistral/v1/chat/completions",
+                Some("http://b/mistral/v1/chat/completions"),
+            ),
+            ("POST", "/v1/runs", None),
+            ("GET", "/v1/runs/self", None),
+            ("POST", "/anthropic/../v1/runs", None),
+            ("POST", "/openai/../runs", None),
+            ("POST", "/anthropic/responses", None),
+            ("POST", "/openai/v1/messages", None),
+            ("POST", "/anthropicx/v1/messages", None),
+            ("POST", "/anthropic", None),
+            ("POST", "/v1/messages", None),
+            ("POST", "/openai/files", None),
+            ("POST", "/mistral/v1/batches", None),
+        ];
+        for (method, path, want) in cases {
+            let got = broker
+                .route(path)
+                .filter(|route| forwarded(route.api, method, route.path))
+                .map(|route| format!("{}{}", route.root, route.path));
+            assert_eq!(got.as_deref(), want, "{method} {path}");
+        }
+        // The token goes as the agents' own clients would send it.
+        let anthropic = broker.credential(Provider::Anthropic);
+        assert!(anthropic.contains(&(RUN_TOKEN_HEADER, "test-run-token-not-secret".into())));
+        assert!(anthropic.contains(&("authorization", format!("Bearer {PLACEHOLDER_CREDENTIAL}"))));
+        assert_eq!(
+            broker.credential(Provider::Openai),
+            [(
+                "authorization",
+                "Bearer test-run-token-not-secret".to_owned()
+            )]
+        );
+    }
+
+    /// The broker's addresses are resolved once, each form of its host
+    /// to itself, and then the proxy's only answer for that host and
+    /// port: another host or port, or a name it had none for, resolves to
+    /// nothing.
+    #[test]
+    fn the_broker_is_pinned_to_the_addresses_resolved_first() {
+        use ureq::unversioned::resolver::Resolver;
+        let hosts = [
+            ("127.0.0.1".to_owned(), 18080),
+            ("::1".to_owned(), 443),
+            ("localhost".to_owned(), 80),
+        ];
+        let pinned = Pinned::lookup(&hosts).unwrap();
+        let resolve = |uri: &str| -> Option<Vec<SocketAddr>> {
+            let config = ureq::config::Config::default();
+            let timeout = ureq::unversioned::transport::NextTimeout {
+                after: ureq::unversioned::transport::time::Duration::NotHappening,
+                reason: ureq::Timeout::Global,
+            };
+            pinned
+                .resolve(&uri.parse().unwrap(), &config, timeout)
+                .ok()
+                .map(|addresses| addresses.to_vec())
+        };
+        let v4: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let v6: SocketAddr = "[::1]:443".parse().unwrap();
+        assert_eq!(resolve("http://127.0.0.1:18080/anthropic"), Some(vec![v4]));
+        assert_eq!(resolve("https://[::1]/v1"), Some(vec![v6]));
+        let local = resolve("http://localhost/x").unwrap();
+        assert!(
+            !local.is_empty() && local.iter().all(|a| a.ip().is_loopback()),
+            "{local:?}"
+        );
+        for other in [
+            "http://127.0.0.1:18081/",
+            "http://localhost:18080/",
+            "http://127.0.0.2:18080/",
+            "http://elsewhere.invalid:18080/",
+        ] {
+            assert_eq!(resolve(other), None, "{other}");
+        }
+        let mut all = pinned.addresses();
+        all.retain(|address| *address == v4 || *address == v6);
+        assert_eq!(all, [v4, v6]);
+        assert!(Pinned::lookup(&[("name.invalid".to_owned(), 80)]).is_err());
     }
 
     /// Tools the agent runs pass; any the provider runs, and fields that

@@ -320,7 +320,9 @@ read a GraphQL query, so a mutation passes it too: only GitHub's
 enforcement of the agent's read-only token stops a write there. A push is refused. So is a
 request whose `Host` header or TLS name is not the host it connected
 to, and with raw TCP off, anything in a tunnel
-that is not HTTP. A refusal is a 403 with the reason in
+that is not HTTP. Under `inference.front`, the Rust proxy also refuses
+the sandbox user the broker, before any policy and by name or address
+([fronting](inference.md#fronting-the-broker)). A refusal is a 403 with the reason in
 `X-Egress-Denied`. The log is one JSON line per request with method,
 host, path and decision, never headers, bodies or query strings; `run`
 copies the part written during the run into the transcript.

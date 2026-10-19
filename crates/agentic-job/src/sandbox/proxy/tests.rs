@@ -517,6 +517,178 @@ async fn redirected_connections() {
     assert_eq!(refused["reason"], NO_SERVER_NAME);
 }
 
+/// `--refuse`'s destinations, as `sandbox setup` passes the broker under
+/// `inference.front`: refused to the sandbox user whatever the policy
+/// says, which here admits every read and write to them, by any method,
+/// in a URL or a CONNECT, by name, address spelling or another name that
+/// resolves to the broker, at any port; but not to the runner's own
+/// redirected connections. Without `--refuse` the same requests reach the broker:
+/// the control that the refusal, not the policy, is what stops them.
+#[tokio::test]
+async fn refused_destinations_whatever_the_policy() {
+    const OPEN: &str = r#"
+[egress]
+mode = "reads-anywhere"
+
+[[write]]
+name = "the broker"
+hosts = ["broker.test", "alias.test", "127.0.0.1", "::1"]
+methods = ["POST", "PUT", "DELETE"]
+paths = ["/**"]
+"#;
+    let refuse = [
+        "broker.test:18080",
+        "127.0.0.1:18080",
+        "[::1]:18080",
+        "BROKER.test.:443",
+    ]
+    .map(str::to_owned);
+    // (method, URL); each is 403 with --refuse and reaches the broker
+    // without it
+    let cases = [
+        ("GET", "http://broker.test:18080/v1/runs/self"),
+        ("POST", "http://broker.test:18080/v1/runs"),
+        ("DELETE", "http://broker.test:18080/v1/runs/self"),
+        // another name for the broker: refused at its address
+        ("POST", "http://alias.test:18080/v1/runs"),
+    ];
+    for refusing in [true, false] {
+        let fixture = Fixture::start_with(|proxy| {
+            proxy.policy = Policy::parse(OPEN, policy::ECOSYSTEMS).unwrap();
+            proxy.runner_policy = proxy.policy.with_runner_writes().unwrap();
+            let plain = proxy.origins[0].1;
+            proxy.origins.push(("broker.test".to_owned(), plain));
+            proxy.origins.push(("alias.test".to_owned(), plain));
+            if refusing {
+                proxy.refused = Refused::parse(&refuse).unwrap();
+            }
+        })
+        .await;
+        for (method, url) in cases {
+            let mut sender = client(TcpStream::connect(fixture.proxy).await.unwrap()).await;
+            let host = url.parse::<Uri>().unwrap().authority().unwrap().to_string();
+            let body = if method == "POST" { "{}" } else { "" };
+            let (status, denied, _) = send(&mut sender, request(method, url, &host, body)).await;
+            if refusing {
+                assert_eq!(
+                    (status, denied.as_deref()),
+                    (403, Some(REFUSED_DESTINATION)),
+                    "{method} {url}"
+                );
+            } else {
+                assert_eq!((status, denied), (200, None), "{method} {url}");
+            }
+        }
+        let reached = fixture.plain.take();
+        if !refusing {
+            assert_eq!(reached.len(), cases.len(), "{reached:?}");
+            continue;
+        }
+        assert!(reached.is_empty(), "{reached:?}");
+        // Addresses in every spelling, refused before the policy, which
+        // would let them through; and the broker's tunnel.
+        for url in [
+            "http://127.0.0.1:18080/v1/runs",
+            "http://[::ffff:127.0.0.1]:18080/v1/runs",
+            "http://[0:0::1]:18080/v1/runs",
+        ] {
+            let mut sender = client(TcpStream::connect(fixture.proxy).await.unwrap()).await;
+            let host = url.parse::<Uri>().unwrap().authority().unwrap().to_string();
+            let (status, denied, _) = send(&mut sender, request("POST", url, &host, "{}")).await;
+            assert_eq!(
+                (status, denied.as_deref()),
+                (403, Some(REFUSED_DESTINATION)),
+                "{url}"
+            );
+        }
+        for authority in ["broker.test:18080", "broker.test:443", "[::1]:18080"] {
+            assert_eq!(
+                fixture.tunnel(authority).await.unwrap_err(),
+                (403, REFUSED_DESTINATION.to_owned()),
+                "{authority}"
+            );
+        }
+        // Another port of the broker's host, which may serve it too.
+        for url in ["http://broker.test:80/v1/runs", "http://127.0.0.1:18081/"] {
+            let mut sender = client(TcpStream::connect(fixture.proxy).await.unwrap()).await;
+            let host = url.parse::<Uri>().unwrap().authority().unwrap().to_string();
+            let (status, denied, _) = send(&mut sender, request("GET", url, &host, "")).await;
+            assert_eq!(
+                (status, denied.as_deref()),
+                (403, Some(REFUSED_DESTINATION)),
+                "{url}"
+            );
+        }
+        // The runner's own connections reach the broker: `run` does.
+        let mut sender = client(TcpStream::connect(fixture.transparent).await.unwrap()).await;
+        let (status, _, _) = send(
+            &mut sender,
+            request("GET", "/v1/runs/self", "broker.test:18080", ""),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(fixture.plain.take(), ["GET /v1/runs/self"]);
+        let log = fixture.log_lines();
+        assert!(
+            log.iter()
+                .filter(|entry| entry["reason"] == REFUSED_DESTINATION)
+                .all(|entry| entry["decision"] == "deny" && entry["status"] == 403),
+            "{log:?}"
+        );
+    }
+}
+
+/// `--refuse`'s forms, and what each names: the host in any case and
+/// without a trailing dot, an address in any of its spellings, at any
+/// port; not a name under it.
+#[test]
+fn refused_names() {
+    let refused = Refused::parse(
+        &[
+            "Broker.Example.:18080",
+            "100.64.0.1:80",
+            "[FD7A:115C:A1E0::1]:443",
+        ]
+        .map(str::to_owned),
+    )
+    .unwrap();
+    let cases = [
+        ("broker.example", true),
+        ("BROKER.example.", true),
+        ("broker.example:18081", true),
+        ("sub.broker.example", false),
+        ("other.example", false),
+        ("100.64.0.1", true),
+        ("::ffff:100.64.0.1", true),
+        ("100.64.0.2", false),
+        ("fd7a:115c:a1e0::1", true),
+        ("fd7a:115c:a1e0:0:0:0:0:1", true),
+        ("[fd7a:115c:a1e0::1]", true),
+        ("fd7a:115c:a1e0::2", false),
+    ];
+    for (host, want) in cases {
+        assert_eq!(refused.names(host), want, "{host}");
+    }
+    // An address is refused at itself before anything resolves.
+    assert_eq!(
+        *lock(&refused.addresses),
+        std::collections::HashSet::from([
+            "100.64.0.1".parse().unwrap(),
+            "fd7a:115c:a1e0::1".parse().unwrap(),
+        ])
+    );
+    for bad in [
+        "broker.example",
+        "broker.example:0",
+        ":80",
+        "a:b:c",
+        "[::1]",
+        "x/y:80",
+    ] {
+        assert!(Refused::parse(&[bad.to_owned()]).is_err(), "{bad}");
+    }
+}
+
 /// The refusals a tunnel adds: its host, the Host header and the TLS
 /// name against it, writes without a rule, and reads with a body.
 #[tokio::test]

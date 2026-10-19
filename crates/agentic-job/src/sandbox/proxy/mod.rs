@@ -12,6 +12,8 @@
 //! protocol passes unseen. Every request is then decided by
 //! [`policy::Policy::request`] against the host the connection goes to,
 //! which is the CONNECT's or the URL's, never the Host header's.
+//! Before any policy, the sandbox user is refused the destinations of
+//! `--refuse` ([`Refused`]), by name and by address.
 //!
 //! A refusal is a 403 with the reason in `X-Egress-Denied`. An allowed
 //! request is sent on to the real server, over TLS checked against
@@ -54,6 +56,10 @@ use tls::Authority;
 
 /// On every refusal, so clients and checks can tell it from the server's.
 pub const DENIED_HEADER: &str = "X-Egress-Denied";
+
+/// Why a destination of `--refuse` is refused, before any policy.
+pub const REFUSED_DESTINATION: &str =
+    "the destination is one only the runner may reach (inference.front's broker)";
 
 /// Longest path kept in the log, in characters.
 const MAX_LOGGED_PATH: usize = 200;
@@ -134,10 +140,16 @@ pub struct Args {
     /// added to the policy
     #[arg(long)]
     pub transparent: Option<SocketAddr>,
+    /// HOST:PORT ([ADDRESS]:PORT for IPv6) the sandbox user is refused,
+    /// whatever the policy says: by name, and at every address the proxy
+    /// would connect to for it (`inference.front`'s broker)
+    #[arg(long = "refuse", value_name = "HOST:PORT")]
+    pub refuse: Vec<String>,
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy, args.denylist.as_deref())?;
+    let refused = Refused::parse(&args.refuse)?;
     let authority = Authority::load_or_create(&args.state_dir)?;
     let log = args
         .log
@@ -150,17 +162,21 @@ pub fn run(args: &Args) -> Result<Exit> {
                 .with_context(|| format!("opening {}", path.display()))
         })
         .transpose()?;
-    let proxy = Arc::new(Proxy::new(
+    let mut proxy = Proxy::new(
         policy,
         authority,
         tls::client_config(tls::mozilla_roots())?,
         log,
-    )?);
+    )?;
+    proxy.refused = refused;
+    let proxy = Arc::new(proxy);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting the async runtime")?;
     runtime.block_on(async {
+        // What the names resolve to now, kept should they later not.
+        proxy.refused_addresses().await;
         let listener = TcpListener::bind(args.listen)
             .await
             .with_context(|| format!("listening on {}", args.listen))?;
@@ -444,6 +460,102 @@ where
     }
 }
 
+/// The destinations of `--refuse`, which the sandbox user's requests may
+/// not reach whatever the policy allows: under `inference.front` the
+/// broker, where the agent would otherwise register runs of its own. A
+/// request is refused when it names one's host (or an address of it in
+/// any of its spellings), and a connection when any address the proxy
+/// resolved for it is one's, so that another name for the broker, or a
+/// name that resolves to it only when the proxy connects, is refused
+/// too. Each is refused at every port, not only its own: a server there
+/// may serve the broker at another. The port given is where the name is
+/// resolved. The runner's own connections (the transparent listener) are
+/// not held to this; `inference.front` refuses `egress.write-policy`.
+#[derive(Debug, Default)]
+struct Refused {
+    /// Each destination's host, normalized, an address canonical
+    /// ([`std::net::IpAddr::to_canonical`]), and its port.
+    destinations: Vec<(String, u16)>,
+    /// Every address a destination has been seen at: its own if it is an
+    /// address, and each one its name has resolved to here. An address
+    /// stays refused when the name later resolves elsewhere, or not at
+    /// all.
+    addresses: Mutex<std::collections::HashSet<std::net::IpAddr>>,
+}
+
+/// ADDRESS's IP as one spelling: an IPv4-mapped IPv6 address as IPv4.
+fn canonical(address: SocketAddr) -> std::net::IpAddr {
+    address.ip().to_canonical()
+}
+
+impl Refused {
+    /// From `--refuse`'s HOST:PORT or [ADDRESS]:PORT.
+    fn parse(given: &[String]) -> Result<Self> {
+        let mut refused = Self::default();
+        for text in given {
+            let (host, port) = match text.parse::<SocketAddr>() {
+                Ok(address) => {
+                    let ip = canonical(address);
+                    lock(&refused.addresses).insert(ip);
+                    (ip.to_string(), address.port())
+                }
+                Err(_) => {
+                    let (host, port) = text
+                        .rsplit_once(':')
+                        .with_context(|| format!("--refuse {text:?}: not HOST:PORT"))?;
+                    let host = policy::normalize_host(host);
+                    let port = port
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|&port| port != 0)
+                        .with_context(|| format!("--refuse {text:?}: a bad port"))?;
+                    if host.is_empty() || host.contains([':', '[', ']', '/']) {
+                        bail!("--refuse {text:?}: not HOST:PORT");
+                    }
+                    (host, port)
+                }
+            };
+            refused.destinations.push((host, port));
+        }
+        Ok(refused)
+    }
+
+    /// Whether HOST, as a request names it, is a destination's.
+    fn names(&self, host: &str) -> bool {
+        let host = policy::normalize_host(host);
+        let address = host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| ip.to_canonical());
+        self.destinations.iter().any(|(refused, _)| {
+            *refused == host
+                || address.is_some_and(|ip| refused.parse::<std::net::IpAddr>().ok() == Some(ip))
+        })
+    }
+
+    /// The names among the destinations, with their ports.
+    fn names_to_resolve(&self) -> Vec<(String, u16)> {
+        self.destinations
+            .iter()
+            .filter(|(host, _)| host.parse::<std::net::IpAddr>().is_err())
+            .cloned()
+            .collect()
+    }
+}
+
+/// A connection refused because an address it would go to is one of
+/// [`Refused`]'s.
+#[derive(Debug)]
+struct RefusedAddress(SocketAddr);
+
+impl std::fmt::Display for RefusedAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is a refused destination's address", self.0)
+    }
+}
+
+impl std::error::Error for RefusedAddress {}
+
 /// A client connection's connection to its server, kept for its next
 /// request: in a tunnel every request goes to the same place.
 type Upstream = Arc<tokio::sync::Mutex<Option<SendRequest<Body>>>>;
@@ -454,6 +566,8 @@ struct Proxy {
     /// ([`Policy::with_runner_writes`]), for the transparent listener's
     /// connections alone.
     runner_policy: Policy,
+    /// `--refuse`: refused to the sandbox user before any policy.
+    refused: Refused,
     authority: Authority,
     upstream_tls: Arc<ClientConfig>,
     log: Option<Mutex<File>>,
@@ -479,6 +593,7 @@ impl Proxy {
         Ok(Self {
             runner_policy: policy.with_runner_writes()?,
             policy,
+            refused: Refused::default(),
             authority,
             upstream_tls,
             log: log.map(Mutex::new),
@@ -570,7 +685,7 @@ impl Proxy {
 
     async fn outer(self: Arc<Self>, request: Request<Incoming>, slot: Slot) -> Response<Body> {
         if request.method() == Method::CONNECT {
-            return self.connect(request, slot);
+            return self.connect(request, slot).await;
         }
         let uri = request.uri();
         let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
@@ -606,7 +721,7 @@ impl Proxy {
         self.forward(request, &target, None).await
     }
 
-    fn connect(self: Arc<Self>, request: Request<Incoming>, slot: Slot) -> Response<Body> {
+    async fn connect(self: Arc<Self>, request: Request<Incoming>, slot: Slot) -> Response<Body> {
         let Some(authority) = request.uri().authority() else {
             return text_response(
                 StatusCode::BAD_REQUEST,
@@ -615,7 +730,17 @@ impl Proxy {
         };
         let host = bare_host(authority.host());
         let port = authority.port_u16().unwrap_or(HTTPS_PORT);
-        let decision = self.policy.connect(&host);
+        // A name is resolved only once the policy would let the tunnel
+        // open: a refused one is never looked up.
+        let decision = match self.refused.names(&host) {
+            true => Decision::deny(REFUSED_DESTINATION),
+            false => self.policy.connect(&host),
+        };
+        let decision = if decision.allowed && self.resolves_refused(&host, port).await {
+            Decision::deny(REFUSED_DESTINATION)
+        } else {
+            decision
+        };
         if !decision.allowed {
             return self.denied(Entry {
                 decision: DENY,
@@ -839,7 +964,9 @@ impl Proxy {
             .collect();
         let websocket = only_websocket(headers);
         let has_body = has_body_headers(headers) || !request.body().is_end_stream();
-        let decision = if hosts.len() > 1 {
+        let decision = if !target.transparent && self.refused.names(&target.host) {
+            Decision::deny(REFUSED_DESTINATION)
+        } else if hosts.len() > 1 {
             // Which one a server reads is its own choice: the one the
             // policy did not check would be a way to front.
             Decision::deny(policy::OTHER_HOST)
@@ -876,6 +1003,10 @@ impl Proxy {
                 });
                 response
             }
+            Err(err) if err.downcast_ref::<RefusedAddress>().is_some() => self.denied(Entry {
+                reason: REFUSED_DESTINATION,
+                ..entry
+            }),
             Err(err) => {
                 let error = format!("{err:#}");
                 self.record(&Entry {
@@ -977,6 +1108,17 @@ impl Proxy {
     /// A new connection to TARGET's server.
     async fn open(&self, target: &Target) -> Result<SendRequest<Body>> {
         let addrs = self.resolve(&target.host, target.port).await?;
+        // Of the very addresses connected to below, so that no name
+        // resolves to the broker after it was checked.
+        if !target.transparent && !self.refused.destinations.is_empty() {
+            let refused = self.refused_addresses().await;
+            if let Some(addr) = addrs
+                .iter()
+                .find(|addr| refused.contains(&canonical(**addr)))
+            {
+                return Err(RefusedAddress(*addr).into());
+            }
+        }
         let mut last = None;
         let mut stream = None;
         for addr in addrs {
@@ -1006,6 +1148,32 @@ impl Proxy {
         } else {
             handshake(stream).await
         }
+    }
+
+    /// [`Refused::addresses`], with what each refused name resolves to
+    /// now added. A name that does not resolve leaves what it resolved
+    /// to before: the proxy cannot reach it by that name either.
+    async fn refused_addresses(&self) -> std::collections::HashSet<std::net::IpAddr> {
+        for (host, port) in self.refused.names_to_resolve() {
+            if let Ok(addrs) = self.resolve(&host, port).await {
+                lock(&self.refused.addresses).extend(addrs.into_iter().map(canonical));
+            }
+        }
+        lock(&self.refused.addresses).clone()
+    }
+
+    /// Whether HOST at PORT resolves now to a refused destination's
+    /// address: a tunnel to it is refused at once, as every connection
+    /// through it would be ([`Self::open`] checks again).
+    async fn resolves_refused(&self, host: &str, port: u16) -> bool {
+        if self.refused.destinations.is_empty() {
+            return false;
+        }
+        let Ok(addrs) = self.resolve(host, port).await else {
+            return false;
+        };
+        let refused = self.refused_addresses().await;
+        addrs.iter().any(|addr| refused.contains(&canonical(*addr)))
     }
 
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
@@ -1075,6 +1243,35 @@ fn bare_host(host: &str) -> String {
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(host)
         .to_owned()
+}
+
+/// The proxy on a loopback port, in a thread of its own, with the policy
+/// file TEXT and `--refuse` REFUSE: for tests elsewhere in the crate
+/// that probe through it.
+#[cfg(test)]
+pub(crate) fn serve_for_tests(text: &str, refuse: &[String]) -> SocketAddr {
+    let mut proxy = Proxy::new(
+        Policy::parse(text, policy::ECOSYSTEMS).unwrap(),
+        Authority::new(rcgen::KeyPair::generate().unwrap()).unwrap(),
+        tls::client_config(tls::mozilla_roots()).unwrap(),
+        None,
+    )
+    .unwrap();
+    proxy.refused = Refused::parse(refuse).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::from_std(listener).unwrap();
+            let _ = Arc::new(proxy).serve(listener, false).await;
+        });
+    });
+    address
 }
 
 #[cfg(test)]

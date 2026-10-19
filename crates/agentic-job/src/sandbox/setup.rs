@@ -306,6 +306,9 @@ struct Preflight {
     config: Config,
     install_vibe: bool,
     direct: Vec<Direct>,
+    /// What the egress proxy refuses the sandbox user: `inference.front`'s
+    /// broker.
+    refused: Vec<(String, u16)>,
     /// A session run's: its bridge is served on the tailnet.
     session: Option<Listen>,
     runner: User,
@@ -321,6 +324,7 @@ fn setup(args: &Args) -> Result<Exit> {
         config,
         install_vibe: needs_vibe,
         direct,
+        refused,
         session,
         runner,
         existing,
@@ -336,6 +340,7 @@ fn setup(args: &Args) -> Result<Exit> {
         .with_context(|| format!("in {}", args.config.display()))?;
         let config::checked::Host {
             direct,
+            refused,
             session,
             install_vibe,
         } = config.check_host()?;
@@ -412,6 +417,7 @@ fn setup(args: &Args) -> Result<Exit> {
             config,
             install_vibe,
             direct,
+            refused,
             session,
             runner,
             existing,
@@ -503,7 +509,7 @@ fn setup(args: &Args) -> Result<Exit> {
         .proxy
         .then(|| {
             timed_setup("egress-proxy", || {
-                egress::start(&config.egress, args.egress_image.as_deref())
+                egress::start(&config.egress, args.egress_image.as_deref(), &refused)
             })
         })
         .transpose()?;

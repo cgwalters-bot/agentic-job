@@ -15,7 +15,9 @@
 //! The token goes to every search on standard input, never on a command
 //! line.
 
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 
@@ -23,6 +25,8 @@ use super::clone::utf8;
 use super::enter::Sandbox;
 use super::inference::Token;
 use crate::config::Config;
+use crate::sandbox::egress;
+use crate::sandbox::network::Direct;
 
 /// Where the sandbox user can write, and so where a token handed to it
 /// could have been left, besides its home.
@@ -49,6 +53,18 @@ const READ_SCRIPT: &str = r#"cat -- "$1" >/dev/null"#;
 /// A file every uid of the image can read: the control that a
 /// subordinate uid's container runs at all.
 const WORLD_READABLE: &str = "/etc/os-release";
+/// Opens a plain TCP connection to `$1` port `$2`, whatever the service
+/// speaks, as `sandbox check`'s `egress-tcp` probe does.
+const CONNECT_SCRIPT: &str = r#"exec 3<>"/dev/tcp/$1/$2""#;
+/// How long a connection may take to open, here and as the sandbox user.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT_S: &str = "10";
+/// Sends `$3` to the proxy at `$1` port `$2` and prints the head of its
+/// answer, up to the blank line: the proxy need not close the
+/// connection after a refused CONNECT.
+const PROXY_REQUEST_SCRIPT: &str = r#"exec 3<>"/dev/tcp/$1/$2" || exit; printf '%s' "$3" >&3; while IFS= read -r line <&3; do printf '%s\n' "$line"; [ "$line" = $'\r' ] && break; done"#;
+/// The broker's run API, where a run is registered.
+const RUNS_PATH: &str = "/v1/runs";
 const PRIVATE_FILE_MODE: &str = "600";
 const PRIVATE_DIR_MODE: &str = "700";
 
@@ -284,19 +300,315 @@ fn in_no_process(sandbox: &Sandbox, what: &str, secret: &str) -> Result<Probe> {
     })
 }
 
-/// Probes that the provider's KEY, which only `run` holds under
-/// `api-key`, is in no process the sandbox user can read, prints what was
-/// found, and fails unless it held. Its files are not searched for the
-/// key, since that search would hand the key to a process of the sandbox
-/// user's: nothing writes it there, and the run token's probes show that
+/// Probes that SECRET, which only `run` holds (the provider's key under
+/// `api-key`, the broker's run token under `inference.front`), is in no
+/// process the sandbox user can read, prints what was found, and fails
+/// unless it held. WHAT names it. Its files are not searched for it,
+/// since that search would hand it to a process of the sandbox user's:
+/// nothing writes it there, and the probes of the agent's token show that
 /// what `run` writes for the agent is where it belongs.
-pub fn require_absent(sandbox: &Sandbox, key: &str) -> Result<()> {
-    let probe = in_no_process(sandbox, "the provider's API key", key.trim())?;
+pub fn require_absent(sandbox: &Sandbox, what: &str, secret: &str) -> Result<()> {
+    let probe = in_no_process(sandbox, what, secret.trim())?;
     ensure!(
         report(&[probe]),
-        "the provider's API key is where the sandbox user can read it: see the failed probes above"
+        "{what} is where the sandbox user can read it: see the failed probes above"
     );
     Ok(())
+}
+
+/// The broker under `inference.front`, as its probes see it.
+pub struct Broker<'a> {
+    /// Its hosts and ports, as the configuration names them.
+    pub hosts: &'a [(String, u16)],
+    /// What `run` resolved those to when it fronted the run, and alone
+    /// connects to ([`super::api_key::Pinned`]).
+    pub addresses: &'a [SocketAddr],
+    /// Where the sandbox user connects around the egress proxy.
+    pub direct: &'a [Direct],
+}
+
+/// The egress proxy `sandbox setup` serves the sandbox user.
+pub fn egress_proxy() -> SocketAddr {
+    SocketAddr::from((egress::PROXY_HOST, egress::PROXY_PORT))
+}
+
+/// Probes that the sandbox user cannot reach the BROKER under
+/// `inference.front`, prints what was found, and fails unless it held.
+/// Were it to, the agent could register runs of its own there, each with
+/// a fresh cap, past the proxy `run` serves it at PROXY. There are two
+/// ways it could:
+///
+/// - Around the egress proxy, where the network rules let it: loopback,
+///   and `egress.direct`. Every address of the broker's is held to that
+///   by what it is, whether it answers now or not, since one that is
+///   down now may answer later; and each that `run` reaches (the control
+///   that it is up, so that a refused connection shows the network
+///   rules) is tried as the sandbox user too. The addresses are `run`'s,
+///   since the sandbox user may resolve nothing.
+/// - Through the egress proxy at EGRESS, which must refuse the broker
+///   itself (`--refuse`) whatever its policy says: a GET and a POST of
+///   `/v1/runs` and a CONNECT to each of the broker's names and
+///   addresses, as the sandbox user and, with IMAGE and podman, a GET and
+///   a POST from a container of that image as a subordinate uid. Only
+///   the egress proxy's 403 for that destination passes: the broker's
+///   own answer, a 502 or no answer at all would not show the refusal.
+///
+/// The sandbox user's own control is that it reaches PROXY: a command
+/// that cannot connect at all shows nothing.
+pub fn require_unreachable(
+    sandbox: &Sandbox,
+    broker: &Broker<'_>,
+    proxy: SocketAddr,
+    egress: &SocketAddr,
+    image: Option<&str>,
+) -> Result<()> {
+    let mut probes = unreachable(sandbox, broker, proxy)?;
+    let forms = forms(broker);
+    probes.extend(through_egress(sandbox, &forms, egress)?);
+    if let Some(image) = image {
+        probes.extend(through_egress_from_container(
+            sandbox, image, &forms, egress,
+        )?);
+    }
+    ensure!(
+        report(&probes),
+        "the sandbox user can reach the broker, or nothing showed it cannot: see the failed \
+         probes above; keep the broker out of egress.direct and off loopback, and its host out \
+         of egress.policy"
+    );
+    Ok(())
+}
+
+/// Whether the sandbox user's uids reach ADDRESS around the egress
+/// proxy (`sandbox::network`): anything on loopback, `0.0.0.0` and `::`
+/// included, which reach this machine, and what DIRECT opens. In any
+/// spelling: an IPv4-mapped IPv6 address is the IPv4 one.
+fn around_the_proxy(address: SocketAddr, direct: &[Direct]) -> bool {
+    let ip = address.ip().to_canonical();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || match ip {
+            std::net::IpAddr::V4(v4) => direct
+                .iter()
+                .any(|open| open.host == v4 && open.port == address.port()),
+            std::net::IpAddr::V6(_) => false,
+        }
+}
+
+/// The broker's names and addresses, each as a request's authority
+/// would name it, with its port: what the egress proxy must refuse.
+fn forms(broker: &Broker<'_>) -> Vec<String> {
+    let mut forms: Vec<String> = broker
+        .hosts
+        .iter()
+        .map(|(host, port)| match host.parse::<std::net::IpAddr>() {
+            Ok(ip) => SocketAddr::new(ip, *port).to_string(),
+            Err(_) => format!("{host}:{port}"),
+        })
+        .chain(broker.addresses.iter().map(SocketAddr::to_string))
+        .collect();
+    forms.sort_unstable();
+    forms.dedup();
+    forms
+}
+
+/// Whether the sandbox user opens a TCP connection to ADDRESS.
+fn connects(sandbox: &Sandbox, address: &SocketAddr) -> Result<bool> {
+    let (ip, port) = (address.ip().to_string(), address.port().to_string());
+    let argv = [
+        "timeout",
+        CONNECT_TIMEOUT_S,
+        "bash",
+        "-c",
+        CONNECT_SCRIPT,
+        "probe",
+        &ip,
+        &port,
+    ];
+    Ok(sandbox.run(&argv, b"", MAX_OUTPUT)?.success())
+}
+
+/// The probes of [`require_unreachable`] around the egress proxy.
+fn unreachable(sandbox: &Sandbox, broker: &Broker<'_>, proxy: SocketAddr) -> Result<Vec<Probe>> {
+    let user = &sandbox.user;
+    let mut probes = vec![
+        Probe {
+            what: format!("{user} reaches the run's inference proxy at {proxy} (control)"),
+            passed: connects(sandbox, &proxy)?,
+        },
+        Probe {
+            what: "run resolved the broker to an address (control)".to_owned(),
+            passed: !broker.addresses.is_empty(),
+        },
+    ];
+    for address in broker.addresses {
+        probes.push(Probe {
+            what: format!(
+                "the broker's {address} is neither on loopback nor in egress.direct, \
+                 where {user} connects around the egress proxy"
+            ),
+            passed: !around_the_proxy(*address, broker.direct),
+        });
+    }
+    let reached: Vec<&SocketAddr> = broker
+        .addresses
+        .iter()
+        .filter(|address| TcpStream::connect_timeout(address, CONNECT_TIMEOUT).is_ok())
+        .collect();
+    probes.push(Probe {
+        what: "run reaches the broker at one of its addresses (control)".to_owned(),
+        passed: !reached.is_empty(),
+    });
+    for address in reached {
+        probes.push(Probe {
+            what: format!("{user} cannot open a TCP connection to the broker at {address}"),
+            passed: !connects(sandbox, address)?,
+        });
+    }
+    Ok(probes)
+}
+
+/// The request for `/v1/runs` that METHOD makes of the broker at
+/// AUTHORITY through a proxy: in absolute form, or a CONNECT's.
+fn proxy_request(method: &str, authority: &str) -> String {
+    match method {
+        "CONNECT" => format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"),
+        "POST" => format!(
+            "POST http://{authority}{RUNS_PATH} HTTP/1.1\r\nHost: {authority}\r\n\
+             Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        ),
+        _ => format!(
+            "{method} http://{authority}{RUNS_PATH} HTTP/1.1\r\nHost: {authority}\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    }
+}
+
+/// Whether HEAD, a response's status line and headers, is the egress
+/// proxy's refusal of a `--refuse` destination: its 403, with its reason
+/// in its own header, which neither the broker nor any other refusal of
+/// the proxy's gives.
+fn refused_as_broker(head: &str) -> bool {
+    let mut lines = head.lines();
+    let forbidden = lines.next().is_some_and(|status| {
+        let mut words = status.split_whitespace();
+        words
+            .next()
+            .is_some_and(|version| version.starts_with("HTTP/"))
+            && words.next() == Some("403")
+    });
+    forbidden
+        && lines.any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case(crate::sandbox::proxy::DENIED_HEADER)
+                    && value.trim() == crate::sandbox::proxy::REFUSED_DESTINATION
+            })
+        })
+}
+
+/// The sandbox user's GET, POST and CONNECT to the broker at each of
+/// FORMS through the egress proxy at EGRESS: each must be refused there.
+fn through_egress(sandbox: &Sandbox, forms: &[String], egress: &SocketAddr) -> Result<Vec<Probe>> {
+    let user = &sandbox.user;
+    let (ip, port) = (egress.ip().to_string(), egress.port().to_string());
+    let mut probes = Vec::new();
+    for authority in forms {
+        for method in ["GET", "POST", "CONNECT"] {
+            let request = proxy_request(method, authority);
+            let argv = [
+                "timeout",
+                CONNECT_TIMEOUT_S,
+                "bash",
+                "-c",
+                PROXY_REQUEST_SCRIPT,
+                "probe",
+                &ip,
+                &port,
+                &request,
+            ];
+            let head = sandbox.run(&argv, b"", MAX_OUTPUT)?.text();
+            let what = match method {
+                "CONNECT" => format!("CONNECT {authority}"),
+                _ => format!("{method} http://{authority}{RUNS_PATH}"),
+            };
+            probes.push(Probe {
+                what: format!("the egress proxy refuses {user} {what}"),
+                passed: refused_as_broker(&head),
+            });
+        }
+    }
+    Ok(probes)
+}
+
+/// [`through_egress`]'s GET and POST, from a container of IMAGE as a
+/// subordinate uid on the host's network, with curl. Without podman
+/// there is no container to try from.
+fn through_egress_from_container(
+    sandbox: &Sandbox,
+    image: &str,
+    forms: &[String],
+    egress: &SocketAddr,
+) -> Result<Vec<Probe>> {
+    let user = &sandbox.user;
+    if !sandbox
+        .run(&["sh", "-c", "command -v podman"], b"", MAX_OUTPUT)?
+        .success()
+    {
+        eprintln!("note: {user} has no podman, so no container to try the broker from");
+        return Ok(Vec::new());
+    }
+    let proxy = format!("http://{egress}");
+    let mut probes = Vec::new();
+    for authority in forms {
+        let url = format!("http://{authority}{RUNS_PATH}");
+        for post in [false, true] {
+            let mut argv = vec![
+                "timeout",
+                "--kill-after=10",
+                CONTAINER_TIMEOUT_S,
+                "podman",
+                "run",
+                "--rm",
+                "--network=host",
+                "--log-driver=none",
+                "--user",
+                CONTAINER_UID,
+                image,
+                "curl",
+                "-sS",
+                "-g",
+                "-m",
+                CONNECT_TIMEOUT_S,
+                "-o",
+                "/dev/null",
+                "-D",
+                "-",
+                "--proxy",
+                &proxy,
+            ];
+            if post {
+                argv.extend([
+                    "-X",
+                    "POST",
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    "{}",
+                ]);
+            }
+            argv.push(&url);
+            let head = sandbox.run(&argv, b"", MAX_OUTPUT)?.text();
+            probes.push(Probe {
+                what: format!(
+                    "the egress proxy refuses a container of {user}'s, as uid {CONTAINER_UID}, \
+                     {} {url}",
+                    if post { "POST" } else { "GET" }
+                ),
+                passed: refused_as_broker(&head),
+            });
+        }
+    }
+    Ok(probes)
 }
 
 /// Probes, before the agent starts, that the MCP server's CREDENTIAL,
@@ -416,6 +728,183 @@ mod tests {
         for (found, want) in cases {
             assert_eq!(only_in(Some(0), found, &[FILE, CHILD]), want, "{found:?}");
         }
+    }
+
+    /// The probe that the agent cannot reach the broker fails where
+    /// nothing blocks it: here the agent is this process's own user, which
+    /// reaches a listener on loopback as the broker's runner does. A broker
+    /// that is not there, or a sandbox user that connects nowhere, the run's
+    /// own proxy included, fails a control instead of passing the probe.
+    #[test]
+    fn a_broker_the_agent_reaches_fails_its_probe() {
+        let home = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::own(&Config::default(), &home.path().join("agent")).unwrap();
+        let listen = || std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (broker, proxy) = (listen(), listen());
+        let address = broker.local_addr().unwrap();
+        let hosts = [("127.0.0.1".to_owned(), address.port())];
+        let addresses = [address];
+        let at = |addresses| Broker {
+            hosts: &hosts,
+            addresses,
+            direct: &[],
+        };
+        let verdicts = |proxy, addresses| -> Vec<bool> {
+            unreachable(&sandbox, &at(addresses), proxy)
+                .unwrap()
+                .iter()
+                .map(|probe| probe.passed)
+                .collect()
+        };
+        // (the proxy's control, the resolution's control, the address
+        // judged by what it is, the broker's control, the probe)
+        let proxy_at = proxy.local_addr().unwrap();
+        assert_eq!(
+            verdicts(proxy_at, &addresses),
+            [true, true, false, true, false]
+        );
+        let closed = SocketAddr::from(([127, 0, 0, 1], 1));
+        assert!(require_unreachable(&sandbox, &at(&addresses), proxy_at, &closed, None).is_err());
+        drop(proxy);
+        assert_eq!(
+            verdicts(proxy_at, &addresses),
+            [false, true, false, true, false]
+        );
+        // An address that does not answer is still judged.
+        drop(broker);
+        assert_eq!(verdicts(proxy_at, &addresses), [false, true, false, false]);
+        assert_eq!(verdicts(proxy_at, &[]), [false, false, false]);
+    }
+
+    /// Where the sandbox user connects around the egress proxy: loopback
+    /// and what `egress.direct` opens, in any spelling of the address,
+    /// whether or not anything listens there.
+    #[test]
+    fn the_brokers_addresses_are_judged_by_what_they_are() {
+        let direct = [Direct::parse("http://100.64.0.1:18080").unwrap()];
+        let cases = [
+            ("127.0.0.1:18080", true),
+            ("127.1.2.3:1", true),
+            ("[::1]:443", true),
+            ("0.0.0.0:80", true),
+            ("[::]:80", true),
+            ("[::ffff:127.0.0.1]:80", true),
+            ("100.64.0.1:18080", true),
+            ("[::ffff:100.64.0.1]:18080", true),
+            ("100.64.0.1:18081", false),
+            ("100.64.0.2:18080", false),
+            ("203.0.113.5:443", false),
+            ("[2001:db8::1]:443", false),
+            ("[fd7a:115c:a1e0::1]:443", false),
+        ];
+        for (address, want) in cases {
+            assert_eq!(
+                around_the_proxy(address.parse().unwrap(), &direct),
+                want,
+                "{address}"
+            );
+        }
+        let broker = Broker {
+            hosts: &[
+                ("broker.example".to_owned(), 18080),
+                ("fd7a:115c:a1e0::1".to_owned(), 443),
+            ],
+            addresses: &[
+                "100.64.0.1:18080".parse().unwrap(),
+                "[fd7a:115c:a1e0::1]:443".parse().unwrap(),
+            ],
+            direct: &direct,
+        };
+        assert_eq!(
+            forms(&broker),
+            [
+                "100.64.0.1:18080",
+                "[fd7a:115c:a1e0::1]:443",
+                "broker.example:18080"
+            ]
+        );
+    }
+
+    /// The probes through the egress proxy, against the Rust proxy itself
+    /// on loopback in front of a broker that answers everything, with a
+    /// policy that admits every read and write to it: they pass when the
+    /// proxy is given the broker to refuse, by its name, its addresses
+    /// and their spellings, and each fails when that refusal is removed,
+    /// the negative control. A proxy that is not there fails them too.
+    #[test]
+    fn the_broker_through_the_egress_proxy() {
+        const OPEN: &str = "[[write]]\nname = \"all\"\nhosts = [\"localhost\", \"127.0.0.1\", \"::1\"]\n\
+                            methods = [\"POST\"]\npaths = [\"/**\"]\n";
+        let home = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::own(&Config::default(), &home.path().join("agent")).unwrap();
+        let broker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = broker.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in broker.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    let mut buffer = [0; 4096];
+                    let _ = stream.read(&mut buffer);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                });
+            }
+        });
+        let hosts = [("localhost".to_owned(), port)];
+        let addresses = super::super::api_key::Pinned::lookup(&hosts)
+            .unwrap()
+            .addresses();
+        let forms = forms(&Broker {
+            hosts: &hosts,
+            addresses: &addresses,
+            direct: &[],
+        });
+        assert!(forms.contains(&format!("127.0.0.1:{port}")), "{forms:?}");
+        let verdicts = |egress: SocketAddr| -> Vec<bool> {
+            through_egress(&sandbox, &forms, &egress)
+                .unwrap()
+                .iter()
+                .map(|probe| probe.passed)
+                .collect()
+        };
+        let refusing = crate::sandbox::proxy::serve_for_tests(OPEN, &[format!("localhost:{port}")]);
+        let got = verdicts(refusing);
+        assert_eq!(got.len(), forms.len() * 3);
+        assert!(got.iter().all(|passed| *passed), "{got:?}");
+        let open = crate::sandbox::proxy::serve_for_tests(OPEN, &[]);
+        let got = verdicts(open);
+        assert!(got.iter().all(|passed| !passed), "{got:?}");
+        assert!(
+            verdicts(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .iter()
+                .all(|passed| !passed)
+        );
+    }
+
+    /// Only the egress proxy's 403 for a refused destination shows the
+    /// refusal.
+    #[test]
+    fn a_refusal_is_the_proxys_for_the_broker() {
+        let reason = crate::sandbox::proxy::REFUSED_DESTINATION;
+        let cases = [
+            (format!("HTTP/1.1 403 Forbidden\r\nX-Egress-Denied: {reason}\r\n"), true),
+            (format!("HTTP/1.1 403 Forbidden\nx-egress-denied:  {reason}"), true),
+            ("HTTP/1.1 403 Forbidden\r\nX-Egress-Denied: host is not in the domain allowlist\r\n".to_owned(), false),
+            ("HTTP/1.1 403 Forbidden\r\n".to_owned(), false),
+            (format!("HTTP/1.1 200 OK\r\nX-Egress-Denied: {reason}\r\n"), false),
+            ("HTTP/1.1 502 Bad Gateway\r\n".to_owned(), false),
+            (String::new(), false),
+        ];
+        for (head, want) in cases {
+            assert_eq!(refused_as_broker(&head), want, "{head}");
+        }
+        assert_eq!(
+            proxy_request("POST", "[::1]:8080"),
+            "POST http://[::1]:8080/v1/runs HTTP/1.1\r\nHost: [::1]:8080\r\n\
+             Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+        );
     }
 
     #[test]

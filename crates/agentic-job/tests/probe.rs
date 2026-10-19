@@ -61,6 +61,7 @@ fn each_probe_fails_when_what_it_names_is_broken() {
         mode: Mode::Plain,
         anthropic_url: "http://127.0.0.1:9/anthropic".into(),
         openai_url: "http://127.0.0.1:9/v1".into(),
+        front: false,
     };
     // Claude Code's files as `run` writes them, without root's settings.
     let configuration = Configuration {

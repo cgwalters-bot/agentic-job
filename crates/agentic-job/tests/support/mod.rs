@@ -29,6 +29,12 @@ pub const RECORD_SCHEMA: &str = "praxis-run-usage/v2";
 const RUNS: &str = "/v1/runs";
 const RUN_SELF: &str = "/v1/runs/self";
 const OIDC: &str = "/oidc";
+/// The broker's model routes for Claude Code, opencode and Vibe.
+pub const MODEL_ROUTES: [&str; 3] = [
+    "/anthropic/v1/messages",
+    "/v1/responses",
+    "/mistral/v1/chat/completions",
+];
 /// Where Forgejo points ACTIONS_ID_TOKEN_REQUEST_URL: its ROOT_URL
 /// (with any sub-path) and this, then `?placeholder=true`
 /// (forgejo/forgejo v17.0.0, services/actions/task.go).
@@ -119,6 +125,8 @@ fn answer(stream: &mut TcpStream, status: u16, body: &str) {
 fn answer_with(stream: &mut TcpStream, status: u16, headers: &str, body: &str) {
     let kind = if body.starts_with('{') {
         "application/json"
+    } else if body.starts_with("data:") {
+        "text/event-stream"
     } else {
         "text/plain"
     };
@@ -247,9 +255,26 @@ impl State {
         (200, Self::record(run).to_string())
     }
 
+    /// A model request on one of the broker's routes: answered with a
+    /// stream for a live run's token, in its own header or as the bearer.
+    /// Not counted: [`Proxy::serve_requests`] sets the broker's count.
+    fn model(&self, request: &Request) -> (u16, String) {
+        let token = request.header("x-run-token").or_else(|| request.bearer());
+        let live = self
+            .runs
+            .iter()
+            .any(|run| run.state == "active" && Some(run.token.as_str()) == token);
+        if live {
+            (200, ANSWER.to_owned())
+        } else {
+            (401, "invalid run token\n".into())
+        }
+    }
+
     fn handle(&mut self, request: &Request) -> (u16, String) {
         let path = request.path.split('?').next().unwrap_or_default();
         match (request.method.as_str(), path) {
+            ("POST", path) if MODEL_ROUTES.contains(&path) => self.model(request),
             ("GET", OIDC | FORGEJO_OIDC) if request.bearer() == Some(REQUEST_BEARER) => {
                 let audience = request.path.split("audience=").nth(1).unwrap_or_default();
                 self.issued += 1;

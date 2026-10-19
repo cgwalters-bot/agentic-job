@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 
 use super::host::{self, User};
-use super::proxy::policy::ECOSYSTEMS;
+use super::proxy::policy::{ECOSYSTEMS, normalize_host};
 use super::setup::SELF_COPY;
 use crate::config::Egress;
 
@@ -306,8 +306,15 @@ fn mitmdump_args(denylist: bool) -> Vec<String> {
 /// The Rust proxy's command line: BINARY, the binary's root-owned copy
 /// that setup installs before it starts the proxy or the image's own,
 /// with mitmdump's settings; with TRANSPARENT (`egress.write-policy`)
-/// also its listener for the runner's redirected connections.
-fn rust_proxy_args(binary: &str, denylist: bool, transparent: bool) -> Vec<String> {
+/// also its listener for the runner's redirected connections; and each
+/// host and port of REFUSED, which it refuses the sandbox user whatever
+/// the policy says.
+fn rust_proxy_args(
+    binary: &str,
+    denylist: bool,
+    transparent: bool,
+    refused: &[(String, u16)],
+) -> Vec<String> {
     let mut args = vec![
         binary.to_owned(),
         "sandbox".to_owned(),
@@ -329,6 +336,14 @@ fn rust_proxy_args(binary: &str, denylist: bool, transparent: bool) -> Vec<Strin
             "--transparent".to_owned(),
             SocketAddr::from((PROXY_HOST, TRANSPARENT_PORT)).to_string(),
         ]);
+    }
+    for (host, port) in refused {
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.clone()
+        };
+        args.extend(["--refuse".to_owned(), format!("{host}:{port}")]);
     }
     args
 }
@@ -378,8 +393,9 @@ fn make_dir(path: &str) -> Result<()> {
 
 /// The proxy's user, and root's copy of the policy; for mitmproxy also
 /// the virtual environment with it pinned, and the addon. `policy`
-/// replaces the write rules that come with the binary.
-fn install(policy: Option<&Path>, rust: bool) -> Result<()> {
+/// replaces the write rules that come with the binary, and may not name
+/// the hosts of REFUSED ([`check_front_policy`]).
+fn install(policy: Option<&Path>, rust: bool, refused: &[(String, u16)]) -> Result<()> {
     if User::lookup(EGRESS_USER)?.is_none() {
         host::run(Command::new("useradd").args([
             "--system",
@@ -397,6 +413,7 @@ fn install(policy: Option<&Path>, rust: bool) -> Result<()> {
             .with_context(|| format!("reading egress.policy {}", path.display()))?,
         None => POLICY_TOML.to_owned(),
     };
+    check_front_policy(&rules, refused).context("the egress policy under inference.front")?;
     if rust {
         // The binary carries the rest, gh-aw's identifiers included.
         return write(&format!("{POLICY_DIR}/policy.toml"), &rules);
@@ -499,6 +516,90 @@ pub fn check_installed_private() -> Result<()> {
     let bytes = crate::files::read_regular(&path, MAX_POLICY_BYTES)
         .with_context(|| format!("reading {}, which `sandbox setup` installs", path.display()))?;
     check_private_policy(&String::from_utf8(bytes).context("the egress policy is not UTF-8")?)
+}
+
+/// What `inference.front` needs of the policy file TEXT: that it names
+/// none of the broker's HOSTS, in a `[[write]]` rule's hosts or under a
+/// domain of its `[egress] allow` list. The proxy refuses the broker
+/// whatever the policy says (`--refuse`); a policy that allows it all the
+/// same says the caller expects otherwise, and would let the agent
+/// register runs of its own the day that refusal were lost. Addresses
+/// are compared as addresses, in any spelling; ecosystem identifiers are
+/// gh-aw's public hosts and not looked at.
+pub fn check_front_policy(text: &str, hosts: &[(String, u16)]) -> Result<()> {
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let table: toml::Table = toml::from_str(text).context("parsing the egress policy")?;
+    let address = |host: &str| {
+        host.parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| ip.to_canonical())
+    };
+    let broker = |named: &str| {
+        let named = normalize_host(named);
+        hosts.iter().find(|(host, _)| {
+            let host = normalize_host(host);
+            host == named || address(&host).is_some_and(|ip| address(&named) == Some(ip))
+        })
+    };
+    let strings = |value: Option<&toml::Value>| -> Vec<String> {
+        value
+            .and_then(toml::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let rules = table
+        .get("write")
+        .and_then(toml::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    for rule in rules {
+        for named in strings(rule.get("hosts")) {
+            if let Some((host, _)) = broker(&named) {
+                bail!(
+                    "[[write]] {:?} allows writes to {host}, the broker inference.front keeps \
+                     from the sandbox user: remove it from that rule's hosts",
+                    rule.get("name")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("without a name")
+                );
+            }
+        }
+    }
+    let allowed = strings(table.get("egress").and_then(|egress| egress.get("allow")));
+    for domain in allowed.iter().filter(|domain| domain.contains('.')) {
+        let domain = normalize_host(domain);
+        let under = hosts.iter().find(|(host, _)| {
+            let host = normalize_host(host);
+            host == domain || host.ends_with(&format!(".{domain}"))
+        });
+        if let Some((host, _)) = under {
+            bail!(
+                "[egress] allow names {domain:?}, which covers {host}, the broker \
+                 inference.front keeps from the sandbox user: allow narrower domains"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Checks the policy this machine's proxy enforces, root's copy that
+/// `sandbox setup` installed, with [`check_front_policy`].
+pub fn check_installed_front(hosts: &[(String, u16)]) -> Result<()> {
+    let path = Path::new(POLICY_DIR).join("policy.toml");
+    let bytes = crate::files::read_regular(&path, MAX_POLICY_BYTES)
+        .with_context(|| format!("reading {}, which `sandbox setup` installs", path.display()))?;
+    check_front_policy(
+        &String::from_utf8(bytes).context("the egress policy is not UTF-8")?,
+        hosts,
+    )
+    .with_context(|| format!("in {}", path.display()))
 }
 
 /// How many domains a feed's text holds.
@@ -621,22 +722,28 @@ fn publish_ca(generated: &str, runner: bool) -> Result<()> {
 
 /// Installs and starts the proxy; returns its uid, which the network
 /// rules name. With IMAGE, which setup's preflight checked, the Rust
-/// proxy runs from that image in root podman ([`PODMAN`]).
-pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
+/// proxy runs from that image in root podman ([`PODMAN`]). REFUSED, the
+/// broker's hosts and ports under `inference.front`, are refused to the
+/// sandbox user by the proxy, and its policy may not name them.
+pub fn start(egress: &Egress, image: Option<&str>, refused: &[(String, u16)]) -> Result<u32> {
     let (rust, transparent) = (egress.rust_proxy, egress.write_policy);
     // The configuration check's, again where it matters: mitmproxy has
-    // no transparent listener.
+    // no transparent listener, and refuses no destination of its own.
     ensure!(
         rust || !transparent,
         "egress.write-policy needs egress.rust-proxy"
     );
-    install(egress.policy.as_deref(), rust)?;
+    ensure!(
+        rust || refused.is_empty(),
+        "inference.front needs egress.rust-proxy"
+    );
+    install(egress.policy.as_deref(), rust, refused)?;
     let user = User::lookup(EGRESS_USER)?.with_context(|| format!("no user {EGRESS_USER}"))?;
     let denylist = fetch_denylist()?;
     let (args, ca, properties) = match (rust, image) {
         (true, Some(image)) => {
             proxy_dirs(&user)?;
-            let proxy = rust_proxy_args(IMAGE_BINARY, denylist, transparent);
+            let proxy = rust_proxy_args(IMAGE_BINARY, denylist, transparent, refused);
             (
                 container_args(image, user.uid, user.gid, &proxy),
                 RUST_CA_GENERATED,
@@ -644,7 +751,7 @@ pub fn start(egress: &Egress, image: Option<&str>) -> Result<u32> {
             )
         }
         (true, None) => (
-            rust_proxy_args(SELF_COPY, denylist, transparent),
+            rust_proxy_args(SELF_COPY, denylist, transparent, refused),
             RUST_CA_GENERATED,
             UNIT_PROPERTIES,
         ),
@@ -796,25 +903,90 @@ mod tests {
                     --policy /opt/egress-proxy/policy/policy.toml \
                     --log /var/log/egress-proxy/access.jsonl --state-dir /var/lib/egress-proxy \
                     --denylist /opt/egress-proxy/denylist.txt";
-        assert_eq!(rust_proxy_args(SELF_COPY, true, false).join(" "), want);
-        assert!(!rust_proxy_args(SELF_COPY, false, false).contains(&"--denylist".to_owned()));
+        assert_eq!(rust_proxy_args(SELF_COPY, true, false, &[]).join(" "), want);
+        assert!(!rust_proxy_args(SELF_COPY, false, false, &[]).contains(&"--denylist".to_owned()));
         assert_eq!(
-            rust_proxy_args(SELF_COPY, true, true).join(" "),
+            rust_proxy_args(SELF_COPY, true, true, &[]).join(" "),
             format!("{want} --transparent 127.0.0.1:3129")
+        );
+        // Under `inference.front`, the broker's hosts, an IPv6 address
+        // in brackets.
+        let broker = [
+            ("broker.example".to_owned(), 18080),
+            ("fd7a:115c:a1e0::1".to_owned(), 443),
+        ];
+        assert_eq!(
+            rust_proxy_args(SELF_COPY, true, false, &broker).join(" "),
+            format!("{want} --refuse broker.example:18080 --refuse [fd7a:115c:a1e0::1]:443")
         );
         assert_eq!(
             Path::new(STATE_DIR).join(crate::sandbox::proxy::tls::CA_CERT),
             Path::new(RUST_CA_GENERATED)
         );
-        for transparent in [false, true] {
+        for (transparent, refused) in [(false, &[][..]), (true, &[][..]), (false, &broker[..])] {
             let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(
                 std::iter::once("agentic-job").chain(
-                    rust_proxy_args(SELF_COPY, true, transparent)[1..]
+                    rust_proxy_args(SELF_COPY, true, transparent, refused)[1..]
                         .iter()
                         .map(String::as_str),
                 ),
             );
             assert!(parsed.is_ok(), "{parsed:?}");
+        }
+    }
+
+    /// Under `inference.front` the policy may name none of the broker's
+    /// hosts, as a write rule's or under an allowed domain, in any
+    /// spelling; other hosts, and any policy without `front`, pass.
+    #[test]
+    fn a_fronted_brokers_host_is_in_no_policy() {
+        let hosts = [
+            ("broker.example.com".to_owned(), 18080),
+            ("100.64.0.1".to_owned(), 18080),
+            ("fd7a:115c:a1e0::1".to_owned(), 443),
+        ];
+        let rule = |host: &str| {
+            format!(
+                "[[write]]\nname = \"r\"\nhosts = [\"github.com\", {host:?}]\n\
+                 methods = [\"POST\"]\npaths = [\"/**\"]\n"
+            )
+        };
+        let allow =
+            |domain: &str| format!("[egress]\nmode = \"allowlist\"\nallow = [{domain:?}]\n");
+        let cases = [
+            (POLICY_TOML.to_owned(), None),
+            (String::new(), None),
+            (rule("other.example.com"), None),
+            (rule("notbroker.example.com"), None),
+            (rule("100.64.0.2"), None),
+            (allow("other.example.com"), None),
+            (allow("github"), None),
+            (rule("broker.example.com"), Some("[[write]] \"r\"")),
+            (rule("Broker.Example.COM."), Some("broker.example.com")),
+            (rule("broker.example.com:18080"), Some("broker.example.com")),
+            (rule("100.64.0.1"), Some("100.64.0.1")),
+            (rule("::ffff:100.64.0.1"), Some("100.64.0.1")),
+            (rule("[fd7a:115c:a1e0:0::1]"), Some("fd7a:115c:a1e0::1")),
+            (allow("broker.example.com"), Some("[egress] allow")),
+            (allow("example.com"), Some("covers broker.example.com")),
+            (
+                format!("{}{}", allow("github.com"), rule("broker.example.com")),
+                Some("[[write]]"),
+            ),
+            ("[egress\n".to_owned(), Some("parsing")),
+        ];
+        for (text, want) in cases {
+            match (check_front_policy(&text, &hosts), want) {
+                (Ok(()), None) => {}
+                (Err(err), Some(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{text}: {err:#}");
+                }
+                (result, _) => panic!("{text}: {result:?}"),
+            }
+            // Nothing is refused without `front`.
+            if !text.starts_with("[egress\n") {
+                check_front_policy(&text, &[]).unwrap();
+            }
         }
     }
 
@@ -834,7 +1006,7 @@ mod tests {
     #[test]
     fn the_container_runs_the_images_proxy_as_the_proxy_user() {
         let image = "0123456789abcdef".repeat(4);
-        let proxy = rust_proxy_args(IMAGE_BINARY, true, false);
+        let proxy = rust_proxy_args(IMAGE_BINARY, true, false, &[]);
         let args = container_args(&image, 991, 992, &proxy);
         let want = format!(
             "podman --events-backend=none run --rm --replace --name egress-proxy --pull=never --network=host \

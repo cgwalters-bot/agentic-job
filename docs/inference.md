@@ -50,6 +50,8 @@ is refused, and so is a key that belongs to another mode:
   is refused unless that request's URL is https, so the proxy relays
   TLS it cannot read. `POST /v1/runs` still goes directly.
 - `plain` sends a name and no proof: [below](#registering-without-proof).
+  Either of these two can have `run` stand in front of the broker:
+  [`front`](#fronting-the-broker).
 - `token-file` reads a token from the absolute path `token-file`. There
   is no run API then: nothing counts the run's requests and nothing
   ends it, so a cap on requests is [refused](harness.md#limits).
@@ -121,15 +123,74 @@ and 403 (the request carried `Origin` or `Sec-Fetch-Site`, which `run`
 does not set), fail at once with the status and the start of the
 broker's text.
 
-Under `plain` the per-run cap is a convention. The sandbox user must
+Without [`front`](#fronting-the-broker), the per-run cap under `plain` is
+a convention. The sandbox user must
 reach the proxy to work, so the agent can register a run of its own and
 get a fresh token with a fresh cap, and the session's request cap reads
 only the run the job registered. What still bounds spending is the
 broker's cap on all runs together, its quota `max_registrations` of
 unproven registrations per window (an hour by default), shared by all
-callers, the session's timeout and the end of the job. Keeping the
-agent from announcing runs of its own is open and not designed: the
-broker only rate-limits and logs them.
+callers, the session's timeout and the end of the job. With `front`, the
+agent cannot reach the broker, so only the job's own processes can
+register: `plain` is then safe for a trusted caller whose broker listener
+only job runners can reach, and OIDC registration is optional rather than
+required.
+
+## Fronting the broker
+
+`front = true` in `[inference]`, for `github-oidc` and `plain`, is off by
+default. With it, `run` serves the agent the loopback proxy of
+[`api-key`](#a-provider-api-key), with the broker as its upstream: the
+same request filter, content-block allowlist, credential stripping and
+hard 403 past `max-requests`, counted at admission. The agent is given
+that proxy's address, with the broker's Anthropic, OpenAI and Mistral
+routes under `/anthropic`, `/openai` and `/mistral/v1`, and a token made
+for the run. `run` adds the run token itself, so the agent never holds it.
+The broker's run API is not forwarded.
+
+The sandbox user must not reach the broker, by either of its two ways
+out:
+
+- Around the egress proxy. `agentic-job config` does not default
+  `egress.direct` to the broker, and the check refuses an `egress.direct`
+  entry that opens any of its URLs, as well as `egress.proxy = false`.
+- Through the egress proxy. `front` needs the Rust proxy
+  (`egress.rust-proxy`, the default): `sandbox setup` starts it with
+  `--refuse` for each of the broker's hosts and ports, and it refuses the
+  sandbox user any request or CONNECT there, by any method and whatever
+  its policy says. It refuses the broker's hosts at every port, by name
+  or an address in any spelling, and every connection it would open to
+  one of their addresses: another name for the broker, or one that
+  resolves to it only later, is refused too. Its 403 says so in
+  `X-Egress-Denied`. Setup and `run` also refuse an egress policy that
+  names the broker's host in a `[[write]]` rule or under an
+  `[egress] allow` domain. `front` does not go with
+  `egress.write-policy`, under which `run`'s own requests to a broker on
+  port 80 or 443 would need such a rule.
+
+`run` resolves the broker's names once, when it fronts the run, and its
+proxy then connects to those addresses alone. Before the agent starts it
+checks that none of those addresses is on loopback or in
+`egress.direct`, whether it answers now or not, and probes that:
+
+- the sandbox user cannot open a TCP connection to any of them that
+  `run` reaches;
+- the egress proxy refuses a GET and a POST of `/v1/runs`, and a
+  CONNECT, to each of the broker's names and addresses, with its own
+  403. With podman, a container of `[sandbox.check] container-image`,
+  as a subordinate uid, is refused the GET and POST too;
+- no process the sandbox user can read holds the run token.
+
+The controls are that the broker resolved, that `run` reaches it and
+that the sandbox user reaches `run`'s proxy. Any failure stops the run.
+`front` needs a sandbox user: `--runner-home` refuses it.
+
+The request cap reads the higher of the broker's count and the proxy's.
+Ending the run closes the proxy's port first, then ends the run at the
+broker. Under `front` the proxy listens on loopback port 3130, the same
+for every run, and Claude Code's managed settings pin
+`ANTHROPIC_BASE_URL` to it: a target repository's `.claude/settings.json`
+cannot point Claude Code elsewhere. A run whose port is taken stops.
 
 ## Which workflows a broker admits
 
@@ -166,8 +227,8 @@ is linked from [workflow.md](workflow.md#what-a-caller-provides).
 ## How the default was chosen
 
 The workflow defaults to `github-oidc` because network reachability alone
-does not bind spending to one run. Under `plain`, the agent can register
-another run. The binary has no default registration mode; non-GitHub
+does not bind spending to one run. Under `plain` without
+[`front`](#fronting-the-broker), the agent can register another run. The binary has no default registration mode; non-GitHub
 callers must choose one explicitly.
 
 ## A provider API key

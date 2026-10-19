@@ -300,10 +300,12 @@ fn compose(args: &Args) -> Result<String> {
         let url = table
             .get("inference")
             .and_then(Value::as_table)
-            // Under `api-key` only `run` reaches the provider; the agent
-            // reaches `run`'s proxy on loopback.
+            // Under `api-key` only `run` reaches the provider, and under
+            // `front` only `run` the broker; the agent reaches `run`'s
+            // proxy on loopback.
             .filter(|inference| {
                 inference.get("register").and_then(Value::as_str) != Some("api-key")
+                    && inference.get("front").and_then(Value::as_bool) != Some(true)
             })
             .and_then(|inference| inference.get("url"))
             .and_then(Value::as_str)
@@ -543,6 +545,11 @@ mod tests {
         .unwrap();
         let config = composed(&args(file.path().to_str(), RUN, LIMITS, &[]));
         assert_eq!(config.egress.direct, ["http://100.64.0.1:18080"]);
+        // Under `front` only `run` reaches the broker.
+        writeln!(file, "front = true").unwrap();
+        let config = composed(&args(file.path().to_str(), RUN, LIMITS, &[]));
+        assert!(config.inference.front);
+        assert!(config.egress.direct.is_empty());
     }
 
     #[test]

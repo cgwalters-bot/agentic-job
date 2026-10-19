@@ -423,6 +423,10 @@ pub struct Inference {
     /// unless set) and the OpenAI Responses API (`URL/v1`).
     pub anthropic_url: Option<String>,
     pub openai_url: Option<String>,
+    /// For `github-oidc` and `plain`: `run` serves the agent a proxy of its
+    /// own in front of the broker, which the sandbox user may then not
+    /// reach, so that the agent never holds the run token.
+    pub front: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

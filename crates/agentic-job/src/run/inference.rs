@@ -34,7 +34,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use tokio::sync::watch;
 
-use super::api_key::{self, ApiKey, Local};
+use super::api_key::{self, ApiKey, Local, Upstream};
 use crate::config::{self, Provider, Register};
 use crate::sandbox::network;
 
@@ -163,6 +163,9 @@ pub struct Endpoint {
     pub mode: Mode,
     pub anthropic_url: String,
     pub openai_url: String,
+    /// `inference.front`: the agent is given a proxy `run` serves in front
+    /// of the broker ([`Run::front`]), not the broker.
+    pub front: bool,
 }
 
 /// An http or https URL with no credentials, query or fragment, without
@@ -300,7 +303,9 @@ impl Endpoint {
             anthropic_url,
             openai_url,
             provider,
+            front,
         } = inference;
+        let front = *front;
         if url.is_empty() {
             ensure!(
                 register.is_none()
@@ -309,7 +314,8 @@ impl Endpoint {
                     && identity_proxy.is_none()
                     && provider.is_none()
                     && anthropic_url.is_none()
-                    && openai_url.is_none(),
+                    && openai_url.is_none()
+                    && !front,
                 "inference.url is not set, and the rest of [inference] means nothing without it"
             );
             return Ok(None);
@@ -364,6 +370,8 @@ impl Endpoint {
             Register::TokenFile => {
                 unused("audience", audience.is_some())?;
                 unused("identity-proxy", identity_proxy.is_some())?;
+                // Nothing would count or end the run behind the proxy.
+                unused("front", front)?;
                 let path = token_file.clone().unwrap_or_default();
                 ensure!(
                     path.is_absolute(),
@@ -379,6 +387,8 @@ impl Endpoint {
                 // The agent gets the proxy `run` serves, at one root.
                 unused("anthropic-url", anthropic_url.is_some())?;
                 unused("openai-url", openai_url.is_some())?;
+                // The proxy is `run`'s already.
+                unused("front", front)?;
                 // The key goes to `url` with every request: never in the
                 // clear over a network, only to this machine's loopback.
                 let host = url
@@ -398,6 +408,7 @@ impl Endpoint {
                     openai_url: url.clone(),
                     url,
                     mode: Mode::ApiKey { provider },
+                    front,
                 }));
             }
         };
@@ -410,7 +421,35 @@ impl Endpoint {
             openai_url: or_under("openai-url", openai_url, OPENAI_PATH)?,
             url,
             mode,
+            front,
         }))
+    }
+}
+
+impl Endpoint {
+    /// The host and port of each of the proxy's URLs, each once: where the
+    /// sandbox user may not connect under `front`.
+    pub fn hosts(&self) -> Result<Vec<(String, u16)>> {
+        let mut hosts = Vec::new();
+        for url in [&self.url, &self.anthropic_url, &self.openai_url] {
+            let uri: ureq::http::Uri = url
+                .parse()
+                .with_context(|| format!("the inference URL {url:?}"))?;
+            let host = uri
+                .host()
+                .with_context(|| format!("the inference URL {url:?} has no host"))?
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_owned();
+            let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+                Some("https") => api_key::HTTPS_PORT,
+                _ => api_key::HTTP_PORT,
+            });
+            if !hosts.contains(&(host.clone(), port)) {
+                hosts.push((host, port));
+            }
+        }
+        Ok(hosts)
     }
 }
 
@@ -684,7 +723,8 @@ pub struct Run {
     register: Register,
     /// What the proxy said of the run when it registered.
     registered: Option<Record>,
-    /// For `api-key`: the proxy this process serves.
+    /// For `api-key`, and under `inference.front`: the proxy this process
+    /// serves the agent.
     local: Option<Local>,
 }
 
@@ -927,7 +967,12 @@ impl Run {
                     retry,
                     stopped,
                 )?;
-                let local = Local::start(*provider, &endpoint.url, key, identity.max_requests)?;
+                let upstream = Upstream::Provider {
+                    provider: *provider,
+                    root: endpoint.url.clone(),
+                    key,
+                };
+                let local = Local::start(upstream, identity.max_requests, None)?;
                 eprintln!(
                     "Serving the run's inference proxy at {} for the {} API at {}",
                     local.url(),
@@ -1009,21 +1054,112 @@ impl Run {
         Ok(run(token, record, None))
     }
 
+    /// Under `inference.front`, serves the agent a proxy of this process's
+    /// own in front of the broker at ENDPOINT, which adds the run token to
+    /// what it forwards, refuses model requests past MAX_REQUESTS and
+    /// holds them to the checks of `api-key`'s proxy. The agent then holds
+    /// that proxy's token, good on loopback alone, and the egress filter
+    /// keeps it from the broker, so it cannot register runs of its own
+    /// there. The broker's names are resolved here, once: the proxy
+    /// connects to those addresses alone ([`api_key::Pinned`]), which are
+    /// what the probes then hold to the sandbox's boundary
+    /// ([`Self::broker_addresses`]). It listens at LISTEN, or a port the
+    /// kernel picks. A run whose proxy cannot start is ended: nobody would
+    /// hold its token.
+    pub fn front(
+        mut self,
+        endpoint: &Endpoint,
+        max_requests: Option<u64>,
+        listen: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
+        if !endpoint.front || self.local.is_some() {
+            return Ok(self);
+        }
+        let started = endpoint
+            .hosts()
+            .and_then(|hosts| api_key::Pinned::lookup(&hosts))
+            .and_then(|pinned| {
+                let upstream = Upstream::Broker {
+                    anthropic: endpoint.anthropic_url.clone(),
+                    openai: endpoint.openai_url.clone(),
+                    mistral: format!("{}{}", endpoint.url, api_key::FRONT_MISTRAL),
+                    token: self.token.clone(),
+                    pinned,
+                };
+                Local::start(upstream, max_requests, listen)
+            });
+        match started {
+            Ok(local) => {
+                eprintln!(
+                    "Serving the run's inference proxy at {} in front of the broker at {}",
+                    local.url(),
+                    endpoint.url
+                );
+                self.local = Some(local);
+                Ok(self)
+            }
+            Err(err) => {
+                if let Err(end) = self.end(Retry::default()) {
+                    eprintln!("error: {end:#}");
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// The run token: the broker's, which under `inference.front` only
+    /// this process sends, or under `api-key` that of the proxy this
+    /// process serves.
     pub fn token(&self) -> &Token {
         &self.token
     }
 
-    /// Where the agent sends its requests: ENDPOINT, or under `api-key`
-    /// the proxy this process serves, in place of the provider.
+    /// The token the agent is given: the run's, or that of the proxy this
+    /// process serves it.
+    pub fn agent_token(&self) -> &Token {
+        self.local.as_ref().map_or(&self.token, Local::token)
+    }
+
+    /// Where the proxy this process serves the agent listens, if it serves
+    /// one.
+    pub fn proxy_address(&self) -> Option<std::net::SocketAddr> {
+        self.local.as_ref().map(Local::address)
+    }
+
+    /// Under `inference.front`, every address the broker is reached at:
+    /// its names as they resolved when the run was fronted.
+    pub fn broker_addresses(&self) -> Vec<std::net::SocketAddr> {
+        self.local
+            .as_ref()
+            .map_or_else(Vec::new, Local::broker_addresses)
+    }
+
+    /// Whether the agent is given a token of this process's proxy where
+    /// it would be given the broker's run token.
+    pub fn fronted(&self) -> bool {
+        self.local.is_some() && self.register != Register::ApiKey
+    }
+
+    /// Where the agent sends its requests: ENDPOINT, or the proxy this
+    /// process serves, in place of the provider under `api-key` and of
+    /// each of the broker's routes under `inference.front`.
     pub fn agent_endpoint(&self, endpoint: &Endpoint) -> Endpoint {
-        match &self.local {
-            Some(local) => Endpoint {
-                url: local.url(),
-                anthropic_url: local.url(),
-                openai_url: local.url(),
-                mode: endpoint.mode.clone(),
-            },
-            None => endpoint.clone(),
+        let Some(local) = &self.local else {
+            return endpoint.clone();
+        };
+        let under = |path: &str| {
+            if self.fronted() {
+                format!("{}{path}", local.url())
+            } else {
+                local.url()
+            }
+        };
+        Endpoint {
+            url: local.url(),
+            anthropic_url: under(api_key::FRONT_ANTHROPIC),
+            openai_url: under(api_key::FRONT_OPENAI),
+            mode: endpoint.mode.clone(),
+            front: endpoint.front,
         }
     }
 
@@ -1063,7 +1199,7 @@ impl Run {
         if !self.has_run_api() {
             return None;
         }
-        if let Some(local) = &self.local {
+        if let Some(local) = self.local.as_ref().filter(|_| !self.fronted()) {
             return Record::parse(local.record(RECORD_SCHEMA));
         }
         let answer = self.own(Method::Get).ok()?;
@@ -1078,6 +1214,9 @@ impl Run {
     /// on them reads, since ACP reports none. A count that cannot be
     /// fetched leaves the last one for five polls, then publishes `None`
     /// so a configured request cap stops the session. No cap, no stop.
+    /// Under `inference.front` it is the higher of the broker's count and
+    /// the one of the proxy this process serves: neither alone can be
+    /// trusted to see every request.
     pub fn count(
         self: &Arc<Self>,
         every: Duration,
@@ -1092,7 +1231,8 @@ impl Run {
         std::thread::spawn(move || {
             let mut missed = 0u32;
             loop {
-                match run.usage().and_then(|record| record.model_requests()) {
+                let counted = run.usage().and_then(|record| record.model_requests());
+                match counted.map(|n| n.max(run.local.as_ref().map_or(0, Local::requests))) {
                     Some(n) => {
                         count.send_replace(Some(n));
                         missed = 0;
@@ -1128,7 +1268,16 @@ impl Run {
         if !self.has_run_api() {
             return Ok(Ended::NoRunApi);
         }
-        if let Some(local) = &self.local {
+        // Closed first, so that no request reaches the broker once it is
+        // asked to end the run.
+        if let Some(local) = self.local.as_ref().filter(|_| self.fronted()) {
+            local.end();
+            eprintln!(
+                "Closed the run's inference proxy in front of the broker: {} model request(s)",
+                local.requests()
+            );
+        }
+        if let Some(local) = self.local.as_ref().filter(|_| !self.fronted()) {
             local.end();
             let record = Record::parse(local.record(RECORD_SCHEMA));
             eprintln!(
@@ -1314,7 +1463,31 @@ mod tests {
                 },
                 anthropic_url: "http://proxy.example:18080/anthropic".into(),
                 openai_url: "http://proxy.example:18080/v1".into(),
+                front: false,
             }
+        );
+        let fronted = Endpoint::from_config(&inference(&format!(
+            "{URL}register = \"plain\"\nfront = true"
+        )))
+        .unwrap()
+        .unwrap();
+        assert!(fronted.front);
+        assert_eq!(
+            fronted.hosts().unwrap(),
+            [("proxy.example".to_owned(), 18080)]
+        );
+        let elsewhere = Endpoint {
+            url: "https://[fd7a:115c:a1e0::1]".into(),
+            openai_url: "http://100.64.0.2/v1".into(),
+            ..fronted
+        };
+        assert_eq!(
+            elsewhere.hosts().unwrap(),
+            [
+                ("fd7a:115c:a1e0::1".to_owned(), 443),
+                ("proxy.example".to_owned(), 18080),
+                ("100.64.0.2".to_owned(), 80),
+            ]
         );
         let given = Endpoint::from_config(&inference(&format!(
             "{URL}register = \"token-file\"\ntoken-file = \"/run/token\"\n\
@@ -1419,6 +1592,17 @@ mod tests {
             (
                 format!("{URL}register = \"plain\"\nanthropic-url = \"x\""),
                 "inference.anthropic-url",
+            ),
+            ("front = true".to_owned(), "inference.url is not set"),
+            (
+                format!("{URL}register = \"token-file\"\ntoken-file = \"/t\"\nfront = true"),
+                "inference.front is set",
+            ),
+            (
+                "url = \"https://api.example\"\nregister = \"api-key\"\nprovider = \"openai\"\n\
+                 front = true"
+                    .to_owned(),
+                "inference.front is set",
             ),
             // The key would cross the network in the clear.
             (

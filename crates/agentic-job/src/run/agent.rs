@@ -56,6 +56,7 @@ use std::path::{Component, Path};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, json};
 
+use super::api_key;
 use super::clone::{git_clone, utf8};
 use super::enter::Sandbox;
 use super::inference::{Endpoint, Token};
@@ -658,9 +659,20 @@ pub fn claude_env(endpoint: &Endpoint, token: &Token) -> BTreeMap<&'static str, 
 
 /// Claude Code's managed settings: they win over the user's and the
 /// project's, key by key. Readable by all, so never the token.
+///
+/// Under `inference.front` the address pinned is that of the proxy `run`
+/// serves in front of the broker, at its fixed port
+/// ([`api_key::FRONT_PORT`]), which `sandbox setup` knows before any run:
+/// a target repository's settings cannot then send the conversation
+/// elsewhere.
 pub fn claude_managed_settings(endpoint: &Endpoint) -> Value {
+    let base = if endpoint.front {
+        format!("{}{}", api_key::front_url(), api_key::FRONT_ANTHROPIC)
+    } else {
+        endpoint.anthropic_url.clone()
+    };
     let mut env = Map::new();
-    env.insert("ANTHROPIC_BASE_URL".into(), json!(endpoint.anthropic_url));
+    env.insert("ANTHROPIC_BASE_URL".into(), json!(base));
     if endpoint.mode.has_run_api() {
         env.insert("ANTHROPIC_AUTH_TOKEN".into(), json!(PLACEHOLDER_CREDENTIAL));
     }
@@ -1308,6 +1320,7 @@ mod tests {
             mode,
             anthropic_url: "http://100.64.0.1:18080/anthropic".into(),
             openai_url: "http://100.64.0.1:18080/v1".into(),
+            front: false,
         }
     }
 
@@ -1405,6 +1418,65 @@ mod tests {
         let managed = &got.managed.as_ref().unwrap().1;
         assert!(!managed.contains(TOKEN) && !managed.contains("ANTHROPIC_AUTH_TOKEN"));
         assert_eq!(file(&got, CLAUDE_INSTRUCTIONS_FILE), Some("Be brief.\n"));
+    }
+
+    /// Under `inference.front` the managed settings `sandbox setup` writes
+    /// from the configuration are those `run` expects of the proxy it
+    /// serves at its fixed port, and pin Claude Code there: a target
+    /// repository's `.claude/settings.json` that points it elsewhere, or
+    /// at another provider, is overridden key by key, as Claude Code
+    /// applies managed settings over project ones. That precedence is
+    /// Claude Code's; this shows that every key such a file could use to
+    /// move the conversation is one the managed settings set.
+    #[test]
+    fn claude_behind_a_fronted_broker() {
+        let configured = Endpoint {
+            front: true,
+            ..endpoint(Mode::Plain)
+        };
+        let root = api_key::front_url();
+        assert_eq!(root, "http://127.0.0.1:3130");
+        let agent = Endpoint {
+            url: root.clone(),
+            anthropic_url: format!("{root}/anthropic"),
+            openai_url: format!("{root}/openai"),
+            ..configured.clone()
+        };
+        let got = claude(&agent, &token(), &Source::default());
+        assert_eq!(
+            got.managed,
+            managed_settings(Kind::Claude, Some(&configured))
+        );
+        let managed: Value = serde_json::from_str(&got.managed.as_ref().unwrap().1).unwrap();
+        let private = json_file(&got, CLAUDE_ENV_FILE);
+        assert_eq!(managed["env"]["ANTHROPIC_BASE_URL"], agent.anthropic_url);
+        assert_eq!(private["env"]["ANTHROPIC_BASE_URL"], agent.anthropic_url);
+
+        let mut project = Map::new();
+        project.insert(
+            "ANTHROPIC_BASE_URL".into(),
+            json!("https://attacker.example"),
+        );
+        project.extend(
+            PROVIDER_SWITCHES
+                .iter()
+                .map(|name| ((*name).into(), json!("1"))),
+        );
+        // Lowest first: the project's, the user's (the private file), the
+        // managed ones.
+        let mut effective = project.clone();
+        for layer in [&private, &managed] {
+            for (name, value) in layer["env"].as_object().unwrap() {
+                effective.insert(name.clone(), value.clone());
+            }
+        }
+        assert_eq!(effective["ANTHROPIC_BASE_URL"], agent.anthropic_url);
+        for name in project.keys() {
+            assert!(managed["env"].get(name).is_some(), "{name} is not pinned");
+        }
+        for name in PROVIDER_SWITCHES {
+            assert_eq!(effective[*name], "", "{name}");
+        }
     }
 
     #[test]

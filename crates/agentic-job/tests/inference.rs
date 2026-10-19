@@ -35,6 +35,7 @@ fn endpoint(proxy: &Proxy, mode: Mode) -> Endpoint {
         mode,
         anthropic_url: format!("{}/anthropic", proxy.url),
         openai_url: format!("{}/v1", proxy.url),
+        front: false,
     }
 }
 
@@ -871,4 +872,220 @@ fn a_short_lived_run_still_registers() {
         .unwrap()
         .as_secs();
     assert!(expires < now + TIMEOUT_S);
+}
+
+/// A run registered without proof, fronted by `run`'s own proxy capped at
+/// CAP model requests.
+fn fronted(proxy: &Proxy, cap: Option<u64>) -> (Run, Endpoint) {
+    proxy.admit_unproven();
+    let endpoint = Endpoint {
+        front: true,
+        ..endpoint(proxy, Mode::Plain)
+    };
+    let run = Run::register(&endpoint, &job(proxy), QUICK, TIMEOUT_S, NEVER)
+        .and_then(|run| run.front(&endpoint, cap, None))
+        .unwrap();
+    let agent = run.agent_endpoint(&endpoint);
+    (run, agent)
+}
+
+/// A request to `run`'s proxy as the agent makes it: the status, the
+/// content type and transfer encoding, and the text.
+fn ask(url: &str, headers: &[(&str, &str)], body: &str) -> (u16, String, String, String) {
+    let http: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .proxy(None)
+        .build()
+        .into();
+    let request = headers
+        .iter()
+        .fold(http.post(url), |request, (name, value)| {
+            request.header(*name, *value)
+        });
+    let mut response = request.send(body).unwrap();
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_default()
+    };
+    let (kind, encoding) = (header("content-type"), header("transfer-encoding"));
+    let status = response.status().as_u16();
+    (
+        status,
+        kind,
+        encoding,
+        response.body_mut().read_to_string().unwrap(),
+    )
+}
+
+const MESSAGE: &str = r#"{"model":"m","max_tokens":1,"messages":[]}"#;
+
+/// Under `inference.front` the agent is given `run`'s proxy and a token
+/// of its own; each agent's route reaches the broker's with the run token
+/// in place of that one, and the answer streams back. The run token
+/// admits nothing at `run`'s proxy, and the broker's run API is not
+/// forwarded, so the agent cannot register a run of its own through it.
+#[test]
+fn a_fronted_broker_gets_the_run_token_and_the_agent_never_does() {
+    let proxy = Proxy::start();
+    let (run, agent) = fronted(&proxy, None);
+    assert!(run.fronted());
+    let (local, broker) = (run.agent_token().expose(), run.token().expose());
+    assert_ne!(local, broker);
+    assert!(agent.url.starts_with("http://127.0.0.1:"), "{agent:?}");
+    assert_ne!(agent.url, proxy.url);
+    // Where the broker resolved when the run was fronted, and only there.
+    let at: std::net::SocketAddr = proxy.url.strip_prefix("http://").unwrap().parse().unwrap();
+    assert_eq!(run.broker_addresses(), [at]);
+    assert_eq!(agent.anthropic_url, format!("{}/anthropic", agent.url));
+    assert_eq!(agent.openai_url, format!("{}/openai", agent.url));
+
+    // As Claude Code, opencode and Vibe send them.
+    let placeholder = "Bearer praxis-substitute:anthropic";
+    let bearer = format!("Bearer {local}");
+    let routes = [
+        (
+            format!("{}/v1/messages?beta=true", agent.anthropic_url),
+            vec![("authorization", placeholder), ("x-run-token", local)],
+            "/anthropic/v1/messages?beta=true",
+        ),
+        (
+            format!("{}/responses", agent.openai_url),
+            vec![("authorization", bearer.as_str())],
+            "/v1/responses",
+        ),
+        (
+            format!("{}/mistral/v1/chat/completions", agent.url),
+            vec![("authorization", bearer.as_str())],
+            "/mistral/v1/chat/completions",
+        ),
+    ];
+    for (url, headers, path) in routes {
+        let (status, kind, encoding, text) = ask(&url, &headers, MESSAGE);
+        assert_eq!(
+            (status, kind.as_str(), encoding.as_str(), text.as_str()),
+            (200, "text/event-stream", "chunked", support::ANSWER),
+            "{url}"
+        );
+        let seen = proxy.requests().pop().unwrap();
+        assert_eq!(seen.path, path);
+        let sent = format!("{:?}", seen.headers);
+        assert!(sent.contains(broker), "{sent}");
+        assert!(!sent.contains(local), "{sent}");
+    }
+
+    // The run token is not the proxy's, and the run API is not forwarded.
+    let registrations = || {
+        proxy
+            .seen()
+            .iter()
+            .filter(|r| *r == "POST /v1/runs")
+            .count()
+    };
+    assert_eq!(registrations(), 1);
+    let stolen = format!("Bearer {broker}");
+    let (status, ..) = ask(
+        &format!("{}/responses", agent.openai_url),
+        &[("authorization", &stolen)],
+        MESSAGE,
+    );
+    assert_eq!(status, 401);
+    for path in ["/v1/runs", "/openai/../v1/runs", "/anthropic/../v1/runs"] {
+        let (status, ..) = ask(
+            &format!("{}{path}", agent.url),
+            &[("authorization", &bearer), ("x-run-id", "agents-own")],
+            "",
+        );
+        assert_eq!(status, 403, "{path}");
+    }
+    assert_eq!(registrations(), 1);
+}
+
+/// What the broker is sent through `run`'s proxy is held to its checks:
+/// a tool the provider runs is refused before it reaches the broker.
+#[test]
+fn a_fronted_broker_gets_only_what_the_filter_admits() {
+    let proxy = Proxy::start();
+    let (run, agent) = fronted(&proxy, None);
+    let before = proxy.seen().len();
+    let bearer = format!("Bearer {}", run.agent_token().expose());
+    for body in [
+        r#"{"model":"m","tools":[{"type":"web_search"}]}"#,
+        r#"{"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://x.invalid/leak"}]}]}"#,
+        r#"{"model":"gpt-4o-search-preview"}"#,
+    ] {
+        let (status, _, _, text) = ask(
+            &format!("{}/responses", agent.openai_url),
+            &[("authorization", &bearer)],
+            body,
+        );
+        assert_eq!(status, 403, "{body}: {text}");
+    }
+    assert_eq!(proxy.seen().len(), before);
+}
+
+/// `run`'s proxy refuses requests past the cap itself, counted when they
+/// are admitted; the session's count is the higher of its count and the
+/// broker's; and ending the run closes the port before the broker ends it.
+#[test]
+fn a_fronted_run_is_capped_counted_and_closed() {
+    let proxy = Proxy::start();
+    let (run, agent) = fronted(&proxy, Some(2));
+    let run = Arc::new(run);
+    let (count, _counter) = run.count(Duration::from_millis(10)).unwrap();
+    let wait_for = |want: u64| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while *count.borrow() != Some(want) {
+            assert!(
+                Instant::now() < deadline,
+                "the count stayed {:?}",
+                *count.borrow()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let bearer = format!("Bearer {}", run.agent_token().expose());
+    let url = format!("{}/responses", agent.openai_url);
+    let models = || {
+        proxy
+            .seen()
+            .iter()
+            .filter(|r| *r == "POST /v1/responses")
+            .count()
+    };
+    for want in [200, 200, 403, 403] {
+        let (status, ..) = ask(&url, &[("authorization", &bearer)], MESSAGE);
+        assert_eq!(status, want);
+    }
+    assert_eq!(models(), 2);
+    // The mock broker counted none of them: the proxy's count is higher.
+    wait_for(2);
+    // Then the broker's, which may see requests the proxy did not.
+    proxy.serve_requests(5);
+    wait_for(5);
+
+    assert!(matches!(run.end(QUICK).unwrap(), Ended::Ended(Some(_))));
+    assert_eq!(proxy.run_states(), ["finished"]);
+    let address = agent.url.strip_prefix("http://").unwrap().to_owned();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::net::TcpStream::connect(&address).is_ok() {
+        assert!(Instant::now() < deadline, "{address} is still open");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(models(), 2);
+}
+
+/// `front` is for a broker: a run without one is left as it is.
+#[test]
+fn only_a_fronted_endpoint_is_fronted() {
+    let proxy = Proxy::start();
+    let endpoint = endpoint(&proxy, oidc_mode());
+    let run = register(&proxy, oidc_mode())
+        .and_then(|run| run.front(&endpoint, Some(1), None))
+        .unwrap();
+    assert!(!run.fronted());
+    assert_eq!(run.agent_token(), run.token());
+    assert_eq!(run.agent_endpoint(&endpoint), endpoint);
 }
