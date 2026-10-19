@@ -17,7 +17,9 @@
 //! `notices = true` is sent the budget's notices during its turn, and one
 //! with `steering = true` the run's item's updates by `_session/steering`.
 //! One with `stall-timeout` (seconds) has a turn in which it says nothing
-//! for that long cancelled and sent again, once (`driver`).
+//! for that long cancelled and sent again, once (`driver`). One with
+//! `rate-limit-code` has a turn answered with that error sent again after
+//! a wait, a few times.
 
 use std::collections::BTreeMap;
 
@@ -30,6 +32,9 @@ const BUILTIN: &str = include_str!("agents.toml");
 const ENV: &str = "env";
 /// The longest `stall-timeout`, in seconds: a day, longer than any run.
 const MAX_STALL_TIMEOUT: u64 = 24 * 60 * 60;
+/// The error codes JSON-RPC reserves for itself and its servers' own
+/// errors, which ACP's are among.
+const RESERVED_CODES: std::ops::RangeInclusive<i32> = -32768..=-32000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -68,6 +73,12 @@ pub struct AgentSpec {
     /// connection that went quiet, with no read timeout of its own (Vibe
     /// 2.26.1 waited six minutes on one). None to wait for the turn.
     pub stall_timeout: Option<u64>,
+    /// The JSON-RPC error code with which the agent answers a turn whose
+    /// model request the provider rate-limited after the agent's own
+    /// retries (Vibe's `RateLimitError`, -31001): the session waits and
+    /// sends the task again a few times before asking for a hand-back
+    /// (`driver`). None to take it as any other error.
+    pub rate_limit_code: Option<i32>,
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -101,6 +112,13 @@ pub fn parse(text: &str, name: &str) -> Result<AgentSpec> {
         && !(1..=MAX_STALL_TIMEOUT).contains(&secs)
     {
         bail!("agent '{name}' has a stall-timeout of {secs}s, not 1 to {MAX_STALL_TIMEOUT}");
+    }
+    // A code JSON-RPC or ACP reserves (internal error, say) would have
+    // every failed turn waited on and sent again, not only a rate limit.
+    if let Some(code) = spec.rate_limit_code
+        && RESERVED_CODES.contains(&code)
+    {
+        bail!("agent '{name}' has a rate-limit-code of {code}, which JSON-RPC reserves");
     }
     for var in spec.env.keys().chain(&spec.model_env) {
         if !valid_env_name(var) {
@@ -238,6 +256,9 @@ command = ["opencode", "acp"]
             // Only Vibe is known to stall in a model request.
             let stall = (agent == "vibe").then_some(120);
             assert_eq!(spec.stall_timeout, stall, "{agent}");
+            // Only Vibe's rate-limit error is known by its code.
+            let code = (agent == "vibe").then_some(-31001);
+            assert_eq!(spec.rate_limit_code, code, "{agent}");
         }
         assert!(!parse(REGISTRY, "opencode").unwrap().notices);
     }
@@ -301,6 +322,16 @@ command = ["opencode", "acp"]
                 "[a]\ncommand = [\"x\"]\nstall-timeout = 86401",
                 "a",
                 "stall-timeout of 86401s",
+            ),
+            (
+                "[a]\ncommand = [\"x\"]\nrate-limit-code = -32603",
+                "a",
+                "rate-limit-code of -32603",
+            ),
+            (
+                "[a]\ncommand = [\"x\"]\nrate-limit-code = -32000",
+                "a",
+                "rate-limit-code of -32000",
             ),
             (
                 "[a]\ncommand = [\"x\"]\nstall-timeout = -1",

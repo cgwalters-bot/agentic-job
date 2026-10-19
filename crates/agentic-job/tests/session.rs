@@ -98,6 +98,8 @@ struct Setup<'a> {
     restate: Option<&'a str>,
     /// The registry's `stall-timeout` for the agent, in seconds.
     stall_s: Option<u64>,
+    /// The registry's `rate-limit-code` for the agent.
+    rate_limit_code: Option<i32>,
 }
 
 /// What a test's client does on its end of the connection.
@@ -349,6 +351,9 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     }
     if let Some(secs) = setup.stall_s {
         registry.push_str(&format!("stall-timeout = {secs}\n"));
+    }
+    if let Some(code) = setup.rate_limit_code {
+        registry.push_str(&format!("rate-limit-code = {code}\n"));
     }
     let log = Captured::default();
     // As in run's registration, accounting starts at a known count.
@@ -1782,6 +1787,116 @@ fn a_stalled_turn_is_sent_again_once() {
         assert_eq!(
             r.log.contains("the agent stalled: nothing from it for 1s"),
             stalls > 0,
+            "{name}: {}",
+            r.log
+        );
+        assert!(
+            r.elapsed < Duration::from_secs(30),
+            "{name}: took {:?}",
+            r.elapsed
+        );
+    }
+}
+
+/// A task's turn the agent answers with its rate-limit error is sent
+/// again after a wait, on the same session, up to three times; then, or
+/// for any other error, or for an agent with no `rate-limit-code`, the
+/// agent is asked to hand back as after any error.
+#[test]
+fn a_rate_limited_turn_is_sent_again() {
+    const VIBE_RATE_LIMIT: i32 = -31001;
+    const ONCE: &str = r#"[{"say": "Working."}, {"rate_limit": "Rate limit exceeded"}]"#;
+    const ALWAYS: &str = r#"[{"rate_limit": "Rate limit exceeded"}]"#;
+    const FAILED: &str = r#"[{"say": "Working."}, {"fail": "Internal error"}]"#;
+    const DONE: &str = r#"[{"say": "Done."}]"#;
+    const LIMITED: &str = "rate limited";
+    const HAND_BACK: &str = "hand back";
+    struct Case {
+        name: &'static str,
+        script: &'static str,
+        later: &'static str,
+        code: Option<i32>,
+        status: u8,
+        result: &'static str,
+        message: Option<&'static str>,
+        notices: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "rate-limited once, then done",
+            script: ONCE,
+            later: DONE,
+            code: Some(VIBE_RATE_LIMIT),
+            status: 0,
+            result: "success",
+            message: None,
+            notices: &[LIMITED],
+        },
+        Case {
+            name: "always rate-limited",
+            script: ALWAYS,
+            later: ALWAYS,
+            code: Some(VIBE_RATE_LIMIT),
+            status: 1,
+            result: "failure",
+            message: Some("session/prompt failed: Rate limit exceeded"),
+            notices: &[LIMITED, LIMITED, LIMITED, HAND_BACK],
+        },
+        Case {
+            name: "another error",
+            script: FAILED,
+            later: DONE,
+            code: Some(VIBE_RATE_LIMIT),
+            status: 3,
+            result: "budget",
+            message: Some("the agent handed back"),
+            notices: &[HAND_BACK],
+        },
+        Case {
+            name: "an agent with no rate-limit-code",
+            script: ONCE,
+            later: DONE,
+            code: None,
+            status: 3,
+            result: "budget",
+            message: Some("the agent handed back"),
+            notices: &[HAND_BACK],
+        },
+    ];
+    for c in cases {
+        let name = c.name;
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                files: &[("script.json", c.script), ("later.json", c.later)],
+                // Three seconds to hand back in, and each wait as long.
+                timeout_s: 60,
+                rate_limit_code: c.code,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, c.status, c.result);
+        let said = r.result["message"].as_str();
+        match c.message {
+            Some(part) => assert!(said.is_some_and(|m| m.contains(part)), "{name}: {said:?}"),
+            None => assert_eq!(said, None, "{name}"),
+        }
+        assert_eq!(r.notices(), c.notices, "{name}");
+        // The task again, behind a note, on the agent's one session.
+        let resent = r.records.iter().filter(|record| {
+            record["dir"] == "send"
+                && record["msg"]["params"]["_meta"][session::permission::META_KEY]["notice"]
+                    == LIMITED
+        });
+        for record in resent {
+            let params = &record["msg"]["params"];
+            assert_eq!(params["sessionId"], "fake-session", "{name}");
+            assert_eq!(params["prompt"][1]["text"], "Do the fake task.\n", "{name}");
+        }
+        let waits = c.notices.iter().filter(|n| **n == LIMITED).count();
+        assert_eq!(
+            r.log.matches("sending the task again in 3s").count(),
+            waits,
             "{name}: {}",
             r.log
         );

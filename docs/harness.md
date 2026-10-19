@@ -316,6 +316,18 @@ error as the reason; if it doesn't, the run fails with the error. A
 limit the run reaches meanwhile stops it as any other time, and a bridge
 client's prompts meanwhile are refused.
 
+A rate limit gets a few retries before that. Vibe answers a turn whose
+model request the provider still rate-limited after its own few quick
+retries with its `RateLimitError`, code -31001, and runs have ended on
+one that a minute's wait would have cleared (#1339). An agent entry with
+`rate-limit-code` (Vibe's; no other has one, and JSON-RPC's reserved
+codes are refused) has a task's turn answered with that code sent again
+on the same session, labelled `rate limited`, behind a note, after
+waits of 10, 20 and 40 seconds (each no longer than the hand-back
+window): three times, and then the turn is taken as one that ended on
+an error. The waits count against the run's time; a limit reached in
+one stops the run, and near one the agent is asked to hand back.
+
 Nor is a task's turn that stalls left to the timeout. Vibe has no read
 timeout on its model requests, and one waited six minutes on idle
 connections before going on (#983). An agent entry with

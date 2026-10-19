@@ -43,6 +43,16 @@
 //! is cancelled and the task sent again, once, on the same session, so the
 //! work so far is kept; a second stall fails the run, saying so (`Stalls`).
 //!
+//! An agent whose entry has a `rate-limit-code` (`AgentSpec::rate_limit_code`)
+//! and answers the task's turn with that error has had its model request
+//! rate-limited by the provider past its own few quick retries. Runs on
+//! Vibe have ended there although a minute's wait would likely have
+//! cleared the limit (#1339). The session waits, longer each time, and
+//! sends the task again on the same session, a few times
+//! (`RATE_LIMIT_RETRIES`), before the turn is taken as one that ended on
+//! an error. The waits take from the run's
+//! time like any other, and a limit reached in one stops the run as ever.
+//!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
 //! agent runs in a login session of that user's, where a signal to the
@@ -76,8 +86,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::agents::AgentSpec;
 use super::bridge::{Bridge, FromClient};
 use super::budget::{
-    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_REMINDER, LABEL_STALLED, Limits, Signal, Stop,
-    Usage, hand_back_text,
+    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_RATE_LIMITED, LABEL_REMINDER, LABEL_STALLED,
+    Limits, Signal, Stop, Usage, hand_back_text,
 };
 use super::clients::Clients;
 use super::digest::{self, Dir};
@@ -130,6 +140,25 @@ const STALLED_NOTE: &str = "Your previous turn was cancelled because nothing cam
                             What you did so far is still in this session and the working \
                             directory: check where you were and carry on from there, without \
                             redoing finished work.";
+/// What the agent is told ahead of its task, sent again after the
+/// provider rate-limited its turn.
+const RATE_LIMITED_NOTE: &str = "Your previous turn ended because the model provider rate-limited \
+                                 a request; it has been waited out. The task follows again. What \
+                                 you did so far is still in this session and the working \
+                                 directory: check where you were and carry on from there, \
+                                 without redoing finished work.";
+/// How many times a task's turn the provider rate-limited is sent again.
+/// With the waits below, about a minute in all is spent on it, and a
+/// minute more pausing before the hand-back (`ERROR_PAUSE`): a limit on
+/// requests per minute has cleared by then, one that has not is unlikely
+/// to soon, and the agent should hand back while it has time to.
+const RATE_LIMIT_RETRIES: u32 = 3;
+/// The wait before the first time it is sent again, doubled for each
+/// next one (10, 20 and 40 s), and never longer than the hand-back
+/// window, so that a short run is not held up for it. The agent's error
+/// says nothing of when to retry (Vibe's carries the provider and the
+/// model), so there is no Retry-After to take instead.
+const RATE_LIMIT_WAIT: Duration = Duration::from_secs(10);
 
 /// Why the agent has not left the output its run requires; `None` when done. It runs
 /// commands (as the sandbox user), so it is called off the runtime, and
@@ -483,6 +512,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         steering: spec.steering,
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
         stall: spec.stall_timeout.map(Duration::from_secs),
+        rate_limit_code: spec.rate_limit_code,
         output,
         restate: restate.filter(|_| spec.notices),
         mcp_servers: &mcp_servers,
@@ -640,6 +670,8 @@ struct Task<'a> {
     hand_back_window: Duration,
     /// `AgentSpec::stall_timeout`.
     stall: Option<Duration>,
+    /// `AgentSpec::rate_limit_code`.
+    rate_limit_code: Option<i32>,
     output: Option<OutputCheck>,
     /// `Options::restate`, for an agent that takes notices.
     restate: Option<Restate>,
@@ -923,17 +955,35 @@ fn notice_prompt(sid: &SessionId, label: &str, text: String) -> PromptRequest {
     .meta(meta(json!({"notice": label})))
 }
 
-/// The task's prompt sent again after its turn stalled, with a note that
-/// it did ahead of it.
-fn stalled_prompt(sid: &SessionId, task: &str) -> PromptRequest {
+/// The task's prompt sent again after its turn stalled or was
+/// rate-limited, behind a NOTE that says why.
+fn task_again(sid: &SessionId, note: &str, label: &str, task: &str) -> PromptRequest {
     PromptRequest::new(
         sid.clone(),
         vec![
-            ContentBlock::Text(TextContent::new(STALLED_NOTE)),
+            ContentBlock::Text(TextContent::new(note.to_owned())),
             ContentBlock::Text(TextContent::new(task.to_owned())),
         ],
     )
-    .meta(meta(json!({"notice": LABEL_STALLED})))
+    .meta(meta(json!({"notice": label})))
+}
+
+/// Whether the agent answered a turn with its rate-limit error (CODE,
+/// `AgentSpec::rate_limit_code`): that, not its words, which a model
+/// could repeat.
+fn rate_limited(
+    r: &Result<PromptResponse, agent_client_protocol::Error>,
+    code: Option<i32>,
+) -> bool {
+    matches!(r, Err(e) if Some(i32::from(e.code)) == code)
+}
+
+/// The wait before the task is sent again after its turn was rate-limited
+/// for the time numbered RETRIED (from 0), within the hand-back WINDOW.
+fn rate_limit_backoff(retried: u32, window: Duration) -> Duration {
+    RATE_LIMIT_WAIT
+        .saturating_mul(2u32.saturating_pow(retried))
+        .min(window)
 }
 
 /// Waits until UNTIL, or forever without one.
@@ -1025,12 +1075,39 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     let mut heard = tap.heard();
     let quiet_for = |limit: Duration| tokio::time::Instant::now() + limit;
     let mut quiet_until = task.stall.map(quiet_for);
+    // The times the task was sent again after the provider rate-limited it.
+    let mut rate_limits = 0;
     let next = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
             // which would start another.
             biased;
-            r = &mut response => break Next::Answered(r),
+            r = &mut response => {
+                // A turn the client cancelled is the client's to go on from.
+                let retry = rate_limited(&r, task.rate_limit_code)
+                    && !client_cancelled
+                    && rate_limits < RATE_LIMIT_RETRIES;
+                let (true, Err(e)) = (retry, &r) else {
+                    break Next::Answered(r);
+                };
+                let error = format!("session/prompt failed: {e}");
+                let wait = rate_limit_backoff(rate_limits, task.hand_back_window);
+                rate_limits += 1;
+                tap.log(&[digest::cut(&format!(
+                    "⚠ {error}: sending the task again in {}s ({rate_limits} of {RATE_LIMIT_RETRIES})",
+                    wait.as_secs()
+                ))]);
+                // An agent that exits meanwhile failed with the error.
+                *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+                if let Some(ended) = rate_limit_wait(&link, &mut stop, &mut nudges, wait, &error).await {
+                    return ended;
+                }
+                pending_error.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let again = task_again(&sid, RATE_LIMITED_NOTE, LABEL_RATE_LIMITED, task.prompt);
+                response.set(cx.send_request(again).block_task());
+                // The wait was no stall.
+                quiet_until = task.stall.map(quiet_for);
+            }
             why = wait_stop(&mut stop) => {
                 return stop_turn(&cx, tap, &sid, &cancelling, why, response.as_mut()).await;
             }
@@ -1116,7 +1193,8 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     }
                     Some(_) if first => {
                         stalls.retried.fetch_add(1, Ordering::Relaxed);
-                        response.set(cx.send_request(stalled_prompt(&sid, task.prompt)).block_task());
+                        let again = task_again(&sid, STALLED_NOTE, LABEL_STALLED, task.prompt);
+                        response.set(cx.send_request(again).block_task());
                     }
                     Some(_) => return Ended::failure(format!("{silent}, and again after the task was sent again")),
                     None => return Ended::failure(format!("{silent}; {NO_CANCEL_ANSWER}")),
@@ -1318,18 +1396,9 @@ async fn after_error(
         _ = wait_stop(stop) => {}
     }
     let limit = |stop: &watch::Receiver<Option<Stop>>| stop.borrow().clone();
-    // A limit reached meanwhile stops the run, which still says what
-    // ended the task's turn.
-    let limited = |why: &Stop| {
-        let ended = Ended::stopped(why, false);
-        Ended {
-            message: ended.message.map(|m| format!("{m}, after {error}")),
-            ..ended
-        }
-    };
     if let Some(why) = limit(stop) {
         link.tap.log(&[format!("⚠ {}", stopped(&why).1)]);
-        return limited(&why);
+        return limited(&why, &error);
     }
     let why = Stop::Budget(format!("the agent's turn ended on an error ({error})"));
     // Without the error's words, which an agent repeating them as it
@@ -1340,8 +1409,57 @@ async fn after_error(
         return ended;
     }
     match limit(stop) {
-        Some(why) => limited(&why),
+        Some(why) => limited(&why, &error),
         None => errored,
+    }
+}
+
+/// A run stopped for WHY after the task's turn ended on ERROR, which it
+/// still says.
+fn limited(why: &Stop, error: &str) -> Ended {
+    let ended = Ended::stopped(why, false);
+    Ended {
+        message: ended.message.map(|m| format!("{m}, after {error}")),
+        ..ended
+    }
+}
+
+/// The WAIT before the task is sent again after the provider rate-limited
+/// its turn with ERROR, with no turn running: `None` once it is over, or
+/// how the session ended in it. A limit reached meanwhile stops the run;
+/// near one the agent hands back as it would have.
+async fn rate_limit_wait(
+    link: &Link<'_>,
+    stop: &mut watch::Receiver<Option<Stop>>,
+    nudges: &mut mpsc::UnboundedReceiver<Nudge>,
+    wait: Duration,
+    error: &str,
+) -> Option<Ended> {
+    let over = tokio::time::sleep(wait);
+    let mut over = std::pin::pin!(over);
+    loop {
+        tokio::select! {
+            biased;
+            why = wait_stop(stop) => {
+                let Some(why) = why else {
+                    return Some(Ended::failure(LOST_STOP_SIGNAL.to_owned()));
+                };
+                link.tap.log(&[format!("⚠ {}", stopped(&why).1)]);
+                return Some(limited(&why, error));
+            }
+            Some(nudge) = nudges.recv() => match nudge {
+                // A notice is for a turn, and none is running.
+                Nudge::Notice { .. } => {}
+                Nudge::Item(seen) => from_item(link, seen, false),
+                Nudge::HandBack { why, text, window } => {
+                    link.tap.log(&[format!("⚠ {}: asking the agent to hand back", stopped(&why).1)]);
+                    let ended = hand_back(link, stop, &why, text, window).await;
+                    // One that didn't still says what ended the task's turn.
+                    return Some(if ended.handed_back { ended } else { limited(&why, error) });
+                }
+            },
+            () = &mut over => return None,
+        }
     }
 }
 
@@ -1808,6 +1926,28 @@ fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>, tap: &
                 },
                 None => ended,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The waits double from RATE_LIMIT_WAIT, within the hand-back window.
+    #[test]
+    fn rate_limit_backoffs() {
+        let secs = Duration::from_secs;
+        // (times retried, window, wait)
+        for (retried, window, want) in [
+            (0, secs(225), secs(10)),
+            (1, secs(225), secs(20)),
+            (2, secs(225), secs(40)),
+            (2, secs(3), secs(3)),
+            (0, Duration::ZERO, Duration::ZERO),
+            (u32::MAX, secs(225), secs(225)),
+        ] {
+            assert_eq!(rate_limit_backoff(retried, window), want, "{retried}");
         }
     }
 }

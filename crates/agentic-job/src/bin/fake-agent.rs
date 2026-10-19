@@ -44,6 +44,7 @@
 //!  {"stop": "refusal"},
 //!  {"exit": 7},
 //!  {"fail": "message"},
+//!  {"rate_limit": "message"},
 //!  {"finish": 0},
 //!  {"mcp": {"tool": "search", "arguments": {"q": "x"}}}]
 //! ```
@@ -57,7 +58,8 @@
 //! came; and an `exit` the
 //! process with that status, as an agent that crashed. A `fail` has the
 //! turn, when it ends, answered with a JSON-RPC error of that message,
-//! as an agent whose model request failed. A `finish` ends
+//! as an agent whose model request failed; a `rate_limit` likewise, with
+//! Vibe's code for a rate-limited request. A `finish` ends
 //! the turn as done and then the process with that status, as an agent
 //! that doesn't wait for its client to hang up. An `mcp` step lists the
 //! tools of the first MCP server `session/new` gave it over HTTP, with the
@@ -113,6 +115,11 @@ const FS_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACE_DELAY: Duration = Duration::from_secs(1);
 /// What `grace` mode says it has spent.
 const GRACE_COST_USD: f64 = 1.0;
+/// JSON-RPC's code for an internal error, which a `fail` step answers with.
+const INTERNAL_ERROR: i32 = -32603;
+/// Vibe's code for a rate-limited model request, which a `rate_limit`
+/// step answers with.
+const RATE_LIMIT_ERROR: i32 = -31001;
 const END_TURN: &str = "end_turn";
 const CANCELLED: &str = "cancelled";
 /// How often a `sleep` step looks for a cancel.
@@ -155,6 +162,7 @@ enum Step {
     Stop(String),
     Exit(i32),
     Fail(String),
+    RateLimit(String),
     Finish(i32),
     Mcp {
         tool: String,
@@ -247,8 +255,9 @@ struct Conn {
     queued: Vec<Value>,
     /// The status to exit with once the turn is answered (`finish`).
     finish: Option<i32>,
-    /// The error the turn is answered with (a `fail` step).
-    fail: Option<String>,
+    /// The error the turn is answered with (a `fail` or `rate_limit`
+    /// step): its code and message.
+    fail: Option<(i32, String)>,
     /// The MCP servers `session/new` gave it.
     mcp_servers: Vec<Value>,
 }
@@ -425,8 +434,8 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                     conn.respond(&queued, json!({"stopReason": stop}));
                 }
                 match conn.fail.take() {
-                    Some(message) => conn.send(json!({"jsonrpc": "2.0", "id": id,
-                        "error": {"code": -32603, "message": message}})),
+                    Some((code, message)) => conn.send(json!({"jsonrpc": "2.0", "id": id,
+                        "error": {"code": code, "message": message}})),
                     None => conn.respond(&id, json!({"stopReason": stop})),
                 }
                 if let Some(status) = conn.finish {
@@ -469,7 +478,10 @@ fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<Strin
                         conn.finish = Some(*status);
                         return Ok(END_TURN.to_owned());
                     }
-                    Step::Fail(message) => conn.fail = Some(message.clone()),
+                    Step::Fail(message) => conn.fail = Some((INTERNAL_ERROR, message.clone())),
+                    Step::RateLimit(message) => {
+                        conn.fail = Some((RATE_LIMIT_ERROR, message.clone()))
+                    }
                     Step::Exit(status) => {
                         eprintln!("{NAME}: exiting with status {status}, as scripted");
                         std::process::exit(*status);
@@ -599,7 +611,9 @@ fn play(
             return Ok(());
         }
         // Ends the turn or the process: `prompt` takes these itself.
-        Step::Stop(_) | Step::Exit(_) | Step::Fail(_) | Step::Finish(_) => return Ok(()),
+        Step::Stop(_) | Step::Exit(_) | Step::Fail(_) | Step::RateLimit(_) | Step::Finish(_) => {
+            return Ok(());
+        }
         Step::Execute { title, command } => (title, "execute", json!({"command": fill(command)})),
         Step::Read { title, path, lines } => {
             (title, "read", json!({"path": fill(path), "lines": lines}))
@@ -691,6 +705,7 @@ fn play(
         | Step::Stop(_)
         | Step::Exit(_)
         | Step::Fail(_)
+        | Step::RateLimit(_)
         | Step::Finish(_)
         | Step::Mcp { .. } => {
             unreachable!("handled above")
@@ -815,7 +830,8 @@ mod tests {
         assert!(parse_script(bad).is_err());
         assert_eq!(
             parse_script(
-                r#"[{"sleep": 0.5}, {"stop": "refusal"}, {"exit": 7}, {"fail": "x"}, {"finish": 0}]"#
+                r#"[{"sleep": 0.5}, {"stop": "refusal"}, {"exit": 7}, {"fail": "x"},
+                    {"rate_limit": "y"}, {"finish": 0}]"#
             )
             .unwrap(),
             [
@@ -823,6 +839,7 @@ mod tests {
                 Step::Stop("refusal".to_owned()),
                 Step::Exit(7),
                 Step::Fail("x".to_owned()),
+                Step::RateLimit("y".to_owned()),
                 Step::Finish(0)
             ]
         );

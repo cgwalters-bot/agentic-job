@@ -140,9 +140,17 @@ pub const LABEL_COMPACTION: &str = "compaction";
 /// The label of the task's turn sent again after it stalled
 /// (`AgentSpec::stall_timeout`).
 pub const LABEL_STALLED: &str = "stalled";
+/// The label of the task's turn sent again after the provider rate-limited
+/// it (`AgentSpec::rate_limit_code`).
+pub const LABEL_RATE_LIMITED: &str = "rate limited";
 /// The labels of the session's prompts that start a turn of their own,
 /// rather than being queued behind the running one.
-pub const TURN_LABELS: [&str; 3] = [LABEL_HAND_BACK, LABEL_REMINDER, LABEL_STALLED];
+pub const TURN_LABELS: [&str; 4] = [
+    LABEL_HAND_BACK,
+    LABEL_REMINDER,
+    LABEL_STALLED,
+    LABEL_RATE_LIMITED,
+];
 
 /// Why the session was stopped.
 #[derive(Debug, Clone, PartialEq)]

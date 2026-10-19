@@ -42,8 +42,14 @@ notices = true
 # minutes on idle connections before going on. A turn with nothing from it
 # for two minutes, and no tool call running, is cancelled and sent again
 # once on the same session (driver.rs).
+# When the provider still answers 429 after Vibe's own few quick retries,
+# Vibe answers the turn with its RateLimitError (code -31001, as seen in a
+# tracker run's acp.jsonl on 2026-10-19, #1339): the turn is sent again
+# after a wait, a few times, before the agent is asked to hand back
+# (driver.rs).
 [vibe]
 stall-timeout = 120
+rate-limit-code = -31001
 command = ["/opt/agentic-job/vibe/bin/python3", "-I", "-c", '''
 import sys
 from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
