@@ -1485,6 +1485,7 @@ mod tests {
                 budget_aic: None,
                 max_requests: None,
                 max_tasks: None,
+                max_repeats: None,
             },
             handed_back: false,
             reminded: false,

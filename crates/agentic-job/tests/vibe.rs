@@ -412,6 +412,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
                 budget_aic: None,
                 max_requests: Some(100),
                 max_tasks: Some(0),
+                max_repeats: None,
             },
             requests: Some(requests_count),
             launch: Launch::Direct,

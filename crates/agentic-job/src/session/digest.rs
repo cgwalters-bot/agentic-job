@@ -4,9 +4,10 @@
 //! works the same for every agent, and the same live as on a recorded
 //! `acp.jsonl`.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use super::budget::Repeats;
 use super::permission::{self, PATH_KEYS};
 use super::steer::{LABEL_UPDATE, STEER_METHOD};
 
@@ -93,6 +94,12 @@ pub struct Digest {
     pub denied: Vec<Denial>,
     /// The subagent tasks the agent started (TASK_TOOLS).
     pub tasks: usize,
+    /// The latest run of finished tool calls that were the same call
+    /// with the same result, for `limits.max-repeats`.
+    pub repeats: Repeats,
+    /// The SHA-256 of the last finished call, as `repeats` compares them:
+    /// a call's input and output may be large, and need not be kept.
+    last_call: Option<[u8; 32]>,
     /// The labels of the budget notices the harness sent, in order.
     pub notices: Vec<String>,
     /// The links of the updates of the run's item the harness sent
@@ -544,6 +551,11 @@ impl Digest {
         call.duration_s = Some(secs);
         call.error = Some(failed);
         let name = call.display_name();
+        // What the model saw of the call, not its timings: a call made
+        // again for a result that changes (a poll) does not count as one.
+        let seen = json!([name, call.title, call.raw_input, text, failed]).to_string();
+        let key = ring::digest::digest(&ring::digest::SHA256, seen.as_bytes());
+        let key: [u8; 32] = key.as_ref().try_into().unwrap_or_default();
         if EDIT_KINDS.contains(&call.kind.as_str()) && !failed {
             out.push(format!("✎ {name} {}", call.summary));
         } else {
@@ -561,6 +573,15 @@ impl Digest {
             let message = error_line(&text);
             out.push(cut(&format!("⚠ tool error: {name}: {message}")));
             call.message = Some(message);
+        }
+        if self.last_call == Some(key) {
+            self.repeats.count += 1;
+        } else {
+            self.last_call = Some(key);
+            self.repeats = Repeats {
+                run: self.repeats.run + 1,
+                count: 1,
+            };
         }
     }
 
@@ -1228,6 +1249,64 @@ mod tests {
                 json!({"sessionUpdate": "usage_update", "used": 1, "size": 2, "cost": cost}),
             )]);
             assert_eq!(d.cost_usd, want, "{cost}");
+        }
+    }
+
+    /// Only finished calls count, and only those with the same input and
+    /// the same result as the one before.
+    #[test]
+    fn repeats() {
+        // Each call: its command, its output and its status, or None for
+        // one that never finishes.
+        type Call = (&'static str, &'static str, Option<&'static str>);
+        let same: Call = ("gh api x", "body", Some("completed"));
+        let cases: &[(&str, &[Call], Repeats)] = &[
+            ("none", &[], Repeats::default()),
+            (
+                "the same call",
+                &[same, same, same],
+                Repeats { run: 1, count: 3 },
+            ),
+            (
+                "a poll whose result changes",
+                &[same, ("gh api x", "other", Some("completed")), same],
+                Repeats { run: 3, count: 1 },
+            ),
+            (
+                "another input",
+                &[same, ("gh api y", "body", Some("completed")), same, same],
+                Repeats { run: 3, count: 2 },
+            ),
+            (
+                "a failure is another result",
+                &[same, ("gh api x", "body", Some("failed"))],
+                Repeats { run: 2, count: 1 },
+            ),
+            (
+                "an unfinished call is not counted",
+                &[same, ("gh api x", "body", None), same],
+                Repeats { run: 1, count: 2 },
+            ),
+        ];
+        for (name, calls, want) in cases {
+            let msgs: Vec<_> = calls
+                .iter()
+                .enumerate()
+                .flat_map(|(i, (command, output, status))| {
+                    let id = format!("t{i}");
+                    let mut msgs = vec![update(json!({"sessionUpdate": "tool_call",
+                        "toolCallId": id, "title": "Bash", "kind": "execute", "status": "pending",
+                        "rawInput": {"command": command}}))];
+                    if let Some(status) = status {
+                        msgs.push(update(json!({"sessionUpdate": "tool_call_update",
+                            "toolCallId": id, "status": status,
+                            "content": [{"type": "content", "content": {"type": "text", "text": output}}]})));
+                    }
+                    msgs
+                })
+                .collect();
+            let (d, _) = lines(&msgs);
+            assert_eq!(d.repeats, *want, "{name}");
         }
     }
 }

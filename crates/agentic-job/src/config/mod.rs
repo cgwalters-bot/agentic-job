@@ -539,6 +539,9 @@ pub struct Limits {
     pub max_requests: u64,
     /// Subagent tasks the agent may start.
     pub max_tasks: u64,
+    /// Identical tool calls in a row before the agent is told to change
+    /// approach, and then asked to hand back; zero for no limit.
+    pub max_repeats: u64,
     /// In AIC, hundredths of a dollar, of the cost the agent reports.
     pub budget: u64,
     /// Asks for a run with neither `max-requests` nor `budget`.

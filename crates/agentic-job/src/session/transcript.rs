@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
-use super::budget::{Limits, Stop};
+use super::budget::{Limits, Repeats, Stop};
 use super::clients::Clients;
 use super::compaction::Compactions;
 use super::digest::{Digest, Dir};
@@ -215,6 +215,11 @@ impl Tap {
     /// The subagent tasks the agent has started.
     pub fn tasks(&self) -> usize {
         self.inner().digest.tasks
+    }
+
+    /// The agent's latest run of identical tool calls.
+    pub fn repeats(&self) -> Repeats {
+        self.inner().digest.repeats
     }
 
     /// What the agent said its turn ended with, if that is that the

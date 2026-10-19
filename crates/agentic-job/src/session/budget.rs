@@ -35,6 +35,10 @@ pub struct Limits {
     /// Subagent tasks the agent may start (the digest's `tasks`).
     #[serde(default)]
     pub max_tasks: Option<usize>,
+    /// Identical tool calls in a row (the digest's `repeats`) after which
+    /// the agent is told to change approach; one more has it hand back.
+    #[serde(default)]
+    pub max_repeats: Option<usize>,
 }
 
 impl Limits {
@@ -71,12 +75,25 @@ impl Limits {
             .map(usize::try_from)
             .transpose()
             .context("limits.max-tasks is out of range")?;
+        let max_repeats = cap(limits.max_repeats)
+            .map(usize::try_from)
+            .transpose()
+            .ok()
+            .flatten()
+            .filter(|n| REPEATS.contains(n));
+        ensure!(
+            max_repeats.is_some() || limits.max_repeats == 0,
+            "limits.max-repeats must be between {} and {}",
+            REPEATS.start(),
+            REPEATS.end()
+        );
         Ok(Self {
             timeout_s,
             // Exact below 2^53, far beyond any budget.
             budget_aic: budget.map(|n| n as f64),
             max_requests,
             max_tasks,
+            max_repeats,
         })
     }
 
@@ -99,6 +116,11 @@ pub const HAND_BACK: u64 = 95;
 /// as many: the hand-back takes a few itself, and the caller's count lags
 /// behind what subagents are doing by its polling interval.
 pub const HAND_BACK_REQUESTS: u64 = 10;
+/// What `limits.max-repeats` may be: one would take any call for a loop,
+/// and the loops it is for (#1328) ran to hundreds of calls, each a model
+/// request, so a larger one would let them spend the provider's rate
+/// limit all the same.
+pub const REPEATS: std::ops::RangeInclusive<usize> = 2..=100;
 /// The notice levels, highest first.
 const NOTICES: [u64; 2] = [FINISH, CONVERGE];
 /// What every message of the session to the agent starts with, so that
@@ -108,6 +130,7 @@ pub const NOTICE_PREFIX: &str = "[bot-harness budget notice]";
 /// The labels of the notices that aren't a percentage.
 pub const LABEL_LAST_TASK: &str = "last task";
 pub const LABEL_HAND_BACK: &str = "hand back";
+pub const LABEL_REPEATED: &str = "repeated";
 /// The label of the one prompt that reminds an agent which ended its
 /// turn without the output its run requires (`session::OutputCheck`).
 pub const LABEL_REMINDER: &str = "reminder";
@@ -136,6 +159,18 @@ pub struct Usage {
     /// None when nothing counts them.
     pub requests: Option<u64>,
     pub tasks: usize,
+    pub repeats: Repeats,
+}
+
+/// The agent's latest run of identical tool calls: the same tool, input
+/// and result, one after another.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Repeats {
+    /// Which run it is, counted from the session's start: a run that
+    /// starts over is a new one, even with the same call.
+    pub run: u64,
+    /// How many calls it has.
+    pub count: usize,
 }
 
 /// What the budget asks for, from one look at the usage.
@@ -178,6 +213,9 @@ pub struct Budget {
     /// The highest notice level sent.
     noticed: u64,
     last_task_noticed: bool,
+    /// The run of identical tool calls the agent was last told about, as
+    /// it was then.
+    repeats_noticed: Option<Repeats>,
     handing_back: bool,
 }
 
@@ -187,6 +225,7 @@ impl Budget {
             limits,
             noticed: 0,
             last_task_noticed: false,
+            repeats_noticed: None,
             handing_back: false,
         }
     }
@@ -263,6 +302,36 @@ impl Budget {
                 window,
             });
         }
+        // An agent stuck repeating one call ends with nothing handed back,
+        // having spent its requests on it (#1328): told once, it hands
+        // back if it keeps making the call. The notice is queued behind
+        // the model step already under way when the call finished, so the
+        // call that step makes is let through. An agent that takes no
+        // notices goes without, and hands back all the same.
+        if let Some(max) = self.limits.max_repeats
+            && u.repeats.count >= max
+        {
+            match self.repeats_noticed {
+                Some(seen) if seen.run == u.repeats.run => {
+                    if u.repeats.count > seen.count + 1 {
+                        self.handing_back = true;
+                        let used = format!("repeated one tool call {} times", u.repeats.count);
+                        return Some(Signal::HandBack {
+                            text: hand_back_text(&used, window),
+                            why: Stop::Budget(used),
+                            window,
+                        });
+                    }
+                }
+                _ => {
+                    self.repeats_noticed = Some(u.repeats);
+                    return Some(Signal::Notice {
+                        label: LABEL_REPEATED.to_owned(),
+                        text: repeated_text(u.repeats.count),
+                    });
+                }
+            }
+        }
         if let Some(level) = NOTICES.into_iter().find(|l| top.percent >= *l)
             && level > self.noticed
         {
@@ -311,6 +380,15 @@ fn last_task_text(tasks: usize) -> String {
     )
 }
 
+fn repeated_text(count: usize) -> String {
+    format!(
+        "{NOTICE_PREFIX} You have made the same tool call, with the same input, {count} times in \
+         a row, and it gave the same result each time: making it again will not change that. \
+         Change your approach, or hand back what you have as your task brief says. If you go \
+         on making the same call, the run is interrupted for you to hand back. {KEEP_WORKING}"
+    )
+}
+
 pub fn hand_back_text(used: &str, window: Duration) -> String {
     format!(
         "{NOTICE_PREFIX} This run has {used}, so your work was interrupted. Hand back now: \
@@ -347,6 +425,7 @@ mod tests {
             budget_aic,
             max_requests,
             max_tasks,
+            max_repeats: None,
         };
         let cases: &[(&str, Result<Limits, &str>)] = &[
             (
@@ -360,6 +439,32 @@ mod tests {
             (
                 "[limits]\ntimeout-minutes = 75\nuncapped = true",
                 Ok(capped(None, None, None)),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nuncapped = true\nmax-repeats = 5",
+                Ok(Limits {
+                    max_repeats: Some(5),
+                    ..capped(None, None, None)
+                }),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nuncapped = true\nmax-repeats = 100",
+                Ok(Limits {
+                    max_repeats: Some(100),
+                    ..capped(None, None, None)
+                }),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nuncapped = true\nmax-repeats = 1",
+                Err("between 2 and 100"),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nuncapped = true\nmax-repeats = 101",
+                Err("between 2 and 100"),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nuncapped = true\nmax-repeats = 18446744073709551615",
+                Err("between 2 and 100"),
             ),
             // No table at all is not an unlimited run.
             ("", Err("needs a timeout")),
@@ -408,6 +513,15 @@ mod tests {
             elapsed: Duration::from_secs(secs),
             requests,
             tasks,
+            repeats: Repeats::default(),
+        }
+    }
+
+    /// Ten seconds in, with COUNT calls in the agent's RUN of identical ones.
+    fn repeated(run: u64, count: usize) -> Usage {
+        Usage {
+            repeats: Repeats { run, count },
+            ..usage(10, None, 0)
         }
     }
 
@@ -512,6 +626,60 @@ mod tests {
                     (usage(1000, None, 4), "stop: Timeout"),
                 ],
             },
+            Case {
+                name: "repeats are not counted unless asked for",
+                limits: limits(None, None),
+                steps: vec![(repeated(1, 500), "-")],
+            },
+            Case {
+                name: "repeats past the one under way at the notice hand back",
+                limits: Limits {
+                    max_repeats: Some(3),
+                    ..limits(None, None)
+                },
+                steps: vec![
+                    (repeated(1, 2), "-"),
+                    (repeated(1, 3), "repeated"),
+                    (repeated(1, 3), "-"),
+                    (repeated(1, 4), "-"),
+                    (
+                        repeated(1, 5),
+                        "hand back: Budget(\"repeated one tool call 5 times\")",
+                    ),
+                    (repeated(1, 6), "-"),
+                ],
+            },
+            Case {
+                name: "a run seen first past the limit is still told first",
+                limits: Limits {
+                    max_repeats: Some(3),
+                    ..limits(None, None)
+                },
+                steps: vec![
+                    (repeated(1, 5), "repeated"),
+                    (repeated(1, 6), "-"),
+                    (
+                        repeated(1, 7),
+                        "hand back: Budget(\"repeated one tool call 7 times\")",
+                    ),
+                ],
+            },
+            Case {
+                name: "another run of repeats is told about again",
+                limits: Limits {
+                    max_repeats: Some(3),
+                    ..limits(None, None)
+                },
+                steps: vec![
+                    (repeated(1, 3), "repeated"),
+                    (repeated(2, 1), "-"),
+                    (repeated(3, 3), "repeated"),
+                    (
+                        repeated(3, 5),
+                        "hand back: Budget(\"repeated one tool call 5 times\")",
+                    ),
+                ],
+            },
         ];
         for c in cases {
             let mut b = Budget::new(c.limits);
@@ -535,5 +703,14 @@ mod tests {
         assert!(text.contains("used 16m of 16m"), "{text}");
         assert_eq!(window, Duration::from_secs(50));
         assert!(text.contains("ends in 50s"), "{text}");
+        let mut b = Budget::new(Limits {
+            max_repeats: Some(5),
+            ..limits(None, None)
+        });
+        let Some(Signal::Notice { text, .. }) = b.check(&repeated(1, 5)) else {
+            panic!("no notice");
+        };
+        assert!(text.starts_with(NOTICE_PREFIX), "{text}");
+        assert!(text.contains("5 times in a row"), "{text}");
     }
 }

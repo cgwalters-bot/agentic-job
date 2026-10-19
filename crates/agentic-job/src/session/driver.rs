@@ -343,6 +343,7 @@ async fn watch_budget(
             elapsed: started.elapsed(),
             requests: requests.as_ref().and_then(|count| *count.borrow()),
             tasks: tap.tasks(),
+            repeats: tap.repeats(),
         };
         // The session may be over: nobody is left to nudge.
         let _ = match budget.check(&usage) {

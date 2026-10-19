@@ -127,6 +127,7 @@ fn pinned_claude_acp_offers_file_tools() {
                 budget_aic: None,
                 max_requests: None,
                 max_tasks: Some(0),
+                max_repeats: None,
             },
             requests: None,
             launch: Launch::Direct,

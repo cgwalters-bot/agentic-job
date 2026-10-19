@@ -292,6 +292,18 @@ just as the timeout cancels it is treated the same way. The budget cannot
 refuse a reply in advance, because no one knows its cost before it
 comes; `max-requests` is the cap that acts before a request is made.
 
+`max-repeats` (off unless set, 2 to 100) is for an agent stuck making
+one tool call over and over: GLM agents have repeated one `gh api`
+command hundreds of times, until the provider's rate limit ended the
+run with nothing handed back. Once that many finished calls in a row
+had the same tool, input and result, the agent is told so in a notice.
+The step under way may still make the call once more; a second call
+after the notice has the agent hand back as at a limit. Only a changed
+result starts the count again: a poll that keeps answering "in
+progress" counts, so leave room for one. The harness sees calls only as
+the agent reports them, after they ran, so it cannot refuse one. An
+agent without notices is not told, and hands back at the same call.
+
 A task's turn that ends on an error is not taken for a finished task.
 That is a turn the agent answers with an error, as opencode and Vibe
 answer one whose model request failed, or one it answers as done

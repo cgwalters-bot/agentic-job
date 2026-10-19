@@ -74,6 +74,7 @@ struct Setup<'a> {
     /// `requests`, which the agent's own script writes.
     count_requests: bool,
     max_tasks: Option<usize>,
+    max_repeats: Option<usize>,
     permissions: Option<&'a str>,
     launch: Launch,
     /// The agent's program, where it isn't the one cargo built.
@@ -376,6 +377,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             budget_aic: setup.budget_aic,
             max_requests: setup.count_requests.then_some(MAX_REQUESTS),
             max_tasks: setup.max_tasks,
+            max_repeats: setup.max_repeats,
         },
         requests: setup.count_requests.then_some(requests),
         launch: setup.launch,
@@ -1231,6 +1233,7 @@ fn hand_back_near_a_limit() {
         timeout_s: u64,
         count_requests: bool,
         max_tasks: Option<usize>,
+        max_repeats: Option<usize>,
         status: u8,
         result: &'static str,
         message: &'static str,
@@ -1242,6 +1245,10 @@ fn hand_back_near_a_limit() {
         use_requests(95)
     );
     let task = r#"{"task": "Review the change"}"#;
+    // An agent stuck on one call, as GLM agents have been (#1328): each
+    // repeat a model step apart, as a real agent's are, and longer than a
+    // few of the budget's checks, so that each is seen.
+    let same = r#"{"execute": {"title": "Bash", "command": "echo same"}}, {"sleep": 1}"#;
     let cases = [
         Case {
             name: "model requests",
@@ -1250,6 +1257,7 @@ fn hand_back_near_a_limit() {
             timeout_s: 60,
             count_requests: true,
             max_tasks: None,
+            max_repeats: None,
             status: 3,
             result: "budget",
             message: "used 95 of 100 model requests; the agent handed back",
@@ -1264,6 +1272,7 @@ fn hand_back_near_a_limit() {
             timeout_s: 20,
             count_requests: true,
             max_tasks: None,
+            max_repeats: None,
             status: 3,
             result: "budget",
             message: "used 95 of 100 model requests; cancelled",
@@ -1279,10 +1288,28 @@ fn hand_back_near_a_limit() {
             timeout_s: 60,
             count_requests: false,
             max_tasks: Some(2),
+            max_repeats: None,
             status: 3,
             result: "budget",
             message: "started more than 2 subagent tasks; the agent handed back",
             notices: &["last task", "hand back"],
+            handed_back: true,
+        },
+        Case {
+            name: "one tool call repeated",
+            script: format!(
+                r#"[{}, {{"sleep": 60}}, {{"say": "Not reached."}}]"#,
+                [same; 8].join(", ")
+            ),
+            later: HAND_BACK,
+            timeout_s: 60,
+            count_requests: false,
+            max_tasks: None,
+            max_repeats: Some(3),
+            status: 3,
+            result: "budget",
+            message: "repeated one tool call 5 times; the agent handed back",
+            notices: &["repeated", "hand back"],
             handed_back: true,
         },
         Case {
@@ -1293,6 +1320,7 @@ fn hand_back_near_a_limit() {
             timeout_s: 20,
             count_requests: false,
             max_tasks: None,
+            max_repeats: None,
             status: 124,
             result: "timeout",
             message: "hit the timeout; the agent handed back",
@@ -1309,6 +1337,7 @@ fn hand_back_near_a_limit() {
                 timeout_s: c.timeout_s,
                 count_requests: c.count_requests,
                 max_tasks: c.max_tasks,
+                max_repeats: c.max_repeats,
                 ..Setup::default()
             },
         );
