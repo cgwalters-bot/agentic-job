@@ -595,7 +595,7 @@ fn send(
     method: Method,
     url: &str,
     headers: &[(&str, &str)],
-) -> Result<Answer, String> {
+) -> Result<Answer, ureq::Error> {
     // The builders differ in type by whether the method takes a body.
     macro_rules! with_headers {
         ($request:expr) => {
@@ -610,14 +610,13 @@ fn send(
         // An empty body with its length, not a chunked one.
         Method::Post => with_headers!(agent.post(url)).send_empty(),
     };
-    let mut response = response.map_err(|err| err.to_string())?;
+    let mut response = response?;
     let status = response.status().as_u16();
     let text = response
         .body_mut()
         .with_config()
         .limit(MAX_BODY_BYTES)
-        .read_to_string()
-        .map_err(|err| err.to_string())?;
+        .read_to_string()?;
     Ok(Answer { status, text })
 }
 
@@ -773,7 +772,29 @@ fn identity_token(http: &ureq::Agent, request: &OidcRequest, audience: &str) -> 
         &[(AUTHORIZATION, &bearer(&request.bearer))],
     ) {
         Ok(answer) => answer,
-        Err(err) => return Attempt::Again(format!("asking for the identity token: {err}")),
+        // Said apart from the inference proxy, which this is easily taken
+        // for: Forgejo builds the request URL from its ROOT_URL, which a
+        // runner may not resolve though it reaches the server URL the job
+        // otherwise uses. The host alone: the URL may carry more than a
+        // log should show.
+        Err(err) => {
+            let host = request
+                .url
+                .parse::<ureq::http::Uri>()
+                .ok()
+                .and_then(|uri| uri.host().map(str::to_owned))
+                .unwrap_or_else(|| String::from("(none)"));
+            let why = match err {
+                ureq::Error::BadUri(_) => String::from("the URL is not valid"),
+                err => err.to_string(),
+            };
+            return Attempt::Again(format!(
+                "asking for the identity token at the CI system's ID token endpoint \
+                 ({OIDC_URL_VAR}, host {host}) got no answer ({why}): that request failed, not \
+                 the inference proxy; does {host} resolve and is it reachable from this runner, \
+                 or through inference.identity-proxy where one is set?"
+            ));
+        }
     };
     let value = answer
         .json()
@@ -1033,6 +1054,7 @@ impl Run {
             &format!("{}{RUN_SELF_PATH}", self.url),
             &[(AUTHORIZATION, &bearer(self.token.expose()))],
         )
+        .map_err(|err| err.to_string())
     }
 
     /// The run's usage so far, or `None` when the proxy has none to give

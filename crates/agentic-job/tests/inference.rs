@@ -532,6 +532,74 @@ fn a_run_needs_what_its_mode_sends() {
     );
 }
 
+/// A request that gets no answer says which one it was: the CI system's
+/// ID token endpoint, named by its host alone, or the inference proxy.
+#[test]
+fn an_unanswered_request_says_which_it_was() {
+    let proxy = Proxy::start();
+    let once = Retry {
+        attempts: 1,
+        ..QUICK
+    };
+    let ci = |url: &str| Identity {
+        oidc: Some(OidcRequest {
+            url: url.to_owned(),
+            bearer: REQUEST_BEARER.to_owned(),
+        }),
+        ..Identity::default()
+    };
+    // A name that does not resolve (RFC 6761), and a refused connection.
+    let endpoints = [
+        (
+            "http://root-url.invalid:3000/_apis/token?not-for-logs=1",
+            "root-url.invalid",
+        ),
+        ("http://127.0.0.1:1/oidc?not-for-logs=1", "127.0.0.1"),
+    ];
+    for (url, host) in endpoints {
+        let err = error(Run::register(
+            &endpoint(&proxy, oidc_mode()),
+            &ci(url),
+            once,
+            TIMEOUT_S,
+            NEVER,
+        ));
+        assert!(
+            err.contains(&format!(
+                "the CI system's ID token endpoint (ACTIONS_ID_TOKEN_REQUEST_URL, host {host}) \
+                 got no answer"
+            )),
+            "{err}"
+        );
+        for absent in [
+            "not-for-logs",
+            REQUEST_BEARER,
+            "cannot reach the inference proxy",
+        ] {
+            assert!(!err.contains(absent), "{absent}: {err}");
+        }
+    }
+    assert_eq!(proxy.seen(), [""; 0]);
+
+    let unreachable = Endpoint {
+        url: "http://127.0.0.1:1".to_owned(),
+        ..endpoint(&proxy, oidc_mode())
+    };
+    let err = error(Run::register(
+        &unreachable,
+        &job(&proxy),
+        once,
+        TIMEOUT_S,
+        NEVER,
+    ));
+    assert!(
+        err.contains("cannot reach the inference proxy at http://127.0.0.1:1"),
+        "{err}"
+    );
+    assert!(!err.contains("ID token endpoint"), "{err}");
+    assert_eq!(proxy.seen(), ["GET /oidc"]);
+}
+
 /// `token-file`: the token is given, there is no run API, and so nothing
 /// is counted and nothing is ended. The proxy is never asked.
 #[test]
