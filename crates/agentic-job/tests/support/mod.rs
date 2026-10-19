@@ -29,6 +29,10 @@ pub const RECORD_SCHEMA: &str = "praxis-run-usage/v2";
 const RUNS: &str = "/v1/runs";
 const RUN_SELF: &str = "/v1/runs/self";
 const OIDC: &str = "/oidc";
+/// Where Forgejo points ACTIONS_ID_TOKEN_REQUEST_URL: its ROOT_URL
+/// (with any sub-path) and this, then `?placeholder=true`
+/// (forgejo/forgejo v17.0.0, services/actions/task.go).
+pub const FORGEJO_OIDC: &str = "/api/actions/_apis/pipelines/workflows/42/idtoken";
 /// How long an answered client gets to close its side.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a registered run lives.
@@ -246,13 +250,13 @@ impl State {
     fn handle(&mut self, request: &Request) -> (u16, String) {
         let path = request.path.split('?').next().unwrap_or_default();
         match (request.method.as_str(), path) {
-            ("GET", OIDC) if request.bearer() == Some(REQUEST_BEARER) => {
+            ("GET", OIDC | FORGEJO_OIDC) if request.bearer() == Some(REQUEST_BEARER) => {
                 let audience = request.path.split("audience=").nth(1).unwrap_or_default();
                 self.issued += 1;
                 let jwt = format!("jwt.{audience}.{}", self.issued);
                 (200, json!({"value": jwt}).to_string())
             }
-            ("GET", OIDC) => (401, "bad request bearer\n".into()),
+            ("GET", OIDC | FORGEJO_OIDC) => (401, "bad request bearer\n".into()),
             (_, RUNS | RUN_SELF) if self.no_run_api => (404, "not found\n".into()),
             ("POST", RUNS) => self.register(request),
             ("GET" | "DELETE", RUN_SELF) => self.own(request),

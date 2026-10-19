@@ -19,8 +19,8 @@ use agentic_job::run::inference::{
     Ended, Endpoint, Identity, Mode, NEVER, OIDC_TOKEN_VAR, OIDC_URL_VAR, OidcRequest,
     RECORD_SCHEMA, Retry, Run, Token,
 };
-use agentic_job::run::register::DEBUG_VAR;
-use support::{AUDIENCE, Fault, Proxy, REQUEST_BEARER};
+use agentic_job::run::register::{DEBUG_VAR, FORGEJO_VAR, STEP_DEBUG_VAR};
+use support::{AUDIENCE, FORGEJO_OIDC, Fault, Proxy, REQUEST_BEARER};
 
 const TIMEOUT_S: u64 = 600;
 const QUICK: Retry = Retry {
@@ -171,13 +171,13 @@ fn a_run_an_earlier_job_registered_is_taken_over() {
 /// stderr; another mode registers nothing and writes nothing; and without
 /// the job's identity token it fails rather than write an empty token.
 /// With step debug logging, where the runner would log the output's
-/// value, it refuses before it registers.
+/// value, it refuses before it registers. On Forgejo it masks the token.
 #[test]
 fn the_register_command_writes_the_token_to_its_output_alone() {
     let proxy = Proxy::start();
     let dir = tempfile::tempdir().unwrap();
     let (config, output) = (dir.path().join("config.toml"), dir.path().join("output"));
-    let command = |register: &str, oidc: bool, debug: Option<&str>| {
+    let command = |register: &str, oidc: bool, env: &[(&str, &str)]| {
         std::fs::write(
             &config,
             format!(
@@ -196,15 +196,15 @@ fn the_register_command_writes_the_token_to_its_output_alone() {
             .arg(&output)
             .env_remove(OIDC_URL_VAR)
             .env_remove(OIDC_TOKEN_VAR)
-            .env_remove(DEBUG_VAR);
+            .env_remove(DEBUG_VAR)
+            .env_remove(STEP_DEBUG_VAR)
+            .env_remove(FORGEJO_VAR);
         if oidc {
             command
                 .env(OIDC_URL_VAR, proxy.oidc_url())
                 .env(OIDC_TOKEN_VAR, REQUEST_BEARER);
         }
-        if let Some(debug) = debug {
-            command.env(DEBUG_VAR, debug);
-        }
+        command.envs(env.iter().copied());
         let got = command.output().unwrap();
         let printed =
             String::from_utf8(got.stdout).unwrap() + &String::from_utf8(got.stderr).unwrap();
@@ -215,28 +215,63 @@ fn the_register_command_writes_the_token_to_its_output_alone() {
         )
     };
     let oidc = format!("register = \"github-oidc\"\naudience = \"{AUDIENCE}\"");
-    let (passed, printed, written) = command(&oidc, true, None);
+    let (passed, printed, written) = command(&oidc, true, &[]);
     assert!(passed, "{printed}");
     let token = proxy.live_tokens().pop().unwrap();
     assert_eq!(written, format!("earlier=1\nrun-token={token}\n"));
     assert!(!printed.contains(&token), "{printed}");
     assert!(!printed.contains(REQUEST_BEARER), "{printed}");
 
-    let (passed, printed, written) = command(&oidc, false, None);
+    let (passed, printed, written) = command(&oidc, false, &[]);
     assert!(!passed && printed.contains("id-token: write"), "{printed}");
     assert_eq!(written, "earlier=1\n");
-    for debug in ["1", "true"] {
-        let (passed, printed, written) = command(&oidc, true, Some(debug));
-        assert!(!passed && printed.contains("debug logging"), "{printed}");
-        assert_eq!(written, "earlier=1\n");
+    // GitHub's runner sets RUNNER_DEBUG; Forgejo's debug switch is the
+    // ACTIONS_STEP_DEBUG secret, which a workflow may pass on. Either
+    // refuses on either forge.
+    for debug in [
+        (DEBUG_VAR, "1"),
+        (DEBUG_VAR, "true"),
+        (STEP_DEBUG_VAR, "true"),
+    ] {
+        for forge in [None, Some((FORGEJO_VAR, "true"))] {
+            let env: Vec<_> = [Some(debug), forge].into_iter().flatten().collect();
+            let (passed, printed, written) = command(&oidc, true, &env);
+            assert!(!passed && printed.contains("debug logging"), "{printed}");
+            assert!(printed.contains(debug.0), "{printed}");
+            assert_eq!(written, "earlier=1\n");
+        }
     }
-    let (passed, printed, written) = command("register = \"plain\"", true, None);
+    let (passed, printed, written) = command("register = \"plain\"", true, &[]);
     assert!(
         passed && printed.contains("Nothing to register"),
         "{printed}"
     );
     assert_eq!(written, "earlier=1\n");
     assert_eq!(proxy.run_states(), ["active"]);
+
+    // On Forgejo, which keeps a masked job output, the token is masked
+    // before it is written: printed in the mask command alone. Not for
+    // another value, as a runner that drops a masked output may have.
+    let mut seen = vec![token];
+    for (value, masked) in [("true", true), ("1", false)] {
+        let (passed, printed, written) = command(&oidc, true, &[(FORGEJO_VAR, value)]);
+        assert!(passed, "{printed}");
+        let new = proxy
+            .live_tokens()
+            .into_iter()
+            .find(|live| !seen.contains(live))
+            .unwrap();
+        assert_eq!(written, format!("earlier=1\nrun-token={new}\n"));
+        let mask = format!("::add-mask::{new}\n");
+        assert_eq!(printed.starts_with(&mask), masked, "{printed}");
+        assert_eq!(
+            printed.matches(&new).count(),
+            usize::from(masked),
+            "{printed}"
+        );
+        assert!(!seen.iter().any(|old| printed.contains(old)), "{printed}");
+        seen.push(new);
+    }
 }
 
 /// A proxy that is restarting is tried again, with the same identity
@@ -598,6 +633,55 @@ fn an_unanswered_request_says_which_it_was() {
     );
     assert!(!err.contains("ID token endpoint"), "{err}");
     assert_eq!(proxy.seen(), ["GET /oidc"]);
+}
+
+/// Forgejo's request URL, its ROOT_URL with a path and `?placeholder=true`:
+/// the audience is added as one more parameter, and when the ROOT_URL's
+/// host gets no answer, the error names that host alone.
+#[test]
+fn a_forgejo_request_url_takes_the_audience_and_names_its_host() {
+    let proxy = Proxy::start();
+    let forgejo = |root_url: &str| Identity {
+        oidc: Some(OidcRequest {
+            url: format!("{root_url}{FORGEJO_OIDC}?placeholder=true"),
+            bearer: REQUEST_BEARER.to_owned(),
+        }),
+        ..Identity::default()
+    };
+    Run::register(
+        &endpoint(&proxy, oidc_mode()),
+        &forgejo(&proxy.url),
+        QUICK,
+        TIMEOUT_S,
+        NEVER,
+    )
+    .unwrap();
+    assert_eq!(
+        proxy.requests()[0].path,
+        format!("{FORGEJO_OIDC}?placeholder=true&audience={AUDIENCE}")
+    );
+
+    let once = Retry {
+        attempts: 1,
+        ..QUICK
+    };
+    let err = error(Run::register(
+        &endpoint(&proxy, oidc_mode()),
+        &forgejo("https://forgejo.invalid/sub"),
+        once,
+        TIMEOUT_S,
+        NEVER,
+    ));
+    assert!(
+        err.contains(
+            "the CI system's ID token endpoint (ACTIONS_ID_TOKEN_REQUEST_URL, host \
+             forgejo.invalid) got no answer"
+        ),
+        "{err}"
+    );
+    for absent in ["placeholder", "/sub", "cannot reach the inference proxy"] {
+        assert!(!err.contains(absent), "{absent}: {err}");
+    }
 }
 
 /// `token-file`: the token is given, there is no run API, and so nothing

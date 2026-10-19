@@ -160,9 +160,16 @@ through a call's `secrets:`. A step that took it from `needs` directly
 would print it in its log, with its other inputs. With step debug
 logging, as on a re-run with debug logging, the runner logs each output
 it sets, value included, in the register job's log, so
-`agentic-job register` then refuses before it registers. Within the agent job
-the token reaches `run` alone, and the agent gets it as its own, as it
-always did.
+`agentic-job register` then refuses before it registers. Forgejo's
+runner logs the outputs of a job's last step, values included, in the
+job log whatever the debug mode, and passes a masked job output on, so
+there `register` masks the token before it sets it. Forgejo's debug
+switch is the `ACTIONS_STEP_DEBUG` secret, in a step's environment only
+if a workflow passes it, and `register` refuses with it set as well
+(sources cited in
+[`register.rs`](../crates/agentic-job/src/run/register.rs)). Within the
+agent job the token reaches `run` alone, and the agent gets it as its
+own, as it always did.
 
 What is left: a run whose agent job never starts stays registered until
 the broker expires it; re-running the agent's job alone hands it the
