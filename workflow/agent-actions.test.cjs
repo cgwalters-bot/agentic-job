@@ -44,6 +44,39 @@ test('prepare rejects missing and nonnumeric trusted artifact IDs before downloa
   assert.doesNotMatch(prepare, /name: \$\{\{ inputs\./);
 });
 
+// The address goes to `agentic-job config`, which checks it, as a value;
+// the summary's record of it is added to meta.json after that is written,
+// and a refusal leaves both files as the policy call left them.
+test('prepare gives a named broker the inference address only through agentic-job config', (t) => {
+  const directory = mkdtempSync(join(homedir(), 'agent-actions-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const bin = join(directory, 'bin');
+  mkdirSync(bin);
+  // A stand-in that prints its arguments as the configuration, and fails
+  // as the binary does for an address it refuses.
+  writeFileSync(join(bin, 'agentic-job'), '#!/bin/bash\n[ "$4" != --inference-address=refused ] || exit 1\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+  const name = "The inference broker's address";
+  assert.match(prepare, new RegExp(`- name: ${name}\\n {6}if: \\$\\{\\{ inputs.inference-address != '' \\}\\}\\n`));
+  assert.ok(prepare.indexOf('- name: Write what the run is called') < prepare.indexOf(`- name: ${name}`));
+  assert.ok(prepare.includes('        ADDRESS: ${{ inputs.inference-address }}\n'));
+  for (const [address, expected] of [['100.64.0.1', 0], ['--help', 0], ['refused', 1]]) {
+    writeFileSync(join(directory, 'config.toml'), 'policy\n');
+    writeFileSync(join(directory, 'meta.json'), '{"item":"x"}');
+    const result = shell(step(prepare, name),
+      { JOB_DIR: directory, ADDRESS: address, PATH: `${bin}:${process.env.PATH}` });
+    assert.equal(result.status, expected, result.stdout + result.stderr);
+    const config = readFileSync(join(directory, 'config.toml'), 'utf8');
+    const meta = JSON.parse(readFileSync(join(directory, 'meta.json'), 'utf8'));
+    if (expected === 0) {
+      assert.equal(config, `config\n--from\n${directory}/config.toml\n--inference-address=${address}\n`);
+      assert.deepEqual(meta, { item: 'x', inference_address: address });
+    } else {
+      assert.equal(config, 'policy\n');
+      assert.deepEqual(meta, { item: 'x' });
+    }
+  }
+});
+
 test('prepare and run refuse a policy call of another commit before using its upload', (t) => {
   const directory = mkdtempSync(join(homedir(), 'agent-actions-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

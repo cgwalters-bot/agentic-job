@@ -24,6 +24,7 @@
 //! file of the agent's configuration (`super::agent`) and nowhere else.
 
 use std::fmt;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -35,6 +36,7 @@ use tokio::sync::watch;
 
 use super::api_key::{self, ApiKey, Local};
 use crate::config::{self, Provider, Register};
+use crate::sandbox::network;
 
 /// The proxy's run API, under its root.
 const RUNS_PATH: &str = "/v1/runs";
@@ -179,6 +181,112 @@ fn base_url(key: &str, url: &str) -> Result<String> {
     Ok(url.trim_end_matches('/').to_owned())
 }
 
+/// The longest DNS name, and the longest label of one.
+const MAX_NAME_BYTES: usize = 253;
+const MAX_LABEL_BYTES: usize = 63;
+
+/// A URL [`base_url`] accepted, split around its host, which is held to
+/// the syntax of a DNS name or an IP literal, and its port, if any, to
+/// a number from 1 to 65535.
+struct Authority<'a> {
+    /// `http://` or `https://`.
+    scheme: &'a str,
+    /// Whether the host is a name rather than an IP literal.
+    named: bool,
+    /// What follows the host: `:PORT`, if the URL gives one, and the path.
+    rest: &'a str,
+}
+
+impl<'a> Authority<'a> {
+    fn parse(url: &'a str) -> Result<Self> {
+        let refusal = || format!("inference.url: {url:?} has no valid host and port");
+        let split = url.find("://").map(|at| at + 3).with_context(refusal)?;
+        let (scheme, after) = url.split_at(split);
+        let end = after.find('/').unwrap_or(after.len());
+        let authority = &after[..end];
+        let (host, port) = match authority.strip_prefix('[') {
+            Some(inner) => {
+                let (literal, port) = inner.split_once(']').with_context(refusal)?;
+                literal.parse::<Ipv6Addr>().ok().with_context(refusal)?;
+                (&authority[..literal.len() + 2], port)
+            }
+            None => {
+                let at = authority.find(':').unwrap_or(authority.len());
+                authority.split_at(at)
+            }
+        };
+        if !port.is_empty() {
+            ensure!(
+                port.strip_prefix(':')
+                    .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|digits| digits.parse::<u16>().ok())
+                    .is_some_and(|port| port != 0),
+                refusal()
+            );
+        }
+        let named = !host.starts_with('[') && host.parse::<Ipv4Addr>().is_err();
+        ensure!(!named || is_name(host), refusal());
+        Ok(Self {
+            scheme,
+            named,
+            rest: &after[host.len()..],
+        })
+    }
+}
+
+/// Whether HOST is a DNS name: labels of letters, digits and inner
+/// hyphens, the last not all digits, which would be a mistyped address.
+/// One terminal dot, an absolute name such as `broker.example.`, is kept.
+fn is_name(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let labels: Vec<&str> = host.split('.').collect();
+    host.len() <= MAX_NAME_BYTES
+        && labels.iter().all(|label| {
+            (1..=MAX_LABEL_BYTES).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+        && labels
+            .last()
+            .is_some_and(|last| !last.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// URL with its host, a name, replaced by ADDRESS, and its scheme, port
+/// and path kept: for a broker on the tailnet whose name only a step of
+/// the agent's job, once on the tailnet, can resolve. The address has to
+/// be on the tailnet, so that a wrong one sends the run's identity and
+/// token nowhere else; IPv4 only, as `egress.direct` is, which opens it
+/// to the agent. A URL that is an address already keeps it: the policy's
+/// address is not replaced by another. Only `http`: an `https` broker's
+/// certificate names its host, not the address, so registration would
+/// fail verification; tailnet traffic is already encrypted.
+pub fn with_address(url: &str, address: &str) -> Result<String> {
+    let address: Ipv4Addr = address
+        .parse()
+        .ok()
+        .filter(|&address| network::tailnet_v4(address))
+        .with_context(|| {
+            format!(
+                "inference address {address:?} is not a tailnet IPv4 address ({})",
+                network::TAILNET_V4
+            )
+        })?;
+    let url = base_url("url", url)?;
+    let authority = Authority::parse(&url)?;
+    ensure!(
+        authority.named,
+        "inference.url {url:?} gives an address, not a name for an inference address to replace"
+    );
+    ensure!(
+        authority.scheme == "http://",
+        "inference.url {url:?} is https, whose certificate would not name an inference address"
+    );
+    Ok(format!("{}{address}{}", authority.scheme, authority.rest))
+}
+
 impl Endpoint {
     /// `None` for a configuration with no proxy. A proxy without a mode is
     /// refused: `plain` is never what leaving `register` out means.
@@ -207,6 +315,7 @@ impl Endpoint {
             return Ok(None);
         }
         let url = base_url("url", url)?;
+        Authority::parse(&url)?;
         let Some(register) = register else {
             bail!(
                 "inference.register is not set: say \"github-oidc\", \"plain\", \
@@ -1311,6 +1420,110 @@ mod tests {
         for (text, want) in cases {
             let err = Endpoint::from_config(&inference(&text)).expect_err(&text);
             assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}");
+        }
+    }
+
+    /// The host of `url` is a name or an IP literal, and its port a port.
+    #[test]
+    fn hosts_and_ports() {
+        for (url, taken) in [
+            ("http://broker", true),
+            ("http://broker.tail-1234.ts.net:18080/v1", true),
+            ("https://100.64.0.1:443", true),
+            ("http://[fd7a:115c:a1e0::1]:18080", true),
+            ("http://[::1]", true),
+            ("http://broker:65535", true),
+            ("https://broker.example./", true),
+            ("http://broker.example.:18080", true),
+            ("http://broker..", false),
+            ("http://.", false),
+            ("http://broker:0", false),
+            ("http://broker:65536", false),
+            ("http://broker:+80", false),
+            ("http://broker:", false),
+            ("http://broker:80:80", false),
+            ("http://:80", false),
+            ("http://broker..example", false),
+            ("http://-broker", false),
+            ("http://broker_x", false),
+            ("http://1.2.3", false),
+            ("http://100.64.0.256", false),
+            ("http://[fd7a::1", false),
+            ("http://[zz]:80", false),
+            ("http://[::1]80", false),
+        ] {
+            let text = format!("url = {url:?}\nregister = \"plain\"");
+            match Endpoint::from_config(&inference(&text)) {
+                Ok(_) => assert!(taken, "{url} was taken"),
+                Err(err) => {
+                    assert!(!taken, "{url}: {err:#}");
+                    assert!(
+                        format!("{err:#}").contains("has no valid host and port"),
+                        "{url}: {err:#}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Only a name is replaced, only by a tailnet IPv4 address, and the
+    /// scheme, port and path stay.
+    #[test]
+    fn addresses_for_names() {
+        for (url, address, want) in [
+            (
+                "http://broker:18080/v1/",
+                "100.100.1.2",
+                Ok("http://100.100.1.2:18080/v1"),
+            ),
+            (
+                "http://broker.tail-1234.ts.net.",
+                "100.64.0.1",
+                Ok("http://100.64.0.1"),
+            ),
+            (
+                "https://broker.tail-1234.ts.net",
+                "100.64.0.1",
+                Err("is https"),
+            ),
+            (
+                "http://broker",
+                "100.127.255.255",
+                Ok("http://100.127.255.255"),
+            ),
+            (
+                "http://100.64.0.1:18080",
+                "100.64.0.2",
+                Err("gives an address, not a name"),
+            ),
+            (
+                "http://[fd7a:115c:a1e0::1]:18080",
+                "100.64.0.2",
+                Err("gives an address, not a name"),
+            ),
+            ("http://broker", "100.128.0.1", Err("not a tailnet IPv4")),
+            ("http://broker", "10.0.0.1", Err("not a tailnet IPv4")),
+            (
+                "http://broker",
+                "fd7a:115c:a1e0::1",
+                Err("not a tailnet IPv4"),
+            ),
+            ("http://broker", "100.64.0.1:80", Err("not a tailnet IPv4")),
+            ("http://broker", "other-broker", Err("not a tailnet IPv4")),
+            ("http://broker", "", Err("not a tailnet IPv4")),
+            (
+                "http://user@broker",
+                "100.64.0.1",
+                Err("without credentials"),
+            ),
+        ] {
+            match (with_address(url, address), want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{url}"),
+                (Err(err), Err(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{url}: {err:#}");
+                }
+                (got, want) => panic!("{url} {address}: {got:?}, not {want:?}"),
+            }
         }
     }
 

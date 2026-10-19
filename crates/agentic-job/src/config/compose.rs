@@ -29,8 +29,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use toml::{Table, Value};
 
-use super::Config;
+use super::{Config, Register};
 use crate::exit::Exit;
+use crate::run::inference::with_address;
 use crate::sandbox::network::Direct;
 
 #[derive(Debug, clap::Args)]
@@ -62,6 +63,11 @@ pub struct Args {
     /// `setup.repo-packages`
     #[arg(long, value_name = "OWNER/NAME")]
     pub repo: Option<String>,
+    /// Replace the host of `inference.url`, a name, with this tailnet
+    /// IPv4 address: for an agent job whose step on the tailnet resolved
+    /// the name
+    #[arg(long, value_name = "ADDRESS")]
+    pub inference_address: Option<String>,
 }
 
 /// The key of `setup.repo-packages` for a repository that has none.
@@ -221,6 +227,35 @@ fn set(table: &mut Table, path: &[String], value: Value) -> Result<()> {
     Ok(())
 }
 
+/// `--inference-address`: the broker's URL with ADDRESS for its name
+/// ([`with_address`]). Only under
+/// `github-oidc`, the broker that admits a run by the job's identity, not
+/// by a token or key that `url` alone would have to be trusted with; and
+/// not with `anthropic-url` or `openai-url`, which would keep the name.
+fn inference_address(table: &mut Table, address: &str) -> Result<()> {
+    let inference = table
+        .get_mut("inference")
+        .and_then(Value::as_table_mut)
+        .context("--inference-address: the configuration has no [inference]")?;
+    let get = |key: &str| inference.get(key).and_then(Value::as_str);
+    ensure!(
+        get("register") == Some(Register::GithubOidc.as_str()),
+        "--inference-address needs inference.register = \"github-oidc\", not {:?}",
+        get("register").unwrap_or_default()
+    );
+    for key in ["anthropic-url", "openai-url"] {
+        ensure!(
+            !inference.contains_key(key),
+            "--inference-address: inference.{key} is set, and would not be replaced"
+        );
+    }
+    let url = get("url")
+        .context("--inference-address: inference.url is not set")?
+        .to_owned();
+    inference.insert("url".into(), Value::String(with_address(&url, address)?));
+    Ok(())
+}
+
 /// The configuration of ARGS as TOML, checked.
 fn compose(args: &Args) -> Result<String> {
     let mut table = match &args.from {
@@ -246,6 +281,10 @@ fn compose(args: &Args) -> Result<String> {
         }
     }
     repo_packages(&mut table, args.repo.as_deref())?;
+    // Before `egress.direct` is defaulted, which then opens the address.
+    if let Some(address) = &args.inference_address {
+        inference_address(&mut table, address)?;
+    }
     if args.no_script
         && let Some(setup) = table.get_mut("setup").and_then(Value::as_table_mut)
     {
@@ -318,6 +357,7 @@ mod tests {
             host: false,
             no_script: false,
             repo: None,
+            inference_address: None,
         }
     }
 
@@ -402,6 +442,74 @@ mod tests {
             &[],
         ));
         assert!(config.egress.direct.is_empty());
+    }
+
+    /// The agent job's `--inference-address` gives a named `github-oidc`
+    /// broker its address, which `egress.direct` then opens; anything
+    /// else is refused.
+    #[test]
+    fn an_inference_address_for_a_named_broker() {
+        const OIDC: &[&str] = &[
+            "agent.name=fake",
+            "inference.url=http://broker:18080",
+            "inference.register=github-oidc",
+            "inference.audience=a",
+        ];
+        let with = |string: &[&str], address: &str| {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            // As the policy job wrote it.
+            let policy = compose(&args(None, string, LIMITS, &[])).unwrap();
+            file.write_all(policy.as_bytes()).unwrap();
+            compose(&Args {
+                inference_address: Some(address.to_owned()),
+                ..args(file.path().to_str(), &[], &[], &[])
+            })
+        };
+        let config = Config::parse(&with(OIDC, "100.100.1.2").unwrap()).unwrap();
+        assert_eq!(config.inference.url, "http://100.100.1.2:18080");
+        assert_eq!(config.egress.direct, ["http://100.100.1.2:18080"]);
+        // The policy's own file, with no address yet, opens nothing.
+        let policy = composed(&args(None, OIDC, LIMITS, &[]));
+        assert!(policy.egress.direct.is_empty());
+
+        let with_key = |key: &'static str| [OIDC, &[key]].concat();
+        let cases = [
+            (
+                vec![
+                    "agent.name=fake",
+                    "inference.url=http://broker:18080",
+                    "inference.register=plain",
+                ],
+                "100.64.0.1",
+                "needs inference.register = \"github-oidc\", not \"plain\"",
+            ),
+            (
+                vec![
+                    "agent.name=fake",
+                    "inference.url=http://100.64.0.1:18080",
+                    "inference.register=github-oidc",
+                    "inference.audience=a",
+                ],
+                "100.64.0.2",
+                "gives an address, not a name",
+            ),
+            (OIDC.to_vec(), "192.0.2.1", "not a tailnet IPv4 address"),
+            (
+                with_key("inference.anthropic-url=http://broker:1"),
+                "100.64.0.1",
+                "inference.anthropic-url is set",
+            ),
+            (
+                with_key("inference.openai-url=http://broker:1/v1"),
+                "100.64.0.1",
+                "inference.openai-url is set",
+            ),
+            (vec!["agent.name=fake"], "100.64.0.1", "has no [inference]"),
+        ];
+        for (string, address, want) in cases {
+            let err = with(&string, address).expect_err(want);
+            assert!(format!("{err:#}").contains(want), "{string:?}: {err:#}");
+        }
     }
 
     #[test]

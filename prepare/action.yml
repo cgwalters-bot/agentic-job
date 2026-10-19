@@ -12,6 +12,12 @@ inputs:
   job-dir:
     description: Runner-private working directory, outside the sandbox user's home
     default: ${{ github.workspace }}/.agentic-job
+  inference-address:
+    description: >-
+      For a `github-oidc` broker the policy call named by a name only the tailnet resolves: the
+      tailnet IPv4 address that name has, as an earlier step of this job on the tailnet found it.
+      It replaces only the host of `inference.url`; empty keeps the policy call's URL
+    default: ""
 outputs:
   job-dir:
     description: Prepared runner-private working directory
@@ -76,3 +82,21 @@ runs:
         item=$(jq -er .id "$JOB_DIR/run.json")
         jq -n --arg item "$item" --arg url "$RUN_URL" --argjson id "$GITHUB_RUN_ID" --argjson attempt "$GITHUB_RUN_ATTEMPT" \
           --argjson cores "$(nproc)" '{run_id: $id, run_attempt: $attempt, run_url: $url, item: $item, cores: $cores}' > "$JOB_DIR/meta.json"
+    # The broker's address for its name, which the policy job, off the
+    # tailnet, could not know. Every later reader of config.toml, the
+    # host's rules and `run` included, uses it; the run's summary records
+    # it, beside the policy's URL in the policy upload the check job has.
+    # `agentic-job config` refuses an address off the tailnet, a URL that
+    # has an address already, and any registration but `github-oidc`.
+    # Joined by `=`, the input is a value even if it begins with `-`.
+    - name: The inference broker's address
+      if: ${{ inputs.inference-address != '' }}
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        ADDRESS: ${{ inputs.inference-address }}
+      run: |
+        agentic-job config --from "$JOB_DIR/config.toml" --inference-address="$ADDRESS" > "$JOB_DIR/config.toml.new"
+        mv "$JOB_DIR/config.toml.new" "$JOB_DIR/config.toml"
+        jq --arg address "$ADDRESS" '. + {inference_address: $address}' "$JOB_DIR/meta.json" > "$JOB_DIR/meta.json.new"
+        mv "$JOB_DIR/meta.json.new" "$JOB_DIR/meta.json"

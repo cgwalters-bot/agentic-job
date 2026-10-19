@@ -167,6 +167,8 @@ mod tests {
             "limits.budget=500",
             "--list",
             "setup.packages=just jq",
+            // As prepare passes its input: a value, whatever it begins with.
+            "--inference-address=--help",
         ]);
         cli.unwrap();
     }

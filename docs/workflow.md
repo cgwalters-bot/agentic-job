@@ -1054,6 +1054,24 @@ added automatically. The agent job refuses an address on the tailnet
 that is not listed there before it sets the sandbox up, since the agent
 could not reach it.
 
+A `github-oidc` broker can instead be named by its tailnet name, which
+the policy job, off the tailnet, records as given. An agent job of your
+own whose network step resolved that name, before `prepare`, passes the
+address to `prepare` as `inference-address`: a tailnet IPv4 address
+(100.64.0.0/10) that replaces only the URL's host, keeping its scheme,
+port and path, and that `egress.direct` then opens as above. `prepare`
+refuses it for another registration mode, for a URL that already has an
+address, for an `https` URL, whose certificate would not name the
+address, and alongside `anthropic-url` or `openai-url`. The run's
+`summary.json` records it as `inference_address`, beside the policy's
+URL in the policy upload. The run registers at, and sends its token
+to, whichever tailnet node has that address, and nothing but the range
+binds it to the name: take it only from your own step that resolved the
+name, never from the item's or event's text. Without it, a name the runner cannot resolve
+fails the reachability check before setup, naming the host.
+`agentic-job.yml`'s own agent and register jobs take no address: with
+them, the URL has to be one their runner reaches.
+
 What the operator of a praxis-credential-broker has to turn on for a
 run of this workflow to be admitted is written up, with what each
 setting gives up, in

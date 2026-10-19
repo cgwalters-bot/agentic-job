@@ -46,7 +46,7 @@ const METADATA_V6_ADDRESS: &str = "fd00:ec2::254";
 /// both: the interface because with accepted subnet routes other
 /// addresses go there too, and the ranges because the node's own tailnet
 /// address is reached over loopback.
-const TAILNET_V4: &str = "100.64.0.0/10";
+pub const TAILNET_V4: &str = "100.64.0.0/10";
 
 const TAILNET_V6: &str = "fd7a:115c:a1e0::/48";
 
@@ -130,10 +130,7 @@ impl Direct {
         let address = host
             .parse::<Ipv4Addr>()
             .ok()
-            .filter(|address| {
-                let [first, second, ..] = address.octets();
-                first == TAILNET_FIRST_OCTET && TAILNET_SECOND_OCTET.contains(&second)
-            })
+            .filter(|&address| tailnet_v4(address))
             .with_context(|| {
                 format!("egress.direct: '{host}' is not a tailnet IPv4 address ({TAILNET_V4})")
             })?;
@@ -149,13 +146,16 @@ impl Direct {
     }
 }
 
+/// Whether ADDRESS is in [`TAILNET_V4`].
+pub fn tailnet_v4(address: Ipv4Addr) -> bool {
+    let [first, second, ..] = address.octets();
+    first == TAILNET_FIRST_OCTET && TAILNET_SECOND_OCTET.contains(&second)
+}
+
 /// Whether `address`, a name server of resolv.conf, is on the tailnet.
 fn on_tailnet(address: &str) -> bool {
     match address.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(v4)) => {
-            let [first, second, ..] = v4.octets();
-            first == TAILNET_FIRST_OCTET && TAILNET_SECOND_OCTET.contains(&second)
-        }
+        Ok(std::net::IpAddr::V4(v4)) => tailnet_v4(v4),
         Ok(std::net::IpAddr::V6(v6)) => v6.segments()[..3] == TAILNET_V6_PREFIX,
         Err(_) => false,
     }

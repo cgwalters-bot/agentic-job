@@ -5,14 +5,14 @@
 //! identity token or model credential. A configuration without a proxy,
 //! a deterministic job's, and the scripted agent are not checked.
 
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use hyper::Uri;
 
-use crate::config::Config;
+use crate::config::{Config, Register};
 
 /// For each address the proxy's name resolves to.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,10 +72,21 @@ pub fn check(config: &Config, connect: impl FnOnce(&str, u16) -> Result<()>) -> 
     let Some((host, port)) = address(config)? else {
         return Ok(());
     };
+    // A broker's tailnet name, which a runner that joined without the
+    // tailnet's DNS cannot resolve, is given its address by the job.
+    let oidc = config.inference.register == Some(Register::GithubOidc);
+    let named = if oidc && host.parse::<IpAddr>().is_err() {
+        format!(
+            "; for {host}, a name this runner may not resolve, pass prepare its address as \
+             inference-address"
+        )
+    } else {
+        String::new()
+    };
     connect(&host, port).with_context(|| {
         format!(
             "control failed: the runner cannot reach the inference proxy at {}: join its \
-             network in a step before secure-host, or use a runner on it",
+             network in a step before secure-host, or use a runner on it{named}",
             config.inference.url
         )
     })
@@ -170,7 +181,23 @@ mod tests {
             ),
             "{err:#}"
         );
+        assert!(!format!("{err:#}").contains("inference-address"), "{err:#}");
         assert_eq!(*calls.borrow(), [("127.0.0.1".to_owned(), 8080)]);
+        // A broker's name the runner could not reach is named, with the
+        // way out; a provider's name has none.
+        let mut broker = config("claude", "http://broker:8080");
+        broker.inference.register = Some(Register::GithubOidc);
+        let err = check(&broker, failing).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(
+                "for broker, a name this runner may not resolve, pass prepare its address as \
+                 inference-address"
+            ),
+            "{err:#}"
+        );
+        broker.inference.register = Some(Register::ApiKey);
+        let err = check(&broker, failing).unwrap_err();
+        assert!(!format!("{err:#}").contains("inference-address"), "{err:#}");
         check(&config("fake", "http://127.0.0.1:8080"), |_: &str, _| {
             panic!("connected")
         })

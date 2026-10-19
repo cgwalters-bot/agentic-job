@@ -35,6 +35,10 @@ const MAX_SLOWEST: usize = 10;
 /// The fields `--meta` gives: on GitHub the run's id, attempt and URL,
 /// the caller's own name for the run, and the size of its machine.
 pub const META_FIELDS: &[&str] = &["run_id", "run_attempt", "run_url", "item", "cores"];
+/// The address prepare's `inference-address` gave the broker's name, in
+/// `--meta` and the summary only where it was given: the check job has
+/// the policy's URL, and sees here the host the run used in its place.
+pub const META_INFERENCE_ADDRESS: &str = "inference_address";
 
 /// What `run` measured or was configured with.
 #[derive(Debug, Clone)]
@@ -248,6 +252,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert("schema".into(), json!(SCHEMA));
     for key in META_FIELDS {
         s.insert((*key).into(), measured.meta[*key].clone());
+    }
+    if let Some(address) = measured.meta.get(META_INFERENCE_ADDRESS) {
+        s.insert(META_INFERENCE_ADDRESS.into(), address.clone());
     }
     s.insert("repo".into(), json!(measured.repo));
     s.insert("context".into(), json!(measured.context));
@@ -1120,7 +1127,19 @@ Redacted 1 string(s).
             assert!(s.get("not_copied").is_none());
             // Only a run with a child agent says what of it was taken.
             assert!(s.get("child_logs").is_none());
+            // Only a run whose broker was given an address says which.
+            assert!(s.get(META_INFERENCE_ADDRESS).is_none());
         }
+        let mut given = measured.clone();
+        given.meta[META_INFERENCE_ADDRESS] = json!("100.64.0.1");
+        let s = summarize(&Inputs {
+            records: &initialize(),
+            result: None,
+            measured: &given,
+            outcome: &Value::Null,
+            usage: None,
+        });
+        assert_eq!(s[META_INFERENCE_ADDRESS], "100.64.0.1");
     }
 
     /// A reminder, and an agent's log that was not there, are said.
