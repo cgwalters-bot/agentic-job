@@ -27,7 +27,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `files.rs`, `redact.rs` | Bounded file reads and secret redaction |
 | `sandbox/setup.rs` | Host preparation |
 | `sandbox/check/` | Host, runner-lock and network probes |
-| `sandbox/enter.rs`, `sandbox/exec.rs` | Entry as the sandbox user |
+| `sandbox/enter.rs` | Entry as the sandbox user |
 | `sandbox/helper.rs`, `sandbox/root.rs` | Fixed privileged operations and their callers |
 | `sandbox/host.rs`, `sandbox/local.rs` | Host users, programs and reachable listeners |
 | `session/` | ACP transport, permissions, limits, transcript and digest |
