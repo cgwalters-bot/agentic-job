@@ -75,6 +75,19 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
             );
         }
     }
+    if !rules.protected_paths.is_empty() {
+        let globs: Vec<String> = rules
+            .protected_paths
+            .iter()
+            .map(|glob| format!("`{glob}`"))
+            .collect();
+        let _ = write!(
+            text,
+            "a path matching one of these globs (`*` within one directory, `**` across \
+             directories): {}; ",
+            globs.join(", ")
+        );
+    }
     let _ = write!(
         text,
         "{ALWAYS_PROTECTED}. So is a change to more than {} files, and one that \
@@ -625,6 +638,14 @@ mod tests {
                 assert!(!brief.contains(unwanted), "{unwanted}\n{brief}");
             }
         }
+        // The bounds' globs, only where there are some.
+        const GLOBS: &str = "a path matching one of these globs";
+        assert!(!text(&policy(Kind::Branch, rules(&[], true))).contains(GLOBS));
+        let mut with_globs = rules(&[], true);
+        with_globs["create_pull_request"]["protected_paths"] = json!(["raw/**"]);
+        let brief = text(&policy(Kind::Branch, with_globs));
+        assert!(brief.contains(&format!("{GLOBS} ")), "{brief}");
+        assert!(brief.contains("`raw/**`;"), "{brief}");
         // A run that proposes no change has no such rules to be told.
         let analysis = text(&policy(Kind::Analysis, rules(&["DESIGN.md"], true)));
         assert!(!analysis.contains("refused whole"), "{analysis}");

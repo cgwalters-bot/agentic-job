@@ -272,7 +272,7 @@ for (const carrier of ['create_pull_request', 'push_to_pull_request_branch']) {
       const root = mkdtempSync(join(homedir(), 'apply-test-'));
       try {
         const original = { max: 1, protected_files: ['CODEOWNERS'], protected_files_policy: 'blocked',
-          protect_top_level_dot_folders: true, unprotected_dot_folders: folders };
+          protect_top_level_dot_folders: true, unprotected_dot_folders: folders, protected_paths: ['raw/**'] };
         writeFileSync(join(root, 'config.json'), JSON.stringify({ [carrier]: original }));
         const name = "Write the handlers' configuration";
         const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
@@ -283,6 +283,8 @@ for (const carrier of ['create_pull_request', 'push_to_pull_request_branch']) {
         assert.equal(result.status, 0, result.stderr);
         const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'))[carrier];
         assert.ok(!Object.hasOwn(config, 'unprotected_dot_folders'));
+        // Check's own globs, which gh-aw's handler has no setting for.
+        assert.ok(!Object.hasOwn(config, 'protected_paths'));
         // gh-aw's guard stays on for every folder the policy does not exempt.
         assert.equal(config.protect_top_level_dot_folders, true);
         // Both carriers use the same exact-repository exemption, only `.github`.

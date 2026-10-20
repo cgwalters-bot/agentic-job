@@ -726,6 +726,25 @@ files = ["CONTRIBUTING.md"]
 dot_folders = [".github"] # optional, and only ".github"; see the protections below
 ```
 
+A bounds file can also protect more paths, in every repository it admits,
+with a top-level `protected` list of globs: paths a run must never change,
+such as a wiki's raw source files. They match as a push's `branches` do
+(`*` within one directory, `**` across them, case counting) against the
+path from the repository root, so `raw/**` covers everything under `raw/`
+and not `wiki/raw/`, and `**/*.pem` misses a `.pem` file at the root
+(list `*.pem` too). A glob only ever adds protection; it cannot take
+anything off the list above. Check refuses a patch touching a matching path,
+naming the path and the glob, and the brief tells the agent the globs.
+With organization bounds, both files' globs apply. A file may list at most
+64 globs of at most 256 bytes each, of plain relative components (no
+leading or trailing `/`, `.` or `..`); `?`, `[...]` and `{a,b}` are refused
+rather than taken literally. The key is top-level, so it goes before the
+file's first table:
+
+```toml
+protected = ["raw/**"]
+```
+
 Who the hand-back's commit is by is otherwise the agent machine's to say
 (`[commit] author`), so a compromised one could pass a commit off as a
 maintainer's. A bounds file can pin it, as `Name <address>` in plain ASCII:

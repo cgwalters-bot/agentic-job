@@ -197,6 +197,12 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
 const MAX_PULL_REQUESTS: u32 = 1;
 const MAX_REPLACEMENT_COMMITS: u32 = 50;
 
+/// How many globs the bounds' `protected` may list, and how long each
+/// may be: room for a repository's own source trees, none for a list
+/// that makes check compile a pattern per path for long.
+const MAX_PROTECTED_GLOBS: usize = 64;
+const MAX_PROTECTED_GLOB_CHARS: usize = 256;
+
 /// A clone URL over plain HTTP, admitted only for a host the bounds'
 /// `allow_http` names.
 pub const PLAIN_HTTP_PREFIX: &str = "http://";
@@ -508,6 +514,13 @@ pub struct Bounds {
     /// Files exempt from protection.
     #[serde(default)]
     pub unprotected_files: Unprotected,
+    /// Globs of paths a patch may never touch, in every repository the
+    /// bounds admit, on top of what is protected anyway: files the
+    /// repository's owner keeps as they are, such as a wiki's raw sources,
+    /// which a run asked to work from them could otherwise rewrite. They
+    /// match as `branches` do, case counting; see [`protecting_glob`].
+    #[serde(default)]
+    pub protected: Vec<String>,
     /// Which events may start a run, and who may start one
     /// (`agentic-job event`). Absent, none may.
     #[serde(default)]
@@ -982,6 +995,11 @@ pub struct PullRequest {
     /// Our selective exemptions; apply translates them for gh-aw's handler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprotected_dot_folders: Vec<String>,
+    /// The bounds' `protected` globs. Check and apply's own reading of
+    /// the patch refuse a path they match; apply takes them out of gh-aw's
+    /// handler configuration, which has no such setting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_paths: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
     /// What gh-aw's handler is given; apply sets it false only for
     /// complete work under [`OutputLimit::ready_when_complete`].
@@ -1021,6 +1039,9 @@ pub struct Push {
     pub protect_top_level_dot_folders: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprotected_dot_folders: Vec<String>,
+    /// As [`PullRequest::protected_paths`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_paths: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
     /// The largest patch, in KB.
     pub max_patch_size: u64,
@@ -1035,6 +1056,8 @@ pub struct PatchRules<'a> {
     /// Whether everything under a top-level dot-folder is protected too.
     pub protect_top_level_dot_folders: bool,
     pub unprotected_dot_folders: &'a [String],
+    /// Globs of paths a patch may not touch, from the bounds.
+    pub protected_paths: &'a [String],
     pub max_patch_files: u32,
     /// [`Policy::commit_author`], which `check` sets: the outputs' own
     /// configuration does not carry it.
@@ -1047,6 +1070,7 @@ impl PullRequest {
             protected_files: &self.protected_files,
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
             unprotected_dot_folders: &self.unprotected_dot_folders,
+            protected_paths: &self.protected_paths,
             max_patch_files: self.max_patch_files,
             commit_author: None,
         }
@@ -1059,6 +1083,7 @@ impl Push {
             protected_files: &self.protected_files,
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
             unprotected_dot_folders: &self.unprotected_dot_folders,
+            protected_paths: &self.protected_paths,
             max_patch_files: self.max_patch_files,
             commit_author: None,
         }
@@ -1201,6 +1226,13 @@ impl Policy {
                 &pr.unprotected_dot_folders,
                 "create_pull_request.unprotected_dot_folders",
             )?;
+            validate_protected(&pr.protected_paths, "create_pull_request.protected_paths")?;
+        }
+        if let Some(push) = &self.safe_outputs.push_to_pull_request_branch {
+            validate_protected(
+                &push.protected_paths,
+                "push_to_pull_request_branch.protected_paths",
+            )?;
         }
         for (output, limit) in &self.safe_outputs.others {
             limit.validate(output)?;
@@ -1279,6 +1311,49 @@ fn glob_cased(pattern: &str, cased: bool) -> Result<Regex, regex::Error> {
 /// makes one dash of a run of them), or it is no branch name at all.
 fn push_branch_ambiguous(branch: &str) -> bool {
     branch.contains("--") || branch.contains("..")
+}
+
+/// The first of the bounds' `protected` globs that `path` matches, as a
+/// push's `branches` match a branch: case counts, since git keeps it in a
+/// path, and `Raw/x` is a new file beside `raw/`, not a change to it. A
+/// glob that does not compile was refused in validation; here it protects
+/// everything rather than nothing.
+pub fn protecting_glob<'g>(globs: &'g [String], path: &str) -> Option<&'g str> {
+    globs
+        .iter()
+        .find(|pattern| glob_cased(pattern, true).map_or(true, |re| re.is_match(path)))
+        .map(String::as_str)
+}
+
+/// The bounds' `protected` globs, wherever they are read. A glob that can
+/// match no path a patch names is the caller's mistake, and would protect
+/// nothing while seeming to: check admits only plain relative paths, so
+/// one with an empty, `.` or `..` component (absolute, `./raw/**`, `raw/`)
+/// never matches. Nor would `?`, `[...]` or `{a,b}`, which other glob
+/// syntaxes give a meaning and this one takes for themselves.
+fn validate_protected(globs: &[String], field: &str) -> Result<()> {
+    ensure!(
+        globs.len() <= MAX_PROTECTED_GLOBS,
+        "{field} lists {} globs, over {MAX_PROTECTED_GLOBS}",
+        globs.len()
+    );
+    for pattern in globs {
+        ensure!(
+            pattern.len() <= MAX_PROTECTED_GLOB_CHARS,
+            "{field}: {pattern:?} is over {MAX_PROTECTED_GLOB_CHARS} bytes"
+        );
+        ensure!(
+            pattern
+                .split('/')
+                .all(|part| !matches!(part, "" | "." | ".."))
+                && !pattern.contains(['?', '[', ']', '{', '}'])
+                && !pattern.chars().any(char::is_control),
+            "{field}: {pattern:?} is not a relative path glob of plain components, \
+             with only `*` and `**` special"
+        );
+        glob_cased(pattern, true).with_context(|| format!("{field}: the glob {pattern:?}"))?;
+    }
+    Ok(())
 }
 
 fn glob_matches(patterns: &[String], value: &str) -> bool {
@@ -1368,6 +1443,7 @@ impl Bounds {
             &self.unprotected_files.dot_folders,
             "unprotected_files.dot_folders",
         )?;
+        validate_protected(&self.protected, "protected")?;
         ensure!(
             self.max_patch_files >= 1,
             "`max_patch_files` must be at least 1"
@@ -1753,6 +1829,7 @@ impl Bounds {
                 protected_files: self.protected_files(repo),
                 protect_top_level_dot_folders: true,
                 unprotected_dot_folders: self.dot_folders(repo),
+                protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 draft: true,
                 ready_when_complete: ready(CREATE_PULL_REQUEST),
@@ -1772,6 +1849,7 @@ impl Bounds {
                 protected_files: self.protected_files(repo),
                 protect_top_level_dot_folders: true,
                 unprotected_dot_folders: self.dot_folders(repo),
+                protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 max_patch_size: self.max_patch_bytes / KB,
                 max_patch_files: self.max_patch_files,
@@ -1925,6 +2003,23 @@ pub fn run(args: &Args) -> Result<Exit> {
             Ok(Exit::Failure)
         }
     }
+}
+
+/// Both files' `protected` globs: each only adds protection. Their union
+/// is held to the one file's limit, which `check` holds the policy to.
+fn union(mut own: Vec<String>, other: Vec<String>) -> Result<Vec<String>, Vec<String>> {
+    for pattern in other {
+        if !own.contains(&pattern) {
+            own.push(pattern);
+        }
+    }
+    if own.len() > MAX_PROTECTED_GLOBS {
+        return Err(vec![format!(
+            "the bounds files protect {} globs together, over {MAX_PROTECTED_GLOBS}",
+            own.len()
+        )]);
+    }
+    Ok(own)
 }
 
 /// Intersect compiled policies rather than trying to intersect glob patterns.
@@ -2085,6 +2180,7 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
                     pr.protected_files.push(name);
                 }
             }
+            pr.protected_paths = union(pr.protected_paths, bound.protected_paths)?;
             Some(pr)
         }
         _ => None,
@@ -2115,6 +2211,7 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
                     push.protected_files.push(name);
                 }
             }
+            push.protected_paths = union(push.protected_paths, bound.protected_paths)?;
             Some(push)
         }
         _ => None,
@@ -4595,6 +4692,105 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     }
 
     #[test]
+    fn protected_globs_match_as_branches_do() {
+        let globs = ["raw/**".to_owned(), "docs/*.lock".to_owned()];
+        for (path, want) in [
+            ("raw/a.md", Some("raw/**")),
+            ("raw/a/b/c.md", Some("raw/**")),
+            ("docs/x.lock", Some("docs/*.lock")),
+            // Case counts: a new file beside `raw/`, not a change to it.
+            ("Raw/a.md", None),
+            ("raw", None),
+            ("rawx/a.md", None),
+            ("wiki/raw/a.md", None),
+            ("docs/a/x.lock", None),
+        ] {
+            assert_eq!(protecting_glob(&globs, path), want, "{path}");
+        }
+        // `**/` is at least one directory, as in `branches`: the root's own
+        // files need a glob of their own.
+        let globs = ["**/*.pem".to_owned()];
+        for (path, want) in [
+            ("a/key.pem", Some("**/*.pem")),
+            ("a/b/key.pem", Some("**/*.pem")),
+            ("key.pem", None),
+        ] {
+            assert_eq!(protecting_glob(&globs, path), want, "{path}");
+        }
+        assert_eq!(protecting_glob(&[], "raw/a.md"), None);
+    }
+
+    #[test]
+    fn protected_globs_compile_union_and_load() {
+        let mut local = bounds();
+        local.protected = vec!["raw/**".into()];
+        local.validate().unwrap();
+        let mut org = bounds();
+        org.protected = vec!["raw/**".into(), "sources/*".into()];
+        let own = local.compile(&request()).unwrap();
+        let pr = own.safe_outputs.create_pull_request.as_ref().unwrap();
+        assert_eq!(pr.protected_paths, ["raw/**"]);
+        assert_eq!(pr.rules().protected_paths, ["raw/**"]);
+        // Each file only adds protection, in either order; none takes it away.
+        for (left, right) in [
+            (own.clone(), org.compile(&request()).unwrap()),
+            (org.compile(&request()).unwrap(), own.clone()),
+        ] {
+            let mut got = intersect(left, right)
+                .unwrap()
+                .safe_outputs
+                .create_pull_request
+                .unwrap()
+                .protected_paths;
+            got.sort();
+            assert_eq!(got, ["raw/**", "sources/*"]);
+        }
+        assert_eq!(
+            intersect(own.clone(), self::policy())
+                .unwrap()
+                .safe_outputs
+                .create_pull_request
+                .unwrap()
+                .protected_paths,
+            ["raw/**"]
+        );
+        let mut push = push_bounds();
+        push.protected = vec!["raw/**".into()];
+        let push = push.compile(&push_request()).unwrap();
+        let push = push.safe_outputs.push_to_pull_request_branch.unwrap();
+        assert_eq!(push.rules().protected_paths, ["raw/**"]);
+
+        // Off by default, and absent from the policy then.
+        let plain = serde_json::to_value(self::policy()).unwrap();
+        assert!(plain["safe_outputs"]["create_pull_request"]["protected_paths"].is_null());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, serde_json::to_vec(&own).unwrap()).unwrap();
+        assert_eq!(Policy::load(&path).unwrap(), own);
+        let mut bad = own;
+        bad.safe_outputs
+            .create_pull_request
+            .as_mut()
+            .unwrap()
+            .protected_paths = vec!["/raw/**".into()];
+        std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(
+            format!("{:#}", Policy::load(&path).unwrap_err())
+                .contains("create_pull_request.protected_paths: \"/raw/**\" is not a relative")
+        );
+
+        let half: Vec<String> = (0..MAX_PROTECTED_GLOBS)
+            .map(|i| format!("a{i}/**"))
+            .collect();
+        let other: Vec<String> = (0..MAX_PROTECTED_GLOBS)
+            .map(|i| format!("b{i}/**"))
+            .collect();
+        assert!(union(half.clone(), half.clone()).is_ok());
+        assert!(union(half, other).unwrap_err()[0].contains("over 64"));
+    }
+
+    #[test]
     fn bad_bounds_files() {
         let with = |from: &str, to: &str| BOUNDS.replace(from, to);
         let cases = [
@@ -4754,6 +4950,67 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 "an upper-case memory extension",
                 format!("{BOUNDS}\n[memory]\nextensions = [\"MD\"]\n"),
                 "not \"MD\"",
+            ),
+            (
+                "an empty protected glob",
+                format!("protected = [\"\"]\n{BOUNDS}"),
+                "protected: \"\" is not a relative path glob",
+            ),
+            (
+                "an absolute protected glob",
+                format!("protected = [\"/raw/**\"]\n{BOUNDS}"),
+                "protected: \"/raw/**\" is not a relative path glob",
+            ),
+            (
+                "a protected glob from the current directory",
+                format!("protected = [\"./raw/**\"]\n{BOUNDS}"),
+                "\"./raw/**\" is not a relative path glob",
+            ),
+            (
+                "a protected glob through a parent",
+                format!("protected = [\"x/../raw/**\"]\n{BOUNDS}"),
+                "\"x/../raw/**\" is not a relative path glob",
+            ),
+            (
+                "a protected directory with a trailing slash",
+                format!("protected = [\"raw/\"]\n{BOUNDS}"),
+                "\"raw/\" is not a relative path glob",
+            ),
+            (
+                "a doubled slash in a protected glob",
+                format!("protected = [\"raw//**\"]\n{BOUNDS}"),
+                "\"raw//**\" is not a relative path glob",
+            ),
+            (
+                "a brace set, which would be taken for itself",
+                format!("protected = [\"*.{{pem,key}}\"]\n{BOUNDS}"),
+                "with only `*` and `**` special",
+            ),
+            (
+                "a question mark, which would be taken for itself",
+                format!("protected = [\"secret?.txt\"]\n{BOUNDS}"),
+                "with only `*` and `**` special",
+            ),
+            (
+                "a character class, which would be taken for itself",
+                format!("protected = [\"raw/[ab]/*\"]\n{BOUNDS}"),
+                "with only `*` and `**` special",
+            ),
+            (
+                "a protected glob too long",
+                format!("protected = [\"{}\"]\n{BOUNDS}", "a".repeat(257)),
+                "is over 256 bytes",
+            ),
+            (
+                "too many protected globs",
+                format!(
+                    "protected = [{}]\n{BOUNDS}",
+                    (0..65)
+                        .map(|i| format!("\"a{i}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "protected lists 65 globs, over 64",
             ),
             (
                 "a memory extension twice",

@@ -626,6 +626,7 @@ fn rules() -> PullRequest {
             .collect(),
         protect_top_level_dot_folders: true,
         unprotected_dot_folders: Vec::new(),
+        protected_paths: Vec::new(),
         protected_files_policy: ProtectedFilesPolicy::Blocked,
         draft: true,
         ready_when_complete: false,

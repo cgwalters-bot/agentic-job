@@ -459,6 +459,8 @@ jobs:
         # bounds' `fields` where the pinned handlers honor them; they do
         # not for an issue's title and status, or a request's `draft` and
         # `update_branch`, so check refuses every field the bounds leave out.
+        # The bounds' `protected_paths` globs are check's alone (gh-aw has no
+        # such setting), so they are taken out like `ready_when_complete`.
         # A pull request opens ready only for complete work, decided above
         # (unset, as in a test of this step alone, means a draft);
         # gh-aw's handler takes `draft` from here, never from the request.
@@ -504,8 +506,8 @@ jobs:
           jq --arg ready "${READY:-}" --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
-            | (select(has("create_pull_request")).create_pull_request) |= (.draft = ($ready != "true") | del(.ready_when_complete))
-            | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |= del(.ready_when_complete)
+            | (select(has("create_pull_request")).create_pull_request) |= (.draft = ($ready != "true") | del(.ready_when_complete, .protected_paths))
+            | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |= del(.ready_when_complete, .protected_paths)
             | (select(has("create_pull_request")).create_pull_request) |=
                 ((.unprotected_dot_folders // [] | map(select(. == ".github"))) as $excludes | del(.unprotected_dot_folders)
                  | if $excludes != [] then .protected_dot_folder_excludes = $excludes else . end)

@@ -27,7 +27,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::policy::{EXEMPTABLE_DOT_FOLDER, PatchRules};
+use crate::policy::{EXEMPTABLE_DOT_FOLDER, PatchRules, protecting_glob};
 
 /// The header `run` adds, naming the commit the patch is against (gh-aw's
 /// name for it).
@@ -690,6 +690,11 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
     let protected = protected(&files, rules);
     if !protected.is_empty() {
         problems.push(format!("protected files: {}", protected.join(", ")));
+    }
+    for path in &files {
+        if let Some(glob) = protecting_glob(rules.protected_paths, path) {
+            problems.push(format!("{path:?}: protected by the bounds' glob {glob:?}"));
+        }
     }
 
     // Each once, in the order found.
@@ -1386,6 +1391,47 @@ mod tests {
         assert_eq!(
             patch_problems(&patch, &rules, BASE),
             ["protected files: AGENTS.md"]
+        );
+    }
+
+    #[test]
+    fn bounds_globs_add_protected_paths() {
+        let mut rules = policy().safe_outputs.create_pull_request.unwrap();
+        rules.protected_paths = vec!["raw/**".into(), "*.lock".into()];
+        for (patch, want) in [
+            (
+                head() + &edit("raw/a.md"),
+                vec!["\"raw/a.md\": protected by the bounds' glob \"raw/**\""],
+            ),
+            (
+                head() + &add("raw/new/b.md", "100644") + &remove("Cargo.lock", "100644"),
+                vec![
+                    "\"Cargo.lock\": protected by the bounds' glob \"*.lock\"",
+                    "\"raw/new/b.md\": protected by the bounds' glob \"raw/**\"",
+                ],
+            ),
+            // On top of the fixed list, which still names its own.
+            (
+                head() + &edit("raw/package.json"),
+                vec![
+                    "protected files: raw/package.json",
+                    "\"raw/package.json\": protected by the bounds' glob \"raw/**\"",
+                ],
+            ),
+            (head() + &edit("wiki/raw/a.md") + &edit("Raw/a.md"), vec![]),
+            (head() + &edit("src/a.lock"), vec![]),
+        ] {
+            assert_eq!(patch_problems(&patch, &rules, BASE), want, "{patch}");
+        }
+        // The same for a push, whose rules carry them too.
+        let mut push = crate::policy::tests::push_policy()
+            .safe_outputs
+            .push_to_pull_request_branch
+            .unwrap();
+        push.protected_paths = vec!["raw/**".into()];
+        assert_eq!(
+            read_patch(&(head() + &edit("raw/a.md")), &push.rules(), BASE).problems,
+            ["\"raw/a.md\": protected by the bounds' glob \"raw/**\""]
         );
     }
 }
