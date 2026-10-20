@@ -1224,7 +1224,7 @@ jobs:
           # A read: retry a transient 5xx rather than fail ci on it.
           retries: 3
           script: |
-            const { checkJobDuration } = require('./workflow/job-timing.cjs');
+            const { checkCompletedJobDuration } = require('./workflow/job-timing.cjs');
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
               ...context.repo, run_id: context.runId, filter: 'all', per_page: 100,
             });
@@ -1232,7 +1232,10 @@ jobs:
             const full = jobs.filter(job => job.name === 'e2e-full / agent / agent')
               .sort((a, b) => b.run_attempt - a.run_attempt);
             if (!full.length) throw new Error('missing hosted end-to-end agent job');
-            const seconds = checkJobDuration(full[0], 900);
+            const seconds = await checkCompletedJobDuration(full[0], 900, async job_id => {
+              const { data } = await github.rest.actions.getJobForWorkflowRun({ ...context.repo, job_id });
+              return data;
+            });
             await core.summary.addRaw(`Hosted end-to-end agent job: ${seconds}s (bound 900s).\n`).write();
       # A re-run of the full run's apply job, as far as the forge is
       # concerned: its guard, from the workflow under test, given the
