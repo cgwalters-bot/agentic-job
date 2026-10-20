@@ -224,11 +224,22 @@ fn log(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpStream;
+
+    fn assert_listener_released(mut queued: TcpStream) {
+        // Linux resets unaccepted connections when their listener closes.
+        // Observe that listener, not a fresh bind: another test can claim the
+        // ephemeral port as soon as the guard releases it.
+        queued.set_read_timeout(Some(CLEANUP_GRACE)).unwrap();
+        let error = queued.read(&mut [0]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    }
 
     #[test]
     fn supervisor_eof_revokes_before_releasing_the_port() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
+        let queued = TcpStream::connect(address).unwrap();
         let guard_listener = listener.try_clone().unwrap();
         let (mut supervisor, control) = UnixStream::pair().unwrap();
         let (revoking, revoked) = std::sync::mpsc::channel();
@@ -257,13 +268,14 @@ mod tests {
         assert!(TcpListener::bind(address).is_err());
         release.send(()).unwrap();
         guard.join().unwrap();
-        assert!(TcpListener::bind(address).is_ok());
+        assert_listener_released(queued);
     }
 
     #[test]
     fn failed_cleanup_keeps_a_surviving_agent_from_binding() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
+        let queued = TcpStream::connect(address).unwrap();
         // The supervisor's listener is gone, as after a crash or failed reap.
         let guard_listener = listener.try_clone().unwrap();
         drop(listener);
@@ -277,7 +289,7 @@ mod tests {
             Ok(())
         });
         assert_eq!(attempts, 2);
-        assert!(TcpListener::bind(address).is_ok());
+        assert_listener_released(queued);
     }
 
     fn output(code: i32, stdout: &str, stderr: &str) -> Output {
