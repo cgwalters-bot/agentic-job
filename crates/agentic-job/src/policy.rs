@@ -879,6 +879,9 @@ pub struct Request<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
+    /// Bounds-approved HTTP authorities; empty keeps publishing on HTTPS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_http: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<ContextRepo>,
     pub repo: String,
@@ -919,6 +922,13 @@ pub struct Policy {
     /// written before there was one, or by hand: the first.
     #[serde(default = "first_contract")]
     pub contract: u32,
+}
+
+/// Match HTTP authorities exactly, including ports, without DNS resolution.
+pub(crate) fn allows_http(allowed: &[String], authority: &str) -> bool {
+    allowed
+        .iter()
+        .any(|host| host.eq_ignore_ascii_case(authority))
 }
 
 /// Not [`CONTRACT`]: once that is raised, a policy without the key is
@@ -1505,12 +1515,7 @@ impl Bounds {
                 self.hosts.join(", ")
             ));
         }
-        if plain
-            && !self
-                .allow_http
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(host))
-        {
+        if plain && !allows_http(&self.allow_http, host) {
             return Some(format!(
                 "clone URL {url:?} is plain http://, which the bounds' allow_http does not \
                  name its host for"
@@ -1863,6 +1868,7 @@ impl Bounds {
                 .collect(),
         };
         Ok(Policy {
+            allow_http: self.allow_http.clone(),
             context: Vec::new(),
             repo: repo.to_owned(),
             clone_url: clone_url.to_owned(),
@@ -2025,6 +2031,9 @@ fn union(mut own: Vec<String>, other: Vec<String>) -> Result<Vec<String>, Vec<St
 /// Intersect compiled policies rather than trying to intersect glob patterns.
 /// Each file independently checks the target and any explicitly requested type.
 fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
+    policy
+        .allow_http
+        .retain(|host| allows_http(&other.allow_http, host));
     if policy.forge != other.forge {
         return Err(vec![format!(
             "the bounds files name different forges: {:?} and {:?}",
@@ -3429,6 +3438,22 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             bounds
         };
         let (opted, default) = (with("\"forge.internal\""), with(""));
+        let https = Request {
+            clone_url: "https://forge.internal/bootc-dev/bootc",
+            ..request()
+        };
+        for (own, org, expected) in [
+            (&opted, &opted, opted.allow_http.clone()),
+            (&opted, &default, vec![]),
+            (&default, &opted, vec![]),
+        ] {
+            assert_eq!(
+                intersect(own.compile(&https).unwrap(), org.compile(&https).unwrap())
+                    .unwrap()
+                    .allow_http,
+                expected
+            );
+        }
         const PLAIN: Option<&str> = Some("plain http://");
         const HOST: Option<&str> = Some("host");
         // The URL, and what bounds with and without the opt-in say of it.
@@ -3461,6 +3486,10 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 match (bounds.compile(&request), want) {
                     (Ok(policy), None) => {
                         assert_eq!(policy.clone_url, url);
+                        assert_eq!(policy.allow_http, bounds.allow_http);
+                        let round_trip: Policy =
+                            serde_json::from_slice(&serde_json::to_vec(&policy).unwrap()).unwrap();
+                        assert_eq!(round_trip.allow_http, bounds.allow_http);
                         // And what it admits, `run` can clone.
                         crate::run::clone::check(&policy).unwrap();
                     }

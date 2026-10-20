@@ -910,6 +910,7 @@ mod tests {
             push_repo: None,
             private: false,
             allowed_domains: crate::policy::link_domains().to_vec(),
+            allow_http: Vec::new(),
             memory: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,

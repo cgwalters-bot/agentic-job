@@ -71,7 +71,7 @@ struct Repository {
 impl Forgejo {
     /// SERVER is the forge's address, `https://forge.example` or one
     /// under a path; REPO the policy's, which it has checked.
-    pub fn new(server: &str, repo: &str, token: String) -> Result<Self> {
+    pub fn new(server: &str, repo: &str, token: String, allow_http: &[String]) -> Result<Self> {
         let server = server.trim_end_matches('/');
         let rest = server
             .strip_prefix("https://")
@@ -87,16 +87,16 @@ impl Forgejo {
         );
         if let Some(rest) = server.strip_prefix("http://") {
             let authority = rest.split('/').next().unwrap_or_default();
-            // Only literal loopback addresses bypass TLS for local fixtures;
-            // names (even localhost) can resolve elsewhere. Parse the entire
-            // authority so a suffix or userinfo cannot disguise a remote host.
+            // Unapproved HTTP would expose the publish token. Match the whole
+            // authority (including port), as clone URLs do, not a DNS suffix.
+            // Literal loopback addresses remain available for local fixtures.
             let loopback = matches!(authority, "127.0.0.1" | "[::1]")
                 || authority
                     .parse::<std::net::SocketAddr>()
                     .is_ok_and(|address| address.ip().is_loopback());
             ensure!(
-                loopback,
-                "--server requires HTTPS except for literal loopback addresses"
+                loopback || crate::policy::allows_http(allow_http, authority),
+                "--server requires HTTPS except for literal loopback addresses or a host named in the bounds' allow_http"
             );
         }
         let http = ureq::Agent::config_builder()
@@ -502,7 +502,7 @@ mod tests {
     }
 
     fn forgejo(server: &str) -> Forgejo {
-        Forgejo::new(&format!("{server}/"), "owner/name", TOKEN.to_owned()).unwrap()
+        Forgejo::new(&format!("{server}/"), "owner/name", TOKEN.to_owned(), &[]).unwrap()
     }
 
     /// The forge's answer about the repository: private, internal (of a
@@ -591,7 +591,7 @@ mod tests {
         }
         let err = format!(
             "{:#}",
-            Forgejo::new("http://127.0.0.1:1", "owner/name", TOKEN.to_owned())
+            Forgejo::new("http://127.0.0.1:1", "owner/name", TOKEN.to_owned(), &[])
                 .unwrap()
                 .comment(5, "x")
                 .unwrap_err()
@@ -637,10 +637,38 @@ mod tests {
             ("forge.example", false),
         ] {
             assert_eq!(
-                Forgejo::new(server, "o/r", TOKEN.to_owned()).is_ok(),
+                Forgejo::new(server, "o/r", TOKEN.to_owned(), &[]).is_ok(),
                 ok,
                 "{server}"
             );
+        }
+    }
+
+    #[test]
+    fn servers_with_http_bounds() {
+        for (server, allowed, ok) in [
+            ("http://127.0.0.1:3000", "", true),
+            ("http://forgejo:3000", "forgejo:3000", true),
+            ("http://FORGEJO:3000/git/", "forgejo:3000", true),
+            ("http://forgejo", "forgejo", true),
+            ("https://other.example", "", true),
+            ("http://forgejo:3000", "", false),
+            ("http://forgejo.evil", "forgejo", false),
+            ("http://xforgejo", "forgejo", false),
+            ("http://forgejo:3001", "forgejo:3000", false),
+            ("http://forgejo:3000", "forgejo", false),
+            ("http://forgejo@evil", "evil", false),
+        ] {
+            let hosts = if allowed.is_empty() {
+                vec![]
+            } else {
+                vec![allowed.to_owned()]
+            };
+            let result = Forgejo::new(server, "o/r", TOKEN.to_owned(), &hosts);
+            assert_eq!(result.is_ok(), ok, "{server} with {allowed:?}");
+            if !ok && !server.contains('@') {
+                assert!(result.err().unwrap().to_string().contains("allow_http"));
+            }
         }
     }
 

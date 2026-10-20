@@ -1066,8 +1066,11 @@ and the patch it accepted. The token comes only from `FORGEJO_TOKEN`,
 goes only in an `Authorization` header (to git through its
 environment), and is taken out of any error. Nothing names a host:
 `--server` and `--run-url` are the caller's.
-Remote servers require HTTPS; plain HTTP is accepted only for literal
-loopback addresses used by local fixtures.
+Remote servers require HTTPS unless the run's bounds name their authority in
+`allow_http` (empty by default); literal loopback addresses remain accepted.
+Like clone URLs, this is an exact, case-insensitive match including the port:
+`forgejo:3000` does not admit `forgejo:3001`, `forgejo.evil` or `xforgejo`.
+Opting in sends the publish token and writes unencrypted over that network.
 
 It publishes two outputs: `add_comment`, to `--comment-target` in the
 repository, and `create_pull_request`. Any other type is refused by

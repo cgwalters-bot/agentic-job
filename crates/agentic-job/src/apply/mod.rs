@@ -479,8 +479,10 @@ pub fn run(args: &Args) -> Result<Exit> {
     let token = std::env::var(TOKEN_ENV).unwrap_or_default();
     anyhow::ensure!(!token.is_empty(), "{TOKEN_ENV} is not set");
     let publisher = match args.forge {
-        Forge::Forgejo => forgejo::Forgejo::new(&args.server, &policy.repo, token)?
-            .recovering(args.recover_pushed_commit.clone()),
+        Forge::Forgejo => {
+            forgejo::Forgejo::new(&args.server, &policy.repo, token, &policy.allow_http)?
+                .recovering(args.recover_pushed_commit.clone())
+        }
     };
     let target = Target {
         repo: &args.repo,

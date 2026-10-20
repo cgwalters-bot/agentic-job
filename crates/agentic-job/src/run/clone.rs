@@ -618,6 +618,7 @@ mod tests {
             push_repo: None,
             private: false,
             allowed_domains: Vec::new(),
+            allow_http: Vec::new(),
             memory: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
