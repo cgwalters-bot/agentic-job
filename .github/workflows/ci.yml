@@ -1556,10 +1556,38 @@ jobs:
           # No number means e2e-scratch opened none: never look for a replacement.
           test -n "$PEOPLE_PR" || exit 0
           [[ $PEOPLE_PR =~ ^[1-9][0-9]*$ && $PEOPLE_BRANCH =~ ^e2e-scratch/$GITHUB_RUN_ID-[1-9][0-9]*$ ]]
-          gh api "repos/$GH_REPO/pulls/$PEOPLE_PR" |
+          set -o pipefail
+          # The API sometimes fails a call or cuts its response short (gh:
+          # "unexpected end of JSON input"), which failed e2e-verify and so
+          # took a pull request out of the merge queue. Retry each call, and
+          # print only a complete attempt's output.
+          retry() {
+            local attempt out
+            for attempt in 1 2 3 4; do
+              if out=$("$@"); then
+                printf '%s\n' "$out"
+                return
+              fi
+              [ "$attempt" = 4 ] || sleep $((attempt * 3))
+            done
+            return 1
+          }
+          # Close nothing but the pull request this run opened from its branch.
+          retry gh api "repos/$GH_REPO/pulls/$PEOPLE_PR" |
             jq -e --arg repo "$GH_REPO" --arg branch "$PEOPLE_BRANCH" '.head.ref == $branch and .head.repo.full_name == $repo' > /dev/null
-          gh api -X PATCH "repos/$GH_REPO/pulls/$PEOPLE_PR" -f state=closed > /dev/null
-          gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$PEOPLE_BRANCH"
+          # A call whose response was lost may still have taken effect, and a
+          # repeated DELETE of a deleted branch fails: so these may fail, and
+          # the reads below decide. Fail only on a leak, still open or still
+          # there, or when the reads cannot tell.
+          retry gh api -X PATCH "repos/$GH_REPO/pulls/$PEOPLE_PR" -f state=closed > /dev/null || true
+          retry gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$PEOPLE_BRANCH" > /dev/null || true
+          state=$(retry gh api "repos/$GH_REPO/pulls/$PEOPLE_PR" --jq .state)
+          refs=$(retry gh api "repos/$GH_REPO/git/matching-refs/heads/$PEOPLE_BRANCH" --jq '.[].ref')
+          test "$state" = closed || { echo "::error::Scratch pull request #$PEOPLE_PR is still $state"; exit 1; }
+          if grep -qxF "refs/heads/$PEOPLE_BRANCH" <<< "$refs"; then
+            echo "::error::Scratch branch $PEOPLE_BRANCH still exists"
+            exit 1
+          fi
       # GitHub coalesces a bot's eyes reaction across runs. Leave it in place:
       # removing it here could invalidate a concurrent run's assertion.
 

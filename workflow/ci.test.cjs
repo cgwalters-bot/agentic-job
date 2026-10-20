@@ -665,3 +665,71 @@ test('every scripted E2E session prints the secret-shaped string run must redact
     assert.ok(fixture.some(step => step.execute?.command === canary), file);
   }
 });
+
+// The run of agentic-job#1430's cleanup: a cut-short first response failed
+// the step and left the fixture open. Against a fake gh whose calls fail by
+// number, either before taking effect ("fail") or after ("lost").
+test("e2e-verify's scratch cleanup retries the API and fails only on a leak", () => {
+  const step = block('e2e-verify').split('      - name: Close only the scratch pull request of this run and delete its branch\n')[1]
+    .split('        run: |\n')[1].split(/\n(?! {10})/)[0].split('\n').map(line => line.slice(10)).join('\n');
+  const branch = 'e2e-scratch/39434669318-1';
+  const gh = `#!/bin/bash
+cd "$GH_STATE"
+n=$(( $(cat calls) + 1 )); echo "$n" > calls
+echo "$*" >> log
+if grep -qx "$n" fail; then echo 'unexpected end of JSON input' >&2; exit 1; fi
+case "$*" in
+  'api repos/o/r/pulls/1430') printf '{"state":"%s","head":{"ref":"%s","repo":{"full_name":"o/r"}}}' "$(cat pr)" "$(cat head)" ;;
+  'api repos/o/r/pulls/1430 --jq .state') cat pr ;;
+  'api -X PATCH repos/o/r/pulls/1430 -f state=closed') echo closed > pr; echo '{}' ;;
+  'api repos/o/r/git/matching-refs/heads/${branch} --jq .[].ref') if [ -e ref ]; then echo 'refs/heads/${branch}'; fi; echo 'refs/heads/${branch}0' ;;
+  'api -X DELETE repos/o/r/git/refs/heads/${branch}') [ -e ref ] || { echo 'Reference does not exist' >&2; exit 1; }; rm ref ;;
+  *) echo "unexpected call: $*" >&2; exit 2 ;;
+esac
+if grep -qx "$n" lost; then echo 'unexpected end of JSON input' >&2; exit 1; fi
+`;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-scratch-cleanup-'));
+  try {
+    const bin = path.join(root, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'gh'), gh, { mode: 0o755 });
+    // No waiting between attempts.
+    fs.writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\n', { mode: 0o755 });
+    const run = (name, { fail = [], lost = [], head = branch }) => {
+      const state = path.join(root, name);
+      fs.mkdirSync(state);
+      for (const [file, content] of Object.entries({ calls: '0', fail: fail.join('\n'), lost: lost.join('\n'), pr: 'open', head, ref: '' })) {
+        fs.writeFileSync(path.join(state, file), `${content}\n`);
+      }
+      const result = spawnSync('bash', ['-e', '-c', step], { encoding: 'utf8', env: {
+        PATH: `${bin}:${process.env.PATH}`, GH_STATE: state, GH_REPO: 'o/r', GITHUB_RUN_ID: '39434669318',
+        PEOPLE_PR: '1430', PEOPLE_BRANCH: branch } });
+      const read = file => fs.readFileSync(path.join(state, file), 'utf8').trim();
+      return { status: result.status, stderr: result.stderr, stdout: result.stdout, pr: read('pr'),
+        ref: fs.existsSync(path.join(state, 'ref')), calls: read('log').split('\n') };
+    };
+    const cases = [
+      // The incident: the first read was cut short.
+      ['first read fails', { fail: [1] }, 0, 'closed', false],
+      ['each call fails once', { fail: [1, 3, 5, 7, 9] }, 0, 'closed', false],
+      ['close and delete took effect but their responses were lost', { lost: [2, 3] }, 0, 'closed', false],
+      ['close never succeeds', { fail: [2, 3, 4, 5] }, 1, 'open', false],
+      ['delete never succeeds', { fail: [3, 4, 5, 6] }, 1, 'closed', true],
+      ['the final reads never succeed', { fail: [4, 5, 6, 7] }, 1, 'closed', false],
+      ['the first read never succeeds', { fail: [1, 2, 3, 4] }, 1, 'open', true],
+    ];
+    for (const [name, options, status, pr, ref] of cases) {
+      const result = run(name.replaceAll(' ', '-'), options);
+      assert.deepEqual([result.status === 0 ? 0 : 1, result.pr, result.ref], [status, pr, ref], `${name}\n${result.stderr}`);
+      assert.doesNotMatch(result.stderr, /unexpected call/, name);
+    }
+    // Another branch's pull request under this number is neither closed nor
+    // its branch deleted.
+    const other = run('other-head', { head: 'feature' });
+    assert.deepEqual([other.status === 0 ? 0 : 1, other.pr, other.ref, other.calls.length], [1, 'open', true, 1]);
+    const leak = run('leak-message', { fail: [2, 3, 4, 5] });
+    assert.match(leak.stdout, /::error::Scratch pull request #1430 is still open/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
