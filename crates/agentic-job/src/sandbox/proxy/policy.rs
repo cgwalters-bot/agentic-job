@@ -108,30 +108,48 @@ fn glob_regex(glob: &str) -> Result<Regex> {
 /// proxy with every other process of the runner's uid: the Actions
 /// service (job and step status, logs, the results service behind
 /// artifacts, caches and summaries, live logs over a WebSocket), and
-/// the Azure storage it hands out signed upload URLs for. Each covers a
-/// domain and every name under it, which a policy file cannot say: the
-/// service's hosts (`run-actions-N-azure-REGION`, `pipelinesghubeusN`)
-/// and its storage accounts (`productionresultssaN`) are not published,
-/// so exact names cannot be known before the job. Only the transparent
-/// listener's connections get them, never the sandbox user's.
+/// the Azure storage it hands out signed upload URLs for. A policy file
+/// cannot say either: the service's hosts (`run-actions-N-azure-REGION`,
+/// `pipelinesghubeusN`) are not published, so that rule covers a domain
+/// and every name under it, and the storage accounts are gh-aw's list.
+/// Only the transparent listener's connections get them, never the
+/// sandbox user's.
 ///
 /// Both are write channels to anyone with a token for them: the Actions
-/// service takes another repository's runtime token, and the storage
-/// domain is every Azure account's, an attacker's too, with a signed URL
-/// of its own. They stop nothing there; they keep the job working.
-const RUNNER_WRITES: &[(&str, &str, &[&str])] = &[
+/// service takes another repository's runtime token, and a storage
+/// account name on the list that GitHub does not hold is anyone's to
+/// register, with a signed URL of its own. They narrow, not close; they
+/// keep the job working.
+const RUNNER_WRITES: &[(&str, RunnerHosts, &[&str])] = &[
     (
         "GitHub Actions service (runner)",
-        "actions.githubusercontent.com",
+        RunnerHosts::Domain("actions.githubusercontent.com"),
         WRITE_METHODS,
     ),
-    // Azure's block, append and put-blob uploads are all PUTs.
+    // Azure's block, append and put-blob uploads are all PUTs. Exact
+    // accounts rather than every name under blob.core.windows.net, which
+    // is every Azure account's, so a step cannot upload to storage of its
+    // choosing. GitHub documents only the suffix, and actions/runner and
+    // actions/toolkit name no account: they PUT to the signed URL the
+    // results service returns. gh-aw's firewall pins
+    // productionresultssa0 to productionresultssa19 (its github-actions
+    // ecosystem), as do allowlists built by watching hosted runners
+    // (step-security/agent, openai/fence); an account beyond them is
+    // refused, and the list follows gh-aw's when ECOSYSTEMS is updated.
     (
         "GitHub Actions results storage (runner)",
-        "blob.core.windows.net",
+        RunnerHosts::Ecosystem("github-actions"),
         &["PUT"],
     ),
 ];
+
+/// What a [`RUNNER_WRITES`] rule covers.
+enum RunnerHosts {
+    /// A domain and every name under it.
+    Domain(&'static str),
+    /// The exact hosts of a gh-aw ecosystem identifier in ECOSYSTEMS.
+    Ecosystem(&'static str),
+}
 
 #[derive(Debug, Clone)]
 struct WriteRule {
@@ -155,11 +173,22 @@ impl WriteRule {
             && self.paths.iter().any(|glob| glob.is_match(path))
     }
 
-    fn runner(name: &str, domain: &str, methods: &[&str]) -> Result<Self> {
+    fn runner(name: &str, covers: &RunnerHosts, methods: &[&str]) -> Result<Self> {
+        let (hosts, domains) = match covers {
+            RunnerHosts::Domain(domain) => (HashSet::new(), vec![(*domain).to_owned()]),
+            // A '*.' entry loses its star here and covers that one name.
+            RunnerHosts::Ecosystem(id) => (
+                ecosystem_hosts(ECOSYSTEMS, id)?
+                    .iter()
+                    .map(|host| normalize_host(host))
+                    .collect(),
+                Vec::new(),
+            ),
+        };
         Ok(Self {
             name: name.to_owned(),
-            hosts: HashSet::new(),
-            domains: vec![domain.to_owned()],
+            hosts,
+            domains,
             methods: methods.iter().map(|method| (*method).to_owned()).collect(),
             paths: vec![glob_regex("/**")?],
         })
@@ -378,10 +407,10 @@ impl Policy {
     /// runner's processes are held to under `egress.write-policy`.
     pub fn with_runner_writes(&self) -> Result<Self> {
         let mut policy = self.clone();
-        for (name, domain, methods) in RUNNER_WRITES {
+        for (name, covers, methods) in RUNNER_WRITES {
             policy
                 .writes
-                .push(WriteRule::runner(name, domain, methods)?);
+                .push(WriteRule::runner(name, covers, methods)?);
         }
         Ok(policy)
     }
@@ -916,10 +945,24 @@ mod tests {
     }
 
     /// The runner's built-in writes reach the Actions service's names and
-    /// the storage domain's, with PUT alone there, and nothing that only
-    /// ends in the same letters; the shipped policy has none of them.
+    /// gh-aw's list of the results service's storage accounts, with PUT
+    /// alone there, and nothing that only ends in the same letters or is
+    /// another Azure account; the shipped policy has none of them.
     #[test]
     fn runner_writes() {
+        // Updating gh-aw's list changes where the runner may write: make
+        // that a reviewed change here, not a silent one.
+        let storage = ecosystem_hosts(ECOSYSTEMS, "github-actions").unwrap();
+        assert_eq!(storage.len(), 20, "{storage:?}");
+        for host in &storage {
+            let account = host
+                .strip_prefix("productionresultssa")
+                .and_then(|rest| rest.strip_suffix(".blob.core.windows.net"));
+            assert!(
+                account.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+                "{host}"
+            );
+        }
         let policy = shipped();
         let runner = policy.with_runner_writes().unwrap();
         let write = |method, host| Request {
@@ -941,8 +984,27 @@ mod tests {
                 true,
             ),
             ("POST", "Actions.GitHubUserContent.com.", true),
+            ("POST", "a.b.actions.githubusercontent.com", true),
             ("PUT", "productionresultssa7.blob.core.windows.net", true),
+            ("PUT", "productionresultssa0.blob.core.windows.net", true),
+            ("PUT", "ProductionResultsSA19.blob.core.windows.net.", true),
             ("POST", "productionresultssa7.blob.core.windows.net", false),
+            // any other Azure account, an attacker's
+            ("PUT", "attacker.blob.core.windows.net", false),
+            ("PUT", "blob.core.windows.net", false),
+            ("PUT", "productionresultssa.blob.core.windows.net", false),
+            ("PUT", "productionresultssa20.blob.core.windows.net", false),
+            ("PUT", "productionresultssa999.blob.core.windows.net", false),
+            ("PUT", "productionresultssa07.blob.core.windows.net", false),
+            ("PUT", "productionresultssa7x.blob.core.windows.net", false),
+            ("PUT", "xproductionresultssa7.blob.core.windows.net", false),
+            ("PUT", "a.productionresultssa7.blob.core.windows.net", false),
+            ("PUT", "productionresultssa7.queue.core.windows.net", false),
+            (
+                "PUT",
+                "productionresultssa7.blob.core.windows.net.example",
+                false,
+            ),
             (
                 "DELETE",
                 "productionresultssa7.blob.core.windows.net",

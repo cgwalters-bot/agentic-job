@@ -199,21 +199,36 @@ summaries) pass by two built-in rules that only the redirected
 connections get
 ([`policy.rs`](../crates/agentic-job/src/sandbox/proxy/policy.rs)):
 any write to `actions.githubusercontent.com` and the names under it,
-and PUT to the names under `blob.core.windows.net`, where the results
-service hands out signed upload URLs. Neither can be pinned to exact
-names before the job: GitHub publishes no list of the service's hosts
-(`run-actions-N-azure-REGION`) or of its storage accounts
-(`productionresultssaN`), and only names the account in the URL it
-returns during the job. So the storage rule is a write channel to any
-Azure storage account, an attacker's too, and the service rule one to
-anyone holding a token for it, such as another repository's runtime
-token. This narrows where a step can write; it does not close it.
+and PUT to `productionresultssa0` to `productionresultssa19` under
+`blob.core.windows.net`, the storage accounts where the results service
+hands out signed upload URLs for artifacts, caches, logs and summaries.
+The service's hosts (`run-actions-N-azure-REGION`) are not published,
+so that rule covers the domain. GitHub documents only
+`*.blob.core.windows.net` for storage, and
+[actions/toolkit](https://github.com/actions/toolkit/blob/main/packages/artifact/src/internal/upload/upload-artifact.ts)
+and actions/runner name no account: they PUT to whatever URL the service
+returns. The account list is gh-aw's `github-actions` ecosystem, which
+the binary embeds
+([`ecosystem_domains.json`](../egress/ecosystem_domains.json)), and
+agrees with allowlists built by watching hosted runners
+([step-security/agent](https://github.com/step-security/agent/blob/main/agent.go),
+[openai/fence](https://github.com/openai/fence/blob/main/src/platform_profile.rs)).
+
+What remains open: the service rule is a write channel to anyone holding
+a token for it, such as another repository's runtime token. The storage
+rule narrows one to any Azure account, an attacker's too, to those twenty
+names, and does not close it: an account name is anyone's to register
+while it is free, and nothing shows that GitHub holds all twenty. If
+GitHub uses an account beyond them, the runner's artifact uploads fail
+and its cache saves are dropped with only a warning, until the list
+follows.
 
 DNS stays a channel, as for the sandbox user. CI's
 `secure-host-write-policy` job runs this through the forwarder with the
 build's image archive: a `run:` step and a JavaScript action read
 `https://example.com/` and are refused a POST to it by the proxy, and
-the job uploads an artifact and ends green. `sandbox check` probes the
+the job uploads an artifact, saves and restores a cache, and ends
+green. `sandbox check` probes the
 same ([sandbox-check.md](sandbox-check.md#the-network-probes)). Not in
 this slice: a read allowlist, and a summary of refused writes.
 
@@ -883,7 +898,9 @@ only the scripted agent, which registers nothing, and holds no
 runner's own endpoint list. Today the runner's user reaches every host but
 the metadata service. #501 found two difficulties. The runner writes logs,
 artifacts and caches to `*.blob.core.windows.net`, and allowing that
-suffix allows any storage account, an attacker's included. The Worker
+suffix allows any storage account, an attacker's included;
+`egress.write-policy` narrows it to gh-aw's twenty `productionresultssaN`
+accounts, any of them still anyone's while free. The Worker
 also reads its proxy settings only when it starts.
 
 ## What a job has to know

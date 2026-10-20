@@ -1704,8 +1704,8 @@ jobs:
   # archive: every later process of the runner's user, with no proxy in
   # its environment, reads an arbitrary host and is refused a POST to it
   # by the proxy, a run: step and a JavaScript action alike; the runner's
-  # own writes still pass, so the artifact uploads and the job, its logs
-  # and its status with it, ends green.
+  # own writes still pass, so the artifact uploads, the cache saves and
+  # the job, its logs and its status with it, ends green.
   secure-host-write-policy:
     needs: [changes, static]
     if: ${{ needs.changes.outputs.host == 'true' }}
@@ -1744,6 +1744,20 @@ jobs:
           path: ${{ runner.temp }}/write-policy.toml
           retention-days: 1
           if-no-files-found: error
+      # A cache upload goes to the results service's storage too, by the
+      # same rule. Saving only warns when the upload fails, so restoring
+      # the entry, which nothing else does with a run-unique key, is what
+      # proves it was written.
+      - name: The runner's cache save passes
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/write-policy.toml
+          key: secure-host-write-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/write-policy.toml
+          key: secure-host-write-policy-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
 
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file, the
