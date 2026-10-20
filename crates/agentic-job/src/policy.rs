@@ -90,6 +90,86 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "missing_data",
 ];
 
+/// The forge a run's outputs are applied on, from the bounds file: what
+/// the caller's repository says, never the request. The wire format is
+/// gh-aw's on every forge; this decides which of its types and fields
+/// mean the same there (docs/safe-outputs.md#neutral-profile).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Forge {
+    #[default]
+    Github,
+    Forgejo,
+    Gitlab,
+}
+
+/// The version of the neutral profile [`Forge`] and [`NEUTRAL_OUTPUTS`]
+/// describe, written into `policy.json`. It follows the gh-aw commit the
+/// type names and fields are read from,
+/// 462ed682857c4ab64d40f2c85e3738fa27834839, and is raised when a type or
+/// field changes meaning there, so that check refuses a policy written
+/// for another profile rather than read its types the new way.
+pub const CONTRACT: u32 = 1;
+
+/// The types whose fields mean the same on GitHub, Forgejo and GitLab,
+/// and the only ones a run off GitHub may be allowed. A list of what is
+/// held, not of what is refused: a type nobody has mapped onto a forge
+/// stays GitHub-only, so a publisher never meets a request it would have
+/// to guess at.
+pub const NEUTRAL_OUTPUTS: &[&str] = &[
+    CREATE_PULL_REQUEST,
+    PUSH_TO_PULL_REQUEST_BRANCH,
+    "add_comment",
+    "create_issue",
+    "close_issue",
+    "close_pull_request",
+    "add_labels",
+    "remove_labels",
+    CREATE_REVIEW_COMMENT,
+    "noop",
+    "missing_tool",
+    "missing_data",
+];
+
+/// gh-aw's target field for an issue or a pull request alike. GitLab
+/// numbers the two apart (`#5` and `!5` are different items), so there a
+/// request names `issue_number` or `pull_request_number`; one naming this
+/// could act on the wrong item.
+pub const ITEM_NUMBER: &str = "item_number";
+
+impl Forge {
+    /// The name a bounds file gives it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Forgejo => "forgejo",
+            Self::Gitlab => "gitlab",
+        }
+    }
+
+    /// Whether the profile holds OUTPUT on this forge.
+    pub fn holds(self, output: &str) -> bool {
+        self == Self::Github || NEUTRAL_OUTPUTS.contains(&output)
+    }
+
+    /// Whether a request on this forge may not have the field KEY.
+    pub fn refuses_field(self, key: &str) -> bool {
+        self == Self::Gitlab && key == ITEM_NUMBER
+    }
+
+    /// The first of OUTPUTS the profile does not hold, as a refusal.
+    fn check_outputs<'a>(self, outputs: impl IntoIterator<Item = &'a str>) -> Result<()> {
+        for output in outputs {
+            ensure!(
+                self.holds(output),
+                "the output type {output:?} is GitHub-only, not for forge {:?}",
+                self.name()
+            );
+        }
+        Ok(())
+    }
+}
+
 /// The output types the job token cannot apply, whatever the call grants
 /// it, and the credential each needs instead. GitHub gives a workflow's
 /// token no permission on Projects, and no account to fork into: apply
@@ -464,6 +544,10 @@ pub struct Bounds {
     /// memory is handed back, and `check` refuses one.
     #[serde(default)]
     pub memory: Option<Memory>,
+    /// Where the outputs are applied; GitHub by default. Another forge
+    /// may list only [`NEUTRAL_OUTPUTS`].
+    #[serde(default)]
+    pub forge: Forge,
 }
 
 /// `[memory]`: how much of the agent's memory directory is handed back,
@@ -815,6 +899,19 @@ pub struct Policy {
     /// The bounds' `[memory]`, where every bounds file has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<Memory>,
+    /// The bounds' [`Forge`].
+    #[serde(default)]
+    pub forge: Forge,
+    /// The [`CONTRACT`] `policy` wrote this for. Absent, the policy was
+    /// written before there was one, or by hand: the first.
+    #[serde(default = "first_contract")]
+    pub contract: u32,
+}
+
+/// Not [`CONTRACT`]: once that is raised, a policy without the key is
+/// still one of the first contract's, and check refuses it.
+fn first_contract() -> u32 {
+    1
 }
 
 /// Reference context admitted before the agent starts. The workflow resolves
@@ -1085,6 +1182,12 @@ impl Policy {
         if let Some(memory) = &self.memory {
             memory.validate()?;
         }
+        ensure!(
+            self.contract == CONTRACT,
+            "written for safe-output contract {}, not {CONTRACT}",
+            self.contract
+        );
+        self.forge.check_outputs(self.safe_outputs.types())?;
         for output in self.safe_outputs.others.keys() {
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str())
@@ -1223,6 +1326,8 @@ impl Bounds {
             glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
         }
         ensure!(!self.outputs.is_empty(), "`outputs` lists no output type");
+        self.forge
+            .check_outputs(self.outputs.keys().map(String::as_str))?;
         for (output, limit) in &self.outputs {
             limit.validate(output)?;
             ensure!(
@@ -1696,6 +1801,8 @@ impl Bounds {
             private,
             allowed_domains: link_domains().to_vec(),
             memory: self.memory.clone(),
+            forge: self.forge,
+            contract: CONTRACT,
         })
     }
 }
@@ -1823,6 +1930,13 @@ pub fn run(args: &Args) -> Result<Exit> {
 /// Intersect compiled policies rather than trying to intersect glob patterns.
 /// Each file independently checks the target and any explicitly requested type.
 fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
+    if policy.forge != other.forge {
+        return Err(vec![format!(
+            "the bounds files name different forges: {:?} and {:?}",
+            policy.forge.name(),
+            other.forge.name()
+        )]);
+    }
     policy.commit_author = match (policy.commit_author, other.commit_author) {
         (Some(own), Some(other)) if own != other => {
             return Err(vec![format!(
@@ -4797,11 +4911,33 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             ..good.clone()
         };
         let defaults: Memory = toml::from_str("").unwrap();
+        let mut off_github = good.clone();
+        off_github.forge = Forge::Forgejo;
+        off_github.safe_outputs.others.insert(
+            "link_sub_issue".to_owned(),
+            OutputLimit {
+                max: 1,
+                ..OutputLimit::default()
+            },
+        );
         let cases = [
             (
                 "a type with no configuration here",
                 other_type,
                 "create_discussion",
+            ),
+            (
+                "a GitHub-only type off GitHub",
+                off_github,
+                "\"link_sub_issue\" is GitHub-only, not for forge \"forgejo\"",
+            ),
+            (
+                "another contract",
+                Policy {
+                    contract: CONTRACT + 1,
+                    ..good.clone()
+                },
+                "safe-output contract",
             ),
             (
                 "memory over its ceiling",
@@ -4865,6 +5001,178 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
             let changed = json.replace(from, to);
             assert_ne!(changed, json, "{from}");
             assert!(serde_json::from_str::<Policy>(&changed).is_err(), "{from}");
+        }
+    }
+
+    /// Bounds on FORGE allowing OUTPUT, with LIMIT as its table.
+    fn forge_bounds(forge: &str, output: &str, limit: &str) -> Result<Bounds> {
+        let bounds: Bounds = toml::from_str(&format!(
+            r#"
+forge = "{forge}"
+hosts = ["forge.example"]
+repos = ["owner/*"]
+bases = ["main"]
+max_outputs = 3
+max_patch_bytes = 65536
+max_patch_files = 10
+
+[outputs]
+{output} = {limit}
+"#
+        ))?;
+        bounds.validate()?;
+        Ok(bounds)
+    }
+
+    #[test]
+    fn the_neutral_profile_by_forge() {
+        const FORGES: [(&str, Forge); 3] = [
+            ("github", Forge::Github),
+            ("forgejo", Forge::Forgejo),
+            ("gitlab", Forge::Gitlab),
+        ];
+        // Each type with the least table its bounds may have, and whether
+        // the profile holds it off GitHub. Every type a bounds file may
+        // list is here, so a new one must be placed.
+        let cases: &[(&str, &str, bool)] = &[
+            (CREATE_PULL_REQUEST, "{ max = 1 }", true),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                r#"{ max = 1, branches = ["agent-*"] }"#,
+                true,
+            ),
+            ("add_comment", "{ max = 1 }", true),
+            ("create_issue", "{ max = 1 }", true),
+            ("close_issue", "{ max = 1 }", true),
+            ("close_pull_request", "{ max = 1 }", true),
+            ("add_labels", "{ max = 1, allowed = [] }", true),
+            ("remove_labels", "{ max = 1, allowed = [] }", true),
+            (CREATE_REVIEW_COMMENT, "{ max = 1 }", true),
+            ("noop", "{ max = 1 }", true),
+            ("missing_tool", "{ max = 1 }", true),
+            ("missing_data", "{ max = 1 }", true),
+            // GitHub-only: no other forge has the object.
+            (
+                "create_discussion",
+                r#"{ max = 1, category = "General" }"#,
+                false,
+            ),
+            (
+                UPDATE_PROJECT,
+                r#"{ max = 1, projects = ["https://github.com/orgs/o/projects/1"], fields = ["Status"] }"#,
+                false,
+            ),
+            (
+                HIDE_COMMENT,
+                r#"{ max = 1, allowed_reasons = ["SPAM"] }"#,
+                false,
+            ),
+            ("link_sub_issue", "{ max = 1 }", false),
+            ("create_check_run", r#"{ max = 1, name = "agent" }"#, false),
+            // Not mapped onto another forge yet, so held only on GitHub.
+            (REPLY_TO_REVIEW_COMMENT, "{ max = 1 }", false),
+            (RESOLVE_REVIEW_THREAD, "{ max = 1 }", false),
+            ("update_issue", r#"{ max = 1, fields = ["title"] }"#, false),
+            (
+                "update_pull_request",
+                r#"{ max = 1, fields = ["title"] }"#,
+                false,
+            ),
+            (MARK_READY, "{ max = 1 }", false),
+            (
+                "add_reviewer",
+                r#"{ max = 1, allowed = ["someone"] }"#,
+                false,
+            ),
+            (
+                "assign_to_user",
+                r#"{ max = 1, allowed = ["someone"] }"#,
+                false,
+            ),
+        ];
+        let listed: Vec<&str> = cases.iter().map(|(output, ..)| *output).collect();
+        assert_eq!(
+            listed
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            OUTPUT_TYPES.iter().copied().collect(),
+        );
+        for (output, limit, neutral) in cases {
+            assert_eq!(NEUTRAL_OUTPUTS.contains(output), *neutral, "{output}");
+            for (name, forge) in FORGES {
+                let held = forge == Forge::Github || *neutral;
+                assert_eq!(forge.holds(output), held, "{output} on {name}");
+                match forge_bounds(name, output, limit) {
+                    Ok(_) => assert!(held, "{output} admitted on {name}"),
+                    Err(err) => {
+                        assert!(!held, "{output} on {name}: {err:#}");
+                        assert!(
+                            format!("{err:#}").contains("GitHub-only"),
+                            "{output} on {name}: {err:#}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // What a run off GitHub is admitted to carries its forge and
+        // contract into policy.json, and loads again.
+        let request = Request {
+            repo: "owner/name",
+            clone_url: "https://forge.example/owner/name",
+            outputs: "add_comment,noop",
+            ..request()
+        };
+        for (name, forge) in FORGES {
+            let mut bounds = forge_bounds(name, "add_comment", "{ max = 2 }").unwrap();
+            bounds.outputs.insert(
+                "noop".into(),
+                OutputLimit {
+                    max: 1,
+                    ..OutputLimit::default()
+                },
+            );
+            let compiled = bounds.compile(&request).unwrap();
+            assert_eq!((compiled.forge, compiled.contract), (forge, CONTRACT));
+            let json = serde_json::to_value(&compiled).unwrap();
+            assert_eq!(json["forge"], name);
+            assert_eq!(json["contract"], CONTRACT);
+            let loaded: Policy = serde_json::from_value(json).unwrap();
+            loaded.validate().unwrap();
+        }
+        // A policy written before the profile reads as GitHub's.
+        let mut json = serde_json::to_value(policy()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("forge");
+        fields.remove("contract");
+        let old: Policy = serde_json::from_value(json).unwrap();
+        assert_eq!((old.forge, old.contract), (Forge::Github, 1));
+
+        // Two bounds files agree on the forge or admit nothing.
+        let on = |name| forge_bounds(name, "noop", "{ max = 1 }").unwrap();
+        let noop = Request {
+            outputs: "noop",
+            ..request
+        };
+        let err = intersect(
+            on("forgejo").compile(&noop).unwrap(),
+            on("gitlab").compile(&noop).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err[0].contains("different forges"), "{err:?}");
+    }
+
+    #[test]
+    fn target_fields_by_forge() {
+        for (forge, field, refused) in [
+            (Forge::Github, ITEM_NUMBER, false),
+            (Forge::Forgejo, ITEM_NUMBER, false),
+            (Forge::Gitlab, ITEM_NUMBER, true),
+            (Forge::Gitlab, "issue_number", false),
+            (Forge::Gitlab, "pull_request_number", false),
+        ] {
+            assert_eq!(forge.refuses_field(field), refused, "{field} on {forge:?}");
         }
     }
 }

@@ -911,6 +911,8 @@ mod tests {
             private: false,
             allowed_domains: crate::policy::link_domains().to_vec(),
             memory: None,
+            forge: Default::default(),
+            contract: crate::policy::CONTRACT,
         };
         let run = RunFile {
             policy,

@@ -423,6 +423,8 @@ mod tests {
             private: false,
             allowed_domains: Vec::new(),
             memory: None,
+            forge: Default::default(),
+            contract: crate::policy::CONTRACT,
         }
     }
 
@@ -704,6 +706,8 @@ mod brief_tests {
             private: false,
             allowed_domains: Vec::new(),
             memory: None,
+            forge: Default::default(),
+            contract: crate::policy::CONTRACT,
         }
     }
 

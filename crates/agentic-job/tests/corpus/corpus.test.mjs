@@ -158,7 +158,7 @@ test("policy: a request against the bounds", () => {
     // What gh-aw's collector is configured with, key for key, and the caps.
     assert.deepEqual(now.policy.safe_outputs, was.policy.safe_outputs, name);
     for (const key of ["repo", "base", "max_outputs", "max_patch_bytes"]) assert.deepEqual(now.policy[key], was.policy[key], `${name}: ${key}`);
-    assert.deepEqual(Object.keys(now.policy).sort(), ["allowed_domains", "base", "clone_url", "kind", "max_outputs", "max_patch_bytes", "repo", "safe_outputs"], name);
+    assert.deepEqual(Object.keys(now.policy).sort(), ["allowed_domains", "base", "clone_url", "contract", "forge", "kind", "max_outputs", "max_patch_bytes", "repo", "safe_outputs"], name);
   }
 });
 

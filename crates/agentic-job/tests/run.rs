@@ -132,6 +132,8 @@ impl Job {
             private: false,
             allowed_domains: Vec::new(),
             memory: None,
+            forge: Default::default(),
+            contract: agentic_job::policy::CONTRACT,
         };
         serde_json::to_string(&policy).unwrap()
     }

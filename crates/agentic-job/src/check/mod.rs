@@ -316,6 +316,16 @@ pub(crate) fn redirections_to(
     let mut problems: Vec<String> = differs("repo", &|value| value.eq_ignore_ascii_case(repo))
         .into_iter()
         .collect();
+    problems.extend(
+        item.keys()
+            .filter(|key| policy.forge.refuses_field(key))
+            .map(|key| {
+                format!(
+                    "a {output} with {key}, which this forge cannot resolve: it numbers issues \
+                     and pull requests apart"
+                )
+            }),
+    );
     if output == "add_comment"
         && let Some((_, target)) = comment
     {
@@ -1135,6 +1145,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::policy::Forge;
     use crate::policy::tests::policy;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
@@ -1175,6 +1186,27 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn item_number_is_refused_where_issues_and_pull_requests_are_numbered_apart() {
+        for (forge, fields, accepted) in [
+            (Forge::Github, json!({"item_number": 64}), true),
+            (Forge::Forgejo, json!({"item_number": 64}), true),
+            (Forge::Gitlab, json!({"item_number": 64}), false),
+            (Forge::Gitlab, json!({"issue_number": 64}), true),
+            (Forge::Gitlab, json!({"pull_request_number": 64}), true),
+        ] {
+            let policy = Policy { forge, ..policy() };
+            let mut item = fields.as_object().unwrap().clone();
+            item.insert("type".into(), json!("add_comment"));
+            let problems = redirections_to(&item, &policy, Some(("tracker/items", 64)));
+            assert_eq!(
+                problems.is_empty(),
+                accepted,
+                "{forge:?} {fields}: {problems:?}"
+            );
+        }
     }
 
     fn patch_of(path: &str) -> String {

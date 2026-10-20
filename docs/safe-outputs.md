@@ -680,7 +680,10 @@ other clone can be downgraded by a redirect. With organization bounds,
 both files must name the host. A top-level `push_repo = "OWNER/NAME"`
 names the fork that [Forgejo's apply](#publishing-to-forgejo) pushes a pull
 request's branch to. It may not be of the target's owner, and with organization
-bounds both files must name it. A top-level `allowed_domains` is
+bounds both files must name it. A top-level `forge` (`github` by default,
+`forgejo` or `gitlab`) says where the outputs are applied, and limits
+`[outputs]` to the [neutral profile](#neutral-profile) off GitHub; with
+organization bounds, both files must name the same one. A top-level `allowed_domains` is
 accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 
@@ -1146,3 +1149,76 @@ Not done: re-run detection (a
 re-run with a pull request is refused at its branch; one with only
 comments posts them again),
 reviews, labels and pushes to an open pull request.
+
+## Neutral profile
+
+The requests stay gh-aw's JSONL on every forge, with its type and field
+names: agents already know them, and nothing on the line changes. What
+differs per forge is which types and fields mean the same thing there.
+That is the *neutral profile*, from the research and plan in
+[#1393](https://github.com/cgwalters-forge/agentic-job/issues/1393#issuecomment-6278826860).
+The bounds' `forge` selects it, and `policy.json` carries it as `forge`
+and `contract`. The contract is a number, now 1, that follows the gh-aw
+commit pinned [above](#what-is-gh-aws-and-why) and is raised when a
+type or field changes meaning there. `check` refuses a policy written
+for another contract. A policy without the two keys is GitHub's, at the
+current contract.
+
+| gh-aw type | GitHub | Forgejo | GitLab |
+| --- | --- | --- | --- |
+| `add_comment` | issue comment | issue comment | note on an issue or a merge request |
+| `create_pull_request` | pull request from a fork; `draft` | pull request; draft is a `WIP:` title | merge request from the fork's project; draft is a `Draft:` title |
+| `push_to_pull_request_branch` | git push | git push | git push |
+| `create_pull_request_review_comment` | review comment | review comment, by line number | discussion with a base, start and head commit position |
+| `add_labels`, `remove_labels` | by name | by name or ID | by name; apply must refuse a label that does not exist, which GitLab would create |
+| `close_issue`, `close_pull_request` | `state` | `state` | `state_event` |
+| `create_issue` | issue | issue (labels by ID) | issue |
+| `noop`, `missing_tool`, `missing_data` | no write | no write | no write |
+
+These are the types a bounds file off GitHub may list; `policy` refuses
+any other there, and `check` refuses a policy that holds one. The list
+is of what is held, not of what is refused, so a type nobody has mapped
+stays GitHub-only. GitHub-only because no other forge has the object:
+`create_discussion`, `update_project`, `hide_comment`, `link_sub_issue`
+and `create_check_run` (check runs are for GitHub Apps; a neutral status
+with a pinned context would be the common subset). GitHub-only until
+someone maps them: `update_issue`, `update_pull_request`,
+`mark_pull_request_as_ready_for_review`, `add_reviewer`,
+`assign_to_user`, `reply_to_pull_request_review_comment` and
+`resolve_pull_request_review_thread`. A forge-native operation added
+later gets a forge prefix, as gh-aw does for its Jira and Linear types.
+
+A request names the kind of item it targets. GitHub and Forgejo number
+issues and pull requests together, so gh-aw's `item_number` is one
+item there. GitLab's `#5` and `!5` are different items, so `check`
+refuses an `item_number` on GitLab. A type whose target must name its
+kind there uses gh-aw's `issue_number` or `pull_request_number` where it
+has them. `add_comment`, `add_labels` and `remove_labels` have only
+`item_number` in gh-aw's rules, and the collector drops a field its
+rules do not list, so on GitLab a comment goes only to the run's own
+item, and labels cannot be applied, until a GitLab collector admits a
+kind-named target for them.
+
+The bounds that already exist are neutral: `hosts`, `repos`, `bases`,
+`max_outputs`, each type's `max`, push `branches`, label lists,
+protected files and dot-folders, and `commit_author`. A check run's
+`name`, a discussion's `category` and `projects` are GitHub's.
+
+Apply acts as one identity per role, which the caller's configuration
+maps to a credential; a request never chooses one. Only apply holds it:
+
+- GitHub: `SAFE_OUTPUTS_PAT` (or the job token), later a role app token
+  ([tracker#766](https://github.com/cgwalters-forge/tracker/issues/766)).
+- Forgejo: a bot user's token.
+- GitLab: a project or group access token, a bot member with a role.
+
+Pushing and opening a change can be separate roles, as in
+[service-gator](https://github.com/LobsterTrap/service-gator/tree/b69814b140bf7c8385014560857760fe8fb71f03):
+a fork identity that may push, and an upstream one that may only open
+pull requests. On Forgejo and GitLab those can be two tokens.
+
+The Forgejo publisher above implements only its listed subset of this
+contract. A GitLab publisher is still to be written; before it writes,
+it needs the mention filter above and must neutralize
+[quick actions](https://docs.gitlab.com/user/project/quick_actions/),
+a `/close` or `/merge` line that GitLab runs with the poster's rights.
