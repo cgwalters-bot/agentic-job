@@ -273,6 +273,12 @@ changing who decides takes the owner:
 /.github/CODEOWNERS @OWNER
 ```
 
+For this repository the owner is `@cgwalters`: the person, since an
+organization cannot be a code owner, and not the `cgwalters-bot` account
+automation acts as, since the rule holds nothing if automation can approve as
+the code owner. The owner adds the file, as check refuses it from any run, and
+until **Require review from Code Owners** is on these paths wait for no one.
+
 Check refuses an agent's patch to either file, `.github/` exemption or not
 ([safe outputs](safe-outputs.md)), so no implement or fix run can change the
 policy or drop the owner's review. The code that states the policy
