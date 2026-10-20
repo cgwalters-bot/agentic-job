@@ -119,3 +119,18 @@ agents-lock spec package +links:
 # refresh has its links redacted until this runs; review the diff.
 refresh-top-level-domains:
     curl --fail --silent --show-error --proto '=https' --output crates/agentic-job/src/top-level-domains.txt https://data.iana.org/TLD/tlds-alpha-by-domain.txt
+
+# The documentation site in site/, a rendering of docs/ and the README.
+# Dependencies come from the lock alone, without their install scripts.
+# SITE_BASE, SITE_URL and SITE_SOURCE_URL (site/astro.config.mjs) place it.
+site-build:
+    cd site && npm ci --ignore-scripts --no-audit --no-fund
+    cd site && ASTRO_TELEMETRY_DISABLED=1 npm run build
+
+site-test:
+    node --test site/links.test.mjs
+
+# Links and fragments of a build served at /, as site-build makes it by
+# default; links to repository files then name the checkout's files.
+site-check:
+    lychee --offline --include-fragments --index-files index.html,. --no-progress --root-dir "$PWD/site/dist" 'site/dist/**/*.html'
