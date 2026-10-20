@@ -23,7 +23,7 @@
 //! incomplete report to a result without requests, which `check` would
 //! drop.
 
-mod markdown;
+pub(crate) mod markdown;
 mod sanitize;
 
 use std::path::PathBuf;

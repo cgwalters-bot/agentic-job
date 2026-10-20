@@ -13,6 +13,7 @@
 //! write ([`plan`]), so a refusal leaves the forge as it was.
 
 pub mod forgejo;
+mod mentions;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -234,7 +235,7 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
                 (_, None) => errors.push("an add_comment without a body".to_owned()),
                 (Some(issue), Some(body)) => ops.push(Op::Comment {
                     issue,
-                    body: with_footer(body, target.run_url),
+                    body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
                 }),
             },
             CREATE_PULL_REQUEST => match pull_request(checked, policy, &report, item, target) {
@@ -375,7 +376,7 @@ fn pull_request(
         } else {
             title.to_owned()
         },
-        body: with_footer(body, target.run_url),
+        body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
         patch: bytes,
         files,
     })
@@ -518,7 +519,7 @@ mod tests {
     const RUN: &str = "https://forge.example/o/r/actions/runs/7";
     const PUSH_REPO: &str = "bot/bootc";
 
-    fn policy() -> Policy {
+    pub(super) fn policy() -> Policy {
         let mut policy = crate::policy::tests::policy();
         policy.push_repo = Some(PUSH_REPO.to_owned());
         policy.safe_outputs.others.insert(
@@ -556,7 +557,7 @@ mod tests {
     }
 
     /// A checked upload of `items`, with the patch check would report.
-    fn checked(items: &[Value]) -> tempfile::TempDir {
+    pub(super) fn checked(items: &[Value]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let patch = patch();
         std::fs::write(dir.path().join(PATCH_NAME), &patch).unwrap();
@@ -573,12 +574,32 @@ mod tests {
         dir
     }
 
-    fn target(comment_target: Option<u64>) -> Target<'static> {
+    pub(super) fn target(comment_target: Option<u64>) -> Target<'static> {
         Target {
             repo: "bootc-dev/bootc",
             push_repo: Some(PUSH_REPO),
             comment_target,
             run_url: RUN,
+        }
+    }
+
+    #[test]
+    fn filters_every_planned_body() {
+        let mut comment = comment_item();
+        let mut pr = pull_request_item();
+        for item in [&mut comment, &mut pr] {
+            item["body"] = json!("@user @org/team !12 `@code` user@example.com");
+        }
+        let dir = checked(&[comment, pr]);
+        let ops = plan(dir.path(), &policy(), &target(Some(64))).unwrap();
+        for op in ops {
+            let body = match op {
+                Op::Comment { body, .. } => body,
+                Op::PullRequest(pr) => pr.body,
+            };
+            assert!(body.starts_with(
+                "@\u{200b}user @\u{200b}org/team !\u{200b}12 `@code` user@example.com"
+            ));
         }
     }
 

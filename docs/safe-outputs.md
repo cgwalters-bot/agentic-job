@@ -1057,7 +1057,11 @@ and the patch (its name, size, base commit and check's patch rules, read
 again). A same-sized patch changed after check is not caught: the
 upload has to come from the check job, as on GitHub, where apply
 holds it to its digest. The bodies are the collector's, sanitized once;
-gh-aw's handlers' second pass is not repeated. Then the pull request is
+gh-aw's handlers' second pass is not repeated. Before publication, apply
+inserts a zero-width break in user and team mentions and Forgejo `!N`
+references outside code spans and fences. Closing and reopening references
+share the collector's cap of ten; later ones are neutralized too.
+Then the pull request is
 opened, its push making the last checks, and the comments posted after
 it; a failure after a write names what was made.
 
