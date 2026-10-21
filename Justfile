@@ -127,6 +127,14 @@ site-build:
     cd site && npm ci --ignore-scripts --no-audit --no-fund
     cd site && ASTRO_TELEMETRY_DISABLED=1 npm run build
 
+# site-build for GitHub Pages, from a GitHub Actions run's own variables:
+# served at the repository's default project-site address,
+# https://OWNER.github.io/REPO/ (a custom domain or a REPO named
+# OWNER.github.io would need other values), and linking repository files
+# at the built commit.
+site-build-pages:
+    SITE_URL="https://$GITHUB_REPOSITORY_OWNER.github.io" SITE_BASE="/${GITHUB_REPOSITORY#*/}/" SITE_SOURCE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/" {{ just_executable() }} site-build
+
 site-test:
     node --test site/links.test.mjs
 
