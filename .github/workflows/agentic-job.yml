@@ -207,6 +207,15 @@ on:
         description: A script in the calling repository that runs as the sandbox user before the agent, for toolchains
         type: string
         default: ""
+      egress-write-policy:
+        description: >-
+          Hold the agent job's every process after secure-host, the agent's included, to the egress
+          proxy's write rules (egress.write-policy, docs/secure-host.md#egress-write-policy-opt-in):
+          writes only where a rule allows and to the inference proxy on the tailnet. The agent keeps
+          the runner's own Actions-service writes, so a private caller or target stays refused.
+          False leaves it to the `config` file, where it is off by default
+        type: boolean
+        default: false
       output-repo:
         description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a new pull request, the patch's base commit must already be in the output repository; comments need no checkout
         type: string
@@ -414,6 +423,7 @@ jobs:
       packages: ${{ inputs.packages }}
       npm: ${{ inputs.npm }}
       setup: ${{ inputs.setup }}
+      egress-write-policy: ${{ inputs.egress-write-policy }}
       output-repo: ${{ inputs.output-repo }}
       item-repo: ${{ inputs.item-repo }}
       apply-environment: ${{ inputs.apply-environment }}

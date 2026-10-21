@@ -22,6 +22,10 @@ if out=$(gh api graphql -f id="$issue" -f query='mutation($id: ID!) {
 fi
 printf '%s\n' "$out"
 case "$out" in *"egress proxy"*) exit 1 ;; *"not accessible"*) ;; *) exit 1 ;; esac
+# Without the egress-write-policy input the agent's writes are open: no
+# proxy refuses its POST (e2e-write-policy is the run where one does).
+headers=$(curl -sS -o /dev/null -D - -X POST --data probe https://example.com/)
+case "$headers" in *[Xx]-[Ee]gress-[Dd]enied:*) exit 1 ;; esac
 printf '%s\n' '{"type": "add_comment", "body": "A comment from the scripted agent of an end-to-end run."}' >> "$HOME/out/safe-outputs.jsonl"
 SH
 cat > "$HOME/.config/fake-agent/demo.json" <<'JSON'

@@ -732,6 +732,38 @@ jobs:
       # So that both ways to the binary run here once a release is pinned.
       build-binary: true
 
+  # The same with the egress-write-policy input: the scripted agent, the
+  # runner's user, reads through the egress proxy and is refused a POST
+  # (.github/agentic-job/e2e/write-policy.sh), and the job hands back and
+  # applies its comment through the proxy's runner rules. e2e-full is the
+  # default, where the agent's writes are open.
+  e2e-write-policy:
+    needs: [changes, static]
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: write # add_comment
+      pull-requests: write # the status comment and reaction on the pull request e2e-event is for
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the register job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-write-policy-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
+      task: Comment on the issue once the egress proxy refuses a write.
+      repo: ${{ github.repository }}
+      outputs: add_comment,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/write-policy.sh
+      egress-write-policy: true
+      timeout: "5"
+      max-requests: "0"
+      budget: "100"
+      comment-target: "64"
+      artifact-prefix: write-policy-
+
   # The event-triggered path, through the workflow itself and on the
   # event that started this run. On a pull request the policy job admits
   # it (its author holds the write role and its head is this
@@ -1296,7 +1328,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1425,6 +1457,16 @@ jobs:
           gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" --jq ".[] | select(.body | contains(\"$RUN\")).body" > "$RUNNER_TEMP/comments"
           grep -F 'A comment from the scripted agent of an end-to-end run.' "$RUNNER_TEMP/comments"
           grep -F -A2 "$NOTE" "$RUNNER_TEMP/comments" | grep -F 'A comment from the scripted agent of a run that is stopped.'
+      # Its agent asked for the comment only once the egress proxy had let
+      # it read and refused it a POST; the hand-back uploaded and applied
+      # through the proxy's runner rules.
+      - name: The write-policy run was refused a write, and handed back its comment
+        env:
+          RESULT: ${{ needs.e2e-write-policy.result }}
+          EXIT: ${{ needs.e2e-write-policy.outputs.exit }}
+        run: |
+          test "$RESULT/$EXIT" = success/0
+          grep -F 'A comment from the scripted agent of a write-policy run.' "$RUNNER_TEMP/comments"
       - name: The run stopped at a limit was applied as partial
         run: jq -e '.partial and (.handlers | keys) == ["add_comment", "noop"]' "$RUNNER_TEMP/limit/applied.json"
       # Check runs cannot be deleted; one of this attempt's, by the pinned
@@ -1913,7 +1955,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1937,7 +1979,7 @@ jobs:
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
             ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
-            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))
         run: >-

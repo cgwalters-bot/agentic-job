@@ -228,7 +228,18 @@ const REDIRECTED_PORTS: &str = "80, 443";
 ///
 /// NAT runs before the filter at the output hook, so the filter sees a
 /// redirected connection to loopback, never its first address.
-fn write_policy_rules(write_uids: &[String], resolvers: &[IpAddr]) -> (String, String, String) {
+///
+/// With `direct` endpoints (the inference proxy on the tailnet, which
+/// `agentic-job config` makes of `inference.url`), those uids reach each
+/// at its own address and port too, as the sandbox user does: a tailnet
+/// address is never redirected, so without this the runner's `run`, and
+/// an agent that is the runner's user, could not reach the broker. No
+/// other tailnet address or port.
+fn write_policy_rules(
+    write_uids: &[String],
+    resolvers: &[IpAddr],
+    direct: bool,
+) -> (String, String, String) {
     if write_uids.is_empty() {
         return (String::new(), String::new(), String::new());
     }
@@ -246,12 +257,17 @@ fn write_policy_rules(write_uids: &[String], resolvers: &[IpAddr]) -> (String, S
         egress::TRANSPARENT_PORT
     );
     let dns = dns_accepts("@write_policy_uids", resolvers);
+    let direct = if direct {
+        "\n    meta skuid @write_policy_uids ip daddr . tcp dport @tailnet_allowed accept"
+    } else {
+        ""
+    };
     let filter = format!(
         "
     meta skuid @sandbox_uids oifname \"lo\" tcp dport {} counter reject
     meta skuid @write_policy_uids ct state established,related accept
     meta skuid @write_policy_uids ip daddr 127.0.0.0/8 accept
-    meta skuid @write_policy_uids ip6 daddr ::1 accept{dns}
+    meta skuid @write_policy_uids ip6 daddr ::1 accept{dns}{direct}
     meta skuid @write_policy_uids counter reject",
         egress::TRANSPARENT_PORT
     );
@@ -303,7 +319,7 @@ pub fn rules_with_resolvers(
     write_uids: &[String],
 ) -> String {
     let (write_set, write_chain, write_rules) = if proxy_uid.is_some() {
-        write_policy_rules(write_uids, resolvers)
+        write_policy_rules(write_uids, resolvers, !direct.is_empty())
     } else {
         Default::default()
     };
@@ -629,6 +645,26 @@ table inet runner_sandbox {
         assert_eq!(
             rules_with_resolvers(&sandbox, &[], None, &resolvers, &[], None, &runner),
             rules(&sandbox, &[], None)
+        );
+        // A direct endpoint (the broker on the tailnet): those uids reach
+        // that address and port, before their reject, and nothing else of
+        // the tailnet; the sandbox user's rules are as without them.
+        let direct = [Direct::parse("http://100.101.102.103:18080").unwrap()];
+        let with_direct =
+            rules_with_resolvers(&sandbox, &direct, Some(993), &resolvers, &[], None, &runner);
+        let accept =
+            "\n    meta skuid @write_policy_uids ip daddr . tcp dport @tailnet_allowed accept";
+        let reject = "\n    meta skuid @write_policy_uids counter reject";
+        assert!(
+            with_direct.contains(&format!("{accept}{reject}")),
+            "{with_direct}"
+        );
+        assert_eq!(
+            with_direct
+                .replace(set_and_chain, "")
+                .replace(filter, "")
+                .replace(&format!("{accept}{reject}"), ""),
+            rules_with_resolvers(&sandbox, &direct, Some(993), &resolvers, &[], None, &[])
         );
     }
 

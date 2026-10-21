@@ -372,16 +372,23 @@ test('agent.yml runs the setup script, and run the agent, as the runner\'s user 
     .split('        run: ')[1].split('\n')[0];
   assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf('- uses: ./.agentic-job-source/secure-host'));
   assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf('- name: The setup script'));
-  for (const [caller, policy, status] of [
-    ['false', {}, 0], ['false', { private: false }, 0],
-    ['true', {}, 1], ['null', {}, 1], ['false', { private: true }, 1],
+  // egress.write-policy admits no private or unknown caller or target:
+  // the agent keeps the runner's own Actions-service writes.
+  const writePolicy = '[egress]\nwrite-policy = true\n';
+  for (const [caller, policy, config, status] of [
+    ['false', {}, '', 0], ['false', { private: false }, '', 0], ['false', {}, writePolicy, 0],
+    ['true', {}, '', 1], ['null', {}, '', 1], ['false', { private: true }, '', 1],
+    ['true', {}, writePolicy, 1], ['null', {}, writePolicy, 1],
+    ['true', { private: true }, writePolicy, 1], ['false', { private: true }, writePolicy, 1],
   ]) {
     env.CALLER_PRIVATE = caller;
     writeFileSync(join(directory, '.agentic-job/policy.json'), JSON.stringify(policy));
+    writeFileSync(join(directory, '.agentic-job/config.toml'), config);
     const admission = inDir(admit);
-    assert.equal(admission.status, status, admission.stderr);
+    assert.equal(admission.status, status, `${caller} ${JSON.stringify(policy)} ${config}: ${admission.stderr}`);
     assert.ok(!existsSync(home));
   }
+  writeFileSync(join(directory, '.agentic-job/config.toml'), '[setup]\npackages = []\n');
   env.CALLER_PRIVATE = 'false';
   writeFileSync(join(directory, '.agentic-job/policy.json'), '{}');
   for (const config of [
@@ -500,7 +507,7 @@ test('the policy job writes the configuration with its own binary, and not for p
     writeFileSync(join(directory, 'bin/agentic-job'), '#!/bin/sh\necho "$@"\n', { mode: 0o755 });
     const env = Object.fromEntries(['CONFIG', 'MODEL', 'CONFIG_REPO', 'CONFIG_REF', 'CONFIG_PATH', 'SKILLS', 'URL',
       'REGISTER', 'AUDIENCE', 'TOKEN_FILE', 'PROVIDER', 'TIMEOUT', 'MAX_REQUESTS', 'MAX_TASKS', 'BUDGET', 'PACKAGES',
-      'NPM', 'AGENTS', 'SETUP', 'SESSION', 'IDLE_MINUTES'].map(name => [name, '']));
+      'NPM', 'AGENTS', 'SETUP', 'SESSION', 'IDLE_MINUTES', 'WRITE_POLICY'].map(name => [name, '']));
     // A workflow's step, two levels deeper than an action's.
     const body = policy.split('- name: Write the configuration\n')[1].split('        run: |\n')[1];
     const script = body.match(/^(?: {10}[^\n]*\n)+/)[0].replace(/^ {10}/gm, '');
@@ -518,7 +525,7 @@ test('the policy job writes the configuration with its own binary, and not for p
 
 test('the end-to-end callers run the scripted agent, which needs no proxy', () => {
   const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
-  for (const name of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review']) {
+  for (const name of ['e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'e2e-review']) {
     // Job bodies are indented at least four spaces.
     const job = ci.split(`\n  ${name}:\n`)[1].split(/\n  [^ ]/)[0];
     assert.ok(job.includes('agent: fake'), name);

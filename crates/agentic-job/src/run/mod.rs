@@ -510,8 +510,9 @@ fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
         ),
         (
             asks.private,
-            "a private target: the egress proxy's rules hold the sandbox user alone, so the \
-             agent could send its source anywhere",
+            "a private target: the egress proxy holds the runner's user only under \
+             egress.write-policy, and even then with the runner's own Actions-service writes, \
+             so the agent could send its source to another repository's artifacts",
         ),
         (
             asks.session,

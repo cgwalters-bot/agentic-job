@@ -196,10 +196,17 @@ identity tokens and any secret a step sends. It already did for the
 sandbox user. A flaw in it reachable from a fetched origin is now worth
 those credentials.
 
-`run`'s own requests go through it too, and nothing allows them: a
-provider's API under `register = "api-key"`, and `egress.direct` on the
-tailnet, which is refused outright. So an agent job cannot use this yet.
-The runner's requests are also logged in the same access log, which an
+`run`'s own requests, and those of an agent that is the runner's user,
+are held too. The one built-in exception is `egress.direct`, which
+`agentic-job config` fills with an `inference.url` on the tailnet when
+the file names none: each of its endpoints is reached at its own address
+and port, by every process of the runner's user, as the sandbox user
+reaches it. A tailnet address is never redirected, so without that the
+broker would be refused. Nothing else is added: a
+provider's API under `register = "api-key"`, or a broker at a public
+address, needs a `[[write]]` rule of the caller's, and `run`'s own HTTPS
+client trusts only the public roots, not the proxy's authority. The
+runner's requests are also logged in the same access log, which an
 agent run reads.
 
 The runner's own writes (job and step status, logs, artifacts, caches,
@@ -239,6 +246,30 @@ the job uploads an artifact, saves and restores a cache, and ends
 green. `sandbox check` probes the
 same ([sandbox-check.md](sandbox-check.md#the-network-probes)). Not in
 this slice: a read allowlist, and a summary of refused writes.
+
+### For an agent job
+
+agentic-job.yml's agent job runs the agent as the runner's user, so
+without this its writes go anywhere but the metadata service. It is off
+by default there too. Turn it on with the workflow's
+`egress-write-policy` input, or `egress.write-policy` in its `config`
+file, when the agent must not send what it reads where it likes. It
+holds the agent, the setup script and every later step of the job.
+
+It holds the agent less than the sandbox user is held. The agent is the
+runner's uid, so it gets the runner's own write rules above: it can
+write to the Actions service with a token of its own, such as another
+repository's runtime token, and upload what it read there. Only a second
+user would close that channel, so the agent job still refuses a private
+caller or target with the write policy on
+([private-repositories.md](private-repositories.md#opting-in)).
+
+The proxy's authority reaches the agent two ways: the system's store,
+which curl, git and OpenSSL read, and `NODE_EXTRA_CA_CERTS` and
+`REQUESTS_CA_BUNDLE`, which `run --runner-home` adds to the agent's
+otherwise cleared environment. CI's `e2e-write-policy` job runs the
+scripted agent this way: it reads through the proxy with curl and Node,
+is refused a POST, and its hand-back is uploaded and applied.
 
 ## Access-time world-write policy
 

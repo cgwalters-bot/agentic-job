@@ -101,7 +101,7 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
   const callers = jobs.filter(([, , job]) =>
     /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
-    'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
+    'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-event',
     'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items', 'e2e-threads',
   ]);
   for (const [, name, caller] of callers) {

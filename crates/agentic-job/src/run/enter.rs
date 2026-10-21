@@ -171,8 +171,18 @@ impl Sandbox {
             ("LOGNAME", &user.name),
         ]
         .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        // Under `egress.write-policy` the agent's HTTPS goes through the
+        // proxy, which ends TLS with its per-job authority. The system's
+        // store has it (curl, git, OpenSSL); Node and Python's requests
+        // read only these, which the step's environment got from the
+        // action's GITHUB_ENV and `env -i` would drop.
+        let ca = crate::sandbox::egress::runner_ca_vars()
+            .into_iter()
+            .filter(|_| config.egress.write_policy)
+            .map(|(name, value)| (name.to_owned(), value.to_owned()));
         let env: std::collections::BTreeMap<String, String> = fixed
             .into_iter()
+            .chain(ca)
             .chain(config.sandbox.env.clone())
             .collect();
         crate::sandbox::check::forget_passed()?;
@@ -481,6 +491,24 @@ mod tests {
         assert_eq!(got, want);
         let pwd = sandbox.checked(&["pwd"], b"", 1 << 10).unwrap().text();
         assert_eq!(Path::new(&pwd), home);
+        // Under egress.write-policy, the proxy's authority for Node and
+        // Python too, and still nothing of this process's own.
+        let config = Config::parse("[egress]\nwrite-policy = true\n").unwrap();
+        let sandbox = Sandbox::own(&config, &home).unwrap();
+        let out = sandbox.checked(&["env"], b"", 1 << 16).unwrap().text();
+        let ca: Vec<&str> = out.lines().filter(|line| line.contains("CA_")).collect();
+        assert_eq!(
+            ca,
+            [
+                "NODE_EXTRA_CA_CERTS=/etc/egress-proxy/ca.pem",
+                "REQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem"
+            ]
+        );
+        // The five fixed ones (HOME, LANG, LOGNAME, PATH, USER) and these.
+        assert_eq!(
+            out.lines().filter(|line| !line.starts_with("PWD=")).count(),
+            5 + ca.len()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

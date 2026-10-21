@@ -374,7 +374,19 @@ fn trust_for_runner(ca: &str) -> Result<()> {
 }
 
 fn runner_env() -> String {
-    format!("NODE_EXTRA_CA_CERTS={CA_CERT}\nREQUESTS_CA_BUNDLE={CA_BUNDLE}\n")
+    runner_ca_vars()
+        .iter()
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect()
+}
+
+/// The variables of [`RUNNER_ENV`]: also what `run --runner-home` gives
+/// an agent under `egress.write-policy`, whose environment it clears.
+pub const fn runner_ca_vars() -> [(&'static str, &'static str); 2] {
+    [
+        ("NODE_EXTRA_CA_CERTS", CA_CERT),
+        ("REQUESTS_CA_BUNDLE", CA_BUNDLE),
+    ]
 }
 
 fn write(path: &str, content: &str) -> Result<()> {

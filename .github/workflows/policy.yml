@@ -196,6 +196,10 @@ on:
         description: A script in the calling repository that runs as the sandbox user before the agent, for toolchains
         type: string
         default: ""
+      egress-write-policy:
+        description: Set egress.write-policy in the run's configuration; false leaves the caller's file to decide
+        type: boolean
+        default: false
       output-repo:
         description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a new pull request, the patch's base commit must already be in the output repository; comments need no checkout
         type: string
@@ -807,6 +811,10 @@ jobs:
           # npm or install scripts; an `npm` input replaces them.
           AGENTS: ${{ inputs.npm == '' && (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') || '' }}
           SETUP: ${{ inputs.setup }}
+          # Off sets nothing, so the caller's file stands. The agent job's
+          # host configuration is this file's, so setup, admission and
+          # `run` all read this one setting.
+          WRITE_POLICY: ${{ inputs.egress-write-policy && 'true' || '' }}
           REPO: ${{ inputs.repo }}
         run: |
           "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} --repo "$REPO" \
@@ -821,6 +829,7 @@ jobs:
             --boolean session.listen="$SESSION" --integer session.idle-minutes="$IDLE_MINUTES" \
             --list setup.packages="$PACKAGES" --list setup.npm="$NPM" \
             --list setup.agents="$AGENTS" --string setup.script="$SETUP" \
+            --boolean egress.write-policy="$WRITE_POLICY" \
             > "$JOB_DIR/config.toml"
           cat "$JOB_DIR/config.toml"
       # What the agent job's actions read of this call, so that its job

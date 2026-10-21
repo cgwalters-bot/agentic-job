@@ -166,7 +166,9 @@ out:
   names the broker's host in a `[[write]]` rule or under an
   `[egress] allow` domain. `front` does not go with
   `egress.write-policy`, under which `run`'s own requests to a broker on
-  port 80 or 443 would need such a rule.
+  port 80 or 443 would need such a rule. A broker in `egress.direct`
+  needs none: the write policy lets the runner's user reach it at its
+  address and port.
 
 `run` resolves the broker's names once, when it fronts the run, and its
 proxy then connects to those addresses alone. Before the agent starts it

@@ -31,8 +31,10 @@ secure-host's deprivileging (R4), a job with read-only tokens, no
 machine. Nothing protects the transcript, the limits or `run`'s
 environment from the agent, which can also stop or kill `run`; cleanup kills only the agent's process
 group, the token probes do not run, and the egress proxy does not filter
-it (`egress.write-policy`, off by default, would hold it to the write
-rules). `run` refuses what would need the second user
+it unless the caller opts into `egress.write-policy`, which holds it to
+the write rules, with the runner's own Actions-service writes
+([secure-host.md](secure-host.md#for-an-agent-job)). `run` refuses what would need the second user,
+a private target included
 ([`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs)).
 [#1335](https://github.com/cgwalters-forge/agentic-job/issues/1335) and
 [#1336](https://github.com/cgwalters-forge/agentic-job/issues/1336)
