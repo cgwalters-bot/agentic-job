@@ -11,6 +11,9 @@
 //! others wrote is not spliced into a script, checkout leaves no token on
 //! disk, and no agent runs outside the sandbox.
 //!
+//! One job shape needs no secure-host: a deploy-only job that runs only
+//! GitHub's pinned Pages actions on an artifact a hardened job built.
+//!
 //! Script expressions use a closed allowlist of direct property references;
 //! unknown contexts and expression syntax are refused rather than interpreted.
 
@@ -45,6 +48,37 @@ const BEFORE_SECURE_HOST: &[&str] = &[
     "actions/setup-java",
     "actions/setup-node",
     "actions/setup-python",
+];
+
+/// The action that marks a deploy-only job, and the only one it may run: a
+/// job without secure-host, admitted because it runs nothing from the
+/// repository (agentic-job#1525). deploy-pages fetches the Pages artifact a
+/// hardened build job uploaded by itself and serves it as data, so not even
+/// download-artifact is admitted: its `path:` could extract the artifact
+/// over the action's own code, and its `repository:` fetch someone else's.
+const DEPLOY_PAGES: &str = "actions/deploy-pages";
+
+// Upstream v4.0.5. Review additions as credential-bearing code: GitHub
+// resolves fork-network commits under the upstream name too, so a SHA's
+// syntax alone does not establish trust in the action implementation.
+const DEPLOY_PAGES_COMMITS: &[&str] = &["d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e"];
+
+/// deploy-pages' inputs a deploy-only job may set, to literal values only.
+/// Its `token` is left out: the job's own token is what it needs.
+const DEPLOY_INPUTS: &[&str] = &[
+    "artifact_name",
+    "error_count",
+    "preview",
+    "reporting_interval",
+    "timeout",
+];
+
+/// A deploy-only job's whole permissions map may hold only these grants:
+/// what deploy-pages needs, and reading the repository.
+const DEPLOY_PERMISSIONS: &[(&str, &str)] = &[
+    ("pages", "write"),
+    ("id-token", "write"),
+    ("contents", "read"),
 ];
 
 /// Actions that run a coding agent on the runner, with the job's token
@@ -118,6 +152,184 @@ fn is_checkout(step: &Value) -> bool {
     step.get("uses")
         .and_then(Value::as_str)
         .is_some_and(|u| action_of(u) == CHECKOUT)
+}
+
+fn is_deploy_pages(step: &Value) -> bool {
+    step.get("uses")
+        .and_then(Value::as_str)
+        .is_some_and(|u| action_of(u) == DEPLOY_PAGES)
+}
+
+/// "step N", with the step's name, action or first script line.
+fn step_label(i: usize, step: &Map<String, Value>) -> String {
+    step.get("name")
+        .or_else(|| step.get("uses"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            let run = step.get("run").and_then(Value::as_str)?;
+            run.lines().next()
+        })
+        .map(|n| n.chars().take(60).collect::<String>())
+        .map_or_else(
+            || format!("step {}", i + 1),
+            |n| format!("step {} ({n})", i + 1),
+        )
+}
+
+const DEPLOY_INSTEAD: &str = "keep only pinned actions/deploy-pages steps in the deploy job; do everything else in the build job that runs secure-host and uploads the Pages artifact";
+
+/// The problems of a job without secure-host that deploys Pages, each with
+/// the step it is at, if any. Such a job holds the OIDC request token, so
+/// it must run nothing but [`DEPLOY_PAGES`] with literal inputs: no
+/// checkout, script, container or other action, no secret it could hand
+/// on, and no `env:`, where `NODE_OPTIONS` or `LD_PRELOAD` would load code
+/// into the action's own process.
+fn deploy_problems(
+    workflow: &Value,
+    job: &Map<String, Value>,
+    steps: &[Value],
+    literal_matrix: bool,
+) -> Vec<(Option<String>, String, &'static str)> {
+    let mut problems = Vec::new();
+    for key in ["container", "services"] {
+        if job.contains_key(key) {
+            problems.push((
+                None,
+                format!("has `{key}:` in a deploy-only job, which may run nothing but actions/deploy-pages"),
+                DEPLOY_INSTEAD,
+            ));
+        }
+    }
+    for (key, value) in job
+        .get("permissions")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if !value
+            .as_str()
+            .is_some_and(|v| DEPLOY_PERMISSIONS.contains(&(key.as_str(), v)))
+        {
+            problems.push((
+                None,
+                format!(
+                    "grants `{key}: {}` in a deploy-only job, beyond `pages: write`, `id-token: write` and `contents: read`",
+                    value.as_str().map_or_else(|| value.to_string(), str::to_owned)
+                ),
+                "grant the deploy job only what deploy-pages needs; other grants belong to a job that runs secure-host",
+            ));
+        }
+    }
+    if map_reads_secrets(job) || workflow.get("env").is_some_and(reads_secrets) {
+        problems.push((
+            None,
+            "reads `secrets` in a deploy-only job".into(),
+            "deploy with the job's own token and OIDC grant; deploy-pages needs no secret",
+        ));
+    }
+    if job.contains_key("env") || workflow.get("env").is_some() {
+        problems.push((
+            None,
+            "has workflow or job `env:` in a deploy-only job, which could load code into its action".into(),
+            "move `env:` to the jobs that use it; a deploy-only job takes none",
+        ));
+    }
+    for (i, step_value) in steps.iter().enumerate() {
+        let Some(step) = step_value.as_object() else {
+            problems.push((
+                Some(format!("step {}", i + 1)),
+                "is not a map".into(),
+                "write the step as a map",
+            ));
+            continue;
+        };
+        let at = Some(step_label(i, step));
+        if let Some(key) = miscased(step) {
+            problems.push((
+                at.clone(),
+                format!("spells `{key}` in a case these rules do not read"),
+                "write the key in lowercase",
+            ));
+        }
+        if step.contains_key("env") {
+            problems.push((
+                at.clone(),
+                "has `env:` in a deploy-only job, which could load code into its action".into(),
+                "remove the step's `env:`",
+            ));
+        }
+        // Another action's inputs are moot: the step is refused below.
+        match step.get("with").filter(|_| is_deploy_pages(step_value)) {
+            None => {}
+            Some(Value::Object(inputs)) => {
+                for (key, value) in inputs {
+                    let literal = match value {
+                        Value::String(s) => !s.contains("${{"),
+                        Value::Bool(_) | Value::Number(_) => true,
+                        _ => false,
+                    };
+                    if !DEPLOY_INPUTS.contains(&key.as_str()) || !literal {
+                        problems.push((
+                            at.clone(),
+                            format!("sets `{key}` outside deploy-pages' literal inputs in a deploy-only job"),
+                            "set only artifact_name, error_count, preview, reporting_interval or timeout, to literal values",
+                        ));
+                    }
+                }
+            }
+            Some(_) => problems.push((
+                at.clone(),
+                "has non-map `with:` inputs that cannot be checked".into(),
+                "write `with:` as a map",
+            )),
+        }
+        match step.get("uses").and_then(Value::as_str) {
+            None => problems.push((
+                at.clone(),
+                "runs something other than an action in a deploy-only job, which has no secure-host".into(),
+                DEPLOY_INSTEAD,
+            )),
+            Some(uses) if action_of(uses) != DEPLOY_PAGES => problems.push((
+                at.clone(),
+                format!("runs {uses} in a deploy-only job, which admits only actions/deploy-pages"),
+                DEPLOY_INSTEAD,
+            )),
+            Some(uses) if !PINNED.is_match(uses) => problems.push((
+                at.clone(),
+                format!("uses {uses}, a ref that can move"),
+                PIN_INSTEAD,
+            )),
+            Some(uses)
+                if !uses
+                    .split_once('@')
+                    .is_some_and(|(_, sha)| DEPLOY_PAGES_COMMITS.contains(&sha)) =>
+            {
+                problems.push((
+                    at.clone(),
+                    format!("uses {uses}, a deploy-pages commit not on the reviewed allowlist"),
+                    "use actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e (v4.0.5)",
+                ));
+            }
+            Some(_) => {}
+        }
+        // A `run:` beside `uses:` is not a valid step, but say so rather
+        // than let it pass as an admitted action.
+        if step.contains_key("uses") && step.contains_key("run") {
+            problems.push((
+                at.clone(),
+                "has `run:` in a deploy-only job, which has no secure-host".into(),
+                DEPLOY_INSTEAD,
+            ));
+        }
+        for what in execution_problems(step_value, "step", literal_matrix) {
+            problems.push((
+                at.clone(),
+                what,
+                "use literal values or a direct allowlisted context",
+            ));
+        }
+    }
+    problems
 }
 
 /// Whether `v` reads the `secrets` context in any expression, including an
@@ -490,6 +702,12 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
             .map_or(&[], Vec::as_slice);
         let secure_host = steps.iter().position(is_secure_host);
         let Some(secure_host) = secure_host else {
+            if steps.iter().any(is_deploy_pages) {
+                for (step, what, instead) in deploy_problems(workflow, job, steps, literal_matrix) {
+                    add(job_name, step.as_deref(), what, instead);
+                }
+                continue;
+            }
             add(
                 job_name,
                 None,
@@ -575,19 +793,7 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                 );
                 continue;
             };
-            let label = step
-                .get("name")
-                .or_else(|| step.get("uses"))
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    let run = step.get("run").and_then(Value::as_str)?;
-                    run.lines().next()
-                })
-                .map(|n| n.chars().take(60).collect::<String>())
-                .map_or_else(
-                    || format!("step {}", i + 1),
-                    |n| format!("step {} ({n})", i + 1),
-                );
+            let label = step_label(i, step);
             let at = Some(label.as_str());
             for key in ["with", "env"] {
                 if let Some(duplicate) = step
@@ -886,6 +1092,15 @@ mod tests {
     /// A workflow of one job with `job` as its body, `@PIN` standing for a
     /// commit.
     fn workflow(job: &str) -> String {
+        let job = job
+            .replace(
+                "actions/deploy-pages@PIN",
+                "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+            )
+            .replace(
+                "Actions/Deploy-Pages@PIN",
+                "Actions/Deploy-Pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+            );
         let job: String = job.lines().map(|l| format!("    {l}\n")).collect();
         format!(
             "on: push\njobs:\n  build:\n{}",
@@ -1086,7 +1301,134 @@ steps:
             "permissions: {id-token: ~}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
             &["grants `id-token`"],
         ),
+        // The deploy-only shape, and each way out of it.
+        (DEPLOY, &[]),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@0123456789abcdef0123456789abcdef01234567",
+            &["deploy-pages commit not on the reviewed allowlist"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write, contents: read}\nsteps:\n  - uses: Actions/Deploy-Pages@PIN\n    if: github.ref == 'refs/heads/main'\n    with: {artifact_name: github-pages, timeout: 600000, preview: false}",
+            &[],
+        ),
+        // download-artifact could extract over the action's own code, or
+        // fetch another repository's artifact.
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/download-artifact@PIN\n    with: {name: tools, path: /home/runner/work/_actions/actions/deploy-pages}\n  - uses: actions/deploy-pages@PIN",
+            &["runs actions/download-artifact@"],
+        ),
+        // Environment variables that load code into the action's process.
+        (
+            "permissions: {pages: write, id-token: write}\nenv: {LD_PRELOAD: ./evil.so}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    env: {NODE_OPTIONS: '--require ./evil.js'}",
+            &[
+                "has workflow or job `env:`",
+                "step 1 (actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03) has `env:`",
+            ],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nenv: {NODE_OPTIONS: '--require ./x.js'}\nsteps:\n  - uses: actions/deploy-pages@PIN",
+            &["has workflow or job `env:`"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    with: {token: not-the-job-token, Artifact_Name: x, timeout: '${{ github.sha }}', error_count: [1]}",
+            &[
+                "sets `token` outside",
+                "sets `Artifact_Name` outside",
+                "sets `timeout` outside",
+                "sets `error_count` outside",
+            ],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    with: 'artifact_name: x'\n  - echo",
+            &["non-map `with:`", "step 2 is not a map"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    if: secrets.T != ''",
+            &["reads `secrets`"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: false}\n  - uses: actions/deploy-pages@PIN",
+            &[
+                "step 1 (actions/checkout@0123456789abcdef0123456789abcdef01234567) runs actions/checkout@",
+            ],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - run: ./publish.sh\n  - uses: actions/deploy-pages@PIN",
+            &["step 1 (./publish.sh) runs something other than an action"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    run: ./publish.sh",
+            &["has `run:`"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/upload-pages-artifact@PIN\n  - uses: ./deploy\n  - uses: docker://alpine\n  - uses: actions/deploy-pages@PIN",
+            &[
+                "runs actions/upload-pages-artifact@",
+                "runs ./deploy in",
+                "runs docker://alpine in",
+            ],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@v4",
+            &["actions/deploy-pages@v4, a ref that can move"],
+        ),
+        (
+            "permissions: {pages: write, id-token: write, contents: write, actions: read, ID-TOKEN: write}\nsteps:\n  - uses: actions/deploy-pages@PIN",
+            &[
+                "grants `contents: write`",
+                "grants `actions: read`",
+                "grants `ID-TOKEN: write`",
+            ],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\ncontainer: node\nservices: {db: {image: postgres}}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    with: {token: '${{ secrets.PAGES_TOKEN }}'}",
+            &[
+                "`container:`",
+                "`services:`",
+                "reads `secrets`",
+                "sets `token` outside",
+            ],
+        ),
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    with: {args: '${{ github.event.issue.title }}'}",
+            &[
+                "sets `args` outside",
+                "expands ${{ github.event.issue.title }}",
+            ],
+        ),
+        (
+            "steps:\n  - uses: actions/deploy-pages@PIN",
+            &["no `permissions:` map"],
+        ),
     ];
+
+    /// A deploy-only job of the shape actions/deploy-pages documents.
+    const DEPLOY: &str = "\
+permissions: {pages: write, id-token: write}
+needs: build-site
+runs-on: ubuntu-26.04
+environment: {name: github-pages, url: '${{ steps.deployment.outputs.page_url }}'}
+steps:
+  - id: deployment
+    uses: actions/deploy-pages@PIN
+";
+
+    /// A workflow's `env:` reaches its deploy-only job too.
+    #[test]
+    fn deploy_job_takes_no_workflow_env() {
+        for (env, refused) in [
+            ("", false),
+            (
+                "env: {NODE_OPTIONS: '--import=data:text/javascript,x'}\n",
+                true,
+            ),
+            ("env: {}\n", true),
+        ] {
+            let text = format!("{env}{}", workflow(DEPLOY));
+            let problems = check_workflow(&yaml::parse(&text).unwrap());
+            assert_eq!(!problems.is_empty(), refused, "{text}: {problems:?}");
+        }
+    }
 
     #[test]
     fn hardening_bypasses() {

@@ -20,18 +20,19 @@ installing a trusted check; nothing is enabled in their repositories by default.
 
 ## What each job must be
 
-Every job must do one of two things. It can call the reusable workflow
+Every job must do one of three things. It can call the reusable workflow
 `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml` at a
-40-hex commit, which holds the agent, check and apply jobs. Or it can
+40-hex commit, which holds the agent, check and apply jobs. It can
 have steps that include secure-host, named as
 `cgwalters-forge/agentic-job/secure-host` or by its standalone path
-`cgwalters-forge/actions/secure-host`, to which the first now forwards. Each
+`cgwalters-forge/actions/secure-host`, to which the first now forwards.
+Or it can be a [deploy-only Pages job](#deploy-only-pages-jobs). Each
 refusal below names the file, the job and the step (by number, with its
 name, action or first script line), and says what to write instead.
 
 | Refused | The threat it stops |
 | --- | --- |
-| A job that neither runs secure-host nor calls the reusable workflow | Untrusted steps on a host whose runner's user still has root, and whose other users' files are open |
+| A job that neither runs secure-host nor calls the reusable workflow, and is not a deploy-only Pages job | Untrusted steps on a host whose runner's user still has root, and whose other users' files are open |
 | A secure-host step with `if:` or `continue-on-error:`, or inputs outside the closed allowlist below | A job that goes on without hardening, or redirects hardening so the runner's user keeps root |
 | A post-hardening condition with a status function other than standalone `success()`, or `continue-on-error` other than literal false on the job or a pre-hardening step | Later steps running after an earlier failure skipped hardening, or a hardening failure being silently ignored |
 | A `uses:` before secure-host other than GitHub's `checkout`, `cache`, `cache/restore`, `download-artifact` and `setup-{dotnet,go,java,node,python}`, including a local `./` action | An action running with root before hardening, which can leave a root process or sudo rule behind that secure-host does not undo |
@@ -46,6 +47,37 @@ name, action or first script line), and says what to write instead.
 | An agent step outside the reusable workflow: the `prepare` and `run` actions of this repository, Claude Code, Codex and Gemini CLI actions, or `agentic-job run` in a script | An agent running as the runner's user with the job's token and files, with no sandbox and no check of its outputs on another machine |
 | A key these rules read (`uses`, `run`, `permissions`, `container` and the like) spelled in another case | A file that GitHub might read differently from this check |
 | Case-folded duplicate action inputs or env keys | GitHub choosing a different value from the checker; action inputs are read case-insensitively, including `lock`, `config`, `script` and `persist-credentials` |
+
+### Deploy-only Pages jobs
+
+Publishing to GitHub Pages needs `actions/deploy-pages` in a job with
+`pages: write` and `id-token: write`, and a job that runs secure-host may
+not hold `id-token`. So a job without secure-host that has an
+`actions/deploy-pages` step is held to a narrower shape instead: a build
+job runs secure-host and uploads the site with
+`actions/upload-pages-artifact`, and the deploy job only takes that
+artifact as data; deploy-pages fetches it itself. The OIDC request token
+and the Pages write grant are safe there because nothing the repository
+or a proposal wrote runs beside them. Expression, key-case,
+`permissions:` map and step-key rules are those of other jobs.
+
+| Refused in a deploy-only job | The threat it stops |
+| --- | --- |
+| A step other than `uses:` of `actions/deploy-pages`, including `actions/checkout`, a `run:` step, a local `./` or `docker://` action, and `actions/download-artifact` | Repository or proposal code, or an action that runs it, executing with the OIDC request token and the Pages grant and no hardening; download-artifact's `path:` can extract over the action's own code, and its `repository:` fetch another repository's files |
+| An `env:` in the workflow, the job or a step | `NODE_OPTIONS` or `LD_PRELOAD` loading code into the action's own process |
+| A deploy-pages input other than `artifact_name`, `error_count`, `preview`, `reporting_interval` and `timeout`, or any value that is not a literal | Another `token` or a value others supplied steering the deployment |
+| A `uses:` not pinned to an allowlisted upstream commit | A moved ref or a fork-network commit that swaps the code holding those credentials |
+| A grant other than `pages: write`, `id-token: write` and `contents: read` | A job that runs no secure-host holding more than deploying needs |
+| `container:` or `services:` | An image the repository names, running beside the deploy steps |
+| A `secrets` expression anywhere in the job, an `if:` or the workflow's `env:` included | A secret handed to the action, which needs none |
+
+This trusts GitHub's action at the pinned commit to serve the artifact
+as data, as it is documented to. Only upstream v4.0.5,
+`d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e`, is admitted. Additions to
+the allowlist need review as credential-bearing code: GitHub also
+resolves fork-network commits under the upstream repository name. The
+check does not judge `runs-on:`: a reused self-hosted runner could hold
+a process an earlier job left behind.
 
 ### Execution surfaces
 
