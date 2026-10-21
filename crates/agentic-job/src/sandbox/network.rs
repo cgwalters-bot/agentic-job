@@ -2,20 +2,20 @@
 //! its subordinate uids, so that containers it starts are covered.
 //!
 //! The ruleset follows the old tree's (`setup-runner-sandbox.mjs`), except
-//! proxy DNS is restricted to configured resolvers. The sandbox user's
-//! uids reach no cloud metadata service and, with direct endpoints
-//! configured, nothing on the tailnet but those. With the egress proxy
-//! they reach nothing else at all but loopback, where the proxy listens,
-//! and not loopback's DNS: the proxy resolves names. The proxy's own uid
-//! opens connections only to DNS and to public addresses, so the proxy
-//! cannot be used to reach what the sandbox user may not.
+//! proxy DNS is restricted to configured resolvers and the metadata
+//! service is refused at its IPv6 address too. The sandbox user's uids
+//! reach no cloud metadata service, at either address, whatever else is
+//! configured, and, with direct endpoints configured, nothing on the
+//! tailnet but those. With the egress proxy they reach nothing else at
+//! all but loopback, where the proxy listens, and not loopback's DNS: the
+//! proxy resolves names. The proxy's own uid opens connections only to
+//! DNS and to public addresses, so the proxy cannot be used to reach what
+//! the sandbox user may not.
 //!
 //! With `sandbox.deny-runner-metadata`, the runner's user and its
 //! subordinate uids are refused the metadata service too, at its IPv4
 //! and its IPv6 address, and only that:
-//! every step of the job then shares that one refusal. The sandbox's
-//! uids are then refused the IPv6 address as well, so that the runner,
-//! which may still enter the sandbox user, has no way around it.
+//! every step of the job then shares that one refusal.
 //!
 //! The tailnet rules are defence in depth under the tailnet's own access
 //! rules for the runner, which are the real control there.
@@ -272,11 +272,17 @@ fn dns_accepts(subject: &str, resolvers: &[IpAddr]) -> String {
 /// DNS exceptions apply only to these resolver addresses. All other DNS
 /// destinations are rejected, including otherwise public addresses.
 ///
+/// The sandbox's uids are refused the metadata service at both its
+/// addresses before any accept, so the refusal does not depend on the
+/// proxy's catch-all: without the proxy (`egress.proxy = false`) the
+/// sandbox user's network is open but for these two rules and the
+/// tailnet's, and a cloud
+/// serving its instance credentials at the IPv6 address would otherwise
+/// hand them to the agent, or to a container under its subordinate uids.
+///
 /// `runner_uids` (`sandbox.deny-runner-metadata`: the runner's user and
 /// its subordinate ranges) are refused the metadata service and nothing
-/// else; none leaves the ruleset as it was. With them the sandbox's uids
-/// are refused its IPv6 address too, which the runner could otherwise
-/// reach as the sandbox user when there is no egress proxy.
+/// else; none leaves the ruleset as it was.
 ///
 /// `session_port` (a session run's bridge, `session::bridge`) is refused
 /// to the sandbox's uids on loopback, and so is the node's own tailnet
@@ -319,7 +325,6 @@ pub fn rules_with_resolvers(
             ),
             format!(
                 "
-    meta skuid @sandbox_uids ip6 daddr {METADATA_V6_ADDRESS} counter reject
     meta skuid @runner_uids ip daddr {METADATA_ADDRESS} counter reject
     meta skuid @runner_uids ip6 daddr {METADATA_V6_ADDRESS} counter reject"
             ),
@@ -369,7 +374,8 @@ table inet {TABLE} {{
   set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{runner_set}{tailnet_set}{write_set}{write_chain}
   chain output {{
     type filter hook output priority 0; policy accept;
-    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{runner_rules}{write_rules}{session_rules}{tailnet_rules}{egress_rules}
+    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject
+    meta skuid @sandbox_uids ip6 daddr {METADATA_V6_ADDRESS} counter reject{runner_rules}{write_rules}{session_rules}{tailnet_rules}{egress_rules}
   }}
 }}
 ",
@@ -480,6 +486,7 @@ table inet runner_sandbox {
   chain output {
     type filter hook output priority 0; policy accept;
     meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject
     meta skuid @sandbox_uids ip daddr . tcp dport @tailnet_allowed accept
     meta skuid @sandbox_uids oifname "tailscale0" counter reject
     meta skuid @sandbox_uids ip daddr 100.64.0.0/10 counter reject
@@ -510,6 +517,7 @@ table inet runner_sandbox {
   chain output {
     type filter hook output priority 0; policy accept;
     meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject
   }
 }
 "#;
@@ -517,9 +525,7 @@ table inet runner_sandbox {
     }
 
     /// The runner's uids get the metadata refusal and nothing more: the
-    /// rest of the ruleset is the sandbox user's alone, but for its IPv6
-    /// metadata refusal, which the runner could reach through `sandbox
-    /// exec` without it.
+    /// rest of the ruleset is the sandbox user's alone.
     #[test]
     fn ruleset_refusing_the_runner_the_metadata_service() {
         let runner = ["1001".to_owned(), "100000-165535".to_owned()];
@@ -557,7 +563,7 @@ table inet runner_sandbox {
                 ""
             )
             .replace(
-                "\n    meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject\n    meta skuid @runner_uids ip daddr 169.254.169.254 counter reject\n    meta skuid @runner_uids ip6 daddr fd00:ec2::254 counter reject",
+                "\n    meta skuid @runner_uids ip daddr 169.254.169.254 counter reject\n    meta skuid @runner_uids ip6 daddr fd00:ec2::254 counter reject",
                 ""
             ),
             rules(&["1002".to_owned()], &[], Some(993))
@@ -589,6 +595,7 @@ table inet runner_sandbox {
   chain output {
     type filter hook output priority 0; policy accept;
     meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject
     meta skuid @sandbox_uids oifname "lo" tcp dport 3129 counter reject
     meta skuid @write_policy_uids ct state established,related accept
     meta skuid @write_policy_uids ip daddr 127.0.0.0/8 accept
@@ -625,45 +632,55 @@ table inet runner_sandbox {
         );
     }
 
-    /// With the runner refused, no uid set the ruleset names keeps a path
-    /// to either metadata address in either family, with or without the
-    /// proxy and direct endpoints: each set's refusal comes before its
-    /// first accept. The sandbox's uids matter without the proxy, since
-    /// the runner may run anything as the sandbox user.
+    /// No uid set the ruleset names keeps a path to either metadata
+    /// address in either family, with or without the proxy, direct
+    /// endpoints and the runner's refusal: each set's refusal comes before
+    /// its first accept. The sandbox's uids matter without the proxy,
+    /// whose catch-all otherwise masks a missing rule: with it off, a rule
+    /// the ruleset lacks is an address the agent reaches.
     #[test]
-    fn no_uid_set_reaches_the_metadata_service_when_the_runner_is_refused() {
+    fn no_uid_set_reaches_the_metadata_service() {
         let sandbox = ["1002".to_owned(), "165536-231071".to_owned()];
         let runner = ["1001".to_owned(), "100000-165535".to_owned()];
         let direct = [direct_of("http://100.101.102.103:18080")];
         for proxy in [None, Some(993)] {
             for direct in [&direct[..], &[]] {
-                let ruleset =
-                    rules_with_resolvers(&sandbox, direct, proxy, &[], &runner, None, &[]);
-                for set in ["@sandbox_uids", "@runner_uids"] {
-                    let accept = ruleset
-                        .lines()
-                        .position(|line| line.contains(set) && line.ends_with("accept"))
-                        .unwrap_or(usize::MAX);
-                    for (family, address) in
-                        [("ip", METADATA_ADDRESS), ("ip6", METADATA_V6_ADDRESS)]
-                    {
-                        let rule =
-                            format!("    meta skuid {set} {family} daddr {address} counter reject");
-                        let at = ruleset.lines().position(|line| line == rule);
-                        assert!(
-                            at.is_some_and(|at| at < accept),
-                            "{set} {family} with {proxy:?}, {} direct:\n{ruleset}",
-                            direct.len()
-                        );
+                for runner in [&runner[..], &[]] {
+                    let ruleset =
+                        rules_with_resolvers(&sandbox, direct, proxy, &[], runner, None, &[]);
+                    let sets: &[&str] = if runner.is_empty() {
+                        &["@sandbox_uids"]
+                    } else {
+                        &["@sandbox_uids", "@runner_uids"]
+                    };
+                    for set in sets {
+                        let accept = ruleset
+                            .lines()
+                            .position(|line| line.contains(set) && line.ends_with("accept"))
+                            .unwrap_or(usize::MAX);
+                        for (family, address) in
+                            [("ip", METADATA_ADDRESS), ("ip6", METADATA_V6_ADDRESS)]
+                        {
+                            let rule = format!(
+                                "    meta skuid {set} {family} daddr {address} counter reject"
+                            );
+                            let at = ruleset.lines().position(|line| line == rule);
+                            assert!(
+                                at.is_some_and(|at| at < accept),
+                                "{set} {family} with {proxy:?}, {} direct, {} runner:\n{ruleset}",
+                                direct.len(),
+                                runner.len()
+                            );
+                        }
                     }
-                }
-                if let Some(proxy) = proxy {
-                    assert!(ruleset.contains(&format!(
-                        "meta skuid {proxy} ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,"
-                    )));
-                    assert!(ruleset.contains(&format!(
-                        "meta skuid {proxy} ip6 daddr {{ ::1/128, ::ffff:0:0/96, fc00::/7,"
-                    )));
+                    if let Some(proxy) = proxy {
+                        assert!(ruleset.contains(&format!(
+                            "meta skuid {proxy} ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,"
+                        )));
+                        assert!(ruleset.contains(&format!(
+                            "meta skuid {proxy} ip6 daddr {{ ::1/128, ::ffff:0:0/96, fc00::/7,"
+                        )));
+                    }
                 }
             }
         }

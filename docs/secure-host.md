@@ -800,11 +800,10 @@ After it, no later step has root:
   too: a root-owned mode-0666 file in `/var/tmp` is writable without the
   policy, and the `confined` probe below writes one.
 - `deny-runner-metadata` refuses the cloud metadata service to the runner's
-  user and its subordinate uids: at `169.254.169.254` through the same
-  nftables rule that refuses the sandbox user, and at EC2's IPv6 address
-  `fd00:ec2::254` as well. The sandbox user's uids, which the runner may
-  still enter through setup's helper, are refused the IPv6 address too, so
-  that is no way around it. The threat it stops is a step asking the metadata
+  user and its subordinate uids: at `169.254.169.254` and at EC2's IPv6
+  address `fd00:ec2::254`, by nftables rules of the same shape as those
+  that always refuse the sandbox user both, so entering that user through
+  setup's helper is no way around it. The threat it stops is a step asking the metadata
   service for the instance's identity, or, on a self-hosted cloud runner,
   for the instance role's credentials, which the job never granted.
   Without this rule the runner's user reaches the service on a hosted

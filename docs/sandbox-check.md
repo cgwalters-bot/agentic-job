@@ -264,8 +264,9 @@ as the walk it replaced was ([agentic-job#108](https://github.com/cgwalters-forg
 its subordinate uids, and by default starts the egress proxy: the
 binary's own with the policy of `egress/`, or with `[egress] rust-proxy
 = false` mitmproxy with its addon, as its own user. The rules are
-the old tree's except for resolver-scoped proxy DNS; a corpus test generates
-both and compares them with that intentional difference. With `[egress]
+the old tree's except for resolver-scoped proxy DNS and the sandbox user's
+IPv6 metadata refusal; a corpus test generates both and compares them with
+those intentional differences. With `[egress]
 proxy = false` only the first three rows
 apply. `[egress] direct` lists the endpoints reached without the proxy,
 the inference proxy for one, and brings the tailnet rows.
@@ -273,7 +274,7 @@ the inference proxy for one, and brings the tailnet rows.
 | Probe | The sandbox user tries to | Control | What stops it |
 | --- | --- | --- | --- |
 | `network-control`, `container-pull`, `container-control` | (controls: reach a public page on the host and from a rootless container on the host's network, through the proxy when there is one) | | |
-| `metadata`, `container-metadata` | reach the cloud's instance metadata service, on the host and from a container | the runner's user reaches it | the rule on its uids |
+| `metadata`, `container-metadata` | reach the cloud's instance metadata service, on the host and from a container | the runner's user reaches it | the rules on its uids |
 | `egress-read`, `egress-cargo`, `egress-npm`, `egress-git` | (controls: read a page, fetch a crate, install an npm package and fetch from git through the proxy) | | |
 | `egress-post`, `egress-push`, `egress-fronting`, `egress-container-post` | POST to a host with no write rule, push to a forge, name another host in `Host` than it connected to; the POST also from a container | the answer must be the proxy's own 403, with its `X-Egress-Denied` header | the proxy's policy |
 | `egress-direct`, `egress-tcp`, `egress-container-direct`, `egress-container-own-network` | reach the public page around the proxy, by URL and by plain TCP, and from containers on the host's network and on their own | the runner's user opens the same TCP connection | everything but loopback is rejected for its uids |
@@ -290,8 +291,7 @@ and the probe stands without it.
 With `sandbox.deny-runner-metadata = true` the rules refuse the runner's
 user and its subordinate uids the metadata service too, at `169.254.169.254`
 and at EC2's IPv6 `fd00:ec2::254`, and only that; the sandbox user's uids
-are refused the IPv6 address too, so that entering that user through the
-helper is no way around it without the egress proxy. Then `runner-metadata`
+are always refused both addresses. Then `runner-metadata`
 and `runner-metadata-v6` expect the runner's own requests to fail in place of
 `metadata-control`, and a note says the metadata probes have no control.
 Off by default; the

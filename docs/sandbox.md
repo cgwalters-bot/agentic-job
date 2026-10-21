@@ -241,7 +241,9 @@ time, whichever process attempts the write, so it holds before PAM forks.
 
 The nftables rules match the sandbox user's uid and its subordinate
 uids, so containers are covered, and reject rather than drop. The cloud
-metadata address is always rejected. With `egress.proxy` (the default),
+metadata service is always rejected, at `169.254.169.254` and at EC2's
+IPv6 `fd00:ec2::254`, whether or not there is a proxy to catch the rest.
+With `egress.proxy` (the default),
 everything else is rejected too except loopback, and loopback's port 53
 with it: the proxy resolves names. `egress.direct` lists endpoints
 reached without the proxy, each an IPv4 address and port on the tailnet;
@@ -402,7 +404,8 @@ show, and what was tried by hand elsewhere, is
   returns fewer than 1000 entries, leaves the proxy without one, with a
   warning.
 - With `egress.proxy = false` the sandbox user's network is open but for
-  the metadata address, and the tailnet when `direct` has entries.
+  the metadata service's two addresses, and the tailnet when `direct` has
+  entries.
 - A container the agent starts has no network of its own. It reaches the
   proxy only on the host's network, and trusts it only if the
   certificate is mounted into it, as the probes do; nothing configures

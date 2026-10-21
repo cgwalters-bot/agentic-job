@@ -12,9 +12,10 @@ use crate::sandbox::{egress, host, network};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
-/// The metadata service at its IPv6 address (EC2's), which only
-/// `sandbox.deny-runner-metadata` names; `-g` keeps curl from reading
-/// the brackets as a glob.
+/// The metadata service at its IPv6 address (EC2's), refused to the
+/// sandbox's uids always and to the runner's with
+/// `sandbox.deny-runner-metadata`, which alone probes it; `-g` keeps curl
+/// from reading the brackets as a glob.
 const METADATA_V6: &[&str] = &["-g", "http://[fd00:ec2::254]/latest/meta-data/"];
 
 /// Azure's WireServer, which serves the VM's configuration.

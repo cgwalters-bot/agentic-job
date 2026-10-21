@@ -1,10 +1,11 @@
 // The network rules and the egress proxy's files against the old tree's.
 //
-// Except for resolver-scoped proxy DNS, the ruleset must be what the old
-// tree's setup-runner-sandbox.mjs generates for the same uids, direct
-// endpoints and proxy uid. That script cannot be imported (it runs as it
-// loads), so its constants and its two functions are cut out of its
-// source and loaded as a module of their own. And egress/ here must be
+// Except for resolver-scoped proxy DNS and the metadata service's IPv6
+// address, the ruleset must be what the old tree's setup-runner-sandbox.mjs
+// generates for the same uids, direct endpoints and proxy uid. That script
+// cannot be imported (it runs as it loads), so its constants and its two
+// functions are cut out of its source and loaded as a module of their
+// own. And egress/ here must be
 // agent/egress/ there, byte for byte: the proxy was moved, not changed.
 // The changes made since are the exceptions, recorded in egress-delta.json
 // as text replaced in the old tree's file (#112 lets gh's GraphQL reads
@@ -36,6 +37,17 @@ const PINS_SOURCE = "requirements.in";
 const ADDED = [PINS_SOURCE, "ecosystem_domains.json", "ecosystems.py", "test_live.py"];
 const DELTA = JSON.parse(readFileSync(new URL("egress-delta.json", import.meta.url), "utf8"));
 
+// Intentional security difference: the old tree refuses the sandbox's uids
+// the metadata service at its IPv4 address only, so without the proxy an
+// IPv6 metadata endpoint (EC2's) stays reachable. The ruleset here refuses
+// both, so the old tree's text gets the IPv6 rule next to the IPv4 one.
+const METADATA_V4 = "meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject";
+const METADATA_V6 = "meta skuid @sandbox_uids ip6 daddr fd00:ec2::254 counter reject";
+const withMetadataV6 = (ruleset) => {
+  assert.equal(ruleset.split(METADATA_V4).length, 2, "the old rule must occur once");
+  return ruleset.replace(METADATA_V4, `${METADATA_V4}\n    ${METADATA_V6}`);
+};
+
 // From the first constant to the end of sandboxRules.
 const source = readFileSync(join(OLD_TREE, "scripts/setup-runner-sandbox.mjs"), "utf8");
 const start = source.indexOf("const SANDBOX_GROUPS");
@@ -66,7 +78,7 @@ for (const [uids, direct, proxy] of CASES) {
     assert.equal(r.status, 0, r.stderr);
     // Intentional security difference: no blanket DNS exception. With no
     // --resolver, even public DNS destinations must be rejected.
-    const expected = old.sandboxRules(uids, direct.map(old.tailnetEndpoint), proxy)
+    const expected = withMetadataV6(old.sandboxRules(uids, direct.map(old.tailnetEndpoint), proxy))
       .replace(`meta skuid ${proxy} meta l4proto { tcp, udp } th dport 53 accept`,
         `meta skuid ${proxy} meta l4proto { tcp, udp } th dport 53 counter reject`);
     assert.equal(r.stdout, expected);
@@ -84,7 +96,7 @@ test("proxy DNS exceptions name only supplied resolver literals", () => {
     "meta skuid 993 ip6 daddr 2001:db8::53 meta l4proto { tcp, udp } th dport 53 accept",
     "meta skuid 993 meta l4proto { tcp, udp } th dport 53 counter reject",
   ].join("\n    ");
-  const baseline = old.sandboxRules(["1002"], [], 993);
+  const baseline = withMetadataV6(old.sandboxRules(["1002"], [], 993));
   assert.ok(baseline.includes(blanket));
   assert.equal(r.stdout, baseline.replace(blanket, scoped));
   const bad = spawnSync(AGENTIC_JOB, [...args, "--resolver", "10.0.0.2;accept"], { encoding: "utf8" });
