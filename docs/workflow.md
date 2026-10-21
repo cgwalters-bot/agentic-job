@@ -228,10 +228,10 @@ agent. The pieces are:
 
 | Piece | What it is | Its credential |
 | --- | --- | --- |
-| [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
+| [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted, `id-token` included |
 | the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), the configuration's setup script, [`run`](../run/action.yml) with `runner-home`, the caller's later steps; or [`agent.yml`](../.github/workflows/agent.yml), called as `review.yml` calls it | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, and no `id-token`, since the agent is the runner's user; the optional GitHub read token; under `github-oidc`, the run token of a register job before it, which only `agent.yml`'s call can take as a secret |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `actions: read` for the proposals' digest, `id-token: write` for detect only, no secrets |
-| [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
+| [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read`; both jobs keep the call's grant, `id-token` included |
 
 Every setting is an input of `policy.yml` (the same inputs as
 `agentic-job.yml`, without `agent-runner` and `github-reads`, which
@@ -1007,10 +1007,16 @@ job for the identity token, for the proxy, whether or not the run uses
 one ([the run token](#the-run-token)).
 GitHub refuses the whole call when any of them is missing, even with
 `github-reads: false`. The policy, register, agent and check jobs take
-no more than that, and only register and check's detector the identity
-token. Activate, notify, conclude and apply name no
-permissions and so
-keeps whatever the call was granted: with `apply-environment` grant
+no more than that, and of them only register and check's detector the
+identity token. Activate, notify, conclude and apply name no
+permissions and so keep whatever the call was granted, the identity
+token included: each can mint OIDC tokens for any audience, alongside
+the call's writes. They run only pinned code, never agent-produced code, and naming
+their permissions would not help, as GitHub refuses a call whose job asks
+for a write the caller did not grant and callers choose these writes.
+So federate nothing to the call's identity, such as a cloud role trusting
+this workflow, that you would not trust those four jobs with.
+With `apply-environment` grant
 nothing more, and without it add `issues: write` (comments, issues and
 issue updates, assignees and `link_sub_issue`) and `pull-requests: write`
 (pull request updates, mark-ready, reviewers and `close_pull_request`) for

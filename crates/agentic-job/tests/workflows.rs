@@ -179,6 +179,54 @@ fn a_linked_workflow_is_not_followed() {
     );
 }
 
+/// The jobs under agentic-job.yml that can mint identity tokens when the
+/// caller grants the call `id-token: write`, as docs/workflow.md's
+/// permissions paragraph names them. A job that names no `permissions`
+/// keeps the call's grant, so a new such job, or a call that stops
+/// narrowing, changes this list and must change the documentation too.
+#[test]
+fn id_token_holders_are_the_documented_ones() {
+    fn walk(dir: &Path, file: &str, holds: bool, found: &mut Vec<String>) {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap();
+        let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+        for (name, job) in doc["jobs"].as_hash().unwrap() {
+            let name = name.as_str().unwrap();
+            let permissions = &job["permissions"];
+            // Named permissions only narrow what the call was granted.
+            let holds = holds
+                && (permissions.is_badvalue()
+                    || permissions.as_str() == Some("write-all")
+                    || permissions["id-token"].as_str() == Some("write"));
+            match job["uses"].as_str() {
+                Some(called) => {
+                    let called = called.strip_prefix("./.github/workflows/").unwrap();
+                    walk(dir, called, holds, found);
+                }
+                None if holds => found.push(format!("{file}:{name}")),
+                None => {}
+            }
+        }
+    }
+    let dir = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.github/workflows"
+    ));
+    let mut found = Vec::new();
+    walk(dir, "agentic-job.yml", true, &mut found);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "agentic-job.yml:register",
+            "apply.yml:apply",
+            "apply.yml:conclude",
+            "check.yml:detect",
+            "policy.yml:activate",
+            "policy.yml:notify",
+        ]
+    );
+}
+
 /// This repository's own workflows pass or are listed, read at test time.
 #[test]
 fn this_repository_passes() {

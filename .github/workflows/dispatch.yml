@@ -216,7 +216,10 @@ jobs:
       issues: write
       pull-requests: write
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # For the register job alone; the agent job gets none.
+      # Asked for by register and check's detector. Activate, notify, apply
+      # and conclude name no permissions, so they hold it too; the agent
+      # job gets none (docs/workflow.md#what-a-caller-provides).
+      id-token: write
     with:
       id: ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}
       repo: ${{ inputs.repo }}
