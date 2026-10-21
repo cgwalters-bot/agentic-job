@@ -53,6 +53,10 @@ pub const MAX_SHAPE_WARNINGS: usize = 32;
 /// bound is what streaming has to look ahead (see `stream`).
 pub const PRIVATE_KEY: &str = r"-----BEGIN [A-Z0-9 ]{0,32}PRIVATE KEY-----(?:(?s:.){0,16384}?-----END [A-Z0-9 ]{0,32}PRIVATE KEY-----|[^\n]*)";
 
+/// praxis-credential-broker's run tokens. `run` refuses its own in a
+/// hand-back, and the agent cannot tell that one from another by shape.
+pub const RUN_TOKEN: &str = r"praxis-run-[0-9a-f]{64}";
+
 /// The shapes, in the syntax of the `regex` crate. Redacted in what `run`
 /// logs, and warned about in a hand-back.
 const PATTERNS: &[&str] = &[
@@ -64,8 +68,7 @@ const PATTERNS: &[&str] = &[
     r"sk-[A-Za-z0-9_-]{20,}",
     // Tailscale
     r"tskey-[A-Za-z0-9-]{10,}",
-    // praxis-credential-broker's run tokens
-    r"praxis-run-[0-9a-f]{64}",
+    RUN_TOKEN,
     // JWTs, such as a CI system's identity tokens
     r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*",
     PRIVATE_KEY,

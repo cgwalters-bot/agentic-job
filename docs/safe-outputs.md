@@ -92,7 +92,11 @@ the string, in check's report and summary and in the run's summary.
 `agentic-job handback check` runs the scan of
 `agentic-job handback scan --base BASE_SHA` too, which lists the same
 by file and line in the change's diff and in `out/`, and exits 1 only
-for a private key. The final refusal names the file and line too, never
+for a private key or a `praxis-run-` broker run token the change adds or
+`out/` holds: `run` refuses its own by value, and the agent cannot tell
+it from another by shape. Other run secrets (an `api-key` run's token,
+the MCP proxy token) have no listed shape, so a hand-back holding one is
+refused only at upload. The final refusal names the file and line too, never
 the string: in the job's log, its summary and, through the run action's
 `secret-at` output, the status comment, since such a run uploads nothing
 else to look in.
@@ -878,9 +882,11 @@ checkpoint, replacing a branch's commits and containers behind the proxy.
 `agentic-job handback check` tells the agent, while it can still fix it,
 what the run would refuse or lose of what it would hand back now. It runs
 `run`'s own capture, on a copy of the checkout, since capture commits
-there; then `check`'s own checks on the result; then the final gate's
-secret scan. It also reports a missing or unreadable `outcome.json`, and a
-change left as a draft by its checkpoint. Each problem is a line,
+there; then `check`'s own checks on the result; then the shape scan of
+`agentic-job handback scan`, which stands in for the final gate's scan
+by value of the run's own secrets ([above](#what-is-gh-aws-and-why)).
+It also reports a missing or unreadable `outcome.json`, and a change left
+as a draft by its checkpoint. Each problem is a line,
 `WHERE: WHAT; HOW TO FIX`, and the command exits 1 while there is one. It
 reads the run's policy, checkout and base from
 `~/.config/agentic-job/handback.json`, which `run` writes without the

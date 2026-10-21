@@ -34,7 +34,8 @@ pub enum Command {
     },
     /// Find secret-shaped strings in what the run would hand back: the
     /// change against BASE, and the files in `out/` under your home. Exits
-    /// 1 only for a private key, which the run refuses; others are warnings
+    /// 1 only for a private key or a run token, which the run refuses;
+    /// others are warnings
     Scan {
         /// The commit the change is made against: the one the run started from
         #[arg(long, default_value = "HEAD")]
@@ -62,12 +63,12 @@ impl Command {
                 for finding in &found {
                     println!("{finding}");
                 }
-                let keys = found.iter().filter(|f| f.is_refused()).count();
-                if keys > 0 {
+                let refused = found.iter().filter(|f| f.is_refused()).count();
+                if refused > 0 {
                     eprintln!(
-                        "{keys} private key(s): `run` refuses everything this run hands back \
-                         while one is there. Remove each, or build it at run time from parts \
-                         that do not match, then scan again."
+                        "{refused} private key(s) or run token(s): `run` refuses everything \
+                         this run hands back while one is there. Remove each, or build it at \
+                         run time from parts that do not match, then scan again."
                     );
                     return Ok(Exit::Failure);
                 }
@@ -219,6 +220,10 @@ const FIXES: &[(&str, &str)] = &[
     ),
     (
         "private key",
+        "remove it, or build it at run time from parts that do not match",
+    ),
+    (
+        "run token",
         "remove it, or build it at run time from parts that do not match",
     ),
     (
@@ -381,11 +386,11 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     }
 
     for finding in scan(&run.checkout, &run.base, home)? {
-        if finding.is_refused() {
+        if let Some(what) = finding.refused() {
             report.problems.push(Problem {
                 at: finding.location,
-                what: "a private key".to_owned(),
-                fix: fix_for("private key").to_owned(),
+                what: what.to_owned(),
+                fix: fix_for(what).to_owned(),
             });
         } else {
             report.notes.push(format!(
@@ -598,13 +603,28 @@ const MAX_SCANNED_BYTES: u64 = 64 << 20;
 struct Finding {
     location: String,
     pattern: &'static str,
+    /// On a line the change removes or quotes as context: one the base
+    /// commit holds, made before this run's token was.
+    from_base: bool,
 }
 
 impl Finding {
-    /// Whether `run` refuses it: a private key cannot be a harmless
-    /// fixture. Any other shape is a warning (see [`redact`]).
+    /// What `run` refuses, if it is that: a private key cannot be a
+    /// harmless fixture. A run token can be one, but the final gate
+    /// refuses this session's own by value as a real leak, and the agent
+    /// cannot tell its own from another by shape, so a new one is refused
+    /// here; one the base holds already cannot be this run's. Any other
+    /// shape is a warning (see [`redact`]).
+    fn refused(&self) -> Option<&'static str> {
+        match self.pattern {
+            redact::PRIVATE_KEY => Some("a private key"),
+            redact::RUN_TOKEN if !self.from_base => Some("a run token"),
+            _ => None,
+        }
+    }
+
     fn is_refused(&self) -> bool {
-        self.pattern == redact::PRIVATE_KEY
+        self.refused().is_some()
     }
 }
 
@@ -616,9 +636,10 @@ impl std::fmt::Display for Finding {
 
 /// The secret-shaped strings in the change of the checkout REPO against
 /// BASE and in HOME's `out/`, while the session can still fix them: the
-/// private keys `run`'s final gate refuses (found only then, a refusal
-/// cost runs all their work, #720) and the shapes it reports as warnings.
-/// Not the gate itself, which also knows the run's own secrets and scans
+/// private keys and run tokens `run`'s final gate refuses (found only
+/// then, a refusal cost runs all their work, #720) and the shapes it
+/// reports as warnings. Not the gate itself, which knows the run's own
+/// secrets by value, not shape, and scans
 /// the patch as it is made; a line at a time, which finds what the gate
 /// finds, since no pattern but a private key's spans lines and that one
 /// also matches its first line alone.
@@ -675,6 +696,7 @@ fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
                 found.push(Finding {
                     location: format!("{}:{}", path.display(), number + 1),
                     pattern,
+                    from_base: false,
                 });
             }
         }
@@ -745,10 +767,12 @@ fn diff_findings(diff: &[u8]) -> Vec<Finding> {
             }
             format!("{new_path} (a diff header)")
         };
+        let from_base = in_hunk && matches!(line.first(), Some(b'-' | b' '));
         for pattern in redact::secret_shapes(line) {
             found.push(Finding {
                 location: location.clone(),
                 pattern,
+                from_base,
             });
         }
     }
@@ -1096,6 +1120,14 @@ mod tests {
                 )
             },
             Case {
+                want: Some("a run token"),
+                ..case(
+                    "a run token, which the gate refuses when it is this run's",
+                    &format!("echo 'praxis-run-{}' > token.txt", "0f".repeat(32)),
+                    pull("Why."),
+                )
+            },
+            Case {
                 outcome: None,
                 want: Some("there is no report"),
                 ..case("no report", "echo two >> a.txt", pull("Why."))
@@ -1363,5 +1395,29 @@ mod tests {
         ];
         assert_eq!(found, want);
         assert!(found.iter().all(|location| !location.contains(&token)));
+    }
+
+    /// A run token the change adds may be this run's, which the final gate
+    /// refuses; one the base holds cannot be, and stays a warning.
+    #[test]
+    fn a_run_token_is_refused_only_where_the_change_adds_it() {
+        let token = format!("praxis-run-{}", "0f".repeat(32));
+        let diff = format!(
+            "diff --git a/t.rs b/t.rs\n\
+             --- a/t.rs\n\
+             +++ b/t.rs\n\
+             @@ -1,3 +1,3 @@\n\
+             \x20{token}\n\
+             -{token}\n\
+             +{token}\n"
+        );
+        let refused: Vec<bool> = diff_findings(diff.as_bytes())
+            .iter()
+            .map(Finding::is_refused)
+            .collect();
+        assert_eq!(refused, [false, false, true]);
+        // One hex digit pair short: no run token's shape.
+        let short = format!("praxis-run-{}", "0f".repeat(31));
+        assert!(diff_findings(format!("+{short}\n").as_bytes()).is_empty());
     }
 }

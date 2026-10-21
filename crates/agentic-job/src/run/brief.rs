@@ -384,7 +384,8 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
     }
     // Runs lost all their work to a fake key in a test fixture, found by
     // the final gate only after their sessions had ended (#720); now only
-    // a private key is refused, and other shapes are warnings (#918).
+    // a private key is refused, and other shapes are warnings (#918). The
+    // scan also refuses a new run token, which may be the run's own.
     let _ = writeln!(
         text,
         "- Secret-shaped strings: a private key (`-----BEGIN ... PRIVATE KEY-----`) anywhere \
@@ -394,8 +395,9 @@ pub fn guide(policy: &Policy, home: &Path, checkout: &Path, base: &str) -> Strin
          `ghp_`, `sk-` or `AKIA` token, a JWT) is kept and reported by file and line as a \
          warning; make sure each is a fixture. Run `agentic-job handback scan --base {base}` \
          in your checkout: it lists the file, line and pattern of each such string in your \
-         change and in `{}`, and exits 1 while there is a private key; `agentic-job handback \
-         check` runs it with the other checks.",
+         change and in `{}`, and exits 1 while there is a private key, or a `praxis-run-` run \
+         token your change adds: the run's own is refused, and you cannot tell it from \
+         another by its shape. `agentic-job handback check` runs it with the other checks.",
         home.join("out").display(),
     );
     text.push_str(
