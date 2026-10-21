@@ -6,7 +6,7 @@ import path from "node:path";
 // Repository files the site renders, by page id; a page's route is
 // `<base><id>/`. The content collection and this table must agree.
 export const PAGES = {
-  "site/index.md": "",
+  "site/index.mdx": "",
   "README.md": "overview",
 };
 export const DOCS = "docs/";

@@ -12,8 +12,8 @@ test("rewrite", () => {
     // The README and the landing page are pages too.
     ["../README.md#try-it", "docs/inference.md", "/agentic-job/overview/#try-it"],
     ["docs/inference.md", "README.md", "/agentic-job/docs/inference/"],
-    ["../docs/workflow.md", "site/index.md", "/agentic-job/docs/workflow/"],
-    ["index.md", "site/index.md", "/agentic-job/"],
+    ["../docs/workflow.md", "site/index.mdx", "/agentic-job/docs/workflow/"],
+    ["index.mdx", "site/index.mdx", "/agentic-job/"],
     // Other repository files, Markdown or not, go to the forge.
     ["../specs/session.md", "docs/sandbox.md", "https://forge.example/o/r/blob/abc/specs/session.md"],
     [".github/workflows/example.yml", "README.md", "https://forge.example/o/r/blob/abc/.github/workflows/example.yml"],
@@ -33,7 +33,7 @@ test("rewrite", () => {
 
 test("pageId", () => {
   assert.equal(pageId("README.md"), "overview");
-  assert.equal(pageId("site/index.md"), "");
+  assert.equal(pageId("site/index.mdx"), "");
   assert.equal(pageId("docs/sandbox.md"), "docs/sandbox");
   // Only the pages the collection loads.
   assert.equal(pageId("docs/sub/x.md"), null);
