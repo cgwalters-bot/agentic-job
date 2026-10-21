@@ -496,7 +496,8 @@ pub struct Bounds {
     /// self-hosted forge on a private network without TLS. Empty by
     /// default: anyone on the path can read and alter a plain-HTTP clone,
     /// so the agent's base, and a private repository's read token, are
-    /// only as safe as that network. Never [`NEVER_PLAIN_HTTP`].
+    /// only as safe as that network. Never [`NEVER_PLAIN_HTTP`], with
+    /// or without a port or user.
     #[serde(default)]
     pub allow_http: Vec<String>,
     /// Globs of OWNER/NAME; see [`glob`].
@@ -1404,11 +1405,8 @@ impl Bounds {
                 self.hosts.iter().any(|own| own.eq_ignore_ascii_case(host)),
                 "allow_http names {host:?}, which is not in `hosts`"
             );
-            // `github.com.` is github.com too.
-            let host = host.to_ascii_lowercase();
-            let host = host.trim_end_matches('.');
             ensure!(
-                host != NEVER_PLAIN_HTTP && !host.ends_with(&format!(".{NEVER_PLAIN_HTTP}")),
+                !under(&host_name(host), NEVER_PLAIN_HTTP),
                 "allow_http may not name {host:?}: {NEVER_PLAIN_HTTP} serves https"
             );
         }
@@ -1899,15 +1897,34 @@ impl Bounds {
 /// Whether a clone URL is on GitHub, whose apply is gh-aw's and reads no
 /// `push_repo`.
 fn on_github(clone_url: &str) -> bool {
-    let host = clone_url
+    let authority = clone_url
         .split_once("://")
         .map_or(clone_url, |(_, rest)| rest)
         .split('/')
         .next()
-        .unwrap_or_default()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    host == GITHUB_HOST || host.ends_with(&format!(".{GITHUB_HOST}"))
+        .unwrap_or_default();
+    under(&host_name(authority), GITHUB_HOST)
+}
+
+/// The host name of an HTTP authority (`user@HOST:port`, as `hosts`,
+/// `allow_http` and a clone URL spell one), in lowercase and without its
+/// root dot. The bounds match authorities exactly, port included, but
+/// who answers for `github.com` does not change with a port or a user:
+/// what refuses GitHub by name compares this, so `github.com:80` cannot be
+/// cloned over plain HTTP and `github.com:443` is not off GitHub.
+fn host_name(authority: &str) -> String {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    // A bracketed IPv6 literal has colons of its own; cut there, it is no
+    // name at all, which is all the comparisons below ask of it.
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Whether a lowercase host name is `domain` or a host under it.
+fn under(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
 }
 
 /// Whether two OWNER/NAME names have the same owner.
@@ -3525,6 +3542,53 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 }
             }
         }
+        // A port names its own authority, matched exactly; one on a host
+        // that is not GitHub is as acceptable as the host alone.
+        let ported: Bounds = toml::from_str(&BOUNDS.replace(
+            "hosts = [\"github.com\"]",
+            "hosts = [\"forge.internal:3000\"]\nallow_http = [\"forge.internal:3000\"]",
+        ))
+        .unwrap();
+        ported.validate().unwrap();
+        let on = |clone_url| Request {
+            clone_url,
+            ..request()
+        };
+        assert_eq!(
+            ported
+                .compile(&on("http://forge.internal:3000/bootc-dev/bootc"))
+                .unwrap()
+                .allow_http,
+            ["forge.internal:3000"]
+        );
+        assert!(
+            ported
+                .compile(&on("http://forge.internal:3001/bootc-dev/bootc"))
+                .is_err()
+        );
+    }
+
+    /// A port, a user or a root dot in a clone URL's authority does not
+    /// take it off GitHub; another host is not GitHub whatever it names.
+    #[test]
+    fn github_with_a_port_user_or_root_is_github() {
+        for (url, github) in [
+            ("https://github.com/bootc-dev/bootc", true),
+            ("https://GitHub.com./bootc-dev/bootc", true),
+            ("https://github.com:443/bootc-dev/bootc", true),
+            ("https://x@github.com:443/bootc-dev/bootc", true),
+            ("https://u:p@github.com/bootc-dev/bootc", true),
+            ("http://api.github.com.:80/bootc-dev/bootc", true),
+            ("http://[::1]:80/bootc-dev/bootc", false),
+            ("https://forge.example/bootc-dev/bootc", false),
+            ("https://github.com.evil/bootc-dev/bootc", false),
+            ("https://xgithub.com/bootc-dev/bootc", false),
+            ("https://forge.example/github.com/bootc", false),
+            ("https://github.com@forge.example/bootc-dev/bootc", false),
+            ("https://forge.example:443/bootc-dev/bootc", false),
+        ] {
+            assert_eq!(on_github(url), github, "{url}");
+        }
     }
 
     /// A repository that is not public is admitted only where every bounds
@@ -3805,6 +3869,18 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 },
                 Some("can't create_pull_request"),
             ),
+            // The bounds name the ported authority, so only the fork
+            // rule can refuse: the port does not take the run off GitHub.
+            (
+                "private, on GitHub with a port",
+                Some(FORK),
+                Some(FORK),
+                Request {
+                    clone_url: "https://github.com:443/bootc-dev/bootc",
+                    ..forge
+                },
+                Some("can't create_pull_request"),
+            ),
         ];
         let with = |push_repo: Option<&str>| {
             let mut bounds = Bounds {
@@ -3813,6 +3889,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 ..bounds()
             };
             bounds.hosts.push("forge.example".to_owned());
+            bounds.hosts.push("github.com:443".to_owned());
             bounds.validate().unwrap();
             bounds
         };
@@ -4900,6 +4977,22 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 with(
                     "hosts = [\"github.com\"]",
                     "hosts = [\"github.com.\"]\nallow_http = [\"github.com.\"]",
+                ),
+                "may not name",
+            ),
+            (
+                "plain HTTP for github.com with a port",
+                with(
+                    "hosts = [\"github.com\"]",
+                    "hosts = [\"github.com:80\"]\nallow_http = [\"github.com:80\"]",
+                ),
+                "may not name",
+            ),
+            (
+                "plain HTTP for a host under github.com with a user, root and port",
+                with(
+                    "hosts = [\"github.com\"]",
+                    "hosts = [\"x@API.github.com.:8080\"]\nallow_http = [\"x@API.github.com.:8080\"]",
                 ),
                 "may not name",
             ),
