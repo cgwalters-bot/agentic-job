@@ -754,7 +754,7 @@ not a guarantee that every network path is filtered.
 **The runner's user is still the runner's user.** The lock takes its
 root, not what it owns. A step that runs as it reads the checkout, the
 caches, the job's token and every secret a step is given, reaches the
-network freely (all but the metadata service with `deny-runner-metadata`), and can change the files of the actions the job has
+network freely (all but the metadata service with `sandbox.deny-runner-metadata`), and can change the files of the actions the job has
 downloaded, the ones whose post steps run later. Code the job does not
 trust therefore runs as the sandbox user; the lock is what keeps a
 mistake there, or in any step, from becoming root.
@@ -782,24 +782,38 @@ The aim of [agentic-job#503](https://github.com/cgwalters-forge/agentic-job/issu
 is that a job does not need a second user to be safe from its own later
 steps. Every step after this one, `run:` or `uses:`, a third-party action
 and its post step included, runs as the runner's user. That user is the
-unprivileged thing. This is the first slice of that design, and it is opt-in:
+unprivileged thing. This is the first slice of that design. The step's
+`config` input names a configuration file of the job's repository; the
+metadata rule is opt-in there:
 
 ```yaml
 - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
   with:
-    deny-runner-metadata: true
+    config: .github/secure-host.toml
 ```
+
+```toml
+# .github/secure-host.toml: copy all of secure-host/hosted.toml, which
+# this file replaces whole (its stop-services list included), and add
+# this one key to its [sandbox] table.
+[sandbox]
+deny-runner-metadata = true
+```
+
+`agentic-job workflows check` refuses a secure-host step with a
+`config` input ([workflows-check.md](workflows-check.md)), so a
+repository that runs it cannot opt in this way yet.
 
 After it, no later step has root:
 
-- `lock` (the default) takes sudo, polkit and the daemons of root-equivalent
+- `sandbox.lock-runner` (on by default) takes sudo, polkit and the daemons of root-equivalent
   groups, `docker` first of all. The setuid inventory went with the walk
   ([above](#what-went-with-the-walk)); the privileged-binary allowlist stays.
 - The world-write policy refuses writes to another user's world-writable files on
   the root filesystem when they happen, in the shared temporary directories
   too: a root-owned mode-0666 file in `/var/tmp` is writable without the
   policy, and the `confined` probe below writes one.
-- `deny-runner-metadata` refuses the cloud metadata service to the runner's
+- `sandbox.deny-runner-metadata` refuses the cloud metadata service to the runner's
   user and its subordinate uids: at `169.254.169.254` and at EC2's IPv6
   address `fd00:ec2::254`, by nftables rules of the same shape as those
   that always refuse the sandbox user both, so entering that user through
@@ -809,18 +823,17 @@ After it, no later step has root:
   Without this rule the runner's user reaches the service on a hosted
   `ubuntu-26.04` runner after the lock: `metadata-control` passes in
   [main's secure-host job](https://github.com/cgwalters-forge/agentic-job/actions/runs/38334947347/job/115092813921).
-- `sandbox.unlink-worker-diagnostics`, a configuration key with no input
-  yet, unlinks the .NET diagnostic sockets of `Runner.Worker`
+- `sandbox.unlink-worker-diagnostics` unlinks the .NET diagnostic sockets of `Runner.Worker`
   (`dotnet-diagnostic-PID-KEY-socket` in its temporary directory). The
   Worker's own user, which every step is, can connect to them and have the
   Worker dump its memory, every secret of the job in it, or load a library
   into it; Yama sees no ptrace attach in that. The runtime binds the
   socket once, when the Worker starts, so the Worker keeps a socket no
-  step can name. Needs `lock`; off by default.
+  step can name. Needs `sandbox.lock-runner`; off by default.
 - `sandbox.deny-runner-reads`, read only by the [image](#the-image)'s
   entrypoint, turns on the
   [runner-read rule](#reads-between-the-runners-own-processes-opt-in)
-  as it loads the world-write policy. Needs `lock`, because with sudo
+  as it loads the world-write policy. Needs `sandbox.lock-runner`, because with sudo
   the runner's user could clear the rule's map. Off by default.
 
 The kernel has no way to change another process's credentials. So the

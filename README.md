@@ -129,12 +129,12 @@ fenced off as data. See [docs/events.md](docs/events.md).
 `secure-host` does two separate things, and they protect different steps.
 
 - **Runner deprivileging** applies to every step after `secure-host`
-  (unless its `lock` input is `false`): the
+  (unless its configuration sets `sandbox.lock-runner = false`): the
   runner's user loses `sudo`, polkit and the root-equivalent daemons
   (Docker first), so no later step, action or post step can become root
   and undo the setup. It does **not** take the job's tokens or network
   away from those steps: they still run as the user that holds them, and
-  reach every host but, with `deny-runner-metadata`, the cloud metadata
+  reach every host but, with `sandbox.deny-runner-metadata`, the cloud metadata
   service ([secure-host.md](docs/secure-host.md#what-a-later-step-can-count-on-and-what-it-cannot)).
 - **Job separation** is what keeps the agent's credentials apart: the
   agent's job holds no secret, no write token and no `id-token`, and
