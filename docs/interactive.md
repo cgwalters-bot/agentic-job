@@ -53,6 +53,12 @@ is typing, but it cannot widen the run: the safe-output types, the
 target, the egress policy and the limits are fixed before the agent
 starts, and nothing sent over ACP changes them.
 
+This assumes `run` without `--runner-home`, where the agent is a second
+user. The reusable workflow and `review.yml` pass `--runner-home`, which
+makes the agent the runner's user and refuses `session.listen`, since
+the agent could reach the bridge's port ahead of the operator, so no
+client can attach there.
+
 The user a client logs in as must not be the runner's user. That user
 holds the job's credentials even after setup removes its root access.
 SSH as that user would admit a credentialed user, not a chat client.

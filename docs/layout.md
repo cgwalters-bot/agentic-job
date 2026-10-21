@@ -34,8 +34,11 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
 | `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |
 
-The supervisor runs as the runner's user. Its file operations in the
-sandbox run as the sandbox user. After setup, privileged operations go
+The supervisor runs as the runner's user. Without `--runner-home` its
+file operations in the sandbox run as the sandbox user; with it, as in
+the reusable workflow, `run` uses no sandbox user and the agent shares
+the supervisor's uid ([requirements.md](requirements.md#actors-and-trust)).
+After setup, privileged operations go
 through the root-owned helper; tests on hosts without setup can use sudo
 directly. The helper's validation is a security boundary, not a generic
 root command runner.

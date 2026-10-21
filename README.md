@@ -10,11 +10,13 @@ a coding agent as one of them.
 issue and writes a patch is the same kind of risk as a build script from
 a pull request or a dependency's install hook: code you did not write,
 steered by text you did not write, on a machine that holds your tokens.
-The defence is the same for all three. Run that code as a user that
-cannot see the tokens, filter what it can reach on the network, and have
-a different machine check what it produced before anything with a write
-token acts on it. agentic-job is those three things as a setup step any
-job can use, and a workflow that runs an agent that way.
+The defence is the same for all three. Take root away from that code,
+run it in a job that holds no token it could misuse, and have a
+different machine check what it produced before anything with a write
+token acts on it. agentic-job is those things as a setup step any job
+can use, and a workflow that runs an agent that way: as the runner's own
+user, with no write token, and outside the egress proxy's filter
+([what separates it](docs/requirements.md#actors-and-trust)).
 
 ## What you get
 
@@ -49,8 +51,8 @@ root-owned helper stays, for what the sandbox itself needs.
 what is not.
 
 **An agent run with no write credential in reach.** The reusable
-workflow runs Claude Code, opencode or Vibe in that sandbox on a task
-you give it. The agent holds no model key and no token that can write
+workflow runs Claude Code, opencode or Vibe on that hardened runner, as
+the runner's user, on a task you give it. The agent holds no model key and no token that can write
 to the forge. It reaches the model through a proxy that holds the key:
 one `run` serves on the runner with a provider API key the caller passes
 as a secret, or a credential broker on another machine, which also caps

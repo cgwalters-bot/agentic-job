@@ -17,11 +17,17 @@ unit tests alone do not show that an adapter works.
 
 ## What it does
 
-It starts the agent as the sandbox user, through the `run0` wrapper
-that `run` gives it, and speaks ACP over the agent's standard input and
-output; nothing listens on the network. The session itself runs as the
-runner's user, so the agent cannot alter the transcript or the limits.
-The agent inherits none of the job's `ACTIONS_*` variables and none of
+It starts the agent through the wrapper `run` gives it and speaks ACP
+over the agent's standard input and output; nothing listens on the
+network. Without `--runner-home` the wrapper is `run0` and the agent is
+the sandbox user, while the session runs as the runner's user, so the
+agent cannot alter the transcript or the limits. The reusable workflow
+and `review.yml` pass `--runner-home`: the agent is the runner's user
+too, so it can write the session's files, the transcript and limits
+included, read `run`'s environment and stop `run`; the record is then
+evidence of what the agent let through, not a guarantee
+([requirements.md](requirements.md#actors-and-trust)). The agent's
+environment holds none of the job's `ACTIONS_*` variables and none of
 its provider settings.
 
 It sends the task as one prompt and advertises no filesystem or
@@ -40,7 +46,9 @@ allow is the agent's "allow once", never "allow always". This is for
 tidiness and for the record, since an agent only asks when it chooses
 to: the [sandbox](sandbox.md) is the boundary.
 
-When the session ends it kills every process of the sandbox user. What
+When the session ends it kills every process of the sandbox user, or,
+with `--runner-home`, only the agent's process group: what the agent
+detached from it runs until the job ends. What
 `run` leaves under `--out` is in [layout.md](layout.md#run).
 
 A run that allows outputs gets one reminder if it ends without a hand-back,

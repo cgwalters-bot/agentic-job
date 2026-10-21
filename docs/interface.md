@@ -34,11 +34,19 @@ that prints the network rules for a test (`sandbox nft-rules`), and
 `sandbox check` and `run` are the supervisor. It runs as the runner's
 user, whose general sudo access setup removes by default. A narrow sudo
 rule permits the root-owned helper to enter the sandbox with `run0`, reap
-its processes and read the proxy's fixed log. Everything it does in the agent's files
-(the clone, git, reading the outcome and the requests) it does as the
-sandbox user, so that a link the agent planted cannot make it read the
-runner's files. [sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)
-describes the helper and the lock's limits.
+its processes and read the proxy's fixed log. Without `--runner-home`,
+everything it does in the agent's files (the clone, git, reading the
+outcome and the requests) it does as the sandbox user, so that a link
+the agent planted cannot make it read the runner's files. The reusable
+workflow and `review.yml` pass `--runner-home`: `run` uses no sandbox
+user, the agent is the runner's user and can read and change the
+transcript and the limits, read `run`'s environment and stop `run`,
+cleanup is the agent's process group only, and the token probes do not
+run. What separates the agent there is the job's read-only tokens, no
+`id-token` and no secret but the run token, secure-host's deprivileging
+and the check on another machine
+([requirements.md](requirements.md#actors-and-trust)).
+[sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root) describes the helper and the lock's limits.
 
 `check` is half the check on purpose. Which request types exist, how
 many of each, and the sanitizing of their text are gh-aw's code, used as
