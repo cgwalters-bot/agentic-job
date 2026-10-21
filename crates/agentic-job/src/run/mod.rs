@@ -1139,12 +1139,13 @@ impl Plan {
                 run_dir: &staging.run(),
                 safe_outputs: &staging.safe_outputs(),
             })?;
+            // The reasons quote what the agent wrote, and enter the
+            // summary after the staged files are redacted.
+            session.redactor.with(|redactor| change.redact(redactor));
             if let Some(why) = &change.dropped {
                 eprintln!("warning: no change handed back: {}", enter::one_line(why));
             }
-            if let Some(why) = &mut change.memory_dropped {
-                // This reason also enters accounting after staged-file redaction.
-                *why = session.redactor.with(|r| r.redact(why).into_owned());
+            if let Some(why) = &change.memory_dropped {
                 eprintln!("warning: no memory handed back: {}", enter::one_line(why));
             }
             change

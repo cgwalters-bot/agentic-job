@@ -802,6 +802,66 @@ fn a_run_as_its_own_user_in_the_home_given() {
     assert!(!job.path("home").exists());
 }
 
+/// The reason a change is dropped can quote what the agent wrote, and
+/// the agent can write the run token: a `replacement.json` whose
+/// `commits` is a string is refused by naming the string. The job's log
+/// gets it redacted, as every other line of it is.
+#[test]
+fn the_reason_a_change_was_dropped_is_redacted_in_the_job_log() {
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let job = Job::new("dropped");
+    job.own_repository();
+    let repo = job.path("repo");
+    let head = sh(&format!("git -C {} rev-parse HEAD", repo.display()));
+    // A run that fixes a pull request by replacing its branch: the only
+    // hand-back `replacement.json` is read for.
+    job.allow(json!({
+        "push_to_pull_request_branch": {
+            "max": 1, "target": "7", "head": head, "replacement_max_commits": 2,
+            "replacement_base": head, "protected_files": [],
+            "protect_top_level_dot_folders": true, "protected_files_policy": "blocked",
+            "max_patch_size": 1024, "max_patch_files": 100,
+        },
+    }));
+    let bin = Path::new(env!("CARGO_BIN_EXE_fake-agent"))
+        .parent()
+        .unwrap();
+    let config = format!(
+        "[agent]\nname = \"fake\"\n[sandbox]\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n{LIMITS}{}",
+        bin.display(),
+        plain(&proxy)
+    );
+    let home = job.path("home");
+    // The string shaped like a credential is put together by the shell,
+    // as the canary is, so that no file holds it.
+    let script = json!([
+        {"execute": {"title": "Bash", "command":
+            "printf '{\"base_commit\":\"x\",\"commits\":\"gh%s_%s\"}\\n' p FAKEREDACTIONCANARY0123456789abcdef \
+             > \"$HOME/out/replacement.json\""}},
+        {"say": "Done."},
+    ]);
+    std::fs::create_dir_all(home.join(".config/fake-agent")).unwrap();
+    std::fs::write(home.join(SCRIPT_PATH), script.to_string()).unwrap();
+    let mut command = job.command(&config);
+    command.arg("--runner-home").arg(&home);
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    let warning = got
+        .stderr
+        .lines()
+        .find(|line| line.starts_with("warning: no change handed back: "))
+        .unwrap_or_else(|| panic!("{}", got.all()));
+    let want = "replacement.json: invalid type: string \"[REDACTED]\", expected a sequence";
+    assert!(warning.contains(want), "{warning}");
+    assert!(!got.all().contains(&canary_text()), "{}", got.all());
+    // Nor is it in the summary's copy of the reason.
+    let summary = job.json("out/run/summary.json");
+    let error = summary["patch"]["error"].as_str().unwrap();
+    assert!(error.contains("[REDACTED]"), "{summary:#}");
+    assert!(!error.contains(&canary_text()), "{summary:#}");
+}
+
 /// `register = "api-key"`: the key is checked with the provider, the
 /// probe that no process of the sandbox user's holds it passes, and it
 /// is in nothing the run wrote or said. Without a key the run does not

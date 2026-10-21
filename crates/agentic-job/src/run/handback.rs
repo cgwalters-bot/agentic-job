@@ -34,6 +34,7 @@ use crate::check::memory::{self, MemoryFiles};
 use crate::check::{BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, patch_file_name};
 use crate::config;
 use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
+use crate::redact::Redactor;
 use crate::session::{Outcome, RunResult};
 
 /// Under the sandbox user's home: the agent's requests, and its own
@@ -674,6 +675,23 @@ impl Change {
     fn drop_patch(&mut self, base: &str, why: String) {
         self.patch = json!({"base": base, "error": why});
         self.dropped = Some(why);
+    }
+
+    /// Replaces the run's secrets in the reasons, in place. A reason can
+    /// quote what the agent wrote: the value of a malformed
+    /// `replacement.json`, a line of its commit message. That can be the
+    /// run token, which the agent can read. The reasons go to the job's
+    /// log and into the summary, after the staged files are redacted.
+    pub fn redact(&mut self, redactor: &mut Redactor) {
+        for why in [&mut self.dropped, &mut self.memory_dropped]
+            .into_iter()
+            .flatten()
+        {
+            *why = redactor.redact(why).into_owned();
+        }
+        if let Some(error) = self.patch.get("error").and_then(Value::as_str) {
+            self.patch["error"] = json!(redactor.redact(error).into_owned());
+        }
     }
 }
 
@@ -2949,6 +2967,46 @@ mod tests {
             names.sort();
             assert_eq!(names, *handed_back, "{name}");
         }
+    }
+
+    /// The reason a malformed `replacement.json` is refused quotes the
+    /// value the agent wrote, which can be the run token: the change is
+    /// redacted of it, wherever the reason is kept.
+    #[test]
+    fn the_reasons_a_change_was_dropped_are_redacted() {
+        let (home, policy, _mail) = replacement_home();
+        let token = format!("praxis-run-{}", "0f".repeat(32));
+        let series = json!({"base_commit": home.checkout.base_commit, "commits": token});
+        std::fs::write(home.path("out/replacement.json"), series.to_string()).unwrap();
+        let mut change = home.collect(&policy, &config::Commit::default());
+        let why = change.dropped.clone().expect("the change must be dropped");
+        assert!(
+            why.starts_with(&format!(
+                "replacement.json: invalid type: string \"{token}\", expected a sequence"
+            )),
+            "{why}"
+        );
+        assert_eq!(change.patch["error"], why);
+        change.memory_dropped = Some(format!("memory: {token} is in a note"));
+
+        let mut redactor = Redactor::new([&token]).unwrap();
+        change.redact(&mut redactor);
+        let redacted = why.replace(&token, crate::redact::REPLACEMENT);
+        assert_eq!(change.dropped.as_deref(), Some(redacted.as_str()));
+        assert_eq!(change.patch["error"], redacted);
+        assert_eq!(
+            change.memory_dropped.as_deref(),
+            Some("memory: [REDACTED] is in a note")
+        );
+        assert_eq!(redactor.count(), 3);
+        // A change with nothing dropped is left as it is.
+        let mut change = Change {
+            patch: json!({"base": "abc", "bytes": 10}),
+            ..Change::default()
+        };
+        change.redact(&mut redactor);
+        assert_eq!(change.patch, json!({"base": "abc", "bytes": 10}));
+        assert_eq!(redactor.count(), 3);
     }
 
     /// The agent's own commits are part of the change, and a tree it
