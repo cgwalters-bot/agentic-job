@@ -1507,8 +1507,8 @@ test("a push goes to its pull request's head repository, the identity's fork as 
     await assert.rejects(fork([push], { config, ...options, forked }), error, name);
     assert.equal(forked.length, forks, name);
   }
-  // A push's checks are the trusted source's, checked out for any patch.
-  assert.match(workflow, /\n {8}if: \$\{\{ fromJSON\(inputs\.check\)\.outputs\.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n {8}with:\n {10}repository: \$\{\{ job\.workflow_repository \}\}\n/);
+  // A push's checks are the trusted source's, checked out for any run that applies.
+  assert.match(workflow, /\n {8}if: \$\{\{ fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n {8}with:\n {10}repository: \$\{\{ job\.workflow_repository \}\}\n/);
   // The pull request's branch is the fork's: the checkout is of the output
   // repository's default branch, by policy's own output, and the base is
   // fetched from the fork the step above checked.
@@ -2126,4 +2126,52 @@ test('a run with no result quotes its reason through the pinned gh-aw sanitizer'
   const quietly = await result({ items: [{ type: 'noop', message }], real: true, bounds: ['create_pull_request', 'noop'] });
   assert.deepEqual(quietly.created, []);
   assert.equal(quietly.outputs['no-result-reason'], outputs['no-result-reason']);
+});
+
+// The handlers log the patch and stream git's output, both the agent's
+// text, where the runner reads workflow commands (#1460). The apply step
+// is run with gh-aw's modules replaced by ones logging as a handler does.
+test('the apply step hands the handlers a core and an exec whose output cannot form a workflow command', async () => {
+  const root = mkdtempSync(join(homedir(), 'apply-log-test-'));
+  const stdout = process.stdout.write;
+  try {
+    const actions = join(root, 'gh-aw', 'actions');
+    mkdirSync(actions, { recursive: true });
+    mkdirSync(join(root, 'apply-source', 'workflow'), { recursive: true });
+    // At the path the step requires it from.
+    writeFileSync(join(root, 'apply-source', 'workflow', 'workflow-commands.cjs'), readFileSync(join(__dirname, 'workflow-commands.cjs')));
+    writeFileSync(join(actions, 'setup_globals.cjs'), `module.exports.setupGlobals = (core, github, context, exec) => Object.assign(global, { core, github, context, exec });\n`);
+    const forged = '::set-output name=created_pr_url::https://attacker.example/';
+    writeFileSync(join(actions, 'safe_output_handler_manager.cjs'), `module.exports.main = async () => {
+      core.info(${JSON.stringify(forged)});
+      core.info('see ##[warning]legacy-marker');
+      await exec.exec('git', ['am', '--3way', 'x.patch'], { cwd: '.' });
+    };\n`);
+    writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [], errors: [] }));
+    const logged = [], outputs = {}, written = [];
+    const core = { info: text => logged.push(text), warning: text => logged.push(text), setOutput: (key, value) => { outputs[key] = value; } };
+    const github = { hook: { before() {}, after() {} } };
+    // Writes git's line to the step's log the way @actions/exec does.
+    const exec = { exec: async (program, args, options) => {
+      assert.equal(options.cwd, '.');
+      await new Promise(resolve => (options.outStream ?? process.stdout).write('Applying: fix ##[set-output name=created_pr_url;]https://attacker.example/\n', resolve));
+      return 0;
+    } };
+    process.stdout.write = (chunk, ...rest) => { written.push(String(chunk)); return stdout.call(process.stdout, chunk, ...rest); };
+    const env = { RUNNER_TEMP: root, GITHUB_WORKSPACE: root, GH_AW_WORKFLOW_NAME: 'agentic-job', GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: '{}',
+      GH_AW_AGENT_OUTPUT: join(root, 'agent_output.json') };
+    await new AsyncFunction('require', 'process', 'core', 'github', 'context', 'exec', 'io', 'getOctokit', script("Apply the outputs with gh-aw's handlers"))(
+      require, { env }, core, github, {}, exec, {}, () => github);
+    assert.deepEqual(logged, [': :set-output name=created_pr_url: :https://attacker.example/', 'see ## [warning]legacy-marker']);
+    assert.deepEqual(written.filter(text => text.includes('attacker.example')), ['Applying: fix ## [set-output name=created_pr_url;]https://attacker.example/\n']);
+    // The module is the apply-source checkout's, which a run without a
+    // patch, whose handlers only post, needs as the apply step does.
+    const condition = name => workflow.split(`- name: ${name}\n`)[1].match(/^        if: (.*)$/m)[1];
+    const checkout = workflow.split('\n      - ').find(step => step.includes('path: apply-source'));
+    assert.equal(checkout.match(/^        if: (.*)$/m)[1], condition("Apply the outputs with gh-aw's handlers"));
+  } finally {
+    process.stdout.write = stdout;
+    for (const name of ['core', 'github', 'context', 'exec']) delete global[name];
+    rmSync(root, { recursive: true, force: true });
+  }
 });

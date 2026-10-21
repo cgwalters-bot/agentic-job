@@ -1,4 +1,7 @@
 //! Keep untrusted log text from becoming GitHub Actions workflow commands.
+//!
+//! `workflow/workflow-commands.cjs` is this module's twin for the apply
+//! job, whose pinned handlers log the agent's patch; keep the two in step.
 
 /// Breaks `::` and `##[` with a space. The runner only reads a command at
 /// the start of a line, after leading whitespace (`TryParseV2` after

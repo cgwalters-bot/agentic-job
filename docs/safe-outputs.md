@@ -1009,6 +1009,17 @@ request, the upstream handler would open a fallback issue despite
 `fallback_as_issue: false`; the workflow lets no handler open more
 issues than the run's `create_issue` outputs allow.
 
+Part of what the handlers log is the agent's text: the patch's first
+lines before `git am`, and git's own `Applying: subject`. The runner
+reads a workflow command in any line a step writes, so a commit message
+could set a step output no handler wrote (`created_pr_url`, which
+conclude reports as the run's result) or mask text from the log. The
+reusable workflow hands the handlers a `core` and an `exec` whose output
+is escaped as `run` escapes the agent's log
+(`workflow/workflow-commands.cjs`); a workflow of your own should do the
+same, since `check` cannot refuse `##[` in file content the preview
+prints too.
+
 CI drives both scripts with the scripted agent, and
 [`safe-outputs-probe.yml`](../.github/workflows/safe-outputs-probe.yml)
 does it on two fixtures when dispatched. Deployment evidence is in the

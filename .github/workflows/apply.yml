@@ -174,8 +174,10 @@ jobs:
       - id: replacement
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # The fork step checks where a patch goes with workflow/push.cjs.
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        # The fork step checks where a patch goes with workflow/push.cjs,
+        # and the apply step escapes the handlers' log with
+        # workflow/workflow-commands.cjs for a run without a patch too.
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -968,7 +970,15 @@ jobs:
               });
               return client;
             };
-            require(`${dir}/setup_globals.cjs`).setupGlobals(core, guarded(github), context, exec, io, (...args) => guarded(getOctokit(...args)));
+            // The handlers log the patch's first lines and git's output,
+            // the agent's text, and the runner reads a workflow command in
+            // any line of this step's output. A commit message could set
+            // an output no handler wrote (created_pr_url, the run's result
+            // in conclude's comment) or mask text from the log. Everything
+            // the handlers log and run goes through the escape `run` uses
+            // for the agent's own log; the step's own `core` stays as it is.
+            const { escapingCore, escapingExec } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/workflow-commands.cjs`);
+            require(`${dir}/setup_globals.cjs`).setupGlobals(escapingCore(core), guarded(github), context, escapingExec(exec), io, (...args) => guarded(getOctokit(...args)));
             await require(`${dir}/safe_output_handler_manager.cjs`).main();
             if (projectRefusal || [...pending.values()].some(count => count !== 0)) {
               core.setOutput("project-refused", "true");
@@ -1083,7 +1093,8 @@ jobs:
       # report holds each failed output's type and error, not the request:
       # bounded and neutralized as check's refusal reasons are, as a
       # handler's error can quote the agent's text. The reader is this
-      # workflow's pinned source: a comment-only run has no other checkout.
+      # workflow's pinned source, in `safe-outputs`, which the checkout
+      # of `workflow` above leaves out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ !cancelled() && steps.apply.outcome == 'failure' }}
         continue-on-error: true

@@ -8,6 +8,7 @@ const { homedir } = require('node:os');
 const { spawnSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { runInNewContext } = require('node:vm');
+const { escapingCore, escapingExec } = require('./workflow-commands.cjs');
 
 // The real pinned handler, a scripted patch, mock forge reads and local git
 // remotes. No write credential, sandbox setup or network service is needed.
@@ -44,7 +45,10 @@ test('scripted fix from a different caller layout reaches the target checkout an
       git(work, 'push', '-q', origin, 'HEAD:refs/heads/main');
       git(work, 'push', '-q', fork, 'HEAD:refs/heads/agent-run-7');
       writeFileSync(join(work, 'target.txt'), 'scripted fix\n');
-      git(work, 'commit', '-qam', 'Fix the target');
+      // The handler logs the patch's first lines, the commit message among
+      // them, where the runner would read these as commands (#1460).
+      const markers = ['::warning::audit-marker-line', 'see ##[warning]legacy-marker'];
+      git(work, 'commit', '-qam', 'Fix the target', '-m', markers[0], '-m', markers[1]);
       const tree = git(work, 'rev-parse', 'HEAD^{tree}');
       const patch = git(work, 'format-patch', '-1', '--stdout').replace('\nSubject:', `\nX-GH-AW-Base-Commit: ${head}\nSubject:`);
       writeFileSync(join(outputs, 'aw-agent-run-7.patch'), patch + '\n');
@@ -70,8 +74,10 @@ test('scripted fix from a different caller layout reaches the target checkout an
       assert.equal(configResult.status, 0, configResult.stderr);
       const config = JSON.parse(readFileSync(join(outputs, 'handler-config.json'), 'utf8')).push_to_pull_request_branch;
       const logs = [];
-      global.core = Object.fromEntries(['info', 'warning', 'error', 'debug', 'setOutput'].map(name => [name, text => logs.push(String(text))]));
-      global.core.summary = { addRaw: () => global.core.summary, write: async () => {} };
+      const core = Object.fromEntries(['info', 'warning', 'error', 'debug', 'setOutput'].map(name => [name, text => logs.push(String(text))]));
+      core.summary = { addRaw: () => core.summary, write: async () => {} };
+      // As the apply step hands them to the handlers.
+      global.core = escapingCore(core);
       global.context = { repo: { owner: 'caller', repo: 'control' }, payload: {}, runId: 7 };
       global.github = { rest: {
         pulls: { get: async () => ({ data: { number: 42, title: 'Target', labels: [],
@@ -80,7 +86,7 @@ test('scripted fix from a different caller layout reaches the target checkout an
         repos: { get: async () => ({ data: { default_branch: 'main' } }),
           getBranchProtection: async () => { throw Object.assign(new Error('unprotected'), { status: 404 }); } },
       } };
-      global.exec = {
+      global.exec = escapingExec({
         getExecOutput: async (program, args, options = {}) => {
           assert.equal(program, 'git');
           // Cross-repository git must use the mapped target, not the caller.
@@ -92,7 +98,7 @@ test('scripted fix from a different caller layout reaches the target checkout an
           assert.equal(options.cwd, work);
           return command(options.cwd, args, options.ignoreReturnCode).exitCode;
         },
-      };
+      });
       const source = resolve(process.env.GH_AW_JS, 'push_to_pull_request_branch.cjs');
       const upstreamRequire = createRequire(source);
       const module = { exports: {} };
@@ -108,6 +114,11 @@ test('scripted fix from a different caller layout reaches the target checkout an
       const request = { type: 'push_to_pull_request_branch', branch: 'agent-run-7' };
       const result = await handler(request, {});
       assert.equal(result.success, true, JSON.stringify({ result, logs }));
+      // The message was logged, broken so that the runner reads no command in it.
+      const lines = logs.flatMap(text => text.split('\n'));
+      assert.ok(lines.includes(': :warning: :audit-marker-line'), JSON.stringify(logs));
+      assert.ok(lines.includes('see ## [warning]legacy-marker'), JSON.stringify(logs));
+      assert.deepEqual(lines.filter(line => /^\s*::/.test(line) || line.includes('##[')), []);
       assert.equal(git(root, '--git-dir', fork, 'show', '-s', '--format=%P', 'agent-run-7'), head);
       assert.equal(git(root, '--git-dir', fork, 'rev-parse', 'agent-run-7^{tree}'), tree);
       assert.equal(git(root, '--git-dir', origin, 'rev-parse', 'main'), head);
