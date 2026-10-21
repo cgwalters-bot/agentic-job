@@ -341,9 +341,13 @@ impl Forgejo {
         // configuration (`am.messageid`, `mailinfo.scissors`) applies.
         // A retry must reconstruct exactly the same object, not a commit
         // with a new committer timestamp. Recovery checks its full SHA.
+        // The carriage return check admits before a newline stays, as in
+        // the GitHub apply job (`am.keepcr`): without it `git am` would
+        // commit other bytes than check read, and a patch to a file with
+        // CRLF line ends would not apply at all.
         self.git(
             dir,
-            &["am", "-q", "--committer-date-is-author-date"],
+            &["am", "-q", "--keep-cr", "--committer-date-is-author-date"],
             Some(&pr.patch),
         )?;
         // check read the paths the patch names; git applies by its own
@@ -707,19 +711,21 @@ mod tests {
     }
 
     /// A bare repository with one commit on main, an empty bare fork of
-    /// it, and the pull request of a patch on it adding `src/x`.
-    fn repository() -> (tempfile::TempDir, PullRequest) {
+    /// it, and the pull request of a patch on it adding `src/x` and a
+    /// line to the README. Every line ends with EOL.
+    fn repository_with(eol: &str) -> (tempfile::TempDir, PullRequest) {
         let root = tempfile::tempdir().unwrap();
         let work = root.path().join("work");
         std::fs::create_dir(&work).unwrap();
         sh(&work, &["init", "-q"]);
-        std::fs::write(work.join("README"), "hi\n").unwrap();
+        std::fs::write(work.join("README"), format!("hi{eol}")).unwrap();
         sh(&work, &["add", "README"]);
         sh(&work, &["commit", "-q", "-m", "Start"]);
         let base = sh(&work, &["rev-parse", "HEAD"]);
+        std::fs::write(work.join("README"), format!("hi{eol}more{eol}")).unwrap();
         std::fs::create_dir(work.join("src")).unwrap();
-        std::fs::write(work.join("src/x"), "x\n").unwrap();
-        sh(&work, &["add", "src/x"]);
+        std::fs::write(work.join("src/x"), format!("x{eol}")).unwrap();
+        sh(&work, &["add", "README", "src/x"]);
         let message = root.path().join("message");
         std::fs::write(&message, MESSAGE).unwrap();
         sh(&work, &["commit", "-q", "-F", message.to_str().unwrap()]);
@@ -744,9 +750,13 @@ mod tests {
             title: "WIP: Fix it".into(),
             body: "Why.".into(),
             patch: patch.into_bytes(),
-            files: vec!["src/x".into()],
+            files: vec!["README".into(), "src/x".into()],
         };
         (root, pr)
+    }
+
+    fn repository() -> (tempfile::TempDir, PullRequest) {
+        repository_with("\n")
     }
 
     #[test]
@@ -1042,11 +1052,35 @@ mod tests {
         pr.files = vec!["src/y".into()];
         let err = format!("{:#}", forgejo.open_pull_request(&pr).unwrap_err());
         assert!(err.contains("other paths than check read"), "{err}");
-        pr.files = vec!["src/x".into()];
+        pr.files = vec!["README".into(), "src/x".into()];
         pr.base_commit = "2".repeat(40);
         let err = format!("{:#}", forgejo.open_pull_request(&pr).unwrap_err());
         assert!(err.contains("is not on main"), "{err}");
         let bare = root.path().join("fork/name.git");
         assert_eq!(sh(&bare, &["branch", "--list", "agent-run-7"]), "");
+    }
+
+    /// A patch whose lines end in CRLF, which check admits, is pushed with
+    /// those bytes: its edit of a CRLF file applies, and its new file is
+    /// not committed with other line ends than check read.
+    #[test]
+    fn keeps_carriage_returns() {
+        let (root, pr) = repository_with("\r\n");
+        let mut answers = public().to_vec();
+        answers.push((
+            201,
+            json!({"number": 9, "html_url": "https://forge.example/owner/name/pulls/9"})
+                .to_string(),
+        ));
+        let (server, _requests) = mock(answers);
+        let mut forgejo = forgejo(&server);
+        forgejo.git = root.path().display().to_string();
+        forgejo.open_pull_request(&pr).unwrap();
+        let bare = root.path().join("fork/name.git");
+        assert_eq!(
+            git_out(&bare, &["show", "agent-run-7:README"]),
+            b"hi\r\nmore\r\n"
+        );
+        assert_eq!(git_out(&bare, &["show", "agent-run-7:src/x"]), b"x\r\n");
     }
 }

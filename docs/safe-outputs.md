@@ -1104,7 +1104,8 @@ private run. It also refuses when the forge does not report one of these.
 
 For the pull request, apply fetches the base branch from the target into an empty
 repository, applies the patch on check's base commit with git configured
-only by apply (no hooks, no credential helpers, no redirects), refuses
+only by apply (no hooks, no credential helpers, no redirects; carriage
+returns kept, as on GitHub), refuses
 it if it changed any path the patch did not name, and pushes it to the
 request's branch in the fork, which must not exist. Then `POST /api/v1/repos/OWNER/NAME/pulls`
 opens it against the target with head `FORK_OWNER:BRANCH`. Forgejo has no draft pull request, so a draft's title starts
