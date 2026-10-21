@@ -28,6 +28,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "agentic-job",
+      components: { Banner: "./src/components/Banner.astro" },
       sidebar: [
         { label: "Overview", slug: pageId("README.md") },
         // Starlight's autogenerate reads src/content/docs/, not the

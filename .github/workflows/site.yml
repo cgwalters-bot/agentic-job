@@ -44,8 +44,8 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: just@1.58.0
+      # Builds the site, which site-check below then checks.
       - run: just site-test
-      - run: just site-build
       # `just site-check`, with the lychee ci.yml uses. The action's shell
       # evaluates args, so it expands $GITHUB_WORKSPACE (lychee wants an
       # absolute root), which the checker refuses as an expression here.
