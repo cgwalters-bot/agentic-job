@@ -1218,6 +1218,8 @@ jobs:
           COMPOSE_RESULT: ${{ needs.e2e-compose.result }}
           PR: ${{ github.event.pull_request.number }}
           REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
+          # The configuration the scripted dispatch ran with.
+          CONFIG: .github/agentic-job/hosted.toml
         run: node workflow/dispatch-verify.cjs
       - name: Bound the hosted end-to-end agent job
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0

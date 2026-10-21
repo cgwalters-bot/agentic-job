@@ -822,9 +822,9 @@ Either copy `.github/agentic-job/hosted.toml` too, or set `config` to
 reads from its own source at the pinned commit, so the pin covers the
 hardening and there is no copy to keep. Replace `uses: ./.github/workflows/agentic-job.yml` with
 `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
-using a reviewed commit. Replace the example's `repo` default and the
-bounds file's `repos` with your public repository; the allowed base is
-`main`. Keep the permissions. Commit to your default branch, enable
+using a reviewed commit. Replace the bounds file's `repos` with your
+public repository; the example's `repo` input is empty by default, which
+means the repository it runs in. The allowed base is `main`. Keep the permissions. Commit to your default branch, enable
 Actions and permit the referenced actions and workflow. No branch of your
 repository is written: the pull request comes from a fork.
 The example applies with the `SAFE_OUTPUTS_PAT` of an `agent-apply`

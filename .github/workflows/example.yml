@@ -10,7 +10,7 @@
 # request here, from the branch `agent-run-RUNID` of the applying
 # account's fork.
 name: example
-run-name: agent ${{ inputs.item }} ${{ inputs.repo }}
+run-name: agent ${{ inputs.item }} ${{ inputs.repo || github.repository }}
 
 on:
   workflow_dispatch:
@@ -20,9 +20,11 @@ on:
         type: string
         default: example
       repo:
-        description: The repository the agent works on, OWNER/NAME; public, one the bounds file allows, and without `output-repo` this repository itself
+        description: The repository the agent works on, OWNER/NAME; public, one the bounds file allows, and without `output-repo` this repository itself; empty for this repository
         type: string
-        default: cgwalters-forge/agentic-job
+        # Empty rather than a name, so a copy of this file targets the
+        # repository it is copied to; the bounds file still decides.
+        default: ""
       task:
         description: The task (public, like everything about a run)
         type: string
@@ -58,7 +60,7 @@ jobs:
     with:
       id: ${{ inputs.item }}
       task: ${{ inputs.task }}
-      repo: ${{ inputs.repo }}
+      repo: ${{ inputs.repo || github.repository }}
       outputs: create_pull_request,noop
       # What a run started from this repository may ask for at all.
       allow: .github/agentic-job/allow.toml

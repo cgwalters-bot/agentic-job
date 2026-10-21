@@ -276,6 +276,10 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   assert.match(verifier, /ref: \$\{\{ github.sha \}\}/);
   assert.match(verifier, /persist-credentials: false/);
   assert.match(verifier, /run: node workflow\/dispatch-verify.cjs/);
+  // The verifier reads the configuration the scripted dispatch ran with.
+  assert.match(verifier, /\n {10}CONFIG: \.github\/agentic-job\/hosted\.toml\n/);
+  assert.match(fs.readFileSync(path.join(root, '.github/workflows/dispatch.yml'), 'utf8'),
+    /\|\| '\.agentic-job-source\/\.github\/agentic-job\/hosted\.toml' \}\}/);
   assert.match(verifier, /GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(verifier, /needs: \[changes, e2e-dispatch, e2e-compose, e2e-full\]/);
   assert.match(verifier, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
@@ -308,7 +312,7 @@ test('CI runs do not share a dispatch or compose concurrency group, and a real d
   assert.match(ci, /- name: Bound the hosted end-to-end agent job\n        uses: actions\/github-script@[0-9a-f]{40} # v\S+\n        with:\n(?:          #[^\n]*\n)?          retries: [1-9]\n/);
 });
 
-test('CI verifies actual dispatch comments and pinned SHA, not only job success', () => {
+test('CI verifies actual dispatch comments and pinned SHA, not only job success', t => {
   const source = fs.readFileSync(path.join(root, 'workflow/dispatch-verify.cjs'), 'utf8');
   const head = 'a'.repeat(40);
   const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
@@ -316,7 +320,7 @@ test('CI verifies actual dispatch comments and pinned SHA, not only job success'
   const completed = [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')];
   const verify = (change = {}) => {
     const repo = change.repo ?? 'owner/repo';
-    const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147',
+    const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147', CONFIG: config,
       REVIEW_HEAD: head, RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
     const responses = {
       [`repos/${repo}/issues/64/comments`]: change.comments ?? completed,
@@ -334,10 +338,36 @@ test('CI verifies actual dispatch comments and pinned SHA, not only job success'
       } } : require(name),
     });
   };
+  // Cargo is required exactly where the configuration gives it, by name
+  // or by `default`; another table's entry or another package does not
+  // count, and a line the verifier cannot read fails it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-verify-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+  const write = (name, text) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, text);
+    return file;
+  };
+  const config = write('config.toml', '[setup.repo-packages] # per repository\n# comment\n' +
+    '"owner/cargo" = ["cargo"] # trailing\n"owner/gcc"=["gcc"]\n\n[other]\n"owner/other" = ["cargo"]\n');
+  const fallback = write('default.toml', '[setup.repo-packages]\ndefault = ["gcc", "cargo"]\n"owner/gcc" = ["gcc"]\n');
+  const multiline = write('multiline.toml', '[setup.repo-packages]\n"owner/cargo" = [\n  "cargo",\n]\n');
+  const missing = write('missing.toml', '[setup]\npackages = ["cargo"]\n');
   verify();
   verify({ toolchain: 'none' });
-  verify({ repo: 'cgwalters-forge/agentic-job' });
-  for (const change of [{ head: 'b'.repeat(40) }, { repo: 'cgwalters-forge/agentic-job', toolchain: 'none' }, { comments: [] },
+  verify({ repo: 'owner/cargo' });
+  verify({ repo: 'owner/gcc', toolchain: 'none' });
+  verify({ repo: 'owner/other', toolchain: 'none' });
+  verify({ repo: 'owner/repo', env: { CONFIG: fallback } });
+  verify({ repo: 'owner/gcc', toolchain: 'none', env: { CONFIG: fallback } });
+  // The shipped configuration gives this repository cargo.
+  const hosted = path.join(root, '.github/agentic-job/hosted.toml');
+  const repository = fs.readFileSync(path.join(root, '.github/agentic-job/dispatch.toml'), 'utf8').match(/^repos = \["([^"]+)"\]$/m)[1];
+  verify({ repo: repository, env: { CONFIG: hosted } });
+  assert.throws(() => verify({ repo: repository, toolchain: 'none', env: { CONFIG: hosted } }));
+  for (const change of [{ head: 'b'.repeat(40) }, { repo: 'owner/cargo', toolchain: 'none' },
+    { repo: 'Owner/Cargo', toolchain: 'none' }, { repo: 'owner/repo', toolchain: 'none', env: { CONFIG: fallback } },
+    { env: { CONFIG: multiline } }, { env: { CONFIG: missing } }, { env: { CONFIG: '' } }, { comments: [] },
     { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
     { comments: completed.slice(1) }, { comments: [...completed, completed[0]] }]) {
     assert.throws(() => verify(change));
