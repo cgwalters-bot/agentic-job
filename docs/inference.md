@@ -292,7 +292,10 @@ without the egress proxy. For each request the proxy:
   admitted, so that requests sent at once cannot pass the cap together;
 - drops every credential the agent sent, adds the key, and passes the
   answer back as it streams, with its content type, request id and
-  `retry-after` and no other header of the provider's.
+  `retry-after` and no other header of the provider's. A refusal of the
+  provider's is read whole first, under 64 KiB and not compressed, and
+  the key cut out of it, as some providers quote the key they refuse; any
+  other refusal is answered 502 instead.
 
 It counts every model request it forwards, and that count is what
 `max-requests` reads, as it reads a broker's. Ending the run closes the

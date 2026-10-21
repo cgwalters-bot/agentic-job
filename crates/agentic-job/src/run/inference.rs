@@ -35,6 +35,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use super::api_key::{self, ApiKey, Local, Upstream};
+use super::mcp;
 use crate::config::{self, Provider, Register};
 use crate::sandbox::network;
 
@@ -553,6 +554,20 @@ struct Answer {
 impl Answer {
     fn detail(&self) -> String {
         self.text.trim().chars().take(MAX_DETAIL_CHARS).collect()
+    }
+
+    /// The start of its text with SECRET cut out of it, as it is and
+    /// JSON-escaped, whole: `check-key` and `run` print this to the job
+    /// log before any redaction is set up. The secret is cut out of the
+    /// whole text first; cut short first, a secret across the cut would
+    /// no longer match, and its start would stay in the log.
+    fn detail_without(&self, secret: &str) -> String {
+        let text = mcp::cut(self.text.clone().into_bytes(), &mcp::quoted(secret));
+        String::from_utf8_lossy(&text)
+            .trim()
+            .chars()
+            .take(MAX_DETAIL_CHARS)
+            .collect()
     }
 
     fn json(&self) -> Option<Value> {
@@ -1379,8 +1394,9 @@ fn check_key(http: &ureq::Agent, url: &str, provider: Provider, key: &ApiKey) ->
             ));
         }
     };
-    // Some providers quote part of a key they refuse.
-    let detail = answer.detail().replace(key.expose(), "[the key]");
+    // Some providers quote the key they refuse, and this error goes to
+    // the job's log.
+    let detail = answer.detail_without(key.expose());
     let at = format!("the {} API at {url}", provider.as_str());
     match answer.status {
         200 => Attempt::Done(()),
@@ -1435,6 +1451,9 @@ fn read_token_file(path: &Path) -> Result<Token> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{Shutdown, TcpListener};
+
     use serde_json::json;
 
     use super::*;
@@ -1443,6 +1462,73 @@ mod tests {
         config::Config::parse(&format!("[inference]\n{text}"))
             .unwrap_or_else(|err| panic!("{text:?}: {err:#}"))
             .inference
+    }
+
+    /// A provider that answers its one request with STATUS and BODY: its
+    /// URL.
+    fn scripted(status: u16, body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.shutdown(Shutdown::Write);
+        });
+        url
+    }
+
+    /// The error of a refused key quotes the provider's answer without
+    /// the key, wherever and however the answer quotes it: the error goes
+    /// to the job's log, before any redaction.
+    #[test]
+    fn a_refused_key_is_cut_out_of_the_error_whole() {
+        let key = format!("{}/{}", "test-key-not-secret", "0123456789abcdef");
+        let once = Retry {
+            attempts: 1,
+            delay: Duration::ZERO,
+        };
+        let check = |status: u16, body: String| {
+            let url = scripted(status, body);
+            check_api_key(&url, Provider::Openai, Some(&key), once, NEVER)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string()
+        };
+        // The key begins before the error's cut of the answer, at
+        // MAX_DETAIL_CHARS, and ends after it: cut short first, nothing of
+        // it would match. It begins where what stands in for it ends at
+        // the cut.
+        let lead = "{\"error\":\"invalid key: ".len() + " ".len();
+        let preamble = "x".repeat(MAX_DETAIL_CHARS - lead - mcp::CUT.len());
+        // (the status, how the answer quotes the key, what the error says)
+        let cases = [
+            (401, key.clone(), "invalid key: [the credential]"),
+            (
+                401,
+                format!("{preamble} {key}"),
+                "x [the credential]): is it",
+            ),
+            (403, key.replace('/', "\\/"), "[the credential]"),
+            (418, key.clone(), "[the credential]"),
+        ];
+        for (status, quoted, says) in cases {
+            let err = check(status, format!("{{\"error\":\"invalid key: {quoted}\"}}"));
+            assert!(err.contains(&format!("HTTP {status}")), "{err}");
+            assert!(err.contains(says), "{err}");
+            for part in ["test-key", "0123456789abcdef"] {
+                assert!(!err.contains(part), "{err}");
+            }
+        }
     }
 
     #[test]

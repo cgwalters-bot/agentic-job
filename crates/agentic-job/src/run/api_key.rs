@@ -37,6 +37,7 @@ use serde_json::{Map, Value, json};
 
 use super::agent::{PLACEHOLDER_CREDENTIAL, RUN_TOKEN_HEADER};
 use super::inference::Token;
+use super::mcp;
 use crate::config::Provider;
 
 /// The variable of `run`'s own environment that holds the key. The
@@ -67,6 +68,10 @@ const MAX_CONNECTIONS: usize = 32;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest a whole answer of the provider may take, streamed or not.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// A refusal of the provider's is read whole, to cut the key out of it
+/// before the agent reads it ([`pass_back`]), if it is under this many
+/// bytes; a refusal is a few hundred bytes of JSON.
+const MAX_REFUSAL_BYTES: u64 = 64 << 10;
 /// The version of the Anthropic API the check of the key asks for; the
 /// agent's own requests carry theirs.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -458,6 +463,9 @@ struct State {
     upstream: Upstream,
     token: Token,
     http: ureq::Agent,
+    /// The upstream's credential as an answer may quote it, to cut out
+    /// of a refusal before the agent reads it ([`pass_back`]).
+    quoted: Vec<Vec<u8>>,
     /// The cap on the run's model requests, `limits.max-requests`.
     max_requests: Option<u64>,
     admission: Mutex<Admission>,
@@ -550,10 +558,15 @@ impl Local {
             ),
             Upstream::Provider { .. } => config.into(),
         };
+        let quoted = mcp::quoted(match &upstream {
+            Upstream::Provider { key, .. } => key.expose(),
+            Upstream::Broker { token, .. } => token.expose(),
+        });
         let state = Arc::new(State {
             upstream,
             token: run_token()?,
             http,
+            quoted,
             max_requests,
             admission: Mutex::default(),
         });
@@ -848,10 +861,7 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
             ),
         )
     })?;
-    // From here the answer is the provider's: whatever fails ends the
-    // connection, and the client sees a body cut short.
-    let _ = pass_back(stream, answer);
-    Ok(())
+    pass_back(stream, answer, &state.quoted)
 }
 
 /// Refuses a model request that has the provider reach the network for
@@ -1084,11 +1094,25 @@ fn chat_part(part: &Map<String, Value>) -> Result<(), Refusal> {
     }
 }
 
-/// Writes the provider's answer to the agent as it arrives, in chunks.
+/// Writes the provider's answer to the agent. A success streams as it
+/// arrives, in chunks: a model's answer is long, and read as it comes. A
+/// refusal is read whole first, and every form of the credential
+/// (QUOTED) cut out of it: some providers quote the key they refuse, as
+/// in "not permitted for key …", and passed on as it is that would hand
+/// the sandbox user the key the proxy exists to keep from it. A refusal
+/// is a few hundred bytes; one of [`MAX_REFUSAL_BYTES`] or more is not
+/// passed on at all, since cutting it short could leave the start of a
+/// key in, and neither is one compressed, where the key would not be
+/// found: the proxy asks for no encoding (the agent's `accept-encoding`
+/// is dropped). The forms cut are the key as it is and as JSON quotes
+/// it, not URL-encoded or split across lines. The answer is the
+/// provider's from the first byte written: whatever fails after that
+/// ends the connection, and the client sees a body cut short.
 fn pass_back(
     mut stream: &TcpStream,
     answer: ureq::http::Response<ureq::Body>,
-) -> std::io::Result<()> {
+    quoted: &[Vec<u8>],
+) -> Result<(), Refusal> {
     let status = answer.status().as_u16();
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
     for (name, value) in answer.headers() {
@@ -1096,9 +1120,52 @@ fn pass_back(
             head.push_str(&format!("{name}: {value}\r\n"));
         }
     }
-    head.push_str("transfer-encoding: chunked\r\nconnection: close\r\n\r\n");
+    if (200..300).contains(&status) {
+        head.push_str("transfer-encoding: chunked\r\nconnection: close\r\n\r\n");
+        let _ = stream_back(stream, head, answer.into_body().into_reader());
+        return Ok(());
+    }
+    let encoding = answer
+        .headers()
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("identity")
+        .to_owned();
+    ensure_ok(encoding.eq_ignore_ascii_case("identity"), || {
+        Refusal(
+            502,
+            format!("the answer (HTTP {status}) is {encoding}-encoded and cannot be read whole"),
+        )
+    })?;
+    let body = answer
+        .into_body()
+        .into_with_config()
+        .limit(MAX_REFUSAL_BYTES)
+        .read_to_vec()
+        .map_err(|err| {
+            Refusal(
+                502,
+                format!(
+                    "the answer (HTTP {status}) could not be read whole, under \
+                     {MAX_REFUSAL_BYTES} bytes: {err}"
+                ),
+            )
+        })?;
+    let body = mcp::cut(body, quoted);
+    head.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    ));
+    let _ = stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(&body))
+        .and_then(|()| stream.flush());
+    Ok(())
+}
+
+/// Writes HEAD, then BODY as it arrives, in chunks.
+fn stream_back(mut stream: &TcpStream, head: String, mut body: impl Read) -> std::io::Result<()> {
     stream.write_all(head.as_bytes())?;
-    let mut body = answer.into_body().into_reader();
     let mut buffer = vec![0; 16 << 10];
     loop {
         let n = body.read(&mut buffer)?;

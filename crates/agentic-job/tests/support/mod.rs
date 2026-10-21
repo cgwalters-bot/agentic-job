@@ -520,12 +520,22 @@ fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<S
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
     let given = credential(provider, &headers);
+    let model = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|request| request.get("model")?.as_str().map(str::to_owned));
     seen.lock().unwrap().push(Seen {
         method: method.clone(),
         target,
         headers,
         body,
     });
+    let not_permitted = |padding: usize| {
+        format!(
+            "{{\"error\":\"{}model not permitted for key {}\"}}",
+            "x".repeat(padding),
+            key()
+        )
+    };
     let (status, kind, extra, text) = match (method.as_str(), given == Some(key())) {
         // As GitHub's API answers a job token without the permission.
         (_, false) if provider == Provider::Github => (
@@ -546,6 +556,22 @@ fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<S
             ),
         ),
         ("GET", true) => (200, "application/json", "", "{\"data\":[]}".to_owned()),
+        // A model the key may not use, as a provider that quotes the key
+        // it refuses says it: in a few bytes, or at a length the proxy
+        // will not read whole (its MAX_REFUSAL_BYTES, 64 KiB), or
+        // compressed, which it does not read either.
+        ("POST", true) if model.as_deref() == Some("refused") => {
+            (403, "application/json", "", not_permitted(0))
+        }
+        ("POST", true) if model.as_deref() == Some("refused-at-length") => {
+            (403, "application/json", "", not_permitted(64 << 10))
+        }
+        ("POST", true) if model.as_deref() == Some("refused-compressed") => (
+            403,
+            "application/json",
+            "content-encoding: gzip\r\n",
+            not_permitted(0),
+        ),
         _ => (
             200,
             "text/event-stream",

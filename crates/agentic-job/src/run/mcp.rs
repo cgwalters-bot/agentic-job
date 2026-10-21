@@ -83,8 +83,9 @@ const CHECK_VERSION: &str = "2025-06-18";
 const MAX_LIST_PAGES: usize = 16;
 /// How much of a refusal's text an error quotes.
 const MAX_DETAIL_CHARS: usize = 300;
-/// What stands in for the credential in what the server wrote.
-const CUT: &str = "[the credential]";
+/// What stands in for the credential in what the server wrote; the
+/// api-key proxy and the check of a key use it for the key too.
+pub(super) const CUT: &str = "[the credential]";
 /// The methods the proxy forwards besides `tools/call`: those of the
 /// protocol itself and the list of tools.
 const FORWARDED: &[&str] = &[
@@ -936,7 +937,7 @@ fn forward(state: &State, mut stream: &TcpStream) -> Result<(), Refused> {
 /// The ways a server may quote SECRET: as it is, and inside a JSON
 /// string, where serializers escape `"` and `\`, some `/`, and some (Go's)
 /// `<`, `>` and `&`.
-fn quoted(secret: &str) -> Vec<Vec<u8>> {
+pub(super) fn quoted(secret: &str) -> Vec<Vec<u8>> {
     let json = serde_json::to_string(secret).unwrap_or_default();
     let json = json
         .strip_prefix('"')
@@ -956,8 +957,10 @@ fn quoted(secret: &str) -> Vec<Vec<u8>> {
     forms
 }
 
-/// BYTES with every one of FORMS in them replaced by [`CUT`].
-fn cut(bytes: Vec<u8>, forms: &[Vec<u8>]) -> Vec<u8> {
+/// BYTES with every one of FORMS in them replaced by [`CUT`]. Give it
+/// the whole text: a form across the end of a part would be missed, and
+/// its start left in.
+pub(super) fn cut(bytes: Vec<u8>, forms: &[Vec<u8>]) -> Vec<u8> {
     forms.iter().fold(bytes, |bytes, form| {
         let mut out = Vec::with_capacity(bytes.len());
         let mut rest = bytes.as_slice();

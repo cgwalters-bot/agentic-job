@@ -222,6 +222,54 @@ fn an_openai_compatible_provider_gets_the_key_as_its_bearer() {
     );
 }
 
+/// A refusal of the provider's that quotes the key reaches the agent with
+/// the key cut out of it, and one too long to read whole not at all: the
+/// proxy exists to keep the key from the sandbox user.
+#[test]
+fn a_refusal_of_the_provider_reaches_the_agent_without_the_key() {
+    let mock = MockProvider::start(Provider::Anthropic);
+    let run = register(&mock, Provider::Anthropic, Some(key())).unwrap();
+    let agent = run.agent_endpoint(&endpoint(&mock.url, Provider::Anthropic));
+    let token = run.token().expose().to_owned();
+    let refused = |model: &str| {
+        ask(
+            &agent.anthropic_url,
+            "POST",
+            "/v1/messages",
+            &[
+                ("x-run-token", &token),
+                ("content-type", "application/json"),
+            ],
+            &format!("{{\"model\":\"{model}\",\"max_tokens\":1}}"),
+        )
+        .unwrap()
+    };
+    let (status, headers, text) = refused("refused");
+    assert_eq!(status, 403, "{text}");
+    assert_eq!(headers["content-type"], "application/json");
+    assert_eq!(
+        text,
+        "{\"error\":\"model not permitted for key [the credential]\"}"
+    );
+    // Read whole, it is passed on whole, not as it streams.
+    assert_eq!(headers["content-length"], text.len().to_string());
+    assert!(!headers.contains_key("transfer-encoding"), "{headers:?}");
+    // One the proxy cannot read whole, or cannot read for the key, is
+    // not passed on at all.
+    for (model, says) in [
+        ("refused-at-length", "could not be read whole"),
+        ("refused-compressed", "gzip-encoded"),
+    ] {
+        let (status, _, text) = refused(model);
+        assert_eq!(status, 502, "{text}");
+        assert!(text.contains(says), "{text}");
+        assert!(!text.contains(&key()), "{text}");
+    }
+    // All reached the provider, and were counted.
+    assert_eq!(mock.seen().len(), 4);
+    assert_eq!(run.usage().unwrap().model_requests(), Some(3));
+}
+
 /// GitHub billing: the GitHub token is checked against the model list
 /// as GitHub's API wants it, and both agents' requests reach that API
 /// with the token and the proxy's integration id in place of the run
