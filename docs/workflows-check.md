@@ -220,6 +220,8 @@ permissions:
   contents: read
 jobs:
   workflow-policy:
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -252,6 +254,16 @@ the forge does not allow fetching the head SHA directly. No proposed checkout,
 action, build script or exemption runs. Permissions remain `contents: read`;
 pass no secrets. The temporary workflow tree is limited to 500 regular files
 of 1 MiB each, and analyzer output is quoted against workflow-command injection.
+
+This job neither runs secure-host nor calls the reusable workflow, so the
+checker refuses it. Exempt it in the base branch's
+`.github/agentic-job/workflows.toml`, as this repository exempts its own
+ingress workflow: it runs base-branch code only and reads the proposal as data.
+
+```toml
+[exempt]
+"workflow-policy.yml" = "Runs the base branch's checker on proposed workflow files as data, with a read-only token."
+```
 
 Land this job and the exemptions through maintainer review, run it once, then
 require `workflow-policy` in the branch ruleset for pull requests and merge

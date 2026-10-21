@@ -845,7 +845,7 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     job_name,
                     at,
                     format!("runs secure-host but {why}"),
-                    "run it unconditionally; omit inputs or use only lock, egress, deny-runner-metadata and check set to true, and build set to true or false; unchecked config files are refused",
+                    "run it unconditionally; omit inputs, or set only `check: true`",
                 );
             }
             if after_checkout && !checkout {
@@ -996,11 +996,14 @@ mod tests {
                     "permissions: {{}}\nsteps:\n  - uses: {SECURE_HOST}@PIN\n    with: {{{key}: {value}}}"
                 ));
                 let allowed = key == "check" && ["true", "'true'"].contains(&value);
-                assert_eq!(
-                    check_workflow(&yaml::parse(&text).unwrap()).is_empty(),
-                    allowed,
-                    "{text}"
-                );
+                let problems = check_workflow(&yaml::parse(&text).unwrap());
+                assert_eq!(problems.is_empty(), allowed, "{text}");
+                // A caller who follows the advice must not be refused again.
+                for p in &problems {
+                    for refused in ["lock", "egress", "deny-runner-metadata", "build"] {
+                        assert!(!p.instead.contains(refused), "{text}: {}", p.instead);
+                    }
+                }
             }
         }
         for action in [
