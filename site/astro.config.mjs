@@ -6,8 +6,8 @@ import starlight from "@astrojs/starlight";
 import { DOCS, pageId, remarkRepositoryLinks } from "./links.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-// Where the site is served (the Pages workflow sets these from the
-// repository's Pages settings) and the prefix of links to repository
+// Where the site is served (a deploy sets these from the host's settings,
+// such as GitHub Pages' URL and base path) and the prefix of links to repository
 // files that are not pages: the forge's view of the built commit when
 // deployed, the checkout itself otherwise, so a local link check also
 // proves those files exist.
