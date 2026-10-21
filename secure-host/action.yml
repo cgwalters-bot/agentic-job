@@ -83,27 +83,41 @@ runs:
           echo "::error::secure-host now forwards to cgwalters-forge/actions/secure-host, which takes only config, check and image-archive, not ${set[*]}: drop them, or name cgwalters-forge/agentic-job/secure-host at an earlier commit (docs/secure-host.md)"
           exit 1
         fi
+    # The new action sets egress.write-policy from its own `egress` input,
+    # over the file's value, so a configuration that asks for the policy
+    # would silently run without it (and a later step could POST the job's
+    # token anywhere). This is not a TOML parser: `write-policy = true`
+    # anywhere but on a comment line turns it on, a trailing comment or a
+    # string included, which can only ask for more (a stricter host, never
+    # a looser one). A key can spell write-policy without those characters
+    # only through a quoted key's backslash escape (of its hyphen, say),
+    # and a value `true` has no other spelling; a line that starts with `#`
+    # sets a key only after a multi-line string that closes on it. So a
+    # backslash outside a comment line, or any multi-line string, is
+    # refused rather than read as off.
+    - name: Read whether the configuration asks for the write policy
+      id: egress
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}
+      run: |
+        if grep -Eq "^[[:space:]]*([^#[:space:]].*)?\\\\|'''|\"\"\"" -- "$CONFIG"; then
+          echo "::error::$CONFIG has a backslash outside a comment or a multi-line string, so the forwarder cannot tell whether it sets egress.write-policy: write the file without them"
+          exit 1
+        fi
+        mode=off
+        if grep -Eq "^[[:space:]]*([^#[:space:]].*)?write-policy[\"']?[[:space:]]*=[[:space:]]*true" -- "$CONFIG"; then mode=write-policy; fi
+        echo "mode=$mode" >> "$GITHUB_OUTPUT"
     # Without a config, this repository's hosted one, as the old action
     # had: the new action's own default turns the egress proxy off, and
-    # the v0.6.1 image's binary still has the old way into its second
-    # user, so a caller that ran untrusted code that way would silently
-    # lose the proxy's rules.
-    - uses: cgwalters-forge/actions/secure-host@5906e6745c4e3e1c68b698dacf409a452c727d08 # main, with secure-host:v0.6.1
+    # the v0.6 image's binary still creates its second user, so a step
+    # that runs untrusted code as it would lose the proxy's rules. With
+    # `egress: write-policy` the new action also copies the proxy's
+    # trust-store variables from /etc/egress-proxy/runner.env into
+    # GITHUB_ENV, refusing any other name.
+    - uses: cgwalters-forge/actions/secure-host@636b20b87bc94417999062ada22700ef4d6a8836 # main, with secure-host:v0.6.3
       with:
         config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}
         check: ${{ inputs.check }}
+        egress: ${{ steps.egress.outputs.mode }}
         image-archive: ${{ inputs.image-archive }}
-    # With egress.write-policy, setup put the proxy's authority in the
-    # system's trust store, which Node (every JavaScript action) and
-    # Python's requests do not read: what they need instead is the lines
-    # setup wrote to /etc/egress-proxy/runner.env, for every later step's
-    # environment. They are written here as literals, not copied from the
-    # file, so that nothing but these two names can reach GITHUB_ENV.
-    # Without the file there is nothing to add.
-    - name: Trust the egress proxy in later steps
-      shell: bash
-      run: |
-        if [ -f /etc/egress-proxy/runner.env ]; then
-          echo "NODE_EXTRA_CA_CERTS=/etc/egress-proxy/ca.pem" >> "$GITHUB_ENV"
-          echo "REQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem" >> "$GITHUB_ENV"
-        fi

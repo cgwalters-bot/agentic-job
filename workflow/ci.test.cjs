@@ -530,37 +530,70 @@ test('the public secure-host forwards to the pinned new action and refuses the o
   assert.deepEqual(inputs(forwarder).filter(name => !forwarded.includes(name)).sort(),
     ['binary', 'build', 'deny-runner-metadata', 'egress', 'egress-policy', 'lock', 'runner-user', 'script', 'stop-services']);
   assert.doesNotMatch(forwarder, /\noutputs:/);
-  const uses = [...forwarder.matchAll(/^ {4}- uses: (\S+)/gm)].map(([, use]) => use);
+  // One pin, by commit, whose comment names the image tag that commit runs.
+  // site.yml (plain CI, no forwarder) takes the same one, so this
+  // repository's agent job is never secured by an older image than its CI.
+  // The tag is a release of this repository, at most the workspace's
+  // version: Dependabot moves the commit, and a reviewer reads the comment.
+  const pin = /^ {4,6}- uses: cgwalters-forge\/actions\/secure-host@[0-9a-f]{40} # main, with secure-host:v(\d+)\.(\d+)\.(\d+)$/gm;
+  const uses = [...forwarder.matchAll(/^ {4}- uses: .*$/gm)];
   assert.equal(uses.length, 1);
-  assert.match(uses[0], /^cgwalters-forge\/actions\/secure-host@[0-9a-f]{40}$/);
-  // Without a config, the hosted one beside it, which keeps the egress proxy
-  // on, never the new action's default, which turns it off.
-  const trust = '    - name: Trust the egress proxy in later steps\n';
-  const [front, last] = forwarder.split(trust);
-  assert.ok(front.replace(/(\n {4}#[^\n]*)+\n$/, '').endsWith(`    - uses: ${forwarder.split(`    - uses: `)[1].split('\n')[0]}\n      with:\n` +
+  const [line, ...tag] = [...forwarder.matchAll(pin)][0] ?? assert.fail(uses[0][0]);
+  assert.deepEqual([...read('.github/workflows/site.yml').matchAll(pin)].map(([used]) => used.trim()), [line.trim()]);
+  const [, ...version] = read('Cargo.toml').match(/^version = "(\d+)\.(\d+)\.(\d+)"$/m);
+  const older = (a, b) => a.map(Number).reduce((cmp, n, i) => cmp || Math.sign(n - Number(b[i])), 0) <= 0;
+  assert.ok(older(tag, version), `${line} is newer than the workspace's ${version.join('.')}`);
+  // The new action is the last step. Without a config, the hosted one beside
+  // it, which keeps the egress proxy on, never the new action's default,
+  // which turns it off; its trust-store step runs under egress: write-policy.
+  assert.ok(forwarder.endsWith(`${line}\n      with:\n` +
     "        config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}\n" +
-    forwarded.slice(1).map(name => `        ${name}: \${{ inputs.${name} }}`).join('\n')));
-  // The last step, after the new action: egress.write-policy's fixed lines
-  // into GITHUB_ENV when setup wrote its file, whatever that holds, and
-  // nothing without.
-  assert.doesNotMatch(last, /\n {4}- /);
-  const append = last.split('      run: |\n')[1].replace(/^ {8}/gm, '')
-    .replace('/etc/egress-proxy/runner.env', '"$RUNNER_ENV"');
+    '        check: ${{ inputs.check }}\n' +
+    '        egress: ${{ steps.egress.outputs.mode }}\n' +
+    '        image-archive: ${{ inputs.image-archive }}\n'));
+  // The new action overrides the file's egress.write-policy with its input:
+  // a configuration that asks for it, in any key form, gets write-policy.
+  const mode = forwarder.split('    - name: Read whether the configuration asks for the write policy\n')[1]
+    .split('\n    - ')[0].split('      run: |\n')[1].replace(/^ {8}/gm, '');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forwarder-'));
   try {
-    const githubEnv = path.join(dir, 'github-env');
-    const runnerEnv = path.join(dir, 'runner.env');
-    const appended = () => {
-      fs.writeFileSync(githubEnv, 'A=1\n');
-      const result = spawnSync('bash', ['-e', '-c', append], { encoding: 'utf8',
-        env: { PATH: process.env.PATH, GITHUB_ENV: githubEnv, RUNNER_ENV: runnerEnv } });
+    const config = path.join(dir, 'config.toml');
+    const output = path.join(dir, 'output');
+    const cases = [
+      ['', 'off'],
+      [read('secure-host/hosted.toml'), 'off'],
+      ['[egress]\nwrite-policy = false\n', 'off'],
+      ['[egress]\n# write-policy = true\n', 'off'],
+      ['[egress]\nwrite-policy = true\n', 'write-policy'],
+      ['[egress]\n  write-policy=true # on\n', 'write-policy'],
+      ['[egress]\n"write-policy" = true\n', 'write-policy'],
+      ["egress.'write-policy' = true\n", 'write-policy'],
+      ['egress = { proxy = true, write-policy = true }\n', 'write-policy'],
+      ['egress = { policy = "/etc/p#1.toml", write-policy = true }\n', 'write-policy'],
+      ['[egress]\n# "write\\u002dpolicy" = true\n', 'off'],
+      // Escapes could spell the key without its characters: refused.
+      ['[egress]\n"write\\u002dpolicy" = true\n', null],
+      ['egress."\\u0077rite-policy" = true\n', null],
+      ['[egress]\n  "write\\x2dpolicy"=true\n', null],
+      ['[sandbox]\nstop-services = ["a\\\\b"]\n', null],
+      // A multi-line string can close on a line that starts with '#'.
+      ["egress = { policy = '''/p\n#''', write-policy = true }\n", null],
+      ['egress = { policy = """/p\n#""", "write\\u002dpolicy" = true }\n', null],
+    ];
+    for (const [text, expected] of cases) {
+      fs.writeFileSync(config, text);
+      fs.writeFileSync(output, '');
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', mode], { encoding: 'utf8',
+        env: { PATH: process.env.PATH, CONFIG: config, GITHUB_OUTPUT: output } });
+      if (expected === null) {
+        assert.equal(result.status, 1, text);
+        assert.match(result.stdout, /^::error::.* has a backslash outside a comment or a multi-line string/, text);
+        assert.equal(fs.readFileSync(output, 'utf8'), '', text);
+        continue;
+      }
       assert.equal(result.status, 0, result.stderr);
-      return fs.readFileSync(githubEnv, 'utf8');
-    };
-    assert.equal(appended(), 'A=1\n');
-    fs.writeFileSync(runnerEnv, 'LD_PRELOAD=/tmp/x.so\n');
-    assert.equal(appended(), 'A=1\nNODE_EXTRA_CA_CERTS=/etc/egress-proxy/ca.pem\n' +
-      'REQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem\n');
+      assert.equal(fs.readFileSync(output, 'utf8'), `mode=${expected}\n`, text);
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -29,9 +29,18 @@ forward keeps the old action. At `@main` or a later commit:
 - Without a `config`, the forwarder passes this repository's
   [`hosted.toml`](../secure-host/hosted.toml), as the old action did, and
   not the new action's default, which turns egress filtering off: the
-  v0.6.1 image's binary still has the old way into its second user, and
-  a step that still runs code that way keeps writing only through the
-  proxy's rules. A `config` of the caller's own replaces it whole.
+  v0.6 image's binary still creates its second user, and a step that
+  runs code as it keeps writing only through the proxy's rules. A
+  `config` of the caller's own replaces it whole. The new action sets
+  `egress.write-policy` from its own `egress` input, over the file, so
+  the forwarder passes `egress: write-policy` when the file asks for it,
+  and refuses a file with a backslash outside a comment or with a
+  multi-line string, either of which could ask for it in a way the
+  forwarder does not read.
+- The forwarder and `site.yml` pin the same commit of the new action;
+  its comment names the image tag that commit runs, and CI's
+  `ci.test.cjs` refuses a pin whose two copies differ or whose tag is
+  newer than the workspace's version.
 - The floor is ubuntu-26.04, the runner the new action is written for.
 - Setting another input of the old action that chose the host fails the
   step and names the new action: `lock`, `egress`,
@@ -175,12 +184,11 @@ authority in the system's trust store (`update-ca-certificates`, or
 and writes `/etc/egress-proxy/runner.env` for what does not read it:
 `NODE_EXTRA_CA_CERTS` for Node, and so every JavaScript action, and
 `REQUESTS_CA_BUNDLE` for Python's requests and pip. A step cannot change a later
-step's environment except through `GITHUB_ENV`, so this repository's
-[forwarder](../secure-host/action.yml) appends the same two lines to it
-after the action, when setup wrote the file; a job that names `cgwalters-forge/actions/secure-host`
-directly runs
-`cat /etc/egress-proxy/runner.env >> "$GITHUB_ENV"` itself. A tool that
-trusts neither fails closed.
+step's environment except through `GITHUB_ENV`, so
+`cgwalters-forge/actions/secure-host`, given `egress: write-policy`
+(which this repository's [forwarder](../secure-host/action.yml) passes
+when its configuration asks for the policy), copies those lines to it,
+refusing any other name. A tool that trusts neither fails closed.
 
 The proxy now ends TLS for every request of the runner's user, so it
 sees what those requests carry: the job's token, the runtime and

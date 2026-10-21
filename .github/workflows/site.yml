@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: cgwalters-forge/actions/secure-host@5906e6745c4e3e1c68b698dacf409a452c727d08 # main, with secure-host:v0.6.1
+      - uses: cgwalters-forge/actions/secure-host@636b20b87bc94417999062ada22700ef4d6a8836 # main, with secure-host:v0.6.3
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: just@1.58.0
