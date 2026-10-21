@@ -18,9 +18,13 @@
 //! the Ith (counted from 0). Each machine still checks that all probes
 //! pass before anything is removed and after everything is put back.
 //!
-//! The run-token probes want the job's identity-token request variables
+//! The `oidc-*` probes want the job's identity-token request variables
 //! in the environment (any values: the probes only look for them where
 //! they must not be).
+//!
+//! The run token's cases also run `run`'s own probes of it
+//! (`agentic_job::run::probe::token`), which `sandbox check` has no token
+//! for.
 
 // Helpers outside a #[test] function are still test code.
 #![allow(clippy::unwrap_used)]
@@ -37,7 +41,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use agentic_job::config::{self, Config};
-use agentic_job::sandbox::check::{self, RunToken};
+use agentic_job::sandbox::check;
 use agentic_job::sandbox::enter::Entry;
 use agentic_job::sandbox::host::User;
 use agentic_job::sandbox::{egress, network, setup};
@@ -227,6 +231,9 @@ fn sandbox_process(entry: &Entry, uid: u32, script: &'static str, arg: String) -
 
 /// A stand-in the length and shape of a real run token.
 const TOKEN: &str = "test-run-0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The agent's configuration that holds it, under the sandbox user's home.
+const AGENT_CONFIG: &str = "agent-config/settings.json";
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|&item| item.to_owned()).collect()
@@ -499,8 +506,8 @@ impl TokenFixture {
         let runner_file = runner.home.join(".agentic-job-test-token");
         std::fs::write(&runner_file, format!("{TOKEN}\n")).unwrap();
         std::fs::set_permissions(&runner_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let agent_dir = entry.home().join("agent-config");
-        let agent_config = agent_dir.join("settings.json");
+        let agent_config = entry.home().join(AGENT_CONFIG);
+        let agent_dir = agent_config.parent().unwrap().to_owned();
         // The modes are set outright, as `run` must: what a umask gives
         // is the host's business.
         let script = "mkdir -p \"$1\" && chmod 700 \"$1\" && cat > \"$2\" && chmod 600 \"$2\"";
@@ -526,13 +533,6 @@ impl TokenFixture {
             runner_file,
             agent_dir,
             agent_config,
-        }
-    }
-
-    fn token(&self) -> RunToken<'_> {
-        RunToken {
-            runner_file: &self.runner_file,
-            agent_config: &self.agent_config,
         }
     }
 }
@@ -1118,8 +1118,11 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
     cases
 }
 
-fn failed(config: &Config, token: Option<RunToken<'_>>) -> BTreeSet<String> {
-    let report = check::probes(config, token).expect("the probes could not run");
+/// The ids of what failed: of `sandbox check`'s probes, and, with the
+/// runner's file the token came from, of `run`'s probes of [`TOKEN`] in
+/// [`AGENT_CONFIG`].
+fn failed(config: &Config, given: Option<&Path>) -> BTreeSet<String> {
+    let report = check::probes(config).expect("the probes could not run");
     for id in [
         "runner-world-write-control",
         "runner-world-write",
@@ -1138,7 +1141,23 @@ fn failed(config: &Config, token: Option<RunToken<'_>>) -> BTreeSet<String> {
             "unexpected view probe selection: {id}"
         );
     }
-    report.failures().into_iter().map(str::to_owned).collect()
+    let mut failed: BTreeSet<String> = report.failures().into_iter().map(str::to_owned).collect();
+    if let Some(given) = given {
+        use agentic_job::run::{enter::Sandbox, inference, probe};
+        let sandbox = Sandbox::new(config).unwrap();
+        let token = inference::Token::new(TOKEN).unwrap();
+        let image = config.sandbox.check.container_image.as_str();
+        let probes = probe::token(&sandbox, &token, &[AGENT_CONFIG], Some(given), Some(image))
+            .expect("the token's probes could not run");
+        probe::report(&probes);
+        failed.extend(
+            probes
+                .iter()
+                .filter(|probe| !probe.passed)
+                .map(|probe| probe.id.to_owned()),
+        );
+    }
+    failed
 }
 
 /// Use the actual session wrapper, not just a separate run0 command. The
@@ -1310,11 +1329,8 @@ else:
         println!("\n=== removed: {} ===", case.name);
         let token = match &case.token {
             Token::None => None,
-            Token::InPlace => Some(fixture.token()),
-            Token::RunnerFile(path) => Some(RunToken {
-                runner_file: path,
-                agent_config: &fixture.agent_config,
-            }),
+            Token::InPlace => Some(fixture.runner_file.as_path()),
+            Token::RunnerFile(path) => Some(path.as_path()),
         };
         let removed = (case.remove)();
         let got = failed(&config, token);
@@ -1328,7 +1344,7 @@ else:
 
     println!("\n=== everything put back ===");
     assert_eq!(
-        failed(&config, Some(fixture.token())),
+        failed(&config, Some(&fixture.runner_file)),
         none,
         "after everything was put back"
     );

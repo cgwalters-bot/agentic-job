@@ -427,15 +427,13 @@ impl Checker<'_> {
     /// The variables that ask for the job's identity token are in every
     /// step's environment when the job may have one, this process's too;
     /// what runs as the sandbox user starts without them.
-    pub(super) fn job_variables(&mut self, environs: &[u8], oidc_token: bool) -> Result<()> {
+    pub(super) fn job_variables(&mut self, environs: &[u8]) -> Result<()> {
         let user = self.user().to_owned();
         let values: Vec<(&str, String)> = OIDC_REQUEST_VARS
             .iter()
             .filter_map(|&name| Some((name, std::env::var(name).ok().filter(|v| !v.is_empty())?)))
             .collect();
-        // A run token got with the identity token says they were, so then
-        // the variables must be here to be proven absent from the sandbox.
-        if oidc_token || !values.is_empty() {
+        if !values.is_empty() {
             self.report.expect(
                 Want::Succeed,
                 "oidc-control",

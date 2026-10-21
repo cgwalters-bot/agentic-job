@@ -6,12 +6,14 @@
 //! work. Without the control, a probe that fails because a program is
 //! missing reads as a protection that holds.
 //!
-//! The probes are a function, [`probes`], because `run` repeats them once
-//! the run token is in place; the command is that function with no token.
-//! docs/sandbox-check.md lists them.
+//! The probes are a function, [`probes`], because `run` repeats them
+//! with `[sandbox.check] before-agent` and the host test that removes
+//! protections calls it. None of them is of the run token: those are
+//! `run`'s own (`crate::run::probe`), made once the token is in place.
+//! docs/sandbox-check.md lists them all.
 //!
 //! The probes are methods of `Checker` in the modules under this one:
-//! `on_host`, `run_token`, `runner` (the runner's own user, which setup
+//! `on_host`, `runner` (the runner's own user, which setup
 //! has taken root from) and `net`; what a pass leaves for a later check
 //! in the same job is `record`.
 
@@ -27,12 +29,10 @@ use super::host::{self, User};
 use super::root::Root;
 use crate::config::{self, Config};
 use crate::exit::Exit;
-use crate::run::inference::{self, Endpoint};
 
 mod net;
 mod on_host;
 mod record;
-mod run_token;
 mod runner;
 
 #[derive(Debug, clap::Args)]
@@ -84,17 +84,6 @@ const PROBE_LIMIT: &[&str] = &["timeout", "--kill-after=10", "600"];
 const CONTAINER_UID: &str = "1000";
 
 const CA_MOUNT: &str = "/etc/egress-proxy/ca.pem:/run/egress-ca.pem:ro";
-
-/// The run token and the one place the sandbox user may hold it. `run`
-/// passes this once it has put the token there.
-#[derive(Debug, Clone, Copy)]
-pub struct RunToken<'a> {
-    /// The runner's copy of the token.
-    pub runner_file: &'a Path,
-    /// The agent's configuration file in the sandbox user's home, the
-    /// only file of that user's that holds the token.
-    pub agent_config: &'a Path,
-}
 
 /// What one probe or control found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,7 +194,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     let record = job_record(record::binary, |name| std::env::var(name).ok(), &text);
     let checked = once(args.mode(), record.as_ref(), || {
         let started = Instant::now();
-        let report = probes(&config, None)?;
+        let report = probes(&config)?;
         let failures = report.failures();
         if failures.is_empty() {
             println!(
@@ -322,7 +311,7 @@ fn once(
 /// Probes the sandbox `config` describes, as its sandbox user, from the
 /// runner's user. `Err` is a probe that could not be made at all; a
 /// probe that came out wrong is in the report.
-pub fn probes(config: &Config, token: Option<RunToken<'_>>) -> Result<Report> {
+pub fn probes(config: &Config) -> Result<Report> {
     let entry = Entry::new(config)?;
     let checker = Checker {
         config,
@@ -332,7 +321,7 @@ pub fn probes(config: &Config, token: Option<RunToken<'_>>) -> Result<Report> {
         canary: canary()?,
         report: Report::default(),
     };
-    checker.run(token)
+    checker.run()
 }
 
 /// A value nothing else on the host has.
@@ -343,16 +332,6 @@ fn canary() -> Result<String> {
         .context("reading /dev/urandom")?;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(format!("isolation-canary-{hex}"))
-}
-
-/// Whether a run's token is got with the job's identity token, which
-/// says that the variables that request one were there; `plain` and
-/// `token-file` registrations need none.
-fn from_identity_token(inference: &config::Inference) -> Result<bool> {
-    Ok(matches!(
-        Endpoint::from_config(inference)?.map(|endpoint| endpoint.mode),
-        Some(inference::Mode::GithubOidc { .. })
-    ))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -373,16 +352,13 @@ struct Checker<'a> {
 }
 
 impl Checker<'_> {
-    fn run(mut self, token: Option<RunToken<'_>>) -> Result<Report> {
+    fn run(mut self) -> Result<Report> {
         self.timed("privileges", |this| this.privileges())?;
         if self.config.sandbox.lock_runner {
             self.timed("runner-privileges", |this| this.runner_privileges())?;
         }
         let environs = self.timed("environments", |this| this.environments())?;
-        let oidc_token = token.is_some() && from_identity_token(&self.config.inference)?;
-        self.timed("job-variables", |this| {
-            this.job_variables(&environs, oidc_token)
-        })?;
+        self.timed("job-variables", |this| this.job_variables(&environs))?;
         self.timed("files", |this| this.files())?;
         self.timed("schedulers", |this| this.schedulers())?;
         self.timed("services", |this| {
@@ -392,9 +368,6 @@ impl Checker<'_> {
         self.timed("local-services", |this| this.local_services())?;
         self.timed("resolved", |this| this.resolved())?;
         self.timed("tailscaled", |this| this.tailscaled())?;
-        if let Some(token) = token {
-            self.timed("run-token", |this| this.run_token(token, &environs))?;
-        }
         self.timed("network", |this| this.network())?;
         Ok(self.report)
     }
@@ -735,33 +708,6 @@ mod diagnostic_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_an_identity_token_registration_needs_the_request_variables() {
-        let cases = [
-            ("", false),
-            (
-                "[inference]\nurl = \"http://100.64.0.1:8080\"\nregister = \"github-oidc\"\naudience = \"proxy\"",
-                true,
-            ),
-            (
-                "[inference]\nurl = \"http://100.64.0.1:8080\"\nregister = \"plain\"",
-                false,
-            ),
-            (
-                "[inference]\nurl = \"http://100.64.0.1:8080\"\nregister = \"token-file\"\ntoken-file = \"/run/token\"",
-                false,
-            ),
-        ];
-        for (text, want) in cases {
-            let config = Config::parse(text).unwrap();
-            assert_eq!(
-                from_identity_token(&config.inference).unwrap(),
-                want,
-                "{text}"
-            );
-        }
-    }
 
     #[test]
     fn byte_search() {

@@ -81,6 +81,16 @@ Every line of output starts with `ok` or `FAIL` and the probe's name in
 brackets. The names are stable; the test that removes protections
 matches on them.
 
+`sandbox check` has no run token, so it runs every row but the
+`token-*` ones. Those are `run`'s, once it has written the agent's
+configuration and before the agent starts, and only with a sandbox
+user: under `--runner-home`, the reusable workflow's case, none runs
+([sandbox.md](sandbox.md#what-is-tested)). The test that removes
+protections runs them for its token cases. `run`'s other probes, of
+the provider's key, the MCP credential and token and the broker under
+`inference.front`, print ids too (`api-key-processes`,
+`mcp-token-files`, `broker-egress` and the like) and have no rows here.
+
 | Probe | The sandbox user tries to | Control | What stops it |
 | --- | --- | --- | --- |
 | `sudo` | run `sudo -n true` | root runs the helper's control | a sudoers rule, read last |
@@ -105,10 +115,10 @@ matches on them.
 | `resolved-bus`, `resolved-varlink` | resolve a name through systemd-resolved, over the system bus (`busctl`) and its Varlink socket (`varlinkctl`) | the runner's user resolves it over the bus; the sandbox user calls the bus itself, and PID 1 over Varlink | `sandbox.close-resolved`: a bus policy and the sockets' modes; without it, or without resolved, a note |
 | `local-sockets`, `local-tcp` | connect to every listening Unix socket and local TCP port | it finds and reaches two listeners opened for it | stopping the daemon, or naming the socket as allowed |
 | `tailscale-status`, `tailscale-localapi` | use tailscaled's LocalAPI | root can | its socket directory is closed |
-| `token-runner-file` | read the runner's copy of the run token | the runner reads it | the runner's home is closed |
-| `token-config-mode`, `token-config-dir-mode` | (none: the agent's configuration must be its own, mode 600, in a directory of mode 700) | the configuration holds the token | `run` writes it so |
-| `token-files`, `token-processes` | find the token in any other file it can write, or in any environment or command line it can read | as above | `run` hands the token over on standard input only |
-| `token-container-subuid` | read the configuration from a rootless container as a subordinate uid | the container's root reads it | the modes above |
+| `token-runner-file` | read the runner's copy of the run token, under `register = "token-file"` | `run` read it | the runner's home is closed |
+| `token-config-mode`, `token-config-dir-mode` | (none: the agent's configuration, and a child agent's, must be its own, mode 600, in a directory of mode 700) | `token-config-control`: the configuration holds the token | `run` writes it so |
+| `token-files`, `token-processes` | find the token in any other file under its home, `/run/user/UID`, `/tmp`, `/var/tmp` or `/dev/shm`, or in any environment or command line it can read | as above | `run` hands the token over on standard input only |
+| `token-container-subuid` | read the configuration from a rootless container as a subordinate uid, with `[sandbox.check] before-agent`, which names the image | `token-container-control`, `token-container-subuid-control`: the container's root reads it, the subordinate uid reads `/etc/os-release` | the modes above |
 
 The nested-view probes use `podman unshare` followed by `unshare --mount`: they
 require that the host-permitted namespace entry point works, can write the sandbox

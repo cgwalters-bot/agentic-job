@@ -928,7 +928,8 @@ fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
     );
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
     assert!(
-        got.stderr.contains("ok   no process") && got.stderr.contains("has the provider's API key"),
+        got.stderr.contains("ok: [api-key-processes] no process")
+            && got.stderr.contains("has the provider's API key"),
         "{}",
         got.all()
     );

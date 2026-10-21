@@ -928,8 +928,10 @@ impl Plan {
             .files
             .push(agent::child(child, &self.agent.context_windows)?);
         agent::install(sandbox, &configuration)?;
-        // Without a sandbox user the token is in this process's own
-        // environment, which the agent can read: not probed for.
+        // Without a sandbox user (`--runner-home`, as the run action
+        // passes) the token is in this process's own environment, which
+        // the agent can read: no probe could show it out of reach, so
+        // none runs (docs/sandbox.md).
         let token_file = self
             .kind
             .token_file()
@@ -950,7 +952,7 @@ impl Plan {
             probe::require(sandbox, run.agent_token(), &files, given, image)?;
         }
         if let Some(key) = &self.identity.api_key {
-            probe::require_absent(sandbox, "the provider's API key", key)?;
+            probe::require_absent(sandbox, "api-key-processes", "the provider's API key", key)?;
         }
         // Under `inference.front`, which needs a sandbox user: the agent
         // holds neither the run token nor a way to the broker, directly
@@ -958,7 +960,12 @@ impl Plan {
         if let (Some(run), Some(endpoint)) =
             (run.as_deref().filter(|run| run.fronted()), &self.endpoint)
         {
-            probe::require_absent(sandbox, "the broker's run token", run.token().expose())?;
+            probe::require_absent(
+                sandbox,
+                "broker-token-processes",
+                "the broker's run token",
+                run.token().expose(),
+            )?;
             let hosts = endpoint.hosts()?;
             crate::sandbox::egress::check_installed_front(&hosts)?;
             let proxy = run

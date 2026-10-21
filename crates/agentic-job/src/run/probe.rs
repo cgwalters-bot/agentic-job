@@ -12,6 +12,12 @@
 //! the container image `[sandbox.check]` names: that a container's
 //! subordinate uid cannot read the token's files.
 //!
+//! These are the only probes of the run token: `sandbox check` has no
+//! token to probe, and the host test that removes protections runs these
+//! for its token cases. Each line carries the probe's id in brackets, as
+//! `sandbox check`'s do, so that a job log names what failed in the words
+//! of docs/sandbox-check.md.
+//!
 //! The token goes to every search on standard input, never on a command
 //! line.
 
@@ -29,7 +35,8 @@ use crate::sandbox::egress;
 use crate::sandbox::network::Direct;
 
 /// Where the sandbox user can write, and so where a token handed to it
-/// could have been left, besides its home.
+/// could have been left, besides its home and its runtime directory
+/// ([`RUNTIME_DIRS`]).
 const SHARED_WRITABLE: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 /// How long the search of those may take, in seconds.
 const SEARCH_TIMEOUT_S: &str = "300";
@@ -68,9 +75,16 @@ const RUNS_PATH: &str = "/v1/runs";
 const PRIVATE_FILE_MODE: &str = "600";
 const PRIVATE_DIR_MODE: &str = "700";
 
+/// Where logind makes each user's runtime directory, `/run/user/UID`:
+/// the sandbox user's, which its own sessions and services write to.
+const RUNTIME_DIRS: &str = "/run/user";
+
 /// One probe: what was expected, and whether it held.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
+    /// Stable, as `sandbox check`'s are: tests and readers of the log
+    /// match on it.
+    pub id: &'static str,
     pub what: String,
     pub passed: bool,
 }
@@ -88,10 +102,17 @@ fn owner_and_mode(sandbox: &Sandbox, path: &str) -> Result<String> {
 
 /// A probe that PATH is USER's and of MODE. It says what it found: a
 /// failed probe whose text is only what was expected cannot be acted on.
-fn private(sandbox: &Sandbox, what: &str, path: &str, mode: &str) -> Result<Probe> {
+fn private(
+    sandbox: &Sandbox,
+    id: &'static str,
+    what: &str,
+    path: &str,
+    mode: &str,
+) -> Result<Probe> {
     let user = &sandbox.user;
     let found = owner_and_mode(sandbox, path)?;
     Ok(Probe {
+        id,
         what: format!("{what} is {user}'s, mode {mode} (it is: {found})"),
         passed: found == format!("{user} {mode}"),
     })
@@ -105,6 +126,8 @@ fn only_in(code: Option<i32>, found: &[&str], files: &[&str]) -> bool {
     let mut found = found.to_vec();
     let mut files = files.to_vec();
     found.sort_unstable();
+    // A home under a searched directory lists each of its files twice.
+    found.dedup();
     files.sort_unstable();
     code != Some(TIMEOUT_EXIT) && found == files
 }
@@ -166,16 +189,19 @@ fn from_container(sandbox: &Sandbox, image: &str, dir: &str, file: &str) -> Resu
     let inside = format!("{CONTAINER_DIR}/{file}");
     Ok(vec![
         Probe {
+            id: "token-container-control",
             what: format!("a container of {user}'s, as its root, reads {file} (control)"),
             passed: reads("0", &inside)?,
         },
         Probe {
+            id: "token-container-subuid-control",
             what: format!(
                 "a container of {user}'s, as uid {CONTAINER_UID}, reads {WORLD_READABLE} (control)"
             ),
             passed: reads(CONTAINER_UID, WORLD_READABLE)?,
         },
         Probe {
+            id: "token-container-subuid",
             what: format!("a container of {user}'s, as uid {CONTAINER_UID}, cannot read {file}"),
             passed: !reads(CONTAINER_UID, &inside)?,
         },
@@ -211,14 +237,25 @@ pub fn token(
             MAX_OUTPUT,
         )?;
         probes.push(Probe {
+            id: "token-config-control",
             what: format!("{user}'s {file} holds the run token (control)"),
             passed: found.success(),
         });
-        for (what, path, mode) in [
-            (file.as_str(), file.as_str(), PRIVATE_FILE_MODE),
-            ("its directory", dir.as_str(), PRIVATE_DIR_MODE),
+        for (id, what, path, mode) in [
+            (
+                "token-config-mode",
+                file.as_str(),
+                file.as_str(),
+                PRIVATE_FILE_MODE,
+            ),
+            (
+                "token-config-dir-mode",
+                "its directory",
+                dir.as_str(),
+                PRIVATE_DIR_MODE,
+            ),
         ] {
-            probes.push(private(sandbox, what, path, mode)?);
+            probes.push(private(sandbox, id, what, path, mode)?);
         }
         if let Some(image) = image {
             let name = Path::new(token_file)
@@ -230,46 +267,69 @@ pub fn token(
         files.push(file);
     }
     let files: Vec<&str> = files.iter().map(String::as_str).collect();
-    probes.extend(elsewhere(sandbox, "the token", token.expose(), &files)?);
-    let mut probe = |what: String, passed: bool| probes.push(Probe { what, passed });
+    probes.extend(elsewhere(
+        sandbox,
+        ["token-files", "token-processes"],
+        "the token",
+        token.expose(),
+        &files,
+    )?);
 
     if let Some(given) = given {
         let given = utf8(given)?;
         let read = sandbox.run(&["cat", "--", given], b"", MAX_OUTPUT)?;
-        probe(format!("{user} cannot read {given}"), !read.success());
+        probes.push(Probe {
+            id: "token-runner-file",
+            what: format!("{user} cannot read {given}"),
+            passed: !read.success(),
+        });
     }
     Ok(probes)
 }
 
-/// Probes that SECRET is in no file under the sandbox user's home and the
-/// directories it shares but FILES, and in no environment or command line
-/// it can read. WHAT names the secret. The search of files runs as the
-/// sandbox user and is given SECRET: only for one that user holds anyway.
-fn elsewhere(sandbox: &Sandbox, what: &str, secret: &str, files: &[&str]) -> Result<Vec<Probe>> {
+/// Every directory the user of HOME and UID can write to, and so where
+/// a secret it held could have been left.
+fn searched(home: &str, uid: u32) -> Vec<String> {
+    [home.to_owned(), format!("{RUNTIME_DIRS}/{uid}")]
+        .into_iter()
+        .chain(SHARED_WRITABLE.iter().map(|dir| (*dir).to_owned()))
+        .collect()
+}
+
+/// Probes that SECRET is in no file under the sandbox user's home, its
+/// runtime directory and the directories it shares but FILES, and in no
+/// environment or command line it can read: IDS are those two probes'.
+/// WHAT names the secret. The search of files runs as the sandbox user
+/// and is given SECRET: only for one that user holds anyway.
+fn elsewhere(
+    sandbox: &Sandbox,
+    ids: [&'static str; 2],
+    what: &str,
+    secret: &str,
+    files: &[&str],
+) -> Result<Vec<Probe>> {
     let user = &sandbox.user;
     let needle = format!("{secret}\n");
-    let home = utf8(&sandbox.home)?;
-    let search = [
-        &[
-            "timeout",
-            SEARCH_TIMEOUT_S,
-            "grep",
-            "-rlsF",
-            "-f",
-            "-",
-            "--",
-            home,
-        ],
-        SHARED_WRITABLE,
-    ]
-    .concat();
+    let dirs = searched(utf8(&sandbox.home)?, sandbox.uid);
+    let mut search = vec![
+        "timeout",
+        SEARCH_TIMEOUT_S,
+        "grep",
+        "-rlsF",
+        "-f",
+        "-",
+        "--",
+    ];
+    search.extend(dirs.iter().map(String::as_str));
     let search = sandbox.run(&search, needle.as_bytes(), MAX_OUTPUT)?;
     let code = search.status.code();
     let timed_out = code == Some(TIMEOUT_EXIT);
     let found = search.text();
     let found: Vec<&str> = found.lines().collect();
+    let [files_id, processes_id] = ids;
     Ok(vec![
         Probe {
+            id: files_id,
             what: format!(
                 "{user} finds {what} in no other file it can write ({})",
                 if timed_out {
@@ -282,16 +342,17 @@ fn elsewhere(sandbox: &Sandbox, what: &str, secret: &str, files: &[&str]) -> Res
             ),
             passed: only_in(code, &found, files),
         },
-        in_no_process(sandbox, what, secret)?,
+        in_no_process(sandbox, processes_id, what, secret)?,
     ])
 }
 
-/// Probes that no environment or command line the sandbox user can read
-/// holds SECRET. What it reads comes back here to be searched: SECRET
-/// itself goes to none of its processes.
-fn in_no_process(sandbox: &Sandbox, what: &str, secret: &str) -> Result<Probe> {
+/// Probes, as ID, that no environment or command line the sandbox user
+/// can read holds SECRET. What it reads comes back here to be searched:
+/// SECRET itself goes to none of its processes.
+fn in_no_process(sandbox: &Sandbox, id: &'static str, what: &str, secret: &str) -> Result<Probe> {
     let processes = sandbox.run(&["sh", "-c", PROCESSES_SCRIPT], b"", MAX_PROCESSES_BYTES)?;
     Ok(Probe {
+        id,
         what: format!(
             "no process {} can read has {what} in its environment or command line",
             sandbox.user
@@ -303,12 +364,12 @@ fn in_no_process(sandbox: &Sandbox, what: &str, secret: &str) -> Result<Probe> {
 /// Probes that SECRET, which only `run` holds (the provider's key under
 /// `api-key`, the broker's run token under `inference.front`), is in no
 /// process the sandbox user can read, prints what was found, and fails
-/// unless it held. WHAT names it. Its files are not searched for it,
-/// since that search would hand it to a process of the sandbox user's:
-/// nothing writes it there, and the probes of the agent's token show that
-/// what `run` writes for the agent is where it belongs.
-pub fn require_absent(sandbox: &Sandbox, what: &str, secret: &str) -> Result<()> {
-    let probe = in_no_process(sandbox, what, secret.trim())?;
+/// unless it held. WHAT names it, ID is the probe's. Its files are not
+/// searched for it, since that search would hand it to a process of the
+/// sandbox user's: nothing writes it there, and the probes of the agent's
+/// token show that what `run` writes for the agent is where it belongs.
+pub fn require_absent(sandbox: &Sandbox, id: &'static str, what: &str, secret: &str) -> Result<()> {
+    let probe = in_no_process(sandbox, id, what, secret.trim())?;
     ensure!(
         report(&[probe]),
         "{what} is where the sandbox user can read it: see the failed probes above"
@@ -433,16 +494,19 @@ fn unreachable(sandbox: &Sandbox, broker: &Broker<'_>, proxy: SocketAddr) -> Res
     let user = &sandbox.user;
     let mut probes = vec![
         Probe {
+            id: "broker-proxy-control",
             what: format!("{user} reaches the run's inference proxy at {proxy} (control)"),
             passed: connects(sandbox, &proxy)?,
         },
         Probe {
+            id: "broker-resolved-control",
             what: "run resolved the broker to an address (control)".to_owned(),
             passed: !broker.addresses.is_empty(),
         },
     ];
     for address in broker.addresses {
         probes.push(Probe {
+            id: "broker-around-proxy",
             what: format!(
                 "the broker's {address} is neither on loopback nor in egress.direct, \
                  where {user} connects around the egress proxy"
@@ -456,11 +520,13 @@ fn unreachable(sandbox: &Sandbox, broker: &Broker<'_>, proxy: SocketAddr) -> Res
         .filter(|address| TcpStream::connect_timeout(address, CONNECT_TIMEOUT).is_ok())
         .collect();
     probes.push(Probe {
+        id: "broker-reached-control",
         what: "run reaches the broker at one of its addresses (control)".to_owned(),
         passed: !reached.is_empty(),
     });
     for address in reached {
         probes.push(Probe {
+            id: "broker-tcp",
             what: format!("{user} cannot open a TCP connection to the broker at {address}"),
             passed: !connects(sandbox, address)?,
         });
@@ -532,6 +598,7 @@ fn through_egress(sandbox: &Sandbox, forms: &[String], egress: &SocketAddr) -> R
                 _ => format!("{method} http://{authority}{RUNS_PATH}"),
             };
             probes.push(Probe {
+                id: "broker-egress",
                 what: format!("the egress proxy refuses {user} {what}"),
                 passed: refused_as_broker(&head),
             });
@@ -599,6 +666,7 @@ fn through_egress_from_container(
             argv.push(&url);
             let head = sandbox.run(&argv, b"", MAX_OUTPUT)?.text();
             probes.push(Probe {
+                id: "broker-egress-container",
                 what: format!(
                     "the egress proxy refuses a container of {user}'s, as uid {CONTAINER_UID}, \
                      {} {url}",
@@ -622,12 +690,14 @@ pub fn require_mcp(sandbox: &Sandbox, credential: Option<&str>, token: &Token) -
     if let Some(credential) = credential {
         probes.push(in_no_process(
             sandbox,
+            "mcp-credential-processes",
             "the MCP server's credential",
             credential.trim(),
         )?);
     }
     probes.extend(elsewhere(
         sandbox,
+        ["mcp-token-files", "mcp-token-processes"],
         "the MCP proxy's token",
         token.expose(),
         &[],
@@ -665,7 +735,7 @@ pub fn require(
 /// probes what such a user left behind (a process, a unit, a listener).
 pub fn recheck(config: &Config) -> Result<()> {
     eprintln!("Probing the sandbox again before the agent starts (sandbox.check.before-agent)");
-    let report = crate::sandbox::check::probes(config, None)?;
+    let report = crate::sandbox::check::probes(config)?;
     let failures: Vec<&str> = report.failures().into_iter().collect();
     ensure!(
         failures.is_empty(),
@@ -676,13 +746,19 @@ pub fn recheck(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Prints PROBES as the old check did, and says whether all passed.
+/// Prints PROBES as `sandbox check` does, and says whether all passed.
 pub fn report(probes: &[Probe]) -> bool {
     for probe in probes {
-        let mark = if probe.passed { "ok  " } else { "FAIL" };
-        eprintln!("{mark} {}", super::enter::one_line(&probe.what));
+        eprintln!("{}", line(probe));
     }
     probes.iter().all(|probe| probe.passed)
+}
+
+/// PROBE's line of the log, with its id in brackets.
+fn line(probe: &Probe) -> String {
+    let mark = if probe.passed { "ok" } else { "FAIL" };
+    let what = super::enter::one_line(&probe.what);
+    format!("{mark}: [{}] {what}", probe.id)
 }
 
 #[cfg(test)]
@@ -704,8 +780,10 @@ mod tests {
         const FILE: &str = "/home/agent/.config/x.json";
         const CHILD: &str = "/home/agent/.config/child.toml";
         // (the search's exit status, what it listed, the verdict)
-        let cases: [(Option<i32>, &[&str], bool); 7] = [
+        let cases: [(Option<i32>, &[&str], bool); 8] = [
             (Some(0), &[FILE], true),
+            // Found under two of the searched directories.
+            (Some(0), &[FILE, FILE], true),
             // grep could not read some file: still a whole search.
             (Some(2), &[FILE], true),
             (Some(TIMEOUT_EXIT), &[FILE], false),
@@ -728,6 +806,68 @@ mod tests {
         for (found, want) in cases {
             assert_eq!(only_in(Some(0), found, &[FILE, CHILD]), want, "{found:?}");
         }
+    }
+
+    /// The search for a secret covers the user's runtime directory, where
+    /// its sessions and services write, as well as its home and the
+    /// shared directories.
+    #[test]
+    fn a_search_covers_every_directory_the_user_writes() {
+        assert_eq!(
+            searched("/home/agent", 1001),
+            [
+                "/home/agent",
+                "/run/user/1001",
+                "/tmp",
+                "/var/tmp",
+                "/dev/shm"
+            ]
+        );
+    }
+
+    /// The token's probes carry the ids docs/sandbox-check.md names, in
+    /// the log too, and a copy of the token outside the agent's file fails
+    /// `token-files` alone. The agent here is this process's own user.
+    #[test]
+    fn the_token_probes_name_what_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        const CONFIG: &str = ".config/agent/settings.json";
+        let home = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::own(&Config::default(), &home.path().join("agent")).unwrap();
+        // Made here, so that no file under the shared directories, this
+        // test's binary included, holds it already.
+        let nanos = std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos();
+        let value = format!("test-key-not-secret-{}-{nanos}", std::process::id());
+        let value = Token::new(&value).unwrap();
+        let file = sandbox.home.join(CONFIG);
+        let dir = file.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(&file, format!("{{\"token\": \"{}\"}}\n", value.expose())).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let failed = |probes: &[Probe]| -> Vec<&'static str> {
+            probes.iter().filter(|p| !p.passed).map(|p| p.id).collect()
+        };
+
+        let probes = token(&sandbox, &value, &[CONFIG], None, None).unwrap();
+        let ids: Vec<&str> = probes.iter().map(|probe| probe.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "token-config-control",
+                "token-config-mode",
+                "token-config-dir-mode",
+                "token-files",
+                "token-processes",
+            ]
+        );
+        assert!(failed(&probes).is_empty());
+        assert!(line(&probes[3]).starts_with("ok: [token-files] "));
+
+        std::fs::copy(&file, sandbox.home.join("copy")).unwrap();
+        let probes = token(&sandbox, &value, &[CONFIG], None, None).unwrap();
+        assert_eq!(failed(&probes), ["token-files"]);
+        assert!(line(&probes[3]).starts_with("FAIL: [token-files] "));
     }
 
     /// The probe that the agent cannot reach the broker fails where
@@ -910,6 +1050,7 @@ mod tests {
     #[test]
     fn a_failed_probe_fails_the_report() {
         let probe = |passed| Probe {
+            id: "a-probe",
             what: "a probe".into(),
             passed,
         };

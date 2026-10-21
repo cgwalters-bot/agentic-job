@@ -47,6 +47,7 @@ const OWN_HOME_MODE: u32 = 0o700;
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     pub user: String,
+    pub uid: u32,
     pub home: PathBuf,
     way: Way,
 }
@@ -137,6 +138,7 @@ impl Sandbox {
         crate::sandbox::check::forget_passed()?;
         Ok(Self {
             user: entry.user().name.clone(),
+            uid: entry.user().uid,
             home: entry.home().to_owned(),
             way: Way::Entry(entry),
         })
@@ -176,6 +178,7 @@ impl Sandbox {
         crate::sandbox::check::forget_passed()?;
         Ok(Self {
             user: user.name,
+            uid: user.uid,
             home,
             way: Way::Own {
                 env: env

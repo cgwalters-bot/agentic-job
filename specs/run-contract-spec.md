@@ -65,7 +65,7 @@ The runner's token file MUST be inaccessible, and the probes MUST refuse a
 token found in another writable file or accessible process environment or
 command line. This is a run-scoped inference token, not a forge credential or
 the model provider's key.
-Enforcement: [run_token.rs](../crates/agentic-job/src/sandbox/check/run_token.rs),
+Enforcement: [probe.rs](../crates/agentic-job/src/run/probe.rs),
 runtime checks `token-runner-file`, `token-config-mode`, `token-config-dir-mode`,
 `token-files` and `token-processes`.
 
