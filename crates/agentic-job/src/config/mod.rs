@@ -111,24 +111,27 @@ pub struct Sandbox {
     /// subordinate uids) the cloud metadata service, as they always
     /// refuse the sandbox user: a step of the job, a third-party action
     /// among them, then cannot ask it for the instance's identity or a
-    /// cloud role's credentials. Off by default; needs [`Self::lock_runner`],
-    /// since with sudo the runner's user could remove the rule.
-    pub deny_runner_metadata: bool,
+    /// cloud role's credentials. Unset, [`Self::lock_runner`]'s value
+    /// ([`Self::deny_runner_metadata`]); needs it, since with sudo the
+    /// runner's user could remove the rule.
+    pub deny_runner_metadata: Option<bool>,
     /// Whether `sandbox setup` unlinks the .NET diagnostic sockets of
     /// GitHub's `Runner.Worker`, through which any step, as the Worker's
     /// own user, could have it dump its memory and the job's secrets with
-    /// it, around Yama (`sandbox::worker_diagnostics`). Off by default;
-    /// needs [`Self::lock_runner`], since with sudo the runner's user
-    /// reads the Worker's memory anyway.
-    pub unlink_worker_diagnostics: bool,
+    /// it, around Yama (`sandbox::worker_diagnostics`). Unset,
+    /// [`Self::lock_runner`]'s value ([`Self::unlink_worker_diagnostics`]);
+    /// needs it, since with sudo the runner's user reads the Worker's
+    /// memory anyway.
+    pub unlink_worker_diagnostics: Option<bool>,
     /// Whether the secure-host image loads the world-write policy with
     /// its runner-read rule on (`secure-host world-write
     /// --deny-runner-reads`), so that a step cannot read the environment,
     /// and the tokens in it, of a process an earlier step left running.
-    /// Off by default; only the image reads it (`secure_host::image`).
-    /// Needs [`Self::lock_runner`], since with sudo the runner's user
-    /// could clear the rule's map.
-    pub deny_runner_reads: bool,
+    /// Only the image reads it (`secure_host::image`), and it refuses a
+    /// host with no single `Runner.Worker` to exempt. Unset,
+    /// [`Self::lock_runner`]'s value ([`Self::deny_runner_reads`]); needs
+    /// it, since with sudo the runner's user could clear the rule's map.
+    pub deny_runner_reads: Option<bool>,
     /// Whether `sandbox setup` closes systemd-resolved to every user but
     /// root and, on the bus, the runner's. resolved answers any local user over its
     /// Varlink socket and the system bus, as itself, so the uid rules do
@@ -184,6 +187,55 @@ impl Sandbox {
     /// Variables that let a process ask for the job's identity token.
     pub const FORBIDDEN_ENV_PREFIX: &'static str = "ACTIONS_";
 
+    pub fn deny_runner_metadata(&self) -> bool {
+        self.deny_runner_metadata.unwrap_or(self.lock_runner)
+    }
+
+    pub fn unlink_worker_diagnostics(&self) -> bool {
+        self.unlink_worker_diagnostics.unwrap_or(self.lock_runner)
+    }
+
+    pub fn deny_runner_reads(&self) -> bool {
+        self.deny_runner_reads.unwrap_or(self.lock_runner)
+    }
+
+    /// The rules that confine the runner's own user beyond the lock, by
+    /// key, whether each is on, and what every later step of the job can
+    /// still do without it.
+    pub fn runner_rules(&self) -> [(&'static str, bool, &'static str); 3] {
+        [
+            (
+                "deny-runner-metadata",
+                self.deny_runner_metadata(),
+                "reaches the cloud metadata service, the instance's identity and a cloud role's credentials",
+            ),
+            (
+                "unlink-worker-diagnostics",
+                self.unlink_worker_diagnostics(),
+                "can have Runner.Worker dump its memory, and the job's secrets, through its .NET diagnostic sockets",
+            ),
+            (
+                "deny-runner-reads",
+                self.deny_runner_reads(),
+                "reads the environment, and the tokens in it, of a process an earlier step left running",
+            ),
+        ]
+    }
+
+    /// Why each rule a locked host's file turned off leaves the runner's
+    /// user less confined, for setup and check to say. Without the lock,
+    /// setup's message about it covers them.
+    pub fn runner_rule_opt_outs(&self, runner: &str) -> Vec<String> {
+        if !self.lock_runner {
+            return Vec::new();
+        }
+        self.runner_rules()
+            .into_iter()
+            .filter(|(_, on, _)| !on)
+            .map(|(key, _, off)| format!("sandbox.{key} = false: {runner} {off}"))
+            .collect()
+    }
+
     /// What the types cannot say. The user's name goes into a sudoers
     /// file and a polkit rule, so it is held to the portable character
     /// set and not to what `useradd` happens to accept.
@@ -209,15 +261,15 @@ impl Sandbox {
             );
         }
         ensure!(
-            self.lock_runner || !self.deny_runner_metadata,
+            self.lock_runner || !self.deny_runner_metadata(),
             "sandbox.deny-runner-metadata needs sandbox.lock-runner: a runner's user with sudo could remove the rule"
         );
         ensure!(
-            self.lock_runner || !self.unlink_worker_diagnostics,
+            self.lock_runner || !self.unlink_worker_diagnostics(),
             "sandbox.unlink-worker-diagnostics needs sandbox.lock-runner: a runner's user with sudo reads the Worker's memory anyway"
         );
         ensure!(
-            self.lock_runner || !self.deny_runner_reads,
+            self.lock_runner || !self.deny_runner_reads(),
             "sandbox.deny-runner-reads needs sandbox.lock-runner: a runner's user with sudo could clear the rule"
         );
         for group in &self.groups {
@@ -273,9 +325,9 @@ impl Default for Sandbox {
             runner_user: None,
             lock_runner: true,
             filesystem_view: false,
-            deny_runner_metadata: false,
-            unlink_worker_diagnostics: false,
-            deny_runner_reads: false,
+            deny_runner_metadata: None,
+            unlink_worker_diagnostics: None,
+            deny_runner_reads: None,
             close_resolved: false,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
@@ -905,6 +957,54 @@ mod tests {
         }
     }
 
+    /// The runner's rules follow the lock unless set, and a locked host's
+    /// file that turns one off is told what that leaves open.
+    #[test]
+    fn runner_rules_follow_the_lock() {
+        // The file, then whether each rule is on (metadata, diagnostics,
+        // reads), then the keys of the opt-outs named.
+        let cases: [(&str, [bool; 3], &[&str]); 7] = [
+            ("", [true; 3], &[]),
+            ("[sandbox]\nlock-runner = true", [true; 3], &[]),
+            ("[sandbox]\nlock-runner = false", [false; 3], &[]),
+            (
+                "[sandbox]\ndeny-runner-metadata = false",
+                [false, true, true],
+                &["deny-runner-metadata"],
+            ),
+            (
+                "[sandbox]\nunlink-worker-diagnostics = false",
+                [true, false, true],
+                &["unlink-worker-diagnostics"],
+            ),
+            (
+                "[sandbox]\ndeny-runner-reads = false\ndeny-runner-metadata = true",
+                [true, true, false],
+                &["deny-runner-reads"],
+            ),
+            (
+                "[sandbox]\nlock-runner = false\ndeny-runner-reads = false",
+                [false; 3],
+                &[],
+            ),
+        ];
+        for (text, on, named) in cases {
+            let sandbox = Config::parse(text).unwrap().sandbox;
+            sandbox.validate().unwrap();
+            let rules = sandbox.runner_rules();
+            assert_eq!(rules.map(|(_, on, _)| on), on, "{text:?}");
+            let opt_outs = sandbox.runner_rule_opt_outs("runner");
+            let prefixes: Vec<String> = named
+                .iter()
+                .map(|key| format!("sandbox.{key} = false: runner "))
+                .collect();
+            assert_eq!(opt_outs.len(), named.len(), "{text:?}: {opt_outs:?}");
+            for (line, prefix) in opt_outs.iter().zip(&prefixes) {
+                assert!(line.starts_with(prefix), "{text:?}: {line}");
+            }
+        }
+    }
+
     /// The action's own host file loads as a host's, and as the same
     /// configuration a run's parser makes of it; a run's table does not.
     #[test]
@@ -914,6 +1014,8 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         let host = HostConfig::parse(&text).unwrap();
         assert!(host.sandbox.close_resolved);
+        // What CI's confined job proves, with no override.
+        assert!(host.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
         assert_eq!(Config::from(host), Config::parse(&text).unwrap());
         assert_eq!(Config::from(HostConfig::default()), Config::default());
         for text in [

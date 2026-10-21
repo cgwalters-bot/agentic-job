@@ -77,7 +77,7 @@ fn deny_runner_reads(config: &Path) -> Result<bool> {
     // is only for admitting standalone host-only input, not this output.
     let config = Config::parse(&text).with_context(|| format!("in {}", config.display()))?;
     config.check_host()?;
-    Ok(config.sandbox.deny_runner_reads)
+    Ok(config.sandbox.deny_runner_reads())
 }
 
 /// The commands run on the host, in order, as the action runs them:
@@ -232,21 +232,23 @@ mod tests {
         );
     }
 
-    /// `sandbox.deny-runner-reads` is off by default and changes only the
-    /// world-write step; a file setup would refuse is refused here first.
+    /// `sandbox.deny-runner-reads` follows the lock unless set and changes
+    /// only the world-write step; a file setup would refuse is refused
+    /// here first.
     #[test]
     fn the_host_file_turns_on_the_runner_read_rule() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         for (text, want) in [
-            ("", Ok(false)),
+            ("", Ok(true)),
             ("[sandbox]\ndeny-runner-reads = false\n", Ok(false)),
             ("[sandbox]\ndeny-runner-reads = true\n", Ok(true)),
+            ("[sandbox]\nlock-runner = false\n", Ok(false)),
             (
                 "[sandbox]\nlock-runner = false\ndeny-runner-reads = true\n",
                 Err("needs sandbox.lock-runner"),
             ),
-            ("[agent]\nname = \"claude\"\n", Ok(false)),
+            ("[agent]\nname = \"claude\"\n", Ok(true)),
             ("[sandbox]\ndeny-runner-read = true\n", Err("unknown field")),
         ] {
             fs::write(&path, text).unwrap();

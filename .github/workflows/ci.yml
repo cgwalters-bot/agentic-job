@@ -1864,16 +1864,12 @@ jobs:
           sleep infinity < /dev/null > /dev/null 2>&1 &
           echo "$!" > "$RUNNER_TEMP/confine-orphan.pid"
           echo "pid=$!" >> "$GITHUB_OUTPUT"
-      # This revision's image and binary, as the static job built them,
-      # never a release: the host is secured as a caller's is.
+      # This revision's image, as the static job built it, never a
+      # release: the host is secured as a caller's is.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: secure-host-image
           path: ${{ runner.temp }}/image
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: agentic-job
-          path: ${{ runner.temp }}/dist
       # Root's and world-writable, where setup's walk does not look (a
       # shared temporary directory): the access-time policy is all that
       # refuses a write to it after the action.
@@ -1881,21 +1877,14 @@ jobs:
         run: sudo install -m 0666 -o root -g root /dev/null /var/tmp/agentic-job-confine-root-file
       - name: Before the lock each route works (control)
         run: node .github/actions/confine-probe/probe.mjs control before
-      # Not under the action's $RUNNER_TEMP/secure-host, which it writes.
-      - name: Write the confinement configuration
-        run: |
-          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
-          "$RUNNER_TEMP/agentic-job" config --host --from secure-host/hosted.toml \
-            --boolean sandbox.deny-runner-metadata=true \
-            --boolean sandbox.unlink-worker-diagnostics=true \
-            --boolean sandbox.deny-runner-reads=true > "$RUNNER_TEMP/confine-config.toml"
-      # The image loads the world-write policy with the runner-read rule,
-      # exempting the one Worker on the host, which its loader under
-      # conmon does not descend from.
+      # The action's own hosted.toml, as a caller that names no config
+      # gets it: under the lock it turns on the metadata, diagnostics and
+      # runner-read rules by itself. The image loads the world-write
+      # policy with the runner-read rule, exempting the one Worker on the
+      # host, which its loader under conmon does not descend from.
       - name: Secure the host from the image archive
         uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
         with:
-          config: ${{ runner.temp }}/confine-config.toml
           image-archive: ${{ runner.temp }}/image/secure-host.tar
       - run: agentic-job sandbox check --record
       - name: A run step is confined

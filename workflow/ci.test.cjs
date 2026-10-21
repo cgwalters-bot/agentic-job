@@ -413,14 +413,15 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.equal(job.split('uses: ./').length, 3);
   assert.equal(job.split('zizmor: ignore').length, 3);
   assert.ok(job.includes(`      - name: The JavaScript action main and post steps are confined\n${local}`));
-  // The build's image archive, with the runner-read rule from the host file.
+  // The build's image archive with the action's own hosted.toml, whose
+  // lock turns on the runner's metadata, diagnostics and read rules: no
+  // config of the job's, and no override of one.
   assert.match(job, /name: secure-host-image\n/);
   const run = job.indexOf(secure);
   assert.ok(run > 0);
   assert.ok(job.slice(run).startsWith(job.slice(run).split('\n')[0] +
-    '\n        with:\n          config: ${{ runner.temp }}/confine-config.toml\n' +
-    '          image-archive: ${{ runner.temp }}/image/secure-host.tar\n'));
-  assert.match(job, /--boolean sandbox\.deny-runner-reads=true > "\$RUNNER_TEMP\/confine-config\.toml"\n/);
+    '\n        with:\n          image-archive: ${{ runner.temp }}/image/secure-host.tar\n      - '));
+  assert.doesNotMatch(job, /config:|--boolean|deny-runner|unlink-worker|lock-runner/);
   assert.doesNotMatch(job, /binary\.sh|secure-host world-write|sandbox setup|podman run|continue-on-error|\|\| true/);
   // The orphan is an earlier step than every probe, the control included.
   const orphan = job.indexOf('      - name: Leave a process running\n        id: orphan\n');
@@ -428,7 +429,6 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.ok(job.indexOf('probe.mjs control before') < run);
   assert.match(job, /\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n/);
   assert.match(job, /echo "\$!" > "\$RUNNER_TEMP\/confine-orphan\.pid"/);
-  assert.match(job, /--boolean sandbox\.deny-runner-metadata=true/);
   assert.match(job, /agentic-job sandbox check --record/);
   assert.match(job, /probe\.mjs confined run-step/);
   // After setup, so its main and post steps run under the lock.

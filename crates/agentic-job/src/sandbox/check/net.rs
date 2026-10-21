@@ -111,7 +111,7 @@ impl Checker<'_> {
             got,
         );
         let metadata = direct(&["-H", "Metadata:true", METADATA_URL]);
-        if self.config.sandbox.deny_runner_metadata {
+        if self.config.sandbox.deny_runner_metadata() {
             // The runner's user is the control everywhere else, and here
             // it is refused too: the probes say less, and say so.
             let runner = self.runner.name.clone();

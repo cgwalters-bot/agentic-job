@@ -357,6 +357,18 @@ impl Checker<'_> {
         if self.config.sandbox.lock_runner {
             self.timed("runner-privileges", |this| this.runner_privileges())?;
         }
+        // The metadata and diagnostics rules have probes that name them.
+        // The read rule is the secure-host image's loader's to enable and
+        // prove, before and after; a probe here would need a process an
+        // earlier step left, and `sandbox setup` alone never loads it.
+        if self.config.sandbox.deny_runner_reads() {
+            self.report.note(
+                "sandbox.deny-runner-reads is on: only the secure-host image's world-write loader enables and proves the runner-read rule; this check does not probe it",
+            );
+        }
+        for line in self.config.sandbox.runner_rule_opt_outs(&self.runner.name) {
+            self.report.note(&line);
+        }
         let environs = self.timed("environments", |this| this.environments())?;
         self.timed("job-variables", |this| this.job_variables(&environs))?;
         self.timed("files", |this| this.files())?;

@@ -68,9 +68,9 @@ to the sandbox user, and `run` probes the token's location. With it, as
 in the reusable workflow, the agent can read every file of the runner's
 user and `run`'s environment, so the job holds only read-only tokens and
 the run token, and the token probe does not run. The network rules that
-reject metadata and restrict private-network access match the sandbox
-user only: the runner's user is refused metadata only with
-`sandbox.deny-runner-metadata`, off by default, and `run` refuses
+restrict private-network access match the sandbox user only; the runner's
+user is refused metadata too with `sandbox.deny-runner-metadata`, on with
+the lock unless set false, and `run` refuses
 `[sandbox.check] before-agent`, so host probes do not repeat. Either way
 the target is cloned without credentials
 ([sandbox-check.md](sandbox-check.md)).

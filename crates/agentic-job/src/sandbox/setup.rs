@@ -442,7 +442,7 @@ fn setup(args: &Args) -> Result<Exit> {
             .chain(subordinate_ranges(&runner, &text))
             .collect();
         let of = |on: bool| if on { all_runner.clone() } else { Vec::new() };
-        let runner_uids = of(config.sandbox.deny_runner_metadata);
+        let runner_uids = of(config.sandbox.deny_runner_metadata());
         let write_uids = of(config.egress.write_policy);
         drop_image_environment()?;
         close_private_dirs(&config, &runner)?;
@@ -571,7 +571,7 @@ fn setup(args: &Args) -> Result<Exit> {
         fix_crypto_policies(Path::new(CRYPTO_POLICIES))?;
         restrict_ptrace()
     })?;
-    if config.sandbox.unlink_worker_diagnostics {
+    if config.sandbox.unlink_worker_diagnostics() {
         timed_setup("worker-diagnostics", worker_diagnostics::unlink)?;
     }
     println!(
@@ -604,6 +604,9 @@ fn setup(args: &Args) -> Result<Exit> {
             "sandbox.lock-runner = false: {} keeps its sudo, and every step after this one has root",
             runner.name
         );
+    }
+    for line in config.sandbox.runner_rule_opt_outs(&runner.name) {
+        println!("{line}");
     }
     Ok(Exit::Success)
 }

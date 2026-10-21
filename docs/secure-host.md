@@ -384,7 +384,7 @@ link checks, map update and both loader controls), 158 s getting the binary
 and object, 43 s in setup and 18 s in the final probes. These are one run's
 step durations, not bounds. This is Ubuntu evidence only; RHEL 10 is below.
 
-### Reads between the runner's own processes (opt-in)
+### Reads between the runner's own processes
 
 Every step runs as the runner's user, so a step can read
 `/proc/PID/environ`, and the tokens in it, of any process an earlier step
@@ -426,12 +426,15 @@ core limit and make it dump core where the host's `core_pattern` leaves the
 dump readable. It can also tamper with later steps, which the job's trust
 model accepts.
 
-The image turns the rule on when the host configuration sets
-`sandbox.deny-runner-reads = true`. The image's loader runs under conmon,
+The image turns the rule on with the lock: unless the host configuration
+sets `sandbox.deny-runner-reads = false` or `sandbox.lock-runner = false`.
+The image's loader runs under conmon,
 not under the Worker, so it passes `--sole-worker`. That makes the loader
 take the one non-root `Runner.Worker` on the host instead of an ancestor.
-It refuses if there is none, a root one or more than one. CI's `confined`
-job sets the key through the public action with `image-archive`, and
+It refuses if there is none, a root one or more than one, so a host that
+runs no GitHub runner sets the key to false. CI's `confined` job gets the
+rule from the action's own `hosted.toml`, through the public action with
+`image-archive`, and
 every probe there must fail to read the environment of a `sleep` that an
 earlier step left running. That `sleep` must still be running, by a signal
 check, which needs no `/proc` entry. The `confined-cleanup` job then reads
@@ -822,8 +825,12 @@ is that a job does not need a second user to be safe from its own later
 steps. Every step after this one, `run:` or `uses:`, a third-party action
 and its post step included, runs as the runner's user. That user is the
 unprivileged thing. This is the first slice of that design. The step's
-`config` input names a configuration file of the job's repository; the
-metadata rule is opt-in there:
+`config` input names a configuration file of the job's repository. The
+runner's metadata, diagnostics and read rules below follow the lock, so
+every configuration has them unless it sets one false, and setup and
+`sandbox check` then print what that leaves a later step. An image released
+before this default, the v0.6.1 one the forwarder pins among them, still
+leaves each off unless set true:
 
 ```yaml
 - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
@@ -834,14 +841,14 @@ metadata rule is opt-in there:
 ```toml
 # .github/secure-host.toml: copy all of secure-host/hosted.toml, which
 # this file replaces whole (its stop-services list included), and add
-# this one key to its [sandbox] table.
+# this one key to its [sandbox] table, for a host with no Runner.Worker.
 [sandbox]
-deny-runner-metadata = true
+deny-runner-reads = false
 ```
 
 `agentic-job workflows check` refuses a secure-host step with a
 `config` input ([workflows-check.md](workflows-check.md)), so a
-repository that runs it cannot opt in this way yet.
+repository that runs it cannot opt out this way yet.
 
 After it, no later step has root:
 
@@ -859,7 +866,7 @@ After it, no later step has root:
   setup's helper is no way around it. The threat it stops is a step asking the metadata
   service for the instance's identity, or, on a self-hosted cloud runner,
   for the instance role's credentials, which the job never granted.
-  Without this rule the runner's user reaches the service on a hosted
+  On with the lock unless set false. Without this rule the runner's user reaches the service on a hosted
   `ubuntu-26.04` runner after the lock: `metadata-control` passes in
   [main's secure-host job](https://github.com/cgwalters-forge/agentic-job/actions/runs/38334947347/job/115092813921).
 - `sandbox.unlink-worker-diagnostics` unlinks the .NET diagnostic sockets of `Runner.Worker`
@@ -868,12 +875,13 @@ After it, no later step has root:
   Worker dump its memory, every secret of the job in it, or load a library
   into it; Yama sees no ptrace attach in that. The runtime binds the
   socket once, when the Worker starts, so the Worker keeps a socket no
-  step can name. Needs `sandbox.lock-runner`; off by default.
+  step can name. On with the lock unless set false; needs `sandbox.lock-runner`.
 - `sandbox.deny-runner-reads`, read only by the [image](#the-image)'s
   entrypoint, turns on the
-  [runner-read rule](#reads-between-the-runners-own-processes-opt-in)
-  as it loads the world-write policy. Needs `sandbox.lock-runner`, because with sudo
-  the runner's user could clear the rule's map. Off by default.
+  [runner-read rule](#reads-between-the-runners-own-processes)
+  as it loads the world-write policy. On with the lock unless set false;
+  needs `sandbox.lock-runner`, because with sudo the runner's user could
+  clear the rule's map.
 
 The kernel has no way to change another process's credentials. So the
 runner's processes, and every step they start, keep the supplementary
@@ -890,16 +898,16 @@ the action (the control, in which sudo, `docker info`, writing that root-owned
 runs like a downloaded one, its post step after the job's last step).
 Each route must fail, or the step fails the job. A file of the runner's own, also mode 0666,
 must still take a write. The job secures the host through the public
-action with the image archive the build saved, and turns on the opt-in
-[runner-read rule](#reads-between-the-runners-own-processes-opt-in) with
-`sandbox.deny-runner-reads`, so reading
+action with the image archive the build saved and the action's own
+`hosted.toml`, unchanged, whose lock turns on the three rules above. With the
+[runner-read rule](#reads-between-the-runners-own-processes), reading
 the environment of a process that an earlier step left running is one more
 route that must fail. Each probe prints its record in its log, and the job
 uploads the records as an artifact, whether or not a probe failed; the post
 step runs after that upload, so its record is only in its log. The
 `confined-cleanup` job checks, from that job's log, that the runner's own
-cleanup after the post steps still ended that process. The job sets
-`sandbox.unlink-worker-diagnostics`, and its probe connects to the
+cleanup after the post steps still ended that process. With
+`sandbox.unlink-worker-diagnostics`, its probe connects to the
 Worker's diagnostic sockets as well: the control must reach one, each
 step after the action none. The control records the Worker's pid for
 the later probes, which the rule keeps from seeing their ancestors. The check

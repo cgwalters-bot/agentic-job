@@ -298,15 +298,17 @@ A control the runner's user cannot make either (no WireServer on this
 cloud, a tailnet that already refuses the port) is printed as a note
 and the probe stands without it.
 
-With `sandbox.deny-runner-metadata = true` the rules refuse the runner's
+With `sandbox.deny-runner-metadata`, on with the lock unless set false, the rules refuse the runner's
 user and its subordinate uids the metadata service too, at `169.254.169.254`
 and at EC2's IPv6 `fd00:ec2::254`, and only that; the sandbox user's uids
 are always refused both addresses. Then `runner-metadata`
 and `runner-metadata-v6` expect the runner's own requests to fail in place of
 `metadata-control`, and a note says the metadata probes have no control.
-Off by default; the
-[confined job](secure-host.md#one-trust-level-for-the-rest-of-the-job)
-makes its control before the action instead.
+The [confined job](secure-host.md#one-trust-level-for-the-rest-of-the-job)
+makes its control before the action instead. The check names each of the
+runner's rules: these probes and `worker-diagnostics` name theirs,
+`sandbox.deny-runner-reads` gets a note (its loader proves it), and each one a
+locked host's file sets false gets a note of what a later step can then do.
 
 With `egress.write-policy = true`
 ([secure-host.md](secure-host.md#egress-write-policy-opt-in)) the

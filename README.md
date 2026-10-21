@@ -134,8 +134,9 @@ fenced off as data. See [docs/events.md](docs/events.md).
   (Docker first), so no later step, action or post step can become root
   and undo the setup. It does **not** take the job's tokens or network
   away from those steps: they still run as the user that holds them, and
-  reach every host but, with `sandbox.deny-runner-metadata`, the cloud metadata
-  service ([secure-host.md](docs/secure-host.md#what-a-later-step-can-count-on-and-what-it-cannot)).
+  reach every host but the cloud metadata service (unless the configuration
+  sets `sandbox.deny-runner-metadata = false`, or the action's image
+  predates that default) ([secure-host.md](docs/secure-host.md#what-a-later-step-can-count-on-and-what-it-cannot)).
 - **Job separation** is what keeps the agent's credentials apart: the
   agent's job holds no secret, no write token and no `id-token`, and
   what it hands back is checked on another machine before a job with a

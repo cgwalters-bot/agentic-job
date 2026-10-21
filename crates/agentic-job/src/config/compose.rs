@@ -745,7 +745,7 @@ mod tests {
             &["sandbox.stop-services=docker.socket docker.service"],
         ));
         assert!(!config.sandbox.lock_runner);
-        assert!(!config.sandbox.deny_runner_metadata);
+        assert!(!config.sandbox.deny_runner_metadata());
         assert!(!config.egress.proxy);
         assert!(!config.sandbox.allow_existing_user);
         assert_eq!(
@@ -753,8 +753,13 @@ mod tests {
             ["docker.socket", "docker.service"]
         );
         assert_eq!(config.agent.name, "");
-        let denied = composed(&host_args(&["sandbox.deny-runner-metadata=true"], &[]));
-        assert!(denied.sandbox.lock_runner && denied.sandbox.deny_runner_metadata);
+        // A locked host has the runner's rules with nothing set; a false
+        // one is the file's to say.
+        let locked = composed(&host_args(&[], &[]));
+        assert!(locked.sandbox.lock_runner);
+        assert!(locked.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
+        let opted_out = composed(&host_args(&["sandbox.deny-runner-reads=false"], &[]));
+        assert!(opted_out.sandbox.deny_runner_metadata() && !opted_out.sandbox.deny_runner_reads());
         // For the secure-host image, a run's file without its script and
         // with all else: the agent job runs the script itself.
         let run = args(None, &["setup.script=setup.sh", RUN[0]], LIMITS, &[]);

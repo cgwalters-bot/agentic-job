@@ -996,12 +996,23 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             .unwrap(),
         )
         .collect();
+    // sandbox.deny-runner-metadata's rule for the runner's uids is in the
+    // same table, and none of the rules below name those uids: the runner
+    // reaches the metadata service again (IPv4 only on CI's hosted runner).
+    let deny_runner_metadata = config.sandbox.deny_runner_metadata();
+    let network_expect = |name: &str, default: &'static [&'static str]| {
+        let mut expect = network_case(name, default);
+        if deny_runner_metadata {
+            expect.push("runner-metadata");
+        }
+        expect
+    };
     if config.egress.proxy {
         let direct = network::direct(&config.egress).unwrap();
         let proxy_uid = User::lookup(egress::EGRESS_USER).unwrap().unwrap().uid;
         cases.push(Case::new(
             "the network rules",
-            &network_case("NO_RULES", NO_RULES),
+            &network_expect("NO_RULES", NO_RULES),
             move || {
                 Removed::by(
                     &[&["nft", "delete", "table", "inet", network::TABLE]],
@@ -1015,7 +1026,7 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             let (uids, direct) = (uids.clone(), direct.clone());
             cases.push(Case::new(
                 "the rules that send everything through the proxy",
-                &network_case("NO_EGRESS_RULES", NO_EGRESS_RULES),
+                &network_expect("NO_EGRESS_RULES", NO_EGRESS_RULES),
                 move || {
                     root_input(&["nft", "-f", "-"], &network::rules(&uids, &direct, None));
                     Removed::by(&[], rules_back)
@@ -1027,7 +1038,7 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             // itself is then free to go where the sandbox may not.
             cases.push(Case::new(
                 "the rules on the proxy's own user",
-                &network_case("PROXY_UNRESTRICTED", PROXY_UNRESTRICTED),
+                &network_expect("PROXY_UNRESTRICTED", PROXY_UNRESTRICTED),
                 move || {
                     let other = Some(proxy_uid + 1);
                     root_input(&["nft", "-f", "-"], &network::rules(&uids, &direct, other));

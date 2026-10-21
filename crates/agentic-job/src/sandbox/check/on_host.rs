@@ -562,7 +562,7 @@ impl Checker<'_> {
             ),
             scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
         );
-        if self.config.sandbox.unlink_worker_diagnostics {
+        if self.config.sandbox.unlink_worker_diagnostics() {
             // As the Worker's user, which every later step is: setup's
             // unlinking proved by no path left to connect to.
             let linked = match worker_diagnostics::linked_sockets() {
@@ -573,7 +573,7 @@ impl Checker<'_> {
                 Want::Fail,
                 "worker-diagnostics",
                 format!(
-                    "no .NET diagnostic socket of {} is linked{}",
+                    "no .NET diagnostic socket of {} is linked (sandbox.unlink-worker-diagnostics){}",
                     worker_diagnostics::WORKER_COMM,
                     if linked.is_empty() {
                         String::new()
@@ -1144,11 +1144,41 @@ impl Checker<'_> {
 mod tests {
     use super::*;
 
+    /// Whether a child of this process reads its parent's `/proc` entry.
+    /// Under secure-host's runner-read rule, which a locked host has by
+    /// default, and setup's `hidepid=invisible`, the runner's user's
+    /// processes cannot even look it up
+    /// (docs/secure-host.md#reads-between-the-runners-own-processes), and
+    /// these tests run as that user in CI's secure-host job.
+    fn parent_readable() -> bool {
+        Command::new("cat")
+            .arg(format!("/proc/{}/cmdline", std::process::id()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
     #[test]
     fn proc_visibility_probe_detects_a_live_process() {
-        for (pid, visible) in [(std::process::id().to_string(), true), ("0".into(), false)] {
+        let parent = parent_readable();
+        // `self` is the probe's own shell, which `exec` keeps the pid of
+        // and every rule lets see itself; this process is its parent.
+        let cases = [
+            ("self".to_owned(), true),
+            (std::process::id().to_string(), parent),
+            ("0".to_owned(), false),
+        ];
+        for (pid, visible) in cases {
             let output = Command::new("sh")
-                .args(["-c", PROC_VISIBLE, "sh", &pid])
+                .args([
+                    "-c",
+                    r#"[ "$2" != self ] || set -- "$1" "$$"; exec sh -c "$1" sh "$2""#,
+                    "sh",
+                    PROC_VISIBLE,
+                    &pid,
+                ])
                 .output()
                 .unwrap();
             assert_eq!(output.status.success(), visible, "{pid}: {output:?}");
@@ -1161,8 +1191,10 @@ mod tests {
         for script in [PROC_SELF, PROC_VISIBLE] {
             assert!(!script.contains("$$") && !script.contains("${"), "{script}");
         }
-        let status = Command::new("sh").args(["-c", PROC_SELF]).status().unwrap();
-        assert!(status.success(), "{status}");
+        // The probe's readers are its shell's children, so they see it as
+        // this process's children see this process.
+        let output = Command::new("sh").args(["-c", PROC_SELF]).output().unwrap();
+        assert_eq!(output.status.success(), parent_readable(), "{output:?}");
     }
 
     #[test]
