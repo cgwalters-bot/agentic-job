@@ -41,6 +41,9 @@ on:
       kind:
         type: string
         required: true
+      status-comment:
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       task:
@@ -66,6 +69,12 @@ on:
         type: choice
         options: [implement, triage, research, review, fix]
         required: true
+      status-comment:
+        description: >-
+          The id of the dispatcher's own comment on the item for the run's status, instead of a
+          second comment; ignored unless the status credential wrote it on that item
+        type: string
+        default: ""
 
 permissions: {}
 # One run per kind and item: GitHub keeps at most one run pending in a
@@ -264,5 +273,6 @@ jobs:
       # across runs, post none. CI covers notify and conclude on an
       # event's item (e2e-event), not on a dispatched comment-target.
       notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}
+      status-comment: ${{ inputs.status-comment }}
       artifact-prefix: dispatch-${{ inputs.kind }}-
       branch-prefix: dispatch/${{ inputs.kind }}/

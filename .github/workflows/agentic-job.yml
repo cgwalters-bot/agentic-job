@@ -277,6 +277,13 @@ on:
           `pull-requests: write`
         type: string
         default: none
+      status-comment:
+        description: >-
+          With `notify: comment`, the id of a comment the status goes in instead of the marked
+          status comment: used only when it is the status credential's own, on the same item.
+          Its opening hidden-comment lines are kept. Empty for the marked status comment
+        type: string
+        default: ""
       title-prefix:
         description: Put before the title of a pull request or an issue the run opens
         type: string
@@ -418,6 +425,7 @@ jobs:
       issue: ${{ inputs.issue }}
       event: ${{ inputs.event }}
       notify: ${{ inputs.notify }}
+      status-comment: ${{ inputs.status-comment }}
       title-prefix: ${{ inputs.title-prefix }}
       branch-prefix: ${{ inputs.branch-prefix }}
       artifact-prefix: ${{ inputs.artifact-prefix }}

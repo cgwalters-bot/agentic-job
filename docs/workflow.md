@@ -108,6 +108,18 @@ permission is granted. Status API failures do not fail apply. Composed callers
 must pass that secret to both policy and apply for start and finish updates.
 The supplied token must identify a user through `GET /user`; an unsupported
 identity fails the status step rather than editing another author's comment.
+A caller that already posted a comment for the run can name it with
+`status-comment` (an id; dispatch takes it too), so the item gets one comment
+rather than two. With `notify: comment`, notify and conclude edit that comment
+only when the status credential's user wrote it on the run's item; otherwise,
+or when it cannot be read, they use the marked status comment as above and the
+job summary says why. Any such comment qualifies, an earlier run's answer by
+the same identity included, so a wrong id replaces that text. Opening lines
+that are each one whole hidden comment, such as a caller's
+`<!-- tag: {...} -->` state, are kept on every status edit; the rest becomes
+the status. A later run without the id edits the first marked comment, which
+is an earlier status comment where the item has one. A newer run's status is
+still never replaced by an older run's in the comment edited.
 Notify does not enter the apply environment: an environment-only credential
 is not available there unless the caller supplies it explicitly.
 Status writes with a supplied credential are not gated by apply's environment

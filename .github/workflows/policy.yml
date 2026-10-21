@@ -266,6 +266,13 @@ on:
           `pull-requests: write`
         type: string
         default: none
+      status-comment:
+        description: >-
+          With `notify: comment`, the id of a comment the status goes in instead of the marked
+          status comment: used only when it is the status credential's own, on the same item.
+          Its opening hidden-comment lines are kept. Empty for the marked status comment
+        type: string
+        default: ""
       title-prefix:
         description: Put before the title of a pull request or an issue the run opens
         type: string
@@ -372,6 +379,9 @@ on:
       notify:
         description: The `notify` input
         value: ${{ jobs.policy.outputs.notify }}
+      status-comment:
+        description: The `status-comment` input, which conclude edits too
+        value: ${{ jobs.policy.outputs.status-comment }}
       notified:
         description: "`true` when the notify job ran, failed or not, so that conclude reports how the run ended"
         value: ${{ jobs.notify.result != 'skipped' }}
@@ -451,6 +461,7 @@ jobs:
       artifact-prefix: ${{ inputs.artifact-prefix }}
       event: ${{ inputs.event }}
       notify: ${{ inputs.notify }}
+      status-comment: ${{ inputs.status-comment }}
     steps:
       - name: Check the proposals mode
         env:
@@ -1017,5 +1028,6 @@ jobs:
           TEXT: ⏳ [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) is running.
           REPO: ${{ needs.policy.outputs.item != '' && github.repository || inputs.item-repo || inputs.output-repo || github.repository }}
           STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
+          STATUS_COMMENT: ${{ inputs.status-comment }}
         run: |
           node "$SOURCE_DIR/workflow/status.cjs" | tee -a "$GITHUB_OUTPUT"

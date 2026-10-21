@@ -26,6 +26,58 @@ for (const [label, comments, method] of [
   });
 }
 
+// The caller's own comment for the round, by id: [label, the comment (or
+// an error), what is written where, and the body written].
+const tag = '<!-- tag: {"round":2} -->';
+const status = `running\n\n<!-- agentic-job-run: 100 -->\n\n${MARKER}`;
+const given = (overrides = {}) => ({ id: 5, user: { login: 'github-actions[bot]' },
+  issue_url: 'https://api.github.com/repos/O/R/issues/7', body: `${tag}\nfix round 2`, ...overrides });
+for (const [label, comment, write, body, id = '5'] of [
+  ['given id used', given({ body: 'fix round 2' }), 'PATCH 5', status],
+  ['markers preserved', given(), 'PATCH 5', `${tag}\n\n${status}`],
+  ['markers preserved across updates', given({ body: `${tag}\n<!-- more: 1 -->\n\nfailed\n\n<!-- agentic-job-run: 99 -->\n\n${MARKER}` }),
+    'PATCH 5', `${tag}\n<!-- more: 1 -->\n\n${status}`],
+  ['only markers', given({ body: tag }), 'PATCH 5', `${tag}\n\n${status}`],
+  ['visible text beside a marker is not kept', given({ body: `<!-- a --> shown <!-- b -->\n${tag}` }), 'PATCH 5', status],
+  ['older run', given({ body: `${tag}\n\nrunning\n\n<!-- agentic-job-run: 101 -->\n\n${MARKER}` }), null],
+  ['foreign author', given({ user: { login: 'mallory' } }), 'POST', status],
+  ['other item', given({ issue_url: 'https://api.github.com/repos/o/r/issues/8' }), 'POST', status],
+  ['other repository', given({ issue_url: 'https://api.github.com/repos/o/other/issues/7' }), 'POST', status],
+  ['missing comment', new Error('HTTP 404'), 'POST', status],
+  ['not an id', given(), 'POST', status, '5/../../8'],
+]) {
+  test(`status comment by id: ${label}`, () => {
+    const writes = [];
+    const messages = [];
+    const result = upsert({ ...env, STATUS_COMMENT: id }, (method, path, text) => {
+      if (path === 'repos/o/r/issues/comments/5' && method === 'GET') {
+        if (comment instanceof Error) throw comment;
+        return comment;
+      }
+      if (method === 'GET') return [];
+      writes.push([`${method}${method === 'PATCH' ? ` ${path.split('/').at(-1)}` : ''}`, text]);
+      return { id: 1 };
+    }, message => messages.push(message));
+    assert.deepEqual(writes, write ? [[write, body]] : []);
+    if (!write) assert.equal(result, comment);
+    assert.equal(messages.length, write === 'POST' ? 1 : 0);
+  });
+}
+
+for (const [label, id] of [['a later run without an id', ''], ['an id that cannot be read', '6']]) {
+  test(`status comment by id: ${label} keeps the caller's markers on the marked comment`, () => {
+    const marked = given({ body: `${tag}\n\nfailed\n\n<!-- agentic-job-run: 99 -->\n\n${MARKER}` });
+    const writes = [];
+    upsert({ ...env, STATUS_COMMENT: id }, (method, path, text) => {
+      if (path.endsWith('/comments/6')) throw new Error('HTTP 502');
+      if (method === 'GET') return [marked];
+      writes.push([path, text]);
+      return { id: 5 };
+    });
+    assert.deepEqual(writes, [['repos/o/r/issues/comments/5', `${tag}\n\n${status}`]]);
+  });
+}
+
 test('start, finish, rerun and next run edit the same item comment', () => {
   const comments = [];
   const methods = [];
@@ -89,6 +141,12 @@ test('dispatch and event status use the same trusted helper, opt-in only', () =>
   assert.match(read('dispatch'), /notify: \$\{\{ \(inputs.kind == 'review' \|\| inputs.scripted\) && 'none' \|\| 'comment' \}\}/);
   assert.doesNotMatch(read('apply'), /await once\(/);
   assert.match(read('apply'), /Edit the status comment\n[^\n]*\n        continue-on-error: true/);
+  // The caller's comment id reaches both status steps, off unless given.
+  assert.match(read('dispatch'), /status-comment: \$\{\{ inputs.status-comment \}\}/);
+  assert.match(read('agentic-job'), /status-comment: \$\{\{ inputs.status-comment \}\}/);
+  assert.match(policy, /status-comment:\n(?:[^\n]*\n){5} {8}default: ""/);
+  assert.match(policy, /STATUS_COMMENT: \$\{\{ inputs.status-comment \}\}\n[^\n]*\n {10}node "\$SOURCE_DIR\/workflow\/status.cjs"/);
+  assert.match(read('apply'), /STATUS_COMMENT: \$\{\{ fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).status-comment \|\| '' \}\}/);
 });
 
 for (const caller of ['caller/repo', 'O/R']) {

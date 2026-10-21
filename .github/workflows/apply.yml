@@ -1273,6 +1273,8 @@ jobs:
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}
           REPO: ${{ fromJSON(inputs.policy).notify-repo }}
           STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
+          # Only with `notify: comment`: a missing-data status otherwise keeps to the marked comment.
+          STATUS_COMMENT: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).status-comment || '' }}
           TEXT: ${{ steps.ended.outputs.text }}
           NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason }}
         run: |

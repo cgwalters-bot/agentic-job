@@ -75,10 +75,13 @@ for (const profile of ['implement', 'triage', 'research']) {
   });
 }
 
-test('dispatch exposes only task, repo, item, item-repo and kind', () => {
+// status-comment only chooses which of the status credential's own
+// comments on the item status.cjs edits (docs/workflow.md says what a
+// wrong id replaces); it grants no new permission.
+test('dispatch exposes only task, repo, item, item-repo, kind and status-comment', () => {
   const inputs = workflow.split('  workflow_dispatch:\n')[1].split('\npermissions:')[0];
   assert.deepEqual([...inputs.matchAll(/^      ([-\w]+):$/gm)].map(m => m[1]),
-    ['task', 'repo', 'item', 'item-repo', 'kind']);
+    ['task', 'repo', 'item', 'item-repo', 'kind', 'status-comment']);
 });
 
 test('caller fixes capabilities and token boundary', () => {
