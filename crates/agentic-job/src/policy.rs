@@ -778,6 +778,9 @@ impl OutputLimit {
         for pattern in &self.branches {
             glob(pattern).with_context(|| format!("outputs.{output}: the glob {pattern:?}"))?;
         }
+        // `allowed` and `blocked` are logins for a person output and labels
+        // for the rest; the pins below are for one output each, whatever
+        // the type, so neither branch returns before them.
         if PERSON_OUTPUTS.contains(&output) {
             // Each named login is notified, and the handlers take an empty
             // or absent list for "anyone": so a nonempty list is required.
@@ -794,22 +797,24 @@ impl OutputLimit {
                     "outputs.{output}: invalid login {login:?}"
                 );
             }
-            return Ok(());
-        }
-        ensure!(
-            matches!(output, "create_issue" | "add_labels" | "remove_labels")
-                || (self.allowed.is_none() && self.blocked.is_empty()),
-            "outputs.{output}: label limits are supported only for create_issue, add_labels and remove_labels"
-        );
-        ensure!(
-            !matches!(output, "add_labels" | "remove_labels") || self.allowed.is_some(),
-            "outputs.{output} requires an explicit allowed label list"
-        );
-        for label in self.allowed.iter().flatten().chain(&self.blocked) {
+        } else {
             ensure!(
-                !label.is_empty() && label == label.trim() && !label.chars().any(char::is_control),
-                "outputs.{output}: invalid label {label:?}"
+                matches!(output, "create_issue" | "add_labels" | "remove_labels")
+                    || (self.allowed.is_none() && self.blocked.is_empty()),
+                "outputs.{output}: label limits are supported only for create_issue, add_labels and remove_labels"
             );
+            ensure!(
+                !matches!(output, "add_labels" | "remove_labels") || self.allowed.is_some(),
+                "outputs.{output} requires an explicit allowed label list"
+            );
+            for label in self.allowed.iter().flatten().chain(&self.blocked) {
+                ensure!(
+                    !label.is_empty()
+                        && label == label.trim()
+                        && !label.chars().any(char::is_control),
+                    "outputs.{output}: invalid label {label:?}"
+                );
+            }
         }
         ensure!(
             (output == "create_check_run") == self.name.is_some(),
@@ -2792,6 +2797,17 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 false,
             ),
             ("add_comment", "max = 1\nallowed_reasons = ['SPAM']", false),
+            // A person output's own checks do not stand in for this one.
+            (
+                "add_reviewer",
+                "max = 1\nallowed = ['octocat']\nallowed_reasons = ['SPAM']",
+                false,
+            ),
+            (
+                "assign_to_user",
+                "max = 1\nallowed = ['octocat']\nallowed_reasons = ['SPAM']",
+                false,
+            ),
         ] {
             assert_eq!(accepts(output, text), ok, "{output}: {text}");
         }
@@ -2964,6 +2980,15 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
                 assert_eq!(accepts(output, &text), ok, "{output}: {text}");
             }
             assert!(!accepts("add_comment", &format!("max = 1\n{key} = 'a'")));
+            // Including an output whose own checks come first.
+            for person in PERSON_OUTPUTS {
+                let valid = "max = 1\nallowed = ['octocat']";
+                assert!(accepts(person, valid), "{person}");
+                assert!(
+                    !accepts(person, &format!("{valid}\n{key} = 'a'")),
+                    "{person} {key}"
+                );
+            }
 
             let configured = |pin: &str| {
                 let mut bounds = bounds();
