@@ -233,6 +233,13 @@ callers must choose one explicitly.
 
 ## A provider API key
 
+The reusable workflow refuses this mode for now, GitHub's billing
+included: its agent job runs the agent as the runner's user, which could
+read the key from `run`, and `run --runner-home` refuses `api-key` until
+the host keeps the runner's processes from reading each other
+([workflow.md](workflow.md)). What follows is what the binary
+does for a caller that composes its own agent job with a sandbox user.
+
 `register = "api-key"` is for a caller with a provider's API key and no
 broker. `provider` is `anthropic`, for Claude Code, or `openai`, for
 opencode at an OpenAI-compatible API with a bearer key (opencode's
@@ -244,13 +251,11 @@ agent the provider's API does not serve: Vibe, and a child agent.
 Threat detection (`detect`) needs a registered run, and the key never
 reaches its host, so enabled detection fails closed in this mode and blocks
 apply. The caller must unset `AGENTIC_JOB_DETECT_MODEL` to use API-key
-inference without detection. The reusable workflows take the key as the secret
-`INFERENCE_API_KEY` and give it, as `AGENTIC_JOB_INFERENCE_KEY`, to the
-step that runs `run` and to `agentic-job check-key`, a step before
-`secure-host` that checks the key as below, so that a missing or refused
-key fails the job before minutes of setup. Both are binaries of the
-policy's commit; `check-key` runs before anything of the agent's is on
-the machine, and with another registration checks nothing.
+inference without detection. `run` reads the key as
+`AGENTIC_JOB_INFERENCE_KEY`, which only the step that runs it should get.
+`agentic-job.yml`, `review.yml` and `dispatch.yml` declare the secret
+`INFERENCE_API_KEY`, so that
+callers that pass it still parse, and give it to no job.
 
 `run` reads the key from its environment and asks the provider for its
 list of models with it, retried as a registration is. A missing key, one
@@ -318,10 +323,10 @@ nothing else is started.
 `provider = "github"` is the same proxy with a GitHub token as the key,
 so GitHub bills the run's inference as gh-aw's
 [Copilot engine](https://github.github.com/gh-aw/engines/copilot/) has
-it billed. In the reusable workflow `inference-provider: github` is the
-one input: it implies `register = "api-key"` and the root
-`https://api.githubcopilot.com`, and the token is the secret
-`INFERENCE_API_KEY`. Another root, such as GitHub Enterprise's, takes
+it billed. In the reusable workflow `inference-provider: github`
+implies `register = "api-key"` and the root
+`https://api.githubcopilot.com`, so the agent job refuses it for now,
+as [above](#a-provider-api-key). Another root, such as GitHub Enterprise's, takes
 `inference-url` with `inference-register: api-key`, so that the URL of a
 broker left in a caller never gets the token (Enterprise is untried).
 
@@ -345,8 +350,9 @@ chat completions, and no Anthropic model.
 GitHub takes two tokens for this, as it does for gh-aw:
 
 - a fine-grained personal access token with the Copilot Requests
-  permission, billed to its owner's Copilot. The reusable workflow takes
-  this one; its agent's GitHub read token is another.
+  permission, billed to its owner's Copilot. This is the one an agent
+  job of your own passes; the reusable workflow refuses the mode for
+  now, [above](#a-provider-api-key).
 - the job's own token where the job has `copilot-requests: write`,
   billed to the organization if its Copilot policy allows Copilot CLI
   billed to it

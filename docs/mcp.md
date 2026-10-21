@@ -8,6 +8,13 @@ This is the first part of
 [#120](https://github.com/cgwalters-forge/agentic-job/issues/120): one
 server, reached over MCP's streamable HTTP, with one secret.
 
+The reusable workflow refuses an `[mcp.*]` server for now, and passes
+`MCP_TOKEN` to no job: its agent job runs the agent as the runner's
+user, which could read the credential from `run`, until the host keeps
+the runner's processes from reading each other
+([workflow.md](workflow.md)). What follows is what the binary does for
+a caller that composes its own agent job with a sandbox user.
+
 ## Configuration
 
 In the caller's configuration file (the `config` input of the reusable
@@ -32,15 +39,9 @@ allowed = ["search_issues", "get_issue"]
 - `allowed` names, exactly, each tool the agent may call: 1 to 64 names of
   letters, digits and `_.-`, without wildcards.
 
-The caller passes the secret to the reusable workflow:
-
-```yaml
-    secrets:
-      MCP_TOKEN: ${{ secrets.TRACKER_MCP_TOKEN }}
-```
-
-Only the agent job's `run` step gets it, as `run`'s input `mcp-token` and
-the variable `AGENTIC_JOB_MCP_TOKEN` of `agentic-job run`. The sandbox
+The caller's own agent job gives the secret only to its `run` step, as
+`run`'s input `mcp-token` and the variable `AGENTIC_JOB_MCP_TOKEN` of
+`agentic-job run`. The sandbox
 user's commands are started without that variable. A run with `[mcp.*]`
 and no credential does not start, and says which variable it wanted.
 

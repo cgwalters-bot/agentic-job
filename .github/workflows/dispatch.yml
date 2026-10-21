@@ -10,8 +10,8 @@ on:
     secrets:
       SAFE_OUTPUTS_PAT:
         required: false
-      # With INFERENCE_REGISTER `api-key`: the provider's key, which only
-      # the agent job's key check and `run` get (agentic-job.yml).
+      # Not passed on: preflight refuses `api-key`, as agentic-job.yml's
+      # `run` does. Kept so that callers that pass it still parse.
       INFERENCE_API_KEY:
         required: false
     outputs:
@@ -116,17 +116,22 @@ jobs:
             }
             const agent = process.env.AGENT;
             if (!['fake', 'opencode', 'claude', 'vibe'].includes(agent)) throw new Error('AGENT must be fake, opencode, claude or vibe');
-            // A broker's registration by the job's identity token, or the
-            // provider's API key (INFERENCE_REGISTER `api-key`), held as the
-            // secret INFERENCE_API_KEY. This job holds no secret: the agent
-            // job checks the key, before secure-host.
+            // A broker's registration by the job's identity token. The
+            // reusable workflow refuses a provider's API key (`api-key`, and
+            // INFERENCE_PROVIDER `github`, which it turns into `api-key`):
+            // the agent is the runner's user and could read the key from
+            // `run`. Refused here, before a policy job, build and runner are
+            // spent on it (docs/inference.md).
             const register = process.env.INFERENCE_REGISTER || 'github-oidc';
-            if (agent !== 'fake' && !['github-oidc', 'api-key'].includes(register)) {
-              throw new Error('INFERENCE_REGISTER must be empty, github-oidc or api-key');
+            if (agent !== 'fake' && register !== 'github-oidc') {
+              throw new Error('INFERENCE_REGISTER must be empty or github-oidc; the reusable workflow refuses api-key for now');
             }
-            const apiKey = register === 'api-key';
+            // policy.yml's `== 'github'` ignores case, as expressions do.
+            if (agent !== 'fake' && process.env.INFERENCE_PROVIDER?.toLowerCase() === 'github') {
+              throw new Error("INFERENCE_PROVIDER github is GitHub's billing with an API key, which the reusable workflow refuses for now");
+            }
             const missing = agent === 'fake' ? [] :
-              ['AGENT_MODEL', 'AGENT_RUNNER', 'INFERENCE_URL', apiKey ? 'INFERENCE_PROVIDER' : 'INFERENCE_AUDIENCE']
+              ['AGENT_MODEL', 'AGENT_RUNNER', 'INFERENCE_URL', 'INFERENCE_AUDIENCE']
                 .filter(key => !process.env[key]?.trim());
             const repo = process.env.TARGET_REPO;
             const item = process.env.TARGET_ITEM;
@@ -199,7 +204,6 @@ jobs:
     # checker; the agent gets only its job's read-only token.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}
-      INFERENCE_API_KEY: ${{ !inputs.scripted && secrets.INFERENCE_API_KEY || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
       # use these writes; neither executes agent-produced code. Every push

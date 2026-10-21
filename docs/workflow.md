@@ -854,15 +854,13 @@ is built from that same commit, so the pin covers both. Never pass
 
 ### Real agent checklist
 
-With GitHub's billing, a real agent needs only `inference-provider:
-github`, a `model` from GitHub's list and a GitHub token with Copilot
-access as the secret `INFERENCE_API_KEY`
-([GitHub billing](inference.md#github-billing)). With a provider's API key
-(`inference-register: api-key`), it needs that key as `INFERENCE_API_KEY`,
-`inference-url` and `inference-provider` ([inference](../README.md#inference)); the agent
-programs and limits below still apply. Opencode also needs its `model`,
-which has no default. The rest of this list is for a
-broker.
+For now a real agent in this workflow needs a broker: the agent job
+refuses a provider's API key (`inference-register: api-key`) and GitHub's
+billing (`inference-provider: github`, which sets `api-key`), as
+[above](#running-it-on-github). Those modes are what the binary does for
+an agent job of your own with a sandbox user
+([inference.md](inference.md#a-provider-api-key)). Opencode also needs
+its `model`, which has no default.
 
 Before replacing `agent: fake` with a broker, ask the inference and network
 operator for the following. The proxy is a
@@ -1045,8 +1043,8 @@ user cannot obtain. `plain` sends the run's name and no proof, and
 `token-file` reads a token from `inference-token-file` on the runner;
 both have to be chosen by name. `api-key` needs no proxy of anyone's:
 `inference-url` is the provider's API root, `inference-provider` the API
-it speaks, and the secret `INFERENCE_API_KEY` its key, which only the
-agent job's key check before `secure-host` and its `run` step get
+it speaks, and its key. This workflow refuses `api-key` for now and
+passes the secret `INFERENCE_API_KEY` to no job
 ([inference.md](inference.md#a-provider-api-key)).
 `inference-provider: github` alone sets `api-key` and GitHub's API root,
 whatever `inference-register` and `inference-url` say, unless

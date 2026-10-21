@@ -100,14 +100,16 @@ jobs:
 ```
 
 That is the shape, not the whole call: a caller also grants the job its
-permissions. [Try it](#try-it) has a whole caller.
+permissions. [Try it](#try-it) has a whole caller. On main the agent job
+refuses GitHub's billing and any API key for now, so a real agent needs a
+broker ([inference](#inference)).
 `COMMIT` may also be a released version's tag, such as `v0.5.2`, the
 first with API-key mode, which Dependabot can then upgrade: see
 [versions to pin](docs/workflow.md#things-a-caller-should-know).
 The docs describe main: a tag lacks what was merged after it (after
-`v0.5.2`: an API key for `review.yml` and `dispatch.yml`, the check of
-the key before `secure-host`, and threat detection that a key skips
-rather than fails). The [releases page](https://github.com/cgwalters-forge/agentic-job/releases)
+`v0.5.2`: threat detection that a key skips rather than fails, and an
+agent job that, running the agent as the runner's user, refuses a key
+for now: [inference](#inference)). The [releases page](https://github.com/cgwalters-forge/agentic-job/releases)
 also lists a `build-DIGEST` release per source; those carry prebuilt
 binaries for commit pins and are not versions.
 
@@ -188,10 +190,10 @@ one. The caller stores the key in a repository secret and passes it as
 (`https://api.anthropic.com`) or `openai` for opencode, at a provider
 that serves OpenAI's Responses API (`https://api.openai.com/v1`).
 opencode also needs `model`, the model's name as the provider serves it:
-there is no default, and the policy job refuses a run without one. Only
-the step that runs `agentic-job run`, and a check before `secure-host`
-that fails a missing or refused key in seconds, get the key. `run` checks
-it with the provider again, then serves the agent a proxy on loopback that takes a token
+there is no default, and the policy job refuses a run without one. In an
+agent job of your own, only the step that runs `agentic-job run` should
+get the key. `run` checks
+it with the provider, then serves the agent a proxy on loopback that takes a token
 made for the run and puts the key in its place, so the key is in no file,
 variable or answer of the agent's. The proxy forwards model requests
 only and counts them, so `max-requests` binds as with a broker. What
@@ -327,7 +329,8 @@ a notice and builds locally (about two minutes). Downloads are verified
 against a source-matching attested manifest; see
 [where the binary comes from](docs/workflow.md#things-a-caller-should-know).
 
-**A real agent** replaces `agent: fake` with `claude`, drops
+**A real agent** (on main, with a broker only for now:
+[inference](#inference)) replaces `agent: fake` with `claude`, drops
 `max-requests: "0"` (the default caps at 150 requests), and adds
 GitHub's billing ([inference](#inference)), with a fine-grained token
 with the Copilot Requests permission stored as the repository secret

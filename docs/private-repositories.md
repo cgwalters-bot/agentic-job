@@ -57,6 +57,13 @@ sandbox user's proxy policy.
 
 ## Opting in
 
+The reusable workflow refuses a private target, or a private caller, for
+now, whatever the bounds say: its agent job runs the agent as the
+runner's user, with no second user between it and `run`, until the host
+keeps the runner's processes from reading each other
+([workflow.md](workflow.md)). What follows is what the binary admits for
+a caller that composes its own agent job with a sandbox user.
+
 Add `private = true` at the top level of the caller's bounds file, and of the
 organization's if there is one; both must set it. Then a run is admitted with a
 private target only if all of these hold, each checked where it is enforced:

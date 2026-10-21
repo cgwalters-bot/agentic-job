@@ -168,14 +168,12 @@ Set operator-controlled repository variables (not dispatch inputs):
   `["self-hosted","agentic-job"]`, for a disposable proxy-reachable image.
 - `INFERENCE_URL`: the reachable broker URL, for example `http://BROKER:PORT`.
 - `INFERENCE_AUDIENCE`: the broker's configured GitHub OIDC audience.
-- Or, with a provider's API key and no broker: `INFERENCE_REGISTER` set to
-  `api-key`, `INFERENCE_PROVIDER` to `anthropic` (claude) or `openai`
-  (opencode), `INFERENCE_URL` to the provider's API root, such as
-  `https://api.anthropic.com`, no `INFERENCE_AUDIENCE`, and the key as the
-  repository secret `INFERENCE_API_KEY`, which a copied caller passes on
-  as it passes `SAFE_OUTPUTS_PAT`. The agent job checks the key with the
-  provider before `secure-host`, and only that check and `run` get it
-  ([inference](inference.md#a-provider-api-key)).
+- Not, for now, a provider's API key: preflight refuses `INFERENCE_REGISTER`
+  `api-key` and `INFERENCE_PROVIDER` `github` (GitHub's billing, which
+  sets `api-key`), and the caller passes no `INFERENCE_API_KEY` on. The
+  reusable workflow's agent job runs the agent as the runner's user,
+  which could read the key from `run`, so it would refuse the run anyway,
+  after policy and a build ([inference](inference.md#a-provider-api-key)).
 - `AGENT_CONFIG`: the caller's runner configuration path if not using hosted
   Ubuntu 26.04 or giving your targets a toolchain. The default is this
   repository's `hosted.toml` at the pinned commit; a scripted trial always
@@ -187,10 +185,10 @@ Set operator-controlled repository variables (not dispatch inputs):
   a directory shared by both agents needs both `opencode.json` and `config.toml`. They
   select agent configuration, not the runner TOML named by `AGENT_CONFIG`.
 
-Preflight names **all** missing model, runner, URL and audience (or, with
-`api-key`, provider) variables at once, before policy/build or agent
-startup. It rejects unknown agents and registrations other than
-`github-oidc` and `api-key`.
+Preflight names **all** missing model, runner, URL and audience
+variables at once, before policy/build or agent startup. It rejects
+unknown agents, registrations other than `github-oidc`, and the provider
+`github`.
 With `claude`, `opencode` or `vibe`, `implement` installs the [skills](skills.md) and
 its task names the skill ("Use the implement skill") in place of the procedure.
 Real agents have a 150-request cap; scripted sessions have no inference and
@@ -280,7 +278,14 @@ what is installed as root. For the same reason
 `rust-toolchain.toml`, `.tool-versions` and the like are not read. A
 toolchain the distribution lacks needs a `setup` script of the caller's
 (the reusable workflow's input; the shipped dispatch caller passes none),
-which runs as the sandbox user, never as root.
+which runs unprivileged, never as root: in the reusable workflow as the
+runner's user, in an agent job of your own as the sandbox user.
+
+The reusable workflow refuses `[setup.tools]` for now: its agent job has
+no sandbox user to run the recipe as, until the host keeps the runner's
+processes from reading each other ([workflow.md](workflow.md)). What
+follows is what the binary does for a caller that composes its own agent
+job with a sandbox user.
 
 For an agenthome tools manifest, opt in through that same caller-owned
 configuration on the default branch, not through dispatcher workflow inputs:
