@@ -1145,6 +1145,9 @@ impl Plan {
             if let Some(why) = &change.dropped {
                 eprintln!("warning: no change handed back: {}", enter::one_line(why));
             }
+            if let Some(why) = &change.requests_dropped {
+                eprintln!("warning: no requests handed back: {}", enter::one_line(why));
+            }
             if let Some(why) = &change.memory_dropped {
                 eprintln!("warning: no memory handed back: {}", enter::one_line(why));
             }
@@ -1281,6 +1284,7 @@ impl Plan {
                 .collect(),
             patch: change.patch,
             memory_dropped: change.memory_dropped,
+            requests_dropped: change.requests_dropped,
             egress_denied: egress::denied_in(&access_log),
             agent_logs,
             child_logs,

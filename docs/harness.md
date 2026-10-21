@@ -348,7 +348,11 @@ change, a change of the checkout. Agents have answered `end_turn` without
 theirs, after a compaction of their context, and the run ended well with
 nothing handed back (#607). The session then checks, as the sandbox user,
 and asks once more in a prompt of its own, labelled `reminder`, under the
-same limits. If the agent still left none, the run fails, exit state 1.
+same limits. A requests file the run would not take (over its limit, or
+not a regular file) is reminded of the same way, naming the file and the
+limit, since the hand-back would otherwise be dropped whole without the
+agent hearing of it. If the agent still left none, the run fails, exit
+state 1.
 `reminded` in `harness.json` and `summary.json` says a reminder was sent.
 The check only decides the reminder; the hand-back is still collected and
 checked as before. A run with a bridge client is not reminded: the

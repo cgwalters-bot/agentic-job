@@ -856,6 +856,16 @@ the run's summary (`memory_dropped`); the change and the requests are
 handed back all the same. A hand-back of memory alone is uploaded like
 any other.
 
+The requests file is read the same way, and one the agent left that is
+not taken (a link, not a regular file, over 1 MiB, or unreadable) drops
+the whole hand-back, with the reason in the run's summary
+(`requests_dropped`, and `patch.error` for the change). The run does not
+make up a pull request from the outcome in its place: that would hand
+the change back under words the agent did not write and lose every
+request it did, a `noop` or an open checkpoint among them. A session
+that reminds the agent of a missing hand-back names the file and the
+limit to it first.
+
 The brief tells the agent to leave a part of a change that check would
 refuse out and say so, except when it is the whole task: then the agent
 makes it anyway, so that the run fails with check naming the file rather

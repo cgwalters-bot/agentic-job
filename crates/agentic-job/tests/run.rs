@@ -1214,7 +1214,16 @@ fn a_planted_link_reads_nothing_of_the_runners() {
         let proxy = Proxy::start();
         proxy.admit_unproven();
         let got = job.run(&config(&user, &plain(&proxy)));
-        assert_eq!(got.code, Some(EXIT_SUCCESS), "{case}: {}", got.all());
+        // The planted requests file is left but not taken, so the agent
+        // is reminded of it and, leaving it, fails: its outputs are
+        // refused, which is a failure of the agent's and not an error of
+        // the run's.
+        assert_eq!(got.code, Some(EXIT_FAILURE), "{case}: {}", got.all());
+        assert!(
+            got.stdout.contains("even after a reminder"),
+            "{case}: {}",
+            got.all()
+        );
         // The control: the agent tried to read the file and could not.
         assert!(
             got.stdout.contains("Permission denied"),
@@ -1235,15 +1244,22 @@ fn a_planted_link_reads_nothing_of_the_runners() {
         {
             assert!(!contains(content, MARKER), "{case}: {path}");
         }
-        // What was a link is as if the agent had written nothing.
+        // A refused requests file drops the whole hand-back rather than
+        // synthesizing a request from the checkout change.
         assert_eq!(job.json("out/run/outcome.json"), json!({}), "{case}");
-        let outputs = job.text("out/safe-outputs/outputs.jsonl");
-        assert_eq!(outputs.lines().count(), 1, "{case}: {outputs}");
-        assert!(outputs.contains("\"create_pull_request\""), "{case}");
-        // The link in the tree is handed back as a link, which names
-        // the file and holds nothing of it, and which `check` refuses.
-        let patch = job.text(PATCH);
-        assert!(patch.contains("new file mode 120000"), "{case}: {patch}");
+        let summary = job.json("out/run/summary.json");
+        let reason = summary["requests_dropped"].as_str().unwrap();
+        assert!(
+            reason.contains("~/out/safe-outputs.jsonl"),
+            "{case}: {summary}"
+        );
+        assert!(reason.contains("not a regular file"), "{case}: {summary}");
+        assert!(summary["patch"]["error"].as_str().unwrap().contains(reason));
+        assert!(
+            !job.path("out/safe-outputs/outputs.jsonl").exists(),
+            "{case}"
+        );
+        assert!(!job.path(PATCH).exists(), "{case}");
         assert_eq!(processes_of(&user), "", "{case}");
     }
 }

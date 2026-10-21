@@ -146,8 +146,16 @@ const IN_BODY_HEADERS: [&str; 3] = ["from", "subject", "date"];
 const SIGN_OFF: &str = "signed-off-by:";
 /// Reads the regular file `$1`, at most `$2` bytes of it. A link is not
 /// followed, though as the sandbox user it could only name what the
-/// agent can read: what is handed back is a file the agent wrote.
-const READ_SCRIPT: &str = r#"test ! -L "$1" && test -f "$1" && exec head -c "$2" -- "$1""#;
+/// agent can read: what is handed back is a file the agent wrote. A path
+/// with nothing at it, not even a dangling link, exits [`ABSENT_STATUS`],
+/// which nothing else in the script exits with: a file the agent left
+/// but that is not taken is told from one it did not leave.
+const READ_SCRIPT: &str = concat!(
+    r#"test -L "$1" || test -e "$1" || exit 3; "#,
+    r#"test ! -L "$1" && test -f "$1" && exec head -c "$2" -- "$1""#
+);
+/// The `exit 3` of [`READ_SCRIPT`].
+const ABSENT_STATUS: i32 = 3;
 /// Runs the command it is given and passes on at most `$1` bytes of what
 /// it writes, so that too much output is cut and not an error. The
 /// command's own status is the only line of standard error: a pipe's is
@@ -669,6 +677,9 @@ pub struct Change {
     /// Why the memory directory was not handed back. Apart from the
     /// change: either goes without the other.
     pub memory_dropped: Option<String>,
+    /// Why the agent's requests file was not handed back, which takes
+    /// the change with it ([`requests_refused`]).
+    pub requests_dropped: Option<String>,
 }
 
 impl Change {
@@ -683,9 +694,13 @@ impl Change {
     /// run token, which the agent can read. The reasons go to the job's
     /// log and into the summary, after the staged files are redacted.
     pub fn redact(&mut self, redactor: &mut Redactor) {
-        for why in [&mut self.dropped, &mut self.memory_dropped]
-            .into_iter()
-            .flatten()
+        for why in [
+            &mut self.dropped,
+            &mut self.memory_dropped,
+            &mut self.requests_dropped,
+        ]
+        .into_iter()
+        .flatten()
         {
             *why = redactor.redact(why).into_owned();
         }
@@ -713,9 +728,38 @@ pub struct Request<'a> {
     pub safe_outputs: &'a Path,
 }
 
-/// The regular file PATH as RUNNER reads it, if it is at most MAX bytes.
-fn read_agent_file(runner: &dyn Runner, path: &Path, max: usize) -> Option<Vec<u8>> {
+/// What became of a file of the agent's that was read.
+#[derive(Debug, PartialEq)]
+enum AgentFile {
+    /// Nothing is at its path: the agent left none.
+    Absent,
+    /// The agent left something there that is not taken: a link or
+    /// another thing than a regular file, one over its limit, or one
+    /// that could not be read. Told apart from [`AgentFile::Absent`] so
+    /// that what the agent did leave is not quietly made nothing of
+    /// (#1463).
+    Refused,
+    Taken(Vec<u8>),
+}
+
+impl AgentFile {
+    /// The content, for a reader to which a refused file is as good as
+    /// none.
+    fn taken(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Taken(bytes) => Some(bytes),
+            Self::Absent | Self::Refused => None,
+        }
+    }
+}
+
+/// The regular file PATH as RUNNER reads it, taken if it is at most MAX
+/// bytes.
+fn read_agent_file(runner: &dyn Runner, path: &Path, max: usize) -> AgentFile {
     let limit = (max + 1).to_string();
+    let Some(path) = path.to_str() else {
+        return AgentFile::Refused;
+    };
     let argv = [
         "timeout",
         READ_TIMEOUT_S,
@@ -723,11 +767,33 @@ fn read_agent_file(runner: &dyn Runner, path: &Path, max: usize) -> Option<Vec<u
         "-c",
         READ_SCRIPT,
         "sh",
-        path.to_str()?,
+        path,
         &limit,
     ];
-    let out = runner.run(&argv, b"", max + 1).ok()?;
-    (out.success() && out.stdout.len() <= max).then_some(out.stdout)
+    let Ok(out) = runner.run(&argv, b"", max + 1) else {
+        return AgentFile::Refused;
+    };
+    if out.status.code() == Some(ABSENT_STATUS) {
+        AgentFile::Absent
+    } else if out.success() && out.stdout.len() <= max {
+        AgentFile::Taken(out.stdout)
+    } else {
+        AgentFile::Refused
+    }
+}
+
+/// Why the agent's requests file is not taken, and nothing with it: the
+/// requests are the hand-back, and a change goes only with one of them
+/// that carries it. A request made up here in their place would hand
+/// back the change under words the agent did not write, and open it
+/// ready for review although the agent's own request may have said the
+/// work was not done (#1463).
+fn requests_refused() -> String {
+    format!(
+        "~/{AGENT_OUTPUTS} is not a regular file of at most {} KiB, or could not be read: \
+         none of its requests is taken, nor a change without them",
+        MAX_OUTPUTS_BYTES >> 10
+    )
 }
 
 struct Git<'a> {
@@ -920,10 +986,13 @@ pub fn requires_output(policy: &Policy) -> bool {
 /// replacement, or for a branch run that may carry one, a change of its
 /// checkout. Asked while the agent still runs, only to decide whether to
 /// remind it of its output: [`collect`] decides what is handed back. So a
-/// checkout git cannot read counts as changed, and a requests file over
-/// its limit as none (`check` would refuse it).
+/// checkout git cannot read counts as changed, and a requests file that
+/// is not taken as left: [`missing`] names what is wrong with it.
 pub fn has_output(runner: &dyn Runner, home: &Path, checkout: &Checkout, policy: &Policy) -> bool {
-    let requests = read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
+    let requests = match read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES) {
+        AgentFile::Refused => return true,
+        requests => requests.taken(),
+    };
     if requests.is_some_and(|bytes| {
         if policy.safe_outputs.push_to_pull_request_branch.is_none() {
             return !bytes.trim_ascii().is_empty();
@@ -980,6 +1049,7 @@ pub fn has_output(runner: &dyn Runner, home: &Path, checkout: &Checkout, policy:
 /// The agent's outcome as it stands, while it still runs.
 fn read_outcome(runner: &dyn Runner, home: &Path) -> Option<Object> {
     read_agent_file(runner, &home.join(AGENT_OUTCOME), MAX_OUTCOME_BYTES)
+        .taken()
         .and_then(|bytes| serde_json::from_slice::<Object>(&bytes).ok())
 }
 
@@ -1088,6 +1158,15 @@ fn missing(
             None => return unreadable(),
         }
     }
+    // Before what counts as left: a requests file that is not taken is
+    // left, and would otherwise pass as the hand-back of a change that
+    // `collect` then drops with it, with nobody having told the agent.
+    if read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES) == AgentFile::Refused {
+        return Some(format!(
+            "{} Rewrite it as one regular file within that limit before handing back.",
+            requests_refused()
+        ));
+    }
     (!has_output(runner, home, checkout, policy)).then(|| "No hand-back was left.".to_owned())
 }
 
@@ -1192,9 +1271,11 @@ fn pack_memory(
         }
         memory::check_name(name, rules).map_err(|err| format!("{err:#}"))?;
         let max = usize::try_from(rules.max_file_bytes).unwrap_or(usize::MAX - 1);
-        let content = read_agent_file(runner, &dir.join(name), max).ok_or_else(|| {
-            format!("{shown}/{name:?} is not a regular file of at most {max} bytes")
-        })?;
+        let content = read_agent_file(runner, &dir.join(name), max)
+            .taken()
+            .ok_or_else(|| {
+                format!("{shown}/{name:?} is not a regular file of at most {max} bytes")
+            })?;
         let content =
             String::from_utf8(content).map_err(|_| format!("{shown}/{name:?} is not UTF-8"))?;
         files.files.insert(name.to_owned(), content);
@@ -1251,9 +1332,38 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     let changed = !files.is_empty() || head.as_deref().is_some_and(|head| head != base);
 
     let outcome = read_agent_file(runner, &request.home.join(AGENT_OUTCOME), MAX_OUTCOME_BYTES)
+        .taken()
         .and_then(|bytes| serde_json::from_slice::<Object>(&bytes).ok())
         .unwrap_or_default();
     let mut outcome = mark_stopped_early(outcome, request.harness);
+    // Read once, for every path below. One the agent left that is not
+    // taken ends the hand-back here, with the reason in the result: the
+    // outcome is still the agent's report, and is saved.
+    let requests = read_agent_file(runner, &request.home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
+    if requests == AgentFile::Refused {
+        let mut text = serde_json::to_string(&outcome).context("writing the outcome")?;
+        text.push('\n');
+        write(&request.run_dir.join(OUTCOME_FILE), text.as_bytes())?;
+        let why = requests_refused();
+        let mut change = Change {
+            files,
+            requests_dropped: Some(why.clone()),
+            ..Change::default()
+        };
+        if policy.kind == Kind::Branch && (changed || unreadable) {
+            change.drop_patch(base, format!("changes dropped: {why}"));
+        } else if changed && !unreadable {
+            change.drop_patch(
+                base,
+                "changes dropped: an analysis run hands back no change".to_owned(),
+            );
+        }
+        return Ok(change);
+    }
+    let agent_text = requests
+        .taken()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     // An explicit replacement is the complete series, not a working-tree
     // fixup. Never reset/squash the producer's checkout on this path.
     let replacement_path = request.home.join(REPLACEMENT_PATH);
@@ -1271,11 +1381,7 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
             ..Change::default()
         };
         let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
-        let content = read_agent_file(runner, &replacement_path, max);
-        let agent_text =
-            read_agent_file(runner, &request.home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES)
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                .unwrap_or_default();
+        let content = read_agent_file(runner, &replacement_path, max).taken();
         let outputs = build_outputs(&agent_text, policy, true, &outcome, run_id);
         if policy.safe_outputs.push_to_pull_request_branch.is_none()
             || !outputs.wants_patch
@@ -1357,9 +1463,6 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     text.push('\n');
     write(&request.run_dir.join(OUTCOME_FILE), text.as_bytes())?;
 
-    let agent_text = read_agent_file(runner, &request.home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
     // An analysis run's change is not handed back.
     let only_litter = staged
         .as_ref()
@@ -2162,6 +2265,19 @@ mod tests {
             self.dir.path().join(name)
         }
 
+        /// The names of the files `collect` handed back, sorted.
+        fn handed_back(&self) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(self.path("safe-outputs"))
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        }
+
         /// The outcome `collect` saved with the run's results.
         fn outcome(&self) -> Value {
             serde_json::from_slice(&std::fs::read(self.path("results/outcome.json")).unwrap())
@@ -2269,6 +2385,19 @@ mod tests {
                 &branch,
                 true,
             ),
+            // Left, though not taken: `missing` says what is wrong with it.
+            (
+                "requests over the cap",
+                "truncate -s 1048577 ../../out/safe-outputs.jsonl",
+                &analysis,
+                true,
+            ),
+            (
+                "requests that are a link",
+                "ln -s /etc/hostname ../../out/safe-outputs.jsonl",
+                &no_carrier,
+                true,
+            ),
         ];
         for (case, script, policy, counts) in cases {
             let home = Home::new();
@@ -2279,6 +2408,25 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// A file of the agent's is told apart from none, and refused for
+    /// more than its size.
+    #[test]
+    fn agent_files_absent_refused_or_taken() {
+        let home = Home::new();
+        let read = |name: &str| read_agent_file(&Unconfined, &home.path(name), 8);
+        assert_eq!(read("out/none"), AgentFile::Absent);
+        assert_eq!(read("nowhere/none"), AgentFile::Absent);
+        std::fs::write(home.path("out/small"), "12345678").unwrap();
+        assert_eq!(read("out/small"), AgentFile::Taken(b"12345678".to_vec()));
+        std::fs::write(home.path("out/big"), "123456789").unwrap();
+        assert_eq!(read("out/big"), AgentFile::Refused);
+        symlink(home.path("out/small"), home.path("out/link")).unwrap();
+        assert_eq!(read("out/link"), AgentFile::Refused);
+        symlink(home.path("out/none"), home.path("out/dangling")).unwrap();
+        assert_eq!(read("out/dangling"), AgentFile::Refused);
+        assert_eq!(read("out"), AgentFile::Refused);
     }
 
     #[test]
@@ -2332,6 +2480,12 @@ mod tests {
                 "unreadable",
                 "rm -rf .git/objects",
                 Some("could not be inspected"),
+            ),
+            // With an edit, which would otherwise count as the hand-back.
+            (
+                "requests over the cap",
+                "echo two >> a.txt; truncate -s 1048577 ../../out/safe-outputs.jsonl",
+                Some("safe-outputs.jsonl is not a regular file of at most 1024 KiB"),
             ),
         ];
         for (case, script, expected) in cases {
@@ -2988,6 +3142,7 @@ mod tests {
         );
         assert_eq!(change.patch["error"], why);
         change.memory_dropped = Some(format!("memory: {token} is in a note"));
+        change.requests_dropped = Some(format!("requests: {token} is in a reason"));
 
         let mut redactor = Redactor::new([&token]).unwrap();
         change.redact(&mut redactor);
@@ -2998,7 +3153,11 @@ mod tests {
             change.memory_dropped.as_deref(),
             Some("memory: [REDACTED] is in a note")
         );
-        assert_eq!(redactor.count(), 3);
+        assert_eq!(
+            change.requests_dropped.as_deref(),
+            Some("requests: [REDACTED] is in a reason")
+        );
+        assert_eq!(redactor.count(), 4);
         // A change with nothing dropped is left as it is.
         let mut change = Change {
             patch: json!({"base": "abc", "bytes": 10}),
@@ -3006,7 +3165,115 @@ mod tests {
         };
         change.redact(&mut redactor);
         assert_eq!(change.patch, json!({"base": "abc", "bytes": 10}));
-        assert_eq!(redactor.count(), 3);
+        assert_eq!(redactor.count(), 4);
+    }
+
+    /// A requests file the agent left that is not taken drops the
+    /// hand-back whole, with the reason: not a pull request made up from
+    /// the outcome in place of what the agent wrote (#1463).
+    #[test]
+    fn requests_that_are_not_taken_drop_the_hand_back_whole() {
+        let pull = policy(Kind::Branch, pull_requests());
+        let analysis = policy(Kind::Analysis, json!({"noop": {"max": 1}}));
+        let over_cap = format!(
+            "{{\"type\":\"noop\",\"message\":\"m\"}}\n{}",
+            " ".repeat(MAX_OUTPUTS_BYTES)
+        );
+        let at_cap = format!("{}\n", " ".repeat(MAX_OUTPUTS_BYTES - 1));
+        let refused = "~/out/safe-outputs.jsonl is not a regular file of at most 1024 KiB";
+        // (the case, the policy, what is left as the requests, whether it
+        // changes a file, why the change was dropped, the files handed back)
+        type Case<'a> = (
+            &'a str,
+            &'a Policy,
+            &'a dyn Fn(&Home),
+            bool,
+            Option<&'a str>,
+            &'a [&'a str],
+        );
+        let cases: &[Case] = &[
+            (
+                "a change with requests over the cap",
+                &pull,
+                &|home| std::fs::write(home.path(AGENT_OUTPUTS), &over_cap).unwrap(),
+                true,
+                Some("changes dropped: ~/out/safe-outputs.jsonl is not a regular file"),
+                &[],
+            ),
+            (
+                "requests over the cap alone",
+                &pull,
+                &|home| std::fs::write(home.path(AGENT_OUTPUTS), &over_cap).unwrap(),
+                false,
+                None,
+                &[],
+            ),
+            (
+                "a change with a link for the requests",
+                &pull,
+                &|home| symlink("/etc/hostname", home.path(AGENT_OUTPUTS)).unwrap(),
+                true,
+                Some("changes dropped: ~/out/safe-outputs.jsonl is not a regular file"),
+                &[],
+            ),
+            (
+                "an analysis run's change with requests over the cap",
+                &analysis,
+                &|home| std::fs::write(home.path(AGENT_OUTPUTS), &over_cap).unwrap(),
+                true,
+                Some("changes dropped: an analysis run hands back no change"),
+                &[],
+            ),
+        ];
+        for (name, policy, leave, changes, dropped, handed_back) in cases {
+            let home = Home::new();
+            std::fs::write(
+                home.path(AGENT_OUTCOME),
+                "{\"summary\":\"Not done\",\"checkpoint\":{\"complete\":false}}",
+            )
+            .unwrap();
+            if *changes {
+                sh(&home.checkout.dir, "echo two >> a.txt");
+            }
+            leave(&home);
+            let change = home.collect(policy, &config::Commit::default());
+            let why = change.requests_dropped.as_deref().unwrap_or_default();
+            assert!(why.starts_with(refused), "{name}: {why}");
+            let dropped_as_expected = match (change.dropped.as_deref(), *dropped) {
+                (Some(got), Some(want)) => got.starts_with(want),
+                (None, None) => true,
+                _ => false,
+            };
+            assert!(dropped_as_expected, "{name}: {:?}", change.dropped);
+            assert_eq!(
+                change.patch["error"].as_str(),
+                change.dropped.as_deref(),
+                "{name}"
+            );
+            assert_eq!(change.files.is_empty(), !changes, "{name}");
+            // Nothing handed back, so nothing is made up; the agent's own
+            // report is still saved.
+            assert_eq!(home.handed_back(), *handed_back, "{name}");
+            assert_eq!(home.outcome()["summary"], "Not done", "{name}");
+        }
+        // The memory goes apart from the change, as ever.
+        let mut remembering = pull.clone();
+        remembering.memory = Some(toml::from_str("").unwrap());
+        let home = Home::new();
+        sh(home.dir.path(), "mkdir memory && echo note > memory/a.md");
+        std::fs::write(home.path(AGENT_OUTPUTS), &over_cap).unwrap();
+        let change = home.collect(&remembering, &config::Commit::default());
+        assert!(change.requests_dropped.is_some());
+        assert_eq!(change.memory_dropped, None);
+        assert_eq!(home.handed_back(), ["memory.json"]);
+        // At the cap, taken: a request the agent did write goes.
+        let home = Home::new();
+        sh(&home.checkout.dir, "echo two >> a.txt");
+        std::fs::write(home.path(AGENT_OUTPUTS), &at_cap).unwrap();
+        let change = home.collect(&pull, &config::Commit::default());
+        assert_eq!(change.requests_dropped, None);
+        assert_eq!(change.dropped, None);
+        assert!(home.path("safe-outputs/outputs.jsonl").exists());
     }
 
     /// The agent's own commits are part of the change, and a tree it
@@ -3242,9 +3509,10 @@ mod tests {
         std::fs::write(&elsewhere, "{\"summary\": \"LINKED-CONTENT\"}\n").unwrap();
         symlink(&elsewhere, home.path(AGENT_OUTCOME)).unwrap();
         symlink(&elsewhere, home.path(AGENT_OUTPUTS)).unwrap();
-        home.collect(&policy, &config::Commit::default());
+        let change = home.collect(&policy, &config::Commit::default());
         assert_eq!(home.outcome(), json!({}));
         assert!(!home.path("safe-outputs").exists());
+        assert!(change.requests_dropped.is_some());
         assert_eq!(
             std::fs::read_to_string(home.path("results/outcome.json")).unwrap(),
             "{}\n"

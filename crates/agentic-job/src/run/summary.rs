@@ -64,6 +64,8 @@ pub struct Measured {
     pub patch: Value,
     /// Why the memory directory was not handed back.
     pub memory_dropped: Option<String>,
+    /// Why the agent's requests file was not handed back.
+    pub requests_dropped: Option<String>,
     /// Requests the egress proxy refused, per host.
     pub egress_denied: Vec<Value>,
     /// What of the agent's own logs the transcript has
@@ -290,6 +292,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert("patch".into(), measured.patch.clone());
     if let Some(why) = &measured.memory_dropped {
         s.insert("memory_dropped".into(), json!(why));
+    }
+    if let Some(why) = &measured.requests_dropped {
+        s.insert("requests_dropped".into(), json!(why));
     }
     if let Some(omitted) = inputs.outcome.get(OMITTED_BINARY_FILES) {
         s.insert(OMITTED_BINARY_FILES.into(), omitted.clone());
@@ -586,6 +591,12 @@ pub fn markdown(s: &Value) -> String {
             format!("No memory handed back: {}", code(&json!(cut(error)))),
         ]);
     }
+    if let Some(error) = s["requests_dropped"].as_str() {
+        out.extend([
+            String::new(),
+            format!("No requests handed back: {}", code(&json!(cut(error)))),
+        ]);
+    }
     let p = &s["praxis"];
     if p.is_object() {
         out.extend([
@@ -729,6 +740,7 @@ mod tests {
             files: vec!["FAKE.md".into()],
             patch: json!({"base": "abc", "bytes": 10}),
             memory_dropped: None,
+            requests_dropped: None,
             egress_denied: Vec::new(),
             agent_logs: json!({"dir": "~/logs", "files": 1, "omitted_files": 0, "truncated": false}),
             child_logs: Value::Null,
@@ -824,6 +836,7 @@ mod tests {
             "permissions": {"allowed": 2, "denied": [{"tool": "Bash", "summary": "git push", "rule": "no-push"}]},
             "tests": [], "egress_denied": [{"domain": "evil.example", "count": 2}], "redactions": 1,
             "patch": {"base": "abc", "error": "the change is over 64 bytes"},
+            "requests_dropped": "~/out/safe-outputs.jsonl is not a regular file",
             "secret_shaped": ["safe-outputs/aw-x.patch, line 3: matches `AKIA[0-9A-Z]{16}`"],
         });
         assert_eq!(
@@ -839,6 +852,8 @@ Cost: 1 AIC (agent-reported, unverified); budget: 500 AIC.
 | 1m | ? | 1k / ? | 1.0 of 500 (mock) |
 
 No change handed back: `the change is over 64 bytes`
+
+No requests handed back: `~/out/safe-outputs.jsonl is not a regular file`
 
 | Tool | Calls | Errors | Time |
 |---|---|---|---|
