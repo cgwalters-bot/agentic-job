@@ -478,6 +478,7 @@ struct SecondUserAsks {
     session: bool,
     before_agent: bool,
     tools: bool,
+    child: bool,
 }
 
 /// Refuses what ASKS needs of a sandbox user, for a run whose agent is
@@ -526,6 +527,11 @@ fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
             asks.tools,
             "setup.tools: they are installed in the sandbox user's home, which this agent does \
              not have",
+        ),
+        (
+            asks.child,
+            "[child-agent]: acp-drive's daemon runs in a session of its own, which only ending \
+             the sandbox user's processes stops, so the run's timeout would not bound the child",
         ),
     ];
     let refused: Vec<&str> = refusals
@@ -684,6 +690,7 @@ impl Plan {
                     session: host.session.is_some(),
                     before_agent: config.sandbox.check.before_agent,
                     tools: config.setup.tools.is_some(),
+                    child: child.is_some(),
                 })?;
                 Sandbox::own(&config, home)?
             }
@@ -1787,6 +1794,13 @@ mod tests {
                 },
                 Some("setup.tools"),
             ),
+            (
+                SecondUserAsks {
+                    child: true,
+                    ..none
+                },
+                Some("[child-agent]"),
+            ),
         ];
         for (asks, want) in cases {
             match (refuse_without_second_user(asks), want) {
@@ -1809,9 +1823,10 @@ mod tests {
             session: true,
             before_agent: true,
             tools: true,
+            child: true,
         };
         let err = format!("{:#}", refuse_without_second_user(all).unwrap_err());
-        assert_eq!(err.matches("; ").count(), 7, "{err}");
+        assert_eq!(err.matches("; ").count(), 8, "{err}");
     }
 
     #[test]

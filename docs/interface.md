@@ -79,7 +79,7 @@ holds no secret.
 | `[setup]` | `packages`, `npm`, `agents` (pinned in the binary), and a `script` for toolchains; optional `tools` for a caller-pinned installer ([toolchains](dispatch.md#giving-runs-a-toolchain)); `repo-packages` only in a file given to `agentic-job config`, which adds the `--repo` entry to `packages` |
 | `[inference]` | `url`; `register`, one of `github-oidc`, `plain` and `token-file`, with no default; `audience`; `token-file`; `identity-proxy`; `anthropic-url` and `openai-url` |
 | `[agent]` | `name`, `model`, and `config-repo`, `config-ref`, `config-path` for a public repository holding its configuration; `skills` to install the built-in [skills](skills.md) |
-| `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` |
+| `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` and a sandbox user (`run --runner-home` refuses it) |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped`; `max-repeats` ([repeated tool calls](harness.md#limits), off by default) |
 | `[mcp.NAME]` | `url`, `secret` (only `MCP_TOKEN`) and `allowed` of one remote [MCP server](mcp.md) `run` serves the agent with a credential it never holds |
 | `[session]` | `listen`, `operators`, `origins` and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default) |

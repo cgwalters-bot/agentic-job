@@ -800,6 +800,21 @@ fn a_run_as_its_own_user_in_the_home_given() {
         got.all()
     );
     assert!(!job.path("home").exists());
+
+    // Asked for by the configuration: the child's daemon would outlive
+    // the agent's session, with nothing to end it.
+    let job = Job::new("own-child-refused");
+    let config = format!("{config}[child-agent]\nname = \"vibe\"\nmodel = \"stand-in\"\n");
+    let mut command = job.command(&config);
+    command.arg("--runner-home").arg(job.path("home"));
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains("--runner-home") && got.stderr.contains("[child-agent]"),
+        "{}",
+        got.all()
+    );
+    assert!(!job.path("home").exists());
 }
 
 /// The reason a change is dropped can quote what the agent wrote, and

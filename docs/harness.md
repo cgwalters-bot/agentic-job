@@ -463,7 +463,9 @@ reads only the cost the main agent reports, but the proxy counts every
 request made with the run's token, so the request cap covers both
 agents: a run capped by its budget alone could spend without bound
 through the child. The timeout covers both too, since the session kills
-every process of the sandbox user when it ends.
+every process of the sandbox user when it ends. `run --runner-home` has
+no sandbox user to end, and the daemon's session of its own would outlive
+the agent's, so it refuses `[child-agent]`.
 
 The main agent uses it through bash; each command prints JSON:
 
