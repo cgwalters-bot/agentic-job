@@ -424,10 +424,11 @@ Three smaller differences:
   The opt-in [workflow checker](docs/workflows-check.md) enforces job shape;
   this repository runs it in the required base-trusted ingress `vet` job.
 
-gh-aw has much that this does not: a large catalogue of output types,
-threat detection, memory across runs and many triggers. This has a handful of each, or none.
-[docs/background-ghaw.md](docs/background-ghaw.md) lists the gaps item by
-item.
+gh-aw has much that this does not: more than twice as many output types,
+memory carried between runs, cache memory and many more triggers and engines.
+This has 24 output types, opt-in threat detection and checked but unstored memory.
+[docs/background-ghaw.md](docs/background-ghaw.md) compares them item by
+item, gh-cao's campaigns and dashboard included.
 
 ## Why not Paperclip
 
