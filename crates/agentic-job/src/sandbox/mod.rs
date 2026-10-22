@@ -10,19 +10,15 @@ use clap::Subcommand;
 use crate::exit::Exit;
 
 pub mod check;
-pub mod egress;
 pub mod enter;
 pub mod helper;
-pub mod host;
-pub mod network;
 pub mod root;
 pub(crate) mod session;
 pub mod setup;
 pub mod timed;
-mod view;
 
 // What secure-host holds already, at the paths callers know.
-pub use ::secure_host::{local, proxy, worker_diagnostics};
+pub use ::secure_host::{egress, host, local, network, proxy, view, worker_diagnostics};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

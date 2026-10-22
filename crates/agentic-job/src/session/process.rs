@@ -310,8 +310,16 @@ mod tests {
             ("GITHUB_ACTIONS_", false),
             ("anthropic_api_key", false),
         ];
+        // As `main` gives them to secure-host, whose commands then leave
+        // out the same.
+        crate::sandbox::host::also_not_inherited(is_inherited_setting);
         for (name, want) in cases {
             assert_eq!(is_inherited_setting(OsStr::new(name)), want, "{name}");
+            assert_eq!(
+                crate::sandbox::host::is_not_inherited(OsStr::new(name)),
+                want,
+                "{name}"
+            );
         }
     }
 

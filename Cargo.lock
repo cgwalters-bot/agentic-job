@@ -1622,6 +1622,7 @@ dependencies = [
  "regex",
  "rustix",
  "rustls",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

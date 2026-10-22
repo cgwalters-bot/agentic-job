@@ -25,7 +25,9 @@ rcgen.workspace = true
 regex.workspace = true
 rustix.workspace = true
 rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 toml.workspace = true
@@ -34,6 +36,3 @@ webpki-roots.workspace = true
 [features]
 # Test helpers for crates that depend on this one, as a dev-dependency.
 test-support = []
-
-[dev-dependencies]
-tempfile.workspace = true

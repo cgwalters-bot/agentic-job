@@ -78,18 +78,16 @@ pub const WORLD_WRITE_PROBE_DIR: &str = "/etc/agentic-job/world-write-probe";
 pub const WORLD_WRITE_PROBE_FILE: &str = "/etc/agentic-job/world-write-probe/file";
 
 /// Where secure-host's loader (`secure-host world-write`) pins the
-/// world-write policy: a link for each of its programs, and its map.
-pub const WORLD_WRITE_PIN: &str = "/sys/fs/bpf/agentic-job-world-write";
+/// world-write policy, and its programs' links.
+pub use ::secure_host::world_write::{WORLD_WRITE_LINKS, WORLD_WRITE_PIN};
 
-/// The policy's programs, each pinned as a link under `WORLD_WRITE_PIN/links`.
-pub const WORLD_WRITE_LINKS: &[&str] = &[
-    "world_write_permission",
-    "world_write_open",
-    "world_write_file_permission",
-    "world_write_setattr",
-    // Inert unless the loader's `--deny-runner-reads` enables its map.
-    "runner_read_check",
-];
+/// The proxy of `[egress]`, as the root-owned copy of this binary and
+/// the image's (`secure-host/Containerfile`) run it.
+pub const EGRESS_PROXY: egress::ProxyBinary = egress::ProxyBinary {
+    host: SELF_COPY,
+    image: "/agentic-job",
+    command: &["sandbox", "egress-proxy"],
+};
 
 /// `[setup] script`, where the sandbox user can read it.
 const SCRIPT_COPY: &str = "/etc/agentic-job/setup-script";
@@ -262,8 +260,6 @@ const MODE_BITS: u32 = 0o7777;
 const ENVIRONMENT: &str = "/etc/environment";
 
 const IMAGE_ENV_VARS: &[&str] = &["XDG_RUNTIME_DIR"];
-
-const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
 const SUBUID: &str = "/etc/subuid";
 
@@ -539,7 +535,12 @@ fn setup(args: &Args) -> Result<Exit> {
         .proxy
         .then(|| {
             timed_setup("egress-proxy", || {
-                egress::start(&config.egress, args.egress_image.as_deref(), &refused)
+                egress::start(
+                    &config.egress,
+                    EGRESS_PROXY,
+                    args.egress_image.as_deref(),
+                    &refused,
+                )
             })
         })
         .transpose()?;
@@ -605,7 +606,7 @@ fn setup(args: &Args) -> Result<Exit> {
     })?;
     timed_setup("ssh-and-ptrace", || {
         fix_crypto_policies(Path::new(CRYPTO_POLICIES))?;
-        restrict_ptrace()
+        ::secure_host::world_write::restrict_ptrace()
     })?;
     if config.sandbox.unlink_worker_diagnostics() {
         timed_setup("worker-diagnostics", worker_diagnostics::unlink)?;
@@ -1417,18 +1418,6 @@ fn fix_crypto_policies(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Hardening only (the uid split is the boundary): some images let any
-/// process attach to any other of its uid. A stricter setting is left.
-/// The runner-read rule leaves attaches to Yama, so its loader calls it too.
-pub(crate) fn restrict_ptrace() -> Result<()> {
-    let scope = fs::read_to_string(PTRACE_SCOPE)
-        .with_context(|| format!("reading {PTRACE_SCOPE} (a kernel without Yama?)"))?;
-    if scope.trim() == "0" {
-        fs::write(PTRACE_SCOPE, "1\n").with_context(|| format!("writing {PTRACE_SCOPE}"))?;
-    }
-    Ok(())
-}
-
 /// Apply to the host, not just one entry path. Reset any image-provided
 /// exemption to root's group, which the sandbox user cannot belong to.
 fn hide_other_processes() -> Result<()> {
@@ -1772,6 +1761,21 @@ fn install_file(path: &Path, content: &[u8], mode: u32, validate: Option<&[&str]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The proxy secure-host starts is this binary's `sandbox
+    /// egress-proxy`, with every option it may be given.
+    #[test]
+    fn the_egress_proxy_command_line_parses() {
+        let refused = [("fd7a:115c:a1e0::1".to_owned(), 443)];
+        for (transparent, refused) in [(false, &[][..]), (true, &[][..]), (false, &refused[..])] {
+            for binary in [EGRESS_PROXY.host, EGRESS_PROXY.image] {
+                let command = EGRESS_PROXY.command;
+                let args = egress::rust_proxy_args(binary, command, true, transparent, refused);
+                let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(&args);
+                assert!(parsed.is_ok(), "{parsed:?}");
+            }
+        }
+    }
 
     #[test]
     fn the_session_name_needs_a_dns_name_with_a_certificate() {

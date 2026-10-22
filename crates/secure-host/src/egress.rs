@@ -1,5 +1,5 @@
 //! The egress proxy, installed and started by `sandbox setup`: this
-//! binary's own ([`super::proxy`]), or with `egress.rust-proxy = false`
+//! crate's own ([`crate::proxy`]), or with `egress.rust-proxy = false`
 //! mitmproxy, with the addon and policy of `egress/` at the top of this
 //! repository, which applies the same policy and writes the same log.
 //!
@@ -24,22 +24,21 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::host::{self, User};
-use super::proxy::policy::{ECOSYSTEMS, normalize_host};
-use super::setup::SELF_COPY;
 use crate::config::Egress;
+use crate::host::{self, User};
+use crate::proxy::policy::{ECOSYSTEMS, normalize_host};
 
 /// The addon and what it needs, as they are in `egress/`: the binary
 /// carries them, since it is all a runner gets.
-const ADDON: &str = include_str!("../../../../egress/addon.py");
+const ADDON: &str = include_str!("../../../egress/addon.py");
 
-const POLICY_PY: &str = include_str!("../../../../egress/policy.py");
+const POLICY_PY: &str = include_str!("../../../egress/policy.py");
 
-const POLICY_TOML: &str = include_str!("../../../../egress/policy.toml");
+const POLICY_TOML: &str = include_str!("../../../egress/policy.toml");
 
 /// mitmproxy and everything it depends on, each at one version and with
 /// the hashes of its files: generated from `egress/requirements.in`.
-const REQUIREMENTS: &str = include_str!("../../../../egress/requirements.txt");
+const REQUIREMENTS: &str = include_str!("../../../egress/requirements.txt");
 
 pub const EGRESS_USER: &str = "egress-proxy";
 
@@ -170,17 +169,26 @@ const UNIT_PROPERTIES: &[&str] = &[
 
 /// With `sandbox setup --egress-image`, which the secure-host image's
 /// entrypoint passes with its own ID, the Rust proxy runs from that image
-/// in root podman under the same systemd unit, and not from
-/// [`SELF_COPY`]: what filters the sandbox user's traffic is then the
-/// binary the release attested, from root's image store, which no step
-/// after setup can write; and its container and unit are root's, which
-/// the runner's user, without root after the lock, can neither stop nor
-/// signal. The process inside is still the proxy's user, which the
-/// network rules let out.
+/// in root podman under the same systemd unit, and not from the host's
+/// copy ([`ProxyBinary::host`]): what filters the sandbox user's traffic
+/// is then the binary the release attested, from root's image store,
+/// which no step after setup can write; and its container and unit are
+/// root's, which the runner's user, without root after the lock, can
+/// neither stop nor signal. The process inside is still the proxy's
+/// user, which the network rules let out.
 const PODMAN: &str = "podman";
 
-/// The binary in the image (`secure-host/Containerfile`).
-const IMAGE_BINARY: &str = "/agentic-job";
+/// The binary that runs the Rust proxy ([`crate::proxy::run`]), as
+/// [`start`] starts it: the program that calls `start` says which.
+#[derive(Debug, Clone, Copy)]
+pub struct ProxyBinary {
+    /// Its copy on the host that only root may change.
+    pub host: &'static str,
+    /// Its path in the image (`secure-host/Containerfile`).
+    pub image: &'static str,
+    /// Its arguments before the proxy's own: the command that is the proxy.
+    pub command: &'static [&'static str],
+}
 
 /// A podman image ID: the SHA-256 of its configuration, in hex.
 const IMAGE_ID_LEN: usize = 64;
@@ -221,7 +229,7 @@ pub fn check_image_id(id: &str) -> Result<()> {
 /// the unit's main process, lives; on the host's network any user could
 /// send to it, and `sandbox check` refuses that. The proxy's own log
 /// records what it does.
-fn container_args(image: &str, uid: u32, gid: u32, proxy: &[String]) -> Vec<String> {
+fn container_args(image: &str, uid: u32, gid: u32, binary: &str, proxy: &[String]) -> Vec<String> {
     let mut args: Vec<String> = [
         PODMAN,
         "--events-backend=none",
@@ -245,7 +253,7 @@ fn container_args(image: &str, uid: u32, gid: u32, proxy: &[String]) -> Vec<Stri
         "--volume",
         "/var/log/egress-proxy:/var/log/egress-proxy:Z",
         "--entrypoint",
-        IMAGE_BINARY,
+        binary,
     ]
     .iter()
     .map(|arg| (*arg).to_owned())
@@ -305,20 +313,22 @@ fn mitmdump_args(denylist: bool) -> Vec<String> {
 
 /// The Rust proxy's command line: BINARY, the binary's root-owned copy
 /// that setup installs before it starts the proxy or the image's own,
-/// with mitmdump's settings; with TRANSPARENT (`egress.write-policy`)
-/// also its listener for the runner's redirected connections; and each
-/// host and port of REFUSED, which it refuses the sandbox user whatever
-/// the policy says.
-fn rust_proxy_args(
+/// and COMMAND, with mitmdump's settings; with TRANSPARENT
+/// (`egress.write-policy`) also its listener for the runner's redirected
+/// connections; and each host and port of REFUSED, which it refuses the
+/// sandbox user whatever the policy says.
+pub fn rust_proxy_args(
     binary: &str,
+    command: &[&str],
     denylist: bool,
     transparent: bool,
     refused: &[(String, u16)],
 ) -> Vec<String> {
-    let mut args = vec![
-        binary.to_owned(),
-        "sandbox".to_owned(),
-        "egress-proxy".to_owned(),
+    let mut args: Vec<String> = std::iter::once(binary)
+        .chain(command.iter().copied())
+        .map(str::to_owned)
+        .collect();
+    args.extend([
         "--listen".to_owned(),
         SocketAddr::from((PROXY_HOST, PROXY_PORT)).to_string(),
         "--policy".to_owned(),
@@ -327,7 +337,7 @@ fn rust_proxy_args(
         ACCESS_LOG.to_owned(),
         "--state-dir".to_owned(),
         STATE_DIR.to_owned(),
-    ];
+    ]);
     if denylist {
         args.extend(["--denylist".to_owned(), DENYLIST.to_owned()]);
     }
@@ -733,11 +743,17 @@ fn publish_ca(generated: &str, runner: bool) -> Result<()> {
 }
 
 /// Installs and starts the proxy; returns its uid, which the network
-/// rules name. With IMAGE, which setup's preflight checked, the Rust
-/// proxy runs from that image in root podman ([`PODMAN`]). REFUSED, the
-/// broker's hosts and ports under `inference.front`, are refused to the
-/// sandbox user by the proxy, and its policy may not name them.
-pub fn start(egress: &Egress, image: Option<&str>, refused: &[(String, u16)]) -> Result<u32> {
+/// rules name. The Rust proxy is BINARY's; with IMAGE, which setup's
+/// preflight checked, it runs from that image in root podman
+/// ([`PODMAN`]). REFUSED, the broker's hosts and ports under
+/// `inference.front`, are refused to the sandbox user by the proxy, and
+/// its policy may not name them.
+pub fn start(
+    egress: &Egress,
+    binary: ProxyBinary,
+    image: Option<&str>,
+    refused: &[(String, u16)],
+) -> Result<u32> {
     let (rust, transparent) = (egress.rust_proxy, egress.write_policy);
     // The configuration check's, again where it matters: mitmproxy has
     // no transparent listener, and refuses no destination of its own.
@@ -755,15 +771,16 @@ pub fn start(egress: &Egress, image: Option<&str>, refused: &[(String, u16)]) ->
     let (args, ca, properties) = match (rust, image) {
         (true, Some(image)) => {
             proxy_dirs(&user)?;
-            let proxy = rust_proxy_args(IMAGE_BINARY, denylist, transparent, refused);
+            let proxy =
+                rust_proxy_args(binary.image, binary.command, denylist, transparent, refused);
             (
-                container_args(image, user.uid, user.gid, &proxy),
+                container_args(image, user.uid, user.gid, binary.image, &proxy),
                 RUST_CA_GENERATED,
                 CONTAINER_UNIT_PROPERTIES,
             )
         }
         (true, None) => (
-            rust_proxy_args(SELF_COPY, denylist, transparent, refused),
+            rust_proxy_args(binary.host, binary.command, denylist, transparent, refused),
             RUST_CA_GENERATED,
             UNIT_PROPERTIES,
         ),
@@ -911,14 +928,21 @@ mod tests {
     /// waits for it.
     #[test]
     fn rust_proxy_command_line() {
+        // agentic-job's, whose command line its own test parses.
+        const COPY: &str = "/usr/local/libexec/agentic-job";
+        const COMMAND: &[&str] = &["sandbox", "egress-proxy"];
         let want = "/usr/local/libexec/agentic-job sandbox egress-proxy --listen 127.0.0.1:3128 \
                     --policy /opt/egress-proxy/policy/policy.toml \
                     --log /var/log/egress-proxy/access.jsonl --state-dir /var/lib/egress-proxy \
                     --denylist /opt/egress-proxy/denylist.txt";
-        assert_eq!(rust_proxy_args(SELF_COPY, true, false, &[]).join(" "), want);
-        assert!(!rust_proxy_args(SELF_COPY, false, false, &[]).contains(&"--denylist".to_owned()));
         assert_eq!(
-            rust_proxy_args(SELF_COPY, true, true, &[]).join(" "),
+            rust_proxy_args(COPY, COMMAND, true, false, &[]).join(" "),
+            want
+        );
+        let without = rust_proxy_args(COPY, COMMAND, false, false, &[]);
+        assert!(!without.contains(&"--denylist".to_owned()));
+        assert_eq!(
+            rust_proxy_args(COPY, COMMAND, true, true, &[]).join(" "),
             format!("{want} --transparent 127.0.0.1:3129")
         );
         // Under `inference.front`, the broker's hosts, an IPv6 address
@@ -928,23 +952,13 @@ mod tests {
             ("fd7a:115c:a1e0::1".to_owned(), 443),
         ];
         assert_eq!(
-            rust_proxy_args(SELF_COPY, true, false, &broker).join(" "),
+            rust_proxy_args(COPY, COMMAND, true, false, &broker).join(" "),
             format!("{want} --refuse broker.example:18080 --refuse [fd7a:115c:a1e0::1]:443")
         );
         assert_eq!(
-            Path::new(STATE_DIR).join(crate::sandbox::proxy::tls::CA_CERT),
+            Path::new(STATE_DIR).join(crate::proxy::tls::CA_CERT),
             Path::new(RUST_CA_GENERATED)
         );
-        for (transparent, refused) in [(false, &[][..]), (true, &[][..]), (false, &broker[..])] {
-            let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(
-                std::iter::once("agentic-job").chain(
-                    rust_proxy_args(SELF_COPY, true, transparent, refused)[1..]
-                        .iter()
-                        .map(String::as_str),
-                ),
-            );
-            assert!(parsed.is_ok(), "{parsed:?}");
-        }
     }
 
     /// Under `inference.front` the policy may name none of the broker's
@@ -1018,8 +1032,9 @@ mod tests {
     #[test]
     fn the_container_runs_the_images_proxy_as_the_proxy_user() {
         let image = "0123456789abcdef".repeat(4);
-        let proxy = rust_proxy_args(IMAGE_BINARY, true, false, &[]);
-        let args = container_args(&image, 991, 992, &proxy);
+        const BINARY: &str = "/agentic-job";
+        let proxy = rust_proxy_args(BINARY, &["sandbox", "egress-proxy"], true, false, &[]);
+        let args = container_args(&image, 991, 992, BINARY, &proxy);
         let want = format!(
             "podman --events-backend=none run --rm --replace --name egress-proxy --pull=never --network=host \
              --cap-drop=all --security-opt=no-new-privileges --read-only --umask=0077 \
@@ -1181,7 +1196,7 @@ mod tests {
     /// names.
     #[test]
     fn every_requirement_is_pinned_with_hashes() {
-        const DIRECT: &str = include_str!("../../../../egress/requirements.in");
+        const DIRECT: &str = include_str!("../../../egress/requirements.in");
         let is_entry = |line: &&str| !line.starts_with(['#', ' ']) && !line.is_empty();
         let lines: Vec<&str> = REQUIREMENTS.lines().collect();
         let entries: Vec<&str> = lines.iter().copied().filter(is_entry).collect();

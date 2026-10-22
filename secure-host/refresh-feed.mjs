@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
-const source = 'crates/agentic-job/src/sandbox/egress.rs';
+const source = 'crates/secure-host/src/egress.rs';
 const limit = 16 * 1024 * 1024;
 
 export function setting(text, name) {

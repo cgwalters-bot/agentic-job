@@ -279,7 +279,13 @@ impl Sandbox {
 /// Everything `run` starts is made with this, also what runs as the
 /// runner's user or as root and holds those already.
 pub fn command(program: &str) -> Command {
-    crate::sandbox::host::bare(program)
+    // By the session's own list too, whether or not `main` has given it
+    // to secure-host's `bare` yet.
+    let mut command = crate::sandbox::host::bare(program);
+    for name in crate::session::process::inherited_settings() {
+        command.env_remove(name);
+    }
+    command
 }
 
 /// COMMAND as a command line, without its last argument, the

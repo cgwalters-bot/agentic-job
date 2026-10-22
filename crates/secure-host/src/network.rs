@@ -27,9 +27,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::egress;
-use super::host;
 use crate::config::Egress;
+use crate::egress;
+use crate::host;
 
 pub const TABLE: &str = "runner_sandbox";
 

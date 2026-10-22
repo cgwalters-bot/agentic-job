@@ -5,7 +5,7 @@
 
 use anyhow::{Result, ensure};
 
-use super::host::User;
+use crate::host::User;
 
 /// These are system-service properties, not properties delegated to the user
 /// manager. Do not add NoNewPrivileges, PrivateUsers or PrivateDevices: they

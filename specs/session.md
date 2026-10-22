@@ -147,7 +147,7 @@ stops one thing:
   browser. That page's connection would otherwise carry the operator's tailnet
   identity (cross-site WebSocket hijacking).
 - The network rules keep the sandbox user from port 7790 on loopback and from
-  the node's own tailnet addresses ([network.rs](../crates/agentic-job/src/sandbox/network.rs)).
+  the node's own tailnet addresses ([network.rs](../crates/secure-host/src/network.rs)).
   Without them, the agent could connect to the bridge with a forged
   `Tailscale-User-Login`, or through serve as the node's owner, and prompt its
   own session.

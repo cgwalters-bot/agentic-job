@@ -1892,7 +1892,7 @@ at one version with the hashes of its files: pip installs no file that is not on
 file is generated from `egress/requirements.in`, whose first lines give
 the command. The threat feed is fetched at one commit of its repository
 and must have the SHA-256 written beside it (`DENYLIST_COMMIT` and
-`DENYLIST_SHA256` in `crates/agentic-job/src/sandbox/egress.rs`): a
+`DENYLIST_SHA256` in `crates/secure-host/src/egress.rs`): a
 file that is not that one stops the setup, and a fetch that fails
 leaves the proxy without a feed, with a warning, as before. To move the
 feed, take the newest commit of the file and the checksum of the file

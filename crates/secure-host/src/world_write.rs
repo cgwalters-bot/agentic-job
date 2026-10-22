@@ -26,9 +26,23 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
-use super::platform;
-use crate::sandbox::host;
-use crate::sandbox::setup::{WORLD_WRITE_LINKS, WORLD_WRITE_PIN};
+use crate::{host, platform, worker_diagnostics};
+
+/// Where the loader pins the world-write policy: a link for each of its
+/// programs, and its map.
+pub const WORLD_WRITE_PIN: &str = "/sys/fs/bpf/agentic-job-world-write";
+
+/// The policy's programs, each pinned as a link under `WORLD_WRITE_PIN/links`.
+pub const WORLD_WRITE_LINKS: &[&str] = &[
+    "world_write_permission",
+    "world_write_open",
+    "world_write_file_permission",
+    "world_write_setattr",
+    // Inert unless the loader's `--deny-runner-reads` enables its map.
+    "runner_read_check",
+];
+
+const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
 /// What `statfs` reports for the BPF filesystem.
 const BPF_FS_MAGIC: i64 = 0xcafe_4a11;
@@ -463,6 +477,19 @@ fn probe_runner_read(worker: &Worker, denied: bool) -> Result<()> {
     Ok(())
 }
 
+/// Hardening only (the uid split is the boundary): some images let any
+/// process attach to any other of its uid. A stricter setting is left.
+/// The runner-read rule leaves attaches to Yama, so its loader calls it
+/// too, as `sandbox setup` does.
+pub fn restrict_ptrace() -> Result<()> {
+    let scope = fs::read_to_string(PTRACE_SCOPE)
+        .with_context(|| format!("reading {PTRACE_SCOPE} (a kernel without Yama?)"))?;
+    if scope.trim() == "0" {
+        fs::write(PTRACE_SCOPE, "1\n").with_context(|| format!("writing {PTRACE_SCOPE}"))?;
+    }
+    Ok(())
+}
+
 /// With SOLE_WORKER, the Worker the runner-read rule exempts is
 /// [`sole_worker`] on the host rather than an ancestor.
 pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result<()> {
@@ -485,10 +512,7 @@ pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result
                 .with_context(|| format!("reading the status of process {pid}"))
         };
         let worker = if sole_worker {
-            self::sole_worker(
-                &crate::sandbox::worker_diagnostics::worker_pids()?,
-                &mut status,
-            )
+            self::sole_worker(&worker_diagnostics::worker_pids()?, &mut status)
         } else {
             find_worker(std::process::id(), &mut status)
         }
@@ -499,7 +523,7 @@ pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result
         )?;
         // The rule decides reads only: an attach (`/proc/PID/mem`,
         // process_vm_readv) is Yama's, which must not be scope 0.
-        crate::sandbox::setup::restrict_ptrace()?;
+        restrict_ptrace()?;
         probe_runner_read(&worker, false)?;
         Some(worker)
     } else {

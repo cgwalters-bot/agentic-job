@@ -10,6 +10,11 @@ use agentic_job::secure_host::{self, HostCli};
 use clap::Parser;
 
 fn main() -> ExitCode {
+    // Before anything is started: the agent's settings and credentials,
+    // which the commands secure-host makes leave out too.
+    agentic_job::sandbox::host::also_not_inherited(
+        agentic_job::session::process::is_inherited_setting,
+    );
     // clap exits with `exit::ERROR` itself on bad arguments.
     let result = if std::env::args_os()
         .next()

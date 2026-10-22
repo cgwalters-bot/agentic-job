@@ -18,10 +18,9 @@ use crate::sandbox;
 
 pub mod image;
 pub mod inference;
-pub mod world_write;
 
 // What the secure-host crate holds already, at the paths callers know.
-pub use ::secure_host::{apt, platform};
+pub use ::secure_host::{apt, platform, world_write};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

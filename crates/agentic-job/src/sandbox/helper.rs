@@ -39,6 +39,9 @@ use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::sandbox::egress::ACCESS_LOG;
 
+// secure-host's now, at the paths callers know.
+pub use super::host::{roots_alone, trusted_program};
+
 /// The command's name, as the sudo rule and the client spell it.
 pub const COMMAND: &str = "helper";
 
@@ -47,11 +50,6 @@ pub const COMMAND: &str = "helper";
 pub fn sudoers_command() -> String {
     format!("{SELF_COPY} {COMMAND} *")
 }
-
-/// Bits that let anyone but the owner write.
-const GROUP_OR_OTHER_WRITE: u32 = 0o022;
-
-const OTHER_WRITE: u32 = 0o002;
 
 /// How long one command that stops the sandbox user may take, how long a
 /// probe's control may, and what ends either then.
@@ -272,50 +270,6 @@ fn root_config() -> Result<Config> {
     Config::load(path).context("`agentic-job sandbox setup` writes this file")
 }
 
-/// Whether META is of something owned by root that nobody but root (or
-/// root's group) may write.
-fn roots_only(meta: &std::fs::Metadata) -> bool {
-    let mode = meta.mode();
-    meta.uid() == 0
-        && mode & OTHER_WRITE == 0
-        && (mode & GROUP_OR_OTHER_WRITE == 0 || meta.gid() == 0)
-}
-
-/// Refuses PATH unless it and every directory above it are root's alone,
-/// the links among them and what they lead to included. Anything else in
-/// the way of a program root runs, or a file root reads, would let its
-/// owner choose what root does.
-pub fn roots_alone(path: &Path) -> Result<()> {
-    let real =
-        std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?;
-    let prefixes = path.ancestors().chain(real.ancestors());
-    for prefix in prefixes {
-        // A link's own mode is always 0777 and says nothing; its owner
-        // chose where it points, and what it points to is checked next.
-        let link = std::fs::symlink_metadata(prefix)
-            .with_context(|| format!("reading {}", prefix.display()))?;
-        ensure!(
-            link.uid() == 0,
-            "{} is owned by uid {}, not root, and root runs or reads {}",
-            prefix.display(),
-            link.uid(),
-            path.display()
-        );
-        let meta =
-            std::fs::metadata(prefix).with_context(|| format!("reading {}", prefix.display()))?;
-        ensure!(
-            roots_only(&meta),
-            "{} is not root's alone (owner {}, group {}, mode {:o}), and root runs or reads {}",
-            prefix.display(),
-            meta.uid(),
-            meta.gid(),
-            meta.mode() & 0o7777,
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 /// Refuses unless every directory root looks programs up in is root's
 /// alone: then whatever is found there is root's, placed before the
 /// lock or by root since.
@@ -340,15 +294,6 @@ fn limited(argv: &[&str], seconds: &str) -> Result<Vec<String>> {
         .chain(std::iter::once(program.display().to_string()))
         .chain(args.iter().map(|&arg| arg.to_owned()))
         .collect())
-}
-
-/// A program root may run: found on the fixed PATH, and root's alone,
-/// the file itself included (root may have put another owner's file in
-/// a directory of its own).
-pub fn trusted_program(name: &str) -> Result<PathBuf> {
-    let path = host::find_program(name).with_context(|| format!("no {name} on this host"))?;
-    roots_alone(&path)?;
-    Ok(path)
 }
 
 /// Runs a command as root, however this process can.

@@ -16,13 +16,19 @@ does not trust: it depends on nothing that runs an agent (no ACP,
 inference, safe outputs, sessions or `run`), which `cargo tree -p
 secure-host` shows, and agentic-job depends on it, never the reverse.
 The split is under way ([#1623](https://github.com/cgwalters-forge/agentic-job/issues/1623)).
-So far it holds bounded file reads (`files.rs`), the egress proxy
-(`proxy/`), the probe of reachable listeners (`local.rs`), the platform
-and apt steps (`platform.rs`, `apt.rs`) and the Worker-diagnostics rule
-(`worker_diagnostics.rs`); agentic-job re-exports each at its old path
-(`files`, `sandbox::proxy`, `secure_host::apt`, ...). The sandbox user,
-helper, network rules, probes, the image and the `secure-host` binary
-still live in agentic-job's `sandbox/` and `secure_host/` below.
+So far it holds bounded file reads (`files.rs`), host users and the
+programs root may run (`host.rs`), the network rules (`network.rs`), the
+egress proxy's setup and the proxy itself (`egress.rs`, `proxy/`) with
+the `[egress]` table (`config.rs`), the mount view (`view.rs`), the
+probe of reachable listeners (`local.rs`), the platform, apt and
+world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`) and the
+Worker-diagnostics rule (`worker_diagnostics.rs`); agentic-job
+re-exports each at its old path (`files`, `sandbox::host`,
+`config::Egress`, `secure_host::apt`, ...). Two seams keep agents out:
+agentic-job's `main` hands `host::bare` the agent's variables to leave
+out too, and gives `egress::start` the binary and command that run the
+proxy. The sandbox user, helper, probes, the image and the `secure-host`
+binary still live in agentic-job's `sandbox/` and `secure_host/` below.
 
 Paths below are relative to `crates/agentic-job/src/`.
 
@@ -42,7 +48,6 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `sandbox/check/` | Host, runner-lock and network probes |
 | `sandbox/enter.rs` | Entry as the sandbox user |
 | `sandbox/helper.rs`, `sandbox/root.rs` | Fixed privileged operations and their callers |
-| `sandbox/host.rs` | Host users and programs |
 | `session/` | ACP transport, permissions, limits, transcript and digest |
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
 | `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |
