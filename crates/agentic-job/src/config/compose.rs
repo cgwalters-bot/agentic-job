@@ -290,6 +290,24 @@ fn compose(args: &Args) -> Result<String> {
     {
         setup.remove("script");
     }
+    // The secure-host image runs a host file's script from the host's
+    // root, not from this directory: a relative path, as the policy job
+    // composes it, would name another file there or none.
+    if args.host
+        && let Some(script) = table
+            .get_mut("setup")
+            .and_then(Value::as_table_mut)
+            .and_then(|setup| setup.get_mut("script"))
+        && let Some(path) = script.as_str().map(PathBuf::from)
+        && path.is_relative()
+    {
+        let dir = std::env::current_dir().context("setup.script: the current directory")?;
+        let path = dir.join(path);
+        let path = path
+            .to_str()
+            .context("setup.script: the current directory is not UTF-8")?;
+        *script = Value::String(path.to_owned());
+    }
     // Default only an absent key: an explicit list (even an empty one)
     // is the caller's network policy, not ours to expand.
     let direct_is_set = table
@@ -766,6 +784,24 @@ mod tests {
         assert_eq!(
             composed(&run).setup.script.as_deref(),
             Some(std::path::Path::new("setup.sh"))
+        );
+        // With its script, for the image to run as the sandbox user
+        // (`agent-user: sandbox`): from here, not the host's root.
+        let sandbox = composed(&Args {
+            host: true,
+            ..args(None, &["setup.script=setup.sh", RUN[0]], LIMITS, &[])
+        });
+        assert_eq!(
+            sandbox.setup.script,
+            Some(std::env::current_dir().unwrap().join("setup.sh"))
+        );
+        let absolute = composed(&Args {
+            host: true,
+            ..args(None, &["setup.script=/etc/setup.sh", RUN[0]], LIMITS, &[])
+        });
+        assert_eq!(
+            absolute.setup.script.as_deref(),
+            Some(std::path::Path::new("/etc/setup.sh"))
         );
         let image = composed(&Args {
             host: true,

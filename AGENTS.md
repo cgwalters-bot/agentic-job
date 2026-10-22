@@ -54,8 +54,9 @@ Do not run destructive host setup, ignored `sandbox_fresh`/`sandbox_host` tests,
 or secure-host examples inside an existing sandbox: they change users, sudo,
 services and firewall rules. CI uses fresh Ubuntu 26.04 machines with root and
 systemd/run0; sandbox probes took 27 minutes unsharded and are now four shards
-with 30-minute job limits. `session-sandbox` needs a second user, sudo/run0 and
-an installed fake agent (20-minute limit); do not enable its environment here.
+with 30-minute job limits. `AGENTIC_JOB_TEST_SANDBOX_USER` needs a second user,
+sudo/run0 and an installed fake agent; do not enable it here. CI covers the
+sandbox user through the `e2e-sandbox` reusable-workflow job instead.
 
 Corpus/parity tests need the pinned external old-tree and gh-aw checkouts;
 validation regeneration needs gh-aw's compiled workflows. Release-pin checks

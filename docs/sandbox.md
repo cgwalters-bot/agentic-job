@@ -250,8 +250,8 @@ a positive control
 it runs only its own probes that the run token is nowhere but the
 agent's configuration (the `token-*` probes of
 [sandbox-check.md](sandbox-check.md#runs-token-probes)). Those need a sandbox
-user: under `--runner-home`, which the reusable workflow always passes,
-the token is in `run`'s own environment, which the agent can read, and
+user: under `--runner-home`, which the reusable workflow passes unless
+`agent-user: sandbox`, the token is in `run`'s own environment, which the agent can read, and
 nothing probes for it. CI's `sandbox` job runs setup and the check for
 real on hosted `ubuntu-26.04`, then removes each
 protection in turn and requires that the matching probes fail

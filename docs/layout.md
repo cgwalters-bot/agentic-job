@@ -25,7 +25,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `files.rs`, `redact.rs` | Bounded file reads and secret redaction |
-| `sandbox/setup.rs` | Host preparation |
+| `sandbox/setup.rs`, `sandbox/setup/` | Host preparation: the lock, the sandbox user, the agents and tools |
 | `sandbox/check/` | Host, runner-lock and network probes |
 | `sandbox/enter.rs` | Entry as the sandbox user |
 | `sandbox/helper.rs`, `sandbox/root.rs` | Fixed privileged operations and their callers |
@@ -34,10 +34,12 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
 | `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |
 
-The supervisor runs as the runner's user. Without `--runner-home` its
-file operations in the sandbox run as the sandbox user; with it, as in
-the reusable workflow, `run` uses no sandbox user and the agent shares
-the supervisor's uid ([requirements.md](requirements.md#actors-and-trust)).
+The supervisor runs as the runner's user. With `--runner-home`, the
+reusable workflow's default (`agent-user: runner`), `run` uses no
+sandbox user and the agent shares the supervisor's uid; without it
+(`agent-user: sandbox`), its file operations in the sandbox run as the
+sandbox user, through `run/enter.rs`
+([requirements.md](requirements.md#actors-and-trust)).
 After setup, privileged operations go
 through the root-owned helper; tests on hosts without setup can use sudo
 directly. The helper's validation is a security boundary, not a generic

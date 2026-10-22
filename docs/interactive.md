@@ -54,7 +54,8 @@ target, the egress policy and the limits are fixed before the agent
 starts, and nothing sent over ACP changes them.
 
 This assumes `run` without `--runner-home`, where the agent is a second
-user. The reusable workflow and `review.yml` pass `--runner-home`, which
+user (the reusable workflow's `agent-user: sandbox`). By default the
+reusable workflow, and `review.yml`, pass `--runner-home`, which
 makes the agent the runner's user and refuses `session.listen`, since
 the agent could reach the bridge's port ahead of the operator, so no
 client can attach there.

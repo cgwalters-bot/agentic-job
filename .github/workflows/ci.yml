@@ -315,73 +315,6 @@ jobs:
           tool: just@1.58.0
       - run: just claude-acp-test
 
-  # The session with its agent as another user, entered with run0 as a
-  # real run enters the sandbox: that nothing of that user's is left
-  # running takes a second user and root, which the tests of the rust job
-  # do without. run0 with --pipe needs systemd 257, newer than
-  # ubuntu-24.04's.
-  session-sandbox:
-    needs: changes
-    if: ${{ needs.changes.outputs.host == 'true' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    env:
-      AGENTIC_JOB_TEST_SANDBOX_USER: agentic-job-test
-      AGENTIC_JOB_TEST_FAKE_AGENT: /usr/local/bin/fake-agent
-      # gh-aw's collector, which the test of `run` puts between a run's
-      # hand-back and `check`, as a workflow does.
-      GH_AW_JS: ${{ github.workspace }}/gh-aw/actions/setup/js
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # The commit safe-outputs-probe.yml takes gh-aw's setup action at.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: github/gh-aw
-          ref: 462ed682857c4ab64d40f2c85e3738fa27834839
-          path: gh-aw
-          sparse-checkout: actions/setup/js
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --locked --bin fake-agent
-      # The runner's home is closed to other users: the agent's program
-      # goes where the sandbox user can run it.
-      - name: Add the sandbox user and install the fake agent for it
-        run: |
-          sudo useradd --create-home "$AGENTIC_JOB_TEST_SANDBOX_USER"
-          sudo install -m 0755 target/debug/fake-agent "$AGENTIC_JOB_TEST_FAKE_AGENT"
-      # All of them, not the one by name: a filter that matches nothing
-      # passes. They include a scripted client that talks to the agent
-      # over a loopback WebSocket (specs/session.md).
-      - run: cargo test --locked --test session
-      # `run` itself, with the fake agent as that user: the clone, the
-      # run's registration at a mock proxy, the session, the end of the
-      # run, the hand-back, and what is left to upload; and from there
-      # through gh-aw's collector into `check`.
-      - run: cargo test --locked --test run
-      # The probes of where the run token is, each failing when what it
-      # names is broken.
-      - run: cargo test --locked --test probe
-      # Shown, not checked: why a file made under `umask 077` as this
-      # user came out 0664 on this runner (#20). `run` sets its modes
-      # outright either way; this tells a umask that did not hold (a
-      # file that was there already keeps its mode, a default ACL
-      # replaces the umask) from one that did.
-      - name: Show how the sandbox user's new files get their mode
-        if: ${{ !cancelled() }}
-        run: |
-          sudo -n run0 --pipe --user="$AGENTIC_JOB_TEST_SANDBOX_USER" -- sh -c '
-            echo "umask of the session: $(umask)"
-            umask 077 && rm -f ~/umask-probe && : >~/umask-probe && stat -c "new file under umask 077: %a" ~/umask-probe && rm -f ~/umask-probe
-            stat -c "%a %U %n" ~ ~/.config ~/.config/* 2>&1
-            findmnt -no FSTYPE,OPTIONS -T ~
-            if command -v getfacl >/dev/null; then getfacl -p ~ ~/.config; else echo "no getfacl"; fi
-          ' || true
-
   # The old tree's check and the new one, on the same requests and
   # hand-backs: crates/agentic-job/tests/corpus. The old tree is fetched at
   # the commit docs/plan.md names as the parity target, and gh-aw's
@@ -800,6 +733,39 @@ jobs:
       budget: "100"
       comment-target: "64"
       artifact-prefix: write-policy-
+
+  # The same with `agent-user: sandbox`: secure-host runs the setup script
+  # as its second user, and `run` enters that user, with run0 through the
+  # helper, for the scripted agent
+  # (.github/agentic-job/e2e/sandbox.sh), which asks for its comment only
+  # as that user, in its home, with the runner's home closed to it. The
+  # other end-to-end jobs are the default, the runner's user.
+  e2e-sandbox:
+    needs: [changes, static]
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: write # add_comment
+      pull-requests: write # the status comment and reaction on the pull request e2e-event is for
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the register job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-sandbox-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
+      task: Comment on the issue as the sandbox user.
+      repo: ${{ github.repository }}
+      outputs: add_comment,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      agent-user: sandbox
+      setup: .github/agentic-job/e2e/sandbox.sh
+      timeout: "5"
+      max-requests: "0"
+      budget: "100"
+      comment-target: "64"
+      artifact-prefix: sandbox-
 
   # The event-triggered path, through the workflow itself and on the
   # event that started this run. On a pull request the policy job admits
@@ -1365,7 +1331,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1504,6 +1470,15 @@ jobs:
         run: |
           test "$RESULT/$EXIT" = success/0
           grep -F 'A comment from the scripted agent of a write-policy run.' "$RUNNER_TEMP/comments"
+      # Its agent asked for the comment only as the sandbox user, with
+      # HOME=/home/runner-sandbox, which its log shows.
+      - name: The sandbox-user run handed back its comment
+        env:
+          RESULT: ${{ needs.e2e-sandbox.result }}
+          EXIT: ${{ needs.e2e-sandbox.outputs.exit }}
+        run: |
+          test "$RESULT/$EXIT" = success/0
+          grep -F 'A comment from the scripted agent of a sandbox-user run.' "$RUNNER_TEMP/comments"
       - name: The run stopped at a limit was applied as partial
         run: jq -e '.partial and (.handlers | keys) == ["add_comment", "noop"]' "$RUNNER_TEMP/limit/applied.json"
       # Check runs cannot be deleted; one of this attempt's, by the pinned
@@ -1985,7 +1960,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -2008,8 +1983,8 @@ jobs:
           FILTER: >-
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
-            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "secure-host-no-user", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
-            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            ($host == "false" and (.key | IN("sandbox", "secure-host", "secure-host-options", "secure-host-no-user", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
+            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-sandbox", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))
         run: >-

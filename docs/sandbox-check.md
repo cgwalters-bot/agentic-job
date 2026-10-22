@@ -64,7 +64,7 @@ give secure-host `check: false`, so that `run` probes after that code.
 `sandbox check` has no run token, so it makes none of these. They are
 `run`'s, once it has written the agent's configuration and before the
 agent starts, and only with a sandbox user: under `--runner-home`, the
-reusable workflow's case, none runs
+reusable workflow's default, none runs
 ([sandbox.md](sandbox.md#what-is-tested)). The test that removes
 protections runs them for its token cases. `run`'s other probes, of
 the provider's key, the MCP credential and token and the broker under

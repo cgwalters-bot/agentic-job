@@ -118,14 +118,32 @@ test('run rejects unlocked configuration before probing and probes before agent 
     const result = spawnSync('python3', ['-c', code], { encoding: 'utf8' });
     assert.equal(result.status, expected, result.stderr);
   }
-  const result = shell('python3() { return 1; }; agentic-job() { echo unexpected; };\n' + guard, { RUNNER_HOME: '/tmp/home' });
-  assert.equal(result.status, 1);
-  assert.doesNotMatch(result.stdout, /unexpected/);
-  // No agent home, no run: there is no other user to run the agent as.
-  const homeless = shell('python3() { echo unexpected; }; agentic-job() { echo unexpected; };\n' + guard, { RUNNER_HOME: '' });
-  assert.equal(homeless.status, 1);
-  assert.match(homeless.stdout, /^::error::run requires runner-home\n$/);
-  assert.match(run, /\n  runner-home:\n(?: {4}description:[^\n]*\n(?: {6}[^\n]*\n)*)? {4}required: true\n/);
+  for (const user of ['runner', 'sandbox']) {
+    const result = shell('python3() { return 1; }; agentic-job() { echo unexpected; };\n' + guard,
+      { AGENT_USER: user, RUNNER_HOME: user === 'runner' ? '/tmp/home' : '' });
+    assert.equal(result.status, 1, user);
+    assert.doesNotMatch(result.stdout, /unexpected/, user);
+  }
+  // The runner's user needs a home, the sandbox user has its own, and
+  // no other user is one: refused before the lock is even read.
+  for (const [user, home, error] of [
+    ['runner', '', 'agent-user runner requires runner-home'],
+    ['sandbox', '/tmp/home', 'agent-user sandbox takes no runner-home'],
+    ['', '/tmp/home', 'agent-user must be runner or sandbox'],
+    ['root', '', 'agent-user must be runner or sandbox'],
+    ['runner/home', '', 'agent-user must be runner or sandbox'],
+  ]) {
+    const refused = shell('python3() { echo unexpected; }; agentic-job() { echo unexpected; };\n' + guard, { AGENT_USER: user, RUNNER_HOME: home });
+    assert.equal(refused.status, 1, `${user} ${home}`);
+    assert.equal(refused.stdout, `::error::${error}\n`, `${user} ${home}`);
+  }
+  assert.match(run, /\n  agent-user:\n(?: {4}description:[^\n]*\n(?: {6}[^\n]*\n)*)? {4}default: runner\n/);
+  // The built-in scripted session is installed as the runner's user, so
+  // it is refused for the sandbox user rather than left in the wrong home.
+  const scripted = shell('env() { echo unexpected; };\n' + step(run, 'Install the built-in scripted session'),
+    { AGENT_USER: 'sandbox', PROFILE: 'comment', RUNNER_HOME: '' });
+  assert.equal(scripted.status, 1);
+  assert.equal(scripted.stdout, '::error::fake-profile requires agent-user runner\n');
   assert.ok(run.indexOf('name: Prove the host') < run.indexOf('name: Run the agent'));
 });
 
@@ -136,7 +154,7 @@ test('agent exit is captured before uploads and partial result gate is unchanged
     const output = join(directory, `output-${exit}`);
     binary(directory, 'printf "%s\\n" "$@"; exit "$STATE"');
     const result = shell(step(run, 'Run the agent'), { JOB_DIR: directory, REVIEW_HEAD: 'review-head', STATE: String(exit),
-      RUNNER_HOME: join(directory, 'home'), GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
+      AGENT_USER: 'runner', RUNNER_HOME: join(directory, 'home'), GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: join(directory, 'summary') });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(output, 'utf8'), `exit=${exit}\n`);
     assert.match(result.stdout, /--review-head\nreview-head\n--runner-home\n/);
@@ -372,9 +390,13 @@ test('agent.yml runs the setup script, and run the agent, as the runner\'s user 
     .split('        run: ')[1].split('\n')[0];
   assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf('- uses: ./.agentic-job-source/secure-host'));
   assert.ok(agent.indexOf('- name: Admit the runner-user configuration') < agent.indexOf('- name: The setup script'));
+  // Admission refuses an unnamed agent user; the composed example's
+  // agent is the runner's user.
+  assert.ok(compose.includes('          AGENT_USER: runner\n        run: python3 .agentic-job-source/workflow/runner-setup.py admit\n'));
   // egress.write-policy admits no private or unknown caller or target:
   // the agent keeps the runner's own Actions-service writes.
   const writePolicy = '[egress]\nwrite-policy = true\n';
+  env.AGENT_USER = 'runner';
   for (const [caller, policy, config, status] of [
     ['false', {}, '', 0], ['false', { private: false }, '', 0], ['false', {}, writePolicy, 0],
     ['true', {}, '', 1], ['null', {}, '', 1], ['false', { private: true }, '', 1],
@@ -391,15 +413,26 @@ test('agent.yml runs the setup script, and run the agent, as the runner\'s user 
   writeFileSync(join(directory, '.agentic-job/config.toml'), '[setup]\npackages = []\n');
   env.CALLER_PRIVATE = 'false';
   writeFileSync(join(directory, '.agentic-job/policy.json'), '{}');
-  for (const config of [
-    '[inference]\nregister = "api-key"', '[mcp.server]\nurl = "https://example.com"',
-    '[session]\nlisten = true', '[sandbox.check]\nbefore-agent = true',
-    '[setup.tools]\nrust = "stable"',
+  // What needs a second user is the sandbox user's alone; neither
+  // user gets a credential the workflow does not pass on.
+  for (const [config, runner, sandbox] of [
+    ['[inference]\nregister = "api-key"', 1, 1], ['[mcp.server]\nurl = "https://example.com"', 1, 1],
+    ['[session]\nlisten = true', 1, 0], ['[sandbox.check]\nbefore-agent = true', 1, 0],
+    ['[setup.tools]\nrust = "stable"', 1, 0], ['[setup]\npackages = []\n', 0, 0],
   ]) {
     writeFileSync(join(directory, '.agentic-job/config.toml'), config);
-    assert.equal(inDir(admit).status, 1, config);
+    for (const [user, status] of [['runner', runner], ['sandbox', sandbox], ['', 1], ['root', 1]]) {
+      env.AGENT_USER = user;
+      assert.equal(inDir(admit).status, status, `${user}: ${config}`);
+    }
     assert.ok(!existsSync(home));
   }
+  // A private caller is refused whichever user the agent is.
+  env.AGENT_USER = 'sandbox';
+  env.CALLER_PRIVATE = 'true';
+  assert.equal(inDir(admit).status, 1);
+  env.CALLER_PRIVATE = 'false';
+  env.AGENT_USER = 'runner';
   writeFileSync(join(directory, '.agentic-job/config.toml'), '[setup]\npackages = []\n');
   let result = inDir(setup);
   assert.equal(result.status, 0, result.stderr);
@@ -426,16 +459,36 @@ test('agent.yml runs the setup script, and run the agent, as the runner\'s user 
   writeFileSync(join(jobDir, 'agentic-job'), recorder, { mode: 0o644 });
   writeFileSync(join(bin, 'agentic-job'), recorder, { mode: 0o755 });
   const record = join(directory, 'record');
-  result = shell(step(run, 'Run the agent'), {
-    JOB_DIR: jobDir, RUNNER_HOME: home, RECORD: record, REVIEW_HEAD: '', WATCH_ITEM: '',
-    GITHUB_OUTPUT: join(directory, 'output'), GITHUB_STEP_SUMMARY: join(directory, 'summary'),
-    PATH: `${bin}:${process.env.PATH}`,
-  });
-  assert.equal(result.status, 0, result.stderr);
-  const args = readFileSync(record, 'utf8').trim().split('\n');
+  const runAs = (user, runnerHome) => {
+    const ran = shell(step(run, 'Run the agent'), {
+      JOB_DIR: jobDir, AGENT_USER: user, RUNNER_HOME: runnerHome, RECORD: record, REVIEW_HEAD: '', WATCH_ITEM: '',
+      GITHUB_OUTPUT: join(directory, 'output'), GITHUB_STEP_SUMMARY: join(directory, 'summary'),
+      PATH: `${bin}:${process.env.PATH}`,
+    });
+    assert.equal(ran.status, 0, ran.stderr);
+    return readFileSync(record, 'utf8').trim().split('\n');
+  };
+  const args = runAs('runner', home);
   assert.equal(args[0], join(jobDir, 'agentic-job'));
   assert.equal(args[1], 'run');
   assert.deepEqual(args.slice(-2), ['--runner-home', home]);
+  // As the sandbox user: `run` enters that user, with no home of ours.
+  const sandboxArgs = runAs('sandbox', '');
+  assert.equal(sandboxArgs[0], join(jobDir, 'agentic-job'));
+  assert.ok(!sandboxArgs.includes('--runner-home'), sandboxArgs.join(' '));
+  // agent.yml gives the run action the user, and a home only to the
+  // runner's; secure-host gets the setup script only for the sandbox
+  // user, and this job runs it only for the runner's.
+  assert.match(agent, /^ {10}agent-user: \$\{\{ inputs\.agent-user \}\}$/m);
+  assert.ok(agent.includes('- name: The setup script\n        if: ${{ inputs.agent-user != \'sandbox\' }}\n'));
+  const hostConfig = agent.split("- name: The host's configuration\n")[1].split('        run: |\n')[1].split(/\n {6}[^ ]/)[0]
+    .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+  for (const [user, flags] of [['runner', ['--host', '--no-script']], ['sandbox', ['--host']]]) {
+    writeFileSync(join(bin, 'agentic-job'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$RECORD"\n', { mode: 0o755 });
+    const configured = shell(hostConfig, { AGENT_USER: user, RECORD: record, RUNNER_TEMP: directory, PATH: `${bin}:${process.env.PATH}` });
+    assert.equal(configured.status, 0, configured.stderr);
+    assert.deepEqual(readFileSync(record, 'utf8').trim().split('\n'), ['config', ...flags, '--from', '.agentic-job/config.toml'], user);
+  }
 });
 
 test('apply applies only what check accepted, whatever the caller\'s gate', () => {
@@ -478,7 +531,10 @@ test('the agent job installs the trusted binary and checks the proxy before setu
       '        run: agentic-job secure-host inference .agentic-job/config.toml\n'), file);
     // The host is the new action's, which takes the policy job's
     // configuration but for the setup script, and that is all it writes.
-    const own = '        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"\n';
+    // agent.yml's keeps the script for the image with `agent-user: sandbox`.
+    const own = file === 'agent.yml'
+      ? '          agentic-job config --host "$@" --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"\n'
+      : '        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"\n';
     assert.ok(agent.includes(own), file);
     assert.doesNotMatch(agent.replace(own, ''), / config /, file);
     assert.ok(agent.includes('config: ${{ runner.temp }}/agentic-job-host.toml'), file);
@@ -600,7 +656,7 @@ test('the agent job token reads and write credentials stay in deterministic jobs
   const checkouts = agent.split('\n      - ').filter(step => step.startsWith('uses: actions/checkout@'));
   assert.equal(checkouts.length, 2);
   for (const step of checkouts) assert.match(step, /^ {10}persist-credentials: false$/m);
-  assert.match(agent, /^ {10}runner-home: \$\{\{ runner\.temp \}\}\/agent-home$/m);
+  assert.ok(agent.includes("          runner-home: ${{ inputs.agent-user != 'sandbox' && format('{0}/agent-home', runner.temp) || '' }}\n"));
   const register = job('register');
   assert.deepEqual(granted(register, '    outputs:\n'), { 'id-token': 'write' });
   assert.match(register, /^    runs-on: \$\{\{ fromJSON\(inputs.agent-runner\) \}\}$/m);
@@ -703,7 +759,7 @@ test('the agent gets its GitHub token, and a classic token that can write is ref
 test('the wrapper forwards every setting to the policy call as it is', () => {
   const names = source => [...source.split('    inputs:\n')[1].split(/^    (?:outputs|secrets):\n/m)[0]
     .matchAll(/^      ([-\w]+):$/gm)].map(([, name]) => name);
-  const own = ['agent-runner', 'github-reads', 'secure-host-image-artifact-id'];
+  const own = ['agent-runner', 'github-reads', 'secure-host-image-artifact-id', 'agent-user'];
   assert.deepEqual(names(wrapper).filter(name => !own.includes(name)), names(policy));
   const call = wrapper.split('\n  policy:\n')[1].split('    with:\n')[1].split('\n\n')[0];
   assert.equal(call, names(policy).map(name => `      ${name}: \${{ inputs.${name} }}`).join('\n'));

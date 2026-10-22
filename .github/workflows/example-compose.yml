@@ -150,6 +150,7 @@ jobs:
       - name: Admit the runner-user configuration
         env:
           CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+          AGENT_USER: runner
         run: python3 .agentic-job-source/workflow/runner-setup.py admit
       # A TCP connection to the inference proxy, if any, so that a runner
       # off its network fails here rather than in a probe of setup's rules.

@@ -96,9 +96,12 @@ next image release:
 The agent job (`agent.yml`, which `agentic-job.yml` and `review.yml`
 call) runs the forwarder, with the policy job's configuration but
 `setup.script`, and then the agent as the runner's user
-(`run --runner-home`, which the run action requires). The image would run
-`setup.script` as its second user, from the host's root, so the job runs
-it itself, after secure-host, in the agent's home. The image also
+(`run --runner-home`, the run action's default `agent-user: runner`).
+The image would run `setup.script` as its second user, from the host's
+root, so the job runs it itself, after secure-host, in the agent's home.
+With `agent-user: sandbox` the forwarder gets the script too, by an
+absolute path (`agentic-job config --host` resolves a relative one), the
+image runs it as the sandbox user, and the agent is that user. The image also
 installs its own binary in `/usr/local/bin` over the one `prepare` put
 there, so `run` starts the policy job's binary from the job directory.
 The composed example (`example-compose.yml`) has the same steps, and

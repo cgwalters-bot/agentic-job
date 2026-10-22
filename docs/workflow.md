@@ -50,7 +50,13 @@ separate jobs on separate machines. The apply job's additional checks are
    what may be uploaded. The job holds nothing the agent may not read:
    read-only permissions, no `id-token`, no secret but the run token.
    `run` refuses what would need a second user there: `api-key`, an MCP
-   server, a private target, a session.
+   server, a private target, a session. With `agent-user: sandbox`,
+   secure-host runs the setup script as the second user it makes, and
+   `run`, without `--runner-home`, drives the agent as that user, which
+   admits a session, `[setup] tools` and probes before the agent
+   ([requirements.md](requirements.md#actors-and-trust)); the workflow
+   still passes no inference key or MCP credential, and refuses a
+   private caller or target and `fake-profile` there.
 3. **check**, on a machine the agent never touched. gh-aw's collector
    validates and sanitizes the producer's requests, then `agentic-job check`
    holds them and the patch to the policy.
@@ -246,8 +252,8 @@ agent. The pieces are:
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read`; both jobs keep the call's grant, `id-token` included |
 
 Every setting is an input of `policy.yml` (the same inputs as
-`agentic-job.yml`, without `agent-runner` and `github-reads`, which
-are the agent job's), and check and apply take the policy call's
+`agentic-job.yml`, without `agent-runner`, `github-reads` and
+`agent-user`, which are the agent job's), and check and apply take the policy call's
 outputs as they are, with `toJSON(needs.policy.outputs)`: what is
 checked and applied is what that call decided. The agent job passes
 `prepare` only the policy call's two upload IDs, and check and apply
@@ -611,7 +617,7 @@ the read-only `changes` job queries the base branch's effective rules. With a
 Without a queue, same-repository pull requests also run those callers. A rules
 API failure fails the gate rather than guessing that testing can be deferred.
 With a queue, pull requests also leave the privileged host jobs (sandbox
-probes, secure-host, world-write, confined, session-sandbox) to the merge
+probes, secure-host, world-write, confined) to the merge
 group, so a pull request learns of their failures only when queued.
 A push to main whose commit already has a successful `merge_group` run of
 this workflow, built on the commit main was at before, runs only `changes`,

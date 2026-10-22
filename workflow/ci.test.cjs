@@ -18,8 +18,8 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
   full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static', 'confined', 'confined-cleanup'],
-  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'secure-host-no-user', 'world-write', 'world-write-runtime', 'secure-host-image', 'secure-host-write-policy'],
-  e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
+  host: ['sandbox', 'secure-host', 'secure-host-options', 'secure-host-no-user', 'world-write', 'world-write-runtime', 'secure-host-image', 'secure-host-write-policy'],
+  e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-sandbox', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 
@@ -61,6 +61,24 @@ test('the full-run CI harness skips its comment on the second apply attempt', as
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The runner's user is the agent by default, everywhere a caller can
+// choose; one end-to-end run, and only that one, asks for the sandbox
+// user, and its verifier insists on its comment.
+test('the agent is the runner\'s user unless a caller asks for the sandbox user', () => {
+  const read = file => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const input = (source, indent) => source.split(`\n${' '.repeat(indent)}agent-user:\n`)[1].split(new RegExp(`\\n {0,${indent}}(?! )`))[0];
+  for (const [file, indent] of [['.github/workflows/agentic-job.yml', 6], ['.github/workflows/agent.yml', 6], ['run/action.yml', 2]]) {
+    assert.match(input(read(file), indent), new RegExp(`\\n {${indent + 2}}default: runner$`), file);
+  }
+  const users = [...ci.matchAll(/^ {6}agent-user: (.*)$/gm)].map(([, user]) => user);
+  assert.deepEqual(users, ['sandbox']);
+  assert.match(block('e2e-sandbox'), /\n {6}agent-user: sandbox\n {6}setup: \.github\/agentic-job\/e2e\/sandbox\.sh\n/);
+  const verify = block('e2e-verify').split('      - name: The sandbox-user run handed back its comment\n')[1].split(/\n {6}(?! )/)[0];
+  assert.match(verify, /test "\$RESULT\/\$EXIT" = success\/0\n/);
+  assert.match(verify, /grep -F 'A comment from the scripted agent of a sandbox-user run\.'/);
+  assert.match(read('.github/agentic-job/e2e/sandbox.sh'), /^test "\$HOME" = \/home\/runner-sandbox$/m);
 });
 
 test('PR CI tests the ingress checker with the same verified analyzers', () => {

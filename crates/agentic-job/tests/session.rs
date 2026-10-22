@@ -5,9 +5,10 @@
 //!
 //! With `AGENTIC_JOB_TEST_SANDBOX_USER` set to a user this one can become
 //! with `sudo run0`, `nothing_survives_the_session` runs the agent as that
-//! user, as a real run does. CI does (the `session-sandbox` job); the
-//! agent's binary must then be where that user can run it, named by
-//! `AGENTIC_JOB_TEST_FAKE_AGENT`.
+//! user, as a run with `agent-user: sandbox` does; the agent's binary must
+//! then be where that user can run it, named by
+//! `AGENTIC_JOB_TEST_FAKE_AGENT`. CI covers that user through the reusable
+//! workflow instead (the `e2e-sandbox` job), not with these tests.
 
 // clippy.toml lets test functions unwrap, but not the helpers they share,
 // where a panic is just as much the test's failure.
@@ -2075,7 +2076,7 @@ fn text_prompt(sid: &Value, text: &str) -> Value {
 /// session already running, is refused what the bridge does not serve,
 /// and has a prompt answered with the run's secret replaced; when it
 /// hangs up the session ends as done. Where the environment names a
-/// sandbox user (the session-sandbox job), the agent runs as that user.
+/// sandbox user (`AGENTIC_JOB_TEST_SANDBOX_USER`), the agent runs as that user.
 #[test]
 fn a_client_talks_to_the_session() {
     let r = run(

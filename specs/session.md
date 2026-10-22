@@ -230,8 +230,9 @@ The slice built here has five parts:
   refused without a login, with another login and with a bad `Origin`. Then the
   operator attaches, is refused what the bridge does not serve, sends a prompt
   and reads the reply, cancels a turn, and goes quiet until the idle timeout.
-  CI's `session-sandbox` job runs the conversation test with the agent as a
-  second user entered through run0.
+  With `AGENTIC_JOB_TEST_SANDBOX_USER` set, the conversation test runs the
+  agent as a second user entered through run0; CI no longer sets it, and
+  covers that user with a whole run instead (`e2e-sandbox`).
 
 No forge writes happen during the session. Still to do:
 

@@ -21,58 +21,66 @@ only intended secret in reach. It proposes outputs; a clean job checks
 them before a separate job applies them. Event notification jobs also
 have write access, but never consume agent-written outputs.
 
-Two ways to run it differ in what separates the agent from `run`.
-`run` without `--runner-home` starts it as a second Unix user on the
-same kernel; R1 to R3 and R7 below describe that model. The reusable
-workflow, and `review.yml` through it, always passes `--runner-home`:
-the agent is the runner's user ([workflow.md](workflow.md)). There, what separates it is
-secure-host's deprivileging (R4), a job with read-only tokens, no
-`id-token` and no secret but the run token, and the check on another
-machine. Nothing protects the transcript, the limits or `run`'s
-environment from the agent, which can also stop or kill `run`; cleanup kills only the agent's process
-group, the token probes do not run, and the egress proxy does not filter
-it unless the caller opts into `egress.write-policy`, which holds it to
-the write rules, with the runner's own Actions-service writes
-([secure-host.md](secure-host.md#the-egress-write-policy-for-an-agent-job)). `run` refuses what would need the second user,
-a private target included
-([`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs)).
-[#1335](https://github.com/cgwalters-forge/agentic-job/issues/1335) and
-[#1336](https://github.com/cgwalters-forge/agentic-job/issues/1336)
-track dropping the second-user path.
+Two ways to run it differ in what separates the agent from `run`; the
+reusable workflow's `agent-user` input chooses ([workflow.md](workflow.md)).
+
+- `runner`, the default: `run --runner-home`, and the agent is the
+  runner's own user, as any deterministic step after secure-host is.
+  What separates it is secure-host's deprivileging (R4), a job with
+  read-only tokens, no `id-token` and no secret but the run token, and
+  the check on another machine. Nothing protects the transcript, the
+  limits or `run`'s environment from the agent, which can also stop or
+  kill `run`; cleanup kills only the agent's process group, the token
+  probes do not run, and the egress proxy does not filter it unless the
+  caller opts into `egress.write-policy`, which holds it to the write
+  rules, with the runner's own Actions-service writes
+  ([secure-host.md](secure-host.md#the-egress-write-policy-for-an-agent-job)).
+  `run` refuses what would need the second user, a private target included
+  ([`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs)).
+- `sandbox`: `run` without `--runner-home` starts the agent as the
+  second Unix user secure-host makes by default, on the same kernel, so
+  that a uid separates it from `run`, the job's steps and their files.
+  This also admits what needs that uid: a session, `[setup] tools` and
+  probes before the agent.
+
+R1 to R3 and R7 below say what holds in each, the runner's user first.
 
 ## Requirements
 
 ### R1. Nothing after setup runs outside the sandbox on the agent's behalf
 
 The reusable workflow fixes the agent job's steps. The caller cannot
-insert a shell or action there. Without `--runner-home` the setup
-script runs as the sandbox user; in the reusable workflow it runs as the
-runner's user after secure-host. Packages and npm install hooks run as root before the lock and
+insert a shell or action there. With the runner's user as the agent,
+the setup script runs as that user after secure-host; with the sandbox
+user, secure-host runs it as the sandbox user. Packages and npm install hooks run as root before the lock and
 must be trusted by the caller. A standalone action cannot enforce the
 ordering of steps around it.
 
 ### R2. The agent runs as another user, in a session of its own
 
-Met only without `--runner-home`. There, entry uses `run0 --pipe` and a
-PAM session, with a fixed environment. With it, as in the reusable
-workflow, entry is `env -i` with that fixed environment at the runner's
-own uid. Either way `ACTIONS_*` variables are refused. Sandbox sudo and polkit are denied.
+Met only with the sandbox user. With the runner's user, the default,
+entry is `env -i` with a fixed environment at the runner's own uid. With
+the sandbox user (`run` without `--runner-home`), entry uses
+`run0 --pipe` and a PAM session, with that fixed environment. Either way `ACTIONS_*` variables are refused. Sandbox sudo and polkit are denied.
 Host probes test the uid boundary and reachable local listeners; they
 do not cover every service behind the system bus or all UDP listeners.
 See the action's [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#local-sockets).
 
 ### R3. The sandbox holds no credential but its run token
 
-Without `--runner-home`, the runner's files and processes are unreadable
-to the sandbox user, and `run` probes the token's location. With it, as
-in the reusable workflow, the agent can read every file of the runner's
-user and `run`'s environment, so the job holds only read-only tokens and
-the run token, and the token probe does not run. The network rules that
-restrict private-network access match the sandbox user only; the runner's
-user is refused metadata too with `sandbox.deny-runner-metadata`, on with
-the lock unless set false (not yet in the image the forwarder pins:
-[what main has](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)), and `run` refuses
-`[sandbox.check] before-agent`, so host probes do not repeat. Either way
+With the runner's user, the default, the agent can read every file of
+that user and `run`'s environment, so the job holds only read-only
+tokens and the run token, and the token probe does not run. The network
+rules that restrict private-network access match the sandbox user only;
+the runner's user is refused metadata too with
+`sandbox.deny-runner-metadata`, on with the lock unless set false (not
+yet in the image the forwarder pins:
+[what main has](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)),
+and `run` refuses `[sandbox.check] before-agent`, so host probes do not
+repeat. With the sandbox user, the runner's files and processes are
+unreadable to the agent, and `run` probes the token's location. The
+reusable workflow passes no inference key or MCP credential on with
+either. Either way
 the target is cloned without credentials
 ([sandbox-check.md](sandbox-check.md)).
 [Inference modes](inference.md) differ: `plain` permits new registrations
@@ -105,9 +113,9 @@ a trusted ref, not an untrusted pull request's merge commit.
 
 ### R7. What leaves the sandbox is checked data
 
-The supervisor reads agent files with size bounds, as the sandbox user
-without `--runner-home` and as its own user with it (where the agent is
-the same user and could change anything `run` holds), turns the working tree into a patch with hooks disabled, redacts evidence
+The supervisor reads agent files with size bounds, as its own user with
+`--runner-home` (where the agent is the same user and could change
+anything `run` holds) and as the sandbox user without it, turns the working tree into a patch with hooks disabled, redacts evidence
 and gates uploads. gh-aw's collector sanitizes requests; `check` enforces
 policy and parses the patch. The exit state is untrusted, and patch
 authorship is not validated

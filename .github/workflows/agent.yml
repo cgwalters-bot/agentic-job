@@ -36,12 +36,19 @@ on:
           commit, as root before secure-host: review.yml's step for reaching the inference proxy
         type: boolean
         default: false
-    # The agent is the runner's user, as every step after secure-host is,
-    # and can read whatever the job holds: so the job holds nothing but
-    # the run token, which is the agent's to use anyway, and the network
-    # step's key, spent before the agent starts. No repository secret
-    # comes here; an inference key or MCP credential would need a second
-    # user (`run --runner-home` refuses both).
+      agent-user:
+        description: >-
+          `runner` runs the agent as the runner's user, as every step after secure-host is;
+          `sandbox` as the second user secure-host makes, which then also runs `setup.script`
+        type: string
+        default: runner
+    # By default the agent is the runner's user, as every step after
+    # secure-host is, and can read whatever the job holds: so the job
+    # holds nothing but the run token, which is the agent's to use anyway,
+    # and the network step's key, spent before the agent starts. No
+    # repository secret comes here, with either `agent-user`; an inference
+    # key or MCP credential would need a second user (`run --runner-home`
+    # refuses both), and the workflow passes neither on.
     secrets:
       # The register job's output: the broker's run token for
       # `github-oidc`, empty for every other mode. Only `run` gets it, and
@@ -127,9 +134,11 @@ jobs:
           policy-artifact-id: ${{ fromJSON(inputs.policy).policy-artifact-id }}
       # No caller code may run with open egress while private source is in
       # this checkout, including when the requested target is public.
+      # Only the runner's user is refused what needs a second user.
       - name: Admit the runner-user configuration
         env:
           CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+          AGENT_USER: ${{ inputs.agent-user }}
         run: python3 .agentic-job-source/workflow/runner-setup.py admit
       # With `network`: the deployment's step for reaching the inference
       # proxy (a VPN or tailnet join), as root before anything of the
@@ -149,11 +158,16 @@ jobs:
       # are not checked.
       - name: Check inference proxy reachability
         run: agentic-job secure-host inference .agentic-job/config.toml
-      # The policy job's configuration for the host, by its binary, but for
-      # `setup.script`: the image would run that from the host's root as
-      # its second user, and this job runs it itself, below.
+      # The policy job's configuration for the host, by its binary. The
+      # image runs `setup.script` from the host's root as its second user:
+      # the agent with `agent-user: sandbox`; for the runner's user this
+      # job leaves it out and runs it itself, below.
       - name: The host's configuration
-        run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"
+        env:
+          AGENT_USER: ${{ inputs.agent-user }}
+        run: |
+          [ "$AGENT_USER" = sandbox ] || set -- --no-script
+          agentic-job config --host "$@" --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"
       - if: ${{ inputs.secure-host-image-artifact-id != '' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -162,25 +176,28 @@ jobs:
       # cgwalters-forge/actions/secure-host, through the forwarder of the
       # policy job's commit, which pins it: its image takes root from this
       # job and proves it. Every step after it is this file's, as the
-      # runner's user without root, and so is the agent (tracker#674).
+      # runner's user without root, and so is the agent (tracker#674)
+      # unless `agent-user` is `sandbox`.
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           config: ${{ runner.temp }}/agentic-job-host.toml
           image-archive: ${{ inputs.secure-host-image-artifact-id != '' && format('{0}/secure-host-image/secure-host.tar', runner.temp) || '' }}
-      # The configuration's `setup.script`, the caller's, for a toolchain:
-      # without root, in the agent's home and with its variables, as the
-      # sandbox user ran it before.
+      # The configuration's `setup.script`, the caller's, for a toolchain,
+      # when the agent is the runner's user: without root, in the agent's
+      # home and with its variables. The image ran it for the sandbox user.
       - name: The setup script
+        if: ${{ inputs.agent-user != 'sandbox' }}
         env:
           AGENT_HOME: ${{ runner.temp }}/agent-home
         run: |
           python3 .agentic-job-source/workflow/runner-setup.py setup
-      # The agent as the runner's user, in its own home; `run` uploads
-      # before reporting a limit.
+      # The agent as the runner's user, in its own home, or as the sandbox
+      # user, in that user's; `run` uploads before reporting a limit.
       - id: run
         timeout-minutes: 340
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
-          runner-home: ${{ runner.temp }}/agent-home
+          agent-user: ${{ inputs.agent-user }}
+          runner-home: ${{ inputs.agent-user != 'sandbox' && format('{0}/agent-home', runner.temp) || '' }}
           github-token: ${{ inputs.github-reads && github.token || '' }}
           inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}

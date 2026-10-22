@@ -38,7 +38,8 @@ its processes and read the proxy's fixed log. Without `--runner-home`,
 everything it does in the agent's files (the clone, git, reading the
 outcome and the requests) it does as the sandbox user, so that a link
 the agent planted cannot make it read the runner's files. The reusable
-workflow and `review.yml` pass `--runner-home`: `run` uses no sandbox
+workflow, by default (`agent-user: runner`), and `review.yml` pass
+`--runner-home`: `run` uses no sandbox
 user, the agent is the runner's user and can read and change the
 transcript and the limits, read `run`'s environment and stop `run`,
 cleanup is the agent's process group only, and the token probes do not

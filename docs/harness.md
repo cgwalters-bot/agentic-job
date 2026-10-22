@@ -21,8 +21,9 @@ It starts the agent through the wrapper `run` gives it and speaks ACP
 over the agent's standard input and output; nothing listens on the
 network. Without `--runner-home` the wrapper is `run0` and the agent is
 the sandbox user, while the session runs as the runner's user, so the
-agent cannot alter the transcript or the limits. The reusable workflow
-and `review.yml` pass `--runner-home`: the agent is the runner's user
+agent cannot alter the transcript or the limits. The reusable workflow,
+by default (`agent-user: runner`), and `review.yml` pass
+`--runner-home`: the agent is the runner's user
 too, so it can write the session's files, the transcript and limits
 included, read `run`'s environment and stop `run`; the record is then
 evidence of what the agent let through, not a guarantee

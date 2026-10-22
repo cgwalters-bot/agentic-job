@@ -8,7 +8,8 @@
 #   register  the run's registration at the inference proxy, with the
 #           identity-token permission the agent's job does not get
 #   agent   agent.yml: the agent, as the runner's user without root on the
-#           caller's machine: prepare, secure-host and run, the actions of this repository
+#           caller's machine (or the sandbox user, with `agent-user`):
+#           prepare, secure-host and run, the actions of this repository
 #   check   check.yml: what the agent handed back, on a machine it never
 #           touched
 #   apply   apply.yml: the only job with a credential that can write
@@ -311,6 +312,14 @@ on:
           False gives it none
         type: boolean
         default: true
+      agent-user:
+        description: >-
+          `runner`, the runner's own user, which secure-host deprivileges; or `sandbox`, the second
+          user secure-host makes, which then also runs `setup`, for a uid between the agent and the
+          job's own steps and for what needs one (a session, `[setup] tools`, probes before the
+          agent). See docs/requirements.md#actors-and-trust
+        type: string
+        default: runner
       secure-host-image-artifact-id:
         description: >-
           For testing an unreleased secure-host image: the ID of an artifact of the calling run
@@ -516,6 +525,7 @@ jobs:
       runner: ${{ inputs.agent-runner }}
       github-reads: ${{ inputs.github-reads }}
       secure-host-image-artifact-id: ${{ inputs.secure-host-image-artifact-id }}
+      agent-user: ${{ inputs.agent-user }}
 
   check:
     needs: [policy, agent]
