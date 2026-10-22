@@ -562,6 +562,98 @@ pub struct Bounds {
     /// may list only [`NEUTRAL_OUTPUTS`].
     #[serde(default)]
     pub forge: Forge,
+    /// One exact further repository a run may propose a pull request to
+    /// (#1075). Kept apart from `repos`, which admits repositories to work
+    /// on, so that admitting one is no permission to write to it. Not yet
+    /// enforced by `check` or `apply`: `compile` refuses every request
+    /// while it is set.
+    #[serde(default)]
+    pub secondary_pull_request: Option<SecondaryPullRequest>,
+}
+
+/// The smallest `secondary_pull_request` patch budget, as for the primary.
+const MIN_SECONDARY_PATCH_BYTES: u64 = KB;
+const MIN_SECONDARY_PATCH_FILES: u32 = 1;
+
+/// `[secondary_pull_request]`: its own repository, base, branches and
+/// patch budget, none with a default, and its own exemptions, none
+/// inherited from the primary output's: configuring it must not widen
+/// what a patch to that repository may touch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecondaryPullRequest {
+    /// One exact OWNER/NAME, no glob.
+    pub repo: String,
+    /// One exact branch the pull request targets.
+    pub base: String,
+    /// What the pull request's branch name starts with, ending in `/`.
+    pub branch_prefix: String,
+    /// [`MAX_PULL_REQUESTS`]: one pull request, from one patch.
+    pub max: u32,
+    pub max_patch_bytes: u64,
+    pub max_patch_files: u32,
+    /// Exemptions for `repo` alone; empty by default.
+    #[serde(default)]
+    pub unprotected_files: Unprotected,
+}
+
+impl SecondaryPullRequest {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            REPO_RE.is_match(&self.repo)
+                && self
+                    .repo
+                    .split('/')
+                    .all(|part| !part.starts_with(['.', '-'])),
+            "secondary_pull_request.repo requires one exact repository name: {:?}",
+            self.repo
+        );
+        // A name gh-aw's handler keeps as it is, of plain components.
+        let exact_branch = |branch: &str| {
+            PUSH_BRANCH_RE.is_match(branch)
+                && !push_branch_ambiguous(branch)
+                && branch.split('/').all(|part| {
+                    !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock")
+                })
+        };
+        ensure!(
+            exact_branch(&self.base),
+            "secondary_pull_request.base requires one exact branch name: {:?}",
+            self.base
+        );
+        ensure!(
+            self.branch_prefix.ends_with('/'),
+            "secondary_pull_request.branch_prefix must be nonempty and end with /"
+        );
+        ensure!(
+            exact_branch(&format!("{}agent-run-1", self.branch_prefix)),
+            "secondary_pull_request.branch_prefix must form an unambiguous branch name: {:?}",
+            self.branch_prefix
+        );
+        ensure!(
+            self.max == MAX_PULL_REQUESTS,
+            "secondary_pull_request.max must be {MAX_PULL_REQUESTS}"
+        );
+        ensure!(
+            self.max_patch_bytes >= MIN_SECONDARY_PATCH_BYTES,
+            "secondary_pull_request.max_patch_bytes must be at least {MIN_SECONDARY_PATCH_BYTES}"
+        );
+        ensure!(
+            self.max_patch_files >= MIN_SECONDARY_PATCH_FILES,
+            "secondary_pull_request.max_patch_files must be at least {MIN_SECONDARY_PATCH_FILES}"
+        );
+        for repo in &self.unprotected_files.repos {
+            ensure!(
+                repo.eq_ignore_ascii_case(&self.repo),
+                "secondary_pull_request.unprotected_files.repos may name only {:?}, not {repo:?}",
+                self.repo
+            );
+        }
+        validate_dot_folders(
+            &self.unprotected_files.dot_folders,
+            "secondary_pull_request.unprotected_files.dot_folders",
+        )
+    }
 }
 
 /// `[memory]`: how much of the agent's memory directory is handed back,
@@ -1446,6 +1538,9 @@ impl Bounds {
         if let Some(memory) = &self.memory {
             memory.validate()?;
         }
+        if let Some(secondary) = &self.secondary_pull_request {
+            secondary.validate()?;
+        }
         for repo in &self.unprotected_files.repos {
             ensure!(
                 REPO_RE.is_match(repo) && !dotted(repo),
@@ -1550,6 +1645,15 @@ impl Bounds {
             private,
         } = *request;
         let mut errors = Vec::new();
+
+        // A write destination that check and apply do not yet hold to its
+        // own bounds: refused until they do, rather than written unchecked.
+        if self.secondary_pull_request.is_some() {
+            errors.push(
+                "secondary_pull_request is configured, but check and apply do not support it yet"
+                    .to_owned(),
+            );
+        }
 
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
         if !repo_ok || !glob_matches(&self.repos, repo) {
@@ -2305,6 +2409,154 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     /// The policy of the request the tests of `check` use.
     pub(crate) fn policy() -> Policy {
         bounds().compile(&request()).unwrap()
+    }
+
+    const SECONDARY: &str = r#"
+[secondary_pull_request]
+repo = "cgwalters-forge/misctool"
+base = "main"
+branch_prefix = "agentic-job/"
+max = 1
+max_patch_bytes = 65536
+max_patch_files = 10
+"#;
+
+    /// [`BOUNDS`] with [`SECONDARY`], `from` replaced by `to` in the
+    /// latter, parsed but not validated.
+    fn secondary_bounds(from: &str, to: &str) -> Result<Bounds, toml::de::Error> {
+        toml::from_str(&format!("{BOUNDS}{}", SECONDARY.replacen(from, to, 1)))
+    }
+
+    #[test]
+    fn secondary_pull_request_bounds_are_explicit() {
+        let configured = secondary_bounds("", "").unwrap();
+        configured.validate().unwrap();
+        let secondary = configured.secondary_pull_request.as_ref().unwrap();
+        // Nothing inherited from the primary output's exemptions.
+        assert!(secondary.unprotected_files.repos.is_empty());
+        assert!(secondary.unprotected_files.files.is_empty());
+        assert!(secondary.unprotected_files.dot_folders.is_empty());
+        // Unreadable: a list of destinations, a missing field (no
+        // defaults), an unknown key.
+        for (from, to) in [
+            ("[secondary_pull_request]", "[[secondary_pull_request]]"),
+            ("repo = \"cgwalters-forge/misctool\"\n", ""),
+            ("base = \"main\"\n", ""),
+            ("branch_prefix = \"agentic-job/\"\n", ""),
+            ("max = 1\n", ""),
+            ("max_patch_bytes = 65536\n", ""),
+            ("max_patch_files = 10\n", ""),
+            ("max = 1\n", "max = 1\nunknown = true\n"),
+        ] {
+            assert!(secondary_bounds(from, to).is_err(), "{from:?} -> {to:?}");
+        }
+        // Readable, and refused or accepted by validation.
+        let unprotected = |repo: &str, folder: &str| {
+            format!(
+                "max_patch_files = 10\n[secondary_pull_request.unprotected_files]\n\
+                 repos = [{repo:?}]\nfiles = [\"AGENTS.md\"]\ndot_folders = [{folder:?}]\n"
+            )
+        };
+        for (from, to, accepted) in [
+            ("main", "release/1.0", true),
+            ("agentic-job/", "bot/agentic-job/", true),
+            ("max_patch_bytes = 65536", "max_patch_bytes = 1024", true),
+            ("max_patch_files = 10", "max_patch_files = 1", true),
+            ("cgwalters-forge/misctool", "cgwalters-forge/*", false),
+            ("cgwalters-forge/misctool", "cgwalters-forge/**", false),
+            ("cgwalters-forge/misctool", "https://github.com/a/b", false),
+            ("cgwalters-forge/misctool", "a/../b", false),
+            ("cgwalters-forge/misctool", "owner", false),
+            ("cgwalters-forge/misctool", "-owner/repo", false),
+            ("cgwalters-forge/misctool", "owner/.repo", false),
+            ("cgwalters-forge/misctool", "owner/..", false),
+            ("main", "", false),
+            ("main", "release/*", false),
+            ("main", "main:other", false),
+            ("main", "main..other", false),
+            ("main", "main--other", false),
+            ("main", "refs//main", false),
+            ("main", "release/.hidden", false),
+            ("main", "topic.lock/main", false),
+            ("main", "-main", false),
+            ("agentic-job/", "", false),
+            ("agentic-job/", "agentic-job", false),
+            ("agentic-job/", "/", false),
+            ("agentic-job/", "../", false),
+            ("agentic-job/", "a--b/", false),
+            ("agentic-job/", "agentic-job//", false),
+            ("agentic-job/", ".agentic-job/", false),
+            ("agentic-job/", "agentic.lock/", false),
+            ("agentic-job/", "agentic job/", false),
+            ("max = 1", "max = 0", false),
+            ("max = 1", "max = 2", false),
+            ("max_patch_bytes = 65536", "max_patch_bytes = 1023", false),
+            ("max_patch_bytes = 65536", "max_patch_bytes = 0", false),
+            ("max_patch_files = 10", "max_patch_files = 0", false),
+            (
+                "max_patch_files = 10\n",
+                &unprotected("cgwalters-forge/misctool", ".github"),
+                true,
+            ),
+            (
+                "max_patch_files = 10\n",
+                &unprotected("CGWALTERS-FORGE/MISCTOOL", ".github"),
+                true,
+            ),
+            // The primary output's repository, or any other.
+            (
+                "max_patch_files = 10\n",
+                &unprotected("bootc-dev/bootc", ".github"),
+                false,
+            ),
+            (
+                "max_patch_files = 10\n",
+                &unprotected("cgwalters-forge/*", ".github"),
+                false,
+            ),
+            (
+                "max_patch_files = 10\n",
+                &unprotected("cgwalters-forge/misctool", ".husky"),
+                false,
+            ),
+        ] {
+            let configured = secondary_bounds(from, to).unwrap();
+            assert_eq!(
+                configured.validate().is_ok(),
+                accepted,
+                "{from:?} -> {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secondary_pull_request_bounds_refuse_every_request() {
+        assert!(bounds().secondary_pull_request.is_none());
+        let configured = secondary_bounds("", "").unwrap();
+        configured.validate().unwrap();
+        for request in [
+            request(),
+            Request {
+                kind: Kind::Analysis,
+                outputs: "noop",
+                ..request()
+            },
+        ] {
+            let errors = configured.compile(&request).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("check and apply do not support it yet")),
+                "{errors:?}"
+            );
+            // Without the table, the same request compiles as it did.
+            let mut unconfigured = configured.clone();
+            unconfigured.secondary_pull_request = None;
+            assert_eq!(
+                unconfigured.compile(&request).unwrap(),
+                bounds().compile(&request).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -829,6 +829,38 @@ unknown key. Destinations stay fixed by the caller
 chosen per type or by the agent, and a patch that touches a protected file
 is refused rather than sent for review or turned into an issue.
 
+### A secondary pull request (not yet active: bounds configuring it refuse every run)
+
+A `[secondary_pull_request]` table names one further, fixed repository
+that a run is to be able to propose one pull request to, without making
+the repositories in `repos` writable
+([#1075](https://github.com/cgwalters-forge/agentic-job/issues/1075)).
+Collection and check
+([#1285](https://github.com/cgwalters-forge/agentic-job/issues/1285)) and
+apply routing
+([#1286](https://github.com/cgwalters-forge/agentic-job/issues/1286))
+do not hold a patch to it yet, so `policy` refuses every request while
+the table is present. Bounds without it are unaffected.
+
+```toml
+[secondary_pull_request]
+repo = "cgwalters-forge/misctool"
+base = "main"
+branch_prefix = "agentic-job/"
+max = 1
+max_patch_bytes = 65536
+max_patch_files = 10
+```
+
+It is one table, not a list. `repo` is one exact OWNER/NAME, `base` one
+exact branch, and `branch_prefix` ends in `/` and forms an unambiguous
+branch name. `max` must be 1, and the patch limits have no defaults
+(at least 1024 bytes and 1 file). Its own
+`[secondary_pull_request.unprotected_files]` takes the same keys as the
+top-level one but may name only `repo`; nothing is inherited from the
+top-level exemptions, so protected files and `.github` stay protected
+unless exempted here.
+
 ## What the agent does
 
 The producer need not be an agent. Any caller job can upload `outputs.jsonl`
