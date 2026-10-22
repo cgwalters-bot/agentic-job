@@ -22,7 +22,7 @@ stop-services = [
 ]
 # systemd-resolved, which the whole runner resolves names with, resolves
 # them for any user, around the egress proxy: setup leaves it to root and
-# the runner's user (docs/sandbox-check.md).
+# the runner's user (cgwalters-forge/actions's secure-host/docs/egress.md).
 close-resolved = true
 
 [sandbox.check]

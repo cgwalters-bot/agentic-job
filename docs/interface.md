@@ -46,7 +46,8 @@ run. What separates the agent there is the job's read-only tokens, no
 `id-token` and no secret but the run token, secure-host's deprivileging
 and the check on another machine
 ([requirements.md](requirements.md#actors-and-trust)).
-[sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root) describes the helper and the lock's limits.
+[sandbox-check.md](sandbox-check.md#the-helper) describes the helper, and the action's
+[lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock) its limits.
 
 `check` is half the check on purpose. Which request types exist, how
 many of each, and the sanitizing of their text are gh-aw's code, used as

@@ -7,7 +7,7 @@
 // ci.yml runs it once before the action as the positive control, where
 // each must work, and after it from a `run:` step and from this
 // directory's action, in its main step and its post step, where each must fail
-// (docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
+// (cgwalters-forge/actions's secure-host/docs/evidence.md).
 // Its `sandbox-user` and `no-user` modes probe, after the lock, the
 // sandbox user setup makes by default, and a host that opted out of it
 // (sandbox.create-user = false).

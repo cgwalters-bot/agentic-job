@@ -512,7 +512,8 @@ jobs:
       # runs as, and the test puts each protection back as root: a shell
       # behind a socket only this user's group may connect to, started as
       # a service of its own before setup. It is this test's and nothing
-      # a job should have (docs/sandbox-check.md says what it stands for).
+      # a job should have (cgwalters-forge/actions/secure-host's docs/evidence.md
+      # says what it stands for).
       - name: Start the root service the test puts protections back through
         run: |
           sudo systemd-run --unit=agentic-job-test-root --quiet \

@@ -119,7 +119,9 @@ The boundaries include `src/policy.rs`, `src/check/` (especially patch parsing),
 `src/event/`, sandbox setup/helper/network/check code and `egress/` policy,
 all under the crate unless a root path is given. Keep size/count/path/type
 limits, no-follow regular-file reads and fail-closed refusals intact.
-See [sandbox threat model](docs/sandbox.md) and [probe coverage](docs/sandbox-check.md).
+See the host's [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md)
+and [probe coverage](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md),
+and the agent's [sandbox user](docs/sandbox.md) and [token probes](docs/sandbox-check.md).
 
 Do not edit generated `safe-outputs/validation.json` by hand or vendor gh-aw;
 use its generator against the pinned source when updating it. Do not weaken

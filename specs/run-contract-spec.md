@@ -57,7 +57,8 @@ private directories, including its checkout. It MUST NOT inherit the job's
 Enforcement: [on_host.rs](../crates/agentic-job/src/sandbox/check/on_host.rs),
 runtime checks `private-dir:{path}`, `env-job-variables` and `oidc-value:{name}`
 (with positive controls). These run as part of `sandbox check` and run's probes;
-see [probe coverage](../docs/sandbox-check.md) for prerequisites and limits.
+see [probe coverage](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#the-sandbox-users-probes)
+for prerequisites and limits.
 
 **RC-003 — Inference credential.** When inference uses a run token, the
 sandboxed producer MAY hold it in its configured private agent configuration.

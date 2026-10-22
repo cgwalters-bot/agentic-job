@@ -1165,7 +1165,7 @@ mod tests {
     /// Under secure-host's runner-read rule, which a locked host has by
     /// default, and setup's `hidepid=invisible`, the runner's user's
     /// processes cannot even look it up
-    /// (docs/secure-host.md#reads-between-the-runners-own-processes), and
+    /// (cgwalters-forge/actions's secure-host/docs/runner-reads.md), and
     /// these tests run as that user in CI's secure-host job.
     fn parent_readable() -> bool {
         Command::new("cat")

@@ -90,7 +90,7 @@ private target only if all of these hold, each checked where it is enforced:
 - **The proxy limits where the source can go.** `run` refuses a private
   policy unless the sandbox uses the egress proxy (`egress.proxy`) and the
   policy file the proxy enforces sets `[egress] mode = "allowlist"`
-  ([domain allowlist](sandbox.md#opt-in-domain-allowlist)), selected by
+  ([domain allowlist](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#opt-in-domain-allowlist)), selected by
   `egress.policy` in the caller's configuration. That file may keep no
   `[[write]]` rule but git fetch's `POST` to paths ending in
   `/git-upload-pack`: any other rule is a channel to what its endpoint stores.

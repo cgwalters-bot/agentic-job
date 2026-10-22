@@ -41,12 +41,13 @@ This repository's `secure-host` forwards to that action
 ([what changes at `@main`](docs/secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
 `make check` above lost root but still runs as the user that holds the
 job's token; so does every `uses:` step. See
-[One trust level for the rest of the job](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
+[one trust level for the rest of the job](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job).
 
 Two limits to know up front. Names still resolve on a hosted runner, so
 a process that wants to can leak data through DNS lookups. And one small
 root-owned helper stays, for what the sandbox itself needs.
-[docs/sandbox-check.md](docs/sandbox-check.md) lists what is probed and
+The action's [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md)
+list what is probed, and its [evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md)
 what is not.
 
 **An agent run with no write credential in reach.** The reusable
@@ -73,7 +74,7 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 | Where | What it holds |
 | --- | --- |
 | The agent | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the agent itself: so no agent job passes on a model key or MCP credential, and `run` refuses `api-key` and MCP servers ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a confined step can still do](docs/secure-host.md#one-trust-level-for-the-rest-of-the-job)) |
+| The runner's user in the agent job | the agent itself: so no agent job passes on a model key or MCP credential, and `run` refuses `api-key` and MCP servers ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a later step can still do](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents: read`; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; notify and conclude prefer `SAFE_OUTPUTS_PAT` for status comments whenever supplied, including same-repository items |
@@ -126,39 +127,29 @@ fenced off as data. See [docs/events.md](docs/events.md).
 
 ## Sandbox execution and runner deprivileging
 
-`secure-host` does two separate things, and they protect different steps.
+Two separate things protect the agent's job, and they protect different
+steps.
 
-- **Runner deprivileging** applies to every step after `secure-host`
-  (unless its configuration sets `sandbox.lock-runner = false`): the
-  runner's user loses `sudo`, polkit and the root-equivalent daemons
-  (Docker first), so no later step, action or post step can become root
-  and undo the setup. It does **not** take the job's tokens or network
-  away from those steps: they still run as the user that holds them, and
-  reach every host but the cloud metadata service (unless the configuration
-  sets `sandbox.deny-runner-metadata = false`, or the action's image
-  predates that default) ([secure-host.md](docs/secure-host.md#what-a-later-step-can-count-on-and-what-it-cannot)).
+- **Runner deprivileging** is `secure-host`'s, for every step after it,
+  the agent included (unless its configuration sets
+  `sandbox.lock-runner = false`): no later step gets root. Unless the
+  configuration sets `sandbox.deny-runner-metadata = true`, later steps
+  still reach the cloud metadata service through this repository's
+  forwarder until its image has main's default for that rule
+  ([what main has](docs/secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)).
+  It does **not** separate those steps from the job's tokens. The action's
+  [contract](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md#the-contract)
+  and [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md)
+  say what it claims, on which hosts, and how it is probed.
 - **Job separation** is what keeps the agent's credentials apart: the
   agent's job holds no secret, no write token and no `id-token`, and
   what it hands back is checked on another machine before a job with a
   write token acts on it ([workflow](docs/workflow.md)).
 
-What each part guarantees today, and what it does not:
-
-| Part | Guarantees | Does not |
-| --- | --- | --- |
-| [World-write policy](docs/secure-host.md#access-time-world-write-policy) (BPF, loaded with bpftool, always on) | no user, root included, changes a world-writable file or non-sticky world-writable directory on the root filesystem that it does not own; probed after setup | cover other filesystems, or a writable mapping made before it loaded. A refused write is a plain `EACCES` that names nothing, also for rootless Podman creating in such a directory of its storage |
-| [Egress proxy](docs/sandbox.md#network) (the sandbox user only) | the sandbox user's HTTP(S) leaves only through it, but for the broker's tailnet address in `egress.direct`; reads of hosts on its threat feed are refused; a request other than `GET`, `HEAD` or `OPTIONS` passes only where [`egress/policy.toml`](egress/policy.toml) has a rule, else `403 refused by the egress proxy` | limit reads: any other host may be read, so data can leave in a URL; stop DNS lookups through the hosted runner's resolver; filter the runner's user |
-| [`secure-host`](docs/secure-host.md) | the deprivileging above, the sandbox user, the network rules, and a final [probe](docs/sandbox-check.md) that fails the job when one does not hold | protect from steps before it, which have root; separate later steps from the job's tokens; act as a container or VM boundary: a kernel flaw or local IPC that answers any user crosses it |
-
-**Supported hosts:** Ubuntu 26.04 and RHEL 10 (with its minor
-releases), as `/etc/os-release`'s `ID` and `VERSION_ID` say. On any other
-host, derivatives such as Fedora or CentOS Stream included, the action
-fails with `secure-host: requires Ubuntu 26.04 or RHEL 10;
-cannot establish a supported host from /etc/os-release` once it has its
-binary, before it changes apt, loads the policy or sets anything up. The machine must be thrown away after the job:
-`sandbox setup` refuses one it has set up before. CI proves the policy
-and probes on hosted Ubuntu 26.04; on RHEL 10 the world-write policy's
-runtime is unverified.
+How the agent job uses the action is in
+[docs/secure-host.md](docs/secure-host.md), and the sandbox user, which
+`run` without `--runner-home` starts the agent as, in
+[docs/sandbox.md](docs/sandbox.md).
 
 ## Inference
 
@@ -407,7 +398,7 @@ the work this was built for: operating system and container tooling.
 Rootless Podman must be installed before hardening. Container build steps
 that need the network also need `--network=host` and a read-only mount of
 the egress proxy's CA bundle at the image's trust-bundle path; these are
-not Podman defaults. See the [container recipe](docs/secure-host.md#containers).
+not Podman defaults. See the [container recipe](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#containers).
 
 Three smaller differences:
 
@@ -493,7 +484,7 @@ the issue that tracks it, where one is filed.
 - Names resolve for the sandbox user on hosted runners, so data can leave
   through DNS ([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).
 - The world-write policy is proven at run time on hosted Ubuntu 26.04
-  ([CI's controls](docs/secure-host.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
+  ([CI's controls](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
   not on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
 - With `inference-register: api-key`, nothing outside the provider caps
   what the long-lived key spends; the run's request cap and timeout bound
@@ -513,9 +504,12 @@ the issue that tracks it, where one is filed.
 
 ## Where to read more
 
-- [docs/secure-host.md](docs/secure-host.md): what the setup step does
-  to the host, and what a job has to do before it.
-- [docs/sandbox.md](docs/sandbox.md): the threat model, and why a second
+- [cgwalters-forge/actions/secure-host](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md):
+  what the setup step does to the host, its threat model, and what a job
+  has to do before it.
+- [docs/secure-host.md](docs/secure-host.md): how agentic-job forwards to
+  that action and how its agent job uses it.
+- [docs/sandbox.md](docs/sandbox.md): the sandbox user, and why a second
   user and not a container.
 - [docs/safe-outputs.md](docs/safe-outputs.md): how requests are checked
   and applied.

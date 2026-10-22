@@ -55,13 +55,13 @@ the run token ([workflow.md](workflow.md)). The CLI's `run` without
 rules keyed on that user's uid ([sandbox.md](sandbox.md)); the reusable
 workflow does not offer that mode. `[egress] write-policy`, off by default,
 holds the runner's user to the same egress policy
-([secure-host.md](secure-host.md#egress-write-policy-opt-in)).
+([egress write policy](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#egress-write-policy-opt-in)).
 Egress goes through the binary's own Rust proxy
-([the egress proxy](sandbox.md#the-egress-proxy)). mitmproxy remains only
+([the policy file](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#the-policy-file)). mitmproxy remains only
 behind `[egress] rust-proxy = false`. By default, reads go to any host not
 on a pinned threat feed, and writes need a `[[write]]` rule. gh-aw's style of
 domain allowlist is opt-in: `mode = "allowlist"`
-([opt-in domain allowlist](sandbox.md#opt-in-domain-allowlist)).
+([opt-in domain allowlist](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#opt-in-domain-allowlist)).
 
 gh-aw runs on private repositories as on public ones. Here runs are
 public-only, and the reusable workflow refuses a private target or caller

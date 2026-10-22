@@ -33,7 +33,7 @@ environment from the agent, which can also stop or kill `run`; cleanup kills onl
 group, the token probes do not run, and the egress proxy does not filter
 it unless the caller opts into `egress.write-policy`, which holds it to
 the write rules, with the runner's own Actions-service writes
-([secure-host.md](secure-host.md#for-an-agent-job)). `run` refuses what would need the second user,
+([secure-host.md](secure-host.md#the-egress-write-policy-for-an-agent-job)). `run` refuses what would need the second user,
 a private target included
 ([`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs)).
 [#1335](https://github.com/cgwalters-forge/agentic-job/issues/1335) and
@@ -59,7 +59,7 @@ workflow, entry is `env -i` with that fixed environment at the runner's
 own uid. Either way `ACTIONS_*` variables are refused. Sandbox sudo and polkit are denied.
 Host probes test the uid boundary and reachable local listeners; they
 do not cover every service behind the system bus or all UDP listeners.
-See [sandbox-check.md](sandbox-check.md).
+See the action's [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#local-sockets).
 
 ### R3. The sandbox holds no credential but its run token
 
@@ -70,7 +70,8 @@ user and `run`'s environment, so the job holds only read-only tokens and
 the run token, and the token probe does not run. The network rules that
 restrict private-network access match the sandbox user only; the runner's
 user is refused metadata too with `sandbox.deny-runner-metadata`, on with
-the lock unless set false, and `run` refuses
+the lock unless set false (not yet in the image the forwarder pins:
+[what main has](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)), and `run` refuses
 `[sandbox.check] before-agent`, so host probes do not repeat. Either way
 the target is cloned without credentials
 ([sandbox-check.md](sandbox-check.md)).
@@ -79,17 +80,11 @@ without proof; `token-file` has no request accounting or revocation by `run`.
 
 ### R4. The runner's user loses root before the agent runs
 
-Setup locks general sudo and polkit by default, closes root-equivalent
-group access. Setup validates known privileged binary metadata, and refuses a
-host without the world-write policy, which keeps every user but the owner,
-the runner's included, from changing a world-writable root-filesystem object.
-Setuid-root programs no package owns are not searched for, so a trusted image
-without such helpers is required. The runner retains
-only the root-owned helper's fixed operations. `ptrace_scope` is raised
-to at least 1. The runner-lock probes test these restrictions.
-`sandbox.lock-runner = false` deliberately gives up this requirement.
-Existing privileged services and kernel flaws remain outside the lock's
-guarantee. See [the helper and lock](sandbox-check.md#after-setup-nothing-has-root).
+secure-host's lock meets this for every later step, the agent included
+([R4 there](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r4-the-runners-user-loses-root-before-untrusted-steps-run)).
+The agent needs no root: the root-owned helper's fixed operations are
+what `run` uses to enter and clean up after the sandbox user
+([the helper](sandbox-check.md#the-helper)).
 
 ### R5. Nothing of the agent's outlives the run
 
@@ -139,7 +134,8 @@ action performs require separate review.
 
 ### R10. What the guarantees depend on
 
-Use a disposable Linux VM with systemd 257 or later, sudo and nftables.
+The host's dependencies are secure-host's
+([R10 there](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r10-what-the-guarantees-depend-on)).
 Trust and protect the caller ref containing bounds and setup configuration.
 Give each job minimal permissions; notification and apply jobs inherit
 the caller's grant. Limit an apply environment to trusted refs. Targets
@@ -149,8 +145,9 @@ conditions of [private repositories](private-repositories.md).
 
 ### R11. Lints are not boundaries
 
-There is no compiler lint for a caller's secrets, shell or environment.
-Sandbox entry drops the job environment regardless of those choices.
+As for any job ([R11 there](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r11-lints-are-not-boundaries)). For the
+agent, sandbox entry drops the job environment regardless of a caller's
+secrets, shell or environment.
 
 ### R12. Untrusted text never becomes privileged code
 

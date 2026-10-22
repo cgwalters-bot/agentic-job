@@ -3,7 +3,7 @@ description: >-
   CI's stand-in for a third-party JavaScript action, run after secure-host:
   its main step and the post step the runner registers for it each run the
   confinement probe, and either fails the job if a route to root or the
-  metadata service is open (docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
+  metadata service is open (cgwalters-forge/actions's secure-host/docs/evidence.md).
 runs:
   using: node24
   main: main.mjs

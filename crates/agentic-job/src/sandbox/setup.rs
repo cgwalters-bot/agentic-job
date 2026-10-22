@@ -13,8 +13,8 @@
 //! sudo. It ends by taking that away ([`lock_runner`]): every step after
 //! it, the supervisor (`sandbox check`, `run`) and the job's own, runs as
 //! an unprivileged user that has root do only what the helper allows
-//! ([`super::helper`]). docs/sandbox-check.md says what that closes and
-//! how the probes prove it.
+//! ([`super::helper`]). cgwalters-forge/actions's secure-host/docs/setup.md
+//! says what that closes, and its probes.md how the probes prove it.
 
 use std::fs;
 use std::io::{ErrorKind, Write};

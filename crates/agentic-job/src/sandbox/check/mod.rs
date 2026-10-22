@@ -10,7 +10,7 @@
 //! with `[sandbox.check] before-agent` and the host test that removes
 //! protections calls it. None of them is of the run token: those are
 //! `run`'s own (`crate::run::probe`), made once the token is in place.
-//! docs/sandbox-check.md lists them all.
+//! cgwalters-forge/actions's secure-host/docs/probes.md lists them all.
 //!
 //! The probes are methods of `Checker` in the modules under this one:
 //! `on_host`, `runner` (the runner's own user, which setup

@@ -149,7 +149,7 @@ inference broker with the job's identity token. With `id-token: write`
 any step of a job, and anything that becomes the runner's user, can
 mint identity tokens for any audience, not only the broker's: a cloud
 whose trust policy admits this repository would take them
-([secure-host.md](secure-host.md#one-trust-level-for-the-rest-of-the-job)).
+([one trust level for the rest of the job](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)).
 So `agentic-job.yml` registers in a job of its own, `register`, before
 the agent's. It has `id-token: write` and no other permission, checks
 out nothing, and runs only the policy job's binary
@@ -429,7 +429,7 @@ Leave alone what `prepare` wrote: `.agentic-job`, `.agentic-job-source`
 and `/usr/local/bin/agentic-job`. Leave no credential on the machine:
 the agent is the runner's user and can read whatever that user can. A step that has to undo
 itself at the end of the job can do so only without sudo
-([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
+([what a job has to know](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#what-a-job-has-to-know)).
 
 **Your later steps** go after `run`. They run as the runner's user, the
 agent's, without sudo, after the agent's outputs were uploaded. They can
@@ -906,7 +906,7 @@ cannot reach a private proxy.
   the Claude Agent SDK); `agent: opencode` defaults to `opencode-ai@1.18.35`.
   Both come from tarballs pinned in the binary, every dependency included,
   installed without npm or install scripts (`setup.agents`, see
-  [the sandbox](sandbox.md#what-sandbox-setup-does)), and are for x86-64
+  [the sandbox](sandbox.md#what-setup-does-for-an-agent)), and are for x86-64
   Linux with glibc: setup refuses another OS or CPU before it changes
   anything, but does not detect musl. Set `npm` to exact
   `NAME@VERSION` pins to install with npm instead; those do not pin
@@ -1004,7 +1004,7 @@ systemd 257 or later (for `run0`), and `apt-get` or `dnf`. `sandbox
 setup` refuses a machine it has set up before, and ends by taking root
 away from the runner's user: every step after it, this workflow's and
 the actions' cleanup steps, runs without it
-([docs/sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)),
+([the lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock)),
 which is one more reason the machine must not be one that runs another
 job afterwards. `runner` is for the other
 three jobs and defaults to `ubuntu-24.04`; where no release fits the
@@ -1937,7 +1937,7 @@ The retry and requirements-file regression tests already address part of
 [#108](https://github.com/cgwalters-forge/agentic-job/issues/108). That issue
 still tracks a CI embedded-source scan that handles `concat!` and multiline macros. The
 world-write walk it also tracked is gone, replaced by the access-time
-policy ([secure-host.md](secure-host.md#access-time-world-write-policy)).
+policy ([world-write](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/world-write.md#access-time-world-write-policy)).
 Source-attested prebuilt releases now replace manual release pins;
 their trust model is described below.
 

@@ -1,6 +1,7 @@
 # A job that runs no agent, as another repository would write one: it
 # secures its host first and then builds and tests as any job does.
-# docs/secure-host.md says what the step does and what a job has to know.
+# cgwalters-forge/actions/secure-host's docs/setup.md says what the step
+# does and what a job has to know.
 #
 # The order is the whole of it. Everything that needs root comes before
 # the step, which is the last thing in the job to have it. After it every

@@ -114,7 +114,7 @@ test('an orphan that is gone or not this user\'s proves nothing', () => {
 
 test('the action probes in both its main and its post step', () => {
   // Without a post entry the runner runs no post step, and the job passes
-  // without the proof docs/secure-host.md claims.
+  // without the proof secure-host's threat model claims.
   const dir = path.dirname(fileURLToPath(import.meta.url));
   const action = fs.readFileSync(path.join(dir, 'action.yml'), 'utf8');
   for (const [key, file, label] of [['main', 'main.mjs', 'action'], ['post', 'post.mjs', 'post']]) {

@@ -4,7 +4,8 @@
 #
 #   podman build --file secure-host/Containerfile dist
 #
-# and run by root podman with the host's root at /host (docs/secure-host.md):
+# and run by root podman with the host's root at /host
+# (cgwalters-forge/actions's secure-host/docs/setup.md):
 #
 #   sudo podman run --rm --privileged --pid=host --network=none -v /:/host IMAGE@sha256:... CONFIG
 FROM scratch

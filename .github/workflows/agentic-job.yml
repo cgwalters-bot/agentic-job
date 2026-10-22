@@ -210,7 +210,7 @@ on:
       egress-write-policy:
         description: >-
           Hold the agent job's every process after secure-host, the agent's included, to the egress
-          proxy's write rules (egress.write-policy, docs/secure-host.md#egress-write-policy-opt-in):
+          proxy's write rules (egress.write-policy, docs/secure-host.md#the-egress-write-policy-for-an-agent-job):
           writes only where a rule allows and to the inference proxy on the tailnet. The agent keeps
           the runner's own Actions-service writes, so a private caller or target stays refused.
           False leaves it to the `config` file, where it is off by default
