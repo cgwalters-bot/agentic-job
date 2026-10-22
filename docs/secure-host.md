@@ -638,7 +638,9 @@ It gets the `agentic-job` binary (below), runs `agentic-job sandbox
 setup` as root, and then `agentic-job sandbox check`. Setup, once, on a
 machine that is thrown away after the job:
 
-- creates a second unprivileged user, the sandbox user, with its own
+- unless `sandbox.create-user = false`
+  ([below](#one-trust-level-for-the-rest-of-the-job)), creates a second
+  unprivileged user, the sandbox user, with its own
   home and subordinate uids, and closes to it the runner's home, the
   job's directories and everything else a runner image leaves open to
   every local user: world-writable system paths, the image's
@@ -883,6 +885,19 @@ After it, no later step has root:
   needs `sandbox.lock-runner`, because with sudo the runner's user could
   clear the rule's map.
 
+None of this needs the sandbox user. Setup still makes it by default, so a
+job can start an agent as it without another setup: a second uid that
+cannot read the runner's processes or home, has no sudo (not even the
+helper's rule), never gets the job's variables, reaches the network only
+as its uids' rules allow and leaves nothing running
+([what it adds](sandbox.md#what-the-sandbox-user-adds)). The one way in is
+`helper enter`, through the runner's one sudo rule. A host that runs
+nothing as another user sets `sandbox.create-user = false`: no user, a
+sudoers file with the runner's lines alone, every rule above unchanged,
+and `sandbox check` probing the runner's user and the host only. Setup
+refuses that with `setup.tools`, `setup.script`, an agent,
+`sandbox.filesystem-view` or `sandbox.groups`, which are the user's.
+
 The kernel has no way to change another process's credentials. So the
 runner's processes, and every step they start, keep the supplementary
 groups they started with: `docker` is still in a step's `id -G` after the
@@ -912,7 +927,12 @@ Worker's diagnostic sockets as well: the control must reach one, each
 step after the action none. The control records the Worker's pid for
 the later probes, which the rule keeps from seeing their ancestors. The check
 that the action runs adds `runner-metadata` and `runner-metadata-v6`
-([sandbox-check.md](sandbox-check.md#the-network-probes)). Only hosted Ubuntu
+([sandbox-check.md](sandbox-check.md#the-network-probes)). The same job
+enters the sandbox user through `helper enter` and proves it exists, has no
+sudo and is refused the metadata service; `secure-host-no-user` sets
+`sandbox.create-user = false` and proves that setup and `sandbox check`
+pass with no such user, and that `sudo -l` ends with the deny rule and the
+helper's grant. Only hosted Ubuntu
 26.04 runs this proof; RHEL 10 is unverified. A hosted runner serves no
 IPv6 metadata address, so the IPv6 refusal has a unit test of its rule and a
 probe without a control, not a hosted proof.

@@ -383,19 +383,25 @@ pub fn rules_with_resolvers(
             PROXY_DENIED_V6.join(", ")
         )
     });
+    // nft refuses an empty element list; a set without one matches no uid
+    // (`sandbox.create-user = false`), and the runner's rules stay.
+    let sandbox_elements = if uids.is_empty() {
+        String::new()
+    } else {
+        format!(" elements = {{ {} }}", uids.join(", "))
+    };
     format!(
         "table inet {TABLE}
 delete table inet {TABLE}
 table inet {TABLE} {{
-  set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{runner_set}{tailnet_set}{write_set}{write_chain}
+  set sandbox_uids {{ type uid; flags interval;{sandbox_elements} }}{runner_set}{tailnet_set}{write_set}{write_chain}
   chain output {{
     type filter hook output priority 0; policy accept;
     meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject
     meta skuid @sandbox_uids ip6 daddr {METADATA_V6_ADDRESS} counter reject{runner_rules}{write_rules}{session_rules}{tailnet_rules}{egress_rules}
   }}
 }}
-",
-        uids.join(", ")
+"
     )
 }
 
@@ -584,6 +590,14 @@ table inet runner_sandbox {
             ),
             rules(&["1002".to_owned()], &[], Some(993))
         );
+        // No sandbox user: the set is empty, and the runner's rules hold.
+        let alone = rules_with_resolvers(&[], &[], Some(993), &[], &runner, None, &[]);
+        assert!(
+            alone.contains("\n  set sandbox_uids { type uid; flags interval; }\n"),
+            "{alone}"
+        );
+        assert_eq!(alone.matches("@runner_uids").count(), 2);
+        assert!(!alone.contains("elements = {  }"));
     }
 
     /// `egress.write-policy`: the runner's new HTTP and HTTPS connections

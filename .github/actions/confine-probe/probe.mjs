@@ -8,8 +8,11 @@
 // each must work, and after it from a `run:` step and from this
 // directory's action, in its main step and its post step, where each must fail
 // (docs/secure-host.md#one-trust-level-for-the-rest-of-the-job).
+// Its `sandbox-user` and `no-user` modes probe, after the lock, the
+// sandbox user setup makes by default, and a host that opted out of it
+// (sandbox.create-user = false).
 //
-//   node probe.mjs control|confined LABEL
+//   node probe.mjs control|confined|sandbox-user|no-user LABEL
 //
 // It writes what it found to $RUNNER_TEMP/confine/LABEL.json for the
 // job's artifact, and to its log. The post step's record is only in its
@@ -44,6 +47,10 @@ const COMMAND_MS = 10_000;
 
 const METADATA_MS = 5_000;
 
+// A run0 session's start, then the command: more than COMMAND_MS, so
+// that a slow start is not taken for a refusal.
+const ENTER_MS = 60_000;
+
 const WORKER_COMM = 'Runner.Worker';
 
 // A step's process is the Worker's child (an action's), or its grandchild
@@ -58,13 +65,91 @@ export const MODES = {
   // After it: none, and its own world-writable file still takes a write,
   // so the refusal of the root-owned one is the policy's, not every write's.
   confined: ['sudo', 'docker', 'world-write', 'metadata', 'environ', 'worker-diagnostics', 'owner-write'],
+  // After it, the sandbox user setup made by default, entered the one way
+  // there is (`helper enter`, whose success is the control): no sudo, no
+  // metadata service.
+  'sandbox-user': ['user', 'user-enter', 'user-sudo', 'user-metadata'],
+  // After it with sandbox.create-user = false: no such user, and the
+  // runner's sudo is the helper's rule and nothing else.
+  'no-user': ['user', 'sudo', 'sudo-true-listed', 'sudo-rules', 'helper'],
 };
 
-const WANT_SUCCESS = new Set(['owner-write']);
+const WANT_SUCCESS = {
+  confined: ['owner-write'],
+  'sandbox-user': ['user', 'user-enter'],
+  'no-user': ['sudo-rules', 'helper'],
+};
 
-/** Whether a probe must succeed in `mode`: everything in control, and only the owner's own write once confined. */
+/** Whether a probe must succeed in `mode`: everything in control, and only those `WANT_SUCCESS` names otherwise. */
 export function wanted(mode, name) {
-  return mode === 'control' || WANT_SUCCESS.has(name);
+  return mode === 'control' || (WANT_SUCCESS[mode] ?? []).includes(name);
+}
+
+// The root-owned copy of agentic-job that the runner's one sudo rule names
+// (sandbox::setup::SELF_COPY), and the user setup makes by default: the
+// configurations CI probes name no other.
+const HELPER = '/usr/local/libexec/agentic-job';
+
+export const SANDBOX_USER = 'runner-sandbox';
+
+/** The rules of a `sudo -l` listing, normalized as sandbox::check::runner::sudo_rules does. */
+export function sudoRules(listing) {
+  return listing.split('\n').map(line => line.trim()).filter(line => line.startsWith('('))
+    .map(line => line.split(/\s+/).join(' '));
+}
+
+/** Whether `rules` end with the lock's deny rule and the helper's grant, which win over any before them. */
+export function lockedRules(rules) {
+  const want = ['(ALL : ALL) !ALL', `(root) NOPASSWD: ${HELPER} helper *`];
+  return rules.length >= want.length && want.every((rule, i) => rules[rules.length - want.length + i] === rule);
+}
+
+/** The home of `user` from a `getent passwd` line, or null. */
+export function homeOf(passwd) {
+  const fields = passwd.trim().split(':');
+  return fields.length === 7 && fields[5].startsWith('/') ? fields[5] : null;
+}
+
+function output(argv) {
+  const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: COMMAND_MS });
+  return result.status === 0 ? result.stdout : null;
+}
+
+/**
+ * Whether ARGV succeeds as the sandbox user, entered through the helper in
+ * HOME. Its streams are pipes, which libuv makes as socket pairs: run0 hands
+ * them to PID 1, which refuses /dev/null (sandbox::enter::Entry::command).
+ */
+function runsAsSandbox(home, argv) {
+  const command = ['sudo', '-n', '--', HELPER, 'helper', 'enter', '--chdir', home, '--', ...argv];
+  const result = spawnSync(command[0], command.slice(1), { input: '', timeout: ENTER_MS });
+  return result.status === 0;
+}
+
+// What the sandbox user does, or that there is none, as the runner's user.
+function userResults(mode) {
+  const passwd = output(['getent', 'passwd', SANDBOX_USER]);
+  const home = passwd === null ? null : homeOf(passwd);
+  if (mode === 'no-user') {
+    const listing = output(['sudo', '-n', '-l']);
+    return {
+      user: passwd !== null,
+      sudo: runs(['sudo', '-n', 'true']),
+      // sudo's own answer for an ordinary command, which the lock refuses.
+      'sudo-true-listed': runs(['sudo', '-n', '-l', '/usr/bin/true']),
+      'sudo-rules': listing !== null && lockedRules(sudoRules(listing)),
+      helper: runs(['sudo', '-n', '--', HELPER, 'helper', 'ping']),
+    };
+  }
+  if (home === null) return { user: false };
+  return {
+    user: true,
+    'user-enter': runsAsSandbox(home, ['true']),
+    'user-sudo': runsAsSandbox(home, ['sudo', '-n', 'true']),
+    // Around the egress proxy its environment names, whose refusal would
+    // otherwise stand in for the rule on its uid.
+    'user-metadata': runsAsSandbox(home, ['curl', '-sf', '--noproxy', '*', '-o', '/dev/null', '-m', String(METADATA_MS / 1000), '-H', 'Metadata: true', METADATA_URL]),
+  };
 }
 
 /** The probes of `mode` whose result is not what it must be, as messages. */
@@ -228,14 +313,19 @@ export async function probe(mode, label) {
   if (!/^[a-z0-9-]+$/.test(label)) throw new Error(`label ${JSON.stringify(label)}`);
   const out = path.join(temp, 'confine');
   fs.mkdirSync(out, { recursive: true });
-  const results = {
-    sudo: runs(['sudo', '-n', 'true']),
-    docker: runs(['docker', 'info']),
-    'world-write': opensForWrite(fixture()),
-    metadata: await reachesMetadata(),
-    environ: readsOrphan(temp),
-    'worker-diagnostics': await reachesWorker(mode, temp),
-  };
+  let results;
+  if (mode === 'sandbox-user' || mode === 'no-user') {
+    results = userResults(mode);
+  } else {
+    results = {
+      sudo: runs(['sudo', '-n', 'true']),
+      docker: runs(['docker', 'info']),
+      'world-write': opensForWrite(fixture()),
+      metadata: await reachesMetadata(),
+      environ: readsOrphan(temp),
+      'worker-diagnostics': await reachesWorker(mode, temp),
+    };
+  }
   if (mode === 'confined') {
     results['owner-write'] = opensForWrite(ownerFile(temp, label));
   }
@@ -269,7 +359,7 @@ export async function probe(mode, label) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [mode, label] = process.argv.slice(2);
   if (!MODES[mode] || !label) {
-    console.error('usage: probe.mjs control|confined LABEL');
+    console.error(`usage: probe.mjs ${Object.keys(MODES).join('|')} LABEL`);
     process.exit(2);
   }
   await probe(mode, label);

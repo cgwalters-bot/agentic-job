@@ -212,6 +212,19 @@ impl Config {
     pub fn check_host(&self) -> Result<Host> {
         self.sandbox.validate()?;
         self.setup.validate()?;
+        // Each runs as the sandbox user, which setup would not make.
+        if !self.sandbox.create_user {
+            for (set, key) in [
+                (self.setup.tools.is_some(), "setup.tools"),
+                (self.setup.script.is_some(), "setup.script"),
+                (!self.agent.name.is_empty(), "agent.name"),
+            ] {
+                ensure!(
+                    !set,
+                    "{key} needs sandbox.create-user: it runs as the sandbox user"
+                );
+            }
+        }
         // Keep setup's closed installer set and run's child set together:
         // accepting a child whose runtime is absent fails only after setup.
         ensure!(
@@ -1012,6 +1025,18 @@ model = \"m\"
         let write_policy = Config::parse("[egress]\nwrite-policy = true\n").unwrap();
         assert!(write_policy.check_host().is_ok());
         assert!(!Config::default().egress.write_policy);
+        // No sandbox user: the runner's hardening, everything else as before.
+        let no_user = "[sandbox]\ncreate-user = false\nclose-resolved = true\n[egress]\nproxy = true\nwrite-policy = true\n";
+        assert!(Config::parse(no_user).unwrap().check_host().is_ok());
+        const NO_USER: &str = "[sandbox]\ncreate-user = false\n";
+        let tools = "[setup.tools]\nrepository = \"https://example.org/t.git\"\nrevision = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nrecipe = \"install\"\n";
+        let script = "[setup]\nscript = \"/tmp/setup.sh\"\n";
+        // What runs as the sandbox user, accepted with it and refused without.
+        for more in [tools, script, FAKE] {
+            assert!(Config::parse(more).unwrap().check_host().is_ok(), "{more}");
+            let config = Config::parse(&format!("{NO_USER}{more}")).unwrap();
+            assert!(config.check_host().is_err(), "{more}");
+        }
         for bad in [
             "[sandbox]\nuser = \"root\"\n",
             "[setup]\npackages = [\"--installroot=/\"]\n",

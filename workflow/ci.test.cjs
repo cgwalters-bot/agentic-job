@@ -18,7 +18,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
   full: ['lint', 'rust', 'vibe', 'claude-acp', 'corpus', 'static', 'confined', 'confined-cleanup'],
-  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'world-write', 'world-write-runtime', 'secure-host-image', 'secure-host-write-policy'],
+  host: ['session-sandbox', 'sandbox', 'secure-host', 'secure-host-options', 'secure-host-no-user', 'world-write', 'world-write-runtime', 'secure-host-image', 'secure-host-write-policy'],
   e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
@@ -620,7 +620,7 @@ test('the public secure-host forwards to the pinned new action and refuses the o
   assert.doesNotMatch(published, /\n {8}with:|steps\.host\.outputs/);
   // This repository's jobs that secure a host take the forwarder with this
   // revision's image, and none takes a shell other than the runner's.
-  for (const job of ['secure-host-options', 'world-write-runtime']) {
+  for (const job of ['secure-host-options', 'secure-host-no-user', 'world-write-runtime']) {
     assert.match(block(job), /uses: \.\/secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}\/image\/secure-host\.tar\n/, job);
     assert.doesNotMatch(block(job), /shell:/, job);
   }

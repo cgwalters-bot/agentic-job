@@ -210,12 +210,10 @@ fn systemd_notification_socket(name: &str) -> bool {
 }
 
 impl Checker<'_> {
-    /// No sudo, no polkit action, no lingering user manager.
-    pub(super) fn privileges(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
-        // The runner's user has root do something for it: everything
-        // after setup, through the helper; or sudo itself where the
-        // machine is not locked.
+    /// The runner's user has root do something for it: everything after
+    /// setup, through the helper; or sudo itself where the machine is not
+    /// locked.
+    pub(super) fn root_control(&mut self) {
         self.report.expect(
             Want::Succeed,
             "sudo-control",
@@ -225,6 +223,12 @@ impl Checker<'_> {
             ),
             self.root.ping(),
         );
+    }
+
+    /// No sudo, no polkit action, no lingering user manager.
+    pub(super) fn privileges(&mut self) -> Result<()> {
+        let user = self.user()?.to_owned();
+        self.root_control();
         let got = self.sandbox_succeeds(&["sudo", "-n", "true"])?;
         self.report
             .expect(Want::Fail, "sudo", format!("{user} has no sudo"), got);
@@ -298,7 +302,7 @@ impl Checker<'_> {
     /// The runner's processes' environments are closed to the sandbox
     /// user. Returns every environment it can read, NUL-separated.
     pub(super) fn environments(&mut self) -> Result<Vec<u8>> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         let decoy = Decoy::start(&self.canary)?;
         self.report.expect(
             Want::Succeed,
@@ -392,7 +396,7 @@ impl Checker<'_> {
                 b"",
             )?
             .stdout;
-        let home = format!("HOME={}", self.entry.home().display());
+        let home = format!("HOME={}", self.entry()?.home().display());
         self.report.expect(
             Want::Succeed,
             "environ-control-sandbox",
@@ -428,7 +432,7 @@ impl Checker<'_> {
     /// step's environment when the job may have one, this process's too;
     /// what runs as the sandbox user starts without them.
     pub(super) fn job_variables(&mut self, environs: &[u8]) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         let values: Vec<(&str, String)> = OIDC_REQUEST_VARS
             .iter()
             .filter_map(|&name| Some((name, std::env::var(name).ok().filter(|v| !v.is_empty())?)))
@@ -450,7 +454,7 @@ impl Checker<'_> {
         }
         let env = self.sandbox(&["env"], b"")?.stdout;
         let env = String::from_utf8_lossy(&env);
-        let home = format!("HOME={}", self.entry.home().display());
+        let home = format!("HOME={}", self.entry()?.home().display());
         self.report.expect(
             Want::Succeed,
             "env-control",
@@ -481,7 +485,7 @@ impl Checker<'_> {
     /// The directories setup closed, the directory this runs in, and
     /// what on the root filesystem any user may write.
     pub(super) fn files(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         self.report.expect(
             Want::Succeed,
             "private-dir-control",
@@ -550,8 +554,15 @@ impl Checker<'_> {
         if self.config.sandbox.filesystem_view {
             self.filesystem_view()?;
         }
+        self.runner_world_write()?;
         self.world_write()?;
+        self.host_files();
+        Ok(())
+    }
 
+    /// What of the files any user could change or reach, whichever users
+    /// there are: no sandbox user is needed to probe it.
+    pub(super) fn host_files(&mut self) {
         let scope = std::fs::read_to_string(PTRACE_SCOPE).unwrap_or_default();
         self.report.expect(
             Want::Succeed,
@@ -609,18 +620,17 @@ impl Checker<'_> {
             ),
             !writable.is_empty(),
         );
-        Ok(())
     }
 
     /// The world-write policy, by what it does: ordinary permissions let
     /// any user create in the planted directory and append to the planted
     /// file, and the policy must refuse both to the runner's user and to
-    /// the sandbox user, neither of which owns them. No denial log is
-    /// read. Each user's control is the same attempt in its own home. The
-    /// runner has no view, so its probe proves the policy alone; under the
-    /// view the sandbox user's attempt also meets a read-only mount.
-    fn world_write(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+    /// the sandbox user ([`Self::world_write`]), neither of which owns
+    /// them. No denial log is read. Each user's control is the same
+    /// attempt in its own home. The runner has no view, so its probe
+    /// proves the policy alone; under the view the sandbox user's attempt
+    /// also meets a read-only mount.
+    pub(super) fn runner_world_write(&mut self) -> Result<()> {
         let created = format!("{}/{}", setup::WORLD_WRITE_PROBE_DIR, self.canary);
         let home_writable = create_and_remove(&self.runner.home.join(&self.canary))?;
         self.report.expect(
@@ -644,7 +654,14 @@ impl Checker<'_> {
             ),
             wrote,
         );
-        let home = self.entry.home().join(&self.canary);
+        Ok(())
+    }
+
+    /// [`Self::runner_world_write`], as the sandbox user.
+    fn world_write(&mut self) -> Result<()> {
+        let user = self.user()?.to_owned();
+        let created = format!("{}/{}", setup::WORLD_WRITE_PROBE_DIR, self.canary);
+        let home = self.entry()?.home().join(&self.canary);
         let control = self.sandbox_succeeds(&[
             "sh",
             "-c",
@@ -711,7 +728,7 @@ impl Checker<'_> {
                     self.sandbox_succeeds(&["sh", "-c", script, "sh", path])
                 }
             };
-            let control = self.entry.home().join(&self.canary);
+            let control = self.entry()?.home().join(&self.canary);
             let control = attempt(&control.display().to_string())?;
             let wrote = attempt(&outside)?;
             self.report.expect(
@@ -728,7 +745,7 @@ impl Checker<'_> {
             );
         }
         let nested = "mount -o remount,rw / 2>/dev/null || :; f=$1; : > \"$f\" && rm -f -- \"$f\"";
-        let control = self.entry.home().join(&self.canary);
+        let control = self.entry()?.home().join(&self.canary);
         let works = self.sandbox_diagnosed(
             "filesystem-view-nested-control",
             &[
@@ -821,7 +838,7 @@ impl Checker<'_> {
     /// cron and at would run the sandbox user's commands outside any
     /// session, after the supervisor has stopped everything it can see.
     pub(super) fn schedulers(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         if host::has_program("crontab") {
             let listed = Command::new("crontab")
                 .arg("-l")
@@ -905,7 +922,7 @@ impl Checker<'_> {
     /// one is a path, since the prober reports abstract sockets without
     /// trying them.
     pub(super) fn local_services(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         let control_path = format!("/tmp/agentic-job-{}.sock", self.canary);
         let control_unix =
             UnixListener::bind(&control_path).context("listening on a socket in /tmp")?;
@@ -941,7 +958,7 @@ impl Checker<'_> {
             .iter()
             .map(|&socket| socket.to_owned())
             // Its own session's: its bus and its systemd manager.
-            .chain([format!("/run/user/{}/", self.entry.user().uid)])
+            .chain([format!("/run/user/{}/", self.entry()?.user().uid)])
             .chain(check.allow_sockets.iter().cloned())
             .collect();
         let (unix, tcp): (Vec<&Reached>, Vec<&Reached>) = reached
@@ -1007,7 +1024,7 @@ impl Checker<'_> {
     /// subordinate uids are refused by the same means (see
     /// `setup::resolved`), and are not tried apart.
     pub(super) fn resolved(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         // Not running is not enough: the sandbox user's own call would
         // start it.
         if !resolved::startable()? {
@@ -1098,7 +1115,7 @@ impl Checker<'_> {
     /// Through its LocalAPI, tailscaled would dial and list the tailnet
     /// for anyone, whatever the packet filter says.
     pub(super) fn tailscaled(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         // Its socket is in a directory setup closed, so the daemon is
         // looked for by its process, which any user sees.
         if !host::succeeds(Command::new("pgrep").args(["-x", "tailscaled"])) {

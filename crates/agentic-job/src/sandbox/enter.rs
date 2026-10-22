@@ -71,6 +71,10 @@ impl Entry {
     /// The sandbox user of `config`, which `sandbox setup` has created.
     pub fn new(config: &Config) -> Result<Self> {
         let host = config.check_host()?;
+        ensure!(
+            config.sandbox.create_user,
+            "sandbox.create-user = false: there is no sandbox user to enter"
+        );
         let name = &config.sandbox.user;
         let user = User::lookup(name)?
             .with_context(|| format!("no user {name}: `agentic-job sandbox setup` creates it"))?;

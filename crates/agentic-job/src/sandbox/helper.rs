@@ -109,13 +109,24 @@ pub fn run(op: &Op) -> Result<Exit> {
     ensure!(host::is_root(), "`{COMMAND}` runs as root, through sudo");
     program_dirs_are_roots()?;
     let config = root_config()?;
-    let entry = Entry::new(&config)?;
-    let user = entry.user();
+    // With sandbox.create-user = false there is no one to enter, reap or
+    // clean up after; the rest, the lock's proof (ping) first, still works.
+    let entry = if config.sandbox.create_user {
+        Some(Entry::new(&config)?)
+    } else {
+        config.check_host()?;
+        None
+    };
+    let sandbox = || {
+        entry
+            .as_ref()
+            .context("sandbox.create-user = false: there is no sandbox user")
+    };
     let exec = Direct;
     match op {
         Op::Ping => Ok(Exit::Success),
-        Op::Enter { chdir, argv } => enter(&entry, chdir, argv),
-        Op::Reap => reap(user.uid, &exec).map(|()| Exit::Success),
+        Op::Enter { chdir, argv } => enter(sandbox()?, chdir, argv),
+        Op::Reap => reap(sandbox()?.user().uid, &exec).map(|()| Exit::Success),
         Op::EgressLogSize => {
             match open_log()? {
                 Some(file) => println!("{}", file.metadata().context("reading the log")?.len()),
@@ -140,8 +151,14 @@ pub fn run(op: &Op) -> Result<Exit> {
             super::session::serve().map(|()| Exit::Success)
         }
         Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
-        Op::DisableLinger => passthrough(&exec, &["loginctl", "disable-linger", "--", &user.name]),
-        Op::CrontabRemove => passthrough(&exec, &["crontab", "-r", "-u", &user.name]),
+        Op::DisableLinger => {
+            let user = &sandbox()?.user().name;
+            passthrough(&exec, &["loginctl", "disable-linger", "--", user])
+        }
+        Op::CrontabRemove => {
+            let user = &sandbox()?.user().name;
+            passthrough(&exec, &["crontab", "-r", "-u", user])
+        }
     }
 }
 

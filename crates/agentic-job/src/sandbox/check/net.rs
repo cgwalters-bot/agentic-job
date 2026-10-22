@@ -99,7 +99,7 @@ impl Checker<'_> {
     /// rootless container: no cloud metadata service, and then what the
     /// egress proxy and the direct endpoints add.
     pub(super) fn network(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         let url = self.config.sandbox.check.control_url.clone();
         let image = self.config.sandbox.check.container_image.clone();
         let egress = self.config.egress.proxy;
@@ -131,23 +131,9 @@ impl Checker<'_> {
                 })
             });
             let mut results = results.into_iter();
-            let got = results.next().expect("three metadata results")?;
-            self.report.expect(
-                Want::Fail,
-                "runner-metadata",
-                format!("{runner} can't reach the instance metadata service (sandbox.deny-runner-metadata)"),
-                got,
-            );
-            let got = results.next().expect("three metadata results")?;
-            self.report.expect(
-                Want::Fail,
-                "runner-metadata-v6",
-                format!("{runner} can't reach the instance metadata service over IPv6 (sandbox.deny-runner-metadata)"),
-                got,
-            );
-            self.report.note(&format!(
-                "{runner} is refused the instance metadata service as well, so the probes of it have no control"
-            ));
+            let v4 = results.next().expect("three metadata results")?;
+            let v6 = results.next().expect("three metadata results")?;
+            self.report_runner_metadata(&runner, v4, v6);
             let got = results.next().expect("three metadata results")?;
             self.report.expect(
                 Want::Fail,
@@ -251,6 +237,42 @@ impl Checker<'_> {
         Ok(())
     }
 
+    /// `sandbox.deny-runner-metadata` alone, where there is no sandbox
+    /// user to probe beside it (`sandbox.create-user = false`).
+    pub(super) fn runner_metadata(&mut self) -> Result<()> {
+        let runner = self.runner.name.clone();
+        let metadata = direct(&["-H", "Metadata:true", METADATA_URL]);
+        let metadata_v6 = direct(METADATA_V6);
+        let requests = [&metadata, &metadata_v6];
+        let results = super::concurrently(&requests, |argv| super::runner_reaches(argv));
+        let mut results = results.into_iter();
+        let v4 = results.next().expect("two metadata results");
+        let v6 = results.next().expect("two metadata results");
+        self.report_runner_metadata(&runner, v4, v6);
+        Ok(())
+    }
+
+    /// Whether `runner` reached the metadata service at its two addresses.
+    fn report_runner_metadata(&mut self, runner: &str, v4: bool, v6: bool) {
+        self.report.expect(
+            Want::Fail,
+            "runner-metadata",
+            format!(
+                "{runner} can't reach the instance metadata service (sandbox.deny-runner-metadata)"
+            ),
+            v4,
+        );
+        self.report.expect(
+            Want::Fail,
+            "runner-metadata-v6",
+            format!("{runner} can't reach the instance metadata service over IPv6 (sandbox.deny-runner-metadata)"),
+            v6,
+        );
+        self.report.note(&format!(
+            "{runner} is refused the instance metadata service as well, so the probes of it have no control"
+        ));
+    }
+
     fn proxy_url(&self) -> String {
         egress::proxy_url()
     }
@@ -260,11 +282,11 @@ impl Checker<'_> {
     /// is the proxy's), going around it fails, and it reaches nothing the
     /// sandbox may not, from a container either.
     fn egress(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         let url = self.config.sandbox.check.control_url.clone();
         let proxy = self.proxy_url();
         let host_name = url_host(&url).to_owned();
-        let work = format!("{}/{EGRESS_WORK}", self.entry.home().display());
+        let work = format!("{}/{EGRESS_WORK}", self.entry()?.home().display());
         let refused = |output: Output| refused_by_proxy(&String::from_utf8_lossy(&output.stdout));
 
         let got = self.sandbox_succeeds(&proxied(&["--proxy", &proxy, &url]))?;
@@ -508,8 +530,29 @@ impl Checker<'_> {
     /// the sandbox user cannot reach the listener that serves the
     /// runner, whose rules are wider than its own.
     fn write_policy(&mut self) -> Result<()> {
+        let user = self.user()?.to_owned();
+        self.runner_write_policy();
+        let address = egress::PROXY_HOST.to_string();
+        let listener = tcp_probe(&address, egress::TRANSPARENT_PORT);
+        let listener: Vec<&str> = listener.iter().map(String::as_str).collect();
+        let what = format!(
+            "the runner's listener at {address}:{}",
+            egress::TRANSPARENT_PORT
+        );
+        self.attempts(&[
+            Attempt::control("write-policy-listener-control", &what, &listener),
+            Attempt::refused(
+                "write-policy-listener",
+                format!("{user} can't reach {what}"),
+                &listener,
+            ),
+        ])
+    }
+
+    /// The runner's half of [`Self::write_policy`], which needs no
+    /// sandbox user.
+    pub(super) fn runner_write_policy(&mut self) {
         let runner = self.runner.name.clone();
-        let user = self.user().to_owned();
         let read = direct(&["--fail", WRITE_URL]);
         self.report.expect(
             Want::Succeed,
@@ -540,21 +583,6 @@ impl Checker<'_> {
             ),
             refused_by_proxy(&super::runner_stdout(&post)),
         );
-        let address = egress::PROXY_HOST.to_string();
-        let listener = tcp_probe(&address, egress::TRANSPARENT_PORT);
-        let listener: Vec<&str> = listener.iter().map(String::as_str).collect();
-        let what = format!(
-            "the runner's listener at {address}:{}",
-            egress::TRANSPARENT_PORT
-        );
-        self.attempts(&[
-            Attempt::control("write-policy-listener-control", &what, &listener),
-            Attempt::refused(
-                "write-policy-listener",
-                format!("{user} can't reach {what}"),
-                &listener,
-            ),
-        ])
     }
 
     /// Whether the sandbox user has `program` on its path.
@@ -569,7 +597,7 @@ impl Checker<'_> {
     /// is shown as a control; once the tailnet's own rules are narrowed
     /// to the endpoint's port, only this node's addresses have one.
     fn tailnet(&mut self) -> Result<()> {
-        let user = self.user().to_owned();
+        let user = self.user()?.to_owned();
         let status = self
             .root
             .tailscale_status()

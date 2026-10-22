@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { MODES, diagnosticSockets, failures, fixtureProblem, orphanProblem } from './probe.mjs';
+import { MODES, diagnosticSockets, failures, fixtureProblem, homeOf, lockedRules, orphanProblem, sudoRules } from './probe.mjs';
 
 const all = value => Object.fromEntries(MODES.confined.map(name => [name, value]));
 
@@ -27,6 +27,52 @@ test('the control passes only when every route works before the lock', () => {
     assert.deepEqual(failures('control', { ...all(true), [name]: false }), [`${name}: failed, must succeed`]);
   }
   assert.throws(() => failures('unlocked', {}), /unknown mode/);
+});
+
+test('the sandbox user and its absence each pass only as they must', () => {
+  // [mode, the results that pass]: flipping any one fails exactly it.
+  for (const [mode, passing] of [
+    ['sandbox-user', { user: true, 'user-enter': true, 'user-sudo': false, 'user-metadata': false }],
+    ['no-user', { user: false, sudo: false, 'sudo-true-listed': false, 'sudo-rules': true, helper: true }],
+  ]) {
+    assert.deepEqual(Object.keys(passing), MODES[mode]);
+    assert.deepEqual(failures(mode, passing), []);
+    for (const name of MODES[mode]) {
+      const got = failures(mode, { ...passing, [name]: !passing[name] });
+      assert.equal(got.length, 1, `${mode} ${name}`);
+      assert.match(got[0], new RegExp(`^${name}: `));
+    }
+  }
+  // No sandbox user where one must be: the rest is not probed, and fails too.
+  assert.deepEqual(failures('sandbox-user', { user: false }), [
+    'user: failed, must succeed',
+    'user-enter: not probed, must succeed',
+    'user-sudo: not probed, must fail',
+    'user-metadata: not probed, must fail',
+  ]);
+});
+
+test('the runner keeps the helper rule and nothing after the lock', () => {
+  const helper = '(root) NOPASSWD: /usr/local/libexec/agentic-job helper *';
+  const listing = `User runner may run the following commands on host:\n    (ALL) NOPASSWD: ALL\n    (ALL : ALL) !ALL\n    (root) NOPASSWD: /usr/local/libexec/agentic-job   helper *\n`;
+  assert.deepEqual(sudoRules(listing), ['(ALL) NOPASSWD: ALL', '(ALL : ALL) !ALL', helper]);
+  assert.equal(lockedRules(sudoRules(listing)), true);
+  for (const rules of [
+    [],
+    [helper],
+    ['(ALL : ALL) !ALL'],
+    [helper, '(ALL : ALL) !ALL'],
+    ['(ALL : ALL) !ALL', helper, '(ALL) NOPASSWD: ALL'],
+    ['(ALL : ALL) !ALL', '(root) NOPASSWD: /usr/local/libexec/agentic-job helper enter *'],
+  ]) {
+    assert.equal(lockedRules(rules), false, JSON.stringify(rules));
+  }
+});
+
+test('the sandbox user is entered in its own home', () => {
+  assert.equal(homeOf('runner-sandbox:x:1002:1002::/home/runner-sandbox:/bin/bash\n'), '/home/runner-sandbox');
+  assert.equal(homeOf('runner-sandbox:x:1002:1002::relative:/bin/bash'), null);
+  assert.equal(homeOf(''), null);
 });
 
 test('a fixture that DAC would refuse anyway proves nothing', () => {

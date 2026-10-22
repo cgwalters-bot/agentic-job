@@ -312,10 +312,15 @@ fn once(
 /// runner's user. `Err` is a probe that could not be made at all; a
 /// probe that came out wrong is in the report.
 pub fn probes(config: &Config) -> Result<Report> {
-    let entry = Entry::new(config)?;
+    let entry = if config.sandbox.create_user {
+        Some(Entry::new(config)?)
+    } else {
+        config.check_host()?;
+        None
+    };
     let checker = Checker {
         config,
-        root: entry.root(),
+        root: entry.as_ref().map_or_else(Root::detect, Entry::root),
         entry,
         runner: User::current()?,
         canary: canary()?,
@@ -343,7 +348,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 struct Checker<'a> {
     config: &'a Config,
-    entry: Entry,
+    /// None with `sandbox.create-user = false`: only the runner's user,
+    /// and the host, are probed.
+    entry: Option<Entry>,
     /// How root is had for the controls that need it.
     root: Root,
     runner: User,
@@ -353,7 +360,14 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn run(mut self) -> Result<Report> {
-        self.timed("privileges", |this| this.privileges())?;
+        if self.entry.is_some() {
+            self.timed("privileges", |this| this.privileges())?;
+        } else {
+            self.report.note(
+                "sandbox.create-user = false: there is no sandbox user, so only the runner's user and the host are probed",
+            );
+            self.root_control();
+        }
         if self.config.sandbox.lock_runner {
             self.timed("runner-privileges", |this| this.runner_privileges())?;
         }
@@ -368,6 +382,28 @@ impl Checker<'_> {
         }
         for line in self.config.sandbox.runner_rule_opt_outs(&self.runner.name) {
             self.report.note(&line);
+        }
+        if self.entry.is_none() {
+            // What of the rest needs no sandbox user to probe.
+            self.timed("runner-files", |this| {
+                this.runner_world_write()?;
+                this.host_files();
+                Ok(())
+            })?;
+            self.timed("services", |this| {
+                this.services();
+                Ok(())
+            })?;
+            if self.config.sandbox.deny_runner_metadata() {
+                self.timed("runner-metadata", |this| this.runner_metadata())?;
+            }
+            if self.config.egress.write_policy {
+                self.timed("write-policy", |this| {
+                    this.runner_write_policy();
+                    Ok(())
+                })?;
+            }
+            return Ok(self.report);
         }
         let environs = self.timed("environments", |this| this.environments())?;
         self.timed("job-variables", |this| this.job_variables(&environs))?;
@@ -388,15 +424,22 @@ impl Checker<'_> {
         super::timed::stage("check", name, || run(self))
     }
 
-    fn user(&self) -> &str {
-        &self.entry.user().name
+    /// The way into the sandbox user, which only its probes ask for.
+    fn entry(&self) -> Result<&Entry> {
+        self.entry
+            .as_ref()
+            .context("sandbox.create-user = false: no sandbox user to probe as")
+    }
+
+    fn user(&self) -> Result<&str> {
+        Ok(&self.entry()?.user().name)
     }
 
     /// Runs `argv` as the sandbox user, with a limit on its time: a probe
     /// that hangs has to fail the check, not hold the job.
     fn sandbox(&self, argv: &[&str], input: &[u8]) -> Result<Output> {
         let limited: Vec<&str> = PROBE_LIMIT.iter().chain(argv).copied().collect();
-        self.entry.run(&limited, input)
+        self.entry()?.run(&limited, input)
     }
 
     fn sandbox_succeeds(&self, argv: &[&str]) -> Result<bool> {

@@ -93,6 +93,42 @@ order, it:
   closes root-equivalent group access. [The lock and its probes](sandbox-check.md#after-setup-nothing-has-root)
   describe the remaining privileged operations.
 
+### What the sandbox user adds
+
+The lock, the world-write policy, the metadata, Worker-diagnostics and
+runner-read rules and the egress proxy harden the runner's own user, and
+every later step runs as it. The sandbox user is a second uid on top of
+that, for code that must not share the runner's: an agent. Over the
+runner's hardening it adds that the code:
+
+- cannot read the runner's processes, their environments and memory
+  (`hidepid`, Yama and the uid split), nor the runner's home and
+  `sandbox.private-dirs`, which are closed to it;
+- has no sudo at all, not even the helper's rule, and no polkit action;
+- never gets the job's variables: no `ACTIONS_*` and no OIDC request
+  credential, since its commands start from `run0` with a fixed
+  environment;
+- reaches the network only as the rules for its uids allow: never the
+  metadata service or the tailnet, and only through the egress proxy when
+  that is on;
+- leaves nothing running after the run: cron, at and lingering are denied,
+  and the supervisor stops every process of its uid (`helper reap`).
+
+There is one way in: `helper enter`, which the runner's one sudo rule
+allows and which runs a command as the sandbox user through `run0`, in a
+directory under its home, with the configured variables and nothing else.
+The account has no password, so `su` and logins do not open it.
+
+Setup makes the user by default, so that a job can start an agent without
+setting it up again. `sandbox.create-user = false` skips it for plain CI
+that runs nothing as another user: setup then makes no user, subordinate
+uids, view or probe directory of its group, and its sudoers file holds the
+runner's lines alone; the rest is as above. It refuses what would run as
+the user or shape it (`setup.tools`, `setup.script`, an agent,
+`sandbox.filesystem-view`, `sandbox.groups`, `sandbox.allow-existing-user`),
+and a host where that user already exists, which nothing would confine.
+`sandbox check` then probes only the runner's user and the host.
+
 The world-write policy applies to every user but an object's owner, the
 runner's user included, and `sandbox check` probes it for both users. The view
 is opt-in, `sandbox.filesystem-view = true`, on top of it. The view confines

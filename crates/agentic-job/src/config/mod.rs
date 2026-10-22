@@ -88,9 +88,17 @@ impl From<HostConfig> for Config {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Sandbox {
+    /// Whether `sandbox setup` creates the sandbox user, the separate uid
+    /// an agent runs as and `helper enter` is the one way into. On by
+    /// default. Off, the host hardens the runner's own user alone (the
+    /// lock, the metadata rule, the egress proxy and the rest): for plain
+    /// CI that runs nothing as another user, which then has no account
+    /// with a home, subordinate uids and a session to leave anything in.
+    pub create_user: bool,
     pub user: String,
-    /// Supplementary groups of the sandbox user.
-    pub groups: Vec<String>,
+    /// Supplementary groups of the sandbox user; unset,
+    /// [`Self::DEFAULT_GROUPS`] ([`Self::groups`]).
+    pub groups: Option<Vec<String>>,
     /// An image may ship the sandbox user; otherwise one that exists
     /// means an earlier job left it, and `sandbox setup` refuses.
     pub allow_existing_user: bool,
@@ -187,6 +195,15 @@ impl Sandbox {
     /// Variables that let a process ask for the job's identity token.
     pub const FORBIDDEN_ENV_PREFIX: &'static str = "ACTIONS_";
 
+    pub fn groups(&self) -> Vec<String> {
+        self.groups.clone().unwrap_or_else(|| {
+            Self::DEFAULT_GROUPS
+                .iter()
+                .map(|&group| group.to_owned())
+                .collect()
+        })
+    }
+
     pub fn deny_runner_metadata(&self) -> bool {
         self.deny_runner_metadata.unwrap_or(self.lock_runner)
     }
@@ -272,7 +289,20 @@ impl Sandbox {
             self.lock_runner || !self.deny_runner_reads(),
             "sandbox.deny-runner-reads needs sandbox.lock-runner: a runner's user with sudo could clear the rule"
         );
-        for group in &self.groups {
+        // What only the sandbox user has, which nothing would make.
+        ensure!(
+            self.create_user || !self.allow_existing_user,
+            "sandbox.allow-existing-user needs sandbox.create-user: without it there is no sandbox user to take from the image"
+        );
+        ensure!(
+            self.create_user || !self.filesystem_view,
+            "sandbox.filesystem-view needs sandbox.create-user: the view confines the sandbox user's commands"
+        );
+        ensure!(
+            self.create_user || self.groups.as_ref().is_none_or(Vec::is_empty),
+            "sandbox.groups needs sandbox.create-user: they are the sandbox user's groups"
+        );
+        for group in &self.groups() {
             ensure!(
                 name_ok(group),
                 "sandbox.groups: {group:?} is not a group name"
@@ -319,8 +349,9 @@ impl Sandbox {
 impl Default for Sandbox {
     fn default() -> Self {
         Self {
+            create_user: true,
             user: Self::DEFAULT_USER.to_owned(),
-            groups: Self::DEFAULT_GROUPS.iter().map(|&g| g.to_owned()).collect(),
+            groups: None,
             allow_existing_user: false,
             runner_user: None,
             lock_runner: true,
@@ -915,7 +946,23 @@ mod tests {
         assert!(!Config::default().sandbox.check.before_agent);
         config.sandbox.validate().unwrap();
         config.setup.validate().unwrap();
+        assert_eq!(config.sandbox.groups(), ["kvm", "render"]);
         Config::default().sandbox.validate().unwrap();
+        // The sandbox user is made unless a host opts out; without it the
+        // default groups mean nothing, and none named is no group at all.
+        assert!(Config::default().sandbox.create_user);
+        assert_eq!(Config::default().sandbox.groups(), Sandbox::DEFAULT_GROUPS);
+        for text in [
+            "[sandbox]\ncreate-user = false",
+            "[sandbox]\ncreate-user = false\ngroups = []",
+            "[sandbox]\ncreate-user = true\ngroups = []",
+        ] {
+            let sandbox = Config::parse(text).unwrap().sandbox;
+            sandbox
+                .validate()
+                .unwrap_or_else(|err| panic!("{text:?}: {err:#}"));
+        }
+        assert!(Config::parse("[sandbox]\ncreate_user = false").is_err());
 
         let bad = [
             "[sandbox]\nuser = \"root\"",
@@ -925,6 +972,9 @@ mod tests {
             "[sandbox]\nlock-runner = false\ndeny-runner-metadata = true",
             "[sandbox]\nlock-runner = false\nunlink-worker-diagnostics = true",
             "[sandbox]\nlock-runner = false\ndeny-runner-reads = true",
+            "[sandbox]\ncreate-user = false\nallow-existing-user = true",
+            "[sandbox]\ncreate-user = false\nfilesystem-view = true",
+            "[sandbox]\ncreate-user = false\ngroups = [\"kvm\"]",
             "[sandbox]\ngroups = [\"docker\"]",
             "[sandbox]\ngroups = [\"wheel\"]",
             "[sandbox]\nprivate-dirs = [\"relative\"]",

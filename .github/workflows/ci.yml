@@ -600,6 +600,42 @@ jobs:
           if systemctl is-active --quiet egress-proxy.service; then echo "::error::the egress proxy runs"; exit 1; fi
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
 
+  # The same step with sandbox.create-user = false: plain CI that runs
+  # nothing as another user. Setup and the action's own sandbox check pass
+  # with no sandbox user, and the lock is as it is with one.
+  secure-host-no-user:
+    needs: [changes, static]
+    if: ${{ needs.changes.outputs.host == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: secure-host-image
+          path: ${{ runner.temp }}/image
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agentic-job
+          path: ${{ runner.temp }}/dist
+      - name: The hosted configuration without the sandbox user
+        run: |
+          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
+          "$RUNNER_TEMP/agentic-job" config --host --from secure-host/hosted.toml \
+            --boolean sandbox.create-user=false > "$RUNNER_TEMP/no-user.toml"
+      - name: Secure the host from the image archive
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
+        with:
+          config: ${{ runner.temp }}/no-user.toml
+          image-archive: ${{ runner.temp }}/image/secure-host.tar
+      - run: agentic-job sandbox check
+      - name: No sandbox user, and sudo is the helper rule alone
+        run: node .github/actions/confine-probe/probe.mjs no-user no-user
+
   # The action as another repository names it, which a pull request
   # cannot do for its own commit: after a push to main, from main. The
   # runner fetches it as an archive without git; it forwards to
@@ -1889,6 +1925,10 @@ jobs:
       - run: agentic-job sandbox check --record
       - name: A run step is confined
         run: node .github/actions/confine-probe/probe.mjs confined run-step
+      # The default still makes the sandbox user: entered the one way
+      # there is, it has no sudo and no metadata service.
+      - name: The sandbox user exists, without sudo or the metadata service
+        run: node .github/actions/confine-probe/probe.mjs sandbox-user sandbox-user
       # Its post step runs after the upload below, and fails the job if a
       # route is open; its record is in that step's log. The ingress check
       # (docs/workflow-ingress.md) accepts this ignore only while every line
@@ -1944,7 +1984,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, rust, vibe, claude-acp, corpus, session-sandbox, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1967,7 +2007,7 @@ jobs:
           FILTER: >-
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
-            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
+            ($host == "false" and (.key | IN("session-sandbox", "sandbox", "secure-host", "secure-host-options", "secure-host-no-user", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
             ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))

@@ -1,6 +1,8 @@
 //! `agentic-job sandbox setup`: create the sandbox user and close its
 //! routes to credentials and root. Run as root, once, on a machine that is
-//! thrown away after the job.
+//! thrown away after the job. With `sandbox.create-user = false` it makes
+//! no user and hardens the runner's alone, all the same but for the
+//! stages that are the sandbox user's.
 //!
 //! The boundary is the separate uid: it cannot read another uid's
 //! processes through `/proc` or memory, and has no sudo. The rest closes what
@@ -376,7 +378,18 @@ fn setup(args: &Args) -> Result<Exit> {
         );
         let runner = runner_user(&config)?;
         // Every refusal comes before the first change.
-        let existing = preflight(&config, &runner)?;
+        let existing = if config.sandbox.create_user {
+            preflight(&config, &runner)?
+        } else {
+            // Nothing would deny such a user sudo, polkit or the metadata
+            // service: one that is there is refused, as by preflight.
+            let name = &config.sandbox.user;
+            ensure!(
+                User::lookup(name)?.is_none(),
+                "the user {name} already exists, and sandbox.create-user = false would leave it unconfined"
+            );
+            None
+        };
         if !config.setup.agents.is_empty() {
             agents::check_platform()?;
         }
@@ -424,20 +437,35 @@ fn setup(args: &Args) -> Result<Exit> {
             resolvers,
         })
     })?;
+    // None with sandbox.create-user = false: the stages below that are the
+    // sandbox user's are skipped, and config::checked refused those that
+    // would run as it (setup.tools, setup.script, an agent).
     let sandbox = timed_setup("create-user", || {
         fs::create_dir(CONFIG_DIR).with_context(|| format!("creating {CONFIG_DIR}"))?;
         fs::set_permissions(CONFIG_DIR, fs::Permissions::from_mode(MODE_PROGRAM))
             .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
-        create_user(&config, &runner, existing)
+        if !config.sandbox.create_user {
+            println!(
+                "sandbox.create-user = false: no sandbox user; {} is hardened alone",
+                runner.name
+            );
+            return Ok(None);
+        }
+        create_user(&config, &runner, existing).map(Some)
     })?;
     // Before any sandbox mount view or user manager inherits /proc.
     timed_setup("proc-hidepid", hide_other_processes)?;
-    if config.sandbox.filesystem_view {
-        timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
+    if config.sandbox.filesystem_view
+        && let Some(sandbox) = &sandbox
+    {
+        timed_setup("filesystem-view", || install_filesystem_view(sandbox))?;
     }
     let (subuids, runner_uids, write_uids) = timed_setup("environment-and-private-dirs", || {
         let text = fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?;
-        let subuids = subuid_ranges(&sandbox, &text)?;
+        let subuids = match &sandbox {
+            Some(sandbox) => subuid_ranges(sandbox, &text)?,
+            None => Vec::new(),
+        };
         let all_runner: Vec<String> = std::iter::once(runner.uid.to_string())
             .chain(subordinate_ranges(&runner, &text))
             .collect();
@@ -495,12 +523,14 @@ fn setup(args: &Args) -> Result<Exit> {
     // step is waiting on this process, root already.
     timed_setup("deny-privileges", || {
         deny_privileges(
-            &sandbox.name,
+            sandbox.as_ref().map(|sandbox| sandbox.name.as_str()),
             config.sandbox.lock_runner.then_some(runner.name.as_str()),
         )
     })?;
-    if let Some(tools) = &config.setup.tools {
-        timed_setup("caller-tools", || tools::install(tools, &sandbox))?;
+    if let Some(tools) = &config.setup.tools
+        && let Some(sandbox) = &sandbox
+    {
+        timed_setup("caller-tools", || tools::install(tools, sandbox))?;
     }
     // The proxy first, since the rules name its uid; and both after the
     // installs, which root does on the open network.
@@ -514,7 +544,9 @@ fn setup(args: &Args) -> Result<Exit> {
         })
         .transpose()?;
     timed_setup("network-rules", || {
-        let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())
+        let uids: Vec<String> = sandbox
+            .iter()
+            .map(|sandbox| sandbox.uid.to_string())
             .chain(subuids.iter().cloned())
             .collect();
         network::apply(&network::rules_with_resolvers(
@@ -545,23 +577,27 @@ fn setup(args: &Args) -> Result<Exit> {
             runner_uids.join(", ")
         );
     }
-    match proxy_uid {
-        Some(_) => println!(
+    match (&sandbox, proxy_uid) {
+        (Some(sandbox), Some(_)) => println!(
             "{} reaches the network only through the egress proxy, {}",
             sandbox.name,
             egress::proxy_url()
         ),
-        None => println!(
+        (Some(sandbox), None) => println!(
             "{} has no egress proxy: its network is open but for the metadata service and the tailnet",
             sandbox.name
         ),
+        (None, _) => {}
     }
     timed_setup("probe-dirs", || {
         // Writable by DAC, so that the probes prove the view and the
         // world-write policy, each on a directory the other leaves alone.
-        fs::create_dir(VIEW_PROBE_DIR).context("creating filesystem-view probe directory")?;
-        host::run(Command::new("chown").args([&format!("root:{}", sandbox.gid), VIEW_PROBE_DIR]))?;
-        fs::set_permissions(VIEW_PROBE_DIR, fs::Permissions::from_mode(0o770))?;
+        if let Some(sandbox) = &sandbox {
+            fs::create_dir(VIEW_PROBE_DIR).context("creating filesystem-view probe directory")?;
+            let owner = format!("root:{}", sandbox.gid);
+            host::run(Command::new("chown").args([owner.as_str(), VIEW_PROBE_DIR]))?;
+            fs::set_permissions(VIEW_PROBE_DIR, fs::Permissions::from_mode(0o770))?;
+        }
         // Root owns both, and the policy has no exemption but the owner's.
         fs::create_dir(WORLD_WRITE_PROBE_DIR).context("creating world-write probe directory")?;
         fs::set_permissions(WORLD_WRITE_PROBE_DIR, fs::Permissions::from_mode(0o777))?;
@@ -574,15 +610,19 @@ fn setup(args: &Args) -> Result<Exit> {
     if config.sandbox.unlink_worker_diagnostics() {
         timed_setup("worker-diagnostics", worker_diagnostics::unlink)?;
     }
-    println!(
-        "Sandbox user {} (uid {}, subordinate uids {}), in addition to {} whose home {} is closed to it",
-        sandbox.name,
-        sandbox.uid,
-        subuids.join(", "),
-        runner.name,
-        runner.home.display()
-    );
-    if let Some(script) = &config.setup.script {
+    if let Some(sandbox) = &sandbox {
+        println!(
+            "Sandbox user {} (uid {}, subordinate uids {}), in addition to {} whose home {} is closed to it",
+            sandbox.name,
+            sandbox.uid,
+            subuids.join(", "),
+            runner.name,
+            runner.home.display()
+        );
+    }
+    if let Some(script) = &config.setup.script
+        && sandbox.is_some()
+    {
         timed_setup("sandbox-script", || run_setup_script(&config, script))?;
     }
     timed_setup("configuration", || {
@@ -753,7 +793,7 @@ fn preflight(config: &Config, runner: &User) -> Result<Option<User>> {
             "{} already exists, with no user {name}: something left it there",
             home.display()
         );
-        for group in &config.sandbox.groups {
+        for group in &config.sandbox.groups() {
             ensure!(
                 host::succeeds(Command::new("getent").args(["group", "--", group.as_str()])),
                 "no group {group}: take it out of sandbox.groups if the sandbox user does not need it"
@@ -845,8 +885,9 @@ fn useradd_command(config: &Config, skeleton: &Path) -> Command {
         "/bin/bash",
     ]);
     useradd.arg("--skel").arg(skeleton);
-    if !config.sandbox.groups.is_empty() {
-        useradd.arg("--groups").arg(config.sandbox.groups.join(","));
+    let groups = config.sandbox.groups();
+    if !groups.is_empty() {
+        useradd.arg("--groups").arg(groups.join(","));
     }
     useradd.args(["--", config.sandbox.user.as_str()]);
     useradd
@@ -884,11 +925,14 @@ fn subordinate_ranges(user: &User, subuid: &str) -> Vec<String> {
         .collect()
 }
 
-/// The sudoers rules: the sandbox user has nothing; the runner's user,
-/// when the machine is locked, nothing but the helper. The last matching
-/// rule wins, so the grant follows the denial.
-fn sudoers_rules(sandbox: &str, locked_runner: Option<&str>) -> String {
-    let mut rules = format!("{sandbox} ALL=(ALL:ALL) !ALL\n");
+/// The sudoers rules: the sandbox user, where there is one, has nothing;
+/// the runner's user, when the machine is locked, nothing but the helper.
+/// The last matching rule wins, so the grant follows the denial.
+fn sudoers_rules(sandbox: Option<&str>, locked_runner: Option<&str>) -> String {
+    let mut rules = String::new();
+    if let Some(sandbox) = sandbox {
+        rules.push_str(&format!("{sandbox} ALL=(ALL:ALL) !ALL\n"));
+    }
     if let Some(runner) = locked_runner {
         rules.push_str(&format!(
             "{runner} ALL=(ALL:ALL) !ALL\n{runner} ALL=(root) NOPASSWD: {}\n",
@@ -937,8 +981,13 @@ fn denial(text: &str, user: &str) -> Option<String> {
 /// Takes away the sandbox user's sudo, its polkit actions, and every way
 /// to leave a process behind for later: cron, at, and a lingering user
 /// manager. With LOCKED_RUNNER, the runner's user's sudo (but for the
-/// helper) and polkit actions go too.
-fn deny_privileges(user: &str, locked_runner: Option<&str>) -> Result<()> {
+/// helper) and polkit actions go too. With neither, there is no one to
+/// write a rule for.
+fn deny_privileges(user: Option<&str>, locked_runner: Option<&str>) -> Result<()> {
+    let users: Vec<&str> = user.into_iter().chain(locked_runner).collect();
+    if users.is_empty() {
+        return Ok(());
+    }
     install_file(
         Path::new(SUDOERS_DENY),
         sudoers_rules(user, locked_runner).as_bytes(),
@@ -946,7 +995,6 @@ fn deny_privileges(user: &str, locked_runner: Option<&str>) -> Result<()> {
         Some(VISUDO_CHECK),
     )?;
     if Path::new(POLKIT_RULES_DIR).is_dir() {
-        let users: Vec<&str> = std::iter::once(user).chain(locked_runner).collect();
         install_file(
             Path::new(POLKIT_DENY),
             polkit_deny(&users).as_bytes(),
@@ -954,10 +1002,12 @@ fn deny_privileges(user: &str, locked_runner: Option<&str>) -> Result<()> {
             None,
         )?;
     }
-    for scheduler in SCHEDULERS {
-        scheduler.deny(user)?;
+    if let Some(user) = user {
+        for scheduler in SCHEDULERS {
+            scheduler.deny(user)?;
+        }
+        host::run(Command::new("loginctl").args(["disable-linger", "--", user]))?;
     }
-    host::run(Command::new("loginctl").args(["disable-linger", "--", user]))?;
     Ok(())
 }
 
@@ -1911,11 +1961,17 @@ mod tests {
 
     #[test]
     fn deny_files() {
-        assert_eq!(sudoers_rules("agent", None), "agent ALL=(ALL:ALL) !ALL\n");
+        let runner_lines = "runner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: /usr/local/libexec/agentic-job helper *\n";
         assert_eq!(
-            sudoers_rules("agent", Some("runner")),
-            "agent ALL=(ALL:ALL) !ALL\nrunner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: /usr/local/libexec/agentic-job helper *\n"
+            sudoers_rules(Some("agent"), None),
+            "agent ALL=(ALL:ALL) !ALL\n"
         );
+        assert_eq!(
+            sudoers_rules(Some("agent"), Some("runner")),
+            format!("agent ALL=(ALL:ALL) !ALL\n{runner_lines}")
+        );
+        // sandbox.create-user = false: the lock alone.
+        assert_eq!(sudoers_rules(None, Some("runner")), runner_lines);
         assert_eq!(
             polkit_deny(&["agent"]),
             "polkit.addRule(function(action, subject) {\n  if (subject.user == \"agent\") return polkit.Result.NO;\n});\n"
