@@ -10,7 +10,10 @@ Tracked in [issue 536](https://github.com/cgwalters-forge/agentic-job/issues/536
 A session run is an ordinary `agentic-job run`, with the same policy, sandbox,
 inference proxy, limits, hand-back, check and apply. It does not end after the
 task's turn. After that turn it waits for a client's prompts, and each prompt is
-a turn of its own. The task is the session's profile, for example the
+a turn of its own. The endpoint is served before the agent starts, so the client
+can attach during the task's turn, see its progress and cancel it ([Wire](#wire)).
+A task that only waits for the operator should end its turn at once.
+The task is the session's profile, for example the
 controller's instructions with agent-board read-only. The run ends when the
 client leaves, when no prompt arrives within the idle timeout, or at a limit.
 The transcript is the run's artifact, as for any run. A new session starts from
@@ -113,7 +116,10 @@ The handshake is refused with HTTP 403 unless both of these hold:
 
 - `Tailscale-User-Login` is there once and is one of `[session] operators`.
   `tailscale serve` sets it to the login of the user whose device connects, and
-  drops one the client sent. A tagged device gets none, so it is refused.
+  drops one the client sent. A tagged device gets none, so it is refused: a
+  client must connect from the operator's own device, not through a tagged
+  server that relays for it. Until a client is let in, the job's log says
+  `refused a connection: no tailnet login` for each such attempt.
 - `Origin` is there once and is one of `[session] origins`, compared as a
   browser sends it (`https://review.example.ts.net`).
 

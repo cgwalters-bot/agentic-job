@@ -2450,15 +2450,21 @@ fn a_client_cancels_its_turn() {
 }
 
 /// A client that attaches during the task's turn is treated as during its
-/// own: its prompt is refused while the turn runs, its cancel ends the
-/// turn, and the session is then the client's.
+/// own: it sees the turn's progress as it comes, not only once the turn
+/// has ended; its prompt is refused while the turn runs, its cancel ends
+/// the turn, and the session is then the client's.
 #[test]
 fn a_client_cancels_the_tasks_turn() {
     let r = run(
         SCRIPT_AND_LATER,
         Setup {
+            // The first sleep leaves the client time to attach before the
+            // turn says anything; the second keeps the turn running after.
             files: &[
-                ("script.json", r#"[{"sleep": 30}, {"say": "Too late."}]"#),
+                (
+                    "script.json",
+                    r#"[{"sleep": 2}, {"say": "Working."}, {"sleep": 30}, {"say": "Too late."}]"#,
+                ),
                 ("later.json", LATER),
             ],
             timeout_s: 60,
@@ -2468,6 +2474,12 @@ fn a_client_cancels_the_tasks_turn() {
                     let new =
                         client.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
                     let sid = new["result"]["sessionId"].clone();
+                    loop {
+                        let msg = client.recv().expect("the session hung up");
+                        if msg["params"]["update"]["content"]["text"] == "Working." {
+                            break;
+                        }
+                    }
                     let busy = client.request(3, "session/prompt", text_prompt(&sid, "Now."));
                     assert!(
                         busy["error"]["message"]
@@ -2500,6 +2512,7 @@ fn a_client_cancels_the_tasks_turn() {
         .iter()
         .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
         .collect();
+    assert!(said.starts_with("Working."), "{said}");
     assert!(said.contains("Answered [REDACTED]."), "{said}");
     assert!(!said.contains("Too late."), "{said}");
     // The task's prompt and the one the client had answered; the refused
