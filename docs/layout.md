@@ -11,6 +11,19 @@ are in [interface.md](interface.md); deployment is in [workflow.md](workflow.md)
 The same crate builds `fake-agent`, the scripted ACP agent used by tests.
 Releases publish both binaries for the reusable workflow's scripted runs.
 
+`crates/secure-host` is the host's side, for any job that runs code it
+does not trust: it depends on nothing that runs an agent (no ACP,
+inference, safe outputs, sessions or `run`), which `cargo tree -p
+secure-host` shows, and agentic-job depends on it, never the reverse.
+The split is under way ([#1623](https://github.com/cgwalters-forge/agentic-job/issues/1623)).
+So far it holds bounded file reads (`files.rs`), the egress proxy
+(`proxy/`), the probe of reachable listeners (`local.rs`), the platform
+and apt steps (`platform.rs`, `apt.rs`) and the Worker-diagnostics rule
+(`worker_diagnostics.rs`); agentic-job re-exports each at its old path
+(`files`, `sandbox::proxy`, `secure_host::apt`, ...). The sandbox user,
+helper, network rules, probes, the image and the `secure-host` binary
+still live in agentic-job's `sandbox/` and `secure_host/` below.
+
 Paths below are relative to `crates/agentic-job/src/`.
 
 | Path | Responsibility |
@@ -24,12 +37,12 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `apply/` | Publishing checked outputs behind `Publisher`; Forgejo only |
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
-| `files.rs`, `redact.rs` | Bounded file reads and secret redaction |
+| `redact.rs` | Secret redaction |
 | `sandbox/setup.rs`, `sandbox/setup/` | Host preparation: the lock, the sandbox user, the agents and tools |
 | `sandbox/check/` | Host, runner-lock and network probes |
 | `sandbox/enter.rs` | Entry as the sandbox user |
 | `sandbox/helper.rs`, `sandbox/root.rs` | Fixed privileged operations and their callers |
-| `sandbox/host.rs`, `sandbox/local.rs` | Host users, programs and reachable listeners |
+| `sandbox/host.rs` | Host users and programs |
 | `session/` | ACP transport, permissions, limits, transcript and digest |
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
 | `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |
@@ -91,7 +104,7 @@ lists the files to change, the adapter contract and the security tests.
 `secure-host/` holds the standalone action, hosted configuration, release
 pin and binary-fetch script. `egress/` holds the mitmproxy addon, policy,
 hashed dependencies and Python tests; the Rust proxy, the default in
-place of mitmproxy, is `crates/agentic-job/src/sandbox/proxy/`. The runtime Python files, default
+place of mitmproxy, is `crates/secure-host/src/proxy/`. The runtime Python files, default
 policy, ecosystem identifiers and requirements file are embedded in the
 binary; the tests are not. Regenerate the identifiers with
 `python3 egress/ecosystems.py GH_AW_CHECKOUT` when changing gh-aw's pin.

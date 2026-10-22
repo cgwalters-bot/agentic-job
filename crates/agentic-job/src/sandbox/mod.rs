@@ -14,15 +14,15 @@ pub mod egress;
 pub mod enter;
 pub mod helper;
 pub mod host;
-pub mod local;
 pub mod network;
-pub mod proxy;
 pub mod root;
 pub(crate) mod session;
 pub mod setup;
 pub mod timed;
 mod view;
-pub mod worker_diagnostics;
+
+// What secure-host holds already, at the paths callers know.
+pub use ::secure_host::{local, proxy, worker_diagnostics};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -66,8 +66,8 @@ impl Command {
             Self::Setup(args) => setup::run(args),
             Self::Check(args) => check::run(args),
             Self::Timed(args) => timed::run(args),
-            Self::ProbeLocal => local::run(),
-            Self::EgressProxy(args) => proxy::run(args),
+            Self::ProbeLocal => local::run().map(|()| Exit::Success),
+            Self::EgressProxy(args) => proxy::run(args).map(|()| Exit::Success),
             Self::NftRules(args) => {
                 let direct = args
                     .direct

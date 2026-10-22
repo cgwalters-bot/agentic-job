@@ -15,7 +15,8 @@ pub mod collect;
 pub mod config;
 pub mod event;
 pub mod exit;
-pub mod files;
+// The `::` is the secure-host crate's, not the `secure_host` module's.
+pub use ::secure_host::files;
 pub mod handback;
 pub mod policy;
 pub mod redact;

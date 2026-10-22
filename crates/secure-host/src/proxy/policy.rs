@@ -33,7 +33,7 @@ const MAX_DOMAIN: usize = 253;
 
 /// gh-aw's ecosystem identifiers and their hosts, derived by
 /// `egress/ecosystems.py`.
-pub const ECOSYSTEMS: &str = include_str!("../../../../../egress/ecosystem_domains.json");
+pub const ECOSYSTEMS: &str = include_str!("../../../../egress/ecosystem_domains.json");
 
 /// The most of a threat feed read: the pinned one is a few MiB.
 const MAX_DENYLIST_BYTES: u64 = 64 << 20;
@@ -540,7 +540,7 @@ pub struct Request<'a> {
 mod tests {
     use super::*;
 
-    const POLICY_TOML: &str = include_str!("../../../../../egress/policy.toml");
+    const POLICY_TOML: &str = include_str!("../../../../egress/policy.toml");
 
     fn shipped() -> Policy {
         let mut policy = Policy::parse(POLICY_TOML, ECOSYSTEMS).unwrap();

@@ -64,30 +64,24 @@ version = "0.6.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "bytes",
  "chrono",
  "clap",
  "flate2",
  "futures",
- "http-body-util",
  "hyper",
- "hyper-util",
- "rcgen",
  "regex",
  "ring",
  "rustix",
- "rustls",
+ "secure-host",
  "serde",
  "serde_json",
  "tar",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
  "toml",
  "unicode-normalization",
  "ureq",
- "webpki-roots",
  "yaml-rust2",
  "zstd",
 ]
@@ -1611,6 +1605,29 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "secure-host"
+version = "0.6.3"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "regex",
+ "rustix",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "webpki-roots",
 ]
 
 [[package]]

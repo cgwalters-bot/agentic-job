@@ -14,8 +14,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
-use crate::exit::Exit;
-
 const PROC_UNIX: &str = "/proc/net/unix";
 
 const PROC_TCP: &[&str] = &["/proc/net/tcp", "/proc/net/tcp6"];
@@ -209,11 +207,11 @@ pub fn reachable() -> Result<Vec<Reached>> {
 }
 
 /// `sandbox probe-local`: one line for each thing reached.
-pub fn run() -> Result<Exit> {
+pub fn run() -> Result<()> {
     for reached in reachable()? {
         println!("{reached}");
     }
-    Ok(Exit::Success)
+    Ok(())
 }
 
 #[cfg(test)]

@@ -14,14 +14,7 @@ workspace = true
 [dependencies]
 agent-client-protocol.workspace = true
 anyhow.workspace = true
-bytes.workspace = true
-http-body-util.workspace = true
 hyper.workspace = true
-hyper-util.workspace = true
-rcgen.workspace = true
-rustls.workspace = true
-tokio-rustls.workspace = true
-webpki-roots.workspace = true
 chrono.workspace = true
 clap.workspace = true
 flate2.workspace = true
@@ -29,6 +22,7 @@ futures.workspace = true
 regex.workspace = true
 ring.workspace = true
 rustix.workspace = true
+secure-host = { path = "../secure-host" }
 serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
@@ -40,3 +34,6 @@ unicode-normalization.workspace = true
 ureq.workspace = true
 yaml-rust2.workspace = true
 zstd.workspace = true
+
+[dev-dependencies]
+secure-host = { path = "../secure-host", features = ["test-support"] }

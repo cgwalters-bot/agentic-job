@@ -150,7 +150,7 @@ metadata matching the policy repository/base and patch header; a patch without
 a pull-request request MUST be refused.
 Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
 `what_is_refused` and `links_and_directories_are_not_read`;
-[files.rs](../crates/agentic-job/src/files.rs), `reads_only_regular_files_within_the_cap`.
+[files.rs](../crates/secure-host/src/files.rs), `reads_only_regular_files_within_the_cap`.
 
 **RC-006 — Collected requests.** Check MUST refuse any collector errors,
 unadmitted type, per-type or total count excess, repository/base redirection,

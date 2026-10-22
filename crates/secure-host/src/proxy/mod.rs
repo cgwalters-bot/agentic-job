@@ -51,7 +51,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 
-use crate::exit::Exit;
 use policy::{Decision, Policy};
 use tls::Authority;
 
@@ -148,7 +147,7 @@ pub struct Args {
     pub refuse: Vec<String>,
 }
 
-pub fn run(args: &Args) -> Result<Exit> {
+pub fn run(args: &Args) -> Result<()> {
     let policy = Policy::load(&args.policy, args.denylist.as_deref())?;
     let refused = Refused::parse(&args.refuse)?;
     let authority = Authority::load_or_create(&args.state_dir)?;
@@ -194,8 +193,7 @@ pub fn run(args: &Args) -> Result<Exit> {
             proxy.serve(redirected, true)
         )
         .map(|_| ())
-    })?;
-    Ok(Exit::Success)
+    })
 }
 
 /// Where the requests of one client connection go: the CONNECT's host
@@ -1247,10 +1245,11 @@ fn bare_host(host: &str) -> String {
 }
 
 /// The proxy on a loopback port, in a thread of its own, with the policy
-/// file TEXT and `--refuse` REFUSE: for tests elsewhere in the crate
-/// that probe through it.
-#[cfg(test)]
-pub(crate) fn serve_for_tests(text: &str, refuse: &[String]) -> SocketAddr {
+/// file TEXT and `--refuse` REFUSE: for tests that probe through it,
+/// agentic-job's among them, which turn on `test-support` for theirs alone.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::unwrap_used)]
+pub fn serve_for_tests(text: &str, refuse: &[String]) -> SocketAddr {
     let mut proxy = Proxy::new(
         Policy::parse(text, policy::ECOSYSTEMS).unwrap(),
         Authority::new(rcgen::KeyPair::generate().unwrap()).unwrap(),

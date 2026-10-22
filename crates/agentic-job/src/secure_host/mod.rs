@@ -16,11 +16,12 @@ use clap::{Parser, Subcommand};
 use crate::exit::Exit;
 use crate::sandbox;
 
-pub mod apt;
 pub mod image;
 pub mod inference;
-pub mod platform;
 pub mod world_write;
+
+// What the secure-host crate holds already, at the paths callers know.
+pub use ::secure_host::{apt, platform};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
