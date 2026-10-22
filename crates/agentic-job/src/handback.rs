@@ -108,7 +108,13 @@ impl Command {
                 let run = RunFile::read(home)?;
                 print!(
                     "{}",
-                    brief::guide(&run.policy, home, &run.checkout, &run.base)
+                    brief::guide(
+                        &run.policy,
+                        home,
+                        &run.checkout,
+                        run.secondary.as_ref().map(|tree| tree.checkout.as_path()),
+                        &run.base
+                    )
                 );
             }
         }
@@ -135,9 +141,35 @@ struct RunFile {
     base: String,
     run_id: String,
     commit: config::Commit,
+    /// The clone of the policy's secondary pull request's repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secondary: Option<Tree>,
+}
+
+/// A clone, and the commit its change is against.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tree {
+    checkout: PathBuf,
+    base: String,
 }
 
 impl RunFile {
+    /// The checkouts the run's agent works in, as `run` collects them.
+    fn checkout(&self) -> Checkout {
+        Checkout {
+            dir: self.checkout.clone(),
+            base_commit: self.base.clone(),
+            secondary: self.secondary.as_ref().map(|tree| {
+                Box::new(Checkout {
+                    dir: tree.checkout.clone(),
+                    base_commit: tree.base.clone(),
+                    secondary: None,
+                })
+            }),
+        }
+    }
+
     fn read(home: &Path) -> Result<Self> {
         let path = home.join(RUN_FILE);
         let bytes = crate::files::read_regular(&path, MAX_RUN_FILE_BYTES).map_err(|err| {
@@ -165,13 +197,17 @@ pub fn run_file(
         context: Vec::new(),
         ..policy.clone()
     };
-    let text = serde_json::to_string(&json!({
+    let mut file = json!({
         "policy": policy,
         "checkout": checkout.dir,
         "base": checkout.base_commit,
         "run_id": run_id,
         "commit": commit,
-    }))?;
+    });
+    if let Some(tree) = &checkout.secondary {
+        file["secondary"] = json!({"checkout": tree.dir, "base": tree.base_commit});
+    }
+    let text = serde_json::to_string(&file)?;
     Ok(text + "\n")
 }
 
@@ -295,10 +331,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
         },
     }
 
-    let checkout = Checkout {
-        dir: run.checkout.clone(),
-        base_commit: run.base.clone(),
-    };
+    let checkout = run.checkout();
     if capture::requires_output(policy)
         && let Some(why) = capture::output_missing(&Unconfined, home, &checkout, policy)
     {
@@ -310,82 +343,90 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     }
 
     let scratch = tempfile::tempdir()?;
-    let copy = scratch.path().join("checkout");
-    match snapshot(&run.checkout, &copy) {
-        Err(err) => report.problems.push(Problem {
-            at: run.checkout.display().to_string(),
-            what: format!("{err:#}"),
-            fix: "fix what it names: the check copies the checkout under $TMPDIR".to_owned(),
-        }),
-        Ok(nested) => {
-            for path in nested {
-                report.problems.push(Problem {
-                    at: path,
-                    what: "a nested repository, which the run stages as a submodule and \
-                           `check` refuses with the whole change"
-                        .to_owned(),
-                    fix: "delete it, or move it out of the checkout".to_owned(),
-                });
-            }
-            let (results, outputs) = (scratch.path().join("run"), scratch.path().join("outputs"));
-            std::fs::create_dir(&results)?;
-            let change = capture::collect(&capture::Request {
-                runner: &Unconfined,
-                home,
-                checkout: &Checkout {
-                    dir: copy,
-                    base_commit: run.base.clone(),
-                },
-                policy,
-                commit: &run.commit,
-                run_id: &run.run_id,
-                harness: None,
-                run_dir: &results,
-                safe_outputs: &outputs,
-            })?;
-            if let Some(why) = change.dropped {
-                report.problems.push(Problem {
-                    at: "the change".to_owned(),
-                    what: why,
-                    fix: GUIDE_FIX.to_owned(),
-                });
-            }
-            if let Some(why) = change.memory_dropped {
-                report.problems.push(Problem {
-                    at: format!("~/{}", capture::MEMORY_DIR),
-                    what: why,
-                    fix: "keep only plain text files there, within the policy's [memory] bounds"
-                        .to_owned(),
-                });
-            }
-            if outputs.is_dir() {
-                let collected = scratch.path().join("collected.json");
-                let text = as_collected(&outputs)?;
-                std::fs::write(&collected, &text)?;
-                report.notes.extend(redacted_links(&text, policy));
-                report.problems.extend(over_handler_limits(&text));
-                let verdict = check::check_outputs(&outputs, &collected, policy)?;
-                report
-                    .problems
-                    .extend(verdict.errors.iter().map(|error| Problem {
-                        at: "check".to_owned(),
-                        what: error.clone(),
-                        fix: fix_for(error).to_owned(),
-                    }));
-                if let Some(checkpoint) = verdict.checkpoint {
-                    report.notes.push(format!(
-                        "the change is handed back as a draft to be continued, at a checkpoint \
+    let copy = copy_tree(&checkout, &scratch.path().join("checkout"), &mut report);
+    let secondary = match checkout.secondary.as_deref() {
+        Some(tree) => copy_tree(tree, &scratch.path().join("secondary"), &mut report)
+            .map(|copy| Some(Box::new(copy))),
+        None => Some(None),
+    };
+    if let (Some(copy), Some(secondary)) = (copy, secondary) {
+        let copy = Checkout { secondary, ..copy };
+        let (results, outputs) = (scratch.path().join("run"), scratch.path().join("outputs"));
+        std::fs::create_dir(&results)?;
+        let change = capture::collect(&capture::Request {
+            runner: &Unconfined,
+            home,
+            checkout: &copy,
+            policy,
+            commit: &run.commit,
+            run_id: &run.run_id,
+            harness: None,
+            run_dir: &results,
+            safe_outputs: &outputs,
+        })?;
+        if let Some(why) = change.dropped {
+            report.problems.push(Problem {
+                at: "the change".to_owned(),
+                what: why,
+                fix: GUIDE_FIX.to_owned(),
+            });
+        }
+        if let (Some(why), Some(tree)) = (change.secondary_dropped, &checkout.secondary) {
+            report.problems.push(Problem {
+                at: tree.dir.display().to_string(),
+                what: why,
+                fix: "propose it with a `create_pull_request` that names that repository as \
+                          its `repo`, or restore it, as `agentic-job handback guide` says"
+                    .to_owned(),
+            });
+        }
+        if let Some(why) = change.memory_dropped {
+            report.problems.push(Problem {
+                at: format!("~/{}", capture::MEMORY_DIR),
+                what: why,
+                fix: "keep only plain text files there, within the policy's [memory] bounds"
+                    .to_owned(),
+            });
+        }
+        if outputs.is_dir() {
+            let collected = scratch.path().join("collected.json");
+            let text = as_collected(&outputs)?;
+            std::fs::write(&collected, &text)?;
+            report.notes.extend(redacted_links(&text, policy));
+            report.problems.extend(over_handler_limits(&text));
+            let verdict = check::check_outputs(&outputs, &collected, policy)?;
+            report
+                .problems
+                .extend(verdict.errors.iter().map(|error| Problem {
+                    at: "check".to_owned(),
+                    what: error.clone(),
+                    fix: fix_for(error).to_owned(),
+                }));
+            if let Some(checkpoint) = verdict.checkpoint {
+                report.notes.push(format!(
+                    "the change is handed back as a draft to be continued, at a checkpoint \
                          ({}): when the work is done, set `complete` to true in {}'s checkpoint, \
                          and leave none in your request",
-                        checkpoint.reason,
-                        outcome.display()
-                    ));
-                }
+                    checkpoint.reason,
+                    outcome.display()
+                ));
             }
         }
     }
 
-    for finding in scan(&run.checkout, &run.base, home)? {
+    let mut found = scan(&run.checkout, &run.base, home)?;
+    if let Some(tree) = &checkout.secondary {
+        // Located by the clone as well: a path alone could be either's.
+        found.extend(
+            scan_change(&tree.dir, &tree.base_commit)?
+                .into_iter()
+                .map(|finding| Finding {
+                    location: format!("{}: {}", tree.dir.display(), finding.location),
+                    ..finding
+                }),
+        );
+    }
+    for finding in found {
         if let Some(what) = finding.refused() {
             report.problems.push(Problem {
                 at: finding.location,
@@ -400,6 +441,38 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
         }
     }
     Ok(report)
+}
+
+/// A copy of TREE at TO that `collect` can commit in ([`snapshot`]), or
+/// none, with the problems that stop one or that `check` would refuse in
+/// REPORT.
+fn copy_tree(tree: &Checkout, to: &Path, report: &mut Report) -> Option<Checkout> {
+    match snapshot(&tree.dir, to) {
+        Err(err) => {
+            report.problems.push(Problem {
+                at: tree.dir.display().to_string(),
+                what: format!("{err:#}"),
+                fix: "fix what it names: the check copies the checkout under $TMPDIR".to_owned(),
+            });
+            None
+        }
+        Ok(nested) => {
+            for path in nested {
+                report.problems.push(Problem {
+                    at: path,
+                    what: "a nested repository, which the run stages as a submodule and \
+                           `check` refuses with the whole change"
+                        .to_owned(),
+                    fix: "delete it, or move it out of the checkout".to_owned(),
+                });
+            }
+            Some(Checkout {
+                dir: to.to_owned(),
+                base_commit: tree.base_commit.clone(),
+                secondary: None,
+            })
+        }
+    }
 }
 
 /// A note for each request in COLLECTED (as [`as_collected`] writes it)
@@ -644,6 +717,14 @@ impl std::fmt::Display for Finding {
 /// finds, since no pattern but a private key's spans lines and that one
 /// also matches its first line alone.
 fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
+    let mut found = scan_change(repo, base)?;
+    scan_out(home, &mut found)?;
+    Ok(found)
+}
+
+/// The findings of the change in the checkout REPO against BASE, as `run`
+/// stages it.
+fn scan_change(repo: &Path, base: &str) -> Result<Vec<Finding>> {
     let base = String::from_utf8(git(
         repo,
         &[
@@ -670,7 +751,11 @@ fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
         base.trim(),
         "--",
     ])?;
-    let mut found = diff_findings(&diff);
+    Ok(diff_findings(&diff))
+}
+
+/// The findings in HOME's `out/`, added to FOUND.
+fn scan_out(home: &Path, found: &mut Vec<Finding>) -> Result<()> {
     // Whatever `run` reads from there: the requests, the report (a
     // summary can become the commit message) and a replacement series.
     let names = [AGENT_OUTPUTS, AGENT_OUTCOME, REPLACEMENT_PATH];
@@ -701,7 +786,7 @@ fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
             }
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 /// PATH as a location, unless it is itself what may not be shown.
@@ -938,6 +1023,7 @@ mod tests {
             memory: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
+            secondary_pull_request: None,
         };
         let run = RunFile {
             policy,
@@ -945,6 +1031,7 @@ mod tests {
             base,
             run_id: "7".into(),
             commit: config::Commit::default(),
+            secondary: None,
         };
         (dir, run)
     }
@@ -979,6 +1066,7 @@ mod tests {
             checkout: &Checkout {
                 dir: copy.path().join("checkout"),
                 base_commit: run.base.clone(),
+                secondary: None,
             },
             policy: &run.policy,
             commit: &run.commit,
@@ -996,6 +1084,88 @@ mod tests {
         check::check_outputs(&outputs, &collected, &run.policy)
             .unwrap()
             .errors
+    }
+
+    /// The clone of the secondary pull request's repository is checked
+    /// with the run's own, as `run` collects both, and left as it was.
+    #[test]
+    fn the_secondary_clone_is_checked_with_the_checkout() {
+        let (dir, mut run) = home(pull_requests());
+        let tool = dir.path().join("work/secondary/o/tool");
+        std::fs::create_dir_all(&tool).unwrap();
+        sh(
+            &tool,
+            "git init -q -b main . && echo tool > tool.txt && git add . && \
+             git -c user.name=t -c user.email=t@example.invalid commit -q -m Tool",
+        );
+        let base = sh(&tool, "git rev-parse HEAD").trim().to_owned();
+        run.secondary = Some(Tree {
+            checkout: tool.clone(),
+            base: base.clone(),
+        });
+        run.policy.secondary_pull_request = Some(crate::policy::Secondary {
+            repo: "o/tool".into(),
+            clone_url: "https://example.invalid/o/tool".into(),
+            base: "main".into(),
+            branch_prefix: "agentic-job/".into(),
+            max: 1,
+            max_patch_bytes: 1 << 20,
+            max_patch_files: 3,
+            protected_files: vec!["go.mod".into()],
+            protect_top_level_dot_folders: true,
+            unprotected_dot_folders: Vec::new(),
+            protected_paths: Vec::new(),
+        });
+        // What `run` writes, `handback check` and `handback guide` read.
+        let text = run_file(&run.policy, &run.checkout(), "7", &run.commit).unwrap();
+        let read: RunFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.checkout(), run.checkout());
+        std::fs::write(
+            dir.path().join(AGENT_OUTCOME),
+            "{\"summary\": \"Done.\", \"tests\": []}",
+        )
+        .unwrap();
+        sh(&tool, "echo two >> tool.txt");
+        let problems = |run: &RunFile| -> Vec<String> {
+            validate(dir.path(), run)
+                .unwrap()
+                .problems
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let unasked = problems(&run);
+        assert!(
+            unasked
+                .iter()
+                .any(|problem| problem.contains("changes to o/tool dropped")
+                    && problem.contains("names that repository as its `repo`")),
+            "{unasked:?}"
+        );
+        let request = "{\"type\":\"create_pull_request\",\"repo\":\"o/tool\",\"title\":\"T\",\"body\":\"B\"}\n";
+        std::fs::write(dir.path().join(AGENT_OUTPUTS), request).unwrap();
+        assert_eq!(problems(&run), Vec::<String>::new());
+        sh(&tool, "echo m > go.mod");
+        let protected = problems(&run);
+        assert!(
+            protected
+                .iter()
+                .any(|problem| problem.contains("go.mod") && problem.contains("restore each")),
+            "{protected:?}"
+        );
+        // A key in the secondary change is found there, and said to be.
+        let key = format!("-----BEGIN {} KEY-----", "PRIVATE");
+        sh(&tool, &format!("rm go.mod && echo '{key}' > key.txt"));
+        let keyed = problems(&run);
+        assert!(
+            keyed.iter().any(
+                |problem| problem.starts_with(&format!("{}: ", tool.display()))
+                    && problem.contains("a private key")
+            ),
+            "{keyed:?}"
+        );
+        assert_eq!(sh(&tool, "git rev-parse HEAD").trim(), base);
+        assert!(sh(&tool, "git diff --cached --name-only").is_empty());
     }
 
     /// Each kind of refusal is reported in the session, as `check` gives
@@ -1298,10 +1468,7 @@ mod tests {
     #[test]
     fn the_run_file_is_the_policy_without_its_clone_urls() {
         let (dir, run) = home(pull_requests());
-        let checkout = Checkout {
-            dir: run.checkout.clone(),
-            base_commit: run.base.clone(),
-        };
+        let checkout = run.checkout();
         let text = run_file(&run.policy, &checkout, "7", &run.commit).unwrap();
         std::fs::create_dir_all(dir.path().join(".config/agentic-job")).unwrap();
         std::fs::write(dir.path().join(RUN_FILE), &text).unwrap();

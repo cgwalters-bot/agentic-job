@@ -1080,6 +1080,7 @@ mod tests {
                 aic_pricing: "mock",
                 files: vec!["MOCK.md".into()],
                 patch: Value::Null,
+                secondary_patch: Value::Null,
                 memory_dropped: None,
                 requests_dropped: None,
                 egress_denied: Vec::new(),

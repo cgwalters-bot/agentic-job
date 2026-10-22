@@ -142,6 +142,7 @@ impl Job {
             memory: None,
             forge: Default::default(),
             contract: agentic_job::policy::CONTRACT,
+            secondary_pull_request: None,
         };
         serde_json::to_string(&policy).unwrap()
     }
@@ -959,7 +960,14 @@ fn collected(job: &Job) -> PathBuf {
     match std::env::var_os(GH_AW_JS_VAR) {
         Some(js) => {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-            job.write("collector.json", &policy["safe_outputs"].to_string());
+            // As check.yml configures it: the secondary pull request is
+            // counted with the run's own.
+            let mut config = policy["safe_outputs"].clone();
+            if let Some(more) = policy["secondary_pull_request"]["max"].as_u64() {
+                let max = config["create_pull_request"]["max"].as_u64().unwrap();
+                config["create_pull_request"]["max"] = json!(max + more);
+            }
+            job.write("collector.json", &config.to_string());
             let out = Command::new("node")
                 .arg(root.join("tests/corpus/collect.cjs"))
                 .arg(js)
@@ -1112,6 +1120,104 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
     );
     assert_eq!(verdict["patch"]["base_commit"], base["commit"]);
     assert_eq!(verdict["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
+}
+
+/// A policy's secondary pull request: `run` clones its repository beside
+/// the target, tells the agent where, and hands back its change as a patch
+/// of its own, against the commit it cloned, with the request that names
+/// it; `check` accepts both patches.
+#[test]
+fn a_secondary_change_is_handed_back_beside_the_runs_own() {
+    let tool = json!({"type": "create_pull_request", "repo": "o/tool",
+        "title": "tool: Add a greeting", "body": "The tool's greeting too."});
+    let own = json!({"type": "create_pull_request", "title": "docs: Add a greeting",
+        "body": "The greeting was missing."});
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let job = Job::new("secondary");
+    job.own_repository();
+    job.script(&json!([
+        canary(),
+        {"execute": {"title": "Bash", "command": "test -f ~/work/secondary/o/tool/TOOL.md"}},
+        {"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}},
+        {"write": {"title": "Write", "path": "{home}/work/secondary/o/tool/GREETING.md",
+            "content": "Hello from the tool.\n"}},
+        {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
+            "content": format!("{own}\n{tool}\n")}},
+        {"write": {"title": "Write", "path": "{home}/out/outcome.json",
+            "content": "{\"summary\": \"Added greetings.\", \"tests\": []}\n"}},
+        {"say": "Done."},
+    ]));
+    let repo = job.path("tool");
+    sh(&format!(
+        "set -e; git init -q -b main {repo}; cd {repo}; echo 'A tool.' > TOOL.md; git add .; \
+         git -c user.name=test -c user.email=test@example.invalid commit -q -m 'Add a tool'",
+        repo = repo.display(),
+    ));
+    let tool_base = sh(&format!("git -C {} rev-parse HEAD", repo.display()));
+    job.allow(pull_requests());
+    let mut policy = job.json("policy.json");
+    policy["secondary_pull_request"] = json!({
+        "repo": "o/tool", "clone_url": format!("file://{}", repo.display()), "base": "main",
+        "branch_prefix": "agentic-job/", "max": 1, "max_patch_bytes": 65536,
+        "max_patch_files": 10, "protected_files": ["CODEOWNERS"],
+        "protect_top_level_dot_folders": true,
+    });
+    job.write("policy.json", &policy.to_string());
+    let got = job.own_run(&own_config(&plain(&proxy)));
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    let acp = job
+        .transcript()
+        .into_iter()
+        .find(|(name, _)| name == "acp.jsonl")
+        .map(|(_, content)| String::from_utf8_lossy(&content).into_owned())
+        .unwrap();
+    assert!(acp.contains("work/secondary/o/tool"), "{acp}");
+
+    let mut names: Vec<String> = std::fs::read_dir(job.path("out/safe-outputs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "aw-agent-run-4242.patch",
+            "aw-o-tool-agentic-job-agent-run-4242.patch",
+            "base.json",
+            "outputs.jsonl",
+            "secondary-base.json",
+        ]
+    );
+    let base = job.json("out/safe-outputs/secondary-base.json");
+    assert_eq!(
+        base,
+        json!({"repo": "o/tool", "ref": "main", "commit": tool_base})
+    );
+    let patch = job.text("out/safe-outputs/aw-o-tool-agentic-job-agent-run-4242.patch");
+    assert!(
+        patch.contains("Subject: [PATCH] tool: Add a greeting\n"),
+        "{patch}"
+    );
+    let summary = job.json("out/run/summary.json");
+    assert_eq!(summary["secondary_patch"]["bytes"], patch.len());
+
+    let collected = collected(&job);
+    let check = Command::new(BIN)
+        .arg("check")
+        .args(["--policy", "policy.json", "--outputs", "out/safe-outputs"])
+        .arg("--collected")
+        .arg(&collected)
+        .args(["--report", "verdict.json"])
+        .current_dir(&job.dir)
+        .output()
+        .unwrap();
+    let verdict = job.json("verdict.json");
+    assert_eq!(check.status.code(), Some(EXIT_SUCCESS), "{verdict:#}");
+    assert_eq!(verdict["patch"]["files"], json!(["GREETING.md"]));
+    assert_eq!(verdict["secondary_patch"]["files"], json!(["GREETING.md"]));
+    assert_eq!(verdict["secondary_patch"]["base_commit"], json!(tool_base));
     assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
 }
 

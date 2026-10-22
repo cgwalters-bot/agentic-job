@@ -31,7 +31,10 @@ use super::clone::{self, Checkout};
 use super::enter::Runner;
 use crate::check::checkpoint::{self, Checkpoint};
 use crate::check::memory::{self, MemoryFiles};
-use crate::check::{BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, patch_file_name};
+use crate::check::{
+    BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, SECONDARY_BASE_FILE, patch_file_name,
+    patch_file_name_in,
+};
 use crate::config;
 use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
 use crate::redact::Redactor;
@@ -416,6 +419,9 @@ pub struct Outputs {
     /// The title and body of the pull request, the agent's own or the
     /// one made up: the message of the commit.
     pub message: Option<(String, String)>,
+    /// Those of the agent's request for the policy's secondary pull
+    /// request, which is never made up: the agent names its `repo`.
+    pub secondary: Option<(String, String)>,
 }
 
 /// The type of request that carries a run's change, and the branch it
@@ -460,6 +466,7 @@ pub fn build_outputs(
         fallback.body = format!("{}\n\n{}", fallback.body, checkpoint.markdown());
     }
     let mut message = None;
+    let mut secondary = None;
     let mut lines: Vec<String> = agent_text
         .lines()
         .map(str::trim)
@@ -470,12 +477,29 @@ pub fn build_outputs(
                 return line.to_owned();
             };
             // gh-aw takes a type with dashes as well.
-            if item
-                .text("type")
-                .map(|kind| kind.replace('-', "_"))
-                .as_deref()
-                != Some(kind)
+            let own_kind = item.text("type").map(|kind| kind.replace('-', "_"));
+            // A pull request in the secondary repository: on the run's
+            // branch there, and named as the policy names the repository,
+            // which gh-aw's handler compares as written. Of several, which
+            // the check refuses, the first is the commit's message.
+            if own_kind.as_deref() == Some(CREATE_PULL_REQUEST)
+                && let Some(target) = &policy.secondary_pull_request
+                && item.text("repo").is_some_and(|repo| target.names(repo))
             {
+                let text = |key: &str, default: &str| {
+                    item.text(key)
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or(default)
+                        .to_owned()
+                };
+                secondary.get_or_insert_with(|| {
+                    (text("title", &fallback.title), text("body", &fallback.body))
+                });
+                item.set("repo", json!(target.repo));
+                item.set("branch", json!(target.branch(&run_branch(run_id))));
+                return serde_json::to_string(&item).unwrap_or_else(|_| line.to_owned());
+            }
+            if own_kind.as_deref() != Some(kind) {
                 return line.to_owned();
             }
             // Keep the request consistent with the fallback commit message.
@@ -535,6 +559,7 @@ pub fn build_outputs(
         text: lines.iter().map(|line| format!("{line}\n")).collect(),
         wants_patch: message.is_some() && has_changes,
         message,
+        secondary,
     }
 }
 
@@ -680,6 +705,11 @@ pub struct Change {
     /// Why the agent's requests file was not handed back, which takes
     /// the change with it ([`requests_refused`]).
     pub requests_dropped: Option<String>,
+    /// As `patch`, for the secondary pull request's repository.
+    pub secondary_patch: Value,
+    /// Why a change to that repository was not handed back while the
+    /// rest was: no request named it.
+    pub secondary_dropped: Option<String>,
 }
 
 impl Change {
@@ -698,14 +728,17 @@ impl Change {
             &mut self.dropped,
             &mut self.memory_dropped,
             &mut self.requests_dropped,
+            &mut self.secondary_dropped,
         ]
         .into_iter()
         .flatten()
         {
             *why = redactor.redact(why).into_owned();
         }
-        if let Some(error) = self.patch.get("error").and_then(Value::as_str) {
-            self.patch["error"] = json!(redactor.redact(error).into_owned());
+        for patch in [&mut self.patch, &mut self.secondary_patch] {
+            if let Some(error) = patch.get("error").and_then(Value::as_str) {
+                patch["error"] = json!(redactor.redact(error).into_owned());
+            }
         }
     }
 }
@@ -1488,6 +1521,9 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     }
 
     let outputs = build_outputs(&agent_text, policy, has_changes, &outcome, run_id);
+    // Made before anything is written: a hand-back either holds every
+    // patch its requests need, or, as in the old tree, none of its files.
+    let mut patches = Vec::new();
     if let (true, Some((title, body))) = (outputs.wants_patch, &outputs.message) {
         let message = commit_message(title, body, &request.commit.trailers, run_id);
         let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
@@ -1507,20 +1543,68 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
                 return Ok(change);
             }
             Ok(Some(patch)) => {
-                create_dir(request.safe_outputs)?;
-                let name = patch_file_name(&carrier(policy, run_id).1);
-                write(&request.safe_outputs.join(name), &patch)?;
+                change.patch = json!({"base": base, "bytes": patch.len()});
                 let base_file = Base {
                     repo: &policy.repo,
                     r#ref: &policy.base,
                     commit: base,
                 };
-                let mut text = serde_json::to_string(&base_file).context("writing the base")?;
-                text.push('\n');
-                write(&request.safe_outputs.join(BASE_FILE), text.as_bytes())?;
-                change.patch = json!({"base": base, "bytes": patch.len()});
+                patches.push((
+                    patch_file_name(&carrier(policy, run_id).1),
+                    patch,
+                    BASE_FILE,
+                    serde_json::to_string(&base_file).context("writing the base")?,
+                ));
             }
         }
+    }
+    if let (Some(target), Some(tree), Kind::Branch) = (
+        &policy.secondary_pull_request,
+        &checkout.secondary,
+        policy.kind,
+    ) {
+        let tree_base = tree.base_commit.as_str();
+        match secondary_patch(request, tree, &author, outputs.secondary.as_ref()) {
+            Err(why) => {
+                let why = format!("the change to {}, for its pull request: {why}", target.repo);
+                change.secondary_patch = json!({"base": tree_base, "error": why});
+                change.drop_patch(base, why);
+                return Ok(change);
+            }
+            Ok(SecondaryChange::Unchanged) => {}
+            Ok(SecondaryChange::Unasked) => {
+                let why = format!(
+                    "changes to {} dropped: no create_pull_request names it as its `repo`",
+                    target.repo
+                );
+                change.secondary_patch = json!({"base": tree_base, "error": why});
+                change.secondary_dropped = Some(why);
+            }
+            Ok(SecondaryChange::Patch(patch, omitted)) => {
+                change.secondary_patch = json!({"base": tree_base, "bytes": patch.len()});
+                // Said, as for the run's own, in the summary.
+                if !omitted.is_empty() {
+                    change.secondary_patch[OMITTED_BINARY_FILES] = json!(omitted);
+                }
+                let base_file = Base {
+                    repo: &target.repo,
+                    r#ref: &target.base,
+                    commit: tree_base,
+                };
+                patches.push((
+                    patch_file_name_in(&target.repo, &target.branch(&run_branch(run_id))),
+                    patch,
+                    SECONDARY_BASE_FILE,
+                    serde_json::to_string(&base_file).context("writing the base")?,
+                ));
+            }
+        }
+    }
+    for (name, patch, base_name, mut base_text) in patches {
+        create_dir(request.safe_outputs)?;
+        write(&request.safe_outputs.join(name), &patch)?;
+        base_text.push('\n');
+        write(&request.safe_outputs.join(base_name), base_text.as_bytes())?;
     }
     if !outputs.text.is_empty() {
         create_dir(request.safe_outputs)?;
@@ -1539,6 +1623,70 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
         );
     }
     Ok(change)
+}
+
+/// What became of the clone of the secondary pull request's repository.
+enum SecondaryChange {
+    Unchanged,
+    /// Changed, without a request that names the repository.
+    Unasked,
+    /// The patch, and the untracked binary files left out of it.
+    Patch(Vec<u8>, Vec<String>),
+}
+
+/// The change of TREE, the clone of the secondary pull request's
+/// repository, as a patch of its own, made as the run's own is, by AUTHOR,
+/// with the title and body of the agent's request for it (MESSAGE) and
+/// within the secondary's own byte budget. `Err` is why it cannot be
+/// handed back.
+fn secondary_patch(
+    request: &Request<'_>,
+    tree: &Checkout,
+    author: &(String, String),
+    message: Option<&(String, String)>,
+) -> Result<SecondaryChange, String> {
+    let Some(target) = &request.policy.secondary_pull_request else {
+        return Ok(SecondaryChange::Unchanged);
+    };
+    let unreadable = || "git cannot read the checkout any more".to_owned();
+    let dir = clone::utf8(&tree.dir).map_err(|_| unreadable())?;
+    let git = Git::new(request.runner, dir, author);
+    let base = tree.base_commit.as_str();
+    let status = git
+        .limited(
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--no-renames",
+                "--untracked-files=all",
+            ],
+            MAX_STATUS_BYTES,
+        )
+        .ok_or_else(unreadable)?;
+    let head = git
+        .run(&["rev-parse", "--verify", "HEAD"], b"")
+        .filter(|(status, _)| *status == 0)
+        .map(|(_, out)| String::from_utf8_lossy(&out).trim().to_owned())
+        .ok_or_else(unreadable)?;
+    if status.is_empty() && head == base {
+        return Ok(SecondaryChange::Unchanged);
+    }
+    let omitted = stage_patch(&git, base, &status)?;
+    // Untracked binary litter alone, or commits that leave the tree as it
+    // was: nothing to propose.
+    if git.ok(&["diff", "--cached", "--quiet"]) {
+        return Ok(SecondaryChange::Unchanged);
+    }
+    let Some((title, body)) = message else {
+        return Ok(SecondaryChange::Unasked);
+    };
+    let message = commit_message(title, body, &request.commit.trailers, request.run_id);
+    let max = usize::try_from(target.max_patch_bytes).unwrap_or(usize::MAX - 1);
+    Ok(match build_patch(&git, base, &message, max)? {
+        Some(patch) => SecondaryChange::Patch(patch, omitted),
+        None => SecondaryChange::Unchanged,
+    })
 }
 
 fn create_dir(dir: &Path) -> Result<()> {
@@ -1576,6 +1724,7 @@ mod tests {
             memory: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
+            secondary_pull_request: None,
         }
     }
 
@@ -2257,8 +2406,34 @@ mod tests {
             let checkout = Checkout {
                 dir: repo,
                 base_commit: String::from_utf8(head.stdout).unwrap().trim().to_owned(),
+                secondary: None,
             };
             Self { dir, checkout }
+        }
+
+        /// The same, with a clone of the secondary pull request's
+        /// repository `o/tool` beside the checkout, as `clone::secondary`
+        /// leaves one.
+        fn with_secondary() -> Self {
+            let mut home = Self::new();
+            let repo = home.path("work/secondary/o/tool");
+            std::fs::create_dir_all(&repo).unwrap();
+            let head = sh(
+                &repo,
+                "git init -q -b main . && echo tool > tool.txt && git add . && \
+                 git -c user.name=t -c user.email=t@example.invalid commit -q -m Tool && \
+                 git rev-parse HEAD",
+            );
+            home.checkout.secondary = Some(Box::new(Checkout {
+                dir: repo,
+                base_commit: head.trim().to_owned(),
+                secondary: None,
+            }));
+            home
+        }
+
+        fn secondary(&self) -> &Checkout {
+            self.checkout.secondary.as_deref().unwrap()
         }
 
         fn path(&self, name: &str) -> std::path::PathBuf {
@@ -2606,6 +2781,245 @@ mod tests {
             sh(&applied, "git diff --name-only HEAD~1"),
             "a.txt\nsub/new-file.txt\n"
         );
+    }
+
+    /// A run of [`policy`] that may also open a pull request in `o/tool`.
+    fn secondary_policy() -> Policy {
+        Policy {
+            secondary_pull_request: Some(crate::policy::Secondary {
+                repo: "o/tool".into(),
+                clone_url: "https://example.invalid/o/tool".into(),
+                base: "main".into(),
+                branch_prefix: "agentic-job/".into(),
+                max: 1,
+                max_patch_bytes: 4096,
+                max_patch_files: 2,
+                protected_files: vec!["go.mod".into()],
+                protect_top_level_dot_folders: true,
+                unprotected_dot_folders: Vec::new(),
+                protected_paths: Vec::new(),
+            }),
+            ..policy(Kind::Branch, pull_requests())
+        }
+    }
+
+    /// The secondary repository's change goes back as a patch of its own,
+    /// only with a request that names it, and the check holds that patch
+    /// to the secondary's bounds and the rest to the run's own.
+    #[test]
+    fn a_secondary_change_is_handed_back_as_its_own_patch() {
+        let policy = secondary_policy();
+        let own = r#"{"type":"create_pull_request","title":"r: Edit","body":"Why."}"#;
+        let tool = r#"{"type":"create_pull_request","repo":"o/tool","title":"tool: Edit","body":"Why there."}"#;
+        let shouting =
+            r#"{"type":"create_pull_request","repo":"O/Tool","title":"tool: Edit","body":"B"}"#;
+        let other = r#"{"type":"create_pull_request","repo":"o/other","title":"T","body":"B"}"#;
+        let own_patch = "aw-agent-run-42.patch";
+        let tool_patch = "aw-o-tool-agentic-job-agent-run-42.patch";
+        // (case, change of the run's checkout, change of the secondary
+        // clone, requests, the hand-back's patches, why the change or the
+        // secondary change is dropped, and what check refuses)
+        type Case<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            String,
+            &'a [&'a str],
+            Option<&'a str>,
+            Option<&'a str>,
+        );
+        let cases: &[Case] = &[
+            (
+                "both",
+                "echo two >> a.txt",
+                "echo two >> tool.txt",
+                format!("{own}\n{tool}"),
+                &[own_patch, tool_patch],
+                None,
+                None,
+            ),
+            (
+                "the secondary alone",
+                "true",
+                "echo two >> tool.txt",
+                tool.to_owned(),
+                &[tool_patch],
+                None,
+                None,
+            ),
+            (
+                "named in another case",
+                "true",
+                "echo two >> tool.txt",
+                shouting.to_owned(),
+                &[tool_patch],
+                None,
+                None,
+            ),
+            (
+                "a secondary change nobody asked for",
+                "echo two >> a.txt",
+                "echo two >> tool.txt",
+                own.to_owned(),
+                &[own_patch],
+                Some("changes to o/tool dropped: no create_pull_request names it"),
+                None,
+            ),
+            (
+                "a secondary request without a change",
+                "echo two >> a.txt",
+                "true",
+                format!("{own}\n{tool}"),
+                &[own_patch],
+                None,
+                Some(
+                    "the create_pull_request for o/tool needs its patch, \
+                     aw-o-tool-agentic-job-agent-run-42.patch",
+                ),
+            ),
+            (
+                "a protected file of the secondary's own",
+                "true",
+                "echo m > go.mod",
+                tool.to_owned(),
+                &[tool_patch],
+                None,
+                Some("protected"),
+            ),
+            (
+                "over the secondary's file count",
+                "true",
+                "echo 1 > one && echo 2 > two && echo 3 > three",
+                tool.to_owned(),
+                &[tool_patch],
+                None,
+                Some("files, over 2"),
+            ),
+            (
+                "two secondary requests",
+                "true",
+                "echo two >> tool.txt",
+                format!("{tool}\n{tool}"),
+                &[tool_patch],
+                None,
+                Some("2 outputs of type \"create_pull_request\" for o/tool, over 1"),
+            ),
+            (
+                "another repository",
+                "echo two >> a.txt",
+                "true",
+                other.to_owned(),
+                &[own_patch],
+                None,
+                Some("with repo \"o/other\", which is not the policy's"),
+            ),
+        ];
+        for (case, own_change, tool_change, requests, patches, dropped, refused) in cases {
+            let home = Home::with_secondary();
+            sh(&home.checkout.dir, own_change);
+            sh(&home.secondary().dir, tool_change);
+            std::fs::write(home.path(AGENT_OUTPUTS), format!("{requests}\n")).unwrap();
+            let change = home.collect(&policy, &config::Commit::default());
+            assert_eq!(change.dropped, None, "{case}");
+            assert_eq!(
+                change
+                    .secondary_dropped
+                    .as_deref()
+                    .map(|why| why.split(" as its").next().unwrap_or_default()),
+                *dropped,
+                "{case}"
+            );
+            let mut names: Vec<String> = std::fs::read_dir(home.path("safe-outputs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name.ends_with(".patch"))
+                .collect();
+            names.sort();
+            let mut want = patches.to_vec();
+            want.sort_unstable();
+            assert_eq!(names, want, "{case}");
+            let verdict = home.verdict(&policy);
+            match refused {
+                None => assert!(verdict.ok, "{case}: {:?}", verdict.errors),
+                Some(want) => assert!(
+                    verdict.errors.iter().any(|error| error.contains(want)),
+                    "{case}: {:?}",
+                    verdict.errors
+                ),
+            }
+            if patches.contains(&tool_patch) {
+                // Named as the policy names it, on the run's branch.
+                let outputs =
+                    std::fs::read_to_string(home.path("safe-outputs/outputs.jsonl")).unwrap();
+                let first = outputs
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .find(|item| item.get("repo").is_some())
+                    .unwrap();
+                assert_eq!(
+                    (&first["repo"], &first["branch"]),
+                    (&json!("o/tool"), &json!("agentic-job/agent-run-42")),
+                    "{case}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(home.path("safe-outputs/secondary-base.json")).unwrap(),
+                    format!(
+                        "{{\"repo\":\"o/tool\",\"ref\":\"main\",\"commit\":\"{}\"}}\n",
+                        home.secondary().base_commit
+                    ),
+                    "{case}"
+                );
+                assert_eq!(
+                    change.secondary_patch["base"],
+                    json!(home.secondary().base_commit),
+                    "{case}"
+                );
+            }
+            if verdict.ok && patches.contains(&tool_patch) {
+                // Applied in a clone of the secondary repository, the
+                // commit is the agent's request's.
+                let checked = verdict.secondary_patch.unwrap();
+                assert_eq!(checked.file, tool_patch, "{case}");
+                assert_eq!(checked.files, ["tool.txt"], "{case}");
+                sh(
+                    home.dir.path(),
+                    &format!(
+                        "git clone -q work/secondary/o/tool applied && cd applied && \
+                         git checkout -q {} && \
+                         git -c user.name=a -c user.email=a@example.invalid am -q \
+                         ../safe-outputs/{tool_patch}",
+                        home.secondary().base_commit
+                    ),
+                );
+                let subject = sh(&home.path("applied"), "git log -1 --format=%s");
+                assert_eq!(subject.trim(), "tool: Edit", "{case}");
+            }
+        }
+    }
+
+    /// A secondary patch that cannot be handed back takes everything with
+    /// it, as the run's own does: the requests go with the change.
+    #[test]
+    fn a_secondary_change_over_its_budget_drops_the_hand_back() {
+        let home = Home::with_secondary();
+        let policy = secondary_policy();
+        sh(&home.checkout.dir, "echo two >> a.txt");
+        sh(
+            &home.secondary().dir,
+            "head -c 8000 /dev/zero | tr '\\0' x > big.txt",
+        );
+        std::fs::write(
+            home.path(AGENT_OUTPUTS),
+            "{\"type\":\"create_pull_request\",\"repo\":\"o/tool\",\"title\":\"T\",\"body\":\"B\"}\n",
+        )
+        .unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        let why = change.dropped.unwrap();
+        assert!(
+            why.contains("o/tool") && why.contains("over 4096 bytes"),
+            "{why}"
+        );
+        assert!(!home.path("safe-outputs").exists());
     }
 
     /// A push is handed back as a patch named for the pull request's

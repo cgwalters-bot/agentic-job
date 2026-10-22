@@ -564,9 +564,9 @@ pub struct Bounds {
     pub forge: Forge,
     /// One exact further repository a run may propose a pull request to
     /// (#1075). Kept apart from `repos`, which admits repositories to work
-    /// on, so that admitting one is no permission to write to it. Not yet
-    /// enforced by `check` or `apply`: `compile` refuses every request
-    /// while it is set.
+    /// on, so that admitting one is no permission to write to it. `check`
+    /// holds it to these bounds; `apply` has no pass for it yet, so the
+    /// `policy` command refuses a run that would open one (#1286).
     #[serde(default)]
     pub secondary_pull_request: Option<SecondaryPullRequest>,
 }
@@ -597,51 +597,79 @@ pub struct SecondaryPullRequest {
     pub unprotected_files: Unprotected,
 }
 
+/// The longest branch a run's pull request has: `agent-run-` and the
+/// largest run ID, which a forge counts in 64 bits.
+const LONGEST_RUN_BRANCH: &str = "agent-run-18446744073709551615";
+
+/// What the bounds and a policy both hold the secondary pull request to:
+/// one exact repository and base, a prefix that keeps every run's branch
+/// one gh-aw pushes by that name, a patch `check` can name, and patch
+/// budgets of its own.
+fn check_secondary(
+    repo: &str,
+    base: &str,
+    branch_prefix: &str,
+    max: u32,
+    max_patch_bytes: u64,
+    max_patch_files: u32,
+) -> Result<()> {
+    ensure!(
+        REPO_RE.is_match(repo) && repo.split('/').all(|part| !part.starts_with(['.', '-'])),
+        "secondary_pull_request.repo requires one exact repository name: {repo:?}"
+    );
+    // A name gh-aw's handler keeps as it is, of plain components.
+    let exact_branch = |branch: &str| {
+        PUSH_BRANCH_RE.is_match(branch)
+            && !push_branch_ambiguous(branch)
+            && branch
+                .split('/')
+                .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+    };
+    ensure!(
+        exact_branch(base),
+        "secondary_pull_request.base requires one exact branch name: {base:?}"
+    );
+    ensure!(
+        branch_prefix.ends_with('/'),
+        "secondary_pull_request.branch_prefix must be nonempty and end with /"
+    );
+    ensure!(
+        exact_branch(&format!("{branch_prefix}{LONGEST_RUN_BRANCH}")),
+        "secondary_pull_request.branch_prefix must form an unambiguous branch name: \
+         {branch_prefix:?}"
+    );
+    ensure!(
+        crate::check::is_patch_file_name(&crate::check::patch_file_name_in(
+            repo,
+            &format!("{branch_prefix}{LONGEST_RUN_BRANCH}")
+        )),
+        "secondary_pull_request.repo and branch_prefix are too long to name its patch"
+    );
+    ensure!(
+        max == MAX_PULL_REQUESTS,
+        "secondary_pull_request.max must be {MAX_PULL_REQUESTS}"
+    );
+    ensure!(
+        max_patch_bytes >= MIN_SECONDARY_PATCH_BYTES,
+        "secondary_pull_request.max_patch_bytes must be at least {MIN_SECONDARY_PATCH_BYTES}"
+    );
+    ensure!(
+        max_patch_files >= MIN_SECONDARY_PATCH_FILES,
+        "secondary_pull_request.max_patch_files must be at least {MIN_SECONDARY_PATCH_FILES}"
+    );
+    Ok(())
+}
+
 impl SecondaryPullRequest {
     fn validate(&self) -> Result<()> {
-        ensure!(
-            REPO_RE.is_match(&self.repo)
-                && self
-                    .repo
-                    .split('/')
-                    .all(|part| !part.starts_with(['.', '-'])),
-            "secondary_pull_request.repo requires one exact repository name: {:?}",
-            self.repo
-        );
-        // A name gh-aw's handler keeps as it is, of plain components.
-        let exact_branch = |branch: &str| {
-            PUSH_BRANCH_RE.is_match(branch)
-                && !push_branch_ambiguous(branch)
-                && branch.split('/').all(|part| {
-                    !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock")
-                })
-        };
-        ensure!(
-            exact_branch(&self.base),
-            "secondary_pull_request.base requires one exact branch name: {:?}",
-            self.base
-        );
-        ensure!(
-            self.branch_prefix.ends_with('/'),
-            "secondary_pull_request.branch_prefix must be nonempty and end with /"
-        );
-        ensure!(
-            exact_branch(&format!("{}agent-run-1", self.branch_prefix)),
-            "secondary_pull_request.branch_prefix must form an unambiguous branch name: {:?}",
-            self.branch_prefix
-        );
-        ensure!(
-            self.max == MAX_PULL_REQUESTS,
-            "secondary_pull_request.max must be {MAX_PULL_REQUESTS}"
-        );
-        ensure!(
-            self.max_patch_bytes >= MIN_SECONDARY_PATCH_BYTES,
-            "secondary_pull_request.max_patch_bytes must be at least {MIN_SECONDARY_PATCH_BYTES}"
-        );
-        ensure!(
-            self.max_patch_files >= MIN_SECONDARY_PATCH_FILES,
-            "secondary_pull_request.max_patch_files must be at least {MIN_SECONDARY_PATCH_FILES}"
-        );
+        check_secondary(
+            &self.repo,
+            &self.base,
+            &self.branch_prefix,
+            self.max,
+            self.max_patch_bytes,
+            self.max_patch_files,
+        )?;
         for repo in &self.unprotected_files.repos {
             ensure!(
                 repo.eq_ignore_ascii_case(&self.repo),
@@ -652,6 +680,103 @@ impl SecondaryPullRequest {
         validate_dot_folders(
             &self.unprotected_files.dot_folders,
             "secondary_pull_request.unprotected_files.dot_folders",
+        )
+    }
+
+    /// Its policy, cloned from HOST: protected files and dot-folders from
+    /// its own exemptions alone, never the primary repository's. The
+    /// bounds' `protected` globs only take away, so they hold here too.
+    fn compile(&self, host: &str, protected_paths: &[String]) -> Secondary {
+        Secondary {
+            repo: self.repo.clone(),
+            clone_url: format!("https://{host}/{}", self.repo),
+            base: self.base.clone(),
+            branch_prefix: self.branch_prefix.clone(),
+            max: self.max,
+            max_patch_bytes: self.max_patch_bytes,
+            max_patch_files: self.max_patch_files,
+            protected_files: protected_files(&self.unprotected_files, &self.repo),
+            protect_top_level_dot_folders: true,
+            unprotected_dot_folders: dot_folders(&self.unprotected_files, &self.repo),
+            protected_paths: protected_paths.to_vec(),
+        }
+    }
+}
+
+/// The secondary pull request a run may open, as `policy` compiled it
+/// from [`SecondaryPullRequest`]: in the repository it names and nowhere
+/// else, from a clone of its base, with a patch of its own that is held
+/// to its own budgets and protected files. Always a draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Secondary {
+    pub repo: String,
+    /// What `run` clones for the agent to change: the repository on the
+    /// host of the run's own clone URL.
+    pub clone_url: String,
+    pub base: String,
+    pub branch_prefix: String,
+    pub max: u32,
+    pub max_patch_bytes: u64,
+    pub max_patch_files: u32,
+    pub protected_files: Vec<String>,
+    pub protect_top_level_dot_folders: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unprotected_dot_folders: Vec<String>,
+    /// As [`PullRequest::protected_paths`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_paths: Vec<String>,
+}
+
+impl Secondary {
+    pub fn rules(&self) -> PatchRules<'_> {
+        PatchRules {
+            protected_files: &self.protected_files,
+            protect_top_level_dot_folders: self.protect_top_level_dot_folders,
+            unprotected_dot_folders: &self.unprotected_dot_folders,
+            protected_paths: &self.protected_paths,
+            max_patch_files: self.max_patch_files,
+            commit_author: None,
+        }
+    }
+
+    /// Whether a request's `repo` names this repository. gh-aw's handler
+    /// compares it as written, so `run` writes it as the policy does.
+    pub fn names(&self, repo: &str) -> bool {
+        repo.eq_ignore_ascii_case(&self.repo)
+    }
+
+    /// The branch of a run whose own pull request is on BRANCH: under the
+    /// prefix, which gh-aw's handler then leaves as it is. So its patch
+    /// is never one gh-aw's handler would take for the run's own: neither
+    /// by the plain name it falls back to, nor, as `policy` refuses the
+    /// prefix that would, by the name it looks for first in the run's or
+    /// the output repository.
+    pub fn branch(&self, branch: &str) -> String {
+        format!("{}{branch}", self.branch_prefix)
+    }
+
+    fn validate(&self) -> Result<()> {
+        check_secondary(
+            &self.repo,
+            &self.base,
+            &self.branch_prefix,
+            self.max,
+            self.max_patch_bytes,
+            self.max_patch_files,
+        )?;
+        crate::run::clone::check_url(&self.clone_url)?;
+        ensure!(
+            self.protect_top_level_dot_folders,
+            "top-level dot-folders are not protected"
+        );
+        validate_dot_folders(
+            &self.unprotected_dot_folders,
+            "secondary_pull_request.unprotected_dot_folders",
+        )?;
+        validate_protected(
+            &self.protected_paths,
+            "secondary_pull_request.protected_paths",
         )
     }
 }
@@ -1020,6 +1145,11 @@ pub struct Policy {
     /// written before there was one, or by hand: the first.
     #[serde(default = "first_contract")]
     pub contract: u32,
+    /// The one pull request a run that opens one may also open in another
+    /// repository. Not in `safe_outputs`: gh-aw's collector reads that,
+    /// and counts a `create_pull_request` of either repository alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_pull_request: Option<Secondary>,
 }
 
 /// Match HTTP authorities exactly, including ports, without DNS resolution.
@@ -1034,6 +1164,10 @@ pub(crate) fn allows_http(allowed: &[String], authority: &str) -> bool {
 fn first_contract() -> u32 {
     1
 }
+
+/// The directory under the agent's `work` that the secondary pull
+/// request's repository is cloned into, as `OWNER/NAME`.
+pub const SECONDARY_DIR: &str = "secondary";
 
 /// Reference context admitted before the agent starts. The workflow resolves
 /// refs and confirms visibility; the policy checks names, pins and caller bounds.
@@ -1386,6 +1520,31 @@ impl Policy {
                 "a push to a branch gh-aw would push by another name"
             );
         }
+        if let Some(secondary) = &self.secondary_pull_request {
+            secondary.validate()?;
+            // As `policy` compiles it: beside the run's own pull request,
+            // from a public repository, and never in the run's own one,
+            // whose patch would then be the secondary's to gh-aw.
+            ensure!(
+                self.kind == Kind::Branch
+                    && self.safe_outputs.create_pull_request.is_some()
+                    && !self.private
+                    && self.forge == Forge::Github,
+                "a secondary pull request without the run's own, in a private run, or off GitHub"
+            );
+            for repo in std::iter::once(&self.repo).chain(&self.push_repo) {
+                ensure!(
+                    !secondary.names(repo)
+                        && !patch_named_as_in(&secondary.repo, &secondary.branch_prefix, repo),
+                    "a secondary pull request in, or with a patch named as one of, the run's own \
+                     or output repository"
+                );
+            }
+            ensure!(
+                self.repo.rsplit('/').next() != Some(SECONDARY_DIR),
+                "target name conflicts with the secondary directory"
+            );
+        }
         Ok(())
     }
 }
@@ -1540,6 +1699,11 @@ impl Bounds {
         }
         if let Some(secondary) = &self.secondary_pull_request {
             secondary.validate()?;
+            // Apply off GitHub pushes to `push_repo` alone.
+            ensure!(
+                self.forge == Forge::Github,
+                "secondary_pull_request is only for GitHub"
+            );
         }
         for repo in &self.unprotected_files.repos {
             ensure!(
@@ -1561,35 +1725,6 @@ impl Bounds {
             "`max_patch_bytes` must be at least {KB}"
         );
         Ok(())
-    }
-
-    /// The protected file names for a patch to `repo`.
-    fn protected_files(&self, repo: &str) -> Vec<String> {
-        let unprotected = &self.unprotected_files;
-        let exempt = unprotected
-            .repos
-            .iter()
-            .any(|own| own.eq_ignore_ascii_case(repo));
-        DEFAULT_PROTECTED_FILES
-            .iter()
-            .filter(|name| {
-                !(exempt && unprotected.files.iter().any(|file| file.as_str() == **name))
-            })
-            .map(|name| (*name).to_owned())
-            .collect()
-    }
-
-    fn dot_folders(&self, repo: &str) -> Vec<String> {
-        if self
-            .unprotected_files
-            .repos
-            .iter()
-            .any(|own| own.eq_ignore_ascii_case(repo))
-        {
-            self.unprotected_files.dot_folders.clone()
-        } else {
-            Vec::new()
-        }
     }
 
     /// Why `url` may not be cloned as `repo`, if it may not. The URL must
@@ -1645,15 +1780,6 @@ impl Bounds {
             private,
         } = *request;
         let mut errors = Vec::new();
-
-        // A write destination that check and apply do not yet hold to its
-        // own bounds: refused until they do, rather than written unchecked.
-        if self.secondary_pull_request.is_some() {
-            errors.push(
-                "secondary_pull_request is configured, but check and apply do not support it yet"
-                    .to_owned(),
-            );
-        }
 
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
         if !repo_ok || !glob_matches(&self.repos, repo) {
@@ -1872,6 +1998,40 @@ impl Bounds {
             )),
             (false, None) => {}
         }
+        // Only beside the run's own pull request, which already needs a
+        // user's token, a public repository and a branch run; and in a
+        // repository the run's own patch cannot be mistaken for.
+        let secondary = self
+            .secondary_pull_request
+            .as_ref()
+            .filter(|_| types.contains(&CREATE_PULL_REQUEST));
+        if let Some(secondary) = secondary {
+            for (what, name) in [("works on", Some(repo)), ("applies to", output_repo)] {
+                if let Some(name) = name.filter(|name| name.eq_ignore_ascii_case(&secondary.repo)) {
+                    errors.push(format!(
+                        "secondary_pull_request.repo {:?} is the repository the run {what}, \
+                         {name:?}: a second pull request there is not a secondary destination",
+                        secondary.repo
+                    ));
+                } else if let Some(name) = name.filter(|name| {
+                    patch_named_as_in(&secondary.repo, &secondary.branch_prefix, name)
+                }) {
+                    errors.push(format!(
+                        "secondary_pull_request's patch would have the name of one for the \
+                         repository the run {what}, {name:?}: choose another branch_prefix"
+                    ));
+                }
+            }
+            if !(repo_ok && clone_url_host(clone_url).is_some()) {
+                errors.push(format!(
+                    "no host to clone secondary_pull_request.repo {:?} from",
+                    secondary.repo
+                ));
+            }
+            if repo.rsplit('/').next() == Some(SECONDARY_DIR) {
+                errors.push("target name conflicts with the secondary directory".to_owned());
+            }
+        }
 
         let max = match max_outputs {
             MAX_OUTPUTS => Some(self.max_outputs),
@@ -1938,9 +2098,9 @@ impl Bounds {
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
                 max: limit(CREATE_PULL_REQUEST).max,
-                protected_files: self.protected_files(repo),
+                protected_files: protected_files(&self.unprotected_files, repo),
                 protect_top_level_dot_folders: true,
-                unprotected_dot_folders: self.dot_folders(repo),
+                unprotected_dot_folders: dot_folders(&self.unprotected_files, repo),
                 protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 draft: true,
@@ -1958,9 +2118,9 @@ impl Bounds {
                     .map_or(0, |bound| bound.replacement_max_commits),
                 replacement_base: None,
                 ready_when_complete: ready(PUSH_TO_PULL_REQUEST_BRANCH),
-                protected_files: self.protected_files(repo),
+                protected_files: protected_files(&self.unprotected_files, repo),
                 protect_top_level_dot_folders: true,
-                unprotected_dot_folders: self.dot_folders(repo),
+                unprotected_dot_folders: dot_folders(&self.unprotected_files, repo),
                 protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 max_patch_size: self.max_patch_bytes / KB,
@@ -1994,6 +2154,9 @@ impl Bounds {
             memory: self.memory.clone(),
             forge: self.forge,
             contract: CONTRACT,
+            secondary_pull_request: secondary.and_then(|secondary| {
+                clone_url_host(clone_url).map(|host| secondary.compile(host, &self.protected))
+            }),
         })
     }
 }
@@ -2035,6 +2198,48 @@ fn under(host: &str, domain: &str) -> bool {
 fn same_owner(one: &str, other: &str) -> bool {
     let owner = |repo: &str| repo.split('/').next().unwrap_or_default().to_owned();
     owner(one).eq_ignore_ascii_case(&owner(other))
+}
+
+/// The host of a clone URL `https://HOST/OWNER/NAME`, whose repository
+/// `clone_url_problem` has checked is within the bounds.
+fn clone_url_host(url: &str) -> Option<&str> {
+    url.strip_prefix("https://")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(host, _)| host)
+}
+
+/// Whether the patch of a secondary pull request in SECONDARY, on a branch
+/// under PREFIX, would have the name gh-aw's handler looks for first for
+/// the run's own pull request in REPO (`aw-OWNER-NAME-BRANCH.patch`, of
+/// its `target-repo`): `org/tool` under `docs/` is `org/tool-docs`'s.
+fn patch_named_as_in(secondary: &str, prefix: &str, repo: &str) -> bool {
+    crate::check::patch_file_name_in(secondary, &format!("{prefix}{LONGEST_RUN_BRANCH}"))
+        == crate::check::patch_file_name_in(repo, LONGEST_RUN_BRANCH)
+}
+
+/// The protected file names for a patch to `repo`, under UNPROTECTED.
+fn protected_files(unprotected: &Unprotected, repo: &str) -> Vec<String> {
+    let exempt = unprotected
+        .repos
+        .iter()
+        .any(|own| own.eq_ignore_ascii_case(repo));
+    DEFAULT_PROTECTED_FILES
+        .iter()
+        .filter(|name| !(exempt && unprotected.files.iter().any(|file| file.as_str() == **name)))
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
+fn dot_folders(unprotected: &Unprotected, repo: &str) -> Vec<String> {
+    if unprotected
+        .repos
+        .iter()
+        .any(|own| own.eq_ignore_ascii_case(repo))
+    {
+        unprotected.dot_folders.clone()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Whether OUTPUT hands back a patch.
@@ -2115,6 +2320,15 @@ pub fn run(args: &Args) -> Result<Exit> {
                 .and_then(|other| intersect(policy, other)),
             None => Ok(policy),
         });
+    // Not admitted while apply has no pass of its own for it: every other
+    // consumer holds it to its bounds, apply would hand its request to the
+    // run's own pull request's handler, which refuses it after a run.
+    let compiled = compiled.and_then(|policy| match policy.secondary_pull_request {
+        Some(_) => Err(vec![
+            "secondary_pull_request is not yet supported by apply".to_owned(),
+        ]),
+        None => Ok(policy),
+    });
     match compiled {
         Ok(mut policy) => {
             if policy.clone_url.starts_with(PLAIN_HTTP_PREFIX) {
@@ -2351,6 +2565,35 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
         }
         _ => None,
     };
+    // Only where both files name the one destination alike, within the
+    // tighter of each budget and the exemptions both make.
+    policy.secondary_pull_request =
+        match (policy.secondary_pull_request, other.secondary_pull_request) {
+            (Some(mut own), Some(bound))
+                if (&own.repo, &own.clone_url, &own.base, &own.branch_prefix)
+                    == (
+                        &bound.repo,
+                        &bound.clone_url,
+                        &bound.base,
+                        &bound.branch_prefix,
+                    ) =>
+            {
+                own.max = own.max.min(bound.max);
+                own.max_patch_bytes = own.max_patch_bytes.min(bound.max_patch_bytes);
+                own.max_patch_files = own.max_patch_files.min(bound.max_patch_files);
+                own.unprotected_dot_folders
+                    .retain(|name| bound.unprotected_dot_folders.contains(name));
+                for name in bound.protected_files {
+                    if !own.protected_files.contains(&name) {
+                        own.protected_files.push(name);
+                    }
+                }
+                own.protected_paths = union(own.protected_paths, bound.protected_paths)?;
+                Some(own)
+            }
+            _ => None,
+        }
+        .filter(|_| policy.safe_outputs.create_pull_request.is_some());
     if policy.safe_outputs.types().next().is_none() {
         return Err(vec!["the bounds files allow no common output type".into()]);
     }
@@ -2427,10 +2670,17 @@ max_patch_files = 10
         toml::from_str(&format!("{BOUNDS}{}", SECONDARY.replacen(from, to, 1)))
     }
 
-    #[test]
-    fn secondary_pull_request_bounds_are_explicit() {
+    /// [`BOUNDS`] with [`SECONDARY`], validated.
+    fn configured() -> Bounds {
         let configured = secondary_bounds("", "").unwrap();
         configured.validate().unwrap();
+        configured
+    }
+
+    #[test]
+    fn secondary_pull_request_bounds_are_explicit() {
+        assert!(policy().secondary_pull_request.is_none());
+        let configured = configured();
         let secondary = configured.secondary_pull_request.as_ref().unwrap();
         // Nothing inherited from the primary output's exemptions.
         assert!(secondary.unprotected_files.repos.is_empty());
@@ -2530,32 +2780,251 @@ max_patch_files = 10
     }
 
     #[test]
-    fn secondary_pull_request_bounds_refuse_every_request() {
-        assert!(bounds().secondary_pull_request.is_none());
-        let configured = secondary_bounds("", "").unwrap();
-        configured.validate().unwrap();
-        for request in [
-            request(),
-            Request {
-                kind: Kind::Analysis,
-                outputs: "noop",
+    fn a_secondary_pull_request_goes_only_beside_the_runs_own() {
+        let configured = configured();
+        // (repo, outputs, output repo, compiled with a secondary, or the
+        // refusal that names it)
+        type Case<'a> = (&'a str, &'a str, Option<&'a str>, Result<bool, &'a str>);
+        let cases: &[Case] = &[
+            (REPO, "create_pull_request,noop", None, Ok(true)),
+            (REPO, "all", None, Ok(true)),
+            (REPO, "create_pull_request", Some(REPO), Ok(true)),
+            // Without a pull request of its own, a run opens none there.
+            (REPO, "add_comment,noop", None, Ok(false)),
+            (
+                "cgwalters-forge/misctool",
+                "create_pull_request",
+                None,
+                Err("the repository the run works on"),
+            ),
+            (
+                "CGWALTERS-FORGE/MISCTOOL",
+                "create_pull_request",
+                None,
+                Err("the repository the run works on"),
+            ),
+            (
+                REPO,
+                "create_pull_request",
+                Some("cgwalters-forge/MiscTool"),
+                Err("the repository the run applies to"),
+            ),
+            (
+                "cgwalters-forge/secondary",
+                "create_pull_request",
+                None,
+                Err("conflicts with the secondary directory"),
+            ),
+            // `misctool` under `agentic-job/` would name its patch as one
+            // of `misctool-agentic-job` on the run's own branch.
+            (
+                "cgwalters-forge/misctool-agentic-job",
+                "create_pull_request",
+                None,
+                Err("choose another branch_prefix"),
+            ),
+            (
+                REPO,
+                "create_pull_request",
+                Some("cgwalters-forge/MiscTool-Agentic-Job"),
+                Err("choose another branch_prefix"),
+            ),
+        ];
+        for (repo, outputs, output_repo, want) in cases {
+            let clone_url = format!("https://github.com/{repo}");
+            let request = Request {
+                repo,
+                clone_url: &clone_url,
+                outputs,
+                output_repo: *output_repo,
                 ..request()
-            },
-        ] {
-            let errors = configured.compile(&request).unwrap_err();
-            assert!(
-                errors
-                    .iter()
-                    .any(|error| error.contains("check and apply do not support it yet")),
-                "{errors:?}"
-            );
-            // Without the table, the same request compiles as it did.
-            let mut unconfigured = configured.clone();
-            unconfigured.secondary_pull_request = None;
+            };
+            match (configured.compile(&request), want) {
+                (Ok(policy), Ok(secondary)) => {
+                    assert_eq!(
+                        policy.secondary_pull_request.is_some(),
+                        *secondary,
+                        "{repo} {outputs}"
+                    );
+                    // What `policy` prints is what `run`, check and apply load.
+                    let json = serde_json::to_string(&policy).unwrap();
+                    let loaded: Policy = serde_json::from_str(&json).unwrap();
+                    loaded.validate().unwrap();
+                    assert_eq!(loaded, policy);
+                }
+                (Err(errors), Err(want)) => {
+                    assert!(
+                        errors.iter().any(|error| error.contains(want)),
+                        "{repo} {outputs}: {errors:?}"
+                    );
+                }
+                (got, want) => panic!("{repo} {outputs}: {got:?}, not {want:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_secondary_pull_request_keeps_its_own_bounds() {
+        // The run's repository is exempt from CONTRIBUTING.md and AGENTS.md
+        // in the primary bounds; the secondary inherits none of that.
+        let configured = configured();
+        let request = Request {
+            repo: "cgwalters-bot/homegit",
+            clone_url: "https://github.com/cgwalters-bot/homegit",
+            ..request()
+        };
+        let policy = configured.compile(&request).unwrap();
+        let own = policy.safe_outputs.create_pull_request.as_ref().unwrap();
+        assert!(!own.protected_files.contains(&"AGENTS.md".to_owned()));
+        let secondary = policy.secondary_pull_request.as_ref().unwrap();
+        assert_eq!(
+            secondary.clone_url,
+            "https://github.com/cgwalters-forge/misctool"
+        );
+        assert_eq!((secondary.base.as_str(), secondary.max), ("main", 1));
+        assert_eq!(secondary.branch_prefix, "agentic-job/");
+        assert_eq!(
+            (secondary.max_patch_bytes, secondary.max_patch_files),
+            (65536, 10)
+        );
+        assert_eq!(secondary.protected_files, DEFAULT_PROTECTED_FILES);
+        assert!(secondary.protect_top_level_dot_folders);
+        assert!(secondary.unprotected_dot_folders.is_empty());
+
+        // Its own exemptions, for itself alone.
+        let text = format!(
+            "{BOUNDS}{SECONDARY}\n[secondary_pull_request.unprotected_files]\n\
+             repos = [\"cgwalters-forge/misctool\"]\nfiles = [\"go.mod\"]\n\
+             dot_folders = [\".github\"]\n"
+        );
+        let exempt: Bounds = toml::from_str(&text).unwrap();
+        let policy = exempt.compile(&request).unwrap();
+        let secondary = policy.secondary_pull_request.as_ref().unwrap();
+        assert!(!secondary.protected_files.contains(&"go.mod".to_owned()));
+        assert_eq!(secondary.unprotected_dot_folders, [".github"]);
+        let own = policy.safe_outputs.create_pull_request.as_ref().unwrap();
+        assert!(own.protected_files.contains(&"go.mod".to_owned()));
+        assert!(own.unprotected_dot_folders.is_empty());
+
+        // The bounds' protected globs only take away: they hold there too.
+        let text = format!("protected = [\"raw/**\"]\n{BOUNDS}{SECONDARY}");
+        let globbed: Bounds = toml::from_str(&text).unwrap();
+        let policy = globbed.compile(&request).unwrap();
+        let secondary = policy.secondary_pull_request.as_ref().unwrap();
+        assert_eq!(secondary.rules().protected_paths, ["raw/**"]);
+    }
+
+    #[test]
+    fn a_policy_holds_its_secondary_pull_request_to_the_bounds_shape() {
+        let good = configured().compile(&request()).unwrap();
+        good.validate().unwrap();
+        type Change = fn(&mut Policy);
+        let cases: &[(&str, Change)] = &[
+            ("no pull request of its own", |policy| {
+                policy.safe_outputs.create_pull_request = None;
+            }),
+            ("an analysis run", |policy| policy.kind = Kind::Analysis),
+            ("a private run", |policy| policy.private = true),
+            ("off GitHub", |policy| policy.forge = Forge::Forgejo),
+            ("an unreadable protected glob", |policy| {
+                policy
+                    .secondary_pull_request
+                    .as_mut()
+                    .unwrap()
+                    .protected_paths = vec!["/raw/**".into()];
+            }),
+            ("the run's own repository", |policy| {
+                policy.secondary_pull_request.as_mut().unwrap().repo = REPO.to_uppercase();
+                policy.secondary_pull_request.as_mut().unwrap().clone_url =
+                    format!("https://github.com/{}", REPO.to_uppercase());
+            }),
+            (
+                "a patch named as one of the run's own repository",
+                |policy| {
+                    policy.repo = "cgwalters-forge/misctool-agentic-job".into();
+                },
+            ),
+            ("the output repository", |policy| {
+                policy.push_repo = Some("cgwalters-forge/MiscTool".into());
+            }),
+            ("a patch named as one of the output repository", |policy| {
+                policy.push_repo = Some("cgwalters-forge/misctool-agentic-job".into());
+            }),
+            ("a clone URL that is no URL", |policy| {
+                policy.secondary_pull_request.as_mut().unwrap().clone_url =
+                    "ext::sh -c x/cgwalters-forge/misctool".into();
+            }),
+            ("unprotected dot-folders", |policy| {
+                policy
+                    .secondary_pull_request
+                    .as_mut()
+                    .unwrap()
+                    .protect_top_level_dot_folders = false;
+            }),
+            ("another dot-folder exempted", |policy| {
+                policy
+                    .secondary_pull_request
+                    .as_mut()
+                    .unwrap()
+                    .unprotected_dot_folders = vec![".husky".into()];
+            }),
+            ("two pull requests", |policy| {
+                policy.secondary_pull_request.as_mut().unwrap().max = 2;
+            }),
+            ("a glob of repositories", |policy| {
+                policy.secondary_pull_request.as_mut().unwrap().repo = "cgwalters-forge/*".into();
+            }),
+        ];
+        for (what, change) in cases {
+            let mut policy = good.clone();
+            change(&mut policy);
+            assert!(policy.validate().is_err(), "{what}");
+        }
+    }
+
+    #[test]
+    fn secondary_pull_requests_intersect_only_where_both_files_agree() {
+        let left = configured().compile(&request()).unwrap();
+        let tighter = format!(
+            "{BOUNDS}{}",
+            SECONDARY
+                .replace("65536", "4096")
+                .replace("max_patch_files = 10", "max_patch_files = 3")
+        );
+        let tighter: Bounds = toml::from_str(&tighter).unwrap();
+        let right = tighter.compile(&request()).unwrap();
+        for (left, right) in [(left.clone(), right.clone()), (right, left.clone())] {
+            let both = intersect(left, right).unwrap();
+            let secondary = both.secondary_pull_request.unwrap();
             assert_eq!(
-                unconfigured.compile(&request).unwrap(),
-                bounds().compile(&request).unwrap()
+                (secondary.max_patch_bytes, secondary.max_patch_files),
+                (4096, 3)
             );
+        }
+        // Absent from one file, or another destination: none.
+        for other in [
+            bounds().compile(&request()).unwrap(),
+            toml::from_str::<Bounds>(&format!(
+                "{BOUNDS}{}",
+                SECONDARY.replace("misctool", "othertool")
+            ))
+            .unwrap()
+            .compile(&request())
+            .unwrap(),
+            toml::from_str::<Bounds>(&format!(
+                "{BOUNDS}{}",
+                SECONDARY.replace("agentic-job/", "other/")
+            ))
+            .unwrap()
+            .compile(&request())
+            .unwrap(),
+        ] {
+            for both in [
+                intersect(left.clone(), other.clone()),
+                intersect(other, left.clone()),
+            ] {
+                assert!(both.unwrap().secondary_pull_request.is_none());
+            }
         }
     }
 
@@ -5034,7 +5503,7 @@ max_patch_files = 10
             ("cgwalters-forge/homegit", false),
         ];
         for (repo, own) in cases {
-            let protected = bounds.protected_files(repo);
+            let protected = protected_files(&bounds.unprotected_files, repo);
             let dropped: Vec<&str> = DEFAULT_PROTECTED_FILES
                 .iter()
                 .copied()

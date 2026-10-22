@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::agent::GITHUB_TOKEN_FILE;
 use super::enter::{Runner, Sandbox, one_line};
-use crate::policy::Policy;
+use crate::policy::{Policy, SECONDARY_DIR};
 
 /// Under the sandbox user's home: the checkouts, and what the agent
 /// hands back.
@@ -111,6 +111,9 @@ pub struct Checkout {
     /// against. For an analysis review this is the admitted head, not the
     /// trusted base commit; it must not be used as an instruction-admission pin.
     pub base_commit: String,
+    /// The clone of the policy's secondary pull request's repository
+    /// ([`secondary`]), whose change is handed back as a patch of its own.
+    pub secondary: Option<Box<Checkout>>,
 }
 
 /// Context is fetched by immutable commit, not by a branch that can move
@@ -457,7 +460,75 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
         sandbox.user,
         one_line(&head)
     );
-    Ok(Checkout { dir, base_commit })
+    Ok(Checkout {
+        dir,
+        base_commit,
+        secondary: None,
+    })
+}
+
+/// Clones the policy's secondary pull request's repository at its base,
+/// as the sandbox user and with no credential (a secondary repository is
+/// public, as `policy` requires of a run that opens a pull request), into
+/// `work/secondary/OWNER/NAME`, apart from the target and its context.
+/// The commit it is at is what its patch is against.
+pub fn secondary(sandbox: &Sandbox, policy: &Policy) -> Result<Option<Checkout>> {
+    let Some(secondary) = &policy.secondary_pull_request else {
+        return Ok(None);
+    };
+    ensure!(
+        checkout_name(policy) != SECONDARY_DIR,
+        "target name conflicts with the secondary directory"
+    );
+    let (owner, name) = secondary
+        .repo
+        .split_once('/')
+        .filter(|(owner, name)| {
+            [owner, name].iter().all(|part| {
+                !part.is_empty() && name_chars(part, b"_.-") && !part.starts_with(['.', '-'])
+            })
+        })
+        .with_context(|| format!("{:?} is not OWNER/NAME", secondary.repo))?;
+    check_ref(&secondary.base).context("secondary base")?;
+    check_url(&secondary.clone_url).context("secondary clone_url")?;
+    let root = sandbox.home.join(WORK_DIR).join(SECONDARY_DIR);
+    let parent = root.join(owner);
+    let dir = parent.join(name);
+    let dir_text = utf8(&dir)?;
+    // As for the target: what an earlier try left is not this one's base.
+    sandbox.checked(&["rm", "-rf", "--", utf8(&root)?], b"", MAX_GIT_OUTPUT)?;
+    sandbox.checked(&["mkdir", "-p", "--", utf8(&parent)?], b"", MAX_GIT_OUTPUT)?;
+    git_clone(
+        sandbox,
+        &secondary.clone_url,
+        Some(&secondary.base),
+        DEPTH,
+        dir_text,
+        &[],
+    )?;
+    let git = |args: &[&str]| -> Result<String> {
+        let argv = [&["timeout", GIT_TIMEOUT_S, "git", "-C", dir_text], args].concat();
+        Ok(sandbox.checked(&argv, b"", MAX_GIT_OUTPUT)?.text())
+    };
+    let base_commit = git(&["rev-parse", "--verify", "HEAD"])?;
+    ensure!(
+        (40..=64).contains(&base_commit.len())
+            && base_commit.bytes().all(|b| b.is_ascii_hexdigit()),
+        "the secondary clone's HEAD is not a commit: {:?}",
+        one_line(&base_commit)
+    );
+    eprintln!(
+        "Cloned {} ({}) for its secondary pull request as {}: {}",
+        secondary.repo,
+        secondary.base,
+        sandbox.user,
+        one_line(&git(&["log", "-1", "--format=%h %s"])?)
+    );
+    Ok(Some(Checkout {
+        dir,
+        base_commit,
+        secondary: None,
+    }))
 }
 
 /// A run that pushes to a pull request starts from the head the policy
@@ -622,6 +693,7 @@ mod tests {
             memory: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
+            secondary_pull_request: None,
         }
     }
 
@@ -1031,6 +1103,7 @@ mod tests {
         let mut checkout = Checkout {
             dir: dir.clone(),
             base_commit: base.clone(),
+            secondary: None,
         };
         review_head(
             &super::super::enter::Unconfined,
@@ -1091,6 +1164,7 @@ mod tests {
         checkout = Checkout {
             dir: dir.clone(),
             base_commit: base.clone(),
+            secondary: None,
         };
         review_head(
             &super::super::enter::Unconfined,

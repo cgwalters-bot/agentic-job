@@ -829,18 +829,16 @@ unknown key. Destinations stay fixed by the caller
 chosen per type or by the agent, and a patch that touches a protected file
 is refused rather than sent for review or turned into an issue.
 
-### A secondary pull request (not yet active: bounds configuring it refuse every run)
+### A secondary pull request (not yet active: apply has no pass for it)
 
 A `[secondary_pull_request]` table names one further, fixed repository
 that a run is to be able to propose one pull request to, without making
 the repositories in `repos` writable
 ([#1075](https://github.com/cgwalters-forge/agentic-job/issues/1075)).
-Collection and check
-([#1285](https://github.com/cgwalters-forge/agentic-job/issues/1285)) and
-apply routing
+`run`, the hand-back and `check` hold a patch to it, but apply routing
 ([#1286](https://github.com/cgwalters-forge/agentic-job/issues/1286))
-do not hold a patch to it yet, so `policy` refuses every request while
-the table is present. Bounds without it are unaffected.
+does not exist yet, so `policy` refuses every run that would open one.
+Bounds without it are unaffected.
 
 ```toml
 [secondary_pull_request]
@@ -859,7 +857,26 @@ branch name. `max` must be 1, and the patch limits have no defaults
 `[secondary_pull_request.unprotected_files]` takes the same keys as the
 top-level one but may name only `repo`; nothing is inherited from the
 top-level exemptions, so protected files and `.github` stay protected
-unless exempted here.
+unless exempted here. The top-level `protected` globs, which only take
+away, hold for it too. It is for GitHub only.
+
+`policy` adds it to `policy.json` only for a branch run that may open its
+own pull request, and refuses one whose run works on, or applies to, that
+same repository. Organization bounds keep it only where both files name
+the same repository, base and prefix, within the tighter budgets. `run`
+clones the repository at its base into `~/work/secondary/OWNER/NAME`, with
+no credential (a run that opens a pull request is public). A change there
+is handed back as its own patch, with `secondary-base.json`, only for a
+`create_pull_request` whose `repo` names that repository; without one it
+is dropped with a warning. The request goes on the run's branch under the
+prefix, and its patch is named as gh-aw's handler looks for it first when
+a request names a `repo` (`aw-OWNER-NAME-agentic-job-agent-run-ID.patch`),
+never as the run's own. Check counts that request against the secondary's
+own `max` (the collector is given the sum of both), and holds it to the
+secondary's base, to being a draft and to that branch, and its patch to
+its own base file, budgets and protected files and to the bounds'
+`commit_author`. A request naming any other repository is refused as
+before.
 
 ## What the agent does
 
@@ -877,7 +894,9 @@ uncommitted. `run` then makes the patch itself, with git running as the
 sandbox user: `git format-patch` of one commit against the commit the
 run started from, with gh-aw's `X-GH-AW-Base-Commit` header. The
 hand-back is `outputs.jsonl`, `base.json` and at most one
-`aw-BRANCH.patch`. gh-aw's agents call an MCP server that validates each
+`aw-BRANCH.patch`, and for a
+[secondary pull request](#a-secondary-pull-request-not-yet-active-apply-has-no-pass-for-it)
+its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
 Where the policy has `[memory]`, `run` also packs the flat directory
@@ -1027,7 +1046,8 @@ puts its files there afterwards. Each script runs in an
 
 The collector reads three paths from its environment:
 `GH_AW_SAFE_OUTPUTS` (the agent's `outputs.jsonl`),
-`GH_AW_SAFE_OUTPUTS_CONFIG_PATH` (`.safe_outputs` of `policy.json`) and
+`GH_AW_SAFE_OUTPUTS_CONFIG_PATH` (`.safe_outputs` of `policy.json`, with a
+secondary pull request's `max` added to `create_pull_request`'s) and
 `GH_AW_VALIDATION_CONFIG_PATH` (`validation.json`). It writes
 `/tmp/gh-aw/agent_output.json`, `{items, errors}`, and succeeds whatever
 it refused, so the job fails on a non-empty `errors` itself.
