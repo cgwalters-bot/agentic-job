@@ -46,6 +46,9 @@ inputs:
   stop-services:
     description: Removed; set nothing
     default: ""
+  sandbox-user:
+    description: Removed; set nothing
+    default: ""
   runner-user:
     description: Removed; set nothing
     default: ""
@@ -70,13 +73,14 @@ runs:
         DENY_RUNNER_METADATA: ${{ inputs.deny-runner-metadata }}
         EGRESS_POLICY: ${{ inputs.egress-policy }}
         STOP_SERVICES: ${{ inputs.stop-services }}
+        SANDBOX_USER: ${{ inputs.sandbox-user }}
         RUNNER_USER: ${{ inputs.runner-user }}
         SCRIPT: ${{ inputs.script }}
         BINARY: ${{ inputs.binary }}
         BUILD: ${{ inputs.build }}
       run: |
         set=()
-        for name in LOCK EGRESS DENY_RUNNER_METADATA EGRESS_POLICY STOP_SERVICES RUNNER_USER SCRIPT BINARY BUILD; do
+        for name in LOCK EGRESS DENY_RUNNER_METADATA EGRESS_POLICY STOP_SERVICES SANDBOX_USER RUNNER_USER SCRIPT BINARY BUILD; do
           if [ -n "${!name}" ]; then name=${name,,}; set+=("${name//_/-}"); fi
         done
         if [ "${#set[@]}" != 0 ]; then

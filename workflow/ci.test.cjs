@@ -546,7 +546,7 @@ test('the public secure-host forwards to the pinned new action and refuses the o
   // Every old input that asked for another host is declared, so that
   // setting one reaches the refusal.
   assert.deepEqual(inputs(forwarder).filter(name => !forwarded.includes(name)).sort(),
-    ['binary', 'build', 'deny-runner-metadata', 'egress', 'egress-policy', 'lock', 'runner-user', 'script', 'stop-services']);
+    ['binary', 'build', 'deny-runner-metadata', 'egress', 'egress-policy', 'lock', 'runner-user', 'sandbox-user', 'script', 'stop-services']);
   assert.doesNotMatch(forwarder, /\noutputs:/);
   // One pin, by commit, whose comment names the image tag that commit runs.
   // site.yml (plain CI, no forwarder) takes the same one, so this

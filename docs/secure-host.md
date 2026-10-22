@@ -54,10 +54,10 @@ forward keeps the old action. At `@main` or a later commit:
   ([supported hosts](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#supported-hosts)).
 - Setting another input of the old action that chose the host fails the
   step and names the new action: `lock`, `egress`,
-  `deny-runner-metadata`, `egress-policy`, `stop-services`, `runner-user`,
-  `script`, `binary` or `build`. Each asked for a host the new action
-  would not set up, so the step does not ignore it. A configuration file
-  says the same things.
+  `deny-runner-metadata`, `egress-policy`, `stop-services`,
+  `sandbox-user`, `runner-user`, `script`, `binary` or `build`. Each
+  asked for a host the new action would not set up, so the step does
+  not ignore it. A configuration file says the same things.
 
 ### What main has that the pinned image does not yet
 
