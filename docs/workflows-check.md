@@ -72,8 +72,9 @@ or a proposal wrote runs beside them. Expression, key-case,
 | A `secrets` expression anywhere in the job, an `if:` or the workflow's `env:` included | A secret handed to the action, which needs none |
 
 This trusts GitHub's action at the pinned commit to serve the artifact
-as data, as it is documented to. Only upstream v4.0.5,
-`d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e`, is admitted. Additions to
+as data, as it is documented to. Only upstream v5.0.1,
+`368f82528645a54fb793d4d04e342629a3f51346`, and v4.0.5,
+`d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e`, are admitted. Additions to
 the allowlist need review as credential-bearing code: GitHub also
 resolves fork-network commits under the upstream repository name. The
 check does not judge `runs-on:`: a reused self-hosted runner could hold

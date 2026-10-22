@@ -58,10 +58,16 @@ const BEFORE_SECURE_HOST: &[&str] = &[
 /// over the action's own code, and its `repository:` fetch someone else's.
 const DEPLOY_PAGES: &str = "actions/deploy-pages";
 
-// Upstream v4.0.5. Review additions as credential-bearing code: GitHub
-// resolves fork-network commits under the upstream name too, so a SHA's
-// syntax alone does not establish trust in the action implementation.
-const DEPLOY_PAGES_COMMITS: &[&str] = &["d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e"];
+// Upstream v5.0.1 and v4.0.5. Review additions as credential-bearing code:
+// GitHub resolves fork-network commits under the upstream name too, so a
+// SHA's syntax alone does not establish trust in the action implementation.
+// v5 moved to node24 and polls with backoff; its inputs and the grants it
+// needs are v4's. v4.0.5 stays admitted so a caller checking its own
+// workflows is not refused before it bumps.
+const DEPLOY_PAGES_COMMITS: &[&str] = &[
+    "368f82528645a54fb793d4d04e342629a3f51346",
+    "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+];
 
 /// deploy-pages' inputs a deploy-only job may set, to literal values only.
 /// Its `token` is left out: the job's own token is what it needs.
@@ -307,7 +313,7 @@ fn deploy_problems(
                 problems.push((
                     at.clone(),
                     format!("uses {uses}, a deploy-pages commit not on the reviewed allowlist"),
-                    "use actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e (v4.0.5)",
+                    "use actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 (v5.0.1)",
                 ));
             }
             Some(_) => {}
@@ -1098,11 +1104,11 @@ mod tests {
         let job = job
             .replace(
                 "actions/deploy-pages@PIN",
-                "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+                "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346",
             )
             .replace(
                 "Actions/Deploy-Pages@PIN",
-                "Actions/Deploy-Pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+                "Actions/Deploy-Pages@368f82528645a54fb793d4d04e342629a3f51346",
             );
         let job: String = job.lines().map(|l| format!("    {l}\n")).collect();
         format!(
@@ -1310,6 +1316,11 @@ steps:
             "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@0123456789abcdef0123456789abcdef01234567",
             &["deploy-pages commit not on the reviewed allowlist"],
         ),
+        // v4.0.5, still admitted beside v5.0.1.
+        (
+            "permissions: {pages: write, id-token: write}\nsteps:\n  - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+            &[],
+        ),
         (
             "permissions: {pages: write, id-token: write, contents: read}\nsteps:\n  - uses: Actions/Deploy-Pages@PIN\n    if: github.ref == 'refs/heads/main'\n    with: {artifact_name: github-pages, timeout: 600000, preview: false}",
             &[],
@@ -1325,7 +1336,7 @@ steps:
             "permissions: {pages: write, id-token: write}\nenv: {LD_PRELOAD: ./evil.so}\nsteps:\n  - uses: actions/deploy-pages@PIN\n    env: {NODE_OPTIONS: '--require ./evil.js'}",
             &[
                 "has workflow or job `env:`",
-                "step 1 (actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03) has `env:`",
+                "step 1 (actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f5134) has `env:`",
             ],
         ),
         (
