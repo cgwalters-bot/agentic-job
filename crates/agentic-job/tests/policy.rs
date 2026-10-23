@@ -56,6 +56,31 @@ fn context_admission() {
         );
         assert_eq!(output.stdout.is_empty(), !accepted);
     }
+    // A request the workflow passes on as it came: none, or one refused
+    // before any API is read, needs no token; a dispatcher cannot supply
+    // a resolved entry's visibility.
+    for (request, accepted) in [
+        ("", true),
+        ("[]", true),
+        (r#"[{"repo":"owner/.."}]"#, false),
+        (r#"[{"repo":"owner/repo","public":true}]"#, false),
+    ] {
+        let output = Command::new(BIN)
+            .arg("policy")
+            .arg("--allow")
+            .arg(data("allow.toml"))
+            .args(REQUEST.iter().flat_map(|(flag, value)| [*flag, *value]))
+            .args(["--context-request", request])
+            .env_remove("GH_TOKEN")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), accepted, "{request:?}");
+        assert_eq!(output.stdout.is_empty(), !accepted);
+        if accepted {
+            let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(policy.get("context").is_none(), "{policy}");
+        }
+    }
 }
 
 /// A request within the bounds of `data/policy/allow.toml`, as pairs of a
@@ -425,6 +450,7 @@ fn a_request_outside_the_bounds_prints_no_policy() {
         ),
         (&[("--base", "main\n\"max_outputs\": 99")], "base "),
         (&[("--base", "main\n::error::owned")], "base "),
+        (&[("--base", "main ##[set-output name=x]y")], "base "),
         (
             &[("--outputs", "noop\",\"create_issue\":{\"max\":9},\"x\":\"")],
             "output type",
@@ -436,9 +462,12 @@ fn a_request_outside_the_bounds_prints_no_policy() {
         assert_eq!(output.status.code(), Some(1), "{change:?}: {stderr}");
         assert!(output.stdout.is_empty(), "{change:?}");
         assert!(stderr.contains(want), "{change:?}: {stderr}");
-        // Whatever the request held, every line of the log is ours.
+        // Whatever the request held, every line of the log is ours, and
+        // none holds a command the runner reads, even mid-line.
         assert!(
-            stderr.lines().all(|line| line.starts_with("error: ")),
+            stderr.lines().all(|line| line.starts_with("error: ")
+                && !line.contains("::")
+                && !line.contains("##[")),
             "{change:?}: {stderr}"
         );
     }

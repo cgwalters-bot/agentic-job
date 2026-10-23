@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::exit::Exit;
 
+mod context;
 mod dispatch;
 use dispatch::admission as dispatch_admission;
 
@@ -431,6 +432,11 @@ pub struct Args {
     /// Resolved context repositories as a JSON array (empty by default)
     #[arg(long, default_value = "[]", allow_hyphen_values = true)]
     pub context: String,
+    /// A dispatcher's context request, `[{"repo": "OWNER/REPO", "ref": "REF"}]`
+    /// (`ref` optional), resolved through the forge API at `GITHUB_API_URL`
+    /// with `GH_TOKEN`; only a public repository is admitted
+    #[arg(long, conflicts_with = "context", allow_hyphen_values = true)]
+    pub context_request: Option<String>,
     /// The caller's bounds file
     #[arg(long, value_name = "FILE")]
     pub allow: PathBuf,
@@ -2287,9 +2293,16 @@ pub fn run(args: &Args) -> Result<Exit> {
     dispatch_admission(bounds.dedupe || org_bounds.as_ref().is_some_and(|b| b.dedupe))?;
     // A dispatcher must not turn context into a way to read outside the caller's
     // authority. Both bounds files admit every URL and repository, independently.
-    ensure!(args.context.len() <= 16384, "context input exceeds 16 KiB");
-    let context: Vec<ContextRepo> =
-        serde_json::from_str(&args.context).context("parsing context")?;
+    let context: Vec<ContextRepo> = match &args.context_request {
+        Some(request) => context::resolve(request, &mut context::forge())?,
+        None => {
+            ensure!(
+                args.context.len() <= context::MAX_REQUEST,
+                "context input exceeds 16 KiB"
+            );
+            serde_json::from_str(&args.context).context("parsing context")?
+        }
+    };
     check_context(&context)?;
     ensure!(
         context.is_empty() || args.repo.rsplit('/').next() != Some("context"),
@@ -2358,8 +2371,10 @@ pub fn run(args: &Args) -> Result<Exit> {
             Ok(Exit::Success)
         }
         Err(errors) => {
+            // A refusal quotes the request, a stranger's text: each stays
+            // one line of the log that no runner reads as a command.
             for error in errors {
-                eprintln!("error: {error}");
+                eprintln!("error: {}", crate::run::enter::one_line(&error));
             }
             Ok(Exit::Failure)
         }

@@ -761,8 +761,11 @@ jobs:
             base=$(jq -r --arg base "$BASE" '.base // $base' "$JOB_DIR/event.json")
             [ -n "$TARGET" ] || target=$(jq -r '.item.number // "*"' "$JOB_DIR/event.json")
           fi
-          node "$SOURCE_DIR/workflow/policy-command.cjs" "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" \
-            --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json"
+          # The binary resolves `context` through the API with the read-only
+          # job token, and prints its reasons as plain log lines, escaped.
+          "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" --context-request "$CONTEXT_REPOS" \
+            --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
+            { echo "::error::The request was refused; this step's log says why"; exit 1; }
           if [ -n "$PUSH_ITEM" ]; then
             jq --arg base "$REPLACEMENT_BASE" '.safe_outputs.push_to_pull_request_branch.replacement_base = $base' "$JOB_DIR/policy.json" > "$JOB_DIR/policy-base.json"
             mv "$JOB_DIR/policy-base.json" "$JOB_DIR/policy.json"

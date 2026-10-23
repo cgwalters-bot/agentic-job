@@ -203,47 +203,6 @@ test('documented proposals caller matches the CI trial and shipped bounds', () =
   assert.match(ci.split('\n  required-checks:\n')[1], /needs: \[.*proposals, e2e-proposals,/);
 });
 
-// Mirror ActionCommand.TryParseV2/TryParse command recognition: modern syntax
-// follows leading whitespace, but legacy syntax can appear anywhere in a line.
-function runnerCommand(line) {
-  const registered = new Set(['error', 'warning', 'set-output', 'add-mask', 'stop-commands']);
-  const modern = line.trimStart().match(/^::([^ :]+)(?: [^]*?)?::/);
-  if (modern && registered.has(modern[1].toLowerCase())) return modern[1].toLowerCase();
-  const start = line.indexOf('##[');
-  if (start < 0) return null;
-  const end = line.indexOf(']', start);
-  if (end < 0) return null;
-  const name = line.slice(start + 3, end).split(' ')[0].toLowerCase();
-  return registered.has(name) ? name : null;
-}
-
-test('policy errors preserve the exit status and escape annotation data', () => {
-  const wrapper = join(__dirname, 'policy-command.cjs');
-  const hostile = 'bad%\r\n  ::warning::data\n' +
-    ['warning', 'set-output name=hostile', 'add-mask', 'stop-commands', 'WaRnInG']
-      .map(command => `embedded ##[${command}]hostile`).join('\r\n');
-  // Ensure the test parser recognizes the attacks even behind the old prefix.
-  for (const line of hostile.split(/[\r\n]/).filter(Boolean).slice(1)) {
-    assert.ok(runnerCommand(line));
-    if (line.includes('##[')) assert.ok(runnerCommand(`policy: ${line}`));
-  }
-  for (const status of [0, 1, 2]) {
-    const result = spawnSync(process.execPath, [wrapper, process.execPath, '-e',
-      `process.stdout.write('policy'); process.stderr.write(${JSON.stringify(hostile)}); process.exitCode=${status}`],
-    { encoding: 'utf8' });
-    assert.equal(result.status, status);
-    assert.equal(result.stdout, 'policy');
-    assert.equal(result.stderr.split('\n').some(line => line.startsWith('::error::') &&
-      line.includes('bad%25%0D%0A  ::warning::data')), status !== 0);
-    assert.deepEqual(result.stderr.split(/[\r\n]/).map(runnerCommand).filter(Boolean),
-      status === 0 ? [] : ['error']);
-    assert.doesNotMatch(result.stderr, /##\[/);
-    assert.match(result.stderr, /policy: embedded # #\[set-output name=hostile\]hostile/);
-  }
-  const step = policy.split('- name: Check the request against')[1].split('- id: binary')[0];
-  assert.match(step, /node "\$SOURCE_DIR\/workflow\/policy-command.cjs"/);
-});
-
 const head = 'a'.repeat(40);
 const push = { PUSH_ITEM: '42', PUSH_BRANCH: 'agent-run-1', PUSH_HEAD: head, REPLACEMENT_BASE: 'b'.repeat(40), OUTPUT_REPO: '', GITHUB_REPOSITORY: 'o/r' };
 const pushArgs = ['--pull-request', '42', '--head', head, '--output-repo'];
@@ -263,10 +222,11 @@ for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token
   test(`the policy command is told when apply holds only the job token: environment ${JSON.stringify(environment)}, issue ${JSON.stringify(issue)}, ${JSON.stringify(extra)}`, () => {
     const dir = mkdtempSync(join(homedir(), 'request-'));
     try {
-      mkdirSync(join(dir, 'workflow'));
+      mkdirSync(join(dir, 'bin'));
       // Stands in for the CLI: the arguments it was given are the policy.
-      writeFileSync(join(dir, 'workflow/policy-command.cjs'),
-        'process.stdout.write(JSON.stringify({args: process.argv.slice(2), safe_outputs: {push_to_pull_request_branch: {}}}))');
+      writeFileSync(join(dir, 'bin/agentic-job'), '#!/usr/bin/env node\n' +
+        'process.stdout.write(JSON.stringify({args: process.argv.slice(2), safe_outputs: {push_to_pull_request_branch: {}}}))',
+      { mode: 0o755 });
       const script = policy.split("- name: Check the request against the caller's bounds\n")[1]
         .split('        run: |\n')[1].split(/\n      [^ ]/)[0]
         .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
@@ -303,9 +263,9 @@ for (const [extra, ok] of [[{}, true], [{ EVENT: 'true' }, true], [{ EVENT: 'tru
   test(`${type} is refused before the agent for an event's item elsewhere: ${JSON.stringify(extra)}`, () => {
     const dir = mkdtempSync(join(homedir(), 'request-'));
     try {
-      mkdirSync(join(dir, 'workflow'));
-      writeFileSync(join(dir, 'workflow/policy-command.cjs'),
-        `process.stdout.write(JSON.stringify({safe_outputs: {noop: {max: 1}, ${type}: {max: 1}}}))`);
+      mkdirSync(join(dir, 'bin'));
+      writeFileSync(join(dir, 'bin/agentic-job'), '#!/usr/bin/env node\n' +
+        `process.stdout.write(JSON.stringify({safe_outputs: {noop: {max: 1}, ${type}: {max: 1}}}))`, { mode: 0o755 });
       const script = policy.split("- name: Check the request against the caller's bounds\n")[1]
         .split('        run: |\n')[1].split(/\n      [^ ]/)[0]
         .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
