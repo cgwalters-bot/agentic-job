@@ -188,7 +188,7 @@ jobs:
       # package: the version and installer its own action pins, checksummed.
       - name: Install just for the shared workflow check
         if: ${{ vars.WORKFLOW_LINT != '' }}
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just@1.58.0
       - name: Shared workflow check
@@ -351,7 +351,7 @@ jobs:
         with:
           node-version: "22"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just@1.58.0
       - run: just claude-acp-test
@@ -391,7 +391,7 @@ jobs:
           node-version: "22"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --locked
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just@1.58.0
       - run: node --test crates/agentic-job/tests/corpus/corpus.test.mjs
@@ -1705,7 +1705,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install recipe runner
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just@1.58.0
       - run: just world-write-test
