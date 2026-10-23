@@ -549,12 +549,11 @@ fn an_analysis_review_starts_at_the_admitted_head_without_a_patch() {
         "collected-review.json",
         &json!({"items": outputs}).to_string(),
     );
-    let validator = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow/review.cjs");
-    let checked = Command::new("node")
-        .arg(validator)
-        .args(["check"])
+    let checked = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .args(["review", "verdict", "--target", "147", "--collected"])
         .arg(job.path("collected-review.json"))
-        .arg("147")
+        .arg("--report")
+        .arg(job.path("review-report.json"))
         .output()
         .unwrap();
     assert!(
@@ -562,6 +561,7 @@ fn an_analysis_review_starts_at_the_admitted_head_without_a_patch() {
         "{}",
         String::from_utf8_lossy(&checked.stderr)
     );
+    assert_eq!(checked.stdout, b"APPROVE\n");
     assert_eq!(proxy.run_states(), ["finished"]);
 }
 

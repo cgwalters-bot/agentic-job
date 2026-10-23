@@ -151,3 +151,67 @@ fn resolver_refuses_links_and_oversized_api_snapshots_without_a_sha() {
         assert!(refused.stdout.is_empty());
     }
 }
+
+/// check.yml takes the verdict from stdout and, on a refusal, the report
+/// its refusal step reads; check then uploads the folded output for apply.
+#[test]
+fn check_gets_one_verdict_word_or_a_refusal_report_and_the_folded_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let collected = dir.path().join("agent_output.json");
+    let report = dir.path().join("report.json");
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .arg("review")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let verdict = || {
+        cli(&[
+            "verdict",
+            "--target",
+            "147",
+            "--collected",
+            collected.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ])
+    };
+    let inline = json!({"type": "create_pull_request_review_comment", "path": "a.rs", "line": 3, "body": "nit: x"});
+    let output = json!({"items": [{"type": "add_comment", "body": "VERDICT: CHANGES\nOne."}, inline], "errors": []});
+    std::fs::write(&collected, output.to_string()).unwrap();
+    let got = verdict();
+    assert!(got.status.success(), "{got:?}");
+    assert_eq!(got.stdout, b"CHANGES\n");
+    assert!(!report.exists());
+
+    let folded = cli(&["fold", collected.to_str().unwrap()]);
+    assert!(folded.status.success(), "{folded:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&folded.stdout).unwrap(),
+        json!({"items": [{"type": "add_comment",
+            "body": "VERDICT: CHANGES\nOne.\n\n### Inline findings\n\n**a.rs, line 3**\n\nnit: x\n"}],
+            "errors": []})
+    );
+
+    std::fs::write(&collected, json!({"items": [{"type": "noop"}]}).to_string()).unwrap();
+    assert_eq!(verdict().stdout, b"\n");
+    std::fs::write(&collected, json!({"items": [inline]}).to_string()).unwrap();
+    let refused = verdict();
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&report).unwrap()).unwrap(),
+        json!({"ok": false, "errors": ["Review must return exactly one comment or noop"]})
+    );
+
+    let refusal = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .args(["review", "refusal"])
+        .env("REASON", "a\n@user [link](url)")
+        .output()
+        .unwrap();
+    assert_eq!(
+        refusal.stdout,
+        b"Review refused by policy: a \\@user \\[link\\]\\(url\\)\n"
+    );
+}

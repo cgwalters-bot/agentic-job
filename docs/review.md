@@ -94,15 +94,16 @@ to ten `create_pull_request_review_comment` outputs, one per finding with a
 line: the bounds list the type with `max = 10` and `max_outputs = 11`.
 Check holds each to the triggering pull request with the rules every
 review comment has ([safe outputs](safe-outputs.md#review-comments-on-the-pull-request));
-`checkOutputs` also refuses a `repo`, any field a review comment cannot
+`agentic-job review verdict` also refuses a `repo`, any field a review comment cannot
 carry, a path with control characters or over 1024 characters, a range
 that ends before it starts, and a verdict comment whose body would exceed
 60000 characters with every inline finding folded in. That bound keeps
 whichever body is posted under GitHub's 65536-character limit.
 With real reviews they are the review's comments, as above. Otherwise,
-or when nothing is submitted, apply folds them into the comment's body,
+or when nothing is submitted, apply posts them in the comment's body,
 under "Inline findings" after the verdict, each under its path and line,
-and posts no review comment: gh-aw's handler would put them in a second
+as check folded them (`agentic-job review fold`, uploaded beside the
+unfolded output, since apply runs no binary), and posts no review comment: gh-aw's handler would put them in a second
 review, of event `COMMENT`, apart from the verdict. A path is shown with Markdown
 characters escaped, as it is the agent's and gh-aw does not sanitize it.
 Dispatch's `review` profile does not offer them.
@@ -126,10 +127,9 @@ The `status` job then sets the commit
 status `review` on the reviewed head: `success` only for a checked APPROVE
 that was posted, as the review or the comment, `failure` for CHANGES, a noop
 or a run that did not get that far. The status job
-holds `statuses: write`, `pull-requests: read` and `contents: read` (to
-check out `workflow/review.cjs` from the policy call's pinned source, never
-the head), and reads no agent text: the verdict is one of two words check.yml
-set, mapped by `reviewStatus`.
+holds `statuses: write` and `pull-requests: read`, runs the policy job's
+binary of the pinned source (`agentic-job review status`), never the head,
+and reads no agent text: the verdict is one of two words check.yml set.
 
 A status belongs to the commit, and the pull request's title and body reach
 the agent, so anyone could open a second pull request at someone else's head
@@ -284,7 +284,7 @@ until **Require review from Code Owners** is on these paths wait for no one.
 Check refuses an agent's patch to either file, `.github/` exemption or not
 ([safe outputs](safe-outputs.md)), so no implement or fix run can change the
 policy or drop the owner's review. The code that states the policy
-(`workflow/review.cjs`, `workflow/review.md`, `review.yml`) is reviewed like
+(`crates/agentic-job/src/review/`, `workflow/review.md`, `review.yml`) is reviewed like
 any other change to the harness; an owner who wants it held for a person
 lists it in CODEOWNERS too. Dispatched reviews
 (`dispatch.yml`'s `review` profile) are not given a merge policy.
@@ -417,20 +417,21 @@ merge policy, written by `review task`. Rust's `review::tests` pins routing
 and admission refusals, the request bounds against `review.yml` and its
 bounds files, the merge policy file and the statement the task gets from it,
 including the example above; `tests/review.rs` exercises the CLI stages and
-refuses oversized or symlinked API snapshots. The remaining workflow review
-helpers still live in `workflow/review.cjs` pending the rest of its Rust port.
+refuses oversized or symlinked API snapshots.
 
-`node --test workflow/real-review.test.cjs` covers opt-in submission, both
-review states, the checked body with its run marker at the exact commit, stale
-heads, stopped or failed runs and noops, outputs that do not match the
-verdict, re-runs and lost responses that must not post twice, and
-inline comments placed in the review or moved to its body.
-The tests use fake APIs; actual forge writes are left to real workflow runs.
+After the agent, check.yml's `review verdict` and `review fold`, and
+review.yml's `review submit` and `review status`, run the same binary.
+`review::verdict::tests` covers the verdict grammar, hostile outputs, inline
+findings and their folding into the comment, and the refusal text.
+`review::submit::tests` covers opt-in submission, both review states, the
+checked body with its run marker at the exact commit, stale heads, stopped or
+failed runs and noops, outputs that do not match the verdict, re-runs and
+lost responses that must not post twice, a 422 posted as the comment, inline
+comments placed in the review or moved to its body, and the status for each
+combination of check, verdict, apply and open pull requests at the head.
+They use a fake API; actual forge writes are left to real workflow runs.
 
-`node --test workflow/review.test.cjs` covers the verdict grammar, inline findings and their folding into the comment,
-hostile outputs, the status for each combination of
-check, verdict, apply and open pull requests at the head (`reviewStatus` and
-`reportStatus` against a fake API) and, by reading `review.yml`, which job
+`node --test workflow/review.test.cjs` checks, by reading `review.yml`, which job
 holds which token, which authors start automatic reviews and what the status
 job runs. It also checks that both review prompts require code analysis without
 running checks or consulting CI, findings tagged blocker, important or nit and

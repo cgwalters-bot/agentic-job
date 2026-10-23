@@ -197,22 +197,15 @@ jobs:
         run: jq -e '.errors == []' "$GH_AW_TMP/agent_output.json"
       # One of two words, never agent text: a caller may report it as a
       # status, which the comment's posting has still to be checked for.
+      # A refusal is written as check's report, for the refusal step below.
       - name: Validate the review verdict
         id: verdict
         if: ${{ fromJSON(inputs.policy).review == 'true' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TARGET: ${{ fromJSON(inputs.policy).comment-target }}
-        with:
-          script: |
-            const fs = require('node:fs');
-            const { checkOutputs } = require(`${process.env.SOURCE_DIR}/workflow/review.cjs`);
-            try {
-              core.setOutput('verdict', checkOutputs(JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')), process.env.TARGET));
-            } catch (error) {
-              fs.writeFileSync(`${process.env.GH_AW_TMP}/report.json`, JSON.stringify({ ok: false, errors: [error.message] }));
-              core.setFailed(error.message);
-            }
+        run: |
+          verdict=$("$JOB_DIR/agentic-job" review verdict --collected "$GH_AW_TMP/agent_output.json" --target "$TARGET" --report "$GH_AW_TMP/report.json")
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
       - name: Check the outputs against the policy
         id: checked
         env:
@@ -254,6 +247,17 @@ jobs:
           jq '{items: .items, errors: []}' "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
           mv "$RUNNER_TEMP/accepted.json" "$GH_AW_TMP/agent_output.json"
           find "$JOB_DIR/safe-outputs" -maxdepth 1 \( -name 'aw-*.patch' -o -name replacement.json \) -exec cp -t "$GH_AW_TMP" {} +
+      # A review's inline findings, for when apply posts its verdict as the
+      # comment (review.yml submitted no review): in that comment's body
+      # after the verdict line, not as a second review without a verdict
+      # (docs/review.md). The verdict step bounded the folded length. Made
+      # here, as apply runs no binary, and uploaded beside the unfolded
+      # output, which the submit job places as the review's comments.
+      - name: Fold a review's inline findings into its comment
+        if: ${{ success() && fromJSON(inputs.policy).review == 'true' && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
+        run: |
+          "$JOB_DIR/agentic-job" review fold "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/folded.json"
+          mv "$RUNNER_TEMP/folded.json" "$GH_AW_TMP/folded.json"
       - id: upload
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -261,6 +265,7 @@ jobs:
           name: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs
           path: |
             ${{ env.GH_AW_TMP }}/agent_output.json
+            ${{ env.GH_AW_TMP }}/folded.json
             ${{ env.GH_AW_TMP }}/config.json
             ${{ env.GH_AW_TMP }}/report.json
             ${{ env.GH_AW_TMP }}/aw-*.patch

@@ -6,7 +6,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { checkOutputs, reviewStatus, reportStatus } = require('./review.cjs');
 
 // The policy job's `if:` as a function of the event context and the
 // repository variables: GitHub's expression syntax is close enough to
@@ -23,181 +22,17 @@ function policyStarts(job) {
   return (github, vars) => evaluate(github, vars, fromJSON, contains, startsWith);
 }
 
-test('only a single verdict comment on this PR or noop passes', () => {
-  const check = item => checkOutputs({ items: [item] }, 147);
-  for (const [body, verdict] of [
-    ['VERDICT: APPROVE', 'APPROVE'],
-    ['VERDICT: APPROVE\nLooks right.', 'APPROVE'],
-    ['VERDICT: APPROVE. Looks right.', 'APPROVE'],
-    ['VERDICT: APPROVE, no blockers\n\n## Follow-ups\n\n- important: a.rs:3\n- nit: b.rs:7', 'APPROVE'],
-    ['VERDICT: CHANGES: one blocker', 'CHANGES'],
-    ['VERDICT: CHANGES\n\n1. Fix the test.', 'CHANGES'],
-    ['VERDICT: CHANGES — one finding', 'CHANGES'],
-    // Briefs written before CHANGES ask for REJECT and a REASON line.
-    ['VERDICT: REJECT\nREASON: Breaks the build.', 'CHANGES'],
-    ['VERDICT: REJECT', 'CHANGES'],
-  ]) {
-    assert.equal(check({ type: 'add_comment', body }), verdict, body);
-  }
-  assert.equal(check({ type: 'noop', message: 'No review possible.' }), '');
-  for (const item of [
-    { type: 'create_pull_request' }, { type: 'add_comment', body: 'APPROVE' },
-    { type: 'add_comment', body: 'VERDICT: approve' },
-    { type: 'add_comment', body: 'VERDICT: REJECTED' },
-    { type: 'add_comment', body: 'VERDICT: REJECT, or APPROVE' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE unless REJECT' },
-    { type: 'add_comment', body: 'VERDICT: APPROVED' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE-ish' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE?' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE|CHANGES' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE / CHANGES' },
-    { type: 'add_comment', body: 'VERDICT: CHANGES, or APPROVE if you like' },
-    { type: 'add_comment', body: ' VERDICT: APPROVE' },
-    { type: 'add_comment', body: 'Summary\nVERDICT: APPROVE' },
-    { type: 'add_comment', body: 'VERDICT: APPROVE', issue_number: 148 },
-    { type: 'add_comment', body: 'VERDICT: APPROVE', pull_request_number: 148 },
-  ]) assert.throws(() => check(item), undefined, JSON.stringify(item));
-  for (const item_number of [147, '147']) {
-    assert.equal(check({ type: 'add_comment', body: 'VERDICT: APPROVE', item_number }), 'APPROVE');
-  }
-  for (const item_number of [148, '148', null, false, {}, [147], '0147', '147\n',
-    'aw_other', 0, -1, 1.47, 9007199254740992]) {
-    assert.throws(() => check({ type: 'add_comment', body: 'VERDICT: APPROVE', item_number }),
-      /triggering pull request/, JSON.stringify(item_number));
-  }
-  for (const key of ['pr', 'pr_number', 'repo', 'comment_id',
-    'reply_to_id', 'target', 'temporary_id']) {
-    assert.throws(() => check({ type: 'add_comment',
-      body: 'VERDICT: APPROVE', [key]: '147' }), undefined, key);
-  }
-  for (const items of [[], [{ type: 'noop' }, { type: 'noop' }]]) {
-    assert.throws(() => checkOutputs({ items }, 147), /exactly one/);
-  }
-});
-
-test('inline comments come with a verdict comment, bounded and on this pull request', () => {
-  const verdict = { type: 'add_comment', body: 'VERDICT: CHANGES\nOne blocker.' };
-  const inline = (fields = {}) => ({ type: 'create_pull_request_review_comment', path: 'src/a.rs', line: 3, body: 'blocker: x', ...fields });
-  const check = (...comments) => checkOutputs({ items: [verdict, ...comments] }, 147);
-  for (const [name, comments, ok] of [
-    ['one', [inline()], true],
-    ['after the verdict or before it', [inline(), inline({ line: '4' })], true],
-    ['a range on the base side', [inline({ start_line: 1, side: 'LEFT' })], true],
-    ['a range of one line', [inline({ start_line: 3 })], true],
-    ['this pull request', [inline({ pull_request_number: 147 }), inline({ pull_request_number: '147' })], true],
-    ['ten', Array(10).fill(inline()), true],
-    ['eleven', Array(11).fill(inline()), false],
-    ['another pull request', [inline({ pull_request_number: 148 })], false],
-    ['another repository', [inline({ repo: 'o/other' })], false],
-    ['a reply route', [inline({ in_reply_to: 1 })], false],
-    ['no body', [inline({ body: ' ' })], false],
-    ['no path', [inline({ path: '' })], false],
-    ['a path with a newline', [inline({ path: 'a\n@user' })], false],
-    ['a long path', [inline({ path: 'a'.repeat(1025) })], false],
-    ['line zero', [inline({ line: 0 })], false],
-    ['a fractional line', [inline({ line: 1.5 })], false],
-    ['a range ending before it starts', [inline({ start_line: 4 })], false],
-    ['another side', [inline({ side: 'right' })], false],
-    ['folded past the bound', [inline({ body: 'x'.repeat(60000) })], false],
-  ]) {
-    if (ok) assert.equal(check(...comments), 'CHANGES', name);
-    else assert.throws(() => check(...comments), undefined, name);
-  }
-  // A noop is posted nowhere: its findings would be lost.
-  assert.throws(() => checkOutputs({ items: [{ type: 'noop' }, inline()] }, 147), /not a noop/);
-  assert.throws(() => checkOutputs({ items: [inline()] }, 147), /exactly one/);
-});
-
-// apply.yml's fold step, when nothing was submitted.
+// apply posts the fold check made (`agentic-job review fold`), before
+// anything that names or marks what it posts.
 test('apply posts inline findings in the verdict comment, not beside it', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-fold-'));
-  try {
-    const file = path.join(dir, 'agent_output.json');
-    const items = [{ type: 'create_pull_request_review_comment', path: 'src/[a]_@b.rs', line: 3, body: 'nit: one' },
-      { type: 'add_comment', body: 'VERDICT: APPROVE\nFindings' },
-      { type: 'create_pull_request_review_comment', path: 'b.rs', line: 9, start_line: 7, side: 'LEFT', body: 'important: two' }];
-    fs.writeFileSync(file, JSON.stringify({ items, errors: [] }));
-    execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'fold', file]);
-    const folded = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.deepEqual(folded, { items: [{ type: 'add_comment', body: 'VERDICT: APPROVE\nFindings\n\n### Inline findings\n' +
-      '\n**src/\\[a\\]\\_\\@b.rs, line 3**\n\nnit: one\n' +
-      '\n**b.rs, lines 7-9 of the base**\n\nimportant: two\n' }], errors: [] });
-    assert.equal(checkOutputs(folded, 147), 'APPROVE');
-    // Without inline comments the file is left as it is.
-    fs.writeFileSync(file, '{"items": [{"type": "noop"}]}');
-    execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'fold', file]);
-    assert.equal(fs.readFileSync(file, 'utf8'), '{"items": [{"type": "noop"}]}');
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
   const apply = fs.readFileSync(path.join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
-  const fold = apply.indexOf('review.cjs fold "$GH_AW_TMP/agent_output.json"');
+  const fold = apply.indexOf('mv "$GH_AW_TMP/folded.json" "$GH_AW_TMP/agent_output.json"');
   assert.ok(fold !== -1 && fold < apply.indexOf('- name: Mark what a partial run opens or posts') &&
     fold < apply.indexOf('- name: Leave out what an earlier attempt applied'));
-});
-
-test('the review status maps each run to one state, only for the one open pull request', () => {
-  const head = 'a'.repeat(40);
-  const approved = { pull: '147', head, check: 'success', verdict: 'APPROVE', apply: 'success',
-    url: 'https://github.com/o/r/pull/147#issuecomment-1' };
-  const did = { state: 'failure', description: 'The review did not approve this commit' };
-  const notPosted = { state: 'failure', description: 'The review did not post; see the workflow run' };
-  for (const [name, change, open, expected] of [
-    ['approved', {}, [147], { state: 'success', description: 'The review approved this commit' }],
-    ['changes', { verdict: 'CHANGES' }, [147], { state: 'failure', description: 'The review asked for changes' }],
-    ['noop', { verdict: '' }, [147], did],
-    ['check failed', { check: 'failure', verdict: '' }, [147], notPosted],
-    ['check failed after the verdict', { check: 'failure' }, [147], notPosted],
-    ['changes, check failed', { check: 'failure', verdict: 'CHANGES' }, [147], notPosted],
-    ['check skipped', { check: 'skipped', verdict: '' }, [147], notPosted],
-    ['apply failed', { apply: 'failure' }, [147], notPosted],
-    ['apply skipped', { apply: 'skipped', url: '' }, [147], notPosted],
-    ['no comment posted', { url: '' }, [147], notPosted],
-    ['submitted as the review, apply skipped', { apply: 'skipped', url: '', review: 'https://github.com/o/r/pull/147#pullrequestreview-1' }, [147],
-      { state: 'success', description: 'The review approved this commit' }],
-    ['changes submitted as the review', { verdict: 'CHANGES', apply: 'skipped', url: '', review: 'https://x/1' }, [147],
-      { state: 'failure', description: 'The review asked for changes' }],
-    ['submitted, check failed', { check: 'failure', review: 'https://x/1' }, [147], notPosted],
-    ['no open pull request', {}, [], { skip: `No review status on ${head}: its open pull requests are none, not only #147` }],
-    ['two open pull requests', {}, [147, 148], { skip: `No review status on ${head}: its open pull requests are 147, 148, not only #147` }],
-    ['another pull request', {}, [148], { skip: `No review status on ${head}: its open pull requests are 148, not only #147` }],
-  ]) assert.deepEqual(reviewStatus({ ...approved, ...change }, open), expected, name);
-  for (const change of [{ head: 'A'.repeat(40) }, { head: `${head}\n` }, { head: undefined },
-    { pull: '0' }, { pull: '01' }, { pull: '147;' }, { pull: '9007199254740992' }]) {
-    assert.throws(() => reviewStatus({ ...approved, ...change }, [147]), /exact head SHA/, JSON.stringify(change));
-  }
-});
-
-test('the review status is posted only after the open pull requests are listed', async () => {
-  const head = 'a'.repeat(40);
-  const env = { GITHUB_REPOSITORY: 'o/r', PULL: '147', HEAD_SHA: head, CHECK_RESULT: 'success',
-    VERDICT: 'APPROVE', APPLY_RESULT: 'success', RESULT_URL: 'https://x/1', RUN_URL: 'https://x/run' };
-  const fake = pulls => {
-    const calls = { posted: [], notices: [] };
-    const github = { rest: { pulls: { list: 'list' }, repos: {
-      createCommitStatus: async args => { calls.posted.push(args); } } },
-    paginate: async (route, args) => {
-      assert.equal(route, 'list');
-      assert.deepEqual(args, { owner: 'o', repo: 'r', state: 'open', per_page: 100 });
-      return pulls;
-    } };
-    return { calls, github, core: { notice: message => calls.notices.push(message) } };
-  };
-  let { calls, github, core } = fake([{ number: 147, head: { sha: head } }, { number: 150, head: { sha: 'b'.repeat(40) } }]);
-  assert.equal((await reportStatus(env, github, core)).state, 'success');
-  assert.deepEqual(calls.posted, [{ owner: 'o', repo: 'r', sha: head, context: 'review',
-    state: 'success', description: 'The review approved this commit', target_url: 'https://x/run' }]);
-  ({ calls, github, core } = fake([{ number: 147, head: { sha: head } }]));
-  await reportStatus({ ...env, CHECK_RESULT: 'failure', VERDICT: '', APPLY_RESULT: 'skipped', RESULT_URL: '' }, github, core);
-  assert.deepEqual(calls.posted, [{ owner: 'o', repo: 'r', sha: head, context: 'review',
-    state: 'failure', description: 'The review did not post; see the workflow run', target_url: 'https://x/run' }]);
-  ({ calls, github, core } = fake([{ number: 147, head: { sha: head } }, { number: 148, head: { sha: head } }]));
-  assert.ok((await reportStatus(env, github, core)).skip);
-  assert.deepEqual(calls.posted, []);
-  assert.equal(calls.notices.length, 1);
-  ({ calls, github, core } = fake([]));
-  await assert.rejects(reportStatus({ ...env, HEAD_SHA: 'main' }, github, core), /exact head SHA/);
-  assert.deepEqual(calls.posted, []);
+  const check = fs.readFileSync(path.join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  const made = check.indexOf('review fold "$GH_AW_TMP/agent_output.json"');
+  assert.ok(made > check.indexOf('- name: Put the patch beside the ingested outputs') && made < check.indexOf('- id: upload'));
+  assert.match(check, /\n {12}\$\{\{ env.GH_AW_TMP \}\}\/folded.json\n/);
 });
 
 test('scripted review reports the checked-out SHA', () => {
@@ -213,7 +48,8 @@ test('scripted review reports the checked-out SHA', () => {
     const item = JSON.parse(fs.readFileSync(path.join(home, 'out/safe-outputs.jsonl'), 'utf8'));
     const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
     assert.ok(item.body.includes(`\nReviewed SHA: ${sha}\n`));
-    checkOutputs({ items: [item] }, 147);
+    // The verdict line `agentic-job review verdict` reads in check.
+    assert.match(item.body, /^VERDICT: (APPROVE|CHANGES)\n/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -301,23 +137,24 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(jobs.agent, /policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}/);
   for (const [, action] of caller.matchAll(/^ +(?:- )?uses: ([^.\s]\S*)/gm)) assert.match(action, /@[0-9a-f]{40}$/, action);
   // The status takes the verdict check.yml set and the head policy
-  // admitted, nothing the agent wrote.
-  // reviewStatus maps them; the only code it runs is the policy call's
-  // pinned source, never the head.
-  assert.doesNotMatch(jobs.status, /needs\.agent\.outputs|artifact|pull_request\.head|needs\.policy\.outputs\.ref\b/);
-  assert.match(jobs.status, /repository: \$\{\{ needs.policy.outputs.source-repository \}\}\s+ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  // admitted, nothing the agent wrote. The only code it runs is the policy
+  // job's binary of the pinned source, never the head, and the only upload
+  // it reads is that binary.
+  assert.doesNotMatch(jobs.status, /needs\.agent\.outputs|needs\.check\.outputs\.artifact|pull_request\.head|needs\.policy\.outputs\.ref\b/);
+  assert.deepEqual([...jobs.status.matchAll(/artifact-ids: (.*)/g)].map(m => m[1]), ['${{ needs.policy.outputs.binary-artifact-id }}']);
   assert.match(jobs.status, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
   assert.match(jobs.status, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
-  assert.match(jobs.status, /await reportStatus\(process.env, github, core\)/);
+  assert.match(jobs.status, /"\$RUNNER_TEMP\/bin\/agentic-job" review status/);
   assert.match(jobs.status, /REVIEW_URL: \$\{\{ needs.submit.outputs.review-url \}\}/);
   // The verdict is posted once: as the review, or else as apply's comment.
   // The review's body is check's accepted upload, from the pinned source's
   // code, and only a checked verdict is submitted.
   assert.match(jobs.apply, /if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.submit.outputs.review-url == '' \}\}/);
   assert.match(jobs.submit, /vars.AGENT_REAL_REVIEWS == 'true'/);
-  assert.match(jobs.submit, /needs.check.result == 'success' && needs.check.outputs.artifact-id != ''/);
-  assert.match(jobs.submit, /artifact-ids: \$\{\{ needs.check.outputs.artifact-id \}\}/);
-  assert.match(jobs.submit, /repository: \$\{\{ needs.policy.outputs.source-repository \}\}\s+ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  assert.match(jobs.submit, /needs.check.result == 'success' && needs.check.outputs.artifact-id != '' &&\s+needs.policy.outputs.binary-artifact-id != ''/);
+  assert.deepEqual([...jobs.submit.matchAll(/artifact-ids: (.*)/g)].map(m => m[1]),
+    ['${{ needs.policy.outputs.binary-artifact-id }}', '${{ needs.check.outputs.artifact-id }}']);
+  assert.match(jobs.submit, /"\$RUNNER_TEMP\/bin\/agentic-job" review submit --accepted "\$RUNNER_TEMP\/checked\/agent_output.json"/);
   assert.match(jobs.submit, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
   assert.match(jobs.submit, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
   assert.match(jobs.submit, /AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}/);
@@ -327,7 +164,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(agentCall, /\n {6}job: \$\{\{ job.check_run_id \}\}\n/);
   assert.match(agentCall, /\n {6}job:\n {8}value: \$\{\{ jobs.agent.outputs.job \}\}\n/);
   assert.doesNotMatch(jobs.submit, /secrets|safe-outputs-artifact-id|pull_request\.head|needs\.policy\.outputs\.ref\b/);
-  assert.match(jobs.status, /if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.agent.result != 'cancelled' \}\}/);
+  assert.match(jobs.status, /if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' \}\}/);
   assert.match(jobs.status, /runs-on: ubuntu-26.04/);
   // Automatic reviews only for the owner, members and collaborators;
   // anyone else, a past contributor included, waits for a `/review`.
@@ -357,7 +194,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   const comment = body => ({ event_name: 'issue_comment', event: { issue: { pull_request: {} }, comment: { body } } });
   assert.equal(starts(comment('/review'), {}), true);
   assert.equal(starts(comment('please /review'), {}), false);
-  assert.match(checker, /core.setOutput\('verdict', checkOutputs\(/);
+  assert.match(checker, /verdict=\$\("\$JOB_DIR\/agentic-job" review verdict --collected "\$GH_AW_TMP\/agent_output.json" --target "\$TARGET" --report "\$GH_AW_TMP\/report.json"\)/);
   const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   assert.match(policy, /inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
   // agentic-job.yml's agent job is agent.yml's, which takes the policy
@@ -368,8 +205,6 @@ test('caller and write job retain the trusted-source boundary', () => {
   const check = workflow.split('\n  check:')[1].split('\n  apply:')[0];
   assert.match(check, /policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}/);
   assert.match(checker, /if: \$\{\{ fromJSON\(inputs.policy\).review == 'true' \}\}/);
-  assert.match(checker, /require\(`\$\{process.env.SOURCE_DIR\}\/workflow\/review.cjs`\)/);
-  assert.match(checker, /errors: \[error.message\]/);
   const applier = fs.readFileSync(path.join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
   const apply = applier.split('\n  apply:')[1].split('\n  conclude:')[0];
   assert.match(apply, /if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
@@ -403,12 +238,9 @@ test('target events read workflow policy without changing the trusted review bas
 });
 
 test('refused event reviews update one author-owned bounded status comment', () => {
-  const { refusalText } = require('./review.cjs');
   const { upsert, MARKER } = require('./status.cjs');
+  // As `agentic-job review refusal` writes it in the policy job.
   const reason = 'the bounds do not allow forks';
-  assert.equal(refusalText(reason), `Review refused by policy: ${reason}`);
-  assert.equal(refusalText('a\n\r@user [link](url)'), 'Review refused by policy: a \\@user \\[link\\]\\(url\\)');
-  assert.ok(refusalText('a'.repeat(2000)).length < 1100);
   const comments = [{ id: 1, user: { login: 'attacker' }, body: `copied\n\n${MARKER}` }];
   const calls = [];
   const api = (method, route, body) => {
@@ -422,7 +254,7 @@ test('refused event reviews update one author-owned bounded status comment', () 
     comments[1].body = body;
     return comments[1];
   };
-  const env = { REPO: 'owner/repo', ITEM: '472', GITHUB_RUN_ID: '100', TEXT: refusalText(reason) };
+  const env = { REPO: 'owner/repo', ITEM: '472', GITHUB_RUN_ID: '100', TEXT: `Review refused by policy: ${reason}` };
   upsert(env, api);
   upsert({ ...env, GITHUB_RUN_ID: '101' }, api);
   assert.equal(calls.filter(([method]) => method === 'POST').length, 1);
@@ -432,8 +264,10 @@ test('refused event reviews update one author-owned bounded status comment', () 
   const refusal = caller.split('\n  refusal:\n')[1].split('\n  agent:\n')[0];
   assert.match(refusal, /needs.policy.outputs.admitted == 'false'/);
   assert.match(refusal, /ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
-  assert.match(refusal, /REASON: \$\{\{ needs.policy.outputs.reason \}\}/);
-  assert.match(refusal, /run: node .agentic-job-source\/workflow\/review.cjs refusal/);
+  assert.match(refusal, /TEXT: \$\{\{ needs.policy.outputs.refusal \}\}/);
+  assert.match(refusal, /run: node .agentic-job-source\/workflow\/status.cjs/);
+  const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+  assert.match(policy, /core.setOutput\('refusal', execFileSync\(process.env.JOB_DIR \+ '\/bin\/agentic-job', \['review', 'refusal'\]/);
   assert.match(refusal, /group: agentic-job-status-/);
 });
 

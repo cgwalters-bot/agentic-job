@@ -7,7 +7,6 @@ const test = require('node:test');
 const vm = require('node:vm');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
-const { checkOutputs } = require('./review.cjs');
 
 const root = path.join(__dirname, '..');
 const workflow = fs.readFileSync(path.join(root, '.github/workflows/dispatch.yml'), 'utf8');
@@ -414,7 +413,8 @@ for (const profile of ['implement', 'comment', 'review']) {
         assert.equal(output.type, 'add_comment');
         assert.deepEqual(Object.keys(output).sort(), ['body', 'type']);
         if (profile === 'review') {
-          checkOutputs({ items: [output] }, 171);
+          // The verdict line `agentic-job review verdict` reads in check.
+          assert.match(output.body, /^VERDICT: (APPROVE|CHANGES)\n/);
           assert.ok(output.body.includes(execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()));
           assert.match(output.body, /\nToolchain: cargo \d/);
           assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8' }), '');

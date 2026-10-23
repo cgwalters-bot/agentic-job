@@ -555,20 +555,12 @@ jobs:
       # A review's inline findings, when apply posts its verdict as the
       # comment (review.yml submitted no review), go in that comment's body
       # after the verdict line, not as a second review without a verdict
-      # (docs/review.md). Check bounded the folded length. Before the guard
-      # below, so a re-run names the same comment.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ fromJSON(inputs.policy).review == 'true' }}
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: review-source
-          sparse-checkout: workflow/review.cjs
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
+      # (docs/review.md). Check folded them (`agentic-job review fold`) and
+      # bounded the folded length; its upload, held to the digest above,
+      # has both. Before the guard below, so a re-run names the same comment.
       - name: Put a review's inline findings in its comment
         if: ${{ fromJSON(inputs.policy).review == 'true' }}
-        run: node review-source/workflow/review.cjs fold "$GH_AW_TMP/agent_output.json"
+        run: mv "$GH_AW_TMP/folded.json" "$GH_AW_TMP/agent_output.json"
       # The first line of what a partial run opens or posts says so too,
       # in this file's words, chosen by the exit state. A partial run with
       # neither a pull request, an issue nor a comment would leave nothing

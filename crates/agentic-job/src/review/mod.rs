@@ -7,6 +7,12 @@
 //! An event review is admitted by `event` first; `admit` only narrows that
 //! decision, and `task` writes the reviewer's task from the trusted checkout
 //! of the default branch, with the owner's merge policy after it.
+//!
+//! After the agent, `verdict` and `fold` read check's output (verdict.rs),
+//! and `submit` and `status` post the checked verdict (submit.rs).
+
+mod submit;
+mod verdict;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -23,6 +29,8 @@ const MAX_PULL_BYTES: u64 = 4 << 20;
 // The decision `event` wrote, which holds no event text beyond its fields.
 const MAX_DECISION_BYTES: u64 = 1 << 20;
 const MAX_TASK_BYTES: u64 = 64 << 10;
+// The collector's or check's output, as check bounds what it collects.
+const MAX_OUTPUT_BYTES: u64 = 4 * crate::check::MAX_OUTPUTS_BYTES;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 static REPO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").expect("valid pattern"));
@@ -74,6 +82,41 @@ pub enum Command {
         /// The task file, relative to the current directory
         file: String,
     },
+    /// Print the refused review's reason in the environment (REASON) as
+    /// one inert line for the status comment
+    Refusal,
+    /// Check the collected output is one verdict comment on the target, or
+    /// a noop, and print the verdict: APPROVE, CHANGES or nothing
+    Verdict {
+        /// The collector's output
+        #[arg(long, value_name = "FILE")]
+        collected: PathBuf,
+        /// The triggering pull request's number
+        #[arg(long)]
+        target: String,
+        /// Where a refusal is written as check's report, `{ok, errors}`
+        #[arg(long, value_name = "FILE")]
+        report: PathBuf,
+    },
+    /// Print check's accepted output with the inline findings folded into
+    /// the verdict comment, as apply posts it
+    Fold {
+        #[arg(value_name = "FILE")]
+        accepted: PathBuf,
+    },
+    /// Submit the checked verdict in the environment as the pull request's
+    /// review, and append its URL, or none, to OUTPUT as `review-url`
+    Submit {
+        /// Check's accepted output
+        #[arg(long, value_name = "FILE")]
+        accepted: PathBuf,
+        /// The step's $GITHUB_OUTPUT
+        #[arg(long, value_name = "FILE")]
+        output: PathBuf,
+    },
+    /// Set the commit status `review` on the reviewed head from the jobs'
+    /// results in the environment
+    Status,
 }
 
 impl Command {
@@ -109,9 +152,46 @@ impl Command {
                 task.push_str(&merge_statement(merge_policy(root)?));
                 print!("{task}");
             }
+            Self::Refusal => println!("{}", verdict::refusal_text(&env("REASON"))),
+            Self::Verdict {
+                collected,
+                target,
+                report,
+            } => {
+                let checked = read_output(collected)
+                    .and_then(|output| verdict::check_outputs(&output, target));
+                match checked {
+                    Ok(verdict) => println!("{}", verdict::Verdict::word(verdict)),
+                    Err(err) => {
+                        let refusal = json!({"ok": false, "errors": [err.to_string()]});
+                        std::fs::write(report, refusal.to_string())
+                            .with_context(|| format!("writing {}", report.display()))?;
+                        eprintln!("::error::{err}");
+                        return Ok(Exit::Failure);
+                    }
+                }
+            }
+            Self::Fold { accepted } => println!("{}", verdict::fold(read_output(accepted)?)),
+            Self::Submit { accepted, output } => {
+                let accepted = read_output(accepted)?;
+                let url = submit::submit(&env, &accepted, &submit::Github::from_env(&env)?)?;
+                submit::write_output(output, &url)?;
+            }
+            Self::Status => submit::report_status(&env, &submit::Github::from_env(&env)?)?,
         }
         Ok(Exit::Success)
     }
+}
+
+fn env(key: &str) -> String {
+    std::env::var(key).unwrap_or_default()
+}
+
+/// The collector's or check's output, `{items, errors}`.
+fn read_output(path: &Path) -> Result<Value> {
+    let bytes = files::read_regular(path, MAX_OUTPUT_BYTES)
+        .with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// The decision, or the same refused: a review needs an admitted pull

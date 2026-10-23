@@ -418,7 +418,8 @@ says why on the issue.
 ## Verification
 
 `node --test workflow/dispatch.test.cjs workflow/review.test.cjs` executes the
-actual preflight, all shipped sessions and hostile review routing/output cases.
+actual preflight and all shipped sessions; `cargo test -p agentic-job review`
+covers hostile review routing and output cases.
 CI calls the **same dispatch.yml**, running research wherever it runs its
 end-to-end jobs, plus review on PRs; triage takes the same path with other
 profile text. Not implement: CI holds no PAT to

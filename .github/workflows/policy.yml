@@ -303,6 +303,9 @@ on:
       reason:
         description: Why, in the binary's words, for an event-triggered run
         value: ${{ jobs.policy.outputs.reason }}
+      refusal:
+        description: For a refused review, the reason as one line of inert text to post
+        value: ${{ jobs.policy.outputs.refusal }}
       binary-artifact-id:
         description: The upload holding the binary, for prepare and check
         value: ${{ jobs.policy.outputs.binary-artifact-id }}
@@ -435,6 +438,7 @@ jobs:
       # Whether the run goes on: `true` unless an event was refused.
       admitted: ${{ steps.event.outputs.admitted || 'true' }}
       reason: ${{ steps.event.outputs.reason }}
+      refusal: ${{ steps.event.outputs.refusal }}
       # The number of the issue or pull request the event was about, for the notify job; empty for a schedule or a dispatch.
       item: ${{ steps.event.outputs.item }}
       # The branch the run starts from, and where its comments go, as
@@ -632,6 +636,12 @@ jobs:
               decision = JSON.parse(execFileSync(process.env.JOB_DIR + '/bin/agentic-job',
                 ['review', 'admit', '--decision', path, '--base', process.env.BASE], { encoding: 'utf8' }));
               fs.writeFileSync(path, JSON.stringify(decision));
+              // What review.yml's refusal job posts: reasons can name event
+              // fields, so the binary keeps them inert and on one line.
+              if (!decision.admitted) {
+                core.setOutput('refusal', execFileSync(process.env.JOB_DIR + '/bin/agentic-job', ['review', 'refusal'],
+                  { encoding: 'utf8', env: { ...process.env, REASON: String(decision.reason ?? '') } }).trim());
+              }
             }
             if (!decision.admitted) fs.rmSync(process.env.JOB_DIR + '/task.md', { force: true });
             core.setOutput('admitted', String(decision.admitted));

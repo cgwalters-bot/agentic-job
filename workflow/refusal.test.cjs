@@ -34,8 +34,18 @@ for (const phase of ['collector', 'policy', 'review']) {
       if (phase === 'policy') fs.writeFileSync(join(dir, 'report.json'), JSON.stringify({
         ok: false, errors: ['protected files: CONTRIBUTING.md'],
       }));
-      if (phase === 'review') await new AsyncFunction('require', 'process', 'core',
-        script('Validate the review verdict', 'script'))(require, { env }, core);
+      if (phase === 'review') {
+        // A stand-in for `review verdict` refusing: it writes the report the
+        // refusal step reads and fails the step (tests/review.rs covers why).
+        const binary = join(dir, 'agentic-job');
+        fs.writeFileSync(binary, '#!/bin/bash\nprintf %s \'{"ok":false,"errors":["Review must return exactly one comment or noop"]}\' > "$8"\nexit 1\n');
+        fs.chmodSync(binary, 0o700);
+        const result = spawnSync('bash', ['-eo', 'pipefail', '-c', script('Validate the review verdict', 'run')], {
+          encoding: 'utf8', env: { ...env, JOB_DIR: dir, GITHUB_OUTPUT: join(dir, 'verdict-output') },
+        });
+        assert.equal(result.status, 1, result.stderr);
+        assert.ok(!fs.existsSync(join(dir, 'verdict-output')));
+      }
       await new AsyncFunction('require', 'process', 'core',
         script('Show why check refused the outputs', 'script'))(require, { env }, core);
       assert.ok(errors.some(text => text.startsWith('Refused by check: ')));
