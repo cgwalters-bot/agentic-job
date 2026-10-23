@@ -13,6 +13,7 @@
 //! write ([`plan`]), so a refusal leaves the forge as it was.
 
 pub mod forgejo;
+pub mod issue_reference;
 mod mentions;
 
 use std::collections::BTreeMap;

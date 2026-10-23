@@ -48,6 +48,8 @@ pub enum Command {
     Detect(crate::detect::Args),
     /// Publish checked comments and a pull request to a Forgejo repository
     Apply(crate::apply::Args),
+    /// Link checked pull requests to the caller's issue before publication
+    LinkIssue(crate::apply::issue_reference::Args),
     /// Decide whether the event that started the workflow may start a run, and write its task
     Event(event::Args),
     /// Resolve trusted workflow review routing without running reviewed code
@@ -84,6 +86,7 @@ impl Command {
             Self::Check(args) => check::run(args),
             Self::Detect(args) => crate::detect::run(args),
             Self::Apply(args) => crate::apply::run(args),
+            Self::LinkIssue(args) => crate::apply::issue_reference::run(args),
             Self::Event(args) => event::run(args),
             Self::Review(command) => command.run(),
             Self::Config(args) => compose::run(args),

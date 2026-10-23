@@ -1,7 +1,7 @@
 // Exercise the actual workflow shell, without tokens or a forge.
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
-const { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
+const { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { test } = require('node:test');
@@ -673,6 +673,23 @@ test("apply takes only this run's check output, whatever the caller wired", () =
   // The callers whose apply job names its permissions grant it the read.
   const compose = readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8');
   assert.match(compose.split('\n  apply:\n')[1], /^ {4}permissions:\n(?: {6}[-\w]+: \w+\n)*? {6}actions: read\n/m);
+});
+
+test('issue linking executes only policy binary artifacts from this run', () => {
+  for (const [id, name, run, expected] of [
+    ['42', 'p-agentic-job-binary', 7, 0], ['', 'p-agentic-job-binary', 7, 1],
+    ['1,2', 'p-agentic-job-binary', 7, 1], ['0', 'p-agentic-job-binary', 7, 1],
+    ['42', 'p-safe-outputs', 7, 1], ['42', 'q-agentic-job-binary', 7, 1],
+    ['42', 'p-agentic-job-binary', 8, 1], ['42', '', 7, 1],
+  ]) {
+    const result = command(homedir(), 'bash', ['-eo', 'pipefail', '-c',
+      'gh() { [ -n "$NAME_FROM_API" ] || return 9; printf \'{"name":"%s","workflow_run":{"id":%s}}\' "$NAME_FROM_API" "$RUN_FROM_API"; }\n' +
+      step("Require policy's binary for issue linking")],
+    { BINARY: id, NAME: 'p-agentic-job-binary', GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7',
+      NAME_FROM_API: name, RUN_FROM_API: String(run) });
+    assert.equal(result.status === 0, expected === 0, result.stderr);
+  }
+  assert.match(workflow, /artifact-ids: \$\{\{ fromJSON\(inputs.policy\).binary-artifact-id \}\}\n {10}path: \$\{\{ runner.temp \}\}\/apply-binary\n {10}digest-mismatch: error/);
 });
 
 test('no failure in notify stops the run, and conclude still reports it', () => {
@@ -1683,9 +1700,8 @@ test('a pull request without a checked patch stops the guard', async () => {
 function refs(items, issue = '64', itemRepo = 'owner/repo') {
   const dir = mkdtempSync(join(homedir(), 'refs-test-'));
   try {
-    mkdirSync(join(dir, 'apply-source/workflow'), { recursive: true });
-    writeFileSync(join(dir, 'apply-source/workflow/issue-reference.cjs'),
-      readFileSync(join(__dirname, 'issue-reference.cjs')));
+    mkdirSync(join(dir, 'apply-binary'));
+    copyFileSync(join(__dirname, '../target/debug/agentic-job'), join(dir, 'apply-binary/agentic-job'));
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
     const result = command(dir, 'bash', ['-e', '-o', 'pipefail', '-c', step('Say which issue a pull request is for')],
       { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_WORKSPACE: dir,
@@ -1791,8 +1807,8 @@ function dispatchedInput(key, value) {
 async function applyImplement(body, { issue = dispatchedInput('issue', '64'), exit = '0' } = {}) {
   const root = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
-    mkdirSync(join(root, 'apply-source/workflow'), { recursive: true });
-    writeFileSync(join(root, 'apply-source/workflow/issue-reference.cjs'), readFileSync(join(__dirname, 'issue-reference.cjs')));
+    mkdirSync(join(root, 'apply-binary'));
+    copyFileSync(join(__dirname, '../target/debug/agentic-job'), join(root, 'apply-binary/agentic-job'));
     writeFileSync(join(root, 'config.json'), JSON.stringify({ create_pull_request: { max: 1, ready_when_complete: true } }));
     writeFileSync(join(root, 'report.json'), JSON.stringify({ ok: true, patch: { file: 'aw-agent-run-7.patch' } }));
     writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [{ ...pull, body }], errors: [] }));
