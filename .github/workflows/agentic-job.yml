@@ -368,6 +368,9 @@ on:
       pull-request:
         description: The number of the pull request the run opened, if it opened one
         value: ${{ jobs.apply.outputs.pull-request }}
+      secondary-pull-request:
+        description: The URL of the pull request the run opened in the policy's secondary repository, if it opened one
+        value: ${{ jobs.apply.outputs.secondary-pull-request }}
       result-url:
         description: The URL of what apply made, the pull request or else the first comment or issue; empty for none
         value: ${{ jobs.apply.outputs.result-url }}

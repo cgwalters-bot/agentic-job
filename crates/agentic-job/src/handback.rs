@@ -14,7 +14,7 @@ use crate::check::{self, OUTPUTS_FILE};
 use crate::config;
 use crate::exit::Exit;
 use crate::files::ReadError;
-use crate::policy::Policy;
+use crate::policy::{Policy, Secondary};
 use crate::redact;
 use crate::run::brief;
 use crate::run::clone::Checkout;
@@ -195,6 +195,13 @@ pub fn run_file(
     let policy = Policy {
         clone_url: String::new(),
         context: Vec::new(),
+        secondary_pull_request: policy
+            .secondary_pull_request
+            .clone()
+            .map(|target| Secondary {
+                clone_url: String::new(),
+                ..target
+            }),
         ..policy.clone()
     };
     let mut file = json!({
@@ -1086,36 +1093,45 @@ mod tests {
             .errors
     }
 
-    /// The clone of the secondary pull request's repository is checked
-    /// with the run's own, as `run` collects both, and left as it was.
-    #[test]
-    fn the_secondary_clone_is_checked_with_the_checkout() {
-        let (dir, mut run) = home(pull_requests());
-        let tool = dir.path().join("work/secondary/o/tool");
-        std::fs::create_dir_all(&tool).unwrap();
-        sh(
-            &tool,
-            "git init -q -b main . && echo tool > tool.txt && git add . && \
-             git -c user.name=t -c user.email=t@example.invalid commit -q -m Tool",
-        );
-        let base = sh(&tool, "git rev-parse HEAD").trim().to_owned();
-        run.secondary = Some(Tree {
-            checkout: tool.clone(),
-            base: base.clone(),
-        });
-        run.policy.secondary_pull_request = Some(crate::policy::Secondary {
+    /// A secondary pull request to `o/tool`, within budgets small enough
+    /// for a case to go over.
+    fn tool() -> Secondary {
+        Secondary {
             repo: "o/tool".into(),
             clone_url: "https://example.invalid/o/tool".into(),
             base: "main".into(),
             branch_prefix: "agentic-job/".into(),
             max: 1,
-            max_patch_bytes: 1 << 20,
+            max_patch_bytes: 4 << 10,
             max_patch_files: 3,
             protected_files: vec!["go.mod".into()],
             protect_top_level_dot_folders: true,
             unprotected_dot_folders: Vec::new(),
             protected_paths: Vec::new(),
+        }
+    }
+
+    /// The clone of the secondary pull request's repository is checked
+    /// with the run's own, as `run` collects both, and left as it was:
+    /// each case's change there and requests, and what `handback check`
+    /// says of them: for each list of parts, a problem holding them all,
+    /// and no problem where there is no list.
+    #[test]
+    fn the_secondary_clone_is_checked_with_the_checkout() {
+        let (dir, mut run) = home(pull_requests());
+        let tool_dir = dir.path().join("work/secondary/o/tool");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        sh(
+            &tool_dir,
+            "git init -q -b main . && echo tool > tool.txt && git add . && \
+             git -c user.name=t -c user.email=t@example.invalid commit -q -m Tool",
+        );
+        let base = sh(&tool_dir, "git rev-parse HEAD").trim().to_owned();
+        run.secondary = Some(Tree {
+            checkout: tool_dir.clone(),
+            base: base.clone(),
         });
+        run.policy.secondary_pull_request = Some(tool());
         // What `run` writes, `handback check` and `handback guide` read.
         let text = run_file(&run.policy, &run.checkout(), "7", &run.commit).unwrap();
         let read: RunFile = serde_json::from_str(&text).unwrap();
@@ -1125,47 +1141,103 @@ mod tests {
             "{\"summary\": \"Done.\", \"tests\": []}",
         )
         .unwrap();
-        sh(&tool, "echo two >> tool.txt");
-        let problems = |run: &RunFile| -> Vec<String> {
-            validate(dir.path(), run)
+        let request = |repo: &str| {
+            json!({"type": "create_pull_request", "repo": repo, "title": "T", "body": "B"})
+                .to_string()
+                + "\n"
+        };
+        let ours = request("o/tool");
+        let key = format!("-----BEGIN {} KEY-----", "PRIVATE");
+        let at_tool = format!("{}: ", tool_dir.display());
+        let keyed = format!("echo '{key}' > key.txt");
+        let cases: [(&str, &str, String, &[&[&str]]); 9] = [
+            (
+                "a change without its request",
+                "echo two >> tool.txt",
+                String::new(),
+                &[&[
+                    "changes to o/tool dropped",
+                    "names that repository as its `repo`",
+                ]],
+            ),
+            (
+                "a change with its request",
+                "echo two >> tool.txt",
+                ours.clone(),
+                &[],
+            ),
+            (
+                "a request without a change",
+                "",
+                ours.clone(),
+                &[&["needs its patch"]],
+            ),
+            (
+                "two requests",
+                "echo two >> tool.txt",
+                ours.repeat(2),
+                &[&["for o/tool, over 1"]],
+            ),
+            (
+                "a request to another repository",
+                "echo two >> tool.txt",
+                request("o/other"),
+                &[&["repo \"o/other\", which is not the policy's"]],
+            ),
+            (
+                "a protected file",
+                "echo m > go.mod",
+                ours.clone(),
+                &[&["go.mod", "restore each"]],
+            ),
+            (
+                "too many files",
+                "touch a b c d",
+                ours.clone(),
+                &[&["aw-o-tool-", "touches 4 files, over 3"]],
+            ),
+            (
+                "too large a patch",
+                "seq 2000 > big.txt",
+                ours.clone(),
+                &[&["over 4096"]],
+            ),
+            (
+                "a private key",
+                &keyed,
+                ours.clone(),
+                &[&[&at_tool, "a private key"]],
+            ),
+        ];
+        for (name, change, requests, wants) in cases {
+            sh(&tool_dir, "git reset -q --hard && git clean -qfdx");
+            if !change.is_empty() {
+                sh(&tool_dir, change);
+            }
+            std::fs::write(dir.path().join(AGENT_OUTPUTS), &requests).unwrap();
+            let problems: Vec<String> = validate(dir.path(), &run)
                 .unwrap()
                 .problems
                 .iter()
                 .map(ToString::to_string)
-                .collect()
-        };
-        let unasked = problems(&run);
-        assert!(
-            unasked
-                .iter()
-                .any(|problem| problem.contains("changes to o/tool dropped")
-                    && problem.contains("names that repository as its `repo`")),
-            "{unasked:?}"
-        );
-        let request = "{\"type\":\"create_pull_request\",\"repo\":\"o/tool\",\"title\":\"T\",\"body\":\"B\"}\n";
-        std::fs::write(dir.path().join(AGENT_OUTPUTS), request).unwrap();
-        assert_eq!(problems(&run), Vec::<String>::new());
-        sh(&tool, "echo m > go.mod");
-        let protected = problems(&run);
-        assert!(
-            protected
-                .iter()
-                .any(|problem| problem.contains("go.mod") && problem.contains("restore each")),
-            "{protected:?}"
-        );
-        // A key in the secondary change is found there, and said to be.
-        let key = format!("-----BEGIN {} KEY-----", "PRIVATE");
-        sh(&tool, &format!("rm go.mod && echo '{key}' > key.txt"));
-        let keyed = problems(&run);
-        assert!(
-            keyed.iter().any(
-                |problem| problem.starts_with(&format!("{}: ", tool.display()))
-                    && problem.contains("a private key")
-            ),
-            "{keyed:?}"
-        );
-        assert_eq!(sh(&tool, "git rev-parse HEAD").trim(), base);
-        assert!(sh(&tool, "git diff --cached --name-only").is_empty());
+                .collect();
+            if wants.is_empty() {
+                assert_eq!(problems, Vec::<String>::new(), "{name}");
+            }
+            for parts in wants {
+                assert!(
+                    problems
+                        .iter()
+                        .any(|problem| parts.iter().all(|part| problem.contains(part))),
+                    "{name}: {parts:?} in {problems:#?}"
+                );
+            }
+            assert_eq!(sh(&tool_dir, "git rev-parse HEAD").trim(), base, "{name}");
+            assert!(
+                sh(&tool_dir, "git diff --cached --name-only").is_empty(),
+                "{name}"
+            );
+        }
     }
 
     /// Each kind of refusal is reported in the session, as `check` gives
@@ -1467,7 +1539,9 @@ mod tests {
     /// validator reads.
     #[test]
     fn the_run_file_is_the_policy_without_its_clone_urls() {
-        let (dir, run) = home(pull_requests());
+        let (dir, mut run) = home(pull_requests());
+        // The secondary's too: the agent has its clone, and needs no URL.
+        run.policy.secondary_pull_request = Some(tool());
         let checkout = run.checkout();
         let text = run_file(&run.policy, &checkout, "7", &run.commit).unwrap();
         std::fs::create_dir_all(dir.path().join(".config/agentic-job")).unwrap();
@@ -1475,6 +1549,13 @@ mod tests {
         let read = RunFile::read(dir.path()).unwrap();
         assert!(!text.contains("example.invalid"), "{text}");
         assert_eq!(read.policy.safe_outputs, run.policy.safe_outputs);
+        assert_eq!(
+            read.policy.secondary_pull_request,
+            Some(Secondary {
+                clone_url: String::new(),
+                ..tool()
+            })
+        );
         assert_eq!(
             (read.checkout, read.base, read.run_id),
             (run.checkout, run.base, run.run_id)

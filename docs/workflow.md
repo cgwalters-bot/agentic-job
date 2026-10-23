@@ -83,7 +83,8 @@ The separate detect job has `contents: read` and `id-token: write`, no write
 credential or agent tools. It registers its own run through the same inference
 proxy using the policy's configuration (`github-oidc` or `plain`, not
 `token-file` or `api-key`, which fail). That proxy must be reachable from the hosted detector runner.
-It sends the task, checked outputs and patches as untrusted evidence to one
+It sends the task, checked outputs and patches (a
+[secondary pull request](#a-secondary-pull-request)'s included) as untrusted evidence to one
 OpenAI-compatible chat-completions request, capped at 2 MiB of evidence, 256
 output tokens and 120 seconds. There are no retries or tool continuations.
 Any threat, malformed/truncated verdict, unavailable model, registration or
@@ -1586,6 +1587,33 @@ fixed-item violation. Expected-refusal runs upload no checked outputs and never
 start apply, even if the check unexpectedly accepts them. This changes only
 result reporting and job/step conditions: permissions, token placement, action
 pins and the validation rules are unchanged.
+
+### A secondary pull request
+
+Bounds with a
+[`[secondary_pull_request]`](safe-outputs.md#a-secondary-pull-request)
+table let a run open one more pull request, in the one repository the
+table names, beside its own. Apply opens it after the run's own outputs,
+with the same `SAFE_OUTPUTS_PAT` and the same way as the run's own
+[from a fork](#pull-requests-come-from-a-fork): it forks that repository
+into the account `GET /user` names, turns the fork's Actions off, pushes
+the checked commit to the fork's branch `PREFIX` + `agent-run-RUN_ID`,
+and opens a draft pull request onto the table's base. So the caller gives
+the token, for that repository, what the run's own pull request needs for
+the output repository: it has to read and fork it, push to and turn off
+Actions on its fork (Contents and Administration write there), and open
+pull requests in it (Pull requests write on it, for a fine-grained token).
+The account must not own it: apply refuses one that does, as it pushes
+nothing to the secondary repository itself.
+
+Nothing else becomes writable. The repository, base and branch prefix
+come from the bounds, through `policy.json` and check, never from the
+agent's request, and no other output may go to that repository: a request
+naming it as anything but this one `create_pull_request` is refused as
+before. A classic PAT of a bot account already reaches every public
+repository; configuring the table adds no permission to the token, only
+a destination apply writes to with it. No job but apply holds the token,
+and the agent's clone of the secondary repository has no credential.
 
 ### A run stopped at a limit
 

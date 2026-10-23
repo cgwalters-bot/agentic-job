@@ -829,16 +829,16 @@ unknown key. Destinations stay fixed by the caller
 chosen per type or by the agent, and a patch that touches a protected file
 is refused rather than sent for review or turned into an issue.
 
-### A secondary pull request (not yet active: apply has no pass for it)
+### A secondary pull request
 
 A `[secondary_pull_request]` table names one further, fixed repository
-that a run is to be able to propose one pull request to, without making
-the repositories in `repos` writable
+that a run may propose one pull request to, beside its own, without
+making the repositories in `repos` writable
 ([#1075](https://github.com/cgwalters-forge/agentic-job/issues/1075)).
-`run`, the hand-back and `check` hold a patch to it, but apply routing
-([#1286](https://github.com/cgwalters-forge/agentic-job/issues/1286))
-does not exist yet, so `policy` refuses every run that would open one.
-Bounds without it are unaffected.
+It is off unless the bounds have the table; bounds without it are
+unaffected. The caller's `SAFE_OUTPUTS_PAT` has to reach that repository
+as it reaches the output repository
+([its token](workflow.md#a-secondary-pull-request)).
 
 ```toml
 [secondary_pull_request]
@@ -848,6 +848,12 @@ branch_prefix = "agentic-job/"
 max = 1
 max_patch_bytes = 65536
 max_patch_files = 10
+
+# Optional, and only for that repository: nothing of the top-level
+# [unprotected_files] carries over.
+[secondary_pull_request.unprotected_files]
+repos = ["cgwalters-forge/misctool"]
+files = ["CONTRIBUTING.md"]
 ```
 
 It is one table, not a list. `repo` is one exact OWNER/NAME, `base` one
@@ -878,6 +884,25 @@ its own base file, budgets and protected files and to the bounds'
 `commit_author`. A request naming any other repository is refused as
 before.
 
+check.yml keeps that request, its patch and the policy's table for it in
+`secondary/` of the checked artifact, apart from the run's own outputs,
+so apply's pass for those sees what it would without a secondary; the
+optional threat detector reads it with them. Only
+once they were all applied does apply open the secondary pull request,
+with gh-aw's `create_pull_request` handler configured for it alone: in
+the table's repository, onto its base, as a draft, on the branch
+`PREFIX` + `agent-run-RUN_ID` of this run, from the applying account's own
+fork of that repository with Actions turned off there, as for the run's
+own ([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
+The repository, base and prefix are the table's; apply refuses a request
+that says otherwise, another run's branch, a second request or a patch
+other than the one check accepted, and tries the patch on its base as it
+does the run's own before the handler sees it. An account that owns the
+secondary repository is refused, as no fork of it is pushed to. A re-run
+finds the pull request an earlier attempt opened from that branch and
+opens none. The pull request's URL is apply's `secondary-pull-request`
+output.
+
 ## What the agent does
 
 The producer need not be an agent. Any caller job can upload `outputs.jsonl`
@@ -895,7 +920,7 @@ sandbox user: `git format-patch` of one commit against the commit the
 run started from, with gh-aw's `X-GH-AW-Base-Commit` header. The
 hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`, and for a
-[secondary pull request](#a-secondary-pull-request-not-yet-active-apply-has-no-pass-for-it)
+[secondary pull request](#a-secondary-pull-request)
 its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 

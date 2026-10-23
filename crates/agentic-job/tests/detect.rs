@@ -64,6 +64,11 @@ fn read_request(stream: &mut TcpStream) {
         serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
     assert_eq!(evidence["task"], "task");
     assert_eq!(evidence["patches"].as_array().unwrap().len(), 2);
+    // The secondary pull request's, which check.yml keeps apart.
+    assert_eq!(
+        evidence["secondary_pull_request"],
+        json!({"outputs": "{\"items\": []}", "patches": ["secondary patch"]})
+    );
 }
 
 /// Serves the detector's one request as MODEL says.
@@ -337,8 +342,13 @@ fn stub_detector_gates_and_always_ends_its_run() {
             ("agent_output.json", "{}"),
             ("aw-test.patch", "patch"),
             ("replacement.json", "replacement"),
+            ("secondary/agent_output.json", "{\"items\": []}"),
+            ("secondary/aw-o-tool-test.patch", "secondary patch"),
+            ("secondary/target.json", "{}"),
         ] {
-            std::fs::write(dir.path().join(name), text).unwrap();
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
         }
         let output = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
             .args(["detect", "--config"])
@@ -380,6 +390,31 @@ fn oversized_evidence_never_registers() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("at most 2 MiB"));
+}
+
+/// A secondary pull request's evidence is a directory of its own, and
+/// nothing in its place passes uninspected.
+#[test]
+fn secondary_evidence_that_is_no_directory_never_registers() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [("task.md", "task"), ("agent_output.json", "{}")] {
+        std::fs::write(dir.path().join(name), text).unwrap();
+    }
+    std::os::unix::fs::symlink("/", dir.path().join("secondary")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .args(["detect", "--config", "absent", "--task"])
+        .arg(dir.path().join("task.md"))
+        .arg("--checked")
+        .arg(dir.path())
+        .args(["--model", "stub"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("secondary is not a directory"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Agent credentials never reach the detector's host. Unsupported modes

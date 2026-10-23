@@ -565,8 +565,7 @@ pub struct Bounds {
     /// One exact further repository a run may propose a pull request to
     /// (#1075). Kept apart from `repos`, which admits repositories to work
     /// on, so that admitting one is no permission to write to it. `check`
-    /// holds it to these bounds; `apply` has no pass for it yet, so the
-    /// `policy` command refuses a run that would open one (#1286).
+    /// holds it to these bounds, and `apply` opens it in a pass of its own.
     #[serde(default)]
     pub secondary_pull_request: Option<SecondaryPullRequest>,
 }
@@ -2320,15 +2319,6 @@ pub fn run(args: &Args) -> Result<Exit> {
                 .and_then(|other| intersect(policy, other)),
             None => Ok(policy),
         });
-    // Not admitted while apply has no pass of its own for it: every other
-    // consumer holds it to its bounds, apply would hand its request to the
-    // run's own pull request's handler, which refuses it after a run.
-    let compiled = compiled.and_then(|policy| match policy.secondary_pull_request {
-        Some(_) => Err(vec![
-            "secondary_pull_request is not yet supported by apply".to_owned(),
-        ]),
-        None => Ok(policy),
-    });
     match compiled {
         Ok(mut policy) => {
             if policy.clone_url.starts_with(PLAIN_HTTP_PREFIX) {

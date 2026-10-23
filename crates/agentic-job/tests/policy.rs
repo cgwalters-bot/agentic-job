@@ -444,11 +444,11 @@ fn a_request_outside_the_bounds_prints_no_policy() {
     }
 }
 
-/// Bounds that configure a secondary pull request admit no run that would
-/// open one while apply has no pass of its own for it; a run that opens
-/// no pull request is admitted as before, without one.
+/// Bounds that configure a secondary pull request give it, as they write
+/// it, to a run that may open its own pull request; a run that opens none
+/// is admitted as before, without one.
 #[test]
-fn a_secondary_pull_request_is_not_yet_admitted() {
+fn a_secondary_pull_request_is_admitted_with_the_runs_own() {
     let dir = tempfile::tempdir().unwrap();
     let allow = dir.path().join("allow.toml");
     let text = std::fs::read_to_string(data("allow.toml")).unwrap();
@@ -463,12 +463,14 @@ fn a_secondary_pull_request_is_not_yet_admitted() {
     .unwrap();
     let output = policy(&allow, &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(output.stdout.is_empty());
-    assert!(
-        stderr.contains("secondary_pull_request is not yet supported by apply"),
-        "{stderr}"
-    );
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let secondary = &printed["secondary_pull_request"];
+    assert_eq!(secondary["repo"], "cgwalters-forge/misctool", "{printed}");
+    assert_eq!(secondary["base"], "main");
+    assert_eq!(secondary["branch_prefix"], "agentic-job/");
+    assert_eq!(secondary["max"], 1);
+    assert_eq!(secondary["max_patch_bytes"], 65536);
     let output = policy(&allow, &[("--outputs", "add_comment,noop")]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");

@@ -48,6 +48,9 @@ on:
       pull-request:
         description: The number of the pull request the run opened, if it opened one
         value: ${{ jobs.apply.outputs.pull-request }}
+      secondary-pull-request:
+        description: The URL of the pull request the run opened in the policy's secondary repository, if it opened one
+        value: ${{ jobs.apply.outputs.secondary-pull-request }}
       result-url:
         description: The URL of what apply made, the pull request or else the first comment or issue; empty for none
         value: ${{ jobs.apply.outputs.result-url }}
@@ -83,6 +86,7 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       pull-request: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
+      secondary-pull-request: ${{ steps.secondary-apply.outputs.url }}
       result-url: ${{ steps.result.outputs.result-url }}
       # `true` when the run handed back only noop, missing_tool or missing_data, for conclude.
       no-result: ${{ steps.result.outputs.no-result }}
@@ -1008,6 +1012,13 @@ jobs:
               echo
               jq -r '.patch.files | join("\n")' "$REPORT" | jq -Rrs '@html "<pre>\(.)</pre>"'
             fi
+            if [ -e "$GH_AW_TMP/secondary/agent_output.json" ]; then
+              echo
+              echo "The secondary pull request, and its patch's files:"
+              echo
+              jq .items "$GH_AW_TMP/secondary/agent_output.json" | jq -Rrs '@html "<pre>\(.)</pre>"'
+              jq -r '.secondary_patch.files | join("\n")' "$REPORT" | jq -Rrs '@html "<pre>\(.)</pre>"'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       # What was made, for whoever reads the run: `pull_request` is null
       # when none was opened, and `fork` names where its branch went. A
@@ -1068,6 +1079,8 @@ jobs:
               const quiet = ['noop', 'missing_tool', 'missing_data'];
               const { items } = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
               if (!items.every(item => quiet.includes(item.type))) return;
+              // A secondary pull request, which a later step opens, is a result too.
+              if (fs.existsSync(`${process.env.GH_AW_TMP}/secondary/agent_output.json`)) return;
               core.setOutput('no-result', 'true');
               core.setOutput('missing-data', String(items.some(item => item.type === 'missing_data')));
               // gh-aw's scripts log through a global `core`, as setupGlobals sets it for the handlers.
@@ -1150,6 +1163,208 @@ jobs:
           if [ "$OUTCOME" != success ] || { [ "$asked" != 0 ] && [ "$opened" != true ]; }; then
             echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1
           fi
+      # A policy's secondary pull request
+      # (docs/safe-outputs.md#a-secondary-pull-request): check.yml put its
+      # request, its patch and the policy's table for it in `secondary/`,
+      # apart from the run's own outputs, which the steps above applied as
+      # they would without it. It is opened only once those all were, and
+      # only where the policy says: the repository, base and branch prefix
+      # are the table's, never the request's, and the request has to be the
+      # one check accepted, on this run's branch under that prefix (check
+      # accepts any run's branch where the run asked for no pull request of
+      # its own). Anything else stops the job before the secondary
+      # repository is forked or written to. It needs nothing of
+      # SAFE_OUTPUTS_PAT but what the run's own pull request does, for
+      # that repository (docs/workflow.md#a-secondary-pull-request).
+      - name: Read the secondary pull request
+        id: secondary
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        run: |
+          dir="$GH_AW_TMP/secondary"
+          if jq -e '.secondary_patch == null' "$REPORT" > /dev/null; then
+            [ ! -e "$dir" ] || { echo '::error::a secondary pull request without a patch check accepted for it'; exit 1; }
+            exit 0
+          fi
+          repo=$(jq -er '.repo | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))' "$dir/target.json")
+          base=$(jq -er '.base | select(test("^[A-Za-z0-9_./-]+$"))' "$dir/target.json")
+          prefix=$(jq -er '.branch_prefix | select(test("^[A-Za-z0-9_./-]+/$"))' "$dir/target.json")
+          branch="${prefix}agent-run-$GITHUB_RUN_ID"
+          # The name gh-aw's handler looks for the patch by (its
+          # sanitizeForFilename, as check's patch_file_name_in), checked
+          # before anything is forked.
+          patch=$(jq -er --arg repo "$repo" --arg branch "$branch" '
+            def name: gsub("[/\\\\:*?\"<>|]"; "-") | gsub("-{2,}"; "-") | ltrimstr("-") | rtrimstr("-") | ascii_downcase;
+            .secondary_patch.file | select(. == "aw-\($repo | name)-\($branch | name).patch")' "$REPORT")
+          jq -e --arg repo "$repo" --arg base "$base" --arg branch "$branch" '
+            .items | length == 1 and (.[0] | .type == "create_pull_request" and .repo == $repo and .branch == $branch
+              and ((has("base") | not) or .base == $base) and ((has("draft") | not) or .draft == true))' "$dir/agent_output.json" > /dev/null ||
+            { echo "::error::the secondary request is not one create_pull_request for $repo on $branch, this run's branch"; exit 1; }
+          [ "$(ls -A "$dir" | LC_ALL=C sort)" = "$(printf '%s\n' agent_output.json target.json "$patch" | LC_ALL=C sort)" ] ||
+            { echo "::error::the secondary hand-back is not its request, its table and $patch"; exit 1; }
+          printf '%s\n' "repo=$repo" "base=$base" "prefix=$prefix" "branch=$branch" "patch=$patch" | tee -a "$GITHUB_OUTPUT"
+      # The secondary repository at its base, whole, as the output
+      # repository's checkout above: the patch is tried on the commit it
+      # starts from, and the handler pushes from here to the fork.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.secondary.outputs.repo != '' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        with:
+          repository: ${{ steps.secondary.outputs.repo }}
+          ref: ${{ steps.secondary.outputs.base }}
+          path: secondary-checkout
+          fetch-depth: 0
+          token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          persist-credentials: true
+      # From the identity's own fork of the secondary repository, for the
+      # reasons the run's own pull request is from one (the fork step above):
+      # its CI runs the agent's commit as a fork's, and the fork's Actions
+      # are off before anything is pushed. Nothing is pushed to the
+      # repository itself, so an account that owns it is refused.
+      - name: Fork the secondary repository
+        id: secondary-fork
+        if: ${{ steps.secondary.outputs.repo != '' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SECONDARY_REPO: ${{ steps.secondary.outputs.repo }}
+        with:
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const target = process.env.SECONDARY_REPO;
+            const [owner, repo] = target.split('/');
+            const me = await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null);
+            if (!me) throw new Error("a pull request is opened from a fork of the identity apply holds, and GET /user names none: SAFE_OUTPUTS_PAT must be a user's token");
+            if (owner.toLowerCase() === me.toLowerCase()) throw new Error(`${me} owns ${target} and has no fork of it: a secondary pull request is opened only from a fork`);
+            const { data: fork } = await github.rest.repos.createFork({ owner, repo, default_branch_only: true });
+            const name = String(fork.full_name);
+            if (fork.fork !== true || String(fork.owner?.login).toLowerCase() !== me.toLowerCase() ||
+                [target, process.env.REPO, process.env.OUTPUT_REPO].some(other => other.toLowerCase() === name.toLowerCase())) {
+              throw new Error(`the forge answered a fork of ${target} for ${me} with ${name}, which is not ${me}'s own fork of it`);
+            }
+            for (let attempt = 1; ; attempt++) {
+              const { exitCode, stdout } = await exec.getExecOutput('git', ['ls-remote', '--heads', `https://github.com/${name}.git`],
+                { ignoreReturnCode: true, silent: true });
+              if (exitCode === 0 && stdout.includes('\trefs/heads/')) break;
+              if (attempt === 30) throw new Error(`the fork ${name} is still not there after ${attempt} tries`);
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            const [forkOwner, forkRepo] = name.split('/');
+            const enabled = await github.rest.actions.setGithubActionsPermissionsRepository({ owner: forkOwner, repo: forkRepo, enabled: false })
+              .then(() => github.rest.actions.getGithubActionsPermissionsRepository({ owner: forkOwner, repo: forkRepo }))
+              .then(({ data }) => data.enabled, () => null);
+            if (enabled !== false) {
+              throw new Error(`Actions could not be turned off on the fork ${name}, which a push with ${me}'s token would run workflows in: ` +
+                "turn them off there, and give SAFE_OUTPUTS_PAT the repo scope (or a fine-grained token Administration: write on the fork)");
+            }
+            core.setOutput('repo', name);
+      # As the run's own patch is tried above: on the commit it says it
+      # starts from, which the secondary's base has to hold, with git set
+      # up as for the run's own, by a plain `git am` that has to change the
+      # files check saw it name and no others. Only then is it put where
+      # gh-aw's handler looks for it, under the name check accepted.
+      - name: Apply the secondary patch on its own base, and compare what changed with what was checked
+        if: ${{ steps.secondary.outputs.repo != '' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        working-directory: secondary-checkout
+        env:
+          PATCH: ${{ steps.secondary.outputs.patch }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config merge.renames false
+          git config diff.renames false
+          git config am.keepcr true
+          base=$(jq -er '.secondary_patch.base_commit' "$REPORT")
+          git merge-base --is-ancestor "$base" HEAD ||
+            { echo "::error::the secondary patch starts from $base, which is not a commit of the base fetched above"; exit 1; }
+          git worktree add --quiet --detach "$RUNNER_TEMP/secondary-trial" "$base"
+          git -C "$RUNNER_TEMP/secondary-trial" am --keep-cr "$GH_AW_TMP/secondary/$PATCH"
+          git -C "$RUNNER_TEMP/secondary-trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/secondary-actual-files"
+          jq -er '.secondary_patch.files | select(type == "array" and length > 0) | .[]' "$REPORT" | LC_ALL=C sort > "$RUNNER_TEMP/secondary-checked-files"
+          diff "$RUNNER_TEMP/secondary-actual-files" "$RUNNER_TEMP/secondary-checked-files"
+          git worktree remove --force "$RUNNER_TEMP/secondary-trial"
+          cp -t "$GH_AW_TMP" "$GH_AW_TMP/secondary/$PATCH"
+      # The handler's configuration for the secondary pull request alone,
+      # from the policy's table: its repository, base and prefix, always a
+      # draft, its own protected files and patch budgets with no exemption
+      # but its own of `.github`, pushed to the fork above alone from the
+      # checkout above, and as the run's own pull request's for the rest.
+      - name: Write the secondary handler's configuration
+        if: ${{ steps.secondary.outputs.repo != '' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        env:
+          FORK: ${{ steps.secondary-fork.outputs.repo }}
+          SECONDARY_REPO: ${{ steps.secondary.outputs.repo }}
+          SECONDARY_BASE: ${{ steps.secondary.outputs.base }}
+          SECONDARY_PREFIX: ${{ steps.secondary.outputs.prefix }}
+          PARTIAL: >-
+            ${{ fromJSON(inputs.agent).outputs.exit == '124' && '[partial: stopped at the timeout] '
+                || fromJSON(inputs.agent).outputs.exit == '3' && '[partial: stopped at a limit] ' || '' }}
+          TITLE_PREFIX: ${{ fromJSON(inputs.policy).title-prefix }}
+          PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true, "auto_close_issue": false}'
+        run: |
+          [ -n "$FORK" ] || { echo '::error::there is no fork to open the secondary pull request from'; exit 1; }
+          jq --arg fork "$FORK" --arg repo "$SECONDARY_REPO" --arg base "$SECONDARY_BASE" --arg branch "$SECONDARY_PREFIX" \
+            --arg title "$PARTIAL$TITLE_PREFIX" --arg checkout "$GITHUB_WORKSPACE/secondary-checkout" --argjson pr "$PULL_REQUEST" '
+            {create_pull_request: ({max: 1, draft: true, protected_files, protect_top_level_dot_folders: true, protected_files_policy: "blocked",
+                max_patch_size: (.max_patch_bytes / 1024 | floor), max_patch_files}
+              + (if (.unprotected_dot_folders // []) | index(".github") then {protected_dot_folder_excludes: [".github"]} else {} end)
+              + $pr + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title,
+                "head-repo": $fork, allowed_repos: [$fork], checkout_mapping: {($repo | ascii_downcase): $checkout}})}
+          ' "$GH_AW_TMP/secondary/target.json" > "$GH_AW_TMP/secondary/handler-config.json"
+      # gh-aw's handler, as for the run's own outputs above, on the
+      # secondary request alone, with its configuration alone, in its
+      # checkout, and with no issue opened in a pull request's place. A
+      # re-run finds the pull request an earlier attempt opened from this
+      # run's branch of the fork and opens none. Either way one has to be
+      # there afterwards, from that branch onto the base, or the job fails.
+      - name: Open the secondary pull request with gh-aw's handler
+        id: secondary-apply
+        if: ${{ steps.secondary.outputs.repo != '' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/secondary/agent_output.json
+          GH_AW_WORKFLOW_ID: agentic-job
+          GH_AW_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+          GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
+          GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
+          GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
+          FORK: ${{ steps.secondary-fork.outputs.repo }}
+          SECONDARY_REPO: ${{ steps.secondary.outputs.repo }}
+          SECONDARY_BASE: ${{ steps.secondary.outputs.base }}
+          SECONDARY_BRANCH: ${{ steps.secondary.outputs.branch }}
+        with:
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const fs = require('node:fs');
+            const [owner, repo] = process.env.SECONDARY_REPO.split('/');
+            const head = `${process.env.FORK.split('/')[0]}:${process.env.SECONDARY_BRANCH}`;
+            const me = await github.rest.users.getAuthenticated().then(({ data }) => data.login);
+            const opened = async () => (await github.paginate(github.rest.pulls.list, { owner, repo, head, state: 'all', per_page: 100 }))
+              .find(pull => pull.user?.login === me && pull.base?.ref === process.env.SECONDARY_BASE && (pull.state === 'open' || pull.merged_at));
+            let pull = await opened();
+            if (!pull) {
+              process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG = fs.readFileSync(`${process.env.GH_AW_TMP}/secondary/handler-config.json`, 'utf8');
+              // As the run's own handlers' footer above.
+              const MAX_WORKFLOW_NAME = 100;
+              const workflowName = process.env.GH_AW_WORKFLOW_NAME;
+              if (workflowName.length > MAX_WORKFLOW_NAME) {
+                process.env.GH_AW_WORKFLOW_NAME = `${workflowName.slice(0, MAX_WORKFLOW_NAME - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+              }
+              const guarded = client => {
+                client.hook.before("request", options => {
+                  if (options.method === "POST" && /^\/repos\/[^/]+\/[^/]+\/issues$/.test(options.url)) {
+                    throw new Error("no issue is opened in place of the secondary pull request");
+                  }
+                });
+                return client;
+              };
+              const { escapingCore, escapingExec } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/workflow-commands.cjs`);
+              const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
+              process.chdir(`${process.env.GITHUB_WORKSPACE}/secondary-checkout`);
+              require(`${dir}/setup_globals.cjs`).setupGlobals(escapingCore(core), guarded(github), context, escapingExec(exec), io, (...args) => guarded(getOctokit(...args)));
+              await require(`${dir}/safe_output_handler_manager.cjs`).main();
+              pull = await opened();
+            }
+            if (!pull) throw new Error(`no pull request is open in ${process.env.SECONDARY_REPO} from ${head} onto ${process.env.SECONDARY_BASE}`);
+            core.setOutput('url', pull.html_url);
+            await core.summary.addHeading('The secondary pull request', 3).addLink(pull.html_url, pull.html_url).write();
       # A continuation under `ready_when_complete`: once its push is on the
       # branch, the pull request is marked ready if the work is complete,
       # and made a draft again at a checkpoint. This is the one place apply

@@ -2175,3 +2175,249 @@ test('the apply step hands the handlers a core and an exec whose output cannot f
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// A policy's secondary pull request goes through check.yml apart from the
+// run's own outputs, and apply opens it only as the policy's table and
+// check's report say, on this run's branch.
+const secondaryTarget = {
+  repo: 'o/tool', clone_url: 'https://github.com/o/tool', base: 'main', branch_prefix: 'agentic-job/', max: 1,
+  max_patch_bytes: 65536, max_patch_files: 10, protected_files: ['go.mod'], protect_top_level_dot_folders: true,
+};
+const secondaryPull = { type: 'create_pull_request', repo: 'o/tool', title: 'tool', body: 'B', branch: 'agentic-job/agent-run-7' };
+const secondaryPatch = 'aw-o-tool-agentic-job-agent-run-7.patch';
+
+function checkStep(name) {
+  const check = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  return check.split(`- name: ${name}\n`)[1].split('        run: |\n')[1].split(/\n      [^ ]/)[0]
+    .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+}
+
+test('check keeps a secondary pull request apart, and apply reads it only as the policy and check say', () => {
+  const root = mkdtempSync(join(homedir(), 'secondary-test-'));
+  try {
+    const job = join(root, 'job'), tmp = join(root, 'tmp'), temp = join(root, 'temp');
+    for (const dir of [join(job, 'safe-outputs'), tmp, temp]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(job, 'safe-outputs', 'aw-agent-run-7.patch'), 'own\n');
+    writeFileSync(join(job, 'safe-outputs', secondaryPatch), 'secondary\n');
+    const report = { ok: true, errors: [], items: [pull, secondaryPull], patch: { file: 'aw-agent-run-7.patch' },
+      secondary_patch: { file: secondaryPatch, bytes: 10, base_commit: 'a'.repeat(40), files: ['GREETING.md'] } };
+    writeFileSync(join(tmp, 'report.json'), JSON.stringify(report));
+    // A policy without the table hands every request to the run's own pass, as before.
+    writeFileSync(join(job, 'policy.json'), JSON.stringify({ secondary_pull_request: null }));
+    const env = { JOB_DIR: job, GH_AW_TMP: tmp, RUNNER_TEMP: temp };
+    const put = () => command(root, 'bash', ['-euo', 'pipefail', '-c', checkStep('Put the patch beside the ingested outputs')], env);
+    writeFileSync(join(tmp, 'report.json'), JSON.stringify({ ...report, items: [pull], secondary_patch: undefined }));
+    assert.equal(put().status, 0);
+    assert.deepEqual(JSON.parse(readFileSync(join(tmp, 'agent_output.json'), 'utf8')).items, [pull]);
+    rmSync(tmp, { recursive: true });
+    mkdirSync(tmp);
+    writeFileSync(join(tmp, 'report.json'), JSON.stringify(report));
+    writeFileSync(join(job, 'policy.json'), JSON.stringify({ secondary_pull_request: secondaryTarget }));
+    const result = put();
+    assert.equal(result.status, 0, result.stderr);
+    const read = path => JSON.parse(readFileSync(join(tmp, path), 'utf8'));
+    assert.deepEqual(read('agent_output.json'), { items: [pull], errors: [] });
+    assert.deepEqual(read('secondary/agent_output.json'), { items: [secondaryPull], errors: [] });
+    assert.deepEqual(read('secondary/target.json'), secondaryTarget);
+    const { readdirSync } = require('node:fs');
+    assert.deepEqual(readdirSync(tmp).filter(name => name.endsWith('.patch')), ['aw-agent-run-7.patch']);
+    assert.deepEqual(readdirSync(join(tmp, 'secondary')).sort(), ['agent_output.json', secondaryPatch, 'target.json']);
+
+    const outputs = join(root, 'outputs');
+    const readSecondary = (runId = '7') => {
+      writeFileSync(outputs, '');
+      const ran = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Read the secondary pull request')],
+        { GH_AW_TMP: tmp, REPORT: join(tmp, 'report.json'), GITHUB_RUN_ID: runId, GITHUB_OUTPUT: outputs });
+      // Refused (1) by jq's own exit status or the step's.
+      return { status: ran.status === 0 ? 0 : 1, outputs: readFileSync(outputs, 'utf8') };
+    };
+    assert.deepEqual(readSecondary(), { status: 0, outputs:
+      `repo=o/tool\nbase=main\nprefix=agentic-job/\nbranch=agentic-job/agent-run-7\npatch=${secondaryPatch}\n` });
+    // Another run's branch, which check accepts without a request of the run's own.
+    assert.equal(readSecondary('8').status, 1);
+    // A patch by a name the handler would not look for it by.
+    writeFileSync(join(tmp, 'report.json'), JSON.stringify({ ...report, secondary_patch: { ...report.secondary_patch, file: 'aw-agent-run-7.patch' } }));
+    assert.equal(readSecondary().status, 1, 'another patch name');
+    writeFileSync(join(tmp, 'report.json'), JSON.stringify(report));
+    const requests = join(tmp, 'secondary', 'agent_output.json');
+    for (const [name, items] of [
+      ['another repository', [{ ...secondaryPull, repo: 'o/other' }]],
+      ['another base', [{ ...secondaryPull, base: 'next' }]],
+      ['not a draft', [{ ...secondaryPull, draft: false }]],
+      ['a branch outside the prefix', [{ ...secondaryPull, branch: 'agent-run-7' }]],
+      ['two requests', [secondaryPull, secondaryPull]],
+      ['none', []],
+    ]) {
+      writeFileSync(requests, JSON.stringify({ items, errors: [] }));
+      assert.equal(readSecondary().status, 1, name);
+    }
+    writeFileSync(requests, JSON.stringify({ items: [secondaryPull], errors: [] }));
+    writeFileSync(join(tmp, 'secondary', 'aw-agent-run-7.patch'), 'own\n');
+    assert.equal(readSecondary().status, 1, 'another patch beside it');
+    rmSync(join(tmp, 'secondary', 'aw-agent-run-7.patch'));
+    // Its table names its destination, not the request.
+    writeFileSync(join(tmp, 'secondary', 'target.json'), JSON.stringify({ ...secondaryTarget, repo: 'o/other' }));
+    assert.equal(readSecondary().status, 1, 'a table of another repository');
+    writeFileSync(join(tmp, 'secondary', 'target.json'), JSON.stringify(secondaryTarget));
+    assert.equal(readSecondary().status, 0);
+    // Without a patch check accepted for it there is none, and nothing beside it.
+    writeFileSync(join(tmp, 'report.json'), JSON.stringify({ ...report, secondary_patch: null }));
+    assert.equal(readSecondary().status, 1, 'a secondary hand-back check did not accept');
+    rmSync(join(tmp, 'secondary'), { recursive: true });
+    assert.deepEqual(readSecondary(), { status: 0, outputs: '' });
+
+    // The handler's configuration is the table's, and as the run's own for the rest.
+    mkdirSync(join(tmp, 'secondary'));
+    writeFileSync(join(tmp, 'secondary', 'target.json'), JSON.stringify({ ...secondaryTarget, unprotected_dot_folders: ['.github'] }));
+    const configured = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the secondary handler's configuration")], {
+      GH_AW_TMP: tmp, FORK: 'bot/tool', SECONDARY_REPO: 'o/tool', SECONDARY_BASE: 'main', SECONDARY_PREFIX: 'agentic-job/',
+      PARTIAL: '', TITLE_PREFIX: '[agent] ', GITHUB_WORKSPACE: '/workspace', PULL_REQUEST: scriptEnv("Write the secondary handler's configuration", 'PULL_REQUEST').slice(1, -1) });
+    assert.equal(configured.status, 0, configured.stderr);
+    assert.deepEqual(read('secondary/handler-config.json'), { create_pull_request: {
+      max: 1, draft: true, protected_files: ['go.mod'], protect_top_level_dot_folders: true, protected_files_policy: 'blocked',
+      max_patch_size: 64, max_patch_files: 10, protected_dot_folder_excludes: ['.github'],
+      signed_commits: false, fallback_as_issue: false, preserve_branch_name: true, auto_close_issue: false,
+      'target-repo': 'o/tool', base_branch: 'main', branch_prefix: 'agentic-job/', title_prefix: '[agent] ',
+      'head-repo': 'bot/tool', allowed_repos: ['bot/tool'], checkout_mapping: { 'o/tool': '/workspace/secondary-checkout' } } });
+    // Only after the run's own outputs were all applied.
+    assert.ok(workflow.indexOf('- name: Every output was applied\n') < workflow.indexOf('- name: Read the secondary pull request\n'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a secondary pull request is opened from the identity\'s own fork of its repository, with Actions off', async () => {
+  const run = async ({ me = 'bot', made = 'bot/tool', answer = {}, actions = 'off' } = {}) => {
+    const outputs = {}, forked = [], settings = [];
+    let on = true;
+    const github = { rest: {
+      users: { getAuthenticated: async () => ({ data: { login: me } }) },
+      repos: { createFork: async params => { forked.push(params); return { data: { full_name: made, fork: true, owner: { login: made.split('/')[0] }, ...answer } }; } },
+      actions: {
+        setGithubActionsPermissionsRepository: async params => { settings.push(params); if (actions === 'off') on = params.enabled; },
+        getGithubActionsPermissionsRepository: async () => ({ data: { enabled: on } }),
+      },
+    } };
+    const exec = { getExecOutput: async () => ({ exitCode: 0, stdout: `${'c'.repeat(40)}\trefs/heads/main\n` }) };
+    await new AsyncFunction('process', 'core', 'github', 'exec', 'setTimeout', script('Fork the secondary repository'))(
+      { env: { SECONDARY_REPO: 'o/tool', REPO: 'caller/repo', OUTPUT_REPO: 'owner/repo' } },
+      { setOutput: (key, value) => { outputs[key] = value; } }, github, exec, resolve => resolve());
+    return { outputs, forked, settings };
+  };
+  assert.deepEqual(await run(), { outputs: { repo: 'bot/tool' }, forked: [{ owner: 'o', repo: 'tool', default_branch_only: true }],
+    settings: [{ owner: 'bot', repo: 'tool', enabled: false }] });
+  for (const [name, options, error] of [
+    ["the secondary repository's owner", { me: 'O' }, /owns o\/tool/],
+    ['a repository that is not a fork', { answer: { fork: false } }, /not bot's own fork/],
+    ['the output repository', { made: 'owner/repo', answer: { owner: { login: 'bot' } } }, /not bot's own fork/],
+    ['a fork whose Actions stay on', { actions: 'on' }, /Actions could not be turned off/],
+  ]) {
+    await assert.rejects(run(options), error, name);
+  }
+});
+
+test('the secondary handler runs in its checkout once, and the job fails without its pull request', async () => {
+  const root = mkdtempSync(join(homedir(), 'secondary-apply-test-'));
+  try {
+    const actions = join(root, 'gh-aw', 'actions');
+    mkdirSync(actions, { recursive: true });
+    mkdirSync(join(root, 'apply-source', 'workflow'), { recursive: true });
+    mkdirSync(join(root, 'tmp', 'secondary'), { recursive: true });
+    mkdirSync(join(root, 'secondary-checkout'));
+    writeFileSync(join(root, 'apply-source', 'workflow', 'workflow-commands.cjs'), readFileSync(join(__dirname, 'workflow-commands.cjs')));
+    writeFileSync(join(root, 'tmp', 'secondary', 'handler-config.json'), '{"create_pull_request":{}}');
+    writeFileSync(join(actions, 'setup_globals.cjs'), 'module.exports.setupGlobals = (core, github) => { global.handlerGithub = github; };\n');
+    writeFileSync(join(actions, 'safe_output_handler_manager.cjs'), `module.exports.main = async () => {
+      global.handled = [process.cwd(), process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG];
+      if (global.opens) global.pulls.push({ user: { login: 'bot' }, base: { ref: 'main' }, state: 'open', html_url: 'https://github.com/o/tool/pull/3' });
+    };\n`);
+    const run = async ({ pulls = [], opens = true } = {}) => {
+      Object.assign(global, { pulls, opens, handled: null });
+      const outputs = {}, listed = [], hooks = [];
+      const github = {
+        rest: { users: { getAuthenticated: async () => ({ data: { login: 'bot' } }) }, pulls: { list: 'list' } },
+        paginate: async (_, params) => { listed.push(params); return global.pulls; },
+        hook: { before: (_, hook) => hooks.push(hook) },
+      };
+      const core = { setOutput: (key, value) => { outputs[key] = value; }, summary: { addHeading() { return this; }, addLink() { return this; }, write: async () => {} } };
+      const env = { RUNNER_TEMP: root, GITHUB_WORKSPACE: root, GH_AW_TMP: join(root, 'tmp'), GH_AW_WORKFLOW_NAME: 'agentic-job',
+        FORK: 'bot/tool', SECONDARY_REPO: 'o/tool', SECONDARY_BASE: 'main', SECONDARY_BRANCH: 'agentic-job/agent-run-7' };
+      // The step's own process, as the handler's modules see it.
+      const saved = { ...process.env }, cwd = process.cwd();
+      try {
+        Object.assign(process.env, env);
+        await new AsyncFunction('require', 'process', 'core', 'github', 'context', 'exec', 'io', 'getOctokit', script("Open the secondary pull request with gh-aw's handler"))(
+          require, process, core, github, {}, {}, {}, () => github);
+      } finally {
+        process.chdir(cwd);
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+      }
+      return { outputs, listed, hooks, handled: global.handled };
+    };
+    const opened = await run();
+    assert.deepEqual(opened.outputs, { url: 'https://github.com/o/tool/pull/3' });
+    assert.deepEqual(opened.listed[0], { owner: 'o', repo: 'tool', head: 'bot:agentic-job/agent-run-7', state: 'all', per_page: 100 });
+    assert.deepEqual(opened.handled, [join(root, 'secondary-checkout'), '{"create_pull_request":{}}']);
+    // No issue in a pull request's place.
+    assert.throws(() => opened.hooks[0]({ method: 'POST', url: '/repos/o/tool/issues' }), /no issue/);
+    opened.hooks[0]({ method: 'POST', url: '/repos/o/tool/pulls' });
+    // A re-run finds the one an earlier attempt opened, and runs no handler.
+    const again = await run({ pulls: [{ user: { login: 'bot' }, base: { ref: 'main' }, state: 'open', html_url: 'https://github.com/o/tool/pull/3' }] });
+    assert.deepEqual([again.outputs, again.handled], [{ url: 'https://github.com/o/tool/pull/3' }, null]);
+    // Someone else's, or onto another base, is not it.
+    for (const pull of [{ user: { login: 'mallory' }, base: { ref: 'main' }, state: 'open' }, { user: { login: 'bot' }, base: { ref: 'next' }, state: 'open' }]) {
+      await assert.rejects(run({ pulls: [pull], opens: false }), /no pull request is open in o\/tool/);
+    }
+  } finally {
+    for (const name of ['pulls', 'opens', 'handled', 'handlerGithub']) delete global[name];
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The secondary patch is tried as the run's own is: on its own base, which
+// the secondary's base branch has to hold, changing exactly the files check
+// named; only then is it put where gh-aw's handler looks for it.
+test('the secondary patch is tried on its own base, and handed to the handler only as checked', () => {
+  for (const [name, files, unrelated, expected] of [
+    ['as checked', ['a.txt'], false, 0],
+    ['other files than checked', ['b.txt'], false, 1],
+    ['a base the branch does not hold', ['a.txt'], true, 1],
+  ]) {
+    const root = mkdtempSync(join(homedir(), 'secondary-trial-test-'));
+    try {
+      const workspace = join(root, 'workspace'), tmp = join(root, 'tmp');
+      const repo = join(workspace, 'secondary-checkout');
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(join(tmp, 'secondary'), { recursive: true });
+      git(repo, 'init', '-q');
+      git(repo, 'config', 'user.name', 'Test');
+      git(repo, 'config', 'user.email', 'test@example.invalid');
+      writeFileSync(join(repo, 'a.txt'), 'before\n');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'base');
+      const base = git(repo, 'rev-parse', 'HEAD');
+      writeFileSync(join(repo, 'a.txt'), 'after\n');
+      git(repo, 'commit', '-qam', 'edit');
+      writeFileSync(join(tmp, 'secondary', secondaryPatch), command(repo, 'git', ['format-patch', '-1', '--stdout']).stdout);
+      git(repo, 'reset', '-q', '--hard', base);
+      if (unrelated) {
+        git(repo, 'checkout', '-q', '--orphan', 'unrelated');
+        git(repo, 'commit', '-qm', 'unrelated root');
+      }
+      const report = join(root, 'report.json');
+      writeFileSync(report, JSON.stringify({ secondary_patch: { file: secondaryPatch, base_commit: base, files } }));
+      const result = command(repo, 'bash', ['-euo', 'pipefail', '-c',
+        step('Apply the secondary patch on its own base, and compare what changed with what was checked')],
+      { REPORT: report, RUNNER_TEMP: root, GH_AW_TMP: tmp, PATCH: secondaryPatch });
+      assert.equal(result.status === 0 ? 0 : 1, expected, `${name}: ${result.stderr}${result.stdout}`);
+      const { existsSync } = require('node:fs');
+      assert.equal(existsSync(join(tmp, secondaryPatch)), expected === 0, name);
+      assert.equal(git(repo, 'config', 'am.keepcr'), 'true');
+      // The checkout is left at its base for the handler.
+      assert.equal(git(repo, 'status', '--porcelain'), '', name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});

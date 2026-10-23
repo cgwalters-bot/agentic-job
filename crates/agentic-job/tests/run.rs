@@ -1135,36 +1135,22 @@ fn a_secondary_change_is_handed_back_beside_the_runs_own() {
         "body": "The greeting was missing."});
     let proxy = Proxy::start();
     proxy.admit_unproven();
-    let job = Job::new("secondary");
-    job.own_repository();
-    job.script(&json!([
-        canary(),
-        {"execute": {"title": "Bash", "command": "test -f ~/work/secondary/o/tool/TOOL.md"}},
-        {"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}},
-        {"write": {"title": "Write", "path": "{home}/work/secondary/o/tool/GREETING.md",
-            "content": "Hello from the tool.\n"}},
-        {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
-            "content": format!("{own}\n{tool}\n")}},
-        {"write": {"title": "Write", "path": "{home}/out/outcome.json",
-            "content": "{\"summary\": \"Added greetings.\", \"tests\": []}\n"}},
-        {"say": "Done."},
-    ]));
-    let repo = job.path("tool");
-    sh(&format!(
-        "set -e; git init -q -b main {repo}; cd {repo}; echo 'A tool.' > TOOL.md; git add .; \
-         git -c user.name=test -c user.email=test@example.invalid commit -q -m 'Add a tool'",
-        repo = repo.display(),
-    ));
-    let tool_base = sh(&format!("git -C {} rev-parse HEAD", repo.display()));
-    job.allow(pull_requests());
-    let mut policy = job.json("policy.json");
-    policy["secondary_pull_request"] = json!({
-        "repo": "o/tool", "clone_url": format!("file://{}", repo.display()), "base": "main",
-        "branch_prefix": "agentic-job/", "max": 1, "max_patch_bytes": 65536,
-        "max_patch_files": 10, "protected_files": ["CODEOWNERS"],
-        "protect_top_level_dot_folders": true,
-    });
-    job.write("policy.json", &policy.to_string());
+    let (job, tool_base) = secondary_job(
+        "secondary",
+        Some(tool_target()),
+        &json!([
+            canary(),
+            {"execute": {"title": "Bash", "command": "test -f ~/work/secondary/o/tool/TOOL.md"}},
+            {"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}},
+            {"write": {"title": "Write", "path": "{home}/work/secondary/o/tool/GREETING.md",
+                "content": "Hello from the tool.\n"}},
+            {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
+                "content": format!("{own}\n{tool}\n")}},
+            {"write": {"title": "Write", "path": "{home}/out/outcome.json",
+                "content": "{\"summary\": \"Added greetings.\", \"tests\": []}\n"}},
+            {"say": "Done."},
+        ]),
+    );
     let got = job.own_run(&own_config(&plain(&proxy)));
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
     let acp = job
@@ -1203,7 +1189,162 @@ fn a_secondary_change_is_handed_back_beside_the_runs_own() {
     let summary = job.json("out/run/summary.json");
     assert_eq!(summary["secondary_patch"]["bytes"], patch.len());
 
-    let collected = collected(&job);
+    let (code, verdict) = check_job(&job);
+    assert_eq!(code, Some(EXIT_SUCCESS), "{verdict:#}");
+    assert_eq!(verdict["patch"]["files"], json!(["GREETING.md"]));
+    assert_eq!(verdict["secondary_patch"]["files"], json!(["GREETING.md"]));
+    assert_eq!(verdict["secondary_patch"]["base_commit"], json!(tool_base));
+    assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
+}
+
+/// What a run hands back of a change to the secondary repository that
+/// the bounds do not give it, or give it less of, `check` refuses whole:
+/// each case's secondary pull request (or none), the agent's change in
+/// its clone and its requests, and the reason check gives (or `run`, for
+/// what it does not hand back at all).
+#[test]
+fn a_secondary_change_is_refused_outside_its_bounds() {
+    let request = |repo: &str| {
+        json!({"type": "create_pull_request", "repo": repo, "title": "tool: Change",
+            "body": "A change to the tool."})
+        .to_string()
+    };
+    let tool = request("o/tool");
+    let tight = json!({"max_patch_files": 2, "max_patch_bytes": 1024});
+    let cases: [(&str, Option<Value>, &str, String, &str); 6] = [
+        (
+            "another repository",
+            Some(tool_target()),
+            "echo hi > GREETING.md",
+            request("o/other"),
+            "repo \"o/other\", which is not the policy's",
+        ),
+        (
+            "no secondary in the bounds",
+            None,
+            "",
+            tool.clone(),
+            "repo \"o/tool\", which is not the policy's",
+        ),
+        (
+            "two requests",
+            Some(tool_target()),
+            "echo hi > GREETING.md",
+            format!("{tool}\n{tool}"),
+            "for o/tool, over 1",
+        ),
+        (
+            "too many files",
+            Some(merged(tool_target(), &tight)),
+            "touch a b c",
+            tool.clone(),
+            "touches 3 files, over 2",
+        ),
+        (
+            "too large a patch",
+            Some(merged(tool_target(), &tight)),
+            "seq 1000 > big.txt",
+            tool.clone(),
+            "run: no change handed back: the change to o/tool, for its pull request: the change \
+             is over 1024 bytes",
+        ),
+        (
+            "a protected file",
+            Some(tool_target()),
+            "echo '* @o' > CODEOWNERS",
+            tool.clone(),
+            "CODEOWNERS",
+        ),
+    ];
+    for (name, secondary, change, requests, want) in cases {
+        // A proxy registers a run once.
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let mut steps = vec![canary()];
+        if !change.is_empty() {
+            steps.push(json!({"execute": {"title": "Bash",
+                "command": format!("cd ~/work/secondary/o/tool && {change}")}}));
+        }
+        steps.extend([
+            json!({"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
+                "content": format!("{requests}\n")}}),
+            json!({"write": {"title": "Write", "path": "{home}/out/outcome.json",
+                "content": "{\"summary\": \"Changed the tool.\", \"tests\": []}\n"}}),
+            json!({"say": "Done."}),
+        ]);
+        let slug: String = name.split(' ').collect::<Vec<_>>().join("-");
+        let (job, _) = secondary_job(&format!("secondary-{slug}"), secondary, &json!(steps));
+        let got = job.own_run(&own_config(&plain(&proxy)));
+        assert_eq!(got.code, Some(EXIT_SUCCESS), "{name}: {}", got.all());
+        // `run` hands back nothing of a change it cannot hand back whole.
+        if let Some(why) = want.strip_prefix("run: ") {
+            assert!(got.all().contains(why), "{name}: {}", got.all());
+            assert!(
+                !job.path("out/safe-outputs/outputs.jsonl").exists(),
+                "{name}"
+            );
+            continue;
+        }
+        let (code, verdict) = check_job(&job);
+        assert_eq!(code, Some(EXIT_FAILURE), "{name}: {verdict:#}");
+        assert!(
+            verdict["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().contains(want)),
+            "{name}: {want} in {verdict:#}"
+        );
+        assert_eq!(verdict["ok"], false, "{name}");
+    }
+}
+
+/// The secondary pull request of [`secondary_job`]: `o/tool`, whose
+/// clone URL that function sets.
+fn tool_target() -> Value {
+    json!({
+        "repo": "o/tool", "base": "main", "branch_prefix": "agentic-job/", "max": 1,
+        "max_patch_bytes": 65536, "max_patch_files": 10, "protected_files": ["CODEOWNERS"],
+        "protect_top_level_dot_folders": true,
+    })
+}
+
+/// VALUE with the keys of MORE set as MORE has them.
+fn merged(mut value: Value, more: &Value) -> Value {
+    for (key, field) in more.as_object().unwrap() {
+        value[key] = field.clone();
+    }
+    value
+}
+
+/// A job named NAME of [`pull_requests`] bounds whose agent runs STEPS on
+/// its own repository, with SECONDARY, where there is one, as its policy's
+/// secondary pull request, cloned from a repository made here; and the
+/// commit that repository is at.
+fn secondary_job(name: &str, secondary: Option<Value>, steps: &Value) -> (Job, String) {
+    let job = Job::new(name);
+    job.own_repository();
+    job.script(steps);
+    let repo = job.path("tool");
+    sh(&format!(
+        "set -e; git init -q -b main {repo}; cd {repo}; echo 'A tool.' > TOOL.md; git add .; \
+         git -c user.name=test -c user.email=test@example.invalid commit -q -m 'Add a tool'",
+        repo = repo.display(),
+    ));
+    let base = sh(&format!("git -C {} rev-parse HEAD", repo.display()));
+    job.allow(pull_requests());
+    if let Some(mut secondary) = secondary {
+        secondary["clone_url"] = json!(format!("file://{}", repo.display()));
+        let mut policy = job.json("policy.json");
+        policy["secondary_pull_request"] = secondary;
+        job.write("policy.json", &policy.to_string());
+    }
+    (job, base)
+}
+
+/// `check`'s exit code and verdict on what JOB's run handed back.
+fn check_job(job: &Job) -> (Option<i32>, Value) {
+    let collected = collected(job);
     let check = Command::new(BIN)
         .arg("check")
         .args(["--policy", "policy.json", "--outputs", "out/safe-outputs"])
@@ -1213,12 +1354,7 @@ fn a_secondary_change_is_handed_back_beside_the_runs_own() {
         .current_dir(&job.dir)
         .output()
         .unwrap();
-    let verdict = job.json("verdict.json");
-    assert_eq!(check.status.code(), Some(EXIT_SUCCESS), "{verdict:#}");
-    assert_eq!(verdict["patch"]["files"], json!(["GREETING.md"]));
-    assert_eq!(verdict["secondary_patch"]["files"], json!(["GREETING.md"]));
-    assert_eq!(verdict["secondary_patch"]["base_commit"], json!(tool_base));
-    assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
+    (check.status.code(), job.json("verdict.json"))
 }
 
 /// The agent's hand-back is read without following links: an agent that

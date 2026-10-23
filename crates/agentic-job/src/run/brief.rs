@@ -326,7 +326,8 @@ pub fn guide(
              {} on a branch under `{}`, only if your requests hold a `create_pull_request` \
              line whose `repo` is `{}`; a change there without one is not handed back, and \
              such a line without a change gets all of your requests refused. Leave your changes \
-             uncommitted, and do not push.{}",
+             uncommitted, and do not push; `agentic-job handback check` checks them with the \
+             rest.{}",
             dir.display(),
             target.repo,
             target.base,
@@ -952,6 +953,7 @@ mod brief_tests {
                     "on a branch under `agentic-job/`",
                     "a file of one of these names, in any directory: `go.mod`; ",
                     "So is a change to more than 10 files",
+                    "`agentic-job handback check` checks them with the rest",
                     "{\"type\": \"create_pull_request\", \"repo\": \"o/tool\", \"title\"",
                     "`create_pull_request` (at most 1, and 1 in o/tool)",
                 ][..],
@@ -984,6 +986,16 @@ mod brief_tests {
         ] {
             assert!(!text.contains("o/tool"), "{text}");
         }
+        // Without a secondary to tell of, the text is the run's alone.
+        let alone = implement();
+        assert_eq!(
+            guide(&policy, home, own, None, "0"),
+            guide(&alone, home, own, Some(tree), "0")
+        );
+        assert_eq!(
+            hand_back(&policy, home, own, None),
+            hand_back(&alone, home, own, Some(tree))
+        );
     }
 
     /// Measures for the pull request: run with `--ignored --nocapture`.

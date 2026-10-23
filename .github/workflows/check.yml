@@ -267,12 +267,29 @@ jobs:
       # Apply's handlers get the requests check accepted, and not the
       # incomplete report gh-aw's collector adds to a result without one,
       # which check leaves out (src/check/mod.rs) and no handler is set up for.
+      #
+      # A policy's secondary pull request is kept apart, in `secondary/`:
+      # its request (a create_pull_request whose `repo` is the secondary's,
+      # exactly, as check tells them apart), the patch check accepted for it
+      # by name, and the policy's table it is to be opened by. Apply's pass
+      # for the run's own outputs then sees what it saw before there was a
+      # secondary, and its trial `git am` of every `aw-*.patch` never takes
+      # the secondary's.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         run: |
-          jq '{items: .items, errors: []}' "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
+          target=$(jq -c '.secondary_pull_request' "$JOB_DIR/policy.json")
+          ours='.type == "create_pull_request" and $target != null and .repo == $target.repo'
+          jq --argjson target "$target" "{items: [.items[] | select($ours | not)], errors: []}" "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
           mv "$RUNNER_TEMP/accepted.json" "$GH_AW_TMP/agent_output.json"
-          find "$JOB_DIR/safe-outputs" -maxdepth 1 \( -name 'aw-*.patch' -o -name replacement.json \) -exec cp -t "$GH_AW_TMP" {} +
+          secondary=$(jq -r '.secondary_patch.file // ""' "$GH_AW_TMP/report.json")
+          if [ -n "$secondary" ]; then
+            mkdir "$GH_AW_TMP/secondary"
+            jq --argjson target "$target" "{items: [.items[] | select($ours)], errors: []}" "$GH_AW_TMP/report.json" > "$GH_AW_TMP/secondary/agent_output.json"
+            printf '%s\n' "$target" > "$GH_AW_TMP/secondary/target.json"
+            cp -t "$GH_AW_TMP/secondary" "$JOB_DIR/safe-outputs/$secondary"
+          fi
+          find "$JOB_DIR/safe-outputs" -maxdepth 1 \( -name 'aw-*.patch' -o -name replacement.json \) ! -name "$secondary" -exec cp -t "$GH_AW_TMP" {} +
       - id: upload
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -284,5 +301,6 @@ jobs:
             ${{ env.GH_AW_TMP }}/report.json
             ${{ env.GH_AW_TMP }}/aw-*.patch
             ${{ env.GH_AW_TMP }}/replacement.json
+            ${{ env.GH_AW_TMP }}/secondary/
           retention-days: 30
           if-no-files-found: error
