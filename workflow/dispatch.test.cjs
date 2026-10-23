@@ -274,17 +274,19 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
     '      actions: read # read hosted job durations; no write or cleanup authority\n');
   assert.match(verifier, /ref: \$\{\{ github.sha \}\}/);
   assert.match(verifier, /persist-credentials: false/);
-  assert.match(verifier, /run: node workflow\/dispatch-verify.cjs/);
+  // The static build of this revision chooses the packages the dispatch had.
+  assert.match(verifier, /\n {8}with:\n {10}name: agentic-job\n/);
+  assert.match(verifier, /"\$RUNNER_TEMP\/agentic-job" config --host --from "\$CONFIG" --repo "\$GH_REPO"\)/);
   // The verifier reads the configuration the scripted dispatch ran with.
   assert.match(verifier, /\n {10}CONFIG: \.github\/agentic-job\/hosted\.toml\n/);
   assert.match(fs.readFileSync(path.join(root, '.github/workflows/dispatch.yml'), 'utf8'),
     /\|\| '\.agentic-job-source\/\.github\/agentic-job\/hosted\.toml' \}\}/);
   assert.match(verifier, /GH_TOKEN: \$\{\{ github.token \}\}/);
-  assert.match(verifier, /needs: \[changes, e2e-dispatch, e2e-compose, e2e-full\]/);
+  assert.match(verifier, /needs: \[changes, static, e2e-dispatch, e2e-compose, e2e-full\]/);
   assert.match(verifier, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
   assert.match(cleanup, /needs: \[.*e2e-dispatch-verify\]/);
   assert.match(cleanup, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
-  assert.doesNotMatch(cleanup, /uses: actions\/checkout@|dispatch-verify\.cjs|github.sha|\.dispatch-verifier/);
+  assert.doesNotMatch(cleanup, /uses: actions\/checkout@|agentic-job config|github.sha|\.dispatch-verifier/);
   for (const name of ['Delete the comments', 'Close only the scratch pull request of this run and delete its branch']) {
     assert.ok(cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() `) ||
       cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() }}`), name);
@@ -311,68 +313,6 @@ test('CI runs do not share a dispatch or compose concurrency group, and a real d
   const bound = ci.split('- name: Bound the hosted end-to-end agent job\n')[1].split('\n      - ')[0];
   assert.match(bound, /read_api\(\) \{ local out; for try in 1 2 3; do out=\$\(gh api "\$@"\) && \{ printf '%s\\n' "\$out"; return; \}; sleep 5; done; return 1; \}/);
   assert.equal(bound.match(/\bgh api\b/g).length, 1);
-});
-
-test('CI verifies actual dispatch comments and pinned SHA, not only job success', t => {
-  const source = fs.readFileSync(path.join(root, 'workflow/dispatch-verify.cjs'), 'utf8');
-  const head = 'a'.repeat(40);
-  const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
-  // Research and the composed example.
-  const completed = [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')];
-  const verify = (change = {}) => {
-    const repo = change.repo ?? 'owner/repo';
-    const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147', CONFIG: config,
-      REVIEW_HEAD: head, RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
-    const responses = {
-      [`repos/${repo}/issues/64/comments`]: change.comments ?? completed,
-      [`repos/${repo}/issues/147/comments`]: [comment(
-        'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: ' + (change.head ?? head) +
-        '\nToolchain: ' + (change.toolchain ?? 'cargo 1.93.1'))],
-    };
-    vm.runInNewContext(source, {
-      process: { env },
-      require: name => name === 'node:child_process' ? { execFileSync: (program, args) => {
-        assert.equal(program, 'gh');
-        const response = responses[args.at(-1)];
-        assert.ok(response, args.at(-1));
-        return JSON.stringify([response]);
-      } } : require(name),
-    });
-  };
-  // Cargo is required exactly where the configuration gives it, by name
-  // or by `default`; another table's entry or another package does not
-  // count, and a line the verifier cannot read fails it.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-verify-'));
-  t.after(() => fs.rmSync(dir, { recursive: true }));
-  const write = (name, text) => {
-    const file = path.join(dir, name);
-    fs.writeFileSync(file, text);
-    return file;
-  };
-  const config = write('config.toml', '[setup.repo-packages] # per repository\n# comment\n' +
-    '"owner/cargo" = ["cargo"] # trailing\n"owner/gcc"=["gcc"]\n\n[other]\n"owner/other" = ["cargo"]\n');
-  const fallback = write('default.toml', '[setup.repo-packages]\ndefault = ["gcc", "cargo"]\n"owner/gcc" = ["gcc"]\n');
-  const multiline = write('multiline.toml', '[setup.repo-packages]\n"owner/cargo" = [\n  "cargo",\n]\n');
-  const missing = write('missing.toml', '[setup]\npackages = ["cargo"]\n');
-  verify();
-  verify({ toolchain: 'none' });
-  verify({ repo: 'owner/cargo' });
-  verify({ repo: 'owner/gcc', toolchain: 'none' });
-  verify({ repo: 'owner/other', toolchain: 'none' });
-  verify({ repo: 'owner/repo', env: { CONFIG: fallback } });
-  verify({ repo: 'owner/gcc', toolchain: 'none', env: { CONFIG: fallback } });
-  // The shipped configuration gives this repository cargo.
-  const hosted = path.join(root, '.github/agentic-job/hosted.toml');
-  const repository = fs.readFileSync(path.join(root, '.github/agentic-job/dispatch.toml'), 'utf8').match(/^repos = \["([^"]+)"\]$/m)[1];
-  verify({ repo: repository, env: { CONFIG: hosted } });
-  assert.throws(() => verify({ repo: repository, toolchain: 'none', env: { CONFIG: hosted } }));
-  for (const change of [{ head: 'b'.repeat(40) }, { repo: 'owner/cargo', toolchain: 'none' },
-    { repo: 'Owner/Cargo', toolchain: 'none' }, { repo: 'owner/repo', toolchain: 'none', env: { CONFIG: fallback } },
-    { env: { CONFIG: multiline } }, { env: { CONFIG: missing } }, { env: { CONFIG: '' } }, { comments: [] },
-    { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
-    { comments: completed.slice(1) }, { comments: [...completed, completed[0]] }]) {
-    assert.throws(() => verify(change));
-  }
 });
 
 for (const profile of ['implement', 'comment', 'review']) {

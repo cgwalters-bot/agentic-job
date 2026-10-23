@@ -11,9 +11,6 @@ const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 
 const stepScript = id => ci.split(`      - id: ${id}\n`)[1].split('        run: |\n')[1].split(/\n(?! {10})/)[0]
   .split('\n').map(line => line.slice(10)).join('\n');
 const script = stepScript('paths');
-// The github-script source of a step of changes, by its id.
-const githubScript = id => ci.split(`      - id: ${id}\n`)[1].split(/\n {6}(?! )/)[0]
-  .split('          script: |\n')[1].trim().split('\n').map(line => line.trim()).join('\n');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
@@ -154,8 +151,7 @@ test('privileged jobs and required check remain gated for forks', () => {
   assert.ok(privileged >= 10);
   assert.match(ci, /^      e2e:.*steps\.queue\.outputs\.enabled == 'true' \|\| github\.event\.pull_request\.head\.repo\.full_name != github\.repository.*$/m);
   assert.match(ci, /^      fork-e2e:.*steps\.queue\.outputs\.enabled != 'true'.*$/m);
-  assert.match(ci, /^            const rules = await github\.paginate\('GET \/repos\/\{owner\}\/\{repo\}\/rules\/branches\/\{branch\}', \{$/m);
-  assert.match(ci, /branch: context.payload.pull_request.base.ref/);
+  assert.match(ci, /\n          BRANCH: \$\{\{ github\.event\.pull_request\.base\.ref \}\}\n/);
   assert.match(ci, /\n  ci:\n    if: \$\{\{ always\(\) \}\}\n    needs: required-checks\n/);
 });
 
@@ -250,41 +246,56 @@ test('gates skip what a queue tested and run everything otherwise', () => {
   }
 });
 
-test('a push skips only a commit whose merge group run passed', async () => {
-  const source = githubScript('queued');
+// Runs a step of changes as `shell: bash` does, with a gh that logs its
+// arguments and answers RESPONSE, or fails without one; null if it fails.
+const gate = (id, env, response) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-gate-'));
+  const file = name => path.join(dir, name);
+  try {
+    fs.writeFileSync(file('gh'), '#!/bin/sh\necho "$*" >> "$0.args"\n[ -e "$0.json" ] && exec cat "$0.json"\nexit 1\n', { mode: 0o755 });
+    fs.writeFileSync(file('sleep'), '#!/bin/sh\n', { mode: 0o755 });
+    if (response !== undefined) fs.writeFileSync(file('gh.json'), JSON.stringify(response));
+    fs.writeFileSync(file('output'), '');
+    const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', stepScript(id)], { encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GITHUB_OUTPUT: file('output'), GITHUB_REPOSITORY: 'owner/repo', ...env } });
+    const args = fs.existsSync(file('gh.args')) ? fs.readFileSync(file('gh.args'), 'utf8') : '';
+    return result.status === 0 ? { output: fs.readFileSync(file('output'), 'utf8'), args } : null;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test('a push skips only a commit whose merge group run passed', () => {
   assert.match(block('changes'), /\n    permissions:\n      contents: read\n      actions: read #[^\n]*\n/);
   assert.match(ci, /- id: queued\n        if: \$\{\{ github\.event_name == 'push' \}\}\n/);
   const sha = 'a'.repeat(40);
   const before = 'c'.repeat(40);
-  const passed = async (runs, context = { repo: { owner: 'owner', repo: 'repo' }, sha, payload: { before } }) => {
-    let output;
-    await new AsyncFunction('github', 'context', 'core', source)({ rest: { actions: { listWorkflowRuns: async params => {
-      assert.deepEqual(params, { owner: 'owner', repo: 'repo', workflow_id: 'ci.yml', head_sha: sha,
-        event: 'merge_group', status: 'success', per_page: 10 });
-      if (runs instanceof Error) throw runs;
-      return { data: { workflow_runs: runs } };
-    } } } }, context, { setOutput: (key, value) => { assert.equal(key, 'passed'); output = value; } });
-    return output;
+  const passed = (runs, value = before) => {
+    const result = gate('queued', { GITHUB_SHA: sha, BEFORE: value }, runs && { workflow_runs: runs });
+    if (!result) return null;
+    assert.equal(result.args, `api repos/owner/repo/actions/workflows/ci.yml/runs?head_sha=${sha}&event=merge_group&status=success&per_page=10\n`);
+    return result.output;
   };
   const group = { head_sha: sha, event: 'merge_group', conclusion: 'success',
     head_branch: `gh-readonly-queue/main/pr-7-${before}` };
-  assert.equal(await passed([group]), true);
-  assert.equal(await passed([{ ...group, head_sha: 'b'.repeat(40) }, group]), true);
+  assert.equal(passed([group]), 'passed=true\n');
+  assert.equal(passed([{ ...group, head_sha: 'b'.repeat(40) }, group]), 'passed=true\n');
   // The filters are the API's; what comes back is checked all the same.
   for (const run of [{ head_sha: 'b'.repeat(40) }, { event: 'push' }, { conclusion: 'failure' }, { conclusion: null },
     // A group built on another commit, as when one push lands two groups.
     { head_branch: `gh-readonly-queue/main/pr-7-${'d'.repeat(40)}` }, { head_branch: `main-${before}` }]) {
-    assert.equal(await passed([{ ...group, ...run }]), false, JSON.stringify(run));
+    assert.equal(passed([{ ...group, ...run }]), 'passed=false\n', JSON.stringify(run));
   }
-  assert.equal(await passed([]), false);
-  await assert.rejects(passed([{ ...group, head_branch: null }]));
-  const pushed = value => ({ repo: { owner: 'owner', repo: 'repo' }, sha, payload: { before: value } });
+  assert.equal(passed([]), 'passed=false\n');
+  assert.equal(passed([{ ...group, head_branch: null }]), null);
   // A new branch's before is all zeros, which no queue branch is built on.
-  assert.equal(await passed([group], pushed('0'.repeat(40))), false);
-  for (const value of ['C'.repeat(40), '', undefined]) {
-    assert.equal(await passed([{ ...group, head_branch: `gh-readonly-queue/main/pr-7-${value}` }], pushed(value)), false, value);
+  assert.equal(passed([group], '0'.repeat(40)), 'passed=false\n');
+  for (const value of ['C'.repeat(40), '']) {
+    assert.equal(passed([{ ...group, head_branch: `gh-readonly-queue/main/pr-7-${value}` }], value), 'passed=false\n', value);
   }
-  await assert.rejects(passed(new Error('API unavailable')), /API unavailable/);
+  // An API failure, after its retries, fails the gate.
+  assert.equal(passed(undefined), null);
+  assert.equal(gate('queued', { GITHUB_SHA: sha, BEFORE: before }, {}), null);
 });
 
 test('review bootstrap reads trusted base files, on pull requests only', () => {
@@ -339,34 +350,22 @@ test('review bootstrap reads trusted base files, on pull requests only', () => {
 });
 
 test('merge-group analysis uses a branch name, not a fully qualified ref', () => {
-  const source = githubScript('merge-base');
-  const run = ref => {
-    let branch;
-    new Function('context', 'core', source)(
-      { payload: { merge_group: { head_ref: ref } } },
-      { setOutput: (key, value) => { assert.equal(key, 'branch'); branch = value; } },
-    );
-    return branch;
-  };
-  assert.equal(run('refs/heads/gh-readonly-queue/main/pr-123-abcd'), 'gh-readonly-queue/main/pr-123-abcd');
-  assert.throws(() => run('refs/tags/main'), /not a branch/);
+  const run = ref => gate('merge-base', { REF: ref })?.output;
+  assert.equal(run('refs/heads/gh-readonly-queue/main/pr-123-abcd'), 'branch=gh-readonly-queue/main/pr-123-abcd\n');
+  for (const ref of ['refs/tags/main', 'refs/heads/', 'refs/heads/a\nb=c', '']) assert.equal(run(ref), undefined, ref);
   assert.equal((ci.match(/base: \$\{\{ github.head_ref \|\| needs.changes.outputs.analysis-base \|\| 'main' \}\}/g) || []).length, 2);
 });
 
-test('queue detection fails closed and sentinel rejects non-success', async () => {
-  const source = githubScript('queue');
-  const detect = new AsyncFunction('github', 'context', 'core', source);
-  const context = { repo: { owner: 'owner', repo: 'repo' }, payload: { pull_request: { base: { ref: 'main' } } } };
+test('queue detection fails closed and sentinel rejects non-success', () => {
+  const detect = (pages, branch = 'main') => gate('queue', { BRANCH: branch }, pages);
   for (const rules of [[], [{ type: 'merge_queue' }], [{ type: 'required_status_checks' }]]) {
-    let enabled;
-    await detect({ paginate: async (route, params) => {
-      assert.equal(params.branch, 'main');
-      return rules;
-    } }, context, { setOutput: (key, value) => { assert.equal(key, 'enabled'); enabled = value; } });
-    assert.equal(enabled, rules.some(rule => rule.type === 'merge_queue'));
+    const result = detect([[{ type: 'deletion' }], rules]);
+    assert.equal(result.args, 'api --paginate --slurp repos/owner/repo/rules/branches/main\n');
+    assert.equal(result.output, `enabled=${rules.some(rule => rule.type === 'merge_queue')}\n`);
   }
-  await assert.rejects(detect({ paginate: async () => { throw new Error('API unavailable'); } }, context,
-    { setOutput: () => assert.fail('must not publish an output after API failure') }), /API unavailable/);
+  assert.equal(detect([[]], 'release/1#x').args, 'api --paginate --slurp repos/owner/repo/rules/branches/release%2F1%23x\n');
+  // An API failure, or an answer that is not a list of pages, publishes nothing.
+  for (const pages of [undefined, 'text', ['text']]) assert.equal(detect(pages), null, JSON.stringify(pages));
   const sentinel = ci.split('\n  ci:\n')[1].split('        run: ')[1].trim();
   for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
     assert.equal(spawnSync('bash', ['-c', sentinel], { env: { ...process.env, RESULT: result } }).status,

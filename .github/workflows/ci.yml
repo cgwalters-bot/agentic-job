@@ -48,12 +48,12 @@ jobs:
     steps:
       - id: merge-base
         if: ${{ github.event_name == 'merge_group' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const ref = context.payload.merge_group.head_ref;
-            if (!ref.startsWith('refs/heads/')) throw new Error('merge group head is not a branch');
-            core.setOutput('branch', ref.slice('refs/heads/'.length));
+        env:
+          REF: ${{ github.event.merge_group.head_ref }}
+        shell: bash
+        run: |
+          [[ "$REF" =~ ^refs/heads/[^[:cntrl:]]+$ ]] || { echo "::error::merge group head is not a branch: '$REF'"; exit 1; }
+          echo "branch=${REF#refs/heads/}" >> "$GITHUB_OUTPUT"
       # The queue fast-forwards main to the merge group's head, so a push of
       # a queued pull request is a commit this workflow has already passed
       # on, every job included. Only a successful merge_group run of this
@@ -64,29 +64,35 @@ jobs:
       # runs it all. One bounded, read-only query; an API failure fails the gate.
       - id: queued
         if: ${{ github.event_name == 'push' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          retries: 3
-          script: |
-            const before = context.payload.before;
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              ...context.repo, workflow_id: 'ci.yml', head_sha: context.sha,
-              event: 'merge_group', status: 'success', per_page: 10,
-            });
-            core.setOutput('passed', /^[0-9a-f]{40}$/.test(before) && data.workflow_runs.some(run => run.head_sha === context.sha
-              && run.event === 'merge_group' && run.conclusion === 'success'
-              && run.head_branch.startsWith('gh-readonly-queue/') && run.head_branch.endsWith(`-${before}`)));
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        shell: bash
+        run: |
+          # A read: retry a transient error. gh prints an error's body too,
+          # so only a successful read's output is kept.
+          read_api() { local out; for _ in 1 2 3 4; do out=$(gh api "$@") && { printf '%s\n' "$out"; return; }; sleep 5; done; return 1; }
+          runs=$(read_api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=merge_group&status=success&per_page=10")
+          # The filters are the API's; what comes back is checked all the
+          # same, and a run with no branch fails the gate.
+          passed=$(jq --arg sha "$GITHUB_SHA" --arg before "$BEFORE" '($before | test("^[0-9a-f]{40}$")) and any(.workflow_runs[];
+            .head_sha == $sha and .event == "merge_group" and .conclusion == "success"
+            and (.head_branch | startswith("gh-readonly-queue/") and endswith("-" + $before)))' <<< "$runs")
+          [[ "$passed" =~ ^(true|false)$ ]] || { echo "::error::cannot read the merge group runs"; exit 1; }
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
       # Effective branch rules include repository and organization rulesets.
       # API failures fail this job; never guess that the queue will test later.
       - id: queue
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const rules = await github.paginate('GET /repos/{owner}/{repo}/rules/branches/{branch}', {
-              ...context.repo, branch: context.payload.pull_request.base.ref,
-            });
-            core.setOutput('enabled', rules.some(rule => rule.type === 'merge_queue'));
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.base.ref }}
+        shell: bash
+        run: |
+          encoded=$(jq -rn --arg branch "$BRANCH" '$branch | @uri')
+          enabled=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rules/branches/$encoded" | jq 'any(.[][]; .type == "merge_queue")')
+          [[ "$enabled" =~ ^(true|false)$ ]] || { echo "::error::cannot read the branch rules"; exit 1; }
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -1270,7 +1276,7 @@ jobs:
   # waits for this job even when verification fails.
   e2e-dispatch-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-dispatch, e2e-compose, e2e-full]
+    needs: [changes, static, e2e-dispatch, e2e-compose, e2e-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -1283,6 +1289,10 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agentic-job
+          path: ${{ runner.temp }}/dist
       - name: Verify the shipped dispatch profiles
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1294,7 +1304,31 @@ jobs:
           REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
           # The configuration the scripted dispatch ran with.
           CONFIG: .github/agentic-job/hosted.toml
-        run: node workflow/dispatch-verify.cjs
+        shell: bash
+        run: |
+          [ "$RESULT" = success ] || { echo "::error::all shipped dispatch profiles must succeed"; exit 1; }
+          [ "$COMPOSE_RESULT" = success ] || { echo "::error::the composed example must succeed"; exit 1; }
+          # The bodies of the comments this run posted on an item.
+          comments() { gh api --paginate --slurp "repos/$GH_REPO/issues/$1/comments" |
+            jq -c --arg run "$RUN" '[.[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run))) | .body]'; }
+          # Research and the composed example each comment once.
+          comments 64 | jq -e 'map(select(contains("Scripted dispatch completed."))) | length == 2'
+          [ -n "$PR" ] || exit 0
+          [[ "$REVIEW_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no reviewed head: '$REVIEW_HEAD'"; exit 1; }
+          verdict=$(comments "$PR" | jq -er 'map(select(startswith("VERDICT: APPROVE\nREASON: Scripted dispatch")))
+            | if length == 1 then .[0] else error("\(length) scripted verdicts, not one") end')
+          grep -qF "Reviewed SHA: $REVIEW_HEAD" <<< "$verdict"
+          # Where the configuration gives this repository cargo (a fork is
+          # not listed), the scripted review ran `cargo metadata --locked`
+          # before writing this. The binary chooses the packages as the
+          # dispatch did, so another deployment's copy checks its own.
+          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
+          composed=$("$RUNNER_TEMP/agentic-job" config --host --from "$CONFIG" --repo "$GH_REPO")
+          packages=$(awk '/^\[/ { setup = $0 == "[setup]" } setup && /^packages = \[.*\]$/' <<< "$composed")
+          [ -n "$packages" ] || { echo "::error::no one-line setup.packages in the composed configuration"; exit 1; }
+          if grep -qF '"cargo"' <<< "$packages"; then
+            grep -qE '^Toolchain: cargo [0-9]' <<< "$verdict" || { echo "::error::the review sandbox must have a working cargo"; exit 1; }
+          fi
       - name: Bound the hosted end-to-end agent job
         env:
           GH_TOKEN: ${{ github.token }}
