@@ -53,6 +53,9 @@ pub enum Command {
     /// Rebuild and push a checked replacement series of a pull request's branch
     #[command(subcommand)]
     Replacement(crate::apply::replacement::Command),
+    /// Annotate why check refused outputs or apply's handlers failed them, bounded and neutralized
+    #[command(subcommand)]
+    Diagnostics(crate::diagnostics::Command),
     /// Decide whether the event that started the workflow may start a run, and write its task
     Event(event::Args),
     /// Resolve trusted workflow review routing without running reviewed code
@@ -91,6 +94,7 @@ impl Command {
             Self::Apply(args) => crate::apply::run(args),
             Self::LinkIssue(args) => crate::apply::issue_reference::run(args),
             Self::Replacement(command) => command.run(),
+            Self::Diagnostics(command) => command.run(),
             Self::Event(args) => event::run(args),
             Self::Review(command) => command.run(),
             Self::Config(args) => compose::run(args),

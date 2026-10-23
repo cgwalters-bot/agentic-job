@@ -232,14 +232,8 @@ jobs:
       - name: Show why check refused the outputs
         id: refusal
         if: ${{ failure() || steps.checked.outputs.refused == 'true' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const { pathToFileURL } = require('node:url');
-            const { refusalReasons } = await import(pathToFileURL(`${process.env.SOURCE_DIR}/safe-outputs/diagnostics.mjs`).href);
-            const reasons = await refusalReasons(process.env.GH_AW_TMP);
-            for (const reason of reasons) core.error(`Refused by check: ${reason}`);
-            core.setOutput('reason', reasons.join('; ').slice(0, 4000));
+        run: |
+          "$JOB_DIR/agentic-job" diagnostics refusals "$GH_AW_TMP" --output "$GITHUB_OUTPUT"
       # Apply's handlers get the requests check accepted.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}

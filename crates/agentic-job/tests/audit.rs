@@ -99,8 +99,6 @@ fn hostile_artifact_text_cannot_issue_ci_commands() {
 
 #[test]
 fn refused_producer_reports_survive_the_download_layout() {
-    let script =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../safe-outputs/diagnostics.mjs");
     for phase in ["collector", "policy"] {
         let producer = tempfile::tempdir().unwrap();
         let download = tempfile::tempdir().unwrap();
@@ -178,8 +176,8 @@ fn refused_producer_reports_survive_the_download_layout() {
             assert_eq!(report["ok"], false);
             assert!(!report["errors"].as_array().unwrap().is_empty());
         }
-        let output = Command::new("node")
-            .arg(&script)
+        let output = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args(["diagnostics", "copy"])
             .arg(producer.path())
             .arg(download.path().join("check-diagnostics"))
             .output()

@@ -12,7 +12,7 @@ Start with the [README](README.md) for usage, limitations and topic documentatio
 - `crates/agentic-job/tests/`: CLI integration tests; `data/` fixtures and `corpus/` old/new implementation parity tests.
 - `egress/`: Python filtering proxy policy, tests and hash-pinned dependencies embedded in the binary.
 - `secure-host/`: composite hardening action, binary fetching/checksums and release pin.
-- `safe-outputs/`: validation derived from pinned gh-aw workflows, generator and refusal diagnostics.
+- `safe-outputs/`: validation derived from pinned gh-aw workflows, and its generator.
 - `workflow/`: event activation/label consumption and its Node tests.
 - `skills/`: agent skills and subagents embedded in the binary ([skills](docs/skills.md)).
 - `.github/workflows/`: reusable workflow, CI, examples, release and pin automation.
@@ -28,7 +28,7 @@ access on a cold cache; ordinary tests use local fixtures and loopback mock
 services, not a real inference service or forge credential.
 
 The following commands are from [CI](.github/workflows/ci.yml), except the
-explicit CLI spelling of the Markdown action and the extra diagnostics test.
+explicit CLI spelling of the Markdown action.
 Observed wall times on one unprivileged runner are guidance, not CI guarantees:
 
 - `cargo build --locked`: 19 seconds with dependencies already checked.
@@ -38,7 +38,6 @@ Observed wall times on one unprivileged runner are guidance, not CI guarantees:
 - `node --test workflow/activation.test.cjs`: under 1 second.
 - `python3 -m unittest discover -s egress -v`: under 1 second.
 - `node --test secure-host/binary.test.mjs`: under 1 second.
-- `node --test safe-outputs/diagnostics.test.mjs`: under 1 second; useful for diagnostics changes, not a separate CI step.
 - `npx --yes markdownlint-cli2 '**/*.md'`: 4 seconds including tool download; CI uses markdownlint-cli2-action with the same glob and repository configuration.
 - `lychee --offline --include-fragments --no-progress "**/*.md"`: CI's relative-link/anchor check; requires lychee (local timing not measured).
 - `just workflow-lint OWNER/REPO@COMMIT`: the forge's shared actionlint, zizmor and runner-label check, as CI runs it when the `WORKFLOW_LINT` repository variable is set; needs just, cargo, network and docker (`CONTAINER=podman` otherwise). 5 seconds with images and crates cached.

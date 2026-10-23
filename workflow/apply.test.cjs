@@ -1096,13 +1096,13 @@ test('replacement uses the trusted leased applier and never reaches the gh-aw pu
   assert.deepEqual(result.kept, []);
   assert.deepEqual(result.skipped, [{ type: item.type, url: 'https://github.com/owner/repo/pull/42' }]);
   // Policy's binary, checked to be this run's, is there before the trial
-  // rebuilds a series and whenever the guard can push one.
+  // rebuilds a series and whenever the handlers, and so the guard, run.
   const steps = workflow.split('\n      - ');
   const condition = text => steps.find(step => step.includes(text)).match(/^        if: (.*)$/m)[1];
   assert.ok(workflow.indexOf("- name: Require policy's binary\n") < workflow.indexOf('id: trial'));
   assert.ok(workflow.indexOf('path: ${{ runner.temp }}/apply-binary') < workflow.indexOf('id: trial'));
-  assert.equal(condition("name: Require policy's binary\n"), condition('id: trial'));
-  assert.equal(condition('path: ${{ runner.temp }}/apply-binary'), condition('id: trial'));
+  assert.equal(condition("name: Require policy's binary\n"), condition('id: apply\n'));
+  assert.equal(condition('path: ${{ runner.temp }}/apply-binary'), condition('id: apply\n'));
   assert.ok(workflow.indexOf('- name: Mark what a partial run') < workflow.indexOf('- name: Leave out what an earlier attempt applied'));
   assert.match(workflow, /REPLACEMENT_HEAD: \$\{\{ steps.trial.outputs.head \}\}/);
   assert.match(step('Apply the patch on its own base, and compare what changed with what was checked'),
@@ -1702,6 +1702,28 @@ for (const [state, merged] of [['open', null], ['closed', '2026-10-01T00:00:00Z'
 test('a pull request without a checked patch stops the guard', async () => {
   await assert.rejects(leaveOutApplied([pull], [], { patch: null }), /check accepted no patch/);
   assert.equal((await leaveOutApplied([comment()], [], { patch: null })).kept.length, 1);
+});
+
+// A handler's error reaches the annotations and the job's output with its
+// Markdown and mentions made inert, and no line of its own.
+test('policy binary says why a handler failed', () => {
+  const dir = mkdtempSync(join(homedir(), 'handler-errors-test-'));
+  try {
+    mkdirSync(join(dir, 'apply-binary'));
+    copyFileSync(join(__dirname, '../target/debug/agentic-job'), join(dir, 'apply-binary/agentic-job'));
+    writeFileSync(join(dir, 'safe-output-errors.json'), JSON.stringify({ failures: [
+      { type: 'add_comment', error: 'bad\n::warning::@user 100%0A' }, { type: 'create_issue' }] }));
+    writeFileSync(join(dir, 'output'), '');
+    const result = command(dir, 'bash', ['-e', '-o', 'pipefail', '-c', step('Show why a handler failed')],
+      { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_OUTPUT: join(dir, 'output') });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '::error::Failed to apply add\\_comment: bad ::warning::@\u200buser 100%250A\n' +
+      '::error::Failed to apply create\\_issue: no error given\n');
+    assert.equal(readFileSync(join(dir, 'output'), 'utf8'),
+      'reason=add\\_comment: bad ::warning::@\u200buser 100%0A; create\\_issue: no error given\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function refs(items, issue = '64', itemRepo = 'owner/repo') {

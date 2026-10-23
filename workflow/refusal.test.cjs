@@ -46,10 +46,14 @@ for (const phase of ['collector', 'policy', 'review']) {
         assert.equal(result.status, 1, result.stderr);
         assert.ok(!fs.existsSync(join(dir, 'verdict-output')));
       }
-      await new AsyncFunction('require', 'process', 'core',
-        script('Show why check refused the outputs', 'script'))(require, { env }, core);
-      assert.ok(errors.some(text => text.startsWith('Refused by check: ')));
-      assert.ok(outputs.reason.length > 0);
+      const reasons = join(dir, 'reasons');
+      fs.writeFileSync(reasons, '');
+      const shown = spawnSync('bash', ['-eo', 'pipefail', '-c', script('Show why check refused the outputs', 'run')], {
+        encoding: 'utf8', env: { ...env, JOB_DIR: join(__dirname, '../target/debug'), GITHUB_OUTPUT: reasons },
+      });
+      assert.equal(shown.status, 0, shown.stderr);
+      assert.match(shown.stdout, /^::error::Refused by check: /);
+      outputs.reason = fs.readFileSync(reasons, 'utf8').match(/^reason=(.+)\n$/)[1];
       const output = join(dir, 'step-output');
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', script('How the run ended', 'run')], {
         encoding: 'utf8', env: { ...env, RESULTS: 'success/failure/skipped', EXIT: '0', PR: '',
@@ -151,8 +155,11 @@ test('expected refusal never uploads applicable outputs or starts apply', async 
   try {
     fs.writeFileSync(join(dir, 'report.json'), JSON.stringify({ ok: false,
       errors: ["an add_comment with item_number outside the caller's fixed item"] }));
-    const { refusalReasons } = await import('../safe-outputs/diagnostics.mjs');
-    const reason = (await refusalReasons(dir)).join('; ');
+    fs.writeFileSync(join(dir, 'output'), '');
+    const shown = spawnSync(join(__dirname, '../target/debug/agentic-job'),
+      ['diagnostics', 'refusals', dir, '--output', join(dir, 'output')], { encoding: 'utf8' });
+    assert.equal(shown.status, 0, shown.stderr);
+    const reason = fs.readFileSync(join(dir, 'output'), 'utf8').match(/^reason=(.+)\n$/)[1];
     const assertion = ci.split('\n').find(line => line.includes('grep -F') && line.includes('$REFUSAL')).trim();
     for (const [value, code] of [[reason, 0], ['unrelated refusal', 1], ['', 1]]) {
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', assertion], {

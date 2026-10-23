@@ -1886,7 +1886,7 @@ An artifact downloaded flat is also accepted. With a custom artifact
 prefix, name the local directories as above.
 
 The audit also accepts a separate, diagnostics-only `check-diagnostics`
-artifact, produced by `node safe-outputs/diagnostics.mjs SOURCE DESTINATION`.
+artifact, produced by `agentic-job diagnostics copy SOURCE DESTINATION`.
 It contains
 bounded collector errors (`agent_output.json`) and, if the policy check ran,
 its verdict and errors (`report.json`). Requests and patches are omitted.

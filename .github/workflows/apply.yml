@@ -376,12 +376,13 @@ jobs:
       # process substitutions would hide them. check rejects control
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
       # A replacement series is rebuilt, and later pushed, by policy's
-      # binary, which also links a pull request to its issue below; check
-      # already runs it, so every run has it. Never
+      # binary, which also links a pull request to its issue below and
+      # says why a handler failed, with or without a patch; check already
+      # runs it, so every run has it. Never
       # execute an artifact ID supplied by the caller without binding it
       # to policy's upload in this run: an agent upload is executable code too.
       - name: Require policy's binary
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
@@ -392,7 +393,7 @@ jobs:
             jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
               '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
           artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           path: ${{ runner.temp }}/apply-binary
@@ -1126,30 +1127,15 @@ jobs:
       # status comment would say only how many outputs failed. Its error
       # report holds each failed output's type and error, not the request:
       # bounded and neutralized as check's refusal reasons are, as a
-      # handler's error can quote the agent's text. The reader is this
-      # workflow's pinned source, in `safe-outputs`, which the checkout
-      # of `workflow` above leaves out.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ !cancelled() && steps.apply.outcome == 'failure' }}
-        continue-on-error: true
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: apply-diagnostics
-          sparse-checkout: safe-outputs
-          persist-credentials: false
+      # handler's error can quote the agent's text. The reader is policy's
+      # binary, fetched above for every applied run.
       - name: Show why a handler failed
         id: handler-errors
         if: ${{ !cancelled() && steps.apply.outcome == 'failure' }}
         continue-on-error: true
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const { pathToFileURL } = require('node:url');
-            const { handlerErrors } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/apply-diagnostics/safe-outputs/diagnostics.mjs`).href);
-            const reasons = await handlerErrors(`${process.env.GH_AW_TMP}/safe-output-errors.json`);
-            for (const reason of reasons) core.error(`Failed to apply ${reason}`);
-            core.setOutput('reason', reasons.join('; ').slice(0, 4000));
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" diagnostics handler-errors "$GH_AW_TMP/safe-output-errors.json" --output "$GITHUB_OUTPUT"
       # A run that asked for a pull request and has none did not do what
       # it was for, and neither did one of whose outputs a handler failed,
       # nor one that handed back missing_data beside anything but noop. A
