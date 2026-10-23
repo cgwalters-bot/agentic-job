@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, reviewStatus, reportStatus } = require('./review.cjs');
+const { checkOutputs, reviewStatus, reportStatus } = require('./review.cjs');
 
 // The policy job's `if:` as a function of the event context and the
 // repository variables: GitHub's expression syntax is close enough to
@@ -22,59 +22,6 @@ function policyStarts(job) {
   const evaluate = Function('github', 'vars', 'fromJSON', 'contains', 'startsWith', `return Boolean(${expression});`);
   return (github, vars) => evaluate(github, vars, fromJSON, contains, startsWith);
 }
-
-const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
-  item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
-
-test('review admission narrows, never overrides, event authorization', () => {
-  for (const event of ['pull_request', 'pull_request_target']) {
-    for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review']) {
-      assert.equal(admit({ ...decision, event, action }, 'main').admitted, true);
-    }
-  }
-  assert.equal(admit({ ...decision, event: 'issue_comment', action: 'created', command: 'review' }, 'main').admitted, true);
-  for (const change of [
-    { admitted: false }, { item: { kind: 'issue', number: 147 } },
-    { item: { kind: 'pull_request', number: '147' } }, { head: null },
-    { head: { sha: '--upload-pack=evil' } }, { base: 'other' },
-    { event: 'push' }, { action: 'closed' }, { action: 'labeled' },
-    { event: 'issue_comment', action: 'created', command: 'agent' },
-  ]) {
-    assert.equal(admit({ ...decision, ...change }, 'main').admitted, false, JSON.stringify(change));
-  }
-});
-
-test('review request has no branch, alternate target/token or notification authority', () => {
-  const env = { EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop,create_pull_request_review_comment',
-    MAX_OUTPUTS: '11', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
-    OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
-  checkRequest(env);
-  // The verdict alone, as CI's e2e-review asks with the base's bounds.
-  checkRequest({ ...env, OUTPUTS: 'add_comment,noop', MAX_OUTPUTS: '1' });
-  assert.throws(() => checkRequest({ ...env, OUTPUTS: 'add_comment,noop', MAX_OUTPUTS: '11' }), /Review requires/);
-  // review.yml asks for what checkRequest takes, and its bounds allow it.
-  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
-  assert.match(workflow, new RegExp(`\\n      outputs: ${env.OUTPUTS}\\n      max-outputs: '${env.MAX_OUTPUTS}'\\n`));
-  for (const bounds of ['review.toml', 'review-command.toml']) {
-    const text = fs.readFileSync(path.join(__dirname, bounds), 'utf8');
-    assert.match(text, /\nmax_outputs = 11\n/, bounds);
-    assert.match(text, /\ncreate_pull_request_review_comment = \{ max = 10 \}\n/, bounds);
-  }
-  for (const AGENT of ['fake', 'claude', 'opencode', 'vibe']) {
-    checkRequest({ ...env, AGENT });
-  }
-  for (const AGENT of ['', 'unknown']) {
-    assert.throws(() => checkRequest({ ...env, AGENT }), /supported agent/);
-  }
-  for (const [key, value] of [['EVENT', 'false'], ['KIND', 'branch'],
-    ['OUTPUTS', 'all'], ['MAX_OUTPUTS', 'max'], ['NOTIFY', 'comment'], ['TARGET', '*'],
-    // Room for more than ten inline comments, or the two requests mixed.
-    ['MAX_OUTPUTS', '12'], ['MAX_OUTPUTS', '1'], ['OUTPUTS', 'add_comment,noop'],
-    ['REPO', 'other/repo'], ['OUTPUT_REPO', 'other/repo'], ['APPLY_ENVIRONMENT', 'write'],
-    ['APPLY_PARTIAL', 'true']]) {
-    assert.throws(() => checkRequest({ ...env, [key]: value }), /Review requires/, `${key}=${value}`);
-  }
-});
 
 test('only a single verdict comment on this PR or noop passes', () => {
   const check = item => checkOutputs({ items: [item] }, 147);
@@ -251,125 +198,6 @@ test('the review status is posted only after the open pull requests are listed',
   ({ calls, github, core } = fake([]));
   await assert.rejects(reportStatus({ ...env, HEAD_SHA: 'main' }, github, core), /exact head SHA/);
   assert.deepEqual(calls.posted, []);
-});
-
-test('task comes from a bounded regular base file, not a symlink or escape', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-task-'));
-  try {
-    fs.writeFileSync(path.join(dir, 'task.md'), 'Trusted base task');
-    fs.symlinkSync('task.md', path.join(dir, 'link.md'));
-    assert.equal(taskFile(dir, 'task.md'), 'Trusted base task');
-    for (const name of ['', '../task.md', '/task.md', 'link.md', './task.md']) {
-      assert.throws(() => taskFile(dir, name));
-    }
-    fs.writeFileSync(path.join(dir, 'task.md'), 'x'.repeat(65537));
-    assert.throws(() => taskFile(dir, 'task.md'), /64 KiB/);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('merge policy comes from one strict base file, person by default', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-merge-'));
-  const file = path.join(dir, '.github/agentic-job/merge.toml');
-  try {
-    assert.deepEqual(mergePolicy(dir), { merge: 'person', set: false });
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    for (const [text, want] of [
-      ['merge = "agent"\n', 'agent'],
-      ['# The owner\'s decision.\n\nmerge = "person"  \n', 'person'],
-      ['merge = "agent"', 'agent'],
-      ['# Windows lines.\r\nmerge = "agent"\r\n', 'agent'],
-      ['\ufeffmerge = "agent"\n', /may hold only/],
-      ['', /exactly once/],
-      ['# nothing\n', /exactly once/],
-      ['merge = "agent"\nmerge = "agent"\n', /exactly once/],
-      ['merge = "anyone"\n', /may hold only/],
-      ['merge = \'agent\'\n', /may hold only/],
-      ['merge = "agent" # inline\n', /may hold only/],
-      ['merge="agent"\n', /may hold only/],
-      ['[review]\nmerge = "agent"\n', /may hold only/],
-      ['merge = "agent"\nmerge = "person"\n', /exactly once/],
-      ['x'.repeat(4097), /at most 4 KiB/],
-    ]) {
-      fs.writeFileSync(file, text);
-      if (typeof want === 'string') assert.deepEqual(mergePolicy(dir), { merge: want, set: true }, text);
-      else assert.throws(() => mergePolicy(dir), want, text);
-    }
-    fs.rmSync(file);
-    fs.writeFileSync(path.join(dir, 'other.toml'), 'merge = "agent"\n');
-    fs.symlinkSync('../../other.toml', file);
-    assert.throws(() => mergePolicy(dir), /without symlinks/);
-    fs.rmSync(file);
-    fs.mkdirSync(file);
-    assert.throws(() => mergePolicy(dir), /regular file/);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-  // The statement says whose it is, for each value, and asks for the owned
-  // paths and any change to who decides.
-  const agent = { merge: 'agent', set: true };
-  const person = { merge: 'person', set: true };
-  const unset = { merge: 'person', set: false };
-  assert.match(mergeStatement(agent), /## Merge policy\n\nThe repository owner set this in \.github\/agentic-job\/merge\.toml on the default branch/);
-  assert.match(mergeStatement(agent), /merge = "agent": an approving review from this job merges/);
-  assert.match(mergeStatement(person), /The repository owner set this[\s\S]*merge = "person": the repository expects a person/);
-  assert.match(mergeStatement(unset), /The default branch has no \.github\/agentic-job\/merge\.toml, so the default holds[\s\S]*merge = "person"/);
-  assert.doesNotMatch(mergeStatement(unset), /owner set this/);
-  for (const policy of [person, unset]) assert.match(mergeStatement(policy), /Review as hard as if your approval merged\./);
-  for (const policy of [agent, person, unset]) {
-    assert.match(mergeStatement(policy), /it is a fact, not a question for this review/);
-    assert.match(mergeStatement(policy), /"Needs the owner's review: " and those paths/);
-    assert.match(mergeStatement(policy), /review those paths as hard as any\s+other/);
-    assert.match(mergeStatement(policy), /changes the merge policy file or a CODEOWNERS file/);
-  }
-});
-
-test('the task command appends the base merge policy to the task', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-task-merge-'));
-  const env = { ...process.env, EVENT: 'true', KIND: 'analysis', OUTPUTS: 'add_comment,noop,create_pull_request_review_comment',
-    MAX_OUTPUTS: '11', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
-    OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
-  const task = () => execFileSync(process.execPath, [path.join(__dirname, 'review.cjs'), 'task', 'task.md'],
-    { cwd: dir, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  try {
-    fs.writeFileSync(path.join(dir, 'task.md'), 'Trusted base task\n');
-    assert.equal(task(), 'Trusted base task\n' + mergeStatement({ merge: 'person', set: false }));
-    fs.mkdirSync(path.join(dir, '.github/agentic-job'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.github/agentic-job/merge.toml'), 'merge = "agent"\n');
-    assert.equal(task(), 'Trusted base task\n' + mergeStatement({ merge: 'agent', set: true }));
-    // A malformed policy fails the run instead of being guessed at.
-    fs.writeFileSync(path.join(dir, '.github/agentic-job/merge.toml'), 'merge = "always"\n');
-    assert.throws(task, /may hold only/);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// The owner's value is theirs to change; a file the review job would refuse is not.
-test('this repository\'s merge policy is one the review job reads', () => {
-  const { merge, set } = mergePolicy(path.join(__dirname, '..'));
-  assert.ok(set && ['agent', 'person'].includes(merge));
-});
-
-// The example the docs show must be one the parser accepts (#558).
-test('the merge policy example in docs/review.md parses', () => {
-  const docs = fs.readFileSync(path.join(__dirname, '../docs/review.md'), 'utf8');
-  const start = docs.indexOf('### Merge policy');
-  assert.ok(start !== -1, 'no Merge policy section in docs/review.md');
-  const example = [...docs.slice(start).matchAll(/```toml\n([\s\S]*?)```/g)]
-    .map(match => match[1]).find(block => block.includes('merge = '));
-  assert.ok(example, 'no toml example with merge = in the Merge policy section');
-  const want = example.match(/merge = "(agent|person)"/);
-  assert.ok(want, 'the Merge policy example sets neither agent nor person');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-docs-merge-'));
-  try {
-    fs.mkdirSync(path.join(dir, '.github/agentic-job'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.github/agentic-job/merge.toml'), example);
-    assert.deepEqual(mergePolicy(dir), { merge: want[1], set: true });
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test('scripted review reports the checked-out SHA', () => {

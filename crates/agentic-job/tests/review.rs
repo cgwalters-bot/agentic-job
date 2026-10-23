@@ -57,6 +57,72 @@ fn policy_dispatch_uses_a_validated_target_and_returns_only_the_exact_sha() {
     assert!(refused.stdout.is_empty());
 }
 
+#[test]
+fn the_task_command_appends_the_base_merge_policy_and_admit_narrows_the_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let task = || {
+        Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args(["review", "task", "task.md"])
+            .current_dir(dir.path())
+            .envs([
+                ("EVENT", "true"),
+                ("KIND", "analysis"),
+                (
+                    "OUTPUTS",
+                    "add_comment,noop,create_pull_request_review_comment",
+                ),
+                ("MAX_OUTPUTS", "11"),
+                ("NOTIFY", "none"),
+                ("REPO", "o/r"),
+                ("GITHUB_REPOSITORY", "o/r"),
+                ("APPLY_PARTIAL", "false"),
+                ("AGENT", "fake"),
+            ])
+            .output()
+            .unwrap()
+    };
+    std::fs::write(dir.path().join("task.md"), "Trusted base task\n").unwrap();
+    let unset = task();
+    assert!(unset.status.success(), "{unset:?}");
+    let unset = String::from_utf8(unset.stdout).unwrap();
+    assert!(
+        unset.starts_with("Trusted base task\n\n\n## Merge policy\n\nThe default branch has no")
+    );
+    let policy = dir.path().join(".github/agentic-job/merge.toml");
+    std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
+    std::fs::write(&policy, "merge = \"agent\"\n").unwrap();
+    let agent = String::from_utf8(task().stdout).unwrap();
+    assert!(
+        agent
+            .starts_with("Trusted base task\n\n\n## Merge policy\n\nThe repository owner set this")
+    );
+    assert!(agent.contains("merge = \"agent\": an approving review"));
+    // A malformed policy fails the run instead of being guessed at.
+    std::fs::write(&policy, "merge = \"always\"\n").unwrap();
+    let refused = task();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("may hold only"));
+
+    let decision = dir.path().join("event.json");
+    let admit = |base: &str| {
+        let got = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args(["review", "admit", "--base", base, "--decision"])
+            .arg(&decision)
+            .output()
+            .unwrap();
+        assert!(got.status.success(), "{got:?}");
+        serde_json::from_slice::<Value>(&got.stdout).unwrap()
+    };
+    let event = json!({"admitted":true, "reason":"member", "event":"pull_request", "action":"opened",
+        "item":{"kind":"pull_request", "number":147}, "base":"main", "head":{"sha":"a".repeat(40)}});
+    std::fs::write(&decision, event.to_string()).unwrap();
+    assert_eq!(admit("main"), event);
+    let refused = admit("other");
+    assert_eq!(refused["admitted"], false);
+    assert_eq!(refused["head"], event["head"]);
+}
+
 /// A pull request the dispatch in `review` accepts.
 fn open_pull() -> Value {
     json!({"number":147, "state":"open",

@@ -236,7 +236,7 @@ repository owner's decision, kept in the repository rather than in prose the
 reviewer weighs: reviewers at older pins kept arguing whether a person should
 be required, and refused changes the owner had accepted (#556). The policy
 job reads `.github/agentic-job/merge.toml` from the same trusted checkout of
-the default branch as the standing task, never the head, and `workflow/review.cjs` appends it to the task under
+the default branch as the standing task, never the head, and `agentic-job review task` appends it to the task under
 "Merge policy" as the owner's statement:
 
 ```toml
@@ -411,11 +411,14 @@ copy is no longer read. The broker entry for it is the
 Dispatched reviews use `agentic-job review dispatch-target` before the policy
 job's read-only API call, then `review resolve-dispatch --pull-request FILE`
 to bind the response to the selected open PR, configured repository and base,
-and exact head SHA. Neither command uses the fork's branch name. Rust's
-`review::tests` pins routing refusals; `tests/review.rs` exercises both CLI
-stages and refuses oversized or symlinked API snapshots. The remaining
-workflow review helpers still live in `workflow/review.cjs` pending the rest
-of its Rust port.
+and exact head SHA. Neither command uses the fork's branch name. An event
+review's admission is narrowed by `review admit`, and its task, with the
+merge policy, written by `review task`. Rust's `review::tests` pins routing
+and admission refusals, the request bounds against `review.yml` and its
+bounds files, the merge policy file and the statement the task gets from it,
+including the example above; `tests/review.rs` exercises the CLI stages and
+refuses oversized or symlinked API snapshots. The remaining workflow review
+helpers still live in `workflow/review.cjs` pending the rest of its Rust port.
 
 `node --test workflow/real-review.test.cjs` covers opt-in submission, both
 review states, the checked body with its run marker at the exact commit, stale
@@ -424,9 +427,7 @@ verdict, re-runs and lost responses that must not post twice, and
 inline comments placed in the review or moved to its body.
 The tests use fake APIs; actual forge writes are left to real workflow runs.
 
-`node --test workflow/review.test.cjs` covers the merge policy file and
-the statement the task gets from it, admission, request bounds,
-the verdict grammar, inline findings and their folding into the comment,
+`node --test workflow/review.test.cjs` covers the verdict grammar, inline findings and their folding into the comment,
 hostile outputs, the status for each combination of
 check, verdict, apply and open pull requests at the head (`reviewStatus` and
 `reportStatus` against a fake API) and, by reading `review.yml`, which job

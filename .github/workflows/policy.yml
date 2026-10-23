@@ -606,7 +606,7 @@ jobs:
           AGENT: ${{ inputs.agent }}
         run: |
           printf '%s\n' "$TASK" > "$RUNNER_TEMP/task.md"
-          if [ "$REVIEW" = true ]; then node "$SOURCE_DIR/workflow/review.cjs" task "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"; fi
+          if [ "$REVIEW" = true ]; then "$JOB_DIR/bin/agentic-job" review task "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"; fi
           [ ! -e "$RUNNER_TEMP/permission.json" ] || set -- "$@" --actor-permission "$RUNNER_TEMP/permission.json"
           [ ! -e "$RUNNER_TEMP/pull.json" ] || set -- "$@" --pull-request "$RUNNER_TEMP/pull.json"
           state=0
@@ -623,13 +623,16 @@ jobs:
         with:
           script: |
             const fs = require('node:fs');
+            const { execFileSync } = require('node:child_process');
             const { admit } = require(process.env.SOURCE_DIR + '/workflow/activation.cjs');
             const path = process.env.JOB_DIR + '/event.json';
             let decision = admit(JSON.parse(fs.readFileSync(path, 'utf8')));
-            if (process.env.REVIEW === 'true') {
-              decision = require(process.env.SOURCE_DIR + '/workflow/review.cjs').admit(decision, process.env.BASE);
-            }
             fs.writeFileSync(path, JSON.stringify(decision));
+            if (process.env.REVIEW === 'true') {
+              decision = JSON.parse(execFileSync(process.env.JOB_DIR + '/bin/agentic-job',
+                ['review', 'admit', '--decision', path, '--base', process.env.BASE], { encoding: 'utf8' }));
+              fs.writeFileSync(path, JSON.stringify(decision));
+            }
             if (!decision.admitted) fs.rmSync(process.env.JOB_DIR + '/task.md', { force: true });
             core.setOutput('admitted', String(decision.admitted));
             core.setOutput('reason', decision.reason);

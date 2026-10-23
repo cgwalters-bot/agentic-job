@@ -47,7 +47,7 @@ static PROTECTED_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// The repository owner's merge policy, which the review workflow reads
-/// from the base (`workflow/review.cjs`). An agent able to change it could
+/// from the base (`agentic-job review task`). An agent able to change it could
 /// give its own reviews merge authority, as one able to change CODEOWNERS
 /// could drop the owner's review of a path; so, like CODEOWNERS, it is
 /// refused whether or not the policy exempts `.github/`, and so is a
