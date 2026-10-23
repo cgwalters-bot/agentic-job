@@ -272,7 +272,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: node --test workflow/status.test.cjs
-      - run: node --test workflow/job-timing.test.cjs
       # The same digest-checked analyzers as workflow-ingress.yml, so a PR
       # that changes the checker is tested before merge. Read-only token.
       - name: Install verified static analyzers
@@ -1297,24 +1296,30 @@ jobs:
           CONFIG: .github/agentic-job/hosted.toml
         run: node workflow/dispatch-verify.cjs
       - name: Bound the hosted end-to-end agent job
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          # A read: retry a transient 5xx rather than fail ci on it.
-          retries: 3
-          script: |
-            const { checkCompletedJobDuration } = require('./workflow/job-timing.cjs');
-            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
-              ...context.repo, run_id: context.runId, filter: 'all', per_page: 100,
-            });
-            // agentic-job.yml's agent job is agent.yml's, one call deeper.
-            const full = jobs.filter(job => job.name === 'e2e-full / agent / agent')
-              .sort((a, b) => b.run_attempt - a.run_attempt);
-            if (!full.length) throw new Error('missing hosted end-to-end agent job');
-            const seconds = await checkCompletedJobDuration(full[0], 900, async job_id => {
-              const { data } = await github.rest.actions.getJobForWorkflowRun({ ...context.repo, job_id });
-              return data;
-            });
-            await core.summary.addRaw(`Hosted end-to-end agent job: ${seconds}s (bound 900s).\n`).write();
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BOUND: 900
+        run: |
+          # A read: retry a transient 5xx rather than fail ci on it. gh prints
+          # an error's body too, so only a successful read's output is kept.
+          read_api() { local out; for try in 1 2 3; do out=$(gh api "$@") && { printf '%s\n' "$out"; return; }; sleep 5; done; return 1; }
+          # agentic-job.yml's agent job is agent.yml's, one call deeper; the latest attempt's.
+          id=$(read_api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?filter=all&per_page=100" \
+            --jq '.jobs[] | select(.name == "e2e-full / agent / agent") | "\(.run_attempt) \(.id)"' | sort -rn | head -n 1 | cut -d' ' -f2)
+          [ -n "$id" ] || { echo "::error::missing hosted end-to-end agent job"; exit 1; }
+          # A completed job's timestamps can lag its status: read this exact
+          # job, not a newer attempt, again, up to three times, five seconds apart.
+          for try in 1 2 3 4; do
+            seconds=$(read_api "repos/$GH_REPO/actions/jobs/$id" --jq \
+              'select(.status == "completed") | ((.completed_at | fromdate) - (.started_at | fromdate))? // empty | select(. >= 0)')
+            [ -z "$seconds" ] && [ "$try" -lt 4 ] || break
+            sleep 5
+          done
+          [[ "$seconds" =~ ^[0-9]+$ ]] || { echo "::error::missing or invalid job duration for job $id"; exit 1; }
+          [ "$seconds" -le "$BOUND" ] || { echo "::error::hosted agent job took ${seconds}s (bound ${BOUND}s)"; exit 1; }
+          echo "Hosted end-to-end agent job: ${seconds}s (bound ${BOUND}s)." >> "$GITHUB_STEP_SUMMARY"
       # A re-run of the full run's apply job, as far as the forge is
       # concerned: its guard, from the workflow under test, given the
       # outputs check accepted, leaves out the comment the first attempt

@@ -308,7 +308,9 @@ test('CI runs do not share a dispatch or compose concurrency group, and a real d
     assert.match(caller, new RegExp(`uses: \\./\\.github/workflows/${file}\\.yml[^\\n]*\\n    with:\\n(?:      [^\\n]*\\n)*?      scripted: true\\n`), job);
   }
   // A 5xx listing the run's jobs is retried rather than failing ci.
-  assert.match(ci, /- name: Bound the hosted end-to-end agent job\n        uses: actions\/github-script@[0-9a-f]{40} # v\S+\n        with:\n(?:          #[^\n]*\n)?          retries: [1-9]\n/);
+  const bound = ci.split('- name: Bound the hosted end-to-end agent job\n')[1].split('\n      - ')[0];
+  assert.match(bound, /read_api\(\) \{ local out; for try in 1 2 3; do out=\$\(gh api "\$@"\) && \{ printf '%s\\n' "\$out"; return; \}; sleep 5; done; return 1; \}/);
+  assert.equal(bound.match(/\bgh api\b/g).length, 1);
 });
 
 test('CI verifies actual dispatch comments and pinned SHA, not only job success', t => {
