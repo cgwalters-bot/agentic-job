@@ -56,7 +56,6 @@ test-binary:
 setup-tests:
     cargo test --locked --lib sandbox::setup::tests
     cargo test --locked --lib sandbox::check::
-    node --test workflow/setup-timing.test.mjs
 
 # Refuses VERSION unless it may be released from this checkout (its tags
 # included); prints the previous version tag. See src/bin/release-check.rs.

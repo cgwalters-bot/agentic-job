@@ -214,6 +214,48 @@ jobs:
       - run: node safe-outputs/validation.mjs gh-aw --check
       - run: python3 -B egress/ecosystems.py gh-aw --check
 
+  # The JavaScript outside site/ may only shrink: new logic goes in the
+  # Rust binary. A change fails if it adds a .js, .mjs, .cjs or .ts file
+  # (or its .mts/.cts form) anywhere but site/, .github/actions/, whose
+  # probes must be JS to stand in for a third-party action, and the corpus
+  # parity harness, or if it grows the line count of the JavaScript outside
+  # them. Renames count as an add and a delete. Scripts inline in a
+  # workflow, .jsx/.tsx and extension-less node scripts are not counted.
+  javascript:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse new JavaScript files and growth of the existing ones
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        shell: bash
+        run: |
+          if ! [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "$BASE^{commit}" 2> /dev/null; then
+            echo "::error::no base commit to compare with: '$BASE'"; exit 1
+          fi
+          js='[.][cm]?[jt]s$'
+          allowed='^(site/|[.]github/actions/|crates/agentic-job/tests/corpus/)'
+          # -z, so git does not quote a name with a tab or non-ASCII byte
+          # (which would end it in `"`); a newline in one becomes `?`.
+          added=$(git diff -z --no-renames --diff-filter=A --name-only "$BASE" HEAD | tr '\0\n' '\n?' | grep -iE "$js" | grep -vE "$allowed" || true)
+          if [ -n "$added" ]; then
+            sed 's/^/::error::adds a JavaScript file outside site\/, .github\/actions\/ and the corpus harness: /' <<< "$added"
+            exit 1
+          fi
+          growth=$(git diff -z --no-renames --numstat "$BASE" HEAD | tr '\0\n' '\n?' |
+            awk -F'\t' -v js="$js" -v allowed="$allowed" 'tolower($3) ~ js && $3 !~ allowed { n += $1 - $2 } END { print n + 0 }')
+          echo "net lines added to JavaScript outside the allowlist: $growth"
+          if [ "$growth" -gt 0 ]; then
+            echo "::error::grows the JavaScript by $growth lines; port the logic to Rust, or delete at least as many lines as you add"
+            exit 1
+          fi
+
   # The runner image's stable toolchain: nothing to download, and the
   # workspace's rust-version says what the code needs.
   rust:
@@ -231,7 +273,6 @@ jobs:
       - run: cargo test --workspace --locked
       - run: node --test workflow/activation.test.cjs
       - run: node --test workflow/status.test.cjs
-      - run: node --test workflow/setup-timing.test.mjs
       - run: node --test workflow/job-timing.test.cjs
       # The same digest-checked analyzers as workflow-ingress.yml, so a PR
       # that changes the checker is tested before merge. Read-only token.
@@ -466,7 +507,9 @@ jobs:
           sudo target/debug/agentic-job sandbox setup --config "$RUNNER_TEMP/sandbox-ci.toml" 2>&1 | tee "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Threat feed:' "$RUNNER_TEMP/sandbox-setup.log"
           if [ "$RUST_PROXY" = true ]; then grep -F 'Egress proxy (Rust)' "$RUNNER_TEMP/sandbox-setup.log"; else grep -F 'Egress proxy (mitmproxy)' "$RUNNER_TEMP/sandbox-setup.log"; fi
-          node workflow/setup-timing.mjs "$RUNNER_TEMP/sandbox-setup.log" "$FILESYSTEM_VIEW"
+          grep -qE '^Sandbox setup stage privileged-binary-allowlist: [0-9]+[.][0-9]{3}s [(]ok[)]$' "$RUNNER_TEMP/sandbox-setup.log"
+          view=0; if [ "$FILESYSTEM_VIEW" = true ]; then view=1; fi
+          test "$(grep -cE '^Sandbox setup stage filesystem-view: [0-9]+[.][0-9]{3}s [(]ok[)]$' "$RUNNER_TEMP/sandbox-setup.log")" = "$view"
       # From here on this job's user has no sudo: root is the test's
       # service, or the helper.
       - name: "The runner's user has no root after setup"
@@ -1960,7 +2003,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, rust, vibe, claude-acp, corpus, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -43,6 +43,10 @@ Observed wall times on one unprivileged runner are guidance, not CI guarantees:
 - `lychee --offline --include-fragments --no-progress "**/*.md"`: CI's relative-link/anchor check; requires lychee (local timing not measured).
 - `just workflow-lint OWNER/REPO@COMMIT`: the forge's shared actionlint, zizmor and runner-label check, as CI runs it when the `WORKFLOW_LINT` repository variable is set; needs just, cargo, network and docker (`CONTAINER=podman` otherwise). 5 seconds with images and crates cached.
 
+CI's `javascript` job lets the JavaScript outside `site/`, `.github/actions/`
+and the corpus harness only shrink: put new logic in the Rust binary, and do
+not add `.js`, `.mjs`, `.cjs` or `.ts` files elsewhere.
+
 Run the narrow test covering a change first, then the applicable checks above.
 Passing the workspace suite does **not** prove the privileged integration paths:
 `run` and `probe` tests can return successfully without executing those paths,
