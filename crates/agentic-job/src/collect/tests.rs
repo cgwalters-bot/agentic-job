@@ -69,7 +69,12 @@ fn matches_gh_aws_collector() {
             items.pop();
         }
         let errors: Vec<String> = serde_json::from_value(want.remove("errors").unwrap()).unwrap();
-        let got = collect(&read("outputs.jsonl"), &config, &keeps_public);
+        let got = collect(
+            &read("outputs.jsonl"),
+            &config,
+            &keeps_public,
+            Unported::Refuse,
+        );
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(got.errors, errors, "{name}: errors");
         assert_eq!(got.items.len(), items.len(), "{name}: how many items");
@@ -102,7 +107,7 @@ fn refusals_of_its_own() {
         ),
     ];
     for (line, want) in cases {
-        let got = collect(line, &config, &keeps_public);
+        let got = collect(line, &config, &keeps_public, Unported::Refuse);
         assert_eq!(got.items, Vec::<Map<String, Value>>::new(), "{line}");
         assert_eq!(got.errors, [want], "{line}");
     }
@@ -142,13 +147,14 @@ fn command_writes_the_result() {
     std::fs::write(&policy_path, serde_json::to_string(&policy).unwrap()).unwrap();
     let outputs = dir.path().join("outputs");
     std::fs::create_dir(&outputs).unwrap();
+    let collected = dir.path().join("collected.json");
     let args = Args {
         policy: policy_path,
         outputs: outputs.clone(),
-        collected: dir.path().join("collected.json"),
+        collected: collected.clone(),
     };
     let read = || -> Value {
-        serde_json::from_str(&std::fs::read_to_string(&args.collected).unwrap()).unwrap()
+        serde_json::from_str(&std::fs::read_to_string(&collected).unwrap()).unwrap()
     };
 
     assert_eq!(run(&args).unwrap(), Exit::Success);
@@ -178,4 +184,50 @@ fn command_writes_the_result() {
     std::fs::write(outputs.join(OUTPUTS_FILE), "\n".repeat(big)).unwrap();
     let err = run(&args).unwrap_err().to_string();
     assert!(err.contains("over 1048576"), "{err}");
+}
+
+/// `handback check` passes on, unvalidated, what check.yml would give
+/// gh-aw's collector; counting and the policy's types still apply.
+#[test]
+fn unported_types_pass_on_only_for_the_session() {
+    let config = object(json!({"add_labels": {"max": 1}, "noop": {"max": 1}}));
+    let text = "{\"type\":\"add-labels\",\"labels\":[\"bug\"],\"extra\":1}\n\
+                {\"type\":\"add_labels\",\"labels\":[\"x\"]}\n\
+                {\"type\":\"create_issue\",\"title\":\"t\"}\n";
+    let got = collect(text, &config, &keeps_public, Unported::PassOn);
+    assert_eq!(
+        got.items,
+        [object(
+            json!({"type": "add_labels", "labels": ["bug"], "extra": 1})
+        )]
+    );
+    assert_eq!(
+        got.errors,
+        [
+            "Line 2: Too many items of type 'add_labels'. Maximum allowed: 1.",
+            "Line 3: Unexpected output type 'create_issue'. Expected one of: add_labels, noop",
+        ]
+    );
+}
+
+/// The collector is told of a secondary pull request in its count.
+#[test]
+fn the_policy_as_the_collector_takes_it() {
+    let mut policy = crate::policy::tests::policy();
+    let max = |config: &Map<String, Value>| config["create_pull_request"]["max"].clone();
+    assert_eq!(max(&config(&policy).unwrap()), json!(1));
+    policy.secondary_pull_request = Some(crate::policy::Secondary {
+        repo: "o/tool".into(),
+        clone_url: "https://example.invalid/o/tool".into(),
+        base: "main".into(),
+        branch_prefix: "agentic-job/".into(),
+        max: 1,
+        max_patch_bytes: 1 << 20,
+        max_patch_files: 3,
+        protected_files: Vec::new(),
+        protect_top_level_dot_folders: true,
+        unprotected_dot_folders: Vec::new(),
+        protected_paths: Vec::new(),
+    });
+    assert_eq!(max(&config(&policy).unwrap()), json!(2));
 }

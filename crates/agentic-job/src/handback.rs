@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::check::replacement::Replacement;
 use crate::check::{self, OUTPUTS_FILE};
+use crate::collect::{self, Unported};
 use crate::config;
 use crate::exit::Exit;
 use crate::files::ReadError;
@@ -275,23 +276,45 @@ const FIXES: &[(&str, &str)] = &[
         "remove requests of that type to its limit",
     ),
     ("over max_outputs", "make fewer requests in all"),
+    // The collector's words for the same.
+    (
+        "Unexpected output type",
+        "remove that request: only the types the brief lists are allowed",
+    ),
+    (
+        "Too many items of type",
+        "remove requests of that type to its limit",
+    ),
+    (
+        "Invalid JSON",
+        "write each request as one JSON object, on a line of its own",
+    ),
+    (
+        "Missing required 'type'",
+        "write each request as one JSON object with a `type`",
+    ),
 ];
 const GUIDE_FIX: &str = "fix what it names: `agentic-job handback guide` gives the rule";
+/// For any other refusal of the collector's: of a request's field.
+const FIELDS_FIX: &str = "give the request the fields of its type that `agentic-job handback \
+                          guide` lists, each of the kind it names";
 
-fn fix_for(reason: &str) -> &'static str {
+/// How to fix REASON, which the collector gave if COLLECTOR.
+fn fix_for(reason: &str, collector: bool) -> &'static str {
+    let other = if collector { FIELDS_FIX } else { GUIDE_FIX };
     FIXES
         .iter()
         .find(|(phrase, _)| reason.contains(phrase))
-        .map_or(GUIDE_FIX, |(_, fix)| fix)
+        .map_or(other, |(_, fix)| fix)
 }
 
 /// What the run would refuse or lose of what the agent of RUN, whose
 /// home is HOME, would hand back now. It is the run's own code: `run`'s
 /// `collect`, on a copy of the checkout, since it commits there, then
+/// gh-aw's collector as [`collect`](crate::collect) ports it, then
 /// `check`'s `check_outputs`, then the scan of the final gate's patterns.
-/// gh-aw's collector is not here to validate each request's fields
-/// (docs/safe-outputs.md): the requests go to `check` as given, so a
-/// field the collector refuses is found only after the session.
+/// A type the collector does not validate is passed on as it is: the
+/// check job gives it to gh-aw's collector (docs/safe-outputs.md).
 fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     let mut report = Report::default();
     let policy = &run.policy;
@@ -389,18 +412,22 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
             });
         }
         if outputs.is_dir() {
-            let collected = scratch.path().join("collected.json");
-            let text = as_collected(&outputs)?;
-            std::fs::write(&collected, &text)?;
-            report.notes.extend(redacted_links(&text, policy));
-            report.problems.extend(over_handler_limits(&text));
-            let verdict = check::check_outputs(&outputs, &collected, policy)?;
+            let path = scratch.path().join("collected.json");
+            let collected = collect::collect_dir(&outputs, policy, Unported::PassOn)?;
+            std::fs::write(&path, serde_json::to_string(&collected)?)?;
+            report
+                .notes
+                .extend(redacted_links(&outputs.join(OUTPUTS_FILE), policy));
+            report
+                .problems
+                .extend(over_handler_limits(&collected.items));
+            let verdict = check::check_outputs(&outputs, &path, policy)?;
             report
                 .problems
                 .extend(verdict.errors.iter().map(|error| Problem {
                     at: "check".to_owned(),
                     what: error.clone(),
-                    fix: fix_for(error).to_owned(),
+                    fix: fix_for(error, collected.errors.contains(error)).to_owned(),
                 }));
             if let Some(checkpoint) = verdict.checkpoint {
                 report.notes.push(format!(
@@ -431,7 +458,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
             report.problems.push(Problem {
                 at: finding.location,
                 what: what.to_owned(),
-                fix: fix_for(what).to_owned(),
+                fix: fix_for(what, false).to_owned(),
             });
         } else {
             report.notes.push(format!(
@@ -475,20 +502,19 @@ fn copy_tree(tree: &Checkout, to: &Path, report: &mut Report) -> Option<Checkout
     }
 }
 
-/// A note for each request in COLLECTED (as [`as_collected`] writes it)
-/// with links gh-aw's collector will redact under POLICY: the reader sees
-/// the host and not the link, so the agent can say what it cites another way.
-fn redacted_links(collected: &str, policy: &Policy) -> Vec<String> {
-    let Ok(Value::Object(result)) = serde_json::from_str::<Value>(collected) else {
-        return Vec::new();
-    };
-    let items = result.get("items").and_then(Value::as_array);
-    items
-        .into_iter()
-        .flatten()
+/// A note for each request in REQUESTS, the `outputs.jsonl` `run` hands
+/// back, with links the collector will redact under POLICY: the reader
+/// sees the host and not the link, so the agent can say what it cites
+/// another way. Read from the requests as written: the collector's result
+/// has the links redacted already.
+fn redacted_links(requests: &Path, policy: &Policy) -> Vec<String> {
+    let text = std::fs::read_to_string(requests).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(Value::is_object)
         .enumerate()
         .filter_map(|(number, item)| {
-            let hosts = check::links::redacted_hosts(item, policy);
+            let hosts = check::links::redacted_hosts(&item, policy);
             (!hosts.is_empty()).then(|| {
                 format!(
                     "{AGENT_OUTPUTS}, request {} ({}): its links to {} are posted as \
@@ -504,17 +530,13 @@ fn redacted_links(collected: &str, policy: &Policy) -> Vec<String> {
         .collect()
 }
 
-/// A problem for each request in COLLECTED (as [`as_collected`] writes it)
-/// that gh-aw's handler would refuse at apply, after the session, over a
-/// limit of its own ([`check::handler_limits`]), or that would be applied
-/// saying nothing ([`unexplained_missing_data`]).
-fn over_handler_limits(collected: &str) -> Vec<Problem> {
-    let Ok(Value::Object(result)) = serde_json::from_str::<Value>(collected) else {
-        return Vec::new();
-    };
-    let items = result.get("items").and_then(Value::as_array);
-    let requests = items.into_iter().flatten().filter_map(Value::as_object);
-    requests
+/// A problem for each request ITEMS, the collector's, holds that gh-aw's
+/// handler would refuse at apply, after the session, over a limit of
+/// its own ([`check::handler_limits`]), or that would be applied saying
+/// nothing ([`unexplained_missing_data`]).
+fn over_handler_limits(items: &[serde_json::Map<String, Value>]) -> Vec<Problem> {
+    items
+        .iter()
         .enumerate()
         .flat_map(|(number, item)| {
             let at = format!(
@@ -564,26 +586,6 @@ fn unexplained_missing_data(item: &serde_json::Map<String, Value>) -> Option<Str
              missing or why it blocks the task"
         )
     })
-}
-
-/// The collector's result for the `outputs.jsonl` in OUTPUTS, as `check`
-/// reads it, were the collector to pass every request on as it is: a
-/// line that is not a JSON object is the one thing it surely refuses.
-fn as_collected(outputs: &Path) -> Result<String> {
-    let text = std::fs::read_to_string(outputs.join(OUTPUTS_FILE)).unwrap_or_default();
-    let (mut items, mut errors) = (Vec::new(), Vec::new());
-    for (number, line) in text.lines().enumerate() {
-        match serde_json::from_str::<Value>(line) {
-            Ok(Value::Object(item)) => items.push(item),
-            _ => errors.push(format!(
-                "{AGENT_OUTPUTS}, line {}: not one JSON object",
-                number + 1
-            )),
-        }
-    }
-    Ok(serde_json::to_string(
-        &json!({"items": items, "errors": errors}),
-    )?)
 }
 
 /// A repository at TO that `collect` can commit in as it does in the
@@ -1079,8 +1081,10 @@ mod tests {
         if !outputs.is_dir() {
             return Vec::new();
         }
+        // gh-aw's collector, as the port its fixtures hold to it has it.
         let collected = copy.path().join("collected.json");
-        std::fs::write(&collected, as_collected(&outputs).unwrap()).unwrap();
+        let result = collect::collect_dir(&outputs, &run.policy, Unported::Refuse).unwrap();
+        std::fs::write(&collected, serde_json::to_string(&result).unwrap()).unwrap();
         check::check_outputs(&outputs, &collected, &run.policy)
             .unwrap()
             .errors
@@ -1242,7 +1246,7 @@ mod tests {
                 )
             },
             Case {
-                want: Some("which the policy does not allow"),
+                want: Some("Line 1: Unexpected output type 'add_labels'. Expected one of: "),
                 ..case(
                     "a type not allowed",
                     "",
@@ -1250,7 +1254,7 @@ mod tests {
                 )
             },
             Case {
-                want: Some("2 outputs of type \"noop\", over 1"),
+                want: Some("Line 2: Too many items of type 'noop'. Maximum allowed: 1."),
                 ..case(
                     "over a type's count",
                     "",
@@ -1270,7 +1274,7 @@ mod tests {
                 )
             },
             Case {
-                want: Some("line 1: not one JSON object"),
+                want: Some("Line 1: Invalid JSON - expected ident at line 1 column 2"),
                 ..case("a line that is not JSON", "", "noop please".to_owned())
             },
             Case {
@@ -1460,6 +1464,79 @@ mod tests {
                 "{}: {shown:#?}",
                 case.name
             );
+        }
+    }
+
+    /// The four refusals of the check job in the week of 2026-10-16, each
+    /// after `handback check` had found no problem (tracker runs
+    /// 40008080307, 39032063278, 39051122763 and 39129439624): the
+    /// session now refuses each in the check job's words, and takes the
+    /// same requests written with the fields the guide lists.
+    #[test]
+    fn the_session_refuses_a_field_as_the_check_job_does() {
+        let cases = [
+            (
+                json!({"type": "add_comment", "issue_number": 459, "text": "Triaged."}),
+                Some("Line 1: add_comment requires a 'body' field (string)"),
+            ),
+            (
+                json!({"type": "add_comment", "item_number": 459, "body": "Triaged."}),
+                None,
+            ),
+            (
+                json!({"type": "missing_tool", "tool": "gh"}),
+                Some("Line 1: missing_tool requires a 'reason' field (string)"),
+            ),
+            (
+                json!({"type": "missing_tool", "tool": "gh", "reason": "No forge CLI."}),
+                None,
+            ),
+            (
+                json!({"type": "missing_data", "reason": "No log.", "alternatives": ["a", "b"]}),
+                Some("Line 1: missing_data 'alternatives' must be a string"),
+            ),
+            (
+                json!({"type": "missing_data", "reason": "No log.", "alternatives": "a, b"}),
+                None,
+            ),
+            (
+                json!({"type": "noop", "reason": "Nothing to do."}),
+                Some("Line 1: noop requires a 'message' field (string)"),
+            ),
+            (json!({"type": "noop", "message": "Nothing to do."}), None),
+        ];
+        for (request, want) in cases {
+            let (dir, mut run) = home(json!({
+                "add_comment": {"max": 1},
+                "noop": {"max": 1},
+                "missing_tool": {"max": 1},
+                "missing_data": {"max": 1},
+            }));
+            run.policy.kind = Kind::Analysis;
+            let home = dir.path();
+            std::fs::write(home.join(AGENT_OUTPUTS), request.to_string()).unwrap();
+            std::fs::write(
+                home.join(AGENT_OUTCOME),
+                r#"{"summary": "Triaged.", "tests": []}"#,
+            )
+            .unwrap();
+            let report = validate(home, &run).unwrap();
+            let after = after_the_session(home, &run);
+            let shown: Vec<(&str, &str)> = report
+                .problems
+                .iter()
+                .map(|problem| (problem.what.as_str(), problem.fix.as_str()))
+                .collect();
+            match want {
+                Some(want) => {
+                    assert_eq!(shown, [(want, FIELDS_FIX)], "{request}");
+                    assert_eq!(after, [want], "{request}");
+                }
+                None => {
+                    assert_eq!(shown, [], "{request}");
+                    assert_eq!(after, Vec::<String>::new(), "{request}");
+                }
+            }
         }
     }
 

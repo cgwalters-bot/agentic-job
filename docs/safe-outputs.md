@@ -942,9 +942,13 @@ as a draft by its checkpoint. Each problem is a line,
 reads the run's policy, checkout and base from
 `~/.config/agentic-job/handback.json`, which `run` writes without the
 clone URLs. The agent can change that file, and so mislead only itself:
-the check job reads the policy the policy job printed. gh-aw's collector is
-not on the agent's machine, so the requests reach `check` as written. A
-field it would refuse is still found only after the session.
+the check job reads the policy the policy job printed. The requests are
+validated by [`collect`](#off-github), which fixtures hold to gh-aw's
+collector, so a missing or malformed field is refused in the session in
+the words the check job would use. A type `collect` does not
+take is passed on as written, and its fields are still found wrong only
+by gh-aw's collector after the session. `handback guide` lists each
+allowed type's fields from the same table.
 
 For a `push_to_pull_request_branch` request without `message`, `run` fills
 that field from the outcome summary (or its default run description), the

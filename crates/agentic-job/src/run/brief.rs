@@ -12,6 +12,7 @@ use super::handback::{
     OUTCOME_CHECKPOINT,
 };
 use crate::check::checkpoint::{FENCE, REASONS};
+use crate::collect;
 use crate::policy::{
     CREATE_PULL_REQUEST, EXEMPTABLE_DOT_FOLDER, Kind, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules,
     Policy, Secondary,
@@ -199,13 +200,16 @@ pub fn hand_back(
     }
     // #119: brief line comes with restore. Until a run is given its memory
     // back, telling the agent of `~/memory` would promise what is not so.
-    let types: Vec<String> = outputs
+    let allowed: Vec<&str> = outputs
         .types()
         .filter(|&name| {
             carrier.is_some_and(|(kind, _)| kind == name)
                 || ![CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH].contains(&name)
         })
-        .map(|name| match outputs.max_of(name) {
+        .collect();
+    let types: Vec<String> = allowed
+        .iter()
+        .map(|&name| match outputs.max_of(name) {
             Some(max) => match secondary_tree(policy, secondary) {
                 Some((target, _)) if name == CREATE_PULL_REQUEST => {
                     format!("`{name}` ({max}, and {} in {})", target.max, target.repo)
@@ -338,13 +342,16 @@ pub fn guide(
         );
     }
 
-    let types: Vec<String> = outputs
+    let allowed: Vec<&str> = outputs
         .types()
         .filter(|&name| {
             carrier.is_some_and(|(kind, _)| kind == name)
                 || ![CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH].contains(&name)
         })
-        .map(|name| match outputs.max_of(name) {
+        .collect();
+    let types: Vec<String> = allowed
+        .iter()
+        .map(|&name| match outputs.max_of(name) {
             Some(max) => match second {
                 Some((target, _)) if name == CREATE_PULL_REQUEST => format!(
                     "`{name}` (at most {max}, and {} in {})",
@@ -366,15 +373,24 @@ pub fn guide(
         let _ = writeln!(
             text,
             "- `{}` (optional): your requests, as JSON Lines: one JSON object to a line, each \
-             with a `type` and that type's fields as gh-aw's safe outputs define them. At most \
-             {} KiB, {MAX_LINES} lines and {} requests in all. This run allows: {}. A request \
-             of another type, or one that is malformed, gets all of them refused, the change \
-             included.",
+             with a `type` and that type's fields, listed below. At most {} KiB, {MAX_LINES} \
+             lines and {} requests in all. This run allows: {}. A request of another type, or \
+             one that is malformed, gets all of them refused, the change included.",
             requests.display(),
             MAX_OUTPUTS_BYTES / KIB,
             policy.max_outputs,
             types.join(", "),
         );
+        text.push_str(
+            "  Each type's fields, as `agentic-job handback check` and the run's check \
+             validate them: a missing required field, or one of another kind, gets all of your \
+             requests refused; a field not listed is dropped.\n",
+        );
+        for name in allowed {
+            let fields = collect::field_guide(name)
+                .unwrap_or_else(|| "as gh-aw's safe outputs define them".to_owned());
+            let _ = writeln!(text, "  - `{name}`: {fields}");
+        }
     }
     if push.is_some() {
         if let Some(push) = push.filter(|push| push.replacement_max_commits > 0) {
@@ -908,6 +924,49 @@ mod brief_tests {
             ..implement()
         });
         assert!(nothing.contains("- Requests: none;"), "{nothing}");
+    }
+
+    /// The guide names each allowed type's fields as the collector that
+    /// `handback check` and the check job share has them, and only those
+    /// types; one it does not validate is left to gh-aw's definition.
+    #[test]
+    fn the_guide_lists_the_fields_of_each_allowed_type() {
+        let mut policy = implement();
+        policy.safe_outputs.others.insert(
+            "add_comment".into(),
+            serde_json::from_value(json!({"max": 1})).unwrap(),
+        );
+        policy.safe_outputs.others.insert(
+            "add_labels".into(),
+            serde_json::from_value(json!({"max": 1})).unwrap(),
+        );
+        let text = |policy: &Policy| {
+            let (home, own) = (Path::new("/home/agent"), Path::new("/home/agent/work/r"));
+            guide(policy, home, own, None, "0")
+        };
+        let full = text(&policy);
+        for want in [
+            "  - `add_comment`: `body` (string, required, cut to 65000 characters), \
+             `comment_id` (positive integer), `item_number` (number or string), ",
+            "`target` (one of: status), `temporary_id` (string matching \
+             `^#?aw_[A-Za-z0-9_]{3,12}$`)\n",
+            "  - `create_pull_request`: `base` (string, cut to 128 characters), ",
+            "`draft` (boolean), `labels` (list of strings, each cut to 128 characters), ",
+            "  - `noop`: `message` (string, required, cut to 65000 characters)\n",
+            "  - `missing_tool`: `alternatives` (string, cut to 512 characters), \
+             `reason` (string, required, cut to 256 characters), ",
+            "  - `missing_data`: `alternatives` (string, cut to 256 characters), ",
+            "  - `add_labels`: as gh-aw's safe outputs define them\n",
+        ] {
+            assert!(full.contains(want), "{want}\n{full}");
+        }
+        // A carrier the run does not hand its change back with is not listed.
+        let analysis = text(&Policy {
+            kind: Kind::Analysis,
+            ..policy
+        });
+        assert!(!analysis.contains("- `create_pull_request`:"), "{analysis}");
+        assert!(analysis.contains("  - `noop`: `message`"), "{analysis}");
     }
 
     /// A run with a secondary pull request is told of its clone, its

@@ -6,7 +6,8 @@
 //! The requests it takes are those of [`TYPES`], each validated and its
 //! text sanitized as gh-aw's collector does for that type ([`sanitize`]).
 //! Any other type is an error, even where the policy allows it: passed on
-//! unvalidated, it would reach an applier unsanitized. Fixtures that
+//! unvalidated, it would reach an applier unsanitized. Only `handback
+//! check`, which applies nothing, passes one on ([`Unported::PassOn`]). Fixtures that
 //! gh-aw's collector wrote, on the same lines and configuration, hold the
 //! two to the same result (`tests/data/collect`).
 //!
@@ -22,11 +23,15 @@
 //! knows who may be mentioned there, and it does not add gh-aw's
 //! incomplete report to a result without requests, which `check` would
 //! drop.
+//!
+//! It is also what `handback check` validates the requests with in the
+//! session, so the agent is told of a field error in the words gh-aw's
+//! collector refuses it in. [`field_guide`] tells it the fields.
 
 pub(crate) mod markdown;
 mod sanitize;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
@@ -53,6 +58,17 @@ pub struct Args {
     /// Where to write what was collected, which `check --collected` reads
     #[arg(long, value_name = "FILE")]
     pub collected: PathBuf,
+}
+
+/// What [`collect`] does with a request of a type the policy allows and
+/// [`TYPES`] does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unported {
+    /// Refuse it: passed on, it would reach an applier unsanitized.
+    Refuse,
+    /// Pass it on as it is, for `handback check`, where nothing is
+    /// applied and the check job's collector validates it later.
+    PassOn,
 }
 
 /// What the collector made of the requests: those it took, sanitized,
@@ -263,6 +279,33 @@ impl Rule {
             Self::TextList(max) => json!({
                 "type": "array", "itemType": "string", "itemSanitize": true, "itemMaxLength": max
             }),
+        }
+    }
+
+    /// What the rule wants, for the agent: [`field_guide`].
+    fn describe(&self) -> String {
+        match self {
+            // The length is kept to only where the text is sanitized.
+            Self::Text {
+                required,
+                sanitize,
+                max_length,
+            } => {
+                let mut what = "string".to_owned();
+                if *required {
+                    what.push_str(", required");
+                }
+                if let (true, Some(max)) = (sanitize, max_length) {
+                    what.push_str(&format!(", cut to {max} characters"));
+                }
+                what
+            }
+            Self::Choice(choices) => format!("one of: {}", choices.join(", ")),
+            Self::Pattern(re) => format!("string matching `{}`", re.as_str()),
+            Self::Flag => "boolean".to_owned(),
+            Self::PositiveInteger => "positive integer".to_owned(),
+            Self::IssueOrPrNumber => "number or string".to_owned(),
+            Self::TextList(max) => format!("list of strings, each cut to {max} characters"),
         }
     }
 
@@ -501,6 +544,56 @@ impl OutputType {
     }
 }
 
+/// The fields of the output type NAME, as [`collect`] validates them, for
+/// the agent's guide: `` `body` (string, required, …), `item_number`
+/// (number or string) ``. None for a type it does not validate.
+pub fn field_guide(name: &str) -> Option<String> {
+    let of = TYPES.iter().find(|of| of.name == name)?;
+    let fields: Vec<String> = of
+        .fields
+        .iter()
+        .map(|field| format!("`{}` ({})", field.name, field.rule.describe()))
+        .collect();
+    Some(fields.join(", "))
+}
+
+/// The configuration the collector is given for POLICY: its
+/// `safe_outputs`, with its secondary pull request's `max` added to
+/// `create_pull_request`'s, since the collector counts a pull request of
+/// either repository alike; `check` counts each against its own.
+pub fn config(policy: &Policy) -> Result<Map<String, Value>> {
+    let Value::Object(mut config) = serde_json::to_value(&policy.safe_outputs)? else {
+        bail!("the policy's safe_outputs is not an object");
+    };
+    if let Some(secondary) = &policy.secondary_pull_request
+        && let Some(Value::Object(pull)) = config.get_mut("create_pull_request")
+    {
+        let max = pull.get("max").and_then(Value::as_u64).unwrap_or(0);
+        pull.insert("max".into(), (max + u64::from(secondary.max)).into());
+    }
+    Ok(config)
+}
+
+/// What [`collect`] makes of the `outputs.jsonl` in OUTPUTS under
+/// POLICY: none at all if there is none, as gh-aw's collector takes a
+/// missing file.
+pub fn collect_dir(outputs: &Path, policy: &Policy, unported: Unported) -> Result<Collected> {
+    let path = outputs.join(OUTPUTS_FILE);
+    let text = match files::read_regular(&path, MAX_OUTPUTS_BYTES) {
+        Ok(bytes) => {
+            String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?
+        }
+        Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => bail!("{} {err}", path.display()),
+    };
+    Ok(collect(
+        &text,
+        &config(policy)?,
+        &|host| policy.keeps_link_to(host),
+        unported,
+    ))
+}
+
 /// Whether a `noop`'s MESSAGE is an agent trying the tool out.
 fn is_probe(message: Option<&Value>) -> bool {
     let Some(Value::String(message)) = message else {
@@ -520,6 +613,7 @@ pub fn collect(
     text: &str,
     config: &Map<String, Value>,
     keeps_link: &dyn Fn(&str) -> bool,
+    unported: Unported,
 ) -> Collected {
     let config: Map<String, Value> = config
         .iter()
@@ -531,7 +625,8 @@ pub fn collect(
         if line_text.is_empty() {
             continue;
         }
-        match request(index + 1, line_text, &config, &collected.items, keeps_link) {
+        let taken = &collected.items;
+        match request(index + 1, line_text, &config, taken, keeps_link, unported) {
             Ok(Some(item)) => collected.items.push(item),
             Ok(None) => {}
             Err(error) => collected.errors.push(error),
@@ -548,6 +643,7 @@ fn request(
     config: &Map<String, Value>,
     taken: &[Map<String, Value>],
     keeps_link: &dyn Fn(&str) -> bool,
+    unported: Unported,
 ) -> Result<Option<Map<String, Value>>, String> {
     let item: Map<String, Value> = match serde_json::from_str(text) {
         Ok(Value::Object(item)) => item,
@@ -587,6 +683,11 @@ fn request(
         ));
     }
     let Some(of) = of else {
+        if unported == Unported::PassOn {
+            let mut item = item;
+            item.insert("type".into(), kind.into());
+            return Ok(Some(item));
+        }
         let known: Vec<&str> = TYPES.iter().map(|of| of.name).collect();
         return Err(format!(
             "Line {line}: Unsupported output type '{kind}': agentic-job collect validates only {}",
@@ -598,23 +699,10 @@ fn request(
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
-    let path = args.outputs.join(OUTPUTS_FILE);
-    // No requests at all, as gh-aw's collector takes a missing file.
-    let text = match files::read_regular(&path, MAX_OUTPUTS_BYTES) {
-        Ok(bytes) => {
-            String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?
-        }
-        Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => bail!("{} {err}", path.display()),
-    };
-    let config = match serde_json::to_value(&policy.safe_outputs)? {
-        Value::Object(config) => config,
-        _ => bail!("the policy's safe_outputs is not an object"),
-    };
-    let collected = collect(&text, &config, &|host| policy.keeps_link_to(host));
+    let (outputs, path) = (&args.outputs, &args.collected);
+    let collected = collect_dir(outputs, &policy, Unported::Refuse)?;
     let json = serde_json::to_string(&collected).context("writing what was collected")?;
-    std::fs::write(&args.collected, json + "\n")
-        .with_context(|| format!("writing {}", args.collected.display()))?;
+    std::fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))?;
     for error in &collected.errors {
         eprintln!("error: {}", crate::run::enter::one_line(error));
     }
