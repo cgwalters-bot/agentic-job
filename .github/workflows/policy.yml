@@ -5,7 +5,7 @@
 # reads with it.
 #
 #   policy    the bounds, the binary, the configuration and the task;
-#             contents: read
+#             contents: read, actions: read
 #   activate  consumes a command label (event-triggered runs)
 #   notify    an eyes reaction and a status comment (event-triggered runs)
 #   apply-token
@@ -427,6 +427,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: read
     outputs:
       binary-artifact-id: ${{ steps.binary.outputs.artifact-id }}

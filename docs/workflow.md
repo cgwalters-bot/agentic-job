@@ -37,6 +37,16 @@ separate jobs on separate machines. The apply job's additional checks are
    outside the bounds stops here, before a machine is spent on the agent.
    Discussion events are refused here until notification and output routing
    can address the discussion namespace safely.
+   Item dispatchers exposing `kind`, `repo` and `item` inputs must target
+   `OWNER/NAME#N`; generic callers' arbitrary item labels are unchanged.
+   Set top-level `dedupe = true` in caller bounds to refuse overlapping
+   dispatches of the same kind and item in the calling workflow, naming the
+   other run's URL. This avoids wasted agent setup; it is off by default.
+   Policy uses only `actions: read`, scans at most 1,000 runs per active
+   status and refuses overflow or API failure. This snapshot is not a lock
+   against simultaneous admissions. Run names must start `KIND OWNER/REPO#N`.
+   Composed callers must grant the policy call `actions: read` alongside
+   `contents: read`; reusable workflows cannot elevate caller permissions.
    **activate**, on another hosted machine, removes an admitted command
    label with the caller's write token. The agent and notification jobs
    depend on its success; removal failure starts neither. Runs not started

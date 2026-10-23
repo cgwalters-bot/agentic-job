@@ -64,6 +64,7 @@ jobs:
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     # Policy reads; activate and notify act on no event here.
     permissions:
+      actions: read
       contents: read
     with:
       id: ${{ github.repository }}#${{ inputs.item }}

@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::exit::Exit;
 
+mod dispatch;
+use dispatch::admission as dispatch_admission;
+
 /// The output type that carries a patch for a new pull request.
 pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
 
@@ -498,6 +501,9 @@ pub enum Kind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bounds {
+    /// Avoid wasted agent setup from overlapping dispatches for one item and kind.
+    #[serde(default)]
+    pub dedupe: bool,
     /// The hosts a clone URL may name, exactly (`github.com`).
     pub hosts: Vec<String>,
     /// Hosts of `hosts` a clone URL may name over plain `http://`, for a
@@ -2278,6 +2284,7 @@ fn validate_dot_folders(names: &[String], field: &str) -> Result<()> {
 pub fn run(args: &Args) -> Result<Exit> {
     let bounds = Bounds::load(&args.allow)?;
     let org_bounds = args.org_allow.as_deref().map(Bounds::load).transpose()?;
+    dispatch_admission(bounds.dedupe || org_bounds.as_ref().is_some_and(|b| b.dedupe))?;
     // A dispatcher must not turn context into a way to read outside the caller's
     // authority. Both bounds files admit every URL and repository, independently.
     ensure!(args.context.len() <= 16384, "context input exceeds 16 KiB");
