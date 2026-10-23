@@ -408,6 +408,19 @@ pub fn run(args: &Args) -> Result<Exit> {
         permission: permission.as_ref(),
         pull_request: pull_request.as_ref(),
     });
+    // Discussion numbers are not issue numbers. Until the workflow can route
+    // their notifications and outputs separately, do not publish an admission.
+    if outcome
+        .decision
+        .item
+        .as_ref()
+        .is_some_and(|item| item.kind == ItemKind::Discussion)
+    {
+        outcome.decision.admitted = false;
+        outcome.decision.reason =
+            "discussion notification and output routing are not supported".into();
+        outcome.text = Text::default();
+    }
     if outcome.decision.admitted
         && let Some(reason) = guards::check(trigger)?
     {

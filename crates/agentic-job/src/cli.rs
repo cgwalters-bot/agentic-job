@@ -21,6 +21,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Consume an admitted command label before starting the agent
+    Activate(crate::activate::Args),
     /// Build and locally validate outputs before handing them back
     #[command(subcommand)]
     Handback(crate::handback::Command),
@@ -72,6 +74,7 @@ pub enum Command {
 impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
+            Self::Activate(args) => crate::activate::run(args),
             Self::Handback(command) => command.run(),
             Self::Audit(args) => audit::run(args),
             Self::Policy(args) => policy::run(args),

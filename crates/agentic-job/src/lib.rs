@@ -7,6 +7,7 @@
 //! once touch different files. docs/layout.md has the map.
 
 pub mod acp_drive;
+pub mod activate;
 pub mod apply;
 pub mod audit;
 pub mod check;

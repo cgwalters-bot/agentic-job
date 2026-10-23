@@ -706,17 +706,13 @@ fn label_caller_bounds_feed_activation() {
             "{action}/{label}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let activation = Command::new("node")
-            .arg(root.join("workflow/activation-integration.cjs"))
-            .arg(dir.path().join("event.json"))
-            .arg(if admitted { "1" } else { "0" })
-            .output()
-            .expect("Node runs activation");
-        assert!(
-            activation.status.success(),
-            "{action}/{label}: {}",
-            String::from_utf8_lossy(&activation.stderr)
-        );
+        let decision = serde_json::from_slice(
+            &std::fs::read(dir.path().join("event.json")).expect("decision artifact"),
+        )
+        .expect("decision JSON");
+        let path = agentic_job::activate::label_path(&decision, "cgwalters-forge/agentic-job")
+            .expect("activation target");
+        assert_eq!(path.as_deref(), admitted.then_some("repos/cgwalters-forge/agentic-job/issues/15/labels/%61%67%65%6E%74%2D%72%65%76%69%65%77"));
     }
 }
 

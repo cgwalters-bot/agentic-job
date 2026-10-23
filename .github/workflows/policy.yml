@@ -628,9 +628,8 @@ jobs:
           script: |
             const fs = require('node:fs');
             const { execFileSync } = require('node:child_process');
-            const { admit } = require(process.env.SOURCE_DIR + '/workflow/activation.cjs');
             const path = process.env.JOB_DIR + '/event.json';
-            let decision = admit(JSON.parse(fs.readFileSync(path, 'utf8')));
+            let decision = JSON.parse(fs.readFileSync(path, 'utf8'));
             fs.writeFileSync(path, JSON.stringify(decision));
             if (process.env.REVIEW === 'true') {
               decision = JSON.parse(execFileSync(process.env.JOB_DIR + '/bin/agentic-job',
@@ -921,26 +920,23 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: activation-source
-          persist-credentials: false
-          sparse-checkout: workflow
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ inputs.event }}
         with:
           artifact-ids: ${{ needs.policy.outputs.policy-artifact-id }}
           path: .agentic-job
-      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ inputs.event }}
         with:
-          script: |
-            const fs = require('node:fs');
-            const { activate } = require('./activation-source/workflow/activation.cjs');
-            const decision = JSON.parse(fs.readFileSync('.agentic-job/event.json', 'utf8'));
-            await activate(decision, github, context.repo);
+          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }}
+          path: activation-bin
+      - name: Consume the admitted command label
+        if: ${{ inputs.event }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x activation-bin/agentic-job
+          activation-bin/agentic-job activate --decision .agentic-job/event.json --repository "$GITHUB_REPOSITORY"
 
   # With `require-safe-outputs-pat`, a wrong SAFE_OUTPUTS_PAT fails the
   # call here, before the agent runs, rather than in apply after it: see

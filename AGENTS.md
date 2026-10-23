@@ -35,7 +35,6 @@ Observed wall times on one unprivileged runner are guidance, not CI guarantees:
 - `cargo fmt --all --check`: under 1 second.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: 42 seconds on a cold dependency cache.
 - `cargo test --workspace --locked`: 92 seconds including compilation; session tests alone took 22 seconds.
-- `node --test workflow/activation.test.cjs`: under 1 second.
 - `python3 -m unittest discover -s egress -v`: under 1 second.
 - `node --test secure-host/binary.test.mjs`: under 1 second.
 - `node --test safe-outputs/diagnostics.test.mjs`: under 1 second; useful for diagnostics changes, not a separate CI step.

@@ -271,7 +271,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: node --test workflow/activation.test.cjs
       - run: node --test workflow/status.test.cjs
       - run: node --test workflow/job-timing.test.cjs
       # The same digest-checked analyzers as workflow-ingress.yml, so a PR
