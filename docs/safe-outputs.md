@@ -1122,24 +1122,30 @@ the `{items, errors}` gh-aw's collector would, given the policy's
 It exits 1 if it refused a line,
 as check.yml fails when gh-aw's collector did.
 
-It takes `add_comment`, `create_pull_request`, `noop`, `missing_tool`
-and `missing_data`: their fields validated and their text sanitized as
-gh-aw does (HTML comments, tags and link titles, URLs and their hosts,
-entities and hiding characters, template delimiters, unbalanced fences,
-the length limits). Any other type is refused, even where the policy
-allows it, rather than passed on unsanitized. A test compares its
+It takes every type a policy may allow, the 24 of
+`safe-outputs/validation.json`: their fields validated and their text
+sanitized as gh-aw does (HTML comments, tags and link titles, URLs and
+their hosts, entities and hiding characters, template delimiters,
+unbalanced fences, the length limits), and the rules gh-aw checks a type
+against as a whole, such as an `update_issue` changing something or a
+review comment's `start_line` not after its `line`. A type outside that
+table is refused rather than passed on unsanitized. A test compares its
 result with what gh-aw's collector wrote for the same lines and
 configuration (`crates/agentic-job/tests/data/collect`, regenerated with
 `just collect-fixtures GH_AW_JS` when gh-aw's pin moves), and its
 built-in field rules with `safe-outputs/validation.json`. Where they
 differ it mostly refuses more (a line that is not JSON is not
 repaired); the other differences are in characters no renderer takes
-for a line end, listed in `src/collect/mod.rs`.
+for a line end, listed in `src/collect/mod.rs`. Like gh-aw's, it passes a
+few fields on unchecked, where gh-aw has no check for their type
+(`assign_to_user`'s `assignees`, `update_project`'s `fields`, …); `check`
+holds those to the policy.
 
-As gh-aw's collector does, it leaves @-mentions in `add_comment` and
-`create_pull_request` to the applier, which knows who may be mentioned
-where it posts; in `noop`, `missing_tool` and `missing_data` it wraps
-them in code. For Forgejo, the applier is `apply`, described below.
+As gh-aw's collector does, it leaves @-mentions in what opens or
+comments on an issue, a pull request or a discussion to the applier,
+which knows who may be mentioned where it posts; in the other types,
+such as `noop`, `missing_tool` and `missing_data`, it wraps them in code.
+For Forgejo, the applier is `apply`, described below.
 On GitHub, gh-aw's handlers remain the applier.
 
 ### Publishing to Forgejo

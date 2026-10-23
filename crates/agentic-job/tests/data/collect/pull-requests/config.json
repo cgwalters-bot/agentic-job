@@ -1,0 +1,8 @@
+{
+  "update_pull_request": {"max": 10},
+  "mark_pull_request_as_ready_for_review": {"max": 10},
+  "add_reviewer": {"max": 10},
+  "close_pull_request": {"max": 10},
+  "push_to_pull_request_branch": {"max": 10},
+  "create_check_run": {"max": 10}
+}

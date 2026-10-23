@@ -928,7 +928,7 @@ mod brief_tests {
 
     /// The guide names each allowed type's fields as the collector that
     /// `handback check` and the check job share has them, and only those
-    /// types; one it does not validate is left to gh-aw's definition.
+    /// types.
     #[test]
     fn the_guide_lists_the_fields_of_each_allowed_type() {
         let mut policy = implement();
@@ -956,7 +956,10 @@ mod brief_tests {
             "  - `missing_tool`: `alternatives` (string, cut to 512 characters), \
              `reason` (string, required, cut to 256 characters), ",
             "  - `missing_data`: `alternatives` (string, cut to 256 characters), ",
-            "  - `add_labels`: as gh-aw's safe outputs define them\n",
+            "  - `add_labels`: `item_number` (positive integer or temporary ID `aw_…`), \
+             `labels` (list of names, or of objects with a `name` and optionally a \
+             `rationale`, a `confidence` of LOW, MEDIUM or HIGH and a boolean `suggest`, \
+             required), `repo` (string)\n",
         ] {
             assert!(full.contains(want), "{want}\n{full}");
         }

@@ -1,0 +1,37 @@
+{"type":"create_issue","title":"Bug @alice <b>x</b>","body":"A body long enough, @alice says hi http://x.internal","labels":"bug, help wanted ,,","parent":"#aw_abc1","temporary_id":"aw_new1","blocked_by":[1,"#aw_x"],"fields":[{"a":1}],"repo":"o/r","extra":1}
+{"type":"create_issue","title":"t","body":"too short"}
+{"type":"create_issue","title":"t","body":"                         "}
+{"type":"create_issue","title":"t","body":"twenty characters at least","labels":"[\"a\", 1, \"b\"]"}
+{"type":"create_issue","title":"t","body":"twenty characters at least","labels":"[nope, two"}
+{"type":"create_issue","title":"t","body":"twenty characters at least","labels":5}
+{"type":"create_issue","title":"t","body":"twenty characters at least","fields":{}}
+{"type":"create_issue","title":"t","body":"twenty characters at least","blocked_by":null}
+{"type":"create_issue","title":"t","body":"twenty characters at least","blocked_by":"  ","temporary_id":"  ","labels":"  "}
+{"type":"create_discussion","title":"D","body":"far too short for a discussion"}
+{"type":"create_discussion","title":"D @bob","body":"A discussion body that is longer than sixty-four characters, cc @bob.","category":"General @bob"}
+{"type":"close_issue","issue_number":"12","body":"Closing @carol","confidence":"high","rationale":"because","state_reason":"NOT_PLANNED","suggest":true}
+{"type":"close_issue","issue_number":3,"confidence":"maybe","rationale":5,"state_reason":"done"}
+{"type":"close_issue","issue_number":3,"confidence":"maybe","rationale":7,"body":"Long rationale follows","duplicate_of":"#9"}
+{"type":"close_issue","issue_number":3,"rationale":"because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because"}
+{"type":"close_issue","confidence":null}
+{"type":"close_issue","issue_number":"  ","duplicate_of":"  ","state_reason":" ","confidence":""}
+{"type":"update_issue","milestone":null}
+{"type":"update_issue","status":" "}
+{"type":"update_issue","title":false}
+{"type":"update_issue","assignees":["a @x"],"status":"Open","operation":"APPEND","labels":["x",{"name":"y","confidence":" low ","rationale":"```\nwhy @dave\n```","suggest":false}]}
+{"type":"update_issue","milestone":"0"}
+{"type":"update_issue","milestone":"7abc","issue_number":[1]}
+{"type":"update_issue","milestone":"7abc","issue_number":"8"}
+{"type":"link_sub_issue","parent_issue_number":"#AW_Parent1","sub_issue_number":"12"}
+{"type":"link_sub_issue","parent_issue_number":"aw_abc","sub_issue_number":"#AW_ABC"}
+{"type":"link_sub_issue","parent_issue_number":"AW_x1y","sub_issue_number":"aw_X1Y"}
+{"type":"link_sub_issue"}
+{"type":"link_sub_issue","parent_issue_number":5}
+{"type":"link_sub_issue","parent_issue_number":-5,"sub_issue_number":6}
+{"type":"link_sub_issue","parent_issue_number":true,"sub_issue_number":6}
+{"type":"link_sub_issue","parent_issue_number":"","sub_issue_number":6}
+{"type":"link_sub_issue","parent_issue_number":7,"sub_issue_number":7.0}
+{"type":"assign_to_user","issue_number":4,"assignees":["@eve"," x "],"assignee":"@frank","confidence":"MEDIUM","rationale":"r","suggest":"yes"}
+{"type":"assign_to_user","issue_number":4,"assignees":"eve, frank","rationale":"because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because"}
+{"type":"assign_to_user","assignees":5,"assignee":"  "}
+{"type":"assign_to_user","assignees":"  ","assignee":"@g"}

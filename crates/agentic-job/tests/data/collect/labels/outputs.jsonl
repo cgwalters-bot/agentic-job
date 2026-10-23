@@ -1,0 +1,28 @@
+{"type":"add_labels","labels":["bug","@team <b>x</b>"],"item_number":"#aw_Issue1","repo":"o/r"}
+{"type":"add_labels","labels":[{"name":"enhancement","rationale":"Because @gina asked","confidence":"Medium","suggest":true}],"item_number":"42"}
+{"type":"add_labels","labels":[{"name":"x","confidence":["low"]}]}
+{"type":"add_labels","labels":[{"name":"x","confidence":3,"rationale":"   "}]}
+{"type":"add_labels","labels":[{"name":"x","color":"red","why":1}]}
+{"type":"add_labels","labels":[{"why":1,"label":"x"}]}
+{"type":"add_labels","labels":[{}]}
+{"type":"add_labels","labels":[{"name":"   "}]}
+{"type":"add_labels","labels":["ok","  "]}
+{"type":"add_labels","labels":[5]}
+{"type":"add_labels","labels":[null]}
+{"type":"add_labels","labels":[{"name":"x","suggest":null}]}
+{"type":"add_labels","labels":[{"name":"x","suggest":"true"}]}
+{"type":"add_labels","labels":"bug"}
+{"type":"add_labels","labels":"  "}
+{"type":"add_labels"}
+{"type":"add_labels","labels":null}
+{"type":"add_labels","labels":[],"item_number":0}
+{"type":"add_labels","labels":[],"item_number":null}
+{"type":"add_labels","labels":[],"item_number":" "}
+{"type":"add_labels","labels":[],"item_number":"12th"}
+{"type":"add_labels","labels":[],"item_number":[1]}
+{"type":"remove_labels","labels":["a",{"name":"b","rationale":"because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because"}]}
+{"type":"remove_labels","labels":["x"],"item_number":"aw_toolongidentifier1"}
+{"type":"remove_labels","labels":["x"],"item_number":"#aw_ab"}
+{"type":"remove_labels","labels":["x"],"item_number":"aw_ſſſ"}
+{"type":"remove_labels","labels":["x"],"item_number":"aw_Kab"}
+{"type":"remove_labels","labels":["x"],"item_number":"AW_Kab"}

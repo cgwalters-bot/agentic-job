@@ -23,22 +23,42 @@ fn object(value: Value) -> Map<String, Value> {
 
 /// The types and fields are gh-aw's, read at test time from the
 /// generated `validation.json` the GitHub path gives gh-aw's collector:
-/// a regeneration that changes them fails here.
+/// a regeneration that changes them fails here. Fields are in the order
+/// gh-aw validates them in, which decides the refusal reported.
 #[test]
 fn types_are_gh_aws() {
     let text = std::fs::read_to_string(checkout().join("safe-outputs/validation.json")).unwrap();
     let validation = object(serde_json::from_str(&text).unwrap());
     for of in TYPES {
+        let want = &validation[of.name];
+        let names: Vec<&str> = of.fields.iter().map(|field| field.name).collect();
+        let order: Vec<&str> = want["fields"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(names, order, "{}", of.name);
         let fields: Map<String, Value> = of
             .fields
             .iter()
-            .map(|field| (field.name.to_owned(), field.rule.to_json()))
+            .map(|field| (field.name.to_owned(), Value::Object(field.to_json())))
             .collect();
-        let want = &validation[of.name];
-        let order: Vec<&String> = want["fields"].as_object().unwrap().keys().collect();
-        assert_eq!(fields.keys().collect::<Vec<_>>(), order, "{}", of.name);
-        let got = json!({"defaultMax": of.default_max, "fields": fields});
+        let mut got = json!({"defaultMax": of.default_max, "fields": fields});
+        if let Some(custom) = &of.custom {
+            got["customValidation"] = custom.to_json().into();
+        }
+        if of.collapse_data {
+            got["collapseData"] = true.into();
+        }
         assert_eq!(&got, want, "{}", of.name);
+    }
+    let ours: Vec<&str> = TYPES.iter().map(|of| of.name).collect();
+    let theirs: Vec<&str> = validation.keys().map(String::as_str).collect();
+    assert_eq!(ours, theirs, "every type of validation.json, in its order");
+    // And so every type a policy may allow.
+    for name in crate::policy::OUTPUT_TYPES {
+        assert!(ours.contains(name), "{name}");
     }
 }
 
@@ -88,13 +108,14 @@ fn matches_gh_aws_collector() {
 /// its own way; none of these is in the fixtures.
 #[test]
 fn refusals_of_its_own() {
-    let config = object(json!({"add_comment": {"max": 1}, "add_labels": {"max": 1}}));
+    let config = object(json!({"add_comment": {"max": 1}, "dispatch_workflow": {"max": 1}}));
+    let known: Vec<&str> = TYPES.iter().map(|of| of.name).collect();
+    let unsupported = format!(
+        "Line 1: Unsupported output type 'dispatch_workflow': agentic-job collect validates only {}",
+        known.join(", ")
+    );
     let cases = [
-        (
-            r#"{"type":"add_labels","labels":["bug"]}"#,
-            "Line 1: Unsupported output type 'add_labels': agentic-job collect validates only \
-             add_comment, create_pull_request, noop, missing_tool, missing_data",
-        ),
+        (r#"{"type":"dispatch_workflow"}"#, unsupported.as_str()),
         (
             r#"{"type":"add_comment","body":"x",}"#,
             "Line 1: Invalid JSON - trailing comma at line 1 column 34",
@@ -191,22 +212,22 @@ fn command_writes_the_result() {
 /// gh-aw's collector; counting and the policy's types still apply.
 #[test]
 fn unported_types_pass_on_only_for_the_session() {
-    let config = object(json!({"add_labels": {"max": 1}, "noop": {"max": 1}}));
-    let text = "{\"type\":\"add-labels\",\"labels\":[\"bug\"],\"extra\":1}\n\
-                {\"type\":\"add_labels\",\"labels\":[\"x\"]}\n\
+    let config = object(json!({"dispatch_workflow": {"max": 1}, "noop": {"max": 1}}));
+    let text = "{\"type\":\"dispatch-workflow\",\"workflow_name\":\"x\",\"extra\":1}\n\
+                {\"type\":\"dispatch_workflow\"}\n\
                 {\"type\":\"create_issue\",\"title\":\"t\"}\n";
     let got = collect(text, &config, &keeps_public, Unported::PassOn);
     assert_eq!(
         got.items,
         [object(
-            json!({"type": "add_labels", "labels": ["bug"], "extra": 1})
+            json!({"type": "dispatch_workflow", "workflow_name": "x", "extra": 1})
         )]
     );
     assert_eq!(
         got.errors,
         [
-            "Line 2: Too many items of type 'add_labels'. Maximum allowed: 1.",
-            "Line 3: Unexpected output type 'create_issue'. Expected one of: add_labels, noop",
+            "Line 2: Too many items of type 'dispatch_workflow'. Maximum allowed: 1.",
+            "Line 3: Unexpected output type 'create_issue'. Expected one of: dispatch_workflow, noop",
         ]
     );
 }
@@ -233,13 +254,11 @@ fn the_policy_as_the_collector_takes_it() {
     });
     assert_eq!(max(&config(&policy).unwrap()), json!(2));
 
-    policy.safe_outputs.others.clear();
-    assert_eq!(unported(&policy), Vec::<&str>::new());
-    for name in ["add_labels", "noop"] {
+    for name in crate::policy::OUTPUT_TYPES {
         policy.safe_outputs.others.insert(
-            name.to_owned(),
+            (*name).to_owned(),
             serde_json::from_value(json!({"max": 1})).unwrap(),
         );
     }
-    assert_eq!(unported(&policy), ["add_labels"]);
+    assert_eq!(unported(&policy), Vec::<&str>::new());
 }

@@ -1,0 +1,151 @@
+{
+  "items": [
+    {
+      "type": "create_issue",
+      "blocked_by": [
+        1,
+        "#aw_x"
+      ],
+      "body": "A body long enough, @alice says hi (x.internal/redacted)",
+      "fields": [
+        {
+          "a": 1
+        }
+      ],
+      "labels": [
+        "bug",
+        "help wanted"
+      ],
+      "parent": "#aw_abc1",
+      "repo": "o/r",
+      "temporary_id": "aw_new1",
+      "title": "Bug @alice <b>x</b>"
+    },
+    {
+      "type": "create_issue",
+      "body": "twenty characters at least",
+      "labels": [
+        "a",
+        "b"
+      ],
+      "title": "t"
+    },
+    {
+      "type": "create_issue",
+      "body": "twenty characters at least",
+      "labels": [
+        "[nope",
+        "two"
+      ],
+      "title": "t"
+    },
+    {
+      "type": "create_issue",
+      "blocked_by": "  ",
+      "body": "twenty characters at least",
+      "temporary_id": "  ",
+      "title": "t"
+    },
+    {
+      "type": "create_discussion",
+      "body": "A discussion body that is longer than sixty-four characters, cc @bob.",
+      "category": "General @bob",
+      "title": "D @bob"
+    },
+    {
+      "type": "close_issue",
+      "body": "Closing `@carol`",
+      "confidence": "HIGH",
+      "issue_number": 12,
+      "rationale": "because",
+      "state_reason": "not_planned",
+      "suggest": true
+    },
+    {
+      "type": "close_issue",
+      "body": "Long rationale follows",
+      "duplicate_of": "#9",
+      "issue_number": 3
+    },
+    {
+      "type": "close_issue",
+      "issue_number": 3,
+      "rationale": "because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because \n[Content truncated due to length]"
+    },
+    {
+      "type": "close_issue"
+    },
+    {
+      "type": "update_issue",
+      "milestone": null
+    },
+    {
+      "type": "update_issue",
+      "assignees": [
+        "a `@x`"
+      ],
+      "labels": [
+        "x",
+        {
+          "name": "y",
+          "rationale": "why `@dave`",
+          "confidence": "LOW"
+        }
+      ],
+      "operation": "append",
+      "status": "open"
+    },
+    {
+      "type": "update_issue",
+      "issue_number": "8",
+      "milestone": 7
+    },
+    {
+      "type": "link_sub_issue",
+      "parent_issue_number": "#aw_parent1",
+      "sub_issue_number": 12
+    },
+    {
+      "type": "link_sub_issue",
+      "parent_issue_number": "#aw_abc",
+      "sub_issue_number": "#aw_abc"
+    },
+    {
+      "type": "assign_to_user",
+      "assignees": "eve, frank",
+      "issue_number": 4,
+      "rationale": "because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because \n[Content truncated due to length]"
+    },
+    {
+      "type": "assign_to_user",
+      "assignee": "",
+      "assignees": 5
+    },
+    {
+      "type": "assign_to_user",
+      "assignee": "`@g`"
+    }
+  ],
+  "errors": [
+    "Line 2: create_issue 'body' is too short (minimum 20 characters)",
+    "Line 3: create_issue 'body' is too short (minimum 20 characters)",
+    "Line 6: create_issue 'labels' must be an array",
+    "Line 7: create_issue 'fields' must be an array",
+    "Line 8: create_issue 'blocked_by' validation (unspecified) accepted object but did not produce a normalized value",
+    "Line 10: create_discussion 'body' is too short (minimum 64 characters)",
+    "Line 13: close_issue 'state_reason' must be one of: completed, not_planned, duplicate",
+    "Line 16: close_issue 'confidence' validation (type=string) accepted object but did not produce a normalized value",
+    "Line 19: update_issue requires at least one of: 'status', 'title', 'body', 'labels', 'assignees', 'milestone' fields",
+    "Line 20: update_issue requires at least one of: 'status', 'title', 'body', 'labels', 'assignees', 'milestone' fields",
+    "Line 22: update_issue 'milestone' must be a valid positive integer (got: 0)",
+    "Line 23: update_issue 'issue_number' must be a number or string",
+    "Line 27: link_sub_issue 'parent_issue_number' and 'sub_issue_number' must be different",
+    "Line 28: link_sub_issue 'parent_issue_number' and 'sub_issue_number' must be different",
+    "Line 29: link_sub_issue 'sub_issue_number' is required",
+    "Line 30: link_sub_issue 'parent_issue_number' must be a positive integer or temporary ID (got: -5)",
+    "Line 31: link_sub_issue 'parent_issue_number' must be a number or string",
+    "Line 32: link_sub_issue 'parent_issue_number' must be a positive integer or temporary ID (got: )",
+    "Line 33: link_sub_issue 'parent_issue_number' and 'sub_issue_number' must be different",
+    "Line 34: assign_to_user 'suggest' must be a boolean"
+  ]
+}

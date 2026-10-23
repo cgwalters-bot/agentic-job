@@ -1,0 +1,90 @@
+{
+  "items": [
+    {
+      "type": "add_labels",
+      "item_number": "#aw_issue1",
+      "labels": [
+        "bug",
+        "`@team` <b>x</b>"
+      ],
+      "repo": "o/r"
+    },
+    {
+      "type": "add_labels",
+      "item_number": 42,
+      "labels": [
+        {
+          "name": "enhancement",
+          "rationale": "Because `@gina` asked",
+          "confidence": "MEDIUM",
+          "suggest": true
+        }
+      ]
+    },
+    {
+      "type": "add_labels",
+      "labels": [
+        {
+          "name": "x",
+          "confidence": "LOW"
+        }
+      ]
+    },
+    {
+      "type": "add_labels",
+      "labels": [
+        {
+          "name": "x"
+        }
+      ]
+    },
+    {
+      "type": "add_labels",
+      "labels": []
+    },
+    {
+      "type": "add_labels",
+      "item_number": 12,
+      "labels": []
+    },
+    {
+      "type": "remove_labels",
+      "labels": [
+        "a",
+        {
+          "name": "b",
+          "rationale": "because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because because "
+        }
+      ]
+    },
+    {
+      "type": "remove_labels",
+      "item_number": "#aw_kab",
+      "labels": [
+        "x"
+      ]
+    }
+  ],
+  "errors": [
+    "Line 5: add_labels labels[0] contains unsupported fields: color, why",
+    "Line 6: add_labels labels[0] contains unsupported fields: why, label",
+    "Line 7: add_labels labels[0].name must be a string",
+    "Line 8: add_labels labels[0].name must be a non-empty string",
+    "Line 9: add_labels labels[1] must be a non-empty string",
+    "Line 10: add_labels labels[0] must be a string or an object with 'name'",
+    "Line 11: add_labels labels[0] must be a string or an object with 'name'",
+    "Line 12: add_labels labels[0].suggest must be a boolean",
+    "Line 13: add_labels labels[0].suggest must be a boolean",
+    "Line 14: add_labels requires a 'labels' field (array)",
+    "Line 15: add_labels requires a 'labels' field (array)",
+    "Line 16: add_labels requires a 'labels' field (array)",
+    "Line 17: add_labels requires a 'labels' field (array)",
+    "Line 18: add_labels 'item_number' must be a positive integer or temporary ID (got: 0)",
+    "Line 19: add_labels 'item_number' validation (issueNumberOrTemporaryId) accepted object but did not produce a normalized value",
+    "Line 22: add_labels 'item_number' must be a number or string",
+    "Line 24: remove_labels 'item_number' must be a positive integer or temporary ID (got: aw_toolongidentifier1)",
+    "Line 25: remove_labels 'item_number' must be a positive integer or temporary ID (got: #aw_ab)",
+    "Line 26: remove_labels 'item_number' must be a positive integer or temporary ID (got: aw_ſſſ)",
+    "Line 27: remove_labels 'item_number' must be a positive integer or temporary ID (got: aw_Kab)"
+  ]
+}

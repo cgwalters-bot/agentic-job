@@ -1,0 +1,52 @@
+{
+  "items": [
+    {
+      "type": "update_project",
+      "content_number": 12,
+      "content_type": "issue",
+      "create_if_missing": false,
+      "draft_body": "B",
+      "draft_issue_id": "#aw_draft1",
+      "draft_title": "T `@q`",
+      "field_definitions": [
+        1
+      ],
+      "fields": {
+        "Status": "Done @r"
+      },
+      "issue": 3,
+      "operation": "create_view",
+      "project": "https://github.com/orgs/acme/projects/7",
+      "target_repo": "acme/app",
+      "temporary_id": "aw_proj1",
+      "view": "anything"
+    },
+    {
+      "type": "update_project",
+      "fields": 5,
+      "project": "#aw_proj1"
+    },
+    {
+      "type": "update_project",
+      "project": "#aw_p12"
+    },
+    {
+      "type": "update_project",
+      "content_number": "#aw_item_1",
+      "project": "#aw_p12"
+    },
+    {
+      "type": "update_project",
+      "project": "https://example.com/users/u/projects/3"
+    }
+  ],
+  "errors": [
+    "Line 3: update_project 'project' must be a full GitHub project URL (e.g., https://github.com/orgs/myorg/projects/42) or temporary project ID (e.g., #aw_project1)",
+    "Line 4: update_project 'project' must be a full GitHub project URL (e.g., https://github.com/orgs/myorg/projects/42) or temporary project ID (e.g., #aw_project1)",
+    "Line 5: update_project requires a 'project' field (string)",
+    "Line 6: update_project 'target_repo' must match pattern ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$",
+    "Line 7: update_project 'field_definitions' must be an array",
+    "Line 9: update_project 'operation' must be 'create_fields' or 'create_view'",
+    "Line 11: update_project 'data' is not enabled (set safe-outputs.data in workflow frontmatter)"
+  ]
+}

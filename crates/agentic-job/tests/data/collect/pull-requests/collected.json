@@ -1,0 +1,73 @@
+{
+  "items": [
+    {
+      "type": "update_pull_request",
+      "body": "b",
+      "draft": true,
+      "operation": "prepend",
+      "pull_request_number": "7",
+      "repo": "o/r",
+      "title": "New `@harry`"
+    },
+    {
+      "type": "update_pull_request",
+      "body": "",
+      "pr": "x"
+    },
+    {
+      "type": "mark_pull_request_as_ready_for_review",
+      "pull_request_number": 3,
+      "reason": "Ready `@ivan`"
+    },
+    {
+      "type": "add_reviewer",
+      "pull_request_number": 5,
+      "reviewers": [
+        "`@jo`",
+        "kim"
+      ],
+      "team_reviewers": [
+        "core"
+      ]
+    },
+    {
+      "type": "close_pull_request",
+      "body": "Closing `@lee`",
+      "pull_request_number": 9
+    },
+    {
+      "type": "push_to_pull_request_branch",
+      "branch": "feature/x",
+      "message": "Fix `@mo` (script)",
+      "pull_request_number": "12"
+    },
+    {
+      "type": "push_to_pull_request_branch",
+      "branch": "",
+      "message": "m"
+    },
+    {
+      "type": "create_check_run",
+      "conclusion": "success",
+      "pr": 1,
+      "summary": "S",
+      "text": "more",
+      "title": "T `@ned`"
+    }
+  ],
+  "errors": [
+    "Line 2: update_pull_request requires at least one of: 'title', 'body', 'update_branch' fields",
+    "Line 3: update_pull_request requires at least one of: 'title', 'body', 'update_branch' fields",
+    "Line 4: update_pull_request 'operation' must be one of: replace, append, prepend, replace-island",
+    "Line 5: update_pull_request 'title' validation (type=string) accepted object but did not produce a normalized value",
+    "Line 8: mark_pull_request_as_ready_for_review requires a 'reason' field (string)",
+    "Line 10: add_reviewer requires at least one of: 'reviewers', 'team_reviewers' fields",
+    "Line 11: add_reviewer 'reviewers' must be an array",
+    "Line 12: add_reviewer team_reviewers array must contain only strings",
+    "Line 14: close_pull_request 'pull_request_number' must be a valid positive integer (got: x9)",
+    "Line 16: push_to_pull_request_branch requires a 'message' field (string)",
+    "Line 19: create_check_run 'conclusion' must be one of: success, failure, neutral, cancelled, skipped, timed_out, action_required",
+    "Line 20: create_check_run requires a 'conclusion' field (string)",
+    "Line 21: create_check_run requires a 'conclusion' field (string)"
+  ]
+}

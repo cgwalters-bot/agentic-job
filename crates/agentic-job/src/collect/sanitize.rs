@@ -240,12 +240,12 @@ pub fn sanitize(
     js_trim(&balance(&s)).to_owned()
 }
 
-fn utf16_len(s: &str) -> usize {
+pub fn utf16_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
 
 /// The longest start of S of at most UNITS UTF-16 units.
-fn utf16_prefix(s: &str, units: usize) -> &str {
+pub fn utf16_prefix(s: &str, units: usize) -> &str {
     let mut seen = 0;
     for (at, c) in s.char_indices() {
         seen += c.len_utf16();

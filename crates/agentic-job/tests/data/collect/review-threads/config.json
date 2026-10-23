@@ -1,0 +1,6 @@
+{
+  "create_pull_request_review_comment": {"max": 20},
+  "reply_to_pull_request_review_comment": {"max": 5},
+  "resolve_pull_request_review_thread": {"max": 5},
+  "hide_comment": {"max": 5}
+}

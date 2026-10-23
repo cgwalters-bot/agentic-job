@@ -1,0 +1,55 @@
+{
+  "items": [
+    {
+      "type": "create_pull_request_review_comment",
+      "body": "Nit @olga",
+      "line": 12,
+      "path": "src/a.rs",
+      "pull_request_number": 4,
+      "side": "LEFT",
+      "start_line": 10
+    },
+    {
+      "type": "create_pull_request_review_comment",
+      "body": "b",
+      "line": 3,
+      "path": "src/a.rs",
+      "start_line": 3
+    },
+    {
+      "type": "create_pull_request_review_comment",
+      "body": "b",
+      "line": 2,
+      "path": "p"
+    },
+    {
+      "type": "reply_to_pull_request_review_comment",
+      "body": "Thanks @pat",
+      "comment_id": 123
+    },
+    {
+      "type": "resolve_pull_request_review_thread",
+      "thread_id": "PRRT_kw@x <b>"
+    },
+    {
+      "type": "hide_comment",
+      "comment_id": "IC_kwDO1",
+      "reason": "SPAM"
+    }
+  ],
+  "errors": [
+    "Line 2: create_pull_request_review_comment 'start_line' must be less than or equal to 'line'",
+    "Line 3: create_pull_request_review_comment 'start_line' must be less than or equal to 'line'",
+    "Line 5: create_pull_request_review_comment 'line' is required",
+    "Line 6: create_pull_request_review_comment requires a 'path' field (string)",
+    "Line 7: create_pull_request_review_comment 'line' must be a valid positive integer (got: 0)",
+    "Line 8: create_pull_request_review_comment 'side' must be 'LEFT' or 'RIGHT'",
+    "Line 9: create_pull_request_review_comment 'start_line' validation (optionalPositiveInteger) accepted object but did not produce a normalized value",
+    "Line 11: create_pull_request_review_comment 'line' must be a valid positive integer (got: abc)",
+    "Line 13: reply_to_pull_request_review_comment 'comment_id' is required",
+    "Line 14: reply_to_pull_request_review_comment 'comment_id' must be a number or string",
+    "Line 16: resolve_pull_request_review_thread requires a 'thread_id' field (string)",
+    "Line 18: hide_comment requires a 'comment_id' field (GraphQL node ID string (e.g. 'IC_kwDOABCD123456'); numeric REST comment IDs are accepted but may not resolve for all comment types (e.g. PR review comments))",
+    "Line 19: hide_comment 'reason' must be one of: SPAM, ABUSE, OFF_TOPIC, OUTDATED, RESOLVED, LOW_QUALITY"
+  ]
+}

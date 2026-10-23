@@ -1,0 +1,19 @@
+{"type":"create_pull_request_review_comment","path":"src/a.rs","line":"12","start_line":10,"side":"left","body":"Nit @olga","pull_request_number":4}
+{"type":"create_pull_request_review_comment","path":"src/a.rs","line":3,"start_line":"5","body":"b"}
+{"type":"create_pull_request_review_comment","path":"src/a.rs","line":3,"start_line":3.5,"body":"b"}
+{"type":"create_pull_request_review_comment","path":"src/a.rs","line":"3x","start_line":"3","body":"b"}
+{"type":"create_pull_request_review_comment","path":"src/a.rs","body":"b"}
+{"type":"create_pull_request_review_comment","path":"  ","line":1,"body":"b"}
+{"type":"create_pull_request_review_comment","path":"p","line":"0","body":"b"}
+{"type":"create_pull_request_review_comment","path":"p","line":2,"body":"b","side":"MIDDLE"}
+{"type":"create_pull_request_review_comment","path":"p","line":2,"body":"b","start_line":null}
+{"type":"create_pull_request_review_comment","path":"p","line":2,"body":"b","start_line":"","side":"","pull_request_number":" "}
+{"type":"create_pull_request_review_comment","path":"p","line":"abc","start_line":"x","body":"b"}
+{"type":"reply_to_pull_request_review_comment","comment_id":"123","body":"Thanks @pat"}
+{"type":"reply_to_pull_request_review_comment","comment_id":null,"body":"x"}
+{"type":"reply_to_pull_request_review_comment","comment_id":[1],"body":"x"}
+{"type":"resolve_pull_request_review_thread","thread_id":"PRRT_kw@x <b>"}
+{"type":"resolve_pull_request_review_thread","thread_id":5}
+{"type":"hide_comment","comment_id":"IC_kwDO1","reason":"spam"}
+{"type":"hide_comment","reason":"SPAM"}
+{"type":"hide_comment","comment_id":"IC_1","reason":"rude"}

@@ -1,0 +1,12 @@
+{"type":"update_project","project":"https://github.com/orgs/acme/projects/7","target_repo":"acme/app","content_type":"Issue","content_number":"12","fields":{"Status":"Done @r"},"view":"anything","field_definitions":[1],"issue":"3","create_if_missing":false,"draft_title":"T @q","draft_body":"B","draft_issue_id":"#aw_draft1","temporary_id":"aw_proj1","operation":"CREATE_VIEW"}
+{"type":"update_project","project":"#aw_proj1","fields":5}
+{"type":"update_project","project":"https://github.com/orgs/acme/projects/x"}
+{"type":"update_project","project":"https://github.com/orgs/acme/projects/١"}
+{"type":"update_project"}
+{"type":"update_project","project":"#aw_p12","target_repo":"acme"}
+{"type":"update_project","project":"#aw_p12","field_definitions":{}}
+{"type":"update_project","project":"#aw_p12","content_type":" ","view":" ","fields":" ","target_repo":" "}
+{"type":"update_project","project":"#aw_p12","operation":"delete"}
+{"type":"update_project","project":"#aw_p12","content_number":"#aw_Item_1"}
+{"type":"update_project","project":"#aw_p12","data":{"x":1}}
+{"type":"update_project","project":"  https://example.com/users/u/projects/3  "}

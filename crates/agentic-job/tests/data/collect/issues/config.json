@@ -1,0 +1,8 @@
+{
+  "create_issue": {"max": 20},
+  "create_discussion": {"max": 5},
+  "close_issue": {"max": 20},
+  "update_issue": {"max": 20},
+  "link_sub_issue": {"max": 20},
+  "assign_to_user": {"max": 20}
+}
