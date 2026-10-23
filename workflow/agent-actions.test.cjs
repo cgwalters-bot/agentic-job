@@ -895,3 +895,31 @@ test('review.yml declares the inference API key and passes it to no job', () => 
   assert.ok(source.includes("      inference-register: ${{ vars.INFERENCE_REGISTER || 'github-oidc' }}\n"));
   assert.ok(source.includes('      inference-provider: ${{ vars.INFERENCE_PROVIDER }}\n'));
 });
+
+// A wrong SAFE_OUTPUTS_PAT fails the policy call before the agent: the agent
+// job needs the whole call, and nothing that would report a run started runs.
+test('the apply token check runs before the agent, off by default, in the apply environment, with the PAT in its step only', () => {
+  for (const caller of [policy, wrapper]) {
+    assert.match(caller, /\n      require-safe-outputs-pat:\n        description: >-\n(?:          [^\n]+\n)+        type: boolean\n        default: false\n/);
+  }
+  assert.match(wrapper, /\n      require-safe-outputs-pat: \$\{\{ inputs.require-safe-outputs-pat \}\}\n/);
+  const job = policy.split('\n  apply-token:\n')[1].split(/\n  (?=[-\w]+:\n)/)[0];
+  assert.match(job, /^    needs: policy\n    if: \$\{\{ inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' \}\}\n/);
+  assert.match(job, /\n    environment: \$\{\{ inputs.apply-environment \}\}\n    permissions:\n      contents: read\n/);
+  assert.doesNotMatch(job, /continue-on-error|always\(\)|cancelled\(\)/);
+  const [before, check] = job.split('- name: Check SAFE_OUTPUTS_PAT\n');
+  assert.doesNotMatch(before, /secrets\./);
+  assert.equal(check.match(/secrets\.SAFE_OUTPUTS_PAT/g).length, 1);
+  assert.match(check, /agentic-job check-apply-token --output-repo "\$OUTPUT_REPO"/);
+  // A refusal leaves no status comment that nothing would conclude.
+  const notify = policy.split('\n  notify:\n')[1].split('\n    runs-on:')[0];
+  assert.match(notify, /needs: \[policy, activate, apply-token\]/);
+  assert.match(notify, /needs.apply-token.result != 'failure'/);
+  for (const [file, name, needs] of [['agentic-job.yml', 'register', 'policy'],
+    ['agentic-job.yml', 'agent', '[policy, register]'], ['example-compose.yml', 'agent', 'policy']]) {
+    const source = file === 'agentic-job.yml' ? wrapper : compose;
+    const agent = source.split(`\n  ${name}:\n`)[1].split(/\n  (?=[-\w]+:\n)/)[0];
+    assert.ok(agent.startsWith(`    needs: ${needs}\n`), `${file} ${name}`);
+    assert.doesNotMatch(agent, /always\(\)|cancelled\(\)|failure\(\)/, file);
+  }
+});

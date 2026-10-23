@@ -9,6 +9,7 @@
 pub mod acp_drive;
 pub mod activate;
 pub mod apply;
+pub mod apply_token;
 pub mod audit;
 pub mod check;
 pub mod cli;

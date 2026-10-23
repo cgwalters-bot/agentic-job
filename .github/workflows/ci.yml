@@ -292,7 +292,6 @@ jobs:
       - run: node --test workflow/review.test.cjs
       - run: node --test workflow/push.test.cjs
       - run: node --test workflow/workflow-commands.test.cjs
-      - run: node --test workflow/apply-token.test.cjs
       - run: node --test workflow/proposals.test.cjs
       - run: node --test workflow/agent-actions.test.cjs
       # Read-only contract tests; no forge token or agent-produced code.

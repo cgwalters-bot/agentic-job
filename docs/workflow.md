@@ -1366,8 +1366,8 @@ The check is the `apply-token` job of policy.yml, which enters
 `apply-environment`, as an environment's secret reaches only a job that
 names it. An environment with required reviewers then asks before the
 agent as well as before apply. The token is in one step running the
-pinned `workflow/apply-token.cjs`, which only reads; it does not reach
-the agent's machine. A caller whose repository
+policy job's binary, `agentic-job check-apply-token`, which only reads;
+it does not reach the agent's machine. A caller whose repository
 [accepts owner branches](#a-repository-the-applying-account-owns) leaves
 the setting off.
 

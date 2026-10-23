@@ -40,6 +40,8 @@ pub enum Command {
     Run(run::Args),
     /// Check the provider's API key that `register = "api-key"` needs, before the host is secured
     CheckKey(run::key_check::Args),
+    /// Check SAFE_OUTPUTS_PAT, from the environment, before the agent runs: it must be able to apply to the output repository
+    CheckApplyToken(crate::apply_token::Args),
     /// Register a `github-oidc` run at the inference proxy for a later job's `run`, in a job that runs nothing else
     Register(run::register::Args),
     /// Validate and sanitize handed-back requests as gh-aw's collector does, for `check --collected`
@@ -82,6 +84,7 @@ impl Command {
             Self::SecureHost(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::CheckKey(args) => run::key_check::run(args),
+            Self::CheckApplyToken(args) => crate::apply_token::run(args),
             Self::Register(args) => run::register::run(args),
             Self::Collect(args) => collect::run(args),
             Self::Check(args) => check::run(args),

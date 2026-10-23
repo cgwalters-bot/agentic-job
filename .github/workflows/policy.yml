@@ -943,10 +943,11 @@ jobs:
 
   # With `require-safe-outputs-pat`, a wrong SAFE_OUTPUTS_PAT fails the
   # call here, before the agent runs, rather than in apply after it: see
-  # workflow/apply-token.cjs. Not a security control, as apply checks the
-  # token again: it saves an agent session. It enters the apply environment,
-  # as an environment's secret reaches only a job that names it, and the
-  # token goes to the pinned helper alone and never to the agent's machine.
+  # `agentic-job check-apply-token`. Not a security control, as apply checks
+  # the token again: it saves an agent session. It enters the apply
+  # environment, as an environment's secret reaches only a job that names
+  # it, and the token goes to the policy job's binary alone, as activate's
+  # write token does, and never to the agent's machine.
   apply-token:
     needs: policy
     if: ${{ inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' }}
@@ -956,24 +957,19 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: apply-token-source
-          persist-credentials: false
-          sparse-checkout: workflow
+          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }}
+          path: apply-token-bin
       - name: Check SAFE_OUTPUTS_PAT
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
+          # Empty when the caller did not pass it, which the check refuses
+          # before any request.
+          SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
           OUTPUT_REPO: ${{ inputs.output-repo || github.repository }}
-        with:
-          # The job token only for an empty PAT, which the check refuses before any request.
-          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
-          script: |
-            const { checkApplyToken } = require('./apply-token-source/workflow/apply-token.cjs');
-            core.info(`SAFE_OUTPUTS_PAT is ${await checkApplyToken(process.env, github)}'s`);
+        run: |
+          chmod +x apply-token-bin/agentic-job
+          apply-token-bin/agentic-job check-apply-token --output-repo "$OUTPUT_REPO"
 
   # For an event-triggered run: an eyes reaction on what started it, and a
   # comment that says a run started, which `conclude` edits when the run
