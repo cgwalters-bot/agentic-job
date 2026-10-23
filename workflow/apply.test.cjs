@@ -684,7 +684,7 @@ test('issue linking executes only policy binary artifacts from this run', () => 
   ]) {
     const result = command(homedir(), 'bash', ['-eo', 'pipefail', '-c',
       'gh() { [ -n "$NAME_FROM_API" ] || return 9; printf \'{"name":"%s","workflow_run":{"id":%s}}\' "$NAME_FROM_API" "$RUN_FROM_API"; }\n' +
-      step("Require policy's binary for issue linking")],
+      step("Require policy's binary")],
     { BINARY: id, NAME: 'p-agentic-job-binary', GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7',
       NAME_FROM_API: name, RUN_FROM_API: String(run) });
     assert.equal(result.status === 0, expected === 0, result.stderr);
@@ -1062,7 +1062,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
     const normalizeBranchName = name => name.replace(/[^a-zA-Z0-9\-_/.]+/g, '-');
     const pushes = [];
     const fakeRequire = path => {
-      if (path === '/workspace/apply-source/workflow/replacement.cjs') return { push: (...args) => { pushes.push(args); } };
+      if (path === 'node:child_process') return { execFileSync: (...args) => { pushes.push(args); } };
       return path === '/runner/gh-aw/actions/normalize_branch_name.cjs' ? { normalizeBranchName } : require(path);
     };
     await new AsyncFunction('require', 'process', 'core', 'github', 'exec', script('Leave out what an earlier attempt applied'))(
@@ -1091,15 +1091,22 @@ const pull = { type: 'create_pull_request', title: 't', body: 'change', branch: 
 test('replacement uses the trusted leased applier and never reaches the gh-aw push handler', async () => {
   const item = { type: 'push_to_pull_request_branch', branch: 'agent-run-7' };
   const result = await leaveOutApplied([item], [], { replacement: true });
-  assert.deepEqual(result.pushes, [['https://github.com/bot/repo', 'agent-run-7', 'head', 'replacement-head']]);
+  assert.deepEqual(result.pushes, [['/runner/apply-binary/agentic-job', ['replacement', 'push', '--remote', 'https://github.com/bot/repo',
+    '--branch', 'agent-run-7', '--original-head', 'head', '--replacement-head', 'replacement-head'], { stdio: 'inherit' }]]);
   assert.deepEqual(result.kept, []);
   assert.deepEqual(result.skipped, [{ type: item.type, url: 'https://github.com/owner/repo/pull/42' }]);
-  const source = workflow.split('path: apply-source')[0].split('- uses: actions/checkout@').at(-1);
-  assert.match(source, /repository: \$\{\{ job.workflow_repository \}\}/);
-  assert.match(source, /ref: \$\{\{ job.workflow_sha \}\}/);
+  // Policy's binary, checked to be this run's, is there before the trial
+  // rebuilds a series and whenever the guard can push one.
+  const steps = workflow.split('\n      - ');
+  const condition = text => steps.find(step => step.includes(text)).match(/^        if: (.*)$/m)[1];
+  assert.ok(workflow.indexOf("- name: Require policy's binary\n") < workflow.indexOf('id: trial'));
+  assert.ok(workflow.indexOf('path: ${{ runner.temp }}/apply-binary') < workflow.indexOf('id: trial'));
+  assert.equal(condition("name: Require policy's binary\n"), condition('id: trial'));
+  assert.equal(condition('path: ${{ runner.temp }}/apply-binary'), condition('id: trial'));
   assert.ok(workflow.indexOf('- name: Mark what a partial run') < workflow.indexOf('- name: Leave out what an earlier attempt applied'));
   assert.match(workflow, /REPLACEMENT_HEAD: \$\{\{ steps.trial.outputs.head \}\}/);
-  assert.match(workflow, /node apply-source\/workflow\/replacement.cjs/);
+  assert.match(step('Apply the patch on its own base, and compare what changed with what was checked'),
+    /"\$RUNNER_TEMP\/apply-binary\/agentic-job" replacement trial /);
 });
 
 test('a re-run leaves out only a push already holding the checked tree as one commit on the pinned head', async () => {

@@ -15,6 +15,7 @@
 pub mod forgejo;
 pub mod issue_reference;
 mod mentions;
+pub mod replacement;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

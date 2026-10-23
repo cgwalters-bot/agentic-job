@@ -484,8 +484,8 @@ applied on a rerun, and verify the resulting remote head. A valid author date
 and fixed committer identity MUST make reconstruction deterministic.
 Enforcement: [replacement.rs](../crates/agentic-job/src/check/replacement.rs),
 `replacement_series_are_individually_bounded` in
-[check/mod.rs](../crates/agentic-job/src/check/mod.rs), and
-[replacement.test.cjs](../workflow/replacement.test.cjs).
+[check/mod.rs](../crates/agentic-job/src/check/mod.rs), and apply's
+[replacement.rs](../crates/agentic-job/src/apply/replacement.rs).
 Run MUST fetch the policy base snapshot into the producer checkout. Check
 MUST validate a full commit ID; apply MUST bind it to one of these trusted
 heads before reconstruction. Live forge application remains unverified locally.

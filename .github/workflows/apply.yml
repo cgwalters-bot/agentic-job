@@ -375,6 +375,28 @@ jobs:
       # Materialize both lists so pipefail catches extraction failures;
       # process substitutions would hide them. check rejects control
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
+      # A replacement series is rebuilt, and later pushed, by policy's
+      # binary, which also links a pull request to its issue below; check
+      # already runs it, so every run has it. Never
+      # execute an artifact ID supplied by the caller without binding it
+      # to policy's upload in this run: an agent upload is executable code too.
+      - name: Require policy's binary
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}agentic-job-binary
+        run: |
+          [[ "$BINARY" =~ ^[1-9][0-9]*$ ]] || { echo '::error::the policy binary artifact ID is required'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINARY" |
+            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
+              '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        with:
+          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          path: ${{ runner.temp }}/apply-binary
+          digest-mismatch: error
       - name: Apply the patch on its own base, and compare what changed with what was checked
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         id: trial
@@ -385,7 +407,10 @@ jobs:
           [ "$patch" != null ] || exit 0
           base=$(jq -er '.patch.base_commit' "$REPORT")
           if jq -e '.patch.commit_files != null' "$REPORT" > /dev/null; then
-            node apply-source/workflow/replacement.cjs
+            chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+            "$RUNNER_TEMP/apply-binary/agentic-job" replacement trial --report "$REPORT" \
+              --series "$GH_AW_TMP/replacement.json" --config "$GH_AW_TMP/config.json" \
+              --current-base "$CURRENT_BASE" --remote "https://github.com/$REPO" --temp "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git merge-base --is-ancestor "$base" refs/agentic-job/target-base ||
@@ -591,25 +616,6 @@ jobs:
       # comment target, which may be a tracking issue merging must not close.
       # A caller composing policy.yml itself that leaves `issue` out has its
       # pull requests link nothing, so say so where the run is looked at.
-      # Never execute an artifact ID supplied by the caller without binding it
-      # to policy's upload in this run: an agent upload is executable code too.
-      - name: Require policy's binary for issue linking
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' && env.ISSUE != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
-          NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}agentic-job-binary
-        run: |
-          [[ "$BINARY" =~ ^[1-9][0-9]*$ ]] || { echo '::error::the policy binary artifact ID is required'; exit 1; }
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINARY" |
-            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
-              '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' && env.ISSUE != '' }}
-        with:
-          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
-          path: ${{ runner.temp }}/apply-binary
-          digest-mismatch: error
       - name: Say which issue a pull request is for
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         run: |
@@ -726,8 +732,9 @@ jobs:
                 const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
                 if (report.patch?.commit_files) {
                   const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch;
-                  const { push } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/replacement.cjs`);
-                  push(`https://github.com/${process.env.FORK}`, process.env.BASE, config.head, process.env.REPLACEMENT_HEAD);
+                  require('node:child_process').execFileSync(`${process.env.RUNNER_TEMP}/apply-binary/agentic-job`, ['replacement', 'push',
+                    '--remote', `https://github.com/${process.env.FORK}`, '--branch', process.env.BASE,
+                    '--original-head', config.head, '--replacement-head', process.env.REPLACEMENT_HEAD], { stdio: 'inherit' });
                   skipped.push({ type: item.type, url: `https://github.com/${owner}/${repo}/pull/${config.target}` });
                   continue;
                 }
