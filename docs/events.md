@@ -243,8 +243,8 @@ commands. Admitted, the task file goes to the agent job with the policy,
 the pull request's base is the run's base (the bounds have to cover it),
 and `comment-target` defaults to the item. With `notify: comment`, a `notify` job puts an eyes
 reaction on what started the run and a status comment on the item, and
-a `conclude` job edits that comment when the run ends, or adds a rocket
-or confused reaction instead (`notify: reaction`), or nothing (`notify:
+a `conclude` job edits that comment when the run ends, or adds a rocket,
++1 (blocked) or confused reaction instead (`notify: reaction`), or nothing (`notify:
 none`, the default); like the apply job these write with what the caller granted the
 call, and the agent's machine never holds a token that can comment.
 The event's text never reaches a script: the binary reads the payload

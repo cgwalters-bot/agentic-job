@@ -282,7 +282,7 @@ on:
         description: >-
           How a run with an item or numeric comment-target reports its state, by jobs
           that run nothing from the agent's machine: `comment` (an eyes reaction on what started it,
-          and a comment edited when the run ends), `reaction` (eyes, then rocket or confused), or
+          and a comment edited when the run ends), `reaction` (eyes, then rocket, +1 for a blocked run, or confused), or
           `none`. These write with the call's own token, which then needs `issues: write` or
           `pull-requests: write`
         type: string
@@ -371,6 +371,9 @@ on:
       result-url:
         description: The URL of what apply made, the pull request or else the first comment or issue; empty for none
         value: ${{ jobs.apply.outputs.result-url }}
+      blocked:
+        description: "`true` when the run handed back only missing_data (and noop) and no change: blocked, not failed"
+        value: ${{ jobs.apply.outputs.blocked }}
       trigger:
         description: "For an event-triggered run, what `agentic-job event` decided: `admitted` or `refused`"
         value: ${{ inputs.event && (jobs.policy.outputs.admitted == 'true' && 'admitted' || 'refused') || '' }}

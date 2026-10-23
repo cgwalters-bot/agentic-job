@@ -21,6 +21,9 @@ on:
       result-url:
         description: The URL of what the run made, its pull request or comment; empty for none
         value: ${{ jobs.run.outputs.result-url }}
+      blocked:
+        description: "`true` when the run handed back only missing_data (and noop) and no change: blocked, not failed"
+        value: ${{ jobs.run.outputs.blocked }}
     inputs:
       scripted:
         description: Trusted CI forces the model-free hosted trial regardless of deployment variables

@@ -26,6 +26,14 @@ pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
 /// branch: one commit on top of the head the run started from.
 pub const PUSH_TO_PULL_REQUEST_BRANCH: &str = "push_to_pull_request_branch";
 
+/// The output type that says the run did nothing, and why.
+pub const NOOP: &str = "noop";
+
+/// The output type that says the run could not do its task without
+/// something it was not given: a prerequisite, a decision, another
+/// repository.
+pub const MISSING_DATA: &str = "missing_data";
+
 /// The output type that sets fields on a Projects v2 board: a destination
 /// of its own, outside the output repository.
 const UPDATE_PROJECT: &str = "update_project";
@@ -85,9 +93,9 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "create_check_run",
     "update_project",
     PUSH_TO_PULL_REQUEST_BRANCH,
-    "noop",
+    NOOP,
     "missing_tool",
-    "missing_data",
+    MISSING_DATA,
 ];
 
 /// The forge a run's outputs are applied on, from the bounds file: what
@@ -126,9 +134,9 @@ pub const NEUTRAL_OUTPUTS: &[&str] = &[
     "add_labels",
     "remove_labels",
     CREATE_REVIEW_COMMENT,
-    "noop",
+    NOOP,
     "missing_tool",
-    "missing_data",
+    MISSING_DATA,
 ];
 
 /// gh-aw's target field for an issue or a pull request alike. GitLab

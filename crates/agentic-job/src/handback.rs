@@ -15,7 +15,7 @@ use crate::collect::{self, Unported};
 use crate::config;
 use crate::exit::Exit;
 use crate::files::ReadError;
-use crate::policy::Policy;
+use crate::policy::{MISSING_DATA, Policy};
 use crate::redact;
 use crate::run::brief;
 use crate::run::clone::Checkout;
@@ -566,8 +566,6 @@ fn over_handler_limits(items: &[serde_json::Map<String, Value>]) -> Vec<Problem>
         })
         .collect()
 }
-
-const MISSING_DATA: &str = "missing_data";
 
 /// Why ITEM is a `missing_data` that nobody can act on: one with no
 /// `reason`. gh-aw's collector takes it, as none of its fields is

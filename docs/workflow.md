@@ -1649,7 +1649,7 @@ and `applied` (`applied.json`, 90 days); and `agentic-job-binary` for a
 day. `applied.json` names what the apply job made:
 
 ```json
-{"schema": "agentic-job-applied/v1", "repo": "OWNER/NAME", "staged": false, "partial": false,
+{"schema": "agentic-job-applied/v1", "repo": "OWNER/NAME", "staged": false, "partial": false, "blocked": false,
  "made": [{"type": "create_pull_request", "number": 12, "url": "..."}],
  "refused": false, "already_applied": [],
  "pull_request": {"number": 12, "url": "..."}, "handlers": {}}
@@ -1666,7 +1666,7 @@ the fork branch's one-parent commit and checked tree are the evidence.
 `handlers` is the configuration the handlers ran with.
 
 The workflow's outputs are `exit` (the exit state of `run`),
-`pull-request`, `applied-artifact-id` and `result-url`: the URL of the pull
+`pull-request`, `applied-artifact-id`, `blocked` (see below) and `result-url`: the URL of the pull
 request, or else of the first comment or issue apply made or found made, also
 in the run summary. With `issue` set to a number of the output repository, a
 new pull request gets `Closes #N` unless that line is already present,
@@ -1685,8 +1685,18 @@ result" with the agent's reason, passed through gh-aw's sanitizer as the
 handlers run it (mentions, HTML comments and URLs off its allowlist
 neutralized, cut at 1000 characters) and quoted line by line. With
 `notify: comment`, the status comment includes the quoted reason.
-When these outputs include `missing_data`, apply fails: the task is incomplete,
-and a job has no neutral conclusion. Conclude posts or updates the item's
+When these outputs are `missing_data` with at most `noop` beside it, and the
+hand-back has no patch or memory, the run is blocked: it could not proceed
+because a prerequisite is not merged, a decision is needed or the work belongs
+in another repository. `check` reports `blocked: true`; apply succeeds with a
+notice and records `blocked` in `applied.json` (check's word, written before
+the handlers' outcome is known) and in its `blocked` output (only when the
+apply job also succeeded); and the status line says the run is blocked and
+starts with the hidden marker `<!-- agentic-job-outcome: blocked -->`, so a
+scheduler can tell it from a failure by a line that starts with that marker.
+A reaction status uses +1. When the outputs include `missing_data`
+beside anything else, such as `missing_tool`, apply fails: the task is
+incomplete, and a job has no neutral conclusion. Conclude posts or updates the item's
 bounded status comment with the reason and run link even with `notify: none`
 or `notify: reaction`. Without a fixed numeric item, only the summary is available;
 cross-repository status still requires the caller's `SAFE_OUTPUTS_PAT`.

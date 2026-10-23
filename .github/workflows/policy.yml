@@ -265,7 +265,7 @@ on:
         description: >-
           How a run with an item or numeric comment-target reports its state, by jobs
           that run nothing from the agent's machine: `comment` (an eyes reaction on what started it,
-          and a comment edited when the run ends), `reaction` (eyes, then rocket or confused), or
+          and a comment edited when the run ends), `reaction` (eyes, then rocket, +1 for a blocked run, or confused), or
           `none`. These write with the call's own token, which then needs `issues: write` or
           `pull-requests: write`
         type: string

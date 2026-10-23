@@ -368,9 +368,14 @@ MUST be cut at a word boundary within its limit. When there is no such URL and
 every checked output is `noop`, `missing_tool` or `missing_data`, apply MUST
 say "No result" in the run summary with the agent's reason, passed through
 gh-aw's sanitizer with the handlers' URL policy, cut at 1000 characters and
-quoted line by line. If those outputs include `missing_data`, apply MUST fail
-and conclude MUST use the bounded status-comment path to report the reason and
-run link to the fixed numeric notification item, regardless of `notify`.
+quoted line by line. If those outputs are `missing_data` with at most `noop`
+beside it, and the hand-back has no patch or memory, check MUST report the
+run `blocked` and apply MUST succeed with a notice, recording `blocked` in
+`applied.json` and, if the apply job succeeded, its `blocked` output; if they include `missing_data` beside
+anything else, apply MUST fail. Either way conclude MUST use the bounded
+status-comment path to report the reason and run link to the fixed numeric
+notification item, regardless of `notify`, and a blocked status MUST say so
+on a line that starts with the hidden marker `<!-- agentic-job-outcome: blocked -->`.
 Cross-repository status still requires the caller's status credential; no fixed
 item means only a summary. Ordinary noops and missing-tool declines stay green
 and respect notification settings. Apply MUST post no separate result notice;

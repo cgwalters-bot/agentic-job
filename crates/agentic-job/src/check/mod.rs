@@ -35,8 +35,8 @@ pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, HIDE_COMMENT, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
-    REVIEW_THREAD_OUTPUTS, Secondary, update_fields,
+    CREATE_PULL_REQUEST, HIDE_COMMENT, MARK_READY, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH,
+    PatchRules, Policy, REVIEW_THREAD_OUTPUTS, Secondary, update_fields,
 };
 use crate::redact;
 
@@ -120,6 +120,10 @@ pub struct Verdict {
     /// What an accepted `memory.json` holds, in counts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<memory::MemoryInfo>,
+    /// The run is blocked, not failed: see [`Verdict::is_blocked`]. Apply
+    /// reports it so and succeeds.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
 }
 
 /// The patch of an accepted pull request.
@@ -170,7 +174,29 @@ impl Verdict {
             checkpoint: None,
             warnings: Vec::new(),
             memory: None,
+            blocked: false,
         }
+    }
+
+    /// Whether the run handed back that it is blocked, and nothing else:
+    /// at least one `missing_data`, at most `noop`s beside it, and no
+    /// patch or memory. Such a run did what it could (a prerequisite is
+    /// not merged yet, a decision is needed, the work is in another
+    /// repository), and showing it as a failure hides real ones. Anything
+    /// more, a `missing_tool` included, keeps the run's outcome as it was.
+    fn is_blocked(&self) -> bool {
+        self.ok
+            && self.patch.is_none()
+            && self.secondary_patch.is_none()
+            && self.memory.is_none()
+            && self
+                .items
+                .iter()
+                .any(|item| item_type(item) == MISSING_DATA)
+            && self
+                .items
+                .iter()
+                .all(|item| [MISSING_DATA, NOOP].contains(&item_type(item)))
     }
 
     /// A Markdown summary, for a job's summary page.
@@ -202,6 +228,11 @@ impl Verdict {
         }));
         if self.items.is_empty() {
             lines.push("- no outputs".to_owned());
+        }
+        if self.blocked {
+            lines.push(
+                "- blocked: the run handed back missing_data and nothing to apply".to_owned(),
+            );
         }
         if let Some(patch) = &self.patch {
             let commit: String = patch.base_commit.chars().take(SHORT_COMMIT).collect();
@@ -917,6 +948,17 @@ pub fn check_outputs(dir: &Path, collected: &Path, policy: &Policy) -> Result<Ve
 }
 
 fn check_outputs_to(
+    dir: &Path,
+    collected: &Path,
+    policy: &Policy,
+    comment: Option<(&str, u64)>,
+) -> Result<Verdict> {
+    let mut verdict = verdict_of(dir, collected, policy, comment)?;
+    verdict.blocked = verdict.is_blocked();
+    Ok(verdict)
+}
+
+fn verdict_of(
     dir: &Path,
     collected: &Path,
     policy: &Policy,
@@ -1915,6 +1957,100 @@ mod tests {
         );
         assert_eq!(patch.bytes, patch_of("src/new.rs").len());
         assert_eq!(patch.files, ["src/new.rs"]);
+    }
+
+    /// A run is blocked only when it hands back `missing_data`, with at
+    /// most `noop` beside it, and nothing that changes anything.
+    #[test]
+    fn blocked_is_missing_data_and_nothing_else() {
+        let missing_data = || json!({"type": MISSING_DATA, "reason": "Needs #630 merged."});
+        let memory = json!({"files": {"notes.md": "Waiting on #630.\n"}}).to_string();
+        let mut policy = policy();
+        for output in ["missing_tool", MISSING_DATA] {
+            policy.safe_outputs.others.insert(
+                output.into(),
+                crate::policy::OutputLimit {
+                    max: 2,
+                    ..Default::default()
+                },
+            );
+        }
+        policy.memory = Some(memory_rules());
+        let only = |items: Vec<Value>| Handback {
+            items,
+            ..Handback::default()
+        };
+        // (the case, the hand-back, accepted, blocked)
+        let cases = [
+            ("missing_data", only(vec![missing_data()]), true, true),
+            (
+                "missing_data, reported incomplete",
+                Handback {
+                    incomplete: true,
+                    ..only(vec![missing_data()])
+                },
+                true,
+                true,
+            ),
+            (
+                "two missing_data",
+                only(vec![missing_data(), missing_data()]),
+                true,
+                true,
+            ),
+            (
+                "missing_data and noop",
+                only(vec![noop(), missing_data()]),
+                true,
+                true,
+            ),
+            ("nothing", only(vec![]), true, false),
+            ("noop", only(vec![noop()]), true, false),
+            ("missing_tool", only(vec![missing_tool()]), true, false),
+            (
+                "missing_data and missing_tool",
+                only(vec![missing_data(), missing_tool()]),
+                true,
+                false,
+            ),
+            (
+                "missing_data and a pull request",
+                Handback {
+                    items: vec![pull_request(), missing_data()],
+                    ..Handback::pull_request()
+                },
+                true,
+                false,
+            ),
+            (
+                "missing_data and memory",
+                only(vec![missing_data()]).with(memory::MEMORY_FILE, Some(memory)),
+                true,
+                false,
+            ),
+            (
+                "missing_data and a patch, refused",
+                only(vec![missing_data()]).with(PATCH_NAME, Some(patch_of("src/new.rs"))),
+                false,
+                false,
+            ),
+        ];
+        for (name, handback, accepted, blocked) in cases {
+            let verdict = handback.check_against(&policy);
+            assert_eq!(verdict.ok, accepted, "{name}: {:?}", verdict.errors);
+            assert_eq!(verdict.blocked, blocked, "{name}");
+            let report = serde_json::to_value(&verdict).unwrap();
+            assert_eq!(
+                report.get("blocked") == Some(&json!(true)),
+                blocked,
+                "{name}"
+            );
+            assert_eq!(
+                verdict.markdown(&policy).contains("- blocked: "),
+                blocked,
+                "{name}"
+            );
+        }
     }
 
     /// A push to pull request 42's branch `agent-run-12` at `HEAD`.

@@ -1553,20 +1553,22 @@ test("a pull request's handler pushes only to the fork, and there is none withou
   }
 });
 
-test('the job fails unless every output was applied and a pull request asked for was opened', () => {
+test('the job fails unless every output was applied, a pull request asked for was opened, and missing data is blocked', () => {
   const root = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
-    for (const [outcome, asked, opened, refused, expected] of [
+    for (const [outcome, asked, opened, refused, expected, missing = '', blocked = ''] of [
       ['success', false, false, '', 0], ['success', true, true, '', 0],
       // The forge refused the pull request, or the handler had no fork to push to.
       ['success', true, false, '', 1], ['failure', true, false, '', 1], ['failure', false, false, '', 1],
-      ['success', false, false, 'true', 1],
+      ['success', false, false, 'true', 1], ['success', false, false, '', 1, 'true'], ['success', false, false, '', 0, 'true', 'true'], ['failure', false, false, '', 1, 'true', 'true'],
     ]) {
       writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: asked ? [pull] : [comment()] }));
-      writeFileSync(join(root, 'applied.json'), JSON.stringify({ pull_request: opened ? { number: 1 } : null }));
+      writeFileSync(join(root, 'applied.json'), JSON.stringify({ pull_request: opened ? { number: 1 } : null })); writeFileSync(join(root, 'output'), '');
       const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Every output was applied')],
-        { GH_AW_TMP: root, OUTCOME: outcome, FAILED: '', OUTPUT_REPO: 'owner/repo', PROJECT_REFUSED: refused });
-      assert.equal(result.status, expected, `${outcome} ${asked} ${opened} ${refused}: ${result.stdout}`);
+        { GH_AW_TMP: root, OUTCOME: outcome, FAILED: '', OUTPUT_REPO: 'owner/repo', PROJECT_REFUSED: refused, MISSING_DATA: missing, BLOCKED: blocked, GITHUB_OUTPUT: join(root, 'output') });
+      assert.deepEqual([result.status, /::notice::the run is blocked/.test(result.stdout), readFileSync(join(root, 'output'), 'utf8')],
+        [expected, blocked === 'true', expected === 0 && blocked ? 'blocked=true\n' : ''],
+        `${outcome} ${asked} ${opened} ${refused} ${missing} ${blocked}: ${result.stdout}`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

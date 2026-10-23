@@ -51,6 +51,9 @@ on:
       result-url:
         description: The URL of what apply made, the pull request or else the first comment or issue; empty for none
         value: ${{ jobs.apply.outputs.result-url }}
+      blocked:
+        description: "`true` when the run handed back only missing_data (and noop) and no change: blocked, not failed"
+        value: ${{ jobs.apply.outputs.blocked }}
 
 # No `permissions` here: a job that names none keeps what the caller
 # granted the call, which apply writes with and conclude comments with.
@@ -87,6 +90,8 @@ jobs:
       # `true` when the run handed back only noop, missing_tool or missing_data, for conclude.
       no-result: ${{ steps.result.outputs.no-result }}
       missing-data: ${{ steps.result.outputs.missing-data }}
+      # `true` when check found the run blocked and everything else here succeeded.
+      blocked: ${{ steps.applied-all.outputs.blocked }}
       no-result-reason: ${{ steps.result.outputs.no-result-reason }}
       handler-errors: ${{ steps.handler-errors.outputs.reason }}
     env:
@@ -1009,6 +1014,13 @@ jobs:
               jq -r '.patch.files | join("\n")' "$REPORT" | jq -Rrs '@html "<pre>\(.)</pre>"'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      # Whether the run is blocked rather than failed: check decides
+      # (`blocked` in its report, crates/agentic-job/src/check), from
+      # missing_data with at most noop beside it and no change.
+      - name: Whether the run is blocked
+        id: blocked
+        if: ${{ always() && (steps.apply.outcome != 'skipped' || steps.staged.outcome != 'skipped') }}
+        run: echo "blocked=$(jq -r '.blocked == true' "$REPORT")" >> "$GITHUB_OUTPUT"
       # What was made, for whoever reads the run: `pull_request` is null
       # when none was opened, and `fork` names where its branch went. A
       # staged run made nothing and says so with `staged`.
@@ -1021,13 +1033,15 @@ jobs:
           EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
           CHECKPOINT: ${{ steps.complete.outputs.checkpoint }}
           STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
+          BLOCKED: ${{ steps.blocked.outputs.blocked }}
         run: |
           touch "$MADE"
           [ "$STAGED" != true ] || echo '[]' > "$GH_AW_TMP/skipped.json"
           jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
             --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --arg fork "$FORK" \
-            --arg checkpoint "$CHECKPOINT" --arg staged "$STAGED" '
-            {schema: "agentic-job-applied/v1", repo: $repo, staged: ($staged == "true"), partial: ($exit != "0"), made: $made,
+            --arg checkpoint "$CHECKPOINT" --arg staged "$STAGED" --arg blocked "${BLOCKED:-}" '
+            {schema: "agentic-job-applied/v1", repo: $repo, staged: ($staged == "true"), partial: ($exit != "0"),
+             blocked: ($blocked == "true"), made: $made,
              checkpoint: (if $checkpoint == "" then null else $checkpoint end),
              fork: (if $fork == "" then null else $fork end),
              already_applied: $skipped[0],
@@ -1117,8 +1131,11 @@ jobs:
             for (const reason of reasons) core.error(`Failed to apply ${reason}`);
             core.setOutput('reason', reasons.join('; ').slice(0, 4000));
       # A run that asked for a pull request and has none did not do what
-      # it was for, and neither did one of whose outputs a handler failed.
+      # it was for, and neither did one of whose outputs a handler failed,
+      # nor one that handed back missing_data beside anything but noop. A
+      # blocked one is a result, not a failure.
       - name: Every output was applied
+        id: applied-all
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
           OUTCOME: ${{ steps.apply.outcome }}
@@ -1128,9 +1145,14 @@ jobs:
           FORK: ${{ steps.fork.outputs.repo }}
           REPLACEMENT_HEAD: ${{ steps.trial.outputs.head }}
           MISSING_DATA: ${{ steps.result.outputs.missing-data }}
+          BLOCKED: ${{ steps.blocked.outputs.blocked }}
         run: |
           [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
-          [ "${MISSING_DATA:-}" != true ] || { echo "::error::the run handed back no result because required data was missing; see the run summary"; exit 1; }
+          if [ "${BLOCKED:-}" = true ]; then
+            echo "::notice::the run is blocked: it handed back missing_data and no change; see the run summary for what it needs"
+          elif [ "${MISSING_DATA:-}" = true ]; then
+            echo "::error::the run handed back no result because required data was missing; see the run summary"; exit 1
+          fi
           # gh-aw counts a push its handler skipped as no failure: the
           # branch itself, in the fork, has to hold the commit, on the head
           # it was for.
@@ -1150,6 +1172,8 @@ jobs:
           if [ "$OUTCOME" != success ] || { [ "$asked" != 0 ] && [ "$opened" != true ]; }; then
             echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1
           fi
+          # Only now, with nothing else wrong, is the run blocked rather than failed.
+          if [ "${BLOCKED:-}" = true ]; then echo blocked=true >> "$GITHUB_OUTPUT"; fi
       # A continuation under `ready_when_complete`: once its push is on the
       # branch, the pull request is marked ready if the work is complete,
       # and made a draft again at a checkpoint. This is the one place apply
@@ -1221,6 +1245,7 @@ jobs:
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
           NO_RESULT_REASON: ${{ needs.apply.outputs.no-result-reason }}
           MISSING_DATA: ${{ needs.apply.outputs.missing-data }}
+          BLOCKED: ${{ needs.apply.outputs.blocked }}
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
           HANDLER_ERRORS: ${{ needs.apply.outputs.handler-errors }}
@@ -1239,23 +1264,31 @@ jobs:
             *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
             *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
           esac
-          if [ "${MISSING_DATA:-}" = true ]; then
+          # The hidden marker, at the start of a line, is for whoever reads
+          # the comment to schedule work: blocked is neither done nor failed.
+          # The reaction is one notify does not put there at the start.
+          if [ "${BLOCKED:-}" = true ] && [ "$RESULTS" = success/success/success ]; then
+            text="<!-- agentic-job-outcome: blocked -->⏸️ [$WORKFLOW]($RUN_URL) is blocked: it handed back missing_data and no change." reaction=+1
+            if [ -z "$REFUSAL" ] && [ -n "$NO_RESULT_REASON" ]; then
+              printf '%s\n' "no-result-reason=$NO_RESULT_REASON" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${MISSING_DATA:-}" = true ]; then
             text="❌ [$WORKFLOW]($RUN_URL) handed back no result because required data was missing." reaction=confused
             if [ -z "$REFUSAL" ] && [ -n "$NO_RESULT_REASON" ]; then
               printf '%s\n' "no-result-reason=$NO_RESULT_REASON" >> "$GITHUB_OUTPUT"
             fi
           fi
           # Where, never what: the run action wrote it, and it is checked again here.
-          [[ ! "$SECRET_AT" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]] || [ "$reaction" = rocket ] ||
+          [[ ! "$SECRET_AT" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]] || [ "$reaction" != confused ] ||
             text="$text Nothing was uploaded: a secret or a private key is in \`$SECRET_AT\`."
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           # One line, already neutralized by apply.
           [ -z "$HANDLER_ERRORS" ] || text="$text Failed outputs: $HANDLER_ERRORS"
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
-          [ "${STAGED:-}" != true ] || [ "$reaction" != rocket ] || text="$text Staged: nothing was applied; the apply job's summary shows what would have been."
-          [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
+          [ "${STAGED:-}" != true ] || [ "$reaction" = confused ] || text="$text Staged: nothing was applied; the apply job's summary shows what would have been."
+          [ "${EXIT:-0}" = 0 ] || [ "$reaction" = confused ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
           # Numbers alone: the agent reported the cost they come from.
-          [[ ! "$OVER_BUDGET" =~ ^[0-9]+(\.[0-9]+)?\ of\ [0-9]+(\.[0-9]+)?\ AIC$ ]] || [ "$reaction" != rocket ] ||
+          [[ ! "$OVER_BUDGET" =~ ^[0-9]+(\.[0-9]+)?\ of\ [0-9]+(\.[0-9]+)?\ AIC$ ]] || [ "$reaction" = confused ] ||
             text="$text Its last reply took the agent over budget: it spent $OVER_BUDGET."
           printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
       # The same bounded lookup at start and finish, including retries.

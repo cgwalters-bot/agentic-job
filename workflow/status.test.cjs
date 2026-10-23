@@ -232,7 +232,7 @@ test('status CLI prefers the supplied credential, falls back to the job token an
   }
 });
 
-test('conclude carries the encoded reason for a decline or missing-data failure', () => {
+test('conclude carries the encoded reason for a decline, a blocked run or a missing-data failure', () => {
   const workflow = readFileSync(`${__dirname}/../.github/workflows/apply.yml`, 'utf8');
   assert.match(workflow, /no-result-reason: \$\{\{ steps\.result\.outputs\.no-result-reason \}\}/);
   assert.match(workflow, /NO_RESULT_REASON: \$\{\{ needs\.apply\.outputs\.no-result-reason \}\}/);
@@ -240,7 +240,7 @@ test('conclude carries the encoded reason for a decline or missing-data failure'
   const source = workflow.split('- name: How the run ended\n')[1]
     .split('        run: |\n')[1].split('\n      #')[0].split('\n').map(line => line.slice(10)).join('\n');
   const reason = '> ask `@maintainer`\n> text=injected\n> $(exit 9)\n> "quoted" \\ path';
-  for (const [results, quiet, refusal, included, missing = ''] of [
+  for (const [results, quiet, refusal, included, missing = '', blocked = ''] of [
     ['success/success/success', 'true', '', true],
     ['success/success/success', '', '', false],
     ['success/success/failure', 'true', '', false],
@@ -249,25 +249,23 @@ test('conclude carries the encoded reason for a decline or missing-data failure'
     ['success/success/success', 'true', 'refused', false],
     ['success/success/failure', 'true', '', true, 'true'],
     ['success/success/failure', 'true', 'refused', false, 'true'],
+    ['success/success/success', 'true', '', true, 'true', 'true'], ['success/success/failure', 'true', '', true, 'true', 'true'],
   ]) {
     const dir = mkdtempSync(join(tmpdir(), 'conclude-'));
     try {
       const output = join(dir, 'output');
       writeFileSync(output, '');
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', source], {
-        env: { ...process.env, RESULTS: results, EXIT: '0', PR: '', NO_RESULT: quiet, MISSING_DATA: missing,
+        env: { ...process.env, RESULTS: results, EXIT: '0', PR: '', NO_RESULT: quiet, MISSING_DATA: missing, BLOCKED: blocked,
           NO_RESULT_REASON: JSON.stringify(reason), REFUSAL: refusal, RESULT_URL: '',
           WORKFLOW: 'test', RUN_URL: 'https://example.invalid/run', GITHUB_OUTPUT: output }, encoding: 'utf8',
       });
       assert.equal(result.status, 0, result.stderr);
-      const fields = Object.fromEntries(readFileSync(output, 'utf8').trim().split('\n').map(line => {
-        const at = line.indexOf('=');
-        return [line.slice(0, at), line.slice(at + 1)];
-      }));
+      const fields = Object.fromEntries(readFileSync(output, 'utf8').trim().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)));
       assert.deepEqual(Object.keys(fields).sort(), included ? ['no-result-reason', 'reaction', 'text'] : ['reaction', 'text']);
       if (missing && !refusal) {
-        assert.match(fields.text, /handed back no result because required data was missing/);
-        assert.equal(fields.reaction, 'confused');
+        assert.match(fields.text, blocked && results === 'success/success/success' ? /^<!-- agentic-job-outcome: blocked -->⏸️ .* is blocked: / : /required data was missing/);
+        assert.equal(fields.reaction, /is blocked/.test(fields.text) ? '+1' : 'confused');
       }
       const calls = [];
       upsert({ ...env, TEXT: fields.text, NO_RESULT_REASON: fields['no-result-reason'] },
