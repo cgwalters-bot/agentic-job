@@ -447,29 +447,6 @@ async function submitReview(env, output, github, core) {
   return data.html_url || `https://github.com/${env.GITHUB_REPOSITORY}/pull/${run.pull}#pullrequestreview-${data.id}`;
 }
 
-async function resolveDispatch(env, github) {
-  if (env.REVIEW !== 'true' || env.EVENT !== 'false' || env.KIND !== 'analysis' ||
-      env.OUTPUTS !== 'add_comment,noop' || env.MAX_OUTPUTS !== '1' ||
-      env.NOTIFY !== 'none' || env.APPLY_PARTIAL !== 'false' ||
-      (env.OUTPUT_REPO && env.OUTPUT_REPO !== env.REPO) ||
-      env.TARGET !== env.ITEM || !/^[1-9][0-9]*$/.test(env.ITEM) ||
-      !Number.isSafeInteger(Number(env.ITEM)) ||
-      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.REPO)) {
-    throw new Error('Dispatch review requires one verdict or noop on the selected PR, analysis only, no event, notifications or partial apply');
-  }
-  const [owner, repo] = env.REPO.split('/');
-  const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(env.ITEM) });
-  // Bind the review to the target PR and exact commit, not its source repository
-  // or author-controlled branch. The sandbox fetches this SHA from the target
-  // without forge credentials; accepting a fork adds no write authority.
-  if (data.number !== Number(env.ITEM) || data.state !== 'open' ||
-      data.base?.ref !== env.BASE || data.base?.repo?.full_name !== env.REPO ||
-      !/^[0-9a-f]{40}$/.test(data.head?.sha ?? '')) {
-    throw new Error('Dispatch review requires an open PR on the configured base with an exact head SHA');
-  }
-  return data.head.sha;
-}
-
 if (require.main === module) {
   const [command, file, number] = process.argv.slice(2);
   if (command === 'task') {
@@ -491,4 +468,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, foldInline, diffLines, reviewStatus, reportStatus, submitReview, resolveDispatch, refusalText };
+module.exports = { admit, taskFile, mergePolicy, mergeStatement, checkRequest, checkOutputs, foldInline, diffLines, reviewStatus, reportStatus, submitReview, refusalText };

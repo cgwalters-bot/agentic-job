@@ -408,6 +408,15 @@ copy is no longer read. The broker entry for it is the
 
 ## Tests
 
+Dispatched reviews use `agentic-job review dispatch-target` before the policy
+job's read-only API call, then `review resolve-dispatch --pull-request FILE`
+to bind the response to the selected open PR, configured repository and base,
+and exact head SHA. Neither command uses the fork's branch name. Rust's
+`review::tests` pins routing refusals; `tests/review.rs` exercises both CLI
+stages and refuses oversized or symlinked API snapshots. The remaining
+workflow review helpers still live in `workflow/review.cjs` pending the rest
+of its Rust port.
+
 `node --test workflow/real-review.test.cjs` covers opt-in submission, both
 review states, the checked body with its run marker at the exact commit, stale
 heads, stopped or failed runs and noops, outputs that do not match the

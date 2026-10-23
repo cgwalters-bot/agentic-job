@@ -20,6 +20,7 @@ pub use ::secure_host::files;
 pub mod handback;
 pub mod policy;
 pub mod redact;
+pub mod review;
 pub mod run;
 pub mod sandbox;
 pub mod secure_host;

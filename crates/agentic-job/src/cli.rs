@@ -50,6 +50,9 @@ pub enum Command {
     Apply(crate::apply::Args),
     /// Decide whether the event that started the workflow may start a run, and write its task
     Event(event::Args),
+    /// Resolve trusted workflow review routing without running reviewed code
+    #[command(subcommand)]
+    Review(crate::review::Command),
     /// Write a run's configuration from a file and settings given one at a time
     Config(compose::Args),
     /// Check a repository's workflow files for the job shape that keeps untrusted steps sandboxed
@@ -82,6 +85,7 @@ impl Command {
             Self::Detect(args) => crate::detect::run(args),
             Self::Apply(args) => crate::apply::run(args),
             Self::Event(args) => event::run(args),
+            Self::Review(command) => command.run(),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),
             Self::AcpDrive(command) => command.run(),

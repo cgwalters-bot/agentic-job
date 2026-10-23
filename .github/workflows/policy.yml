@@ -657,8 +657,16 @@ jobs:
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
         with:
           script: |
-            const { resolveDispatch } = require(process.env.SOURCE_DIR + '/workflow/review.cjs');
-            core.setOutput('review-head', await resolveDispatch(process.env, github));
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { execFileSync } = require('node:child_process');
+            const binary = path.join(process.env.JOB_DIR, 'bin/agentic-job');
+            const target = JSON.parse(execFileSync(binary, ['review', 'dispatch-target'], { encoding: 'utf8' }));
+            const { data } = await github.rest.pulls.get(target);
+            const file = path.join(process.env.RUNNER_TEMP, 'dispatch-review.json');
+            fs.writeFileSync(file, JSON.stringify(data));
+            const head = execFileSync(binary, ['review', 'resolve-dispatch', '--pull-request', file], { encoding: 'utf8' }).trim();
+            core.setOutput('review-head', head);
       # A run that pushes to a pull request starts from its branch at the
       # head read here with the read-only token, never from agent text or
       # the caller's task; the binary checks the branch against the bounds
