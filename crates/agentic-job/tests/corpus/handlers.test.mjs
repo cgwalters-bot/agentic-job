@@ -1,4 +1,4 @@
-// Real pinned collector -> Rust check -> real pinned handler, with no forge.
+// check.yml's collector -> Rust check -> real pinned handler, with no forge.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
@@ -15,6 +15,12 @@ const js = resolve(process.env.GH_AW_JS);
 const binary = resolve(process.env.AGENTIC_JOB);
 const require = createRequire(import.meta.url);
 const workflow = readFileSync(join(root, '.github/workflows/apply.yml'), 'utf8');
+// As check.yml collects: a refused line is in the result, for check.
+function collect(file) {
+  const result = spawnSync(binary, ['collect', '--policy', file('policy.json'), '--outputs', file('outputs'),
+    '--collected', file('collected.json')], { encoding: 'utf8' });
+  return { ...result, status: result.status === 1 ? 0 : result.status };
+}
 const configStep = workflow.split('- name: Write the handlers\' configuration\n')[1]
   .split('        run: |\n')[1].split(/\n        [^ ]/)[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
@@ -58,8 +64,7 @@ test('agent-board proposals pass the pinned collector and bounded project check'
       ['routing alias', [{ ...proposal, target_repo: undefined, targetRepo: 'example/other' }], false],
     ]) {
       writeFileSync(file('outputs/outputs.jsonl'), items.map(item => JSON.stringify(item)).join('\n') + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), proposal.target_repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, collected.stderr);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -188,8 +193,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(policy.safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(item) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       assert.deepEqual(JSON.parse(readFileSync(file('collected.json'))).errors, [], name);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
@@ -261,8 +265,7 @@ test('checked updates reach the pinned handlers with only the listed fields', as
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type, repo, ...item }) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${type}: ${collected.stderr}`);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -321,8 +324,7 @@ test('checked reviewer and assignee requests name exactly the allowed logins', a
         writeFileSync(file('policy.json'), policyResult.stdout);
         writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
         writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type, repo, [key]: 7, [people]: logins }) + '\n');
-        const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-          file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+        const collected = collect(file);
         assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
         assert.deepEqual(JSON.parse(readFileSync(file('collected.json'))).errors, [], name);
         const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
@@ -384,8 +386,7 @@ test('a checked check run is posted with the pinned name on the pull request hea
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -431,11 +432,9 @@ function urlPolicy(file, name) {
 }
 
 test('links and build output survive gh-aw\'s URL filtering, a private key does not', () => {
-  const policies = [
-    urlPolicy('check.yml', 'Ingest the outputs with gh-aw\'s collector'),
-    urlPolicy('apply.yml', 'Apply the outputs with gh-aw\'s handlers'),
-  ];
-  assert.deepEqual(policies, ['allowed-or-code-region', 'allowed-or-code-region']);
+  // `collect` filters URLs as gh-aw does under this policy.
+  const policy = urlPolicy('apply.yml', 'Apply the outputs with gh-aw\'s handlers');
+  assert.equal(policy, 'allowed-or-code-region');
   const repo = 'owner/source';
   // The head of a `cargo metadata` that gh-aw's default policy cut (#401).
   const cargo = '{"packages":[{"name":"agentic-job","version":"0.0.3","id":"path+file:///home/u/agentic-job#0.0.3","license":"MIT OR Apache-2.0"}]}';
@@ -466,11 +465,9 @@ test('links and build output survive gh-aw\'s URL filtering, a private key does 
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type: 'add_comment', item_number: 7, body }) + '\n');
-      // As policy.yml passes it to check.yml and apply.yml.
+      // As policy.yml passes it to apply.yml.
       const domains = JSON.parse(policyResult.stdout).allowed_domains.join(',');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')],
-      { encoding: 'utf8', env: { ...process.env, GH_AW_ALLOWED_DOMAINS: domains } });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -485,7 +482,7 @@ test('links and build output survive gh-aw\'s URL filtering, a private key does 
       globalThis.core = { info() {}, warning() {}, debug() {}, error() {} };
       const { sanitizeContent } = require(join(js, 'sanitize_content.cjs'));
       const previous = [process.env.GH_AW_SAFE_OUTPUTS_URLS, process.env.GH_AW_ALLOWED_DOMAINS];
-      process.env.GH_AW_SAFE_OUTPUTS_URLS = policies[1];
+      process.env.GH_AW_SAFE_OUTPUTS_URLS = policy;
       process.env.GH_AW_ALLOWED_DOMAINS = domains;
       let posted;
       try {
@@ -533,8 +530,7 @@ test('checked pull request closures and sub-issue links reach only the named ite
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(item) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -614,8 +610,7 @@ test('a checked discussion is posted only in the category the bounds pin', async
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
         '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
@@ -699,8 +694,7 @@ test('a checked comment is hidden only on the triggering item, for a pinned reas
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       // As check.yml passes the triggering item, and nothing for `*`.
       const destination = target === '*' ? [] : ['--comment-repo', itemRepo, '--comment-target', target];
@@ -788,8 +782,7 @@ test('checked review comments, replies and resolved threads stay on the triggeri
       writeFileSync(file('policy.json'), policyResult.stdout);
       writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policyResult.stdout).safe_outputs));
       writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify(line) + '\n');
-      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
-        file('config.json'), join(root, 'safe-outputs/validation.json'), repo, file('collected.json')], { encoding: 'utf8' });
+      const collected = collect(file);
       assert.equal(collected.status, 0, `${name}: ${collected.stderr}`);
       // As check.yml passes the triggering item, and nothing for `*`.
       const destination = target === '*' ? [] : ['--comment-repo', itemRepo, '--comment-target', target];

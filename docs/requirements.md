@@ -116,8 +116,7 @@ a trusted ref, not an untrusted pull request's merge commit.
 The supervisor reads agent files with size bounds, as its own user with
 `--runner-home` (where the agent is the same user and could change
 anything `run` holds) and as the sandbox user without it, turns the working tree into a patch with hooks disabled, redacts evidence
-and gates uploads. `collect`, gh-aw's collector ported, or gh-aw's own for a type it does
-not port, sanitizes requests; `check` enforces
+and gates uploads. `collect`, gh-aw's collector ported, sanitizes requests; `check` enforces
 policy and parses the patch. The exit state is untrusted, and patch
 authorship is not validated
 ([#22](https://github.com/cgwalters-forge/agentic-job/issues/22)).

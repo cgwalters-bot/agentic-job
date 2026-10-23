@@ -226,7 +226,7 @@ and 2000 lines, with 160 KiB for all of it. With the caller's task,
 64 KiB at most, the file stays under the 256 KiB `run` accepts; a test
 holds the sum. Mentions, issue references and URLs are left as written:
 the task file notifies nobody, and they matter only when the agent
-copies text into an output, where gh-aw's collector handles them.
+copies text into an output, where `collect` handles them as gh-aw's collector does.
 Unicode normalization and homoglyph mapping, which gh-aw also does, are
 not done.
 

@@ -18,8 +18,8 @@ The form follows gh-aw's
 For the shared safe-output model, see its section 5 and the
 [safe-outputs reference](https://github.github.com/gh-aw/reference/safe-outputs/).
 The NDJSON format, text sanitization and handler semantics belong to gh-aw,
-not this specification. agentic-job uses its unmodified collector and handlers
-at the pin documented in [safe outputs](../docs/safe-outputs.md#what-is-gh-aws-and-why).
+not this specification. agentic-job uses its unmodified handlers, and a port
+of its collector held to it by fixtures, at the pin documented in [safe outputs](../docs/safe-outputs.md#what-is-gh-aws-and-why).
 The requirements below describe local restrictions and integration differences.
 
 ## 2. Terminology and conformance

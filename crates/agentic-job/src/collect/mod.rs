@@ -1,14 +1,12 @@
 //! `agentic-job collect`: what gh-aw's collector (`collect_ndjson_output.cjs`
-//! at the commit check.yml pins) makes of a hand-back's `outputs.jsonl`:
-//! check.yml's collector wherever it takes every type the policy allows,
-//! and a caller's off GitHub, which has no `actions/github-script` to run
-//! gh-aw's in. It writes the `{items, errors}` that `check --collected` reads.
+//! at the commit apply.yml pins gh-aw's handlers at) makes of a hand-back's
+//! `outputs.jsonl`, for check.yml and for a caller off GitHub. It writes
+//! the `{items, errors}` that `check --collected` reads.
 //!
-//! The requests it takes are those of [`TYPES`], each validated and its
-//! text sanitized as gh-aw's collector does for that type ([`sanitize`]).
-//! Any other type is an error, even where the policy allows it: passed on
-//! unvalidated, it would reach an applier unsanitized. Only `handback
-//! check`, which applies nothing, passes one on ([`Unported::PassOn`]). Fixtures that
+//! The requests it takes are those of [`TYPES`], every type a policy may
+//! allow, each validated and its text sanitized as gh-aw's collector does
+//! for that type ([`sanitize`]). Any other type is an error: passed on
+//! unvalidated, it would reach an applier unsanitized. Fixtures that
 //! gh-aw's collector wrote, on the same lines and configuration, hold the
 //! two to the same result (`tests/data/collect`).
 //!
@@ -35,9 +33,8 @@
 //! holds each to the policy, and refuses what it does not allow.
 //!
 //! It is also what `handback check` validates the requests with in the
-//! session, and check.yml's collector for a policy whose types are all
-//! [`TYPES`], so the agent is told of a field error in the words the
-//! check job refuses it in. [`field_guide`] tells it the fields.
+//! session, so the agent is told of a field error in the words the check
+//! job refuses it in. [`field_guide`] tells it the fields.
 
 pub(crate) mod markdown;
 mod sanitize;
@@ -65,26 +62,11 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub policy: PathBuf,
     /// The directory holding the handed-back outputs
-    #[arg(long, value_name = "DIR", required_unless_present = "unported")]
-    pub outputs: Option<PathBuf>,
+    #[arg(long, value_name = "DIR")]
+    pub outputs: PathBuf,
     /// Where to write what was collected, which `check --collected` reads
-    #[arg(long, value_name = "FILE", required_unless_present = "unported")]
-    pub collected: Option<PathBuf>,
-    /// Collect nothing: print, a line each, the types the policy allows
-    /// that this does not validate, for which gh-aw's collector is needed
-    #[arg(long, conflicts_with_all = ["outputs", "collected"])]
-    pub unported: bool,
-}
-
-/// What [`collect`] does with a request of a type the policy allows and
-/// [`TYPES`] does not hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unported {
-    /// Refuse it: passed on, it would reach an applier unsanitized.
-    Refuse,
-    /// Pass it on as it is, for `handback check`, where nothing is
-    /// applied and the check job's collector validates it later.
-    PassOn,
+    #[arg(long, value_name = "FILE")]
+    pub collected: PathBuf,
 }
 
 /// What the collector made of the requests: those it took, sanitized,
@@ -1560,15 +1542,6 @@ pub fn field_guide(name: &str) -> Option<String> {
     Some(fields.join(", "))
 }
 
-/// The types POLICY allows that [`collect`] does not validate.
-pub fn unported(policy: &Policy) -> Vec<&str> {
-    policy
-        .safe_outputs
-        .types()
-        .filter(|name| !TYPES.iter().any(|of| of.name == *name))
-        .collect()
-}
-
 /// The configuration the collector is given for POLICY: its
 /// `safe_outputs`, with its secondary pull request's `max` added to
 /// `create_pull_request`'s, since the collector counts a pull request of
@@ -1589,7 +1562,7 @@ pub fn config(policy: &Policy) -> Result<Map<String, Value>> {
 /// What [`collect`] makes of the `outputs.jsonl` in OUTPUTS under
 /// POLICY: none at all if there is none, as gh-aw's collector takes a
 /// missing file.
-pub fn collect_dir(outputs: &Path, policy: &Policy, unported: Unported) -> Result<Collected> {
+pub fn collect_dir(outputs: &Path, policy: &Policy) -> Result<Collected> {
     let path = outputs.join(OUTPUTS_FILE);
     let text = match files::read_regular(&path, MAX_OUTPUTS_BYTES) {
         Ok(bytes) => {
@@ -1598,12 +1571,9 @@ pub fn collect_dir(outputs: &Path, policy: &Policy, unported: Unported) -> Resul
         Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => bail!("{} {err}", path.display()),
     };
-    Ok(collect(
-        &text,
-        &config(policy)?,
-        &|host| policy.keeps_link_to(host),
-        unported,
-    ))
+    Ok(collect(&text, &config(policy)?, &|host| {
+        policy.keeps_link_to(host)
+    }))
 }
 
 /// Whether a `noop`'s MESSAGE is an agent trying the tool out.
@@ -1625,7 +1595,6 @@ pub fn collect(
     text: &str,
     config: &Map<String, Value>,
     keeps_link: &dyn Fn(&str) -> bool,
-    unported: Unported,
 ) -> Collected {
     let config: Map<String, Value> = config
         .iter()
@@ -1638,7 +1607,7 @@ pub fn collect(
             continue;
         }
         let taken = &collected.items;
-        match request(index + 1, line_text, &config, taken, keeps_link, unported) {
+        match request(index + 1, line_text, &config, taken, keeps_link) {
             Ok(Some(item)) => collected.items.push(item),
             Ok(None) => {}
             Err(error) => collected.errors.push(error),
@@ -1655,7 +1624,6 @@ fn request(
     config: &Map<String, Value>,
     taken: &[Map<String, Value>],
     keeps_link: &dyn Fn(&str) -> bool,
-    unported: Unported,
 ) -> Result<Option<Map<String, Value>>, String> {
     let item: Map<String, Value> = match serde_json::from_str(text) {
         Ok(Value::Object(item)) => item,
@@ -1694,12 +1662,8 @@ fn request(
             js_number(max)
         ));
     }
+    // A policy allows no such type; a configuration written by hand might.
     let Some(of) = of else {
-        if unported == Unported::PassOn {
-            let mut item = item;
-            item.insert("type".into(), kind.into());
-            return Ok(Some(item));
-        }
         let known: Vec<&str> = TYPES.iter().map(|of| of.name).collect();
         return Err(format!(
             "Line {line}: Unsupported output type '{kind}': agentic-job collect validates only {}",
@@ -1711,13 +1675,8 @@ fn request(
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
-    let (Some(outputs), Some(path)) = (&args.outputs, &args.collected) else {
-        for name in unported(&policy) {
-            println!("{name}");
-        }
-        return Ok(Exit::Success);
-    };
-    let collected = collect_dir(outputs, &policy, Unported::Refuse)?;
+    let path = &args.collected;
+    let collected = collect_dir(&args.outputs, &policy)?;
     let json = serde_json::to_string(&collected).context("writing what was collected")?;
     std::fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))?;
     for error in &collected.errors {

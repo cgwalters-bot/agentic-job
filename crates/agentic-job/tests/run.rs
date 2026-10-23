@@ -52,8 +52,6 @@ const PROXY_VARS: [&str; 6] = [
 ];
 const DEAD_PROXY: &str = "http://127.0.0.1:1";
 const LIMITS: &str = "[limits]\ntimeout-minutes = 5\nmax-requests = 50\n";
-/// Where gh-aw's scripts are, for the collector.
-const GH_AW_JS_VAR: &str = "GH_AW_JS";
 /// The places a workflow uploads from.
 const PUBLISHED: [&str; 3] = ["out/run", "out/transcript.tar.zst", "out/safe-outputs"];
 /// The session the fake agent plays in place of its built-in one, under
@@ -951,54 +949,28 @@ fn api_key(mock: &MockProvider, provider: Provider) -> String {
     )
 }
 
-/// gh-aw's collector on the requests of a hand-back, if this machine
-/// has it; else its result for requests that need no sanitizing.
+/// What check.yml's collector makes of the requests of a hand-back.
 fn collected(job: &Job) -> PathBuf {
     let result = job.path("agent_output.json");
-    let outputs = job.path("out/safe-outputs/outputs.jsonl");
-    let policy = job.json("policy.json");
-    match std::env::var_os(GH_AW_JS_VAR) {
-        Some(js) => {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-            // As check.yml configures it: the secondary pull request is
-            // counted with the run's own.
-            let mut config = policy["safe_outputs"].clone();
-            if let Some(more) = policy["secondary_pull_request"]["max"].as_u64() {
-                let max = config["create_pull_request"]["max"].as_u64().unwrap();
-                config["create_pull_request"]["max"] = json!(max + more);
-            }
-            job.write("collector.json", &config.to_string());
-            let out = Command::new("node")
-                .arg(root.join("tests/corpus/collect.cjs"))
-                .arg(js)
-                .arg(&outputs)
-                .arg(job.path("collector.json"))
-                .arg(root.join("../../safe-outputs/validation.json"))
-                .arg(policy["repo"].as_str().unwrap())
-                .arg(&result)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "gh-aw's collector: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        None => {
-            let items: Vec<Value> = std::fs::read_to_string(&outputs)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            std::fs::write(&result, json!({"items": items, "errors": []}).to_string()).unwrap();
-        }
-    }
+    let out = Command::new(BIN)
+        .arg("collect")
+        .args(["--policy", "policy.json", "--outputs", "out/safe-outputs"])
+        .arg("--collected")
+        .arg(&result)
+        .current_dir(&job.dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "collect: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     result
 }
 
 /// The whole path of a change: the agent edits the tree and words its
-/// pull request, `run` hands that back as gh-aw's safe outputs, gh-aw's
-/// collector reads the requests, and `check` accepts the hand-back. The
+/// pull request, `run` hands that back as gh-aw's safe outputs, `collect`
+/// reads the requests, and `check` accepts the hand-back. The
 /// commit's message is the request's title and body, and nothing in the
 /// body can end the message early or start a patch of its own.
 #[test]

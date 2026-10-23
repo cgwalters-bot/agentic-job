@@ -6,7 +6,7 @@
 //! keeps in its own repository. A request outside them is refused here,
 //! on a machine the agent never touches and before the agent's machine
 //! starts, and what is within them becomes the run's [`Policy`]: the one
-//! thing `run`, gh-aw's collector and `check` all read.
+//! thing `run`, `collect` and `check` all read.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

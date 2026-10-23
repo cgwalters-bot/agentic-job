@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::check::replacement::Replacement;
 use crate::check::{self, OUTPUTS_FILE};
-use crate::collect::{self, Unported};
+use crate::collect;
 use crate::config;
 use crate::exit::Exit;
 use crate::files::ReadError;
@@ -313,8 +313,6 @@ fn fix_for(reason: &str, collector: bool) -> &'static str {
 /// `collect`, on a copy of the checkout, since it commits there, then
 /// gh-aw's collector as [`collect`](crate::collect) ports it, then
 /// `check`'s `check_outputs`, then the scan of the final gate's patterns.
-/// A type the collector does not validate is passed on as it is: the
-/// check job gives it to gh-aw's collector (docs/safe-outputs.md).
 fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     let mut report = Report::default();
     let policy = &run.policy;
@@ -413,7 +411,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
         }
         if outputs.is_dir() {
             let path = scratch.path().join("collected.json");
-            let collected = collect::collect_dir(&outputs, policy, Unported::PassOn)?;
+            let collected = collect::collect_dir(&outputs, policy)?;
             std::fs::write(&path, serde_json::to_string(&collected)?)?;
             report
                 .notes
@@ -1079,10 +1077,9 @@ mod tests {
         if !outputs.is_dir() {
             return Vec::new();
         }
-        // As check.yml collects for a policy whose types are all ported.
-        assert_eq!(collect::unported(&run.policy), Vec::<&str>::new());
+        // As check.yml collects.
         let collected = copy.path().join("collected.json");
-        let result = collect::collect_dir(&outputs, &run.policy, Unported::Refuse).unwrap();
+        let result = collect::collect_dir(&outputs, &run.policy).unwrap();
         std::fs::write(&collected, serde_json::to_string(&result).unwrap()).unwrap();
         check::check_outputs(&outputs, &collected, &run.policy)
             .unwrap()

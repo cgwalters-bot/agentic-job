@@ -26,25 +26,23 @@ for repository bounds, job-token limits and default-branch environment storage.
 
 ## What is gh-aw's, and why
 
-Two scripts are run as gh-aw ships them: its collector
-(`collect_ndjson_output.cjs`), which validates and sanitizes the
-requests, and its handlers (`safe_output_handler_manager.cjs`), which
-act on them. Both come from the action `github/gh-aw/actions/setup`,
-pinned at commit `462ed682857c4ab64d40f2c85e3738fa27834839`
-(v0.91.12-7) in every place that uses it. Nothing of gh-aw is copied
-into this repository. The one reimplementation is
-[`collect`](#off-github), a port of the collector held to it by
-fixtures gh-aw's collector wrote. The rules an agent is held to must be
-the ones it can check before its session ends, and gh-aw's collector
-cannot run on the agent's machine: so `handback check` runs `collect`,
-and so does the check job, for every run whose policy allows only types
-`collect` ports. A run allowing any other type is still collected by
-gh-aw's collector.
+One script is run as gh-aw ships it: its handlers
+(`safe_output_handler_manager.cjs`), which act on the requests. They
+come from the action `github/gh-aw/actions/setup`, pinned at commit
+`462ed682857c4ab64d40f2c85e3738fa27834839` (v0.91.12-7) in every place
+that uses it. Nothing of gh-aw is copied into this repository. Its
+collector (`collect_ndjson_output.cjs`), which validates and sanitizes
+the requests, is reimplemented as [`collect`](#off-github), held to it
+by fixtures gh-aw's collector wrote at that commit. The rules an agent
+is held to must be the ones it can check before its session ends, and
+gh-aw's collector cannot run on the agent's machine: so `handback check`
+runs `collect`, and so does the check job.
 
-The collector adds a `report_incomplete` item of its own to a result
-holding nothing but `missing_tool` and `missing_data`, or nothing at all.
-No run may hand one back: check leaves out exactly that last item, refuses
-any other, and apply's handlers get only the requests check accepted.
+gh-aw's collector adds a `report_incomplete` item of its own to a result
+holding nothing but `missing_tool` and `missing_data`, or nothing at all;
+`collect` does not. No run may hand one back: check leaves out exactly
+that last item, refuses any other, and apply's handlers get only the
+requests check accepted.
 
 Both run with gh-aw's
 [`safe-outputs.urls`](https://github.github.com/gh-aw/reference/glossary/#url-sanitization-policy-safe-outputsurls)
@@ -67,7 +65,7 @@ and GitHub fetches images through its own proxy. The pinned sanitizer
 has no setting that keeps every https link, and no wildcard for every
 domain, so `policy` gives it, as
 [`safe-outputs.allowed-domains`](https://github.github.com/gh-aw/reference/safe-outputs/)
-(`GH_AW_ALLOWED_DOMAINS` to the collector and the handlers), every
+(`GH_AW_ALLOWED_DOMAINS` to the handlers; `collect` keeps the same), every
 top-level domain in IANA's list, whose subdomains it keeps.
 `just refresh-top-level-domains` updates the list; a link to a domain
 newer than it, to an address or to a host of one label is still
@@ -948,9 +946,7 @@ clone URLs. The agent can change that file, and so mislead only itself:
 the check job reads the policy the policy job printed. The requests are
 validated by [`collect`](#off-github), which fixtures hold to gh-aw's
 collector, so a missing or malformed field is refused in the session in
-the words the check job would use. A type `collect` does not
-take is passed on as written, and its fields are still found wrong only
-by gh-aw's collector after the session. `handback guide` lists each
+the words the check job would use. `handback guide` lists each
 allowed type's fields from the same table.
 
 For a `push_to_pull_request_branch` request without `message`, `run` fills
@@ -965,10 +961,9 @@ check job.
 ## The check, in two halves
 
 The check job runs on a machine the agent never touched, with read
-access only. First the collector, `agentic-job collect` or, for a policy
-allowing a type it does not port (`agentic-job collect --policy FILE
---unported` lists them), gh-aw's: which types exist, how many of each,
-the fields of each, and the sanitizing of their text. Then
+access only. First the collector, `agentic-job collect`: which types
+exist, how many of each, the fields of each, and the sanitizing of their
+text. Then
 
 ```text
 agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE]
@@ -1053,14 +1048,15 @@ puts its files there afterwards. Each script runs in an
 `setupGlobals(core, github, context, exec, io, getOctokit)` from
 `setup_globals.cjs` and then the script's `main()`.
 
-gh-aw's collector, where check.yml runs it, reads three paths from its
-environment:
+gh-aw's collector would read three paths from its environment:
 `GH_AW_SAFE_OUTPUTS` (the agent's `outputs.jsonl`),
 `GH_AW_SAFE_OUTPUTS_CONFIG_PATH` (`.safe_outputs` of `policy.json`, with a
 secondary pull request's `max` added to `create_pull_request`'s) and
 `GH_AW_VALIDATION_CONFIG_PATH` (`validation.json`). It writes
 `/tmp/gh-aw/agent_output.json`, `{items, errors}`, and succeeds whatever
-it refused, so the job fails on a non-empty `errors` itself.
+it refused. check.yml runs `collect` in its place, which writes the same
+file and exits 1 where it refused a line; either way, the job fails on a
+non-empty `errors` itself.
 
 The handlers read `GH_AW_AGENT_OUTPUT`,
 `GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG` (JSON, in the variable itself),
@@ -1070,7 +1066,7 @@ base branch, whole and with credentials persisted, since they push with
 it; git's `user.name` and `user.email` (`git am` keeps the patch's
 author and needs a committer); and the token of their step for the API.
 Comment-only results need the API token, not a checkout or a fetched base.
-The configuration is the collector's with settings added:
+The configuration is `.safe_outputs` of `policy.json` with settings added:
 `create_pull_request` gets `signed_commits: false` (a signed push is
 made through the API as the token's owner), `fallback_as_issue: false`,
 `preserve_branch_name: true`, `auto_close_issue: false` (apply supplies the
@@ -1099,28 +1095,27 @@ is escaped as `run` escapes the agent's log
 same, since `check` cannot refuse `##[` in file content the preview
 prints too.
 
-CI drives both scripts with the scripted agent, and
+CI drives `collect` and the handlers with the scripted agent, and
 [`safe-outputs-probe.yml`](../.github/workflows/safe-outputs-probe.yml)
-does it on two fixtures when dispatched. Deployment evidence is in the
+drives gh-aw's own collector and handlers on two fixtures when dispatched. Deployment evidence is in the
 [README](../README.md#what-is-real-today).
 
 ## Off GitHub
 
-`policy` and `check` need no forge. gh-aw's collector and handlers run
+`policy`, `collect` and `check` need no forge; gh-aw's handlers run
 under `actions/github-script`. A caller that is not on GitHub (Forgejo,
-later GitLab) runs instead
+later GitLab) runs
 
 ```text
 agentic-job collect --policy FILE --outputs DIR --collected FILE
 ```
 
 on the checking machine, then `check` with the same `--collected`, as
-check.yml does on GitHub where it can ([above](#the-check-in-two-halves)). It
+check.yml does on GitHub ([above](#the-check-in-two-halves)). It
 reads `outputs.jsonl` (at most 1 MiB, never through a link) and writes
 the `{items, errors}` gh-aw's collector would, given the policy's
-`safe_outputs` and the URL policy and allowed hosts check.yml gives it.
-It exits 1 if it refused a line,
-as check.yml fails when gh-aw's collector did.
+`safe_outputs`, with gh-aw's URL policy `allowed-or-code-region` and the
+policy's allowed hosts. It exits 1 if it refused a line.
 
 It takes every type a policy may allow, the 24 of
 `safe-outputs/validation.json`: their fields validated and their text

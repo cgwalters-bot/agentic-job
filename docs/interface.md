@@ -18,7 +18,6 @@ builds that source. `build-binary: true` forces a build.
 | `sandbox check [--record\|--unless-passed]` | the runner's user | Probes the sandbox as the sandbox user, each probe with a positive control. `--record` (secure-host's) leaves a record when all probes pass, and `--unless-passed` (run's) probes nothing when it finds that record, against the same configuration, with nothing having entered the sandbox user since ([sandbox-check.md](sandbox-check.md)). |
 | `run --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent in the sandbox and takes what it hands back. |
 | `collect --policy FILE --outputs DIR --collected FILE` | anyone | Validates and sanitizes the handed-back requests as gh-aw's collector does, in check.yml and for a caller off GitHub ([safe-outputs.md](safe-outputs.md#off-github)). Exit 1 if it refused a line. |
-| `collect --policy FILE --unported` | anyone | Prints, a line each, the types the policy allows that `collect` does not validate; check.yml runs gh-aw's collector if there is any. |
 | `check --policy FILE --outputs DIR --collected FILE [--report FILE]` | anyone | Checks handed-back outputs and patch against the policy. |
 | `apply --forge forgejo --server URL --repo OWNER/NAME --policy FILE --checked DIR --run-url URL [--comment-target N] [--push-repo OWNER/NAME]` | the apply job | Publishes checked comments, and a pull request from the bounds' fork, to Forgejo with `FORGEJO_TOKEN` ([safe outputs](safe-outputs.md#publishing-to-forgejo)). |
 | `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
@@ -52,10 +51,10 @@ and the check on another machine
 [lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock) its limits.
 
 `check` is half the check on purpose. Which request types exist, how
-many of each, and the sanitizing of their text are gh-aw's code, used as
-it is. `--collected` is what gh-aw's collector made of the outputs, and
-is given by path so that it is never taken from what the agent's machine
-uploaded; off GitHub, `collect` writes it. [safe-outputs.md](safe-outputs.md) has both halves.
+many of each, and the sanitizing of their text are gh-aw's rules, which
+`collect` ports and is held to by fixtures. `--collected` is what
+`collect` made of the outputs, and is given by path so that it is never
+taken from what the agent's machine uploaded. [safe-outputs.md](safe-outputs.md) has both halves.
 
 `config` exists because a workflow gets a run's settings as strings from
 whoever called it. Each setting is the value of its one key and is never
@@ -101,7 +100,7 @@ one.
 ## Files written
 
 `policy` prints `policy.json`: the request as allowed, the clone URL for
-`run`, and the configuration gh-aw's collector and handlers run with.
+`run`, and the configuration `collect` and gh-aw's handlers run with.
 
 `run` writes under `--out`, in the names and schemas of the tree this
 replaces so that its readers keep working: `run/` (`summary.json`,

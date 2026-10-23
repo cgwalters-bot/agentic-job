@@ -1,11 +1,12 @@
 //! `agentic-job check`: check handed-back outputs and the patch against
 //! the policy. Step 4 of docs/plan.md.
 //!
-//! This is the second half of the check. The first is gh-aw's collector
-//! (`collect_ndjson_output.cjs`), which knows the request types, counts
-//! them, and validates and sanitizes their fields; it is run before this,
-//! configured with the policy's `safe_outputs`, and its result is given
-//! here with `--collected`. Nothing of it is done again. What is done
+//! This is the second half of the check. The first is the collector,
+//! `agentic-job collect`, gh-aw's (`collect_ndjson_output.cjs`) ported,
+//! which knows the request types, counts them, and validates and
+//! sanitizes their fields; it is run before this, configured with the
+//! policy's `safe_outputs`, and its result is given here with
+//! `--collected`. Nothing of it is done again. What is done
 //! here is what gh-aw leaves to the workflow it generates, or does not do
 //! at all: the hand-back holds only the files it may, within their sizes
 //! and free of private keys (other secret-shaped strings are warnings: see

@@ -22,7 +22,7 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 /// The types and fields are gh-aw's, read at test time from the
-/// generated `validation.json` the GitHub path gives gh-aw's collector:
+/// generated `validation.json`, regenerated from gh-aw's pinned source:
 /// a regeneration that changes them fails here. Fields are in the order
 /// gh-aw validates them in, which decides the refusal reported.
 #[test]
@@ -89,12 +89,7 @@ fn matches_gh_aws_collector() {
             items.pop();
         }
         let errors: Vec<String> = serde_json::from_value(want.remove("errors").unwrap()).unwrap();
-        let got = collect(
-            &read("outputs.jsonl"),
-            &config,
-            &keeps_public,
-            Unported::Refuse,
-        );
+        let got = collect(&read("outputs.jsonl"), &config, &keeps_public);
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(got.errors, errors, "{name}: errors");
         assert_eq!(got.items.len(), items.len(), "{name}: how many items");
@@ -128,7 +123,7 @@ fn refusals_of_its_own() {
         ),
     ];
     for (line, want) in cases {
-        let got = collect(line, &config, &keeps_public, Unported::Refuse);
+        let got = collect(line, &config, &keeps_public);
         assert_eq!(got.items, Vec::<Map<String, Value>>::new(), "{line}");
         assert_eq!(got.errors, [want], "{line}");
     }
@@ -171,9 +166,8 @@ fn command_writes_the_result() {
     let collected = dir.path().join("collected.json");
     let args = Args {
         policy: policy_path,
-        outputs: Some(outputs.clone()),
-        collected: Some(collected.clone()),
-        unported: false,
+        outputs: outputs.clone(),
+        collected: collected.clone(),
     };
     let read = || -> Value {
         serde_json::from_str(&std::fs::read_to_string(&collected).unwrap()).unwrap()
@@ -208,32 +202,7 @@ fn command_writes_the_result() {
     assert!(err.contains("over 1048576"), "{err}");
 }
 
-/// `handback check` passes on, unvalidated, what check.yml would give
-/// gh-aw's collector; counting and the policy's types still apply.
-#[test]
-fn unported_types_pass_on_only_for_the_session() {
-    let config = object(json!({"dispatch_workflow": {"max": 1}, "noop": {"max": 1}}));
-    let text = "{\"type\":\"dispatch-workflow\",\"workflow_name\":\"x\",\"extra\":1}\n\
-                {\"type\":\"dispatch_workflow\"}\n\
-                {\"type\":\"create_issue\",\"title\":\"t\"}\n";
-    let got = collect(text, &config, &keeps_public, Unported::PassOn);
-    assert_eq!(
-        got.items,
-        [object(
-            json!({"type": "dispatch_workflow", "workflow_name": "x", "extra": 1})
-        )]
-    );
-    assert_eq!(
-        got.errors,
-        [
-            "Line 2: Too many items of type 'dispatch_workflow'. Maximum allowed: 1.",
-            "Line 3: Unexpected output type 'create_issue'. Expected one of: dispatch_workflow, noop",
-        ]
-    );
-}
-
-/// The collector is told of a secondary pull request in its count, and
-/// check.yml of the types it must leave to gh-aw's collector.
+/// The collector is told of a secondary pull request in its count.
 #[test]
 fn the_policy_as_the_collector_takes_it() {
     let mut policy = crate::policy::tests::policy();
@@ -253,12 +222,4 @@ fn the_policy_as_the_collector_takes_it() {
         protected_paths: Vec::new(),
     });
     assert_eq!(max(&config(&policy).unwrap()), json!(2));
-
-    for name in crate::policy::OUTPUT_TYPES {
-        policy.safe_outputs.others.insert(
-            (*name).to_owned(),
-            serde_json::from_value(json!({"max": 1})).unwrap(),
-        );
-    }
-    assert_eq!(unported(&policy), Vec::<&str>::new());
 }

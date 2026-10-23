@@ -117,8 +117,8 @@ binary; the tests are not. Regenerate the identifiers with
 embedded.
 
 `safe-outputs/` holds integration scripts, derived validation rules and
-fixtures. gh-aw's collector and handlers come from its pinned setup
-action, not a vendored copy. Regenerate the rules with
+fixtures. gh-aw's handlers come from its pinned setup action, not a
+vendored copy; `collect` is held to its collector at the same commit. Regenerate the rules with
 `node safe-outputs/validation.mjs GH_AW_CHECKOUT` when changing that pin,
 and `collect`'s parity fixtures with `just collect-fixtures GH_AW_JS`.
 

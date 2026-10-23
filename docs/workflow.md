@@ -68,9 +68,8 @@ separate jobs on separate machines. The apply job's additional checks are
    still passes no inference key or MCP credential, and refuses a
    private caller or target and `fake-profile` there.
 3. **check**, on a machine the agent never touched. `agentic-job collect`
-   (gh-aw's collector, for a type it does not port) validates and sanitizes
-   the producer's requests, then `agentic-job check` holds them and the
-   patch to the policy.
+   validates and sanitizes the producer's requests, as gh-aw's collector
+   would, then `agentic-job check` holds them and the patch to the policy.
 4. **detect**, inside the check workflow on a separate read-only machine,
    optionally inspects accepted proposals before releasing their artifact ID.
 5. **apply**, on a machine of its own, uses a write credential.
@@ -595,8 +594,9 @@ Read this before relying on it.
   yet, so CI has only run the pull request and push paths.
 - Not tried at all: a network join in a composed caller other than
   `review.yml`, and applying a `create_issue`:
-  that type is checked through gh-aw's collector and `check` in CI
-  (the `corpus` job), and its handler has not run from this workflow.
+  that type is checked through `collect` and `check` in CI (the
+  collector's fixtures, and gh-aw's collector in the `corpus` job), and
+  its handler has not run from this workflow.
 
 ## CI runner use
 

@@ -19,7 +19,7 @@ test-safe-output-handlers:
 # The parity fixtures of `collect` (crates/agentic-job/tests/data/collect):
 # what gh-aw's collector makes of each case's lines and configuration,
 # with links kept as `policy` keeps them. GH_AW_JS is actions/setup/js of
-# gh-aw at the commit check.yml pins its setup action at.
+# gh-aw at the commit apply.yml pins its setup action at.
 collect-fixtures gh-aw-js:
     #!/usr/bin/env bash
     set -euo pipefail

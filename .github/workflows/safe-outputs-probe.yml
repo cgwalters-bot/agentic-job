@@ -1,7 +1,8 @@
 # Proves that gh-aw's own collector and handlers can be driven from a
 # workflow gh-aw did not generate, on the safe-outputs artifact of a real
 # run (safe-outputs/fixtures/, since artifacts expire). It is the shape the
-# check and apply jobs of the reusable workflow take.
+# apply job of the reusable workflow takes; its check job runs
+# `agentic-job collect`, which ports gh-aw's collector, in place of it.
 #
 # What it makes is scratch: it deletes every branch under probe/ and closes
 # the pull request and the issue it opened. Where Actions may not open pull
@@ -35,8 +36,8 @@ env:
   HANDBACK_AUTHOR: agent <agent@localhost>
 
 jobs:
-  # What the check job does before `agentic-job check`: gh-aw's ingestion,
-  # which validates each output against its type's rules, enforces the
+  # gh-aw's ingestion, which `agentic-job collect` ports for the check
+  # job: it validates each output against its type's rules, enforces the
   # counts of config.json and sanitizes the text.
   check:
     runs-on: ubuntu-24.04

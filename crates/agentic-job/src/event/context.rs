@@ -7,7 +7,7 @@
 //! for structure, and fenced with more backticks than any run it holds,
 //! so that nothing in it can end the fence early. Mentions, references
 //! and URLs are left as written: they matter when the agent copies text
-//! into an output, and gh-aw's collector handles them there.
+//! into an output, and `collect` handles them there.
 
 use std::path::Path;
 use std::sync::LazyLock;
