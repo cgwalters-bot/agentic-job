@@ -114,8 +114,8 @@ Event text written to the task file has its control characters, format
 characters, ANSI escapes and line separators stripped. It is then capped and
 fenced ([`context.rs`](../crates/agentic-job/src/event/context.rs)). URLs
 and mentions are left as written there. gh-aw's full sanitizer is applied
-to outputs instead: gh-aw's own collector on GitHub, and a Rust port of it
-elsewhere.
+to outputs instead: a Rust port of gh-aw's collector, or gh-aw's own on
+GitHub for a type the port does not take.
 
 ## Tools available to the agent
 

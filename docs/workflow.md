@@ -57,9 +57,10 @@ separate jobs on separate machines. The apply job's additional checks are
    ([requirements.md](requirements.md#actors-and-trust)); the workflow
    still passes no inference key or MCP credential, and refuses a
    private caller or target and `fake-profile` there.
-3. **check**, on a machine the agent never touched. gh-aw's collector
-   validates and sanitizes the producer's requests, then `agentic-job check`
-   holds them and the patch to the policy.
+3. **check**, on a machine the agent never touched. `agentic-job collect`
+   (gh-aw's collector, for a type it does not port) validates and sanitizes
+   the producer's requests, then `agentic-job check` holds them and the
+   patch to the policy.
 4. **detect**, inside the check workflow on a separate read-only machine,
    optionally inspects accepted proposals before releasing their artifact ID.
 5. **apply**, on a machine of its own, uses a write credential.

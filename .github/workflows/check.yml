@@ -161,9 +161,6 @@ jobs:
             safe-outputs
             workflow
           persist-credentials: false
-      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
-        with:
-          destination: ${{ runner.temp }}/gh-aw/actions
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }},${{ fromJSON(inputs.policy).policy-artifact-id }}
@@ -180,16 +177,47 @@ jobs:
         with:
           name: ${{ fromJSON(inputs.policy).proposals-artifact }}
           path: .agentic-job/safe-outputs
+      # agentic-job's own collector, the one `handback check` ran in the
+      # session, so the agent was told of a refusal in these words. A type
+      # it does not port yet leaves the run to gh-aw's, which it is held
+      # to by fixtures (docs/safe-outputs.md#off-github). The types are
+      # the policy's, never the agent's.
+      - name: Choose the collector
+        id: collector
+        run: |
+          chmod +x "$JOB_DIR/agentic-job"
+          unported=$("$JOB_DIR/agentic-job" collect --policy "$JOB_DIR/policy.json" --unported)
+          if [ -z "$unported" ]; then
+            echo 'collector=agentic-job' >> "$GITHUB_OUTPUT"
+          else
+            echo "gh-aw's collector takes this run's requests: agentic-job collect does not validate $(paste -sd, <<< "$unported")"
+            echo 'collector=gh-aw' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
+        if: ${{ steps.collector.outputs.collector == 'gh-aw' }}
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
       # The collector counts a policy's secondary pull request with the
       # run's own, as one type: it is given their sum, and check counts each
       # against its own `max`. Apply's handlers get the policy's own.
+      # gh-aw's setup empties GH_AW_TMP, so this comes after it, and
+      # empties it as well where setup did not run.
       - name: Write the collector's configuration
         run: |
-          chmod +x "$JOB_DIR/agentic-job"
+          rm -rf "$GH_AW_TMP"
+          mkdir -p "$GH_AW_TMP"
           jq .safe_outputs "$JOB_DIR/policy.json" > "$GH_AW_TMP/config.json"
           jq '.secondary_pull_request.max as $more | .safe_outputs
             | if $more then .create_pull_request.max += $more else . end' "$JOB_DIR/policy.json" > "$RUNNER_TEMP/collector.json"
+      # Exit 1 is a refused line, written to the result like any other:
+      # the step after this one fails on it, as on gh-aw's collector's.
+      - name: Ingest the outputs with agentic-job collect
+        if: ${{ steps.collector.outputs.collector == 'agentic-job' }}
+        run: |
+          "$JOB_DIR/agentic-job" collect --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
+            --collected "$GH_AW_TMP/agent_output.json" || test $? = 1
       - name: Ingest the outputs with gh-aw's collector
+        if: ${{ steps.collector.outputs.collector == 'gh-aw' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_SAFE_OUTPUTS: ${{ env.JOB_DIR }}/safe-outputs/outputs.jsonl

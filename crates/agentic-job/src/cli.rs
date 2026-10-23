@@ -337,6 +337,24 @@ mod tests {
         }
     }
 
+    /// Not in the plan's table: check.yml asks which types `collect`
+    /// leaves to gh-aw's collector, then collects, never both at once.
+    #[test]
+    fn collect_lists_or_collects() {
+        Cli::try_parse_from(["agentic-job", "collect", "--policy", "p", "--unported"]).unwrap();
+        for bad in [
+            &["collect", "--policy", "p"][..],
+            &["collect", "--policy", "p", "--outputs", "d"],
+            &["collect", "--policy", "p", "--unported", "--outputs", "d"],
+            &["collect", "--policy", "p", "--unported", "--collected", "c"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["agentic-job"].iter().chain(bad)).is_err(),
+                "{bad:?} parsed"
+            );
+        }
+    }
+
     #[test]
     fn bad_command_lines_are_refused() {
         let cases: &[&[&str]] = &[

@@ -1,7 +1,8 @@
 //! `agentic-job collect`: what gh-aw's collector (`collect_ndjson_output.cjs`
-//! at the commit check.yml pins) makes of a hand-back's `outputs.jsonl`,
-//! for a caller off GitHub, which has no `actions/github-script` to run
-//! it in. It writes the `{items, errors}` that `check --collected` reads.
+//! at the commit check.yml pins) makes of a hand-back's `outputs.jsonl`:
+//! check.yml's collector wherever it takes every type the policy allows,
+//! and a caller's off GitHub, which has no `actions/github-script` to run
+//! gh-aw's in. It writes the `{items, errors}` that `check --collected` reads.
 //!
 //! The requests it takes are those of [`TYPES`], each validated and its
 //! text sanitized as gh-aw's collector does for that type ([`sanitize`]).
@@ -25,8 +26,9 @@
 //! drop.
 //!
 //! It is also what `handback check` validates the requests with in the
-//! session, so the agent is told of a field error in the words gh-aw's
-//! collector refuses it in. [`field_guide`] tells it the fields.
+//! session, and check.yml's collector for a policy whose types are all
+//! [`TYPES`], so the agent is told of a field error in the words the
+//! check job refuses it in. [`field_guide`] tells it the fields.
 
 pub(crate) mod markdown;
 mod sanitize;
@@ -53,11 +55,15 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub policy: PathBuf,
     /// The directory holding the handed-back outputs
-    #[arg(long, value_name = "DIR")]
-    pub outputs: PathBuf,
+    #[arg(long, value_name = "DIR", required_unless_present = "unported")]
+    pub outputs: Option<PathBuf>,
     /// Where to write what was collected, which `check --collected` reads
-    #[arg(long, value_name = "FILE")]
-    pub collected: PathBuf,
+    #[arg(long, value_name = "FILE", required_unless_present = "unported")]
+    pub collected: Option<PathBuf>,
+    /// Collect nothing: print, a line each, the types the policy allows
+    /// that this does not validate, for which gh-aw's collector is needed
+    #[arg(long, conflicts_with_all = ["outputs", "collected"])]
+    pub unported: bool,
 }
 
 /// What [`collect`] does with a request of a type the policy allows and
@@ -557,6 +563,15 @@ pub fn field_guide(name: &str) -> Option<String> {
     Some(fields.join(", "))
 }
 
+/// The types POLICY allows that [`collect`] does not validate.
+pub fn unported(policy: &Policy) -> Vec<&str> {
+    policy
+        .safe_outputs
+        .types()
+        .filter(|name| !TYPES.iter().any(|of| of.name == *name))
+        .collect()
+}
+
 /// The configuration the collector is given for POLICY: its
 /// `safe_outputs`, with its secondary pull request's `max` added to
 /// `create_pull_request`'s, since the collector counts a pull request of
@@ -699,7 +714,12 @@ fn request(
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
-    let (outputs, path) = (&args.outputs, &args.collected);
+    let (Some(outputs), Some(path)) = (&args.outputs, &args.collected) else {
+        for name in unported(&policy) {
+            println!("{name}");
+        }
+        return Ok(Exit::Success);
+    };
     let collected = collect_dir(outputs, &policy, Unported::Refuse)?;
     let json = serde_json::to_string(&collected).context("writing what was collected")?;
     std::fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))?;

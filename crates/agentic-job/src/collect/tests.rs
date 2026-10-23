@@ -150,8 +150,9 @@ fn command_writes_the_result() {
     let collected = dir.path().join("collected.json");
     let args = Args {
         policy: policy_path,
-        outputs: outputs.clone(),
-        collected: collected.clone(),
+        outputs: Some(outputs.clone()),
+        collected: Some(collected.clone()),
+        unported: false,
     };
     let read = || -> Value {
         serde_json::from_str(&std::fs::read_to_string(&collected).unwrap()).unwrap()
@@ -210,7 +211,8 @@ fn unported_types_pass_on_only_for_the_session() {
     );
 }
 
-/// The collector is told of a secondary pull request in its count.
+/// The collector is told of a secondary pull request in its count, and
+/// check.yml of the types it must leave to gh-aw's collector.
 #[test]
 fn the_policy_as_the_collector_takes_it() {
     let mut policy = crate::policy::tests::policy();
@@ -230,4 +232,14 @@ fn the_policy_as_the_collector_takes_it() {
         protected_paths: Vec::new(),
     });
     assert_eq!(max(&config(&policy).unwrap()), json!(2));
+
+    policy.safe_outputs.others.clear();
+    assert_eq!(unported(&policy), Vec::<&str>::new());
+    for name in ["add_labels", "noop"] {
+        policy.safe_outputs.others.insert(
+            name.to_owned(),
+            serde_json::from_value(json!({"max": 1})).unwrap(),
+        );
+    }
+    assert_eq!(unported(&policy), ["add_labels"]);
 }

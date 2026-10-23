@@ -32,11 +32,14 @@ requests, and its handlers (`safe_output_handler_manager.cjs`), which
 act on them. Both come from the action `github/gh-aw/actions/setup`,
 pinned at commit `462ed682857c4ab64d40f2c85e3738fa27834839`
 (v0.91.12-7) in every place that uses it. Nothing of gh-aw is copied
-into this repository. On GitHub none of it is reimplemented either: it
-is validated, maintained code, and a second implementation would only be
-a second reading of the same rules to keep in step. The one exception is
-[`collect`](#off-github), for callers that cannot run gh-aw's
-collector, held to it by fixtures gh-aw's collector wrote.
+into this repository. The one reimplementation is
+[`collect`](#off-github), a port of the collector held to it by
+fixtures gh-aw's collector wrote. The rules an agent is held to must be
+the ones it can check before its session ends, and gh-aw's collector
+cannot run on the agent's machine: so `handback check` runs `collect`,
+and so does the check job, for every run whose policy allows only types
+`collect` ports. A run allowing any other type is still collected by
+gh-aw's collector.
 
 The collector adds a `report_incomplete` item of its own to a result
 holding nothing but `missing_tool` and `missing_data`, or nothing at all.
@@ -962,8 +965,10 @@ check job.
 ## The check, in two halves
 
 The check job runs on a machine the agent never touched, with read
-access only. First gh-aw's collector: which types exist, how many of
-each, and the sanitizing of their text. Then
+access only. First the collector, `agentic-job collect` or, for a policy
+allowing a type it does not port (`agentic-job collect --policy FILE
+--unported` lists them), gh-aw's: which types exist, how many of each,
+the fields of each, and the sanitizing of their text. Then
 
 ```text
 agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE]
@@ -1048,7 +1053,8 @@ puts its files there afterwards. Each script runs in an
 `setupGlobals(core, github, context, exec, io, getOctokit)` from
 `setup_globals.cjs` and then the script's `main()`.
 
-The collector reads three paths from its environment:
+gh-aw's collector, where check.yml runs it, reads three paths from its
+environment:
 `GH_AW_SAFE_OUTPUTS` (the agent's `outputs.jsonl`),
 `GH_AW_SAFE_OUTPUTS_CONFIG_PATH` (`.safe_outputs` of `policy.json`, with a
 secondary pull request's `max` added to `create_pull_request`'s) and
@@ -1108,7 +1114,8 @@ later GitLab) runs instead
 agentic-job collect --policy FILE --outputs DIR --collected FILE
 ```
 
-on the checking machine, then `check` with the same `--collected`. It
+on the checking machine, then `check` with the same `--collected`, as
+check.yml does on GitHub where it can ([above](#the-check-in-two-halves)). It
 reads `outputs.jsonl` (at most 1 MiB, never through a link) and writes
 the `{items, errors}` gh-aw's collector would, given the policy's
 `safe_outputs` and the URL policy and allowed hosts check.yml gives it.
@@ -1133,7 +1140,7 @@ As gh-aw's collector does, it leaves @-mentions in `add_comment` and
 `create_pull_request` to the applier, which knows who may be mentioned
 where it posts; in `noop`, `missing_tool` and `missing_data` it wraps
 them in code. For Forgejo, the applier is `apply`, described below.
-The GitHub path keeps gh-aw's collector.
+On GitHub, gh-aw's handlers remain the applier.
 
 ### Publishing to Forgejo
 

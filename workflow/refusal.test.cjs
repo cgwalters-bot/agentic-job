@@ -62,6 +62,47 @@ test('conclusion reports refusal only through the opted-in status helper', () =>
   assert.match(conclude, /STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}/);
 });
 
+// The collector is agentic-job's where it takes every type the policy
+// allows, else gh-aw's; a line it refused fails the step after it, with
+// the reason in agent_output.json, and an error of its own fails its own.
+test('the collector is chosen by the policy and its refusals reach the refusal step', () => {
+  const dir = fs.mkdtempSync(join(homedir(), 'workflow-collector-'));
+  try {
+    const binary = join(dir, 'agentic-job');
+    fs.writeFileSync(binary, '#!/bin/bash\nif [ "$4" = --unported ]; then printf %s "$UNPORTED"; exit 0; fi\n' +
+      'if [ "$STATUS" != 2 ]; then echo "$RESULT" > "$GH_AW_TMP/agent_output.json"; fi\nexit "$STATUS"\n');
+    fs.chmodSync(binary, 0o700);
+    const refusedNothing = checker.match(/- name: The collector refused nothing\n {8}run: (.*)\n/)[1];
+    const run = (name, env) => spawnSync('bash', ['-eo', 'pipefail', '-c', name === null ? refusedNothing : script(name, 'run')], {
+      encoding: 'utf8', env: { ...process.env, JOB_DIR: dir, GH_AW_TMP: dir, GITHUB_OUTPUT: join(dir, 'output'), ...env },
+    });
+    for (const [unported, want] of [['', 'agentic-job'], ['add_labels\nupdate_issue\n', 'gh-aw']]) {
+      fs.rmSync(join(dir, 'output'), { force: true });
+      const result = run('Choose the collector', { UNPORTED: unported });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(fs.readFileSync(join(dir, 'output'), 'utf8'), `collector=${want}\n`);
+    }
+    assert.match(checker, /- name: Ingest the outputs with agentic-job collect\n {8}if: \$\{\{ steps\.collector\.outputs\.collector == 'agentic-job' \}\}\n/);
+    assert.match(checker, /- name: Ingest the outputs with gh-aw's collector\n {8}if: \$\{\{ steps\.collector\.outputs\.collector == 'gh-aw' \}\}\n/);
+    assert.match(checker, /- uses: github\/gh-aw\/actions\/setup@[0-9a-f]{40} # \S+\n {8}if: \$\{\{ steps\.collector\.outputs\.collector == 'gh-aw' \}\}\n/);
+    const refused = JSON.stringify({ items: [], errors: ["Line 1: add_comment requires a 'body' field (string)"] });
+    for (const [name, status, result, ingested, accepted] of [
+      ['accepted', '0', JSON.stringify({ items: [{ type: 'noop', message: 'm' }], errors: [] }), 0, 0],
+      ['refused', '1', refused, 0, 1],
+      ['an error of its own', '2', '', 1, null],
+    ]) {
+      fs.rmSync(join(dir, 'agent_output.json'), { force: true });
+      const ingest = run('Ingest the outputs with agentic-job collect', { STATUS: status, RESULT: result });
+      assert.equal(ingest.status, ingested, `${name}: ${ingest.stderr}`);
+      if (accepted === null) continue;
+      const check = run(null, {});
+      assert.equal(check.status, accepted, `${name}: ${check.stderr}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('expected policy refusal succeeds only with a refusal report and a working summary writer', () => {
   const dir = fs.mkdtempSync(join(homedir(), 'workflow-expected-refusal-'));
   try {

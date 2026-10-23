@@ -1081,7 +1081,8 @@ mod tests {
         if !outputs.is_dir() {
             return Vec::new();
         }
-        // gh-aw's collector, as the port its fixtures hold to it has it.
+        // As check.yml collects for a policy whose types are all ported.
+        assert_eq!(collect::unported(&run.policy), Vec::<&str>::new());
         let collected = copy.path().join("collected.json");
         let result = collect::collect_dir(&outputs, &run.policy, Unported::Refuse).unwrap();
         std::fs::write(&collected, serde_json::to_string(&result).unwrap()).unwrap();

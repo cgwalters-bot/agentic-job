@@ -39,7 +39,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `policy.rs` | Bounds, per-run policy and gh-aw configuration |
 | `event/` | Event admission, run guards and fenced task context |
 | `check/` | Output policy and strict mail-patch parsing |
-| `collect/` | gh-aw's collector and sanitizer, for callers off GitHub |
+| `collect/` | gh-aw's collector and sanitizer, ported: `handback check`, check.yml and callers off GitHub |
 | `apply/` | Publishing checked outputs behind `Publisher`; Forgejo only |
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
