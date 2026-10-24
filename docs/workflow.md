@@ -153,7 +153,7 @@ best-effort, not a run gate. Existing unmarked comments are not deleted or migra
 Only the workflow's pinned source is checked out in these write-capable jobs,
 with persisted credentials disabled; no agent-produced code is executed.
 
-`policy` and `check` have `contents: read`; `agent` has `contents`,
+`policy` and `check` have `contents` and `actions` read; `agent` has `contents`,
 `issues`, `pull-requests` and `actions` read, not repository write
 permissions and no `id-token`, and hands its token to the agent for
 [GitHub reads](#github-reads-from-the-agent). `register` has
@@ -257,7 +257,7 @@ agent. The pieces are:
 
 | Piece | What it is | Its credential |
 | --- | --- | --- |
-| [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted, `id-token` included |
+| [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`, `actions: read` to list runs for `dedupe`; activate and notify write with what the call was granted, `id-token` included |
 | the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), the configuration's setup script, [`run`](../run/action.yml) with `runner-home`, the caller's later steps; or [`agent.yml`](../.github/workflows/agent.yml), called as `review.yml` calls it | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, and no `id-token`, since the agent is the runner's user; the optional GitHub read token; under `github-oidc`, the run token of a register job before it, which only `agent.yml`'s call can take as a secret |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, then optional threat detection | `contents: read`, `actions: read` for the proposals' digest, `id-token: write` for detect only, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read`; both jobs keep the call's grant, `id-token` included |

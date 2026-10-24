@@ -61,8 +61,10 @@ jobs:
             contains(fromJSON(vars.REVIEW_BOT_IDS || '[]'), github.event.pull_request.user.id)))) ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
-    # The policy job reads; activate and notify have nothing to do.
+    # The policy job reads (actions too, to list runs for `dedupe`);
+    # activate and notify have nothing to do.
     permissions:
+      actions: read
       contents: read
     with:
       id: review-${{ github.event.pull_request.number || github.event.issue.number }}
