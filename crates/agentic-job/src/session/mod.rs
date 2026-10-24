@@ -39,6 +39,7 @@ pub mod digest;
 mod driver;
 pub mod permission;
 pub mod process;
+pub mod provider;
 pub mod steer;
 pub mod transcript;
 pub mod vibe;

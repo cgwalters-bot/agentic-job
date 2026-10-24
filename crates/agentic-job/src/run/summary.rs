@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
 use crate::session::digest::{Digest, Dir, EDIT_KINDS, cut};
+use crate::session::provider::Class;
 use crate::session::{Outcome, Record, RunResult, STALLED};
 
 pub const SCHEMA: &str = "agent-run-summary/v1";
@@ -39,6 +40,23 @@ pub const META_FIELDS: &[&str] = &["run_id", "run_attempt", "run_url", "item", "
 /// `--meta` and the summary only where it was given: the check job has
 /// the policy's URL, and sees here the host the run used in its place.
 pub const META_INFERENCE_ADDRESS: &str = "inference_address";
+/// The kinds of the one failure in `failures[]` that says how a run that
+/// did not succeed ended (a `tool_error` is a tool's, not the run's):
+/// the fixed words `run/action.yml` lets through as its `failure-class`
+/// output, and `apply.yml`'s `conclude` into the status comment. A caller
+/// requeues on the first three inference kinds, which a wait may clear,
+/// and not on `inference_quota` or `inference_unauthorized`.
+pub const FAILURE_KINDS: [&str; 9] = [
+    "timeout",
+    "budget",
+    "stall",
+    "agent_exit",
+    "inference_rate_limited",
+    "inference_overloaded",
+    "inference_unreachable",
+    "inference_quota",
+    "inference_unauthorized",
+];
 
 /// What `run` measured or was configured with.
 #[derive(Debug, Clone)]
@@ -217,20 +235,40 @@ pub fn summarize(inputs: &Inputs) -> Value {
         })
         .collect();
     let why = |default: &str| cut(message.as_deref().unwrap_or(default));
+    // A run that ended on a model provider's failure is filed under its
+    // class, whatever the exit it then came to: that, not the agent's
+    // words, is what a caller decides on. Not so for a run whose agent
+    // then handed back: that is a partial result at a limit (`timeout`,
+    // `budget`), to continue rather than to repeat, and the class stays
+    // in `provider_error`. Words that fit no class (`other`) leave it the
+    // agent's failure, as before.
+    let provider = inputs
+        .result
+        .filter(|r| !r.handed_back)
+        .and_then(|r| r.provider_error)
+        .and_then(Class::kind);
+    let ended = |default: &'static str, message: String| {
+        let mut failure = json!({"kind": provider.unwrap_or(default), "message": message});
+        if let (Some(_), Some(r)) = (provider, inputs.result) {
+            failure["resends"] = json!(r.resends);
+            failure["waited_s"] = json!(r.resend_wait_s);
+        }
+        failure
+    };
     match result {
         Outcome::Timeout => {
-            failures.push(json!({"kind": "timeout", "message": why("the agent hit the timeout")}));
+            failures.push(ended("timeout", why("the agent hit the timeout")));
         }
         Outcome::Budget => {
-            failures.push(json!({"kind": "budget", "message": why("the agent went over budget")}));
+            failures.push(ended("budget", why("the agent went over budget")));
         }
         // A stalled turn is the agent's model request hanging, not the
         // agent's own mistake: a retry may do.
         Outcome::Failure if inputs.result.is_some_and(RunResult::failed_stalled) => {
-            failures.push(json!({"kind": "stall", "message": why(STALLED)}));
+            failures.push(ended("stall", why(STALLED)));
         }
         Outcome::Failure | Outcome::Cancelled => {
-            failures.push(json!({"kind": "agent_exit", "message": why("the agent failed")}));
+            failures.push(ended("agent_exit", why("the agent failed")));
         }
         Outcome::Success => {}
     }
@@ -357,6 +395,20 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert(
         "stall_retries".into(),
         json!(inputs.result.map_or(0, |r| r.stall_retries)),
+    );
+    // The model provider's failure the run ended on, if one, and how often
+    // the task was sent again after one it got past, waiting how long.
+    s.insert(
+        "provider_error".into(),
+        json!(inputs.result.and_then(|r| r.provider_error)),
+    );
+    s.insert(
+        "resends".into(),
+        json!(inputs.result.map_or(0, |r| r.resends)),
+    );
+    s.insert(
+        "resend_wait_s".into(),
+        json!(inputs.result.map_or(0, |r| r.resend_wait_s)),
     );
     s.insert("notices".into(), json!(digest.notices));
     // The links of the updates of the run's item the agent was sent.
@@ -536,6 +588,16 @@ pub fn markdown(s: &Value) -> String {
             ),
         ]);
     }
+    if let Some(resends) = s["resends"].as_u64().filter(|n| *n > 0) {
+        out.extend([
+            String::new(),
+            format!(
+                "The model provider failed the agent's request {resends} time(s) in a way a wait \
+                 may clear; the task was sent again after each, after {}s of waiting in all.",
+                s["resend_wait_s"].as_u64().unwrap_or(0)
+            ),
+        ]);
+    }
     if let Some(updates) = s["updates"].as_array().filter(|u| !u.is_empty()) {
         out.extend([
             String::new(),
@@ -651,11 +713,17 @@ pub fn markdown(s: &Value) -> String {
     }
     if let Some(failures) = list("failures") {
         out.extend([String::new(), "Failures:".to_owned(), String::new()]);
-        out.extend(
-            failures
-                .iter()
-                .map(|f| format!("- {}: {}", text(&f["kind"]), code(&f["message"]))),
-        );
+        out.extend(failures.iter().map(|f| {
+            let tried = match f["resends"].as_u64() {
+                Some(0) => " (the task was not sent again)".to_owned(),
+                Some(n) => format!(
+                    " (the task was sent again {n} time(s), after {}s of waiting)",
+                    text(&f["waited_s"])
+                ),
+                None => String::new(),
+            };
+            format!("- {}: {}{tried}", text(&f["kind"]), code(&f["message"]))
+        }));
     }
     if let Some(denied) = s["permissions"]["denied"]
         .as_array()
@@ -782,6 +850,9 @@ mod tests {
             reminded: false,
             stalls: 0,
             stall_retries: 0,
+            provider_error: None,
+            resends: 0,
+            resend_wait_s: 0,
         }
     }
 
@@ -1161,6 +1232,167 @@ Redacted 1 string(s).
             usage: None,
         });
         assert_eq!(s[META_INFERENCE_ADDRESS], "100.64.0.1");
+    }
+
+    /// A run that ended on a model provider's failure is filed under its
+    /// class, whatever it then came to, with the resends and the wait;
+    /// one whose error fit no class, or that got past the failure, is
+    /// filed as before. Every kind is one of `FAILURE_KINDS`.
+    #[test]
+    fn a_providers_failure_is_filed_under_its_class() {
+        let records = initialize();
+        let measured = measured();
+        let ended = |outcome, message: &str, class, resends, waited| RunResult {
+            provider_error: class,
+            resends,
+            resend_wait_s: waited,
+            ..result(outcome, Some(message), false)
+        };
+        // A run whose agent handed back after the failure is a partial
+        // result at a limit, not an inference failure to repeat.
+        let handed_back = RunResult {
+            handed_back: true,
+            ..ended(
+                Outcome::Timeout,
+                "hit the timeout, after session/prompt failed: Rate limit exceeded; the agent handed back",
+                Some(Class::RateLimited),
+                1,
+                10,
+            )
+        };
+        // (the result, the kind, the resends said in the summary)
+        let cases = [
+            (
+                ended(
+                    Outcome::Failure,
+                    "the agent exited (exit status: 0) after the provider rate-limited a request",
+                    Some(Class::RateLimited),
+                    3,
+                    70,
+                ),
+                "inference_rate_limited",
+                Some("(the task was sent again 3 time(s), after 70s of waiting)"),
+            ),
+            (
+                ended(
+                    Outcome::Budget,
+                    "the agent's turn ended on an error; the agent handed back",
+                    Some(Class::Overloaded),
+                    0,
+                    0,
+                ),
+                "inference_overloaded",
+                Some("(the task was not sent again)"),
+            ),
+            (
+                ended(
+                    Outcome::Timeout,
+                    "hit the timeout, after session/prompt failed: connection refused",
+                    Some(Class::Unreachable),
+                    1,
+                    10,
+                ),
+                "inference_unreachable",
+                Some("(the task was sent again 1 time(s), after 10s of waiting)"),
+            ),
+            (
+                ended(
+                    Outcome::Failure,
+                    "the model provider refused the agent's request: usage limit reached",
+                    Some(Class::Quota),
+                    0,
+                    0,
+                ),
+                "inference_quota",
+                Some("(the task was not sent again)"),
+            ),
+            (
+                ended(
+                    Outcome::Failure,
+                    "session/prompt failed: invalid x-api-key",
+                    Some(Class::Unauthorized),
+                    0,
+                    0,
+                ),
+                "inference_unauthorized",
+                Some("(the task was not sent again)"),
+            ),
+            (
+                ended(
+                    Outcome::Failure,
+                    "session/prompt failed: Internal error",
+                    Some(Class::Other),
+                    0,
+                    0,
+                ),
+                "agent_exit",
+                None,
+            ),
+            (
+                ended(Outcome::Failure, "the agent failed", None, 2, 30),
+                "agent_exit",
+                None,
+            ),
+            (handed_back, "timeout", None),
+        ];
+        for (result, kind, tried) in cases {
+            let s = summarize(&Inputs {
+                records: &records,
+                result: Some(&result),
+                measured: &measured,
+                outcome: &json!({}),
+                usage: None,
+            });
+            let failure = &s["failures"][0];
+            assert_eq!(failure["kind"], kind, "{result:?}");
+            assert!(FAILURE_KINDS.contains(&kind), "{kind}");
+            assert_eq!(
+                failure.get("resends").is_some(),
+                tried.is_some(),
+                "{result:?}"
+            );
+            assert_eq!(s["provider_error"], json!(result.provider_error));
+            assert_eq!(s["resends"], result.resends);
+            assert_eq!(s["resend_wait_s"], result.resend_wait_s);
+            let md = markdown(&s);
+            let line = md
+                .lines()
+                .find(|l| l.starts_with(&format!("- {kind}: ")))
+                .unwrap_or_else(|| panic!("{md}"));
+            match tried {
+                Some(tried) => assert!(line.ends_with(tried), "{line}"),
+                None => assert!(line.ends_with('`'), "{line}"),
+            }
+            assert_eq!(
+                md.contains("The model provider failed the agent's request"),
+                result.resends > 0,
+                "{md}"
+            );
+        }
+        // A run that got past the failure and ended well files none.
+        let passed = RunResult {
+            resends: 1,
+            resend_wait_s: 10,
+            ..result(Outcome::Success, None, false)
+        };
+        let s = summarize(&Inputs {
+            records: &records,
+            result: Some(&passed),
+            measured: &measured,
+            outcome: &json!({}),
+            usage: None,
+        });
+        assert_eq!(s["failures"], json!([]));
+        assert_eq!(s["provider_error"], Value::Null);
+        assert!(markdown(&s).contains(
+            "failed the agent's request 1 time(s) in a way a wait may clear; the task \
+                 was sent again after each, after 10s of waiting in all."
+        ));
+        for class in Class::ALL {
+            if let Some(kind) = class.kind() {
+                assert!(FAILURE_KINDS.contains(&kind), "{kind}");
+            }
+        }
     }
 
     /// A reminder, and an agent's log that was not there, are said.

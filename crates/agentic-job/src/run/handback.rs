@@ -1765,6 +1765,9 @@ mod tests {
             reminded: false,
             stalls: 0,
             stall_retries: 0,
+            provider_error: None,
+            resends: 0,
+            resend_wait_s: 0,
         }
     }
 

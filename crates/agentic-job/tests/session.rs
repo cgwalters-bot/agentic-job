@@ -1382,7 +1382,9 @@ fn hand_back_near_a_limit() {
 /// back in, which decides between stopped at a limit and failed.
 #[test]
 fn a_turn_that_ends_on_an_error() {
-    const REFUSAL: &str = "API Error: Request rejected (429)";
+    // An error whose words fit no class of provider failure: one that a
+    // wait may clear is sent again first (`a_rate_limited_turn_is_sent_again`).
+    const REFUSAL: &str = "API Error: Request rejected (400) · bad request";
     const PREFIX: Option<&str> = Some("API Error:");
     const HAND_BACK: &str = r#"[
       {"write": {"title": "Write", "path": "{cwd}/partial.txt", "content": "partial\n"}},
@@ -1391,7 +1393,7 @@ fn a_turn_that_ends_on_an_error() {
     let refused = format!(
         r#"[{{"say": "Working."}}, {{"execute": {{"title": "Bash", "command": "true"}}}}, {{"say": "{REFUSAL}"}}]"#
     );
-    let failed = r#"[{"say": "Working."}, {"fail": "rate limited"}]"#;
+    let failed = r#"[{"say": "Working."}, {"fail": "the model answered nothing usable"}]"#;
     let limit_in_hand_back = format!(r#"[{}, {{"sleep": 60}}]"#, use_requests(100));
     struct Case<'a> {
         name: &'a str,
@@ -1416,7 +1418,7 @@ fn a_turn_that_ends_on_an_error() {
             result: "budget",
             message: &[
                 "the agent's turn ended on an error",
-                "the model provider refused the agent's request: API Error: Request rejected (429)",
+                "the model provider refused the agent's request: API Error: Request rejected (400)",
                 "the agent handed back",
             ],
             handed_back: true,
@@ -1444,7 +1446,7 @@ fn a_turn_that_ends_on_an_error() {
             result: "budget",
             message: &[
                 "the agent's turn ended on an error (session/prompt failed",
-                "rate limited",
+                "nothing usable",
                 "the agent handed back",
             ],
             handed_back: true,
@@ -1458,7 +1460,7 @@ fn a_turn_that_ends_on_an_error() {
             provider_error: None,
             status: 1,
             result: "failure",
-            message: &["session/prompt failed", "rate limited"],
+            message: &["session/prompt failed", "nothing usable"],
             handed_back: false,
             count_requests: false,
             notices: &["hand back"],
@@ -1477,7 +1479,7 @@ fn a_turn_that_ends_on_an_error() {
         },
         Case {
             name: "an error the agent went on from, to words that are no error",
-            script: r#"[{"say": "API Error: 529"}, {"execute": {"title": "Bash", "command": "true"}}, {"say": "API Error responses are retried now."}]"#,
+            script: r#"[{"say": "API Error: 400"}, {"execute": {"title": "Bash", "command": "true"}}, {"say": "API Error responses are retried now."}]"#,
             later: HAND_BACK,
             provider_error: PREFIX,
             status: 0,
@@ -1509,14 +1511,17 @@ fn a_turn_that_ends_on_an_error() {
             provider_error: None,
             status: 1,
             result: "failure",
-            message: &["exit status: 7", "session/prompt failed: rate limited"],
+            message: &[
+                "exit status: 7",
+                "session/prompt failed: the model answered nothing usable",
+            ],
             handed_back: false,
             count_requests: false,
             notices: &["hand back"],
         },
         Case {
             name: "an agent that exits after its error fails with it",
-            script: r#"[{"say": "Working."}, {"fail": "rate limited"}, {"finish": 7}]"#,
+            script: r#"[{"say": "Working."}, {"fail": "the model answered nothing usable"}, {"finish": 7}]"#,
             later: HAND_BACK,
             provider_error: None,
             status: 1,
@@ -1524,7 +1529,7 @@ fn a_turn_that_ends_on_an_error() {
             message: &[
                 "the agent exited",
                 "exit status: 7",
-                "session/prompt failed: rate limited",
+                "session/prompt failed: the model answered nothing usable",
             ],
             handed_back: false,
             count_requests: false,
@@ -1799,39 +1804,78 @@ fn a_stalled_turn_is_sent_again_once() {
     }
 }
 
-/// A task's turn the agent answers with its rate-limit error is sent
-/// again after a wait, on the same session, up to three times; then, or
-/// for any other error, or for an agent with no `rate-limit-code`, the
-/// agent is asked to hand back as after any error.
+/// A task's turn that ends on a model provider's failure a wait may clear
+/// (the agent's rate-limit error, or an error or a refusal whose words
+/// say rate-limited, overloaded or unreachable, for any agent) is sent
+/// again after a wait, on the same session, up to three times, the wait
+/// the provider's own where it names one; then, or for any other error,
+/// the agent is asked to hand back as after any error, and at once
+/// after a failure no wait clears. The class of the failure the run ended
+/// on is in its result, an agent that dies of one included, and a wait
+/// never runs into the time limit: near it the agent hands back instead.
 #[test]
 fn a_rate_limited_turn_is_sent_again() {
     const VIBE_RATE_LIMIT: i32 = -31001;
     const ONCE: &str = r#"[{"say": "Working."}, {"rate_limit": "Rate limit exceeded"}]"#;
     const ALWAYS: &str = r#"[{"rate_limit": "Rate limit exceeded"}]"#;
     const FAILED: &str = r#"[{"say": "Working."}, {"fail": "Internal error"}]"#;
+    const OVERLOADED: &str = r#"[{"say": "Working."}, {"fail": "AI_RetryError: Failed after 3 attempts. Last error: Service Unavailable"}]"#;
+    const CLOSED: &str = r#"[{"say": "Working."}, {"fail": "socket hang up"}]"#;
+    const RETRY_AFTER: &str =
+        r#"[{"say": "Working."}, {"fail": "Rate limit exceeded. Retry-After: 1"}]"#;
+    const QUOTA: &str = r#"[{"say": "Working."}, {"fail": "You exceeded your current quota, please check your plan and billing details."}]"#;
+    const UNAUTHORIZED: &str = r#"[{"say": "Working."}, {"fail": "API Error: 401 {\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}"}]"#;
+    const SAID_THEN_DIED: &str = r#"[{"say": "API Error: 529 Overloaded"}, {"exit": 7}]"#;
+    const NEAR_THE_TIMEOUT: &str = r#"[{"sleep": 36.5}, {"rate_limit": "Rate limit exceeded"}]"#;
+    const TOO_LONG_A_WAIT: &str =
+        r#"[{"say": "Working."}, {"fail": "Rate limit exceeded, retry after 10 minutes"}]"#;
     const DONE: &str = r#"[{"say": "Done."}]"#;
     const LIMITED: &str = "rate limited";
+    const PROVIDER: &str = "provider error";
     const HAND_BACK: &str = "hand back";
+    const PREFIX: Option<&str> = Some("API Error:");
     struct Case {
         name: &'static str,
         script: &'static str,
         later: &'static str,
         code: Option<i32>,
+        provider_error: Option<&'static str>,
+        /// The run's timeout: three seconds to hand back in, and each
+        /// wait as long, unless the case is about the timeout.
+        timeout_s: u64,
         status: u8,
         result: &'static str,
-        message: Option<&'static str>,
+        message: &'static [&'static str],
         notices: &'static [&'static str],
+        /// The seconds of each wait the log says.
+        wait_s: u64,
+        /// What the log says besides.
+        log: &'static [&'static str],
+        /// `provider_error` and `resends` in the result.
+        class: Option<&'static str>,
+        resends: u64,
     }
+    let case = Case {
+        name: "",
+        script: ONCE,
+        later: DONE,
+        code: None,
+        provider_error: None,
+        timeout_s: 60,
+        status: 0,
+        result: "success",
+        message: &[],
+        notices: &[LIMITED],
+        wait_s: 3,
+        log: &[],
+        class: None,
+        resends: 1,
+    };
     let cases = [
         Case {
             name: "rate-limited once, then done",
-            script: ONCE,
-            later: DONE,
             code: Some(VIBE_RATE_LIMIT),
-            status: 0,
-            result: "success",
-            message: None,
-            notices: &[LIMITED],
+            ..case
         },
         Case {
             name: "always rate-limited",
@@ -1840,28 +1884,132 @@ fn a_rate_limited_turn_is_sent_again() {
             code: Some(VIBE_RATE_LIMIT),
             status: 1,
             result: "failure",
-            message: Some("session/prompt failed: Rate limit exceeded"),
+            message: &["session/prompt failed: Rate limit exceeded"],
             notices: &[LIMITED, LIMITED, LIMITED, HAND_BACK],
+            log: &["asking the agent to hand back in 3s"],
+            class: Some("rate_limited"),
+            resends: 3,
+            ..case
         },
         Case {
             name: "another error",
             script: FAILED,
-            later: DONE,
             code: Some(VIBE_RATE_LIMIT),
             status: 3,
             result: "budget",
-            message: Some("the agent handed back"),
+            message: &["the agent handed back"],
             notices: &[HAND_BACK],
+            log: &["asking the agent to hand back in 3s"],
+            class: Some("other"),
+            resends: 0,
+            ..case
         },
         Case {
-            name: "an agent with no rate-limit-code",
-            script: ONCE,
-            later: DONE,
-            code: None,
+            name: "an agent with no rate-limit-code is sent again by the error's words",
+            ..case
+        },
+        Case {
+            name: "overloaded by the error's words, then done",
+            script: OVERLOADED,
+            notices: &[PROVIDER],
+            log: &["the provider was overloaded; sending the task again"],
+            ..case
+        },
+        Case {
+            name: "the connection closed by the error's words, then done",
+            script: CLOSED,
+            notices: &[PROVIDER],
+            log: &["the provider was unreachable; sending the task again"],
+            ..case
+        },
+        Case {
+            name: "the provider's retry-after is the wait",
+            script: RETRY_AFTER,
+            wait_s: 1,
+            ..case
+        },
+        Case {
+            name: "a usage limit is not waited on",
+            script: QUOTA,
             status: 3,
             result: "budget",
-            message: Some("the agent handed back"),
+            message: &[
+                "the agent's turn ended on an error",
+                "exceeded your current quota",
+                "the agent handed back",
+            ],
             notices: &[HAND_BACK],
+            log: &["asking the agent to hand back now"],
+            class: Some("quota"),
+            resends: 0,
+            ..case
+        },
+        Case {
+            name: "a refused credential is not waited on",
+            script: UNAUTHORIZED,
+            status: 3,
+            result: "budget",
+            message: &["the agent handed back"],
+            notices: &[HAND_BACK],
+            log: &["asking the agent to hand back now"],
+            class: Some("unauthorized"),
+            resends: 0,
+            ..case
+        },
+        Case {
+            name: "an agent that dies after saying the provider refused died of it",
+            script: SAID_THEN_DIED,
+            provider_error: PREFIX,
+            status: 1,
+            result: "failure",
+            message: &[
+                "the agent exited",
+                "exit status: 7",
+                "after the provider was overloaded (API Error: 529 Overloaded)",
+            ],
+            notices: &[],
+            class: Some("overloaded"),
+            resends: 0,
+            ..case
+        },
+        Case {
+            name: "a provider that asks for longer than the cap is not waited for",
+            script: TOO_LONG_A_WAIT,
+            status: 3,
+            result: "budget",
+            message: &[
+                "the agent's turn ended on an error",
+                "the agent handed back",
+            ],
+            notices: &[HAND_BACK],
+            log: &[
+                "asks for a wait of 600s, more than the 120s waited for: not sending the task again",
+                "asking the agent to hand back in 3s",
+            ],
+            class: Some("rate_limited"),
+            resends: 0,
+            ..case
+        },
+        // The wait (two seconds, the window) would run past the point
+        // where the agent is to hand back for the time: it hands back
+        // instead, and the task is not sent again (the budget's notices
+        // came during the long turn).
+        Case {
+            name: "a wait that would run into the time limit hands back instead",
+            script: NEAR_THE_TIMEOUT,
+            timeout_s: 40,
+            status: 124,
+            result: "timeout",
+            message: &["hit the timeout", "the agent handed back"],
+            notices: &["60%", "80%", HAND_BACK],
+            wait_s: 2,
+            log: &[
+                "sending the task again in 2s",
+                "hit the timeout: asking the agent to hand back",
+            ],
+            class: Some("rate_limited"),
+            resends: 0,
+            ..case
         },
     ];
     for c in cases {
@@ -1870,39 +2018,69 @@ fn a_rate_limited_turn_is_sent_again() {
             SCRIPT_AND_LATER,
             Setup {
                 files: &[("script.json", c.script), ("later.json", c.later)],
-                // Three seconds to hand back in, and each wait as long.
-                timeout_s: 60,
+                timeout_s: c.timeout_s,
                 rate_limit_code: c.code,
+                provider_error: c.provider_error,
                 ..Setup::default()
             },
         );
         assert_result(&r, c.status, c.result);
         let said = r.result["message"].as_str();
-        match c.message {
-            Some(part) => assert!(said.is_some_and(|m| m.contains(part)), "{name}: {said:?}"),
-            None => assert_eq!(said, None, "{name}"),
+        if c.message.is_empty() {
+            assert_eq!(said, None, "{name}");
+        }
+        for part in c.message {
+            assert!(said.is_some_and(|m| m.contains(part)), "{name}: {said:?}");
         }
         assert_eq!(r.notices(), c.notices, "{name}");
+        assert_eq!(
+            r.result.get("provider_error").and_then(Value::as_str),
+            c.class,
+            "{name}: {:#}",
+            r.result
+        );
+        assert_eq!(r.result["resends"].as_u64(), Some(c.resends), "{name}");
+        // Each wait was at least a second and at most the wait said; a
+        // wait a limit interrupted counts too, with no resend after it.
+        let waited = r.result["resend_wait_s"].as_u64().unwrap_or(u64::MAX);
+        assert!(
+            (c.resends..=c.resends.max(1) * c.wait_s).contains(&waited),
+            "{name}: waited {waited}s for {} resend(s)",
+            c.resends
+        );
         // The task again, behind a note, on the agent's one session.
-        let resent = r.records.iter().filter(|record| {
-            record["dir"] == "send"
-                && record["msg"]["params"]["_meta"][session::permission::META_KEY]["notice"]
-                    == LIMITED
-        });
+        let resent: Vec<&Value> = r
+            .records
+            .iter()
+            .filter(|record| {
+                let label =
+                    &record["msg"]["params"]["_meta"][session::permission::META_KEY]["notice"];
+                record["dir"] == "send" && (label == LIMITED || label == PROVIDER)
+            })
+            .collect();
+        assert_eq!(resent.len() as u64, c.resends, "{name}");
         for record in resent {
             let params = &record["msg"]["params"];
             assert_eq!(params["sessionId"], "fake-session", "{name}");
             assert_eq!(params["prompt"][1]["text"], "Do the fake task.\n", "{name}");
         }
-        let waits = c.notices.iter().filter(|n| **n == LIMITED).count();
-        assert_eq!(
-            r.log.matches("sending the task again in 3s").count(),
-            waits,
-            "{name}: {}",
+        // Each resend was announced with its wait; so was a wait a limit
+        // then interrupted.
+        let announced = r
+            .log
+            .matches(&format!("sending the task again in {}s", c.wait_s))
+            .count() as u64;
+        assert!(
+            announced == c.resends || announced == c.resends + 1,
+            "{name}: {announced} announced for {} resend(s): {}",
+            c.resends,
             r.log
         );
+        for part in c.log {
+            assert!(r.log.contains(part), "{name}: {part:?} not in {}", r.log);
+        }
         assert!(
-            r.elapsed < Duration::from_secs(30),
+            r.elapsed < Duration::from_secs(c.timeout_s.min(40) + 15),
             "{name}: took {:?}",
             r.elapsed
         );
@@ -2521,7 +2699,12 @@ fn a_client_while_the_agent_hands_back_after_an_error() {
         SCRIPT_AND_LATER,
         Setup {
             files: &[
-                ("script.json", r#"[{"sleep": 1}, {"fail": "rate limited"}]"#),
+                // An error whose words fit no class: one a wait may clear
+                // would have the task sent again first.
+                (
+                    "script.json",
+                    r#"[{"sleep": 1}, {"fail": "the model answered nothing usable"}]"#,
+                ),
                 ("later.json", r#"[{"say": "Handed back."}]"#),
             ],
             timeout_s: 60,

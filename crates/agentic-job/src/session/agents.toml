@@ -17,7 +17,10 @@
 # item's updates use; the budget's notices do not yet.
 #
 # When Claude Code gives up on a model request (a 429 after its own
-# retries), the adapter may say "API Error: ..." and answer end_turn.
+# retries), the adapter may say "API Error: ..." and answer end_turn, or
+# answer the turn with an error whose message starts the same way; the
+# words are classified either way (provider.rs), and a turn that ended
+# on a failure a wait may clear is sent again (driver.rs).
 [claude]
 command = ["claude-agent-acp"]
 model-env = "ANTHROPIC_MODEL"
@@ -46,7 +49,8 @@ notices = true
 # Vibe answers the turn with its RateLimitError (code -31001, as seen in a
 # tracker run's acp.jsonl on 2026-10-19, #1339): the turn is sent again
 # after a wait, a few times, before the agent is asked to hand back
-# (driver.rs).
+# (driver.rs). The code makes it a rate limit whatever its words; other
+# agents' errors are classified by their words alone (provider.rs).
 [vibe]
 stall-timeout = 120
 rate-limit-code = -31001

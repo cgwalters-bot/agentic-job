@@ -141,15 +141,19 @@ pub const LABEL_COMPACTION: &str = "compaction";
 /// (`AgentSpec::stall_timeout`).
 pub const LABEL_STALLED: &str = "stalled";
 /// The label of the task's turn sent again after the provider rate-limited
-/// it (`AgentSpec::rate_limit_code`).
+/// it (`AgentSpec::rate_limit_code`, or words that say so).
 pub const LABEL_RATE_LIMITED: &str = "rate limited";
+/// The label of the task's turn sent again after a model request failed
+/// at the provider in another way a wait may clear (`provider::Class`).
+pub const LABEL_PROVIDER_ERROR: &str = "provider error";
 /// The labels of the session's prompts that start a turn of their own,
 /// rather than being queued behind the running one.
-pub const TURN_LABELS: [&str; 4] = [
+pub const TURN_LABELS: [&str; 5] = [
     LABEL_HAND_BACK,
     LABEL_REMINDER,
     LABEL_STALLED,
     LABEL_RATE_LIMITED,
+    LABEL_PROVIDER_ERROR,
 ];
 
 /// Why the session was stopped.

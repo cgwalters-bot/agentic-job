@@ -359,6 +359,15 @@ on:
       exit:
         description: "The exit state of `agentic-job run`: 0, 1 (failed), 3 (a limit, or a hand-back after an error), 4 (never started), 124 (the timeout)"
         value: ${{ jobs.agent.outputs.exit }}
+      failure-class:
+        description: >-
+          What a run that did not end well ended on, as one of the run action's fixed failure
+          kinds: `timeout`, `budget`, `stall`, `agent_exit`, or a model provider's failure the
+          session could not get past, `inference_rate_limited`, `inference_overloaded`,
+          `inference_unreachable` (a wait may clear these three: a dispatcher may requeue the run),
+          `inference_quota` or `inference_unauthorized` (it will not: do not). Empty for a run that
+          ended well
+        value: ${{ jobs.agent.outputs.failure-class }}
       applied-artifact-id:
         description: The artifact holding applied.json, which names what the apply job made
         value: ${{ jobs.apply.outputs.applied-artifact-id }}

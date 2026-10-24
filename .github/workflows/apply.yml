@@ -1236,6 +1236,9 @@ jobs:
         env:
           RESULTS: ${{ fromJSON(inputs.policy).proposals-artifact != '' && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
           EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
+          # The run action's fixed word for what the run ended on, checked
+          # again below against the same list before it goes into the text.
+          FAILURE_CLASS: ${{ fromJSON(inputs.agent).outputs.failure-class }}
           OVER_BUDGET: ${{ fromJSON(inputs.agent).outputs.over-budget }}
           SECRET_AT: ${{ fromJSON(inputs.agent).outputs.secret-at }}
           PR: ${{ needs.apply.outputs.pull-request }}
@@ -1252,6 +1255,8 @@ jobs:
           STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ && ( -z "$PR_REPO" || "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ) ]]
+          # A fixed word or nothing: the same list as the run action's.
+          [[ "$FAILURE_CLASS" =~ ^(timeout|budget|stall|agent_exit|inference_(rate_limited|overloaded|unreachable|quota|unauthorized))$ ]] || FAILURE_CLASS=
           case "$RESULTS" in
             success/success/success) text="✅ [$WORKFLOW]($RUN_URL) ended well${PR:+ and opened pull request $PR_REPO#$PR}." reaction=rocket
               if [ "$NO_RESULT" = true ]; then
@@ -1262,7 +1267,7 @@ jobs:
               fi ;;
             success/skipped/skipped) text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back nothing to apply." reaction=rocket ;;
             *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
-            *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
+            *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none}${FAILURE_CLASS:+; failure class: $FAILURE_CLASS})." reaction=confused ;;
           esac
           # The hidden marker, at the start of a line, is for whoever reads
           # the comment to schedule work: blocked is neither done nor failed.
@@ -1286,7 +1291,7 @@ jobs:
           [ -z "$HANDLER_ERRORS" ] || text="$text Failed outputs: $HANDLER_ERRORS"
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
           [ "${STAGED:-}" != true ] || [ "$reaction" = confused ] || text="$text Staged: nothing was applied; the apply job's summary shows what would have been."
-          [ "${EXIT:-0}" = 0 ] || [ "$reaction" = confused ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
+          [ "${EXIT:-0}" = 0 ] || [ "$reaction" = confused ] || text="$text The run was stopped at a limit (exit state $EXIT${FAILURE_CLASS:+, $FAILURE_CLASS}); what it handed back is marked partial."
           # Numbers alone: the agent reported the cost they come from.
           [[ ! "$OVER_BUDGET" =~ ^[0-9]+(\.[0-9]+)?\ of\ [0-9]+(\.[0-9]+)?\ AIC$ ]] || [ "$reaction" = confused ] ||
             text="$text Its last reply took the agent over budget: it spent $OVER_BUDGET."

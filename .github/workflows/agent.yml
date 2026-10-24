@@ -65,6 +65,8 @@ on:
     outputs:
       exit:
         value: ${{ jobs.agent.outputs.exit }}
+      failure-class:
+        value: ${{ jobs.agent.outputs.failure-class }}
       over-budget:
         value: ${{ jobs.agent.outputs.over-budget }}
       secret-at:
@@ -95,6 +97,10 @@ jobs:
       actions: read
     outputs:
       exit: ${{ steps.run.outputs.exit }}
+      # One of the run action's fixed failure kinds, or empty: apply's
+      # conclude puts it in the status comment, and a caller's
+      # dispatcher decides on it (docs/workflow.md).
+      failure-class: ${{ steps.run.outputs.failure-class }}
       over-budget: ${{ steps.run.outputs.over-budget }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}

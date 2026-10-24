@@ -43,6 +43,15 @@ outputs:
   exit:
     description: Exit state of agentic-job run
     value: ${{ steps.run.outputs.exit }}
+  failure-class:
+    description: >-
+      For a run that did not end well, what it ended on, as one of the summary's failure kinds
+      (`timeout`, `budget`, `stall`, `agent_exit`, `inference_rate_limited`, `inference_overloaded`,
+      `inference_unreachable`, `inference_quota`, `inference_unauthorized`): a caller's dispatcher
+      may requeue a run on the first three inference kinds, which a wait clears, a bounded number
+      of times (the class is read from the agent's words, which the agent controls), and should
+      not on `inference_quota` or `inference_unauthorized`. Empty for a run that ended well
+    value: ${{ steps.run.outputs.failure-class }}
   over-budget:
     description: >-
       For a run that ended well although the cost its agent reported went over the budget, how far
@@ -221,6 +230,17 @@ runs:
           echo "::warning::the agent ended its turn over budget: spent $over"
           echo "over-budget=$over" >> "$GITHUB_OUTPUT"
         fi
+        # What a run that did not end well ended on: the kind of the one
+        # failure in summary.json that is the run's (a tool_error is a
+        # tool's), one of the binary's fixed words and nothing else, so
+        # that it can be an output and go into a status comment. The
+        # message beside it is the agent's and stays in summary.md and
+        # the condensed log, never in an output or a workflow command.
+        class=
+        [ ! -e "$JOB_DIR/out/run/summary.json" ] ||
+          class=$(jq -r '[.failures[]? | .kind? | select(. != "tool_error")] | first // ""' "$JOB_DIR/out/run/summary.json") || class=
+        [[ "$class" =~ ^(timeout|budget|stall|agent_exit|inference_(rate_limited|overloaded|unreachable|quota|unauthorized))$ ]] || class=
+        [ -z "$class" ] || echo "failure-class=$class" >> "$GITHUB_OUTPUT"
         # Nothing of such a run is uploaded, its summary included: the
         # place alone, which the log has already, says where to look.
         at=
@@ -307,14 +327,37 @@ runs:
         path: ${{ inputs.job-dir }}/out/safe-outputs/
         retention-days: 30
         if-no-files-found: ignore
+    # The exit state alone said nothing of a run that died of a rate
+    # limit (#1842): the annotation names the failure's kind, and how
+    # often the task was sent again, from summary.json; the failures
+    # themselves follow in the log, each on a line that starts with a
+    # fixed word and never with `::`, so nothing the agent wrote can act
+    # as a workflow command. The kind was checked against the fixed list
+    # when it became an output; the counts are numbers or nothing.
     - name: The run's result
       shell: bash
       env:
+        JOB_DIR: ${{ inputs.job-dir }}
         EXIT: ${{ steps.run.outputs.exit }}
+        CLASS: ${{ steps.run.outputs.failure-class }}
         PARTIAL: ${{ steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != '' }}
       run: |
+        summary=$JOB_DIR/out/run/summary.json
+        why=
+        [[ "$CLASS" =~ ^(timeout|budget|stall|agent_exit|inference_(rate_limited|overloaded|unreachable|quota|unauthorized))$ ]] || CLASS=
+        if [ -n "$CLASS" ]; then
+          resends=$(jq -r '.resends // 0' "$summary" 2> /dev/null) || resends=
+          waited=$(jq -r '.resend_wait_s // 0' "$summary" 2> /dev/null) || waited=
+          why=" ($CLASS"
+          [[ "$resends" =~ ^[0-9]+$ && "$waited" =~ ^[0-9]+$ ]] && [ "$resends" != 0 ] &&
+            why="$why; the task was sent again $resends time(s) after ${waited}s of waiting"
+          why="$why)"
+          # Each message is one line of at most 200 characters, cut by the binary.
+          jq -r '.failures[]? | "    failure \(.kind): \(.message)"' "$summary" 2> /dev/null | head -n 40 || true
+          echo "summary.md in the job summary and the agent-run artifact say more."
+        fi
         case "$EXIT/$PARTIAL" in
           0/*) ;;
-          3/true | 124/true) echo "::warning::the run was stopped at a limit (exit state $EXIT) and handed back what it had" ;;
-          *) echo "::error::agentic-job run ended with exit state $EXIT"; exit 1 ;;
+          3/true | 124/true) echo "::warning::the run was stopped at a limit (exit state $EXIT)$why and handed back what it had" ;;
+          *) echo "::error::agentic-job run ended with exit state $EXIT$why"; exit 1 ;;
         esac

@@ -1,0 +1,102 @@
+[
+  {
+    "source": "run 39640220953, acp.jsonl: claude-agent-acp 0.88.0 answering session/prompt with a JSON-RPC error (code -32603); the message, then the data",
+    "text": "Internal error: API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later. {\"errorKind\":\"rate_limit\"}",
+    "class": "rate_limited"
+  },
+  {
+    "source": "run 39640220953, acp.jsonl: what the agent said in the turn, as the provider-error prefix catches it",
+    "text": "API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later.",
+    "class": "rate_limited"
+  },
+  {
+    "source": "run 39640220953, agent-stderr.log: the adapter's last line before it exited; the error above was in the turn, not here",
+    "text": "Unexpected case: {\"type\":\"system\",\"subtype\":\"ui_invalidate\",\"event\":\"ui.render\",\"uuid\":\"00000000-0000-0000-0000-000000000000\",\"session_id\":\"00000000-0000-0000-0000-000000000000\"}",
+    "class": "other"
+  },
+  {
+    "source": "run 39138758231, acp.jsonl: Vibe 2.26.1 answering session/prompt with its RateLimitError (code -31001); the provider and model redacted",
+    "text": "Rate limit exceeded for a-provider (model: a-model). {\"provider\":\"a-provider\",\"model\":\"a-model\"}",
+    "class": "rate_limited"
+  },
+  {
+    "source": "run 39138758231, agent-stderr.log: Vibe's own retries, before it gave the turn up; the proxy's address redacted",
+    "text": "WARNING:vibe:Retrying GenericBackend._send_parsed_streaming_request after error attempt=4 delay=60.00s error=HTTPStatusError(\"Client error '429 Too Many Requests' for url 'http://proxy.invalid/v1/chat/completions'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429\")",
+    "class": "rate_limited"
+  },
+  {
+    "source": "run 39138758231, agent-stderr.log",
+    "text": "vibe.acp.exceptions.RateLimitError: Rate limit exceeded for a-provider (model: a-model).",
+    "class": "rate_limited"
+  },
+  {
+    "source": "run 39029903347, condensed.log: a stalled turn is the session's own finding, not the provider's words",
+    "text": "the agent stalled: nothing from it for 120s in its turn, and again after the task was sent again",
+    "class": "other"
+  },
+  {
+    "source": "run 39029903347, condensed.log: a tool's error",
+    "text": "bash: bash failed: Command failed: 'grep -n plan README.md | head'",
+    "class": "other"
+  },
+  {
+    "source": "Claude Code, as its adapter relays it after its own retries",
+    "text": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+    "class": "overloaded"
+  },
+  {
+    "source": "Claude Code",
+    "text": "API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"}}",
+    "class": "overloaded"
+  },
+  {
+    "source": "Claude Code",
+    "text": "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}",
+    "class": "unauthorized"
+  },
+  {
+    "source": "Claude Code",
+    "text": "API Error: Connection error.",
+    "class": "unreachable"
+  },
+  {
+    "source": "Claude Code",
+    "text": "API Error (Request timed out.)",
+    "class": "unreachable"
+  },
+  {
+    "source": "Claude Code, at a subscription's limit",
+    "text": "Claude AI usage limit reached|1761087600",
+    "class": "quota"
+  },
+  {
+    "source": "Claude Code, at a subscription's limit",
+    "text": "You've hit your limit · resets 3pm (UTC)",
+    "class": "quota"
+  },
+  {
+    "source": "opencode (AI SDK)",
+    "text": "AI_RetryError: Failed after 3 attempts. Last error: Service Unavailable",
+    "class": "overloaded"
+  },
+  {
+    "source": "opencode (AI SDK)",
+    "text": "AI_APICallError: Cannot connect to API: fetch failed",
+    "class": "unreachable"
+  },
+  {
+    "source": "an OpenAI-style 429 that is a quota, not a rate",
+    "text": "You exceeded your current quota, please check your plan and billing details.",
+    "class": "quota"
+  },
+  {
+    "source": "a connection refused while the run's proxy restarted (#1796)",
+    "text": "connect ECONNREFUSED 127.0.0.1:18080",
+    "class": "unreachable"
+  },
+  {
+    "source": "an adapter's log line with a number that is no status",
+    "text": "[session/create] phase=sdk-initialize durationMs=529 totalMs=534",
+    "class": "other"
+  }
+]

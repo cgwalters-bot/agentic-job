@@ -1431,7 +1431,9 @@ impl Signals {
 /// for the gate on uploads.
 async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
     let ending = Arc::clone(&run);
-    let ended = tokio::task::spawn_blocking(move || ending.end(Retry::default()))
+    // With time for a proxy that is restarting just then (#1796): until
+    // the run is ended, nothing of it is uploaded.
+    let ended = tokio::task::spawn_blocking(move || ending.end(Retry::end_of_run()))
         .await
         .context("ending the run at the proxy")?;
     let (ended, usage) = match ended {

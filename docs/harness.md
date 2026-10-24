@@ -315,8 +315,10 @@ agent without notices is not told, and hands back at the same call.
 
 A task's turn that ends on an error is not taken for a finished task.
 That is a turn the agent answers with an error, as opencode and Vibe
-answer one whose model request failed, or one it answers as done
-after saying it gave up on a refused request, as Claude Code says
+answer one whose model request failed and as Claude Code's adapter
+answers one it gave up on (`Internal error: API Error: Request rejected
+(429) ...`, with `errorKind` in the error's data), or one it answers as
+done after saying it gave up on a refused request, as Claude Code says
 `API Error: ...` after its own retries (the entry's `provider-error`
 names the words). After a pause of a minute (no longer than the
 hand-back window), the agent is asked to hand back as near a limit.
@@ -325,17 +327,40 @@ error as the reason; if it doesn't, the run fails with the error. A
 limit the run reaches meanwhile stops it as any other time, and a bridge
 client's prompts meanwhile are refused.
 
-A rate limit gets a few retries before that. Vibe answers a turn whose
-model request the provider still rate-limited after its own few quick
-retries with its `RateLimitError`, code -31001, and runs have ended on
-one that a minute's wait would have cleared (#1339). An agent entry with
-`rate-limit-code` (Vibe's; no other has one, and JSON-RPC's reserved
-codes are refused) has a task's turn answered with that code sent again
-on the same session, labelled `rate limited`, behind a note, after
-waits of 10, 20 and 40 seconds (each no longer than the hand-back
-window): three times, and then the turn is taken as one that ended on
-an error. The waits count against the run's time; a limit reached in
-one stops the run, and near one the agent is asked to hand back.
+A model provider's failure that a wait may clear gets a few retries
+before that, for every agent. The session sorts the error's words, or
+the agent's, into a class (`session/provider.rs`): `rate_limited` (HTTP
+429, "rate limit"), `overloaded` (5xx, Anthropic's 529, "overloaded"),
+`unreachable` (refused, reset, closed, EOF, a timeout), `quota` (a usage
+or spending limit), `unauthorized` (401 or 403) or `other`. The words
+are those of real runs' transcripts, in
+`tests/data/provider/errors.json`; a status code counts only next to a
+word that makes it one. Vibe's `RateLimitError`, code -31001, is
+`rate_limited` by the entry's `rate-limit-code` whatever its words
+(JSON-RPC's reserved codes are refused there). A turn that ended on one
+of the first three is sent again on the same session, labelled `rate
+limited` or `provider error`, behind a note, after a wait of 10, 20 and
+40 seconds plus up to a quarter of jitter, or as long as the provider
+said to (`retry-after`), each no longer than the hand-back window: three
+times, and then the turn is taken as one that ended on an error. A
+provider that asks for more than two minutes is not waited for at all.
+Runs had ended on a 429 that a minute's wait would have cleared (#1339).
+A `quota` or `unauthorized` failure is never waited on: nothing within
+the run clears it, so the agent is asked to hand back at once, without
+the pause. The waits count against the run's time; a limit reached in
+one stops the run, and near one the agent is asked to hand back instead
+of waiting on. `provider_error` in `harness.json` and `summary.json`
+names the class of the failure a run that did not end well ended on. An
+agent that died mid-turn, after letting a failure out on its standard
+error or in its words in that turn, died of it: that, not the adapter's
+crash, is the class; the words of an earlier turn do not count, and the
+agent's own log uses words like "timed out" or "connection closed" for
+other things, so only a provider's phrasing of them does. `resends` and
+`resend_wait_s` count the times the task was sent again and the seconds
+spent waiting, a wait a limit interrupted included. `summary.json` files
+the failure of a run that did not hand back under `inference_` and the
+class, and the run action and the status comment carry that word on
+([workflow.md](workflow.md#why-a-run-failed)).
 
 Nor is a task's turn that stalls left to the timeout. Vibe has no read
 timeout on its model requests, and one waited six minutes on idle

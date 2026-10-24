@@ -43,15 +43,20 @@
 //! is cancelled and the task sent again, once, on the same session, so the
 //! work so far is kept; a second stall fails the run, saying so (`Stalls`).
 //!
-//! An agent whose entry has a `rate-limit-code` (`AgentSpec::rate_limit_code`)
-//! and answers the task's turn with that error has had its model request
-//! rate-limited by the provider past its own few quick retries. Runs on
-//! Vibe have ended there although a minute's wait would likely have
-//! cleared the limit (#1339). The session waits, longer each time, and
-//! sends the task again on the same session, a few times
-//! (`RATE_LIMIT_RETRIES`), before the turn is taken as one that ended on
-//! an error. The waits take from the run's
-//! time like any other, and a limit reached in one stops the run as ever.
+//! A task's turn that ends on a model provider's failure a wait may clear
+//! (`provider::Class`: rate-limited, overloaded or unreachable, by the
+//! words of the error the agent answers with or says, or by the entry's
+//! `rate-limit-code`, `AgentSpec::rate_limit_code`) is not given up on
+//! at once. Runs have ended there although a minute's wait would likely
+//! have cleared the limit (#1339). The session waits, longer each time
+//! and with some jitter, or as long as the provider said to, and sends
+//! the task again on the same session, a few times (`PROVIDER_RETRIES`),
+//! before the turn is taken as one that ended on an error. A usage limit
+//! or a refused credential is not waited on: nothing within the run
+//! clears them. The waits take from the run's time like any other, and a
+//! limit reached in one stops the run as ever. The class of the failure
+//! the run ended on is in its result (`RunResult::provider_error`), for
+//! the run's summary and its caller.
 //!
 //! When the session ends, the process group started for the agent is
 //! killed, and then every process of the sandbox user (`process`): the
@@ -61,7 +66,7 @@
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -86,13 +91,14 @@ use tokio::sync::{mpsc, oneshot, watch};
 use super::agents::AgentSpec;
 use super::bridge::{Bridge, FromClient};
 use super::budget::{
-    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_RATE_LIMITED, LABEL_REMINDER, LABEL_STALLED,
-    Limits, Signal, Stop, Usage, hand_back_text,
+    Budget, LABEL_COMPACTION, LABEL_HAND_BACK, LABEL_PROVIDER_ERROR, LABEL_RATE_LIMITED,
+    LABEL_REMINDER, LABEL_STALLED, Limits, Signal, Stop, Usage, hand_back_text,
 };
 use super::clients::Clients;
 use super::digest::{self, Dir};
 use super::permission::{self, Policy, Request, pick_option};
 use super::process::{self, Launch};
+use super::provider::{self, Class};
 use super::steer::{self, Seen, Watch};
 use super::transcript::{Log, Tap, set_stop};
 use crate::exit::Exit;
@@ -147,18 +153,30 @@ const RATE_LIMITED_NOTE: &str = "Your previous turn ended because the model prov
                                  you did so far is still in this session and the working \
                                  directory: check where you were and carry on from there, \
                                  without redoing finished work.";
-/// How many times a task's turn the provider rate-limited is sent again.
-/// With the waits below, about a minute in all is spent on it, and a
-/// minute more pausing before the hand-back (`ERROR_PAUSE`): a limit on
-/// requests per minute has cleared by then, one that has not is unlikely
-/// to soon, and the agent should hand back while it has time to.
-const RATE_LIMIT_RETRIES: u32 = 3;
+/// The same, after a model request failed at the provider in another way
+/// a wait may clear (overloaded, unreachable).
+const PROVIDER_ERROR_NOTE: &str = "Your previous turn ended because a model request failed at \
+                                   the provider (overloaded or unreachable); it has been waited \
+                                   out. The task follows again. What you did so far is still in \
+                                   this session and the working directory: check where you were \
+                                   and carry on from there, without redoing finished work.";
+/// How many times a task's turn that ended on a provider's failure a wait
+/// may clear is sent again. With the waits below, about a minute in all
+/// is spent on it, and a minute more pausing before the hand-back
+/// (`ERROR_PAUSE`): a limit on requests per minute has cleared by then,
+/// one that has not is unlikely to soon, and the agent should hand back
+/// while it has time to.
+const PROVIDER_RETRIES: u32 = 3;
 /// The wait before the first time it is sent again, doubled for each
-/// next one (10, 20 and 40 s), and never longer than the hand-back
-/// window, so that a short run is not held up for it. The agent's error
-/// says nothing of when to retry (Vibe's carries the provider and the
-/// model), so there is no Retry-After to take instead.
-const RATE_LIMIT_WAIT: Duration = Duration::from_secs(10);
+/// next one (10, 20 and 40 s) plus jitter (`provider::jittered`), and
+/// never longer than the hand-back window, so that a short run is not
+/// held up for it.
+const RETRY_WAIT: Duration = Duration::from_secs(10);
+/// The longest `retry-after` of the provider's own that is waited for in
+/// place of the computed wait: one that asks for longer is not waited
+/// on at all, and the agent hands back instead, as after a failure no
+/// wait clears.
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(120);
 
 /// Why the agent has not left the output its run requires; `None` when done. It runs
 /// commands (as the sandbox user), so it is called off the runtime, and
@@ -229,6 +247,18 @@ pub struct RunResult {
     pub stalls: u32,
     #[serde(default)]
     pub stall_retries: u32,
+    /// The model provider's failure the run ended on, by class
+    /// (`provider::Class`); none when it ended on nothing of the kind,
+    /// `other` for an error whose words fit no class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_error: Option<Class>,
+    /// How many times the task's turn was sent again after a provider's
+    /// failure a wait may clear, and the seconds spent waiting for them,
+    /// a wait a limit then interrupted included.
+    #[serde(default)]
+    pub resends: u32,
+    #[serde(default)]
+    pub resend_wait_s: u64,
 }
 
 impl RunResult {
@@ -264,6 +294,9 @@ impl RunResult {
             reminded: false,
             stalls: 0,
             stall_retries: 0,
+            provider_error: None,
+            resends: 0,
+            resend_wait_s: 0,
         }
     }
 
@@ -519,6 +552,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
     };
     let started = chrono::Utc::now();
     let stalls = Arc::new(Stalls::default());
+    let resends = Arc::new(Resends::default());
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
     let item_watcher = watch.map(|watch| {
         let nudges = nudge_tx.clone();
@@ -551,6 +585,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
                 after_error: Arc::default(),
                 conversation,
                 stalls: stalls.clone(),
+                resends: resends.clone(),
             };
             let (ended, exited) = drive(
                 &mut agent,
@@ -572,7 +607,9 @@ pub async fn run(opts: Options) -> Result<RunResult> {
             // what was written until then belongs in the log.
             let _ = tokio::time::timeout(EXIT_GRACE, stderr).await;
             let ended = match exited {
-                Some(status) => ended.agent_exited(status, tap.last_stderr()),
+                Some(status) => {
+                    ended.agent_exited(status, tap.last_stderr(), tap.provider_failure())
+                }
                 None => ended,
             };
             (ended, reaped)
@@ -599,6 +636,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         mut message,
         handed_back,
         reminded,
+        class,
         ..
     } = ended;
     let transcript = tap.finish();
@@ -637,6 +675,10 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         reminded,
         stalls: stalls.seen.load(Ordering::Relaxed),
         stall_retries: stalls.retried.load(Ordering::Relaxed),
+        // A run that ended well got past the provider's failure.
+        provider_error: class.filter(|_| outcome != Outcome::Success),
+        resends: resends.count.load(Ordering::Relaxed),
+        resend_wait_s: resends.waited_ms.load(Ordering::Relaxed) / 1000,
     };
     let path = out.join(RESULT_FILE);
     std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
@@ -743,10 +785,13 @@ async fn drive(
     // after the error it was to hand back after, if any.
     let transport_failed = |e: agent_client_protocol::Error| {
         let failed = format!("the agent failed: {e}");
-        Ended::failure(match pending() {
-            Some(error) => format!("{error}; then {failed}"),
-            None => failed,
-        })
+        match pending() {
+            Some(Pending { error, class }) => Ended {
+                class,
+                ..Ended::failure(format!("{error}; then {failed}"))
+            },
+            None => Ended::failure(failed),
+        }
     };
     // The agent exiting ends the session, whatever it was waiting for.
     let ended = tokio::select! {
@@ -757,7 +802,10 @@ async fn drive(
             Ok(r) => r.unwrap_or_else(transport_failed),
             // One that exits while it is to hand back after an error
             // failed with that error.
-            Err(_) => Ended::failure(pending().unwrap_or_else(|| AGENT_EXITED.to_owned())),
+            Err(_) => match pending() {
+                Some(Pending { error, class }) => Ended { class, ..Ended::failure(error) },
+                None => Ended::failure(AGENT_EXITED.to_owned()),
+            },
         },
     };
     // A failure is usually the agent having died, and its exit status and
@@ -826,6 +874,9 @@ struct Ended {
     errored: bool,
     /// The agent was reminded of the output the run requires.
     reminded: bool,
+    /// The model provider's failure the turn ended on, by class; none
+    /// when it ended on nothing of the kind.
+    class: Option<Class>,
 }
 
 impl Ended {
@@ -837,13 +888,53 @@ impl Ended {
             handed_back: false,
             errored: false,
             reminded: false,
+            class: None,
+        }
+    }
+
+    /// The same, ended on a provider's failure of CLASS, where one is
+    /// known.
+    fn with_class(self, class: Option<Class>) -> Self {
+        Ended {
+            class: class.or(self.class),
+            ..self
         }
     }
 
     /// The failure of an agent that exited on its own with STATUS: that,
-    /// and the last it said on its standard error, ahead of the request
-    /// that failed for it.
-    fn agent_exited(self, status: ExitStatus, last_words: Option<String>) -> Self {
+    /// the provider's failure it died of, the last it said on its
+    /// standard error, and the request that was waiting. The provider's
+    /// failure comes first: an adapter that crashes after the provider
+    /// refused it (claude-agent-acp 0.88.0 on a 429 burst) died of the
+    /// refusal, and its last line says only how. The failure is the one
+    /// the turn ended on where it ended on one; only an agent that died
+    /// mid-turn is taken at the words it let out in that turn (PROVIDER),
+    /// which its own log may use for other things.
+    fn agent_exited(
+        self,
+        status: ExitStatus,
+        last_words: Option<String>,
+        provider: Option<(Class, String)>,
+    ) -> Self {
+        // A transport that closed under the agent's death is an error
+        // too, of no class: the words count then.
+        let turn = self.class.filter(|class| *class != Class::Other);
+        let said = match turn {
+            Some(_) => None,
+            None => provider.filter(|(class, _)| *class != Class::Other),
+        };
+        let class = turn
+            .or(said.as_ref().map(|(class, _)| *class))
+            .or(self.class);
+        let of = match (class, said) {
+            (Some(class), Some((_, said))) if class != Class::Other => {
+                format!(" after the provider {} ({said})", class.describe())
+            }
+            (Some(class), None) if class != Class::Other => {
+                format!(" after the provider {}", class.describe())
+            }
+            _ => String::new(),
+        };
         let last_words = last_words
             .map(|line| format!(": {line}"))
             .unwrap_or_default();
@@ -852,7 +943,12 @@ impl Ended {
             .filter(|m| m != AGENT_EXITED)
             .map(|m| format!(" ({m})"))
             .unwrap_or_default();
-        Ended::failure(format!("{AGENT_EXITED} ({status}){last_words}{request}"))
+        Ended {
+            class,
+            ..Ended::failure(format!(
+                "{AGENT_EXITED} ({status}){of}{last_words}{request}"
+            ))
+        }
     }
 
     /// A conversation that ended as it may: the client left, or went
@@ -865,6 +961,7 @@ impl Ended {
             handed_back: false,
             errored: false,
             reminded: false,
+            class: None,
         }
     }
 
@@ -883,6 +980,7 @@ impl Ended {
             handed_back,
             errored: false,
             reminded: false,
+            class: None,
         }
     }
 }
@@ -897,10 +995,19 @@ struct Signals {
     /// The agent's session, once it has one, for the bridge's client.
     session_id: watch::Sender<Option<String>>,
     /// The error the task's turn ended on, while the agent is to hand
-    /// back after it (`after_error`).
-    after_error: Arc<Mutex<Option<String>>>,
+    /// back after it, or the task is to be sent again (`after_error`).
+    after_error: Arc<Mutex<Option<Pending>>>,
     conversation: Option<Conversation>,
     stalls: Arc<Stalls>,
+    resends: Arc<Resends>,
+}
+
+/// The error the task's turn ended on, kept while the session waits:
+/// what an agent that exits meanwhile failed with.
+#[derive(Debug, Clone)]
+struct Pending {
+    error: String,
+    class: Option<Class>,
 }
 
 /// The stalls of the task's turn, for the run's result.
@@ -909,6 +1016,14 @@ struct Stalls {
     seen: AtomicU32,
     /// The times the task was sent again after one: no more than once.
     retried: AtomicU32,
+}
+
+/// The times the task was sent again after a provider's failure, and the
+/// waits before them, for the run's result.
+#[derive(Default)]
+struct Resends {
+    count: AtomicU32,
+    waited_ms: AtomicU64,
 }
 
 /// What the session goes on to after the task's turn, with a bridge.
@@ -969,8 +1084,7 @@ fn task_again(sid: &SessionId, note: &str, label: &str, task: &str) -> PromptReq
 }
 
 /// Whether the agent answered a turn with its rate-limit error (CODE,
-/// `AgentSpec::rate_limit_code`): that, not its words, which a model
-/// could repeat.
+/// `AgentSpec::rate_limit_code`): that, whatever its words.
 fn rate_limited(
     r: &Result<PromptResponse, agent_client_protocol::Error>,
     code: Option<i32>,
@@ -978,12 +1092,48 @@ fn rate_limited(
     matches!(r, Err(e) if Some(i32::from(e.code)) == code)
 }
 
-/// The wait before the task is sent again after its turn was rate-limited
-/// for the time numbered RETRIED (from 0), within the hand-back WINDOW.
-fn rate_limit_backoff(retried: u32, window: Duration) -> Duration {
-    RATE_LIMIT_WAIT
-        .saturating_mul(2u32.saturating_pow(retried))
-        .min(window)
+/// The model provider's failure the task's turn ended on, if one: by
+/// class, with the error as the result says it. An error the agent
+/// answered the turn with is classified by its words (and its data: the
+/// Claude adapter's `errorKind`), unless its code is the agent's
+/// rate-limit code; a turn answered as done after the agent said the
+/// provider refused (`Tap::refusal`) by what it said. Anything else ended
+/// on no failure of the provider's.
+fn provider_failure(
+    r: &Result<PromptResponse, agent_client_protocol::Error>,
+    code: Option<i32>,
+    tap: &Tap,
+) -> Option<(Class, String)> {
+    match r {
+        Err(e) => {
+            let class = if rate_limited(r, code) {
+                Class::RateLimited
+            } else {
+                provider::classify(&e.to_string())
+            };
+            Some((class, format!("session/prompt failed: {e}")))
+        }
+        Ok(resp) => {
+            let said = tap
+                .refusal()
+                .filter(|_| resp.stop_reason == StopReason::EndTurn)?;
+            Some((provider::classify(&said), format!("{REFUSED}: {said}")))
+        }
+    }
+}
+
+/// The wait before the task is sent again after its turn ended on a
+/// provider's failure, for the time numbered RETRIED (from 0): doubling
+/// from `RETRY_WAIT`, or what the provider said (RETRY_AFTER), with
+/// jitter, and never past the hand-back WINDOW. `None` for a provider
+/// that asks for more than `RETRY_AFTER_CAP`: not worth the run's time.
+fn backoff(retried: u32, window: Duration, retry_after: Option<Duration>) -> Option<Duration> {
+    let wait = match retry_after {
+        Some(after) if after > RETRY_AFTER_CAP => return None,
+        Some(after) => after,
+        None => RETRY_WAIT.saturating_mul(2u32.saturating_pow(retried)),
+    };
+    Some(provider::jittered(wait).min(window))
 }
 
 /// Waits until UNTIL, or forever without one.
@@ -996,8 +1146,9 @@ async fn quiet(until: Option<tokio::time::Instant>) {
 
 /// What ends the task's turn as the session waits on it.
 enum Next<R> {
-    /// The turn's answer.
-    Answered(R),
+    /// The turn's answer, and the class of the provider's failure it is,
+    /// if one.
+    Answered(R, Option<Class>),
     /// Near a limit: the agent is to hand back.
     HandBack(Stop, String, Duration),
 }
@@ -1032,6 +1183,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         after_error: pending_error,
         mut conversation,
         stalls,
+        resends,
     } = signals;
     let sid = tokio::select! {
         r = setup(&cx, task) => match r {
@@ -1075,36 +1227,61 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     let mut heard = tap.heard();
     let quiet_for = |limit: Duration| tokio::time::Instant::now() + limit;
     let mut quiet_until = task.stall.map(quiet_for);
-    // The times the task was sent again after the provider rate-limited it.
-    let mut rate_limits = 0;
+    // The times the task was sent again after a provider's failure.
+    let mut resent = 0;
     let next = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
             // which would start another.
             biased;
             r = &mut response => {
-                // A turn the client cancelled is the client's to go on from.
-                let retry = rate_limited(&r, task.rate_limit_code)
-                    && !client_cancelled
-                    && rate_limits < RATE_LIMIT_RETRIES;
-                let (true, Err(e)) = (retry, &r) else {
-                    break Next::Answered(r);
+                // A provider's failure a wait may clear has the task sent
+                // again, a few times; a turn the client cancelled is the
+                // client's to go on from.
+                let failed = provider_failure(&r, task.rate_limit_code, tap);
+                let class = failed.as_ref().map(|(class, _)| *class);
+                let again = failed.filter(|(class, _)| {
+                    class.transient() && !client_cancelled && resent < PROVIDER_RETRIES
+                });
+                let Some((class, error)) = again else {
+                    break Next::Answered(r, class);
                 };
-                let error = format!("session/prompt failed: {e}");
-                let wait = rate_limit_backoff(rate_limits, task.hand_back_window);
-                rate_limits += 1;
+                let retry_after = provider::retry_after(&error);
+                let Some(wait) = backoff(resent, task.hand_back_window, retry_after) else {
+                    tap.log(&[digest::cut(&format!(
+                        "⚠ {error}: the provider asks for a wait of {}s, more than the {}s waited for: not sending the task again",
+                        retry_after.unwrap_or_default().as_secs(),
+                        RETRY_AFTER_CAP.as_secs()
+                    ))]);
+                    break Next::Answered(r, Some(class));
+                };
+                resent += 1;
                 tap.log(&[digest::cut(&format!(
-                    "⚠ {error}: sending the task again in {}s ({rate_limits} of {RATE_LIMIT_RETRIES})",
+                    "⚠ {error}: the provider {}; sending the task again in {}s ({resent} of {PROVIDER_RETRIES})",
+                    class.describe(),
                     wait.as_secs()
                 ))]);
                 // An agent that exits meanwhile failed with the error.
-                *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
-                if let Some(ended) = rate_limit_wait(&link, &mut stop, &mut nudges, wait, &error).await {
+                *pending_error.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Pending { error: error.clone(), class: Some(class) });
+                let waited = Instant::now();
+                let interrupted = provider_wait(&link, &mut stop, &mut nudges, wait, &error, class).await;
+                // What was waited, whether or not the task was then sent.
+                resends.waited_ms.fetch_add(
+                    u64::try_from(waited.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                if let Some(ended) = interrupted {
                     return ended;
                 }
+                resends.count.fetch_add(1, Ordering::Relaxed);
                 pending_error.lock().unwrap_or_else(|e| e.into_inner()).take();
-                let again = task_again(&sid, RATE_LIMITED_NOTE, LABEL_RATE_LIMITED, task.prompt);
-                response.set(cx.send_request(again).block_task());
+                let (note, label) = if class == Class::RateLimited {
+                    (RATE_LIMITED_NOTE, LABEL_RATE_LIMITED)
+                } else {
+                    (PROVIDER_ERROR_NOTE, LABEL_PROVIDER_ERROR)
+                };
+                response.set(cx.send_request(task_again(&sid, note, label, task.prompt)).block_task());
                 // The wait was no stall.
                 quiet_until = task.stall.map(quiet_for);
             }
@@ -1189,7 +1366,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     // The turn ended by itself as the cancel went: that
                     // answer stands.
                     Some(r) if !matches!(&r, Ok(resp) if resp.stop_reason == StopReason::Cancelled) => {
-                        break Next::Answered(r);
+                        break Next::Answered(r, None);
                     }
                     Some(_) if first => {
                         stalls.retried.fetch_add(1, Ordering::Relaxed);
@@ -1207,9 +1384,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         // A task run ends with its turn; with a bridge, a turn that
         // ended well, or that the client cancelled, is followed by the
         // client's.
-        Next::Answered(r) => {
+        Next::Answered(r, class) => {
             cancelling.store(false, Ordering::Relaxed);
-            let ended = prompt_result(r, tap);
+            let ended = prompt_result(r, tap).with_class(class);
             // A turn the client cancelled is the client's to go on from.
             if ended.errored && !client_cancelled {
                 // The session ends with the hand-back: a client's
@@ -1217,7 +1394,11 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 if let Some(talk) = conversation.take() {
                     tokio::spawn(refuse_prompts(talk));
                 }
-                *pending_error.lock().unwrap_or_else(|e| e.into_inner()) = ended.message.clone();
+                *pending_error.lock().unwrap_or_else(|e| e.into_inner()) =
+                    ended.message.clone().map(|error| Pending {
+                        error,
+                        class: ended.class,
+                    });
                 return after_error(&link, &mut stop, ended, task.hand_back_window).await;
             }
             let goes_on = ended.outcome == Outcome::Success
@@ -1379,6 +1560,8 @@ async fn hand_back(
 /// pause. A run whose agent did is stopped at a limit, with the error for
 /// the reason; one whose agent didn't (the provider still refuses) fails
 /// with the error. A limit the run reaches meanwhile stops it as ever.
+/// There is no pause after a failure no wait clears (a usage limit, a
+/// refused credential): it would only spend the time the hand-back needs.
 async fn after_error(
     link: &Link<'_>,
     stop: &mut watch::Receiver<Option<Stop>>,
@@ -1386,10 +1569,18 @@ async fn after_error(
     window: Duration,
 ) -> Ended {
     let error = errored.message.clone().unwrap_or_default();
-    let pause = ERROR_PAUSE.min(window);
+    let class = errored.class;
+    let pause = match class {
+        Some(class) if class != Class::Other && !class.transient() => Duration::ZERO,
+        _ => ERROR_PAUSE.min(window),
+    };
+    let when = if pause.is_zero() {
+        "now".to_owned()
+    } else {
+        format!("in {}s", pause.as_secs())
+    };
     link.tap.log(&[digest::cut(&format!(
-        "⚠ {error}: asking the agent to hand back in {}s",
-        pause.as_secs()
+        "⚠ {error}: asking the agent to hand back {when}"
     ))]);
     tokio::select! {
         _ = tokio::time::sleep(pause) => {}
@@ -1398,42 +1589,47 @@ async fn after_error(
     let limit = |stop: &watch::Receiver<Option<Stop>>| stop.borrow().clone();
     if let Some(why) = limit(stop) {
         link.tap.log(&[format!("⚠ {}", stopped(&why).1)]);
-        return limited(&why, &error);
+        return limited(&why, &error, class);
     }
     let why = Stop::Budget(format!("the agent's turn ended on an error ({error})"));
     // Without the error's words, which an agent repeating them as it
     // hands back would have taken for the error again.
     let text = hand_back_text("had a model request fail", window);
-    let ended = hand_back(link, stop, &why, text, window).await;
+    let ended = hand_back(link, stop, &why, text, window)
+        .await
+        .with_class(class);
     if ended.handed_back {
         return ended;
     }
     match limit(stop) {
-        Some(why) => limited(&why, &error),
+        Some(why) => limited(&why, &error, class),
         None => errored,
     }
 }
 
-/// A run stopped for WHY after the task's turn ended on ERROR, which it
-/// still says.
-fn limited(why: &Stop, error: &str) -> Ended {
+/// A run stopped for WHY after the task's turn ended on ERROR (of CLASS,
+/// if a provider's), which it still says.
+fn limited(why: &Stop, error: &str, class: Option<Class>) -> Ended {
     let ended = Ended::stopped(why, false);
     Ended {
         message: ended.message.map(|m| format!("{m}, after {error}")),
+        class,
         ..ended
     }
 }
 
-/// The WAIT before the task is sent again after the provider rate-limited
-/// its turn with ERROR, with no turn running: `None` once it is over, or
-/// how the session ended in it. A limit reached meanwhile stops the run;
-/// near one the agent hands back as it would have.
-async fn rate_limit_wait(
+/// The WAIT before the task is sent again after its turn ended on a
+/// provider's failure of CLASS with ERROR, with no turn running: `None`
+/// once it is over, or how the session ended in it. A limit reached
+/// meanwhile stops the run; near one the agent hands back as it would
+/// have, so the wait never runs past the run's time.
+async fn provider_wait(
     link: &Link<'_>,
     stop: &mut watch::Receiver<Option<Stop>>,
     nudges: &mut mpsc::UnboundedReceiver<Nudge>,
     wait: Duration,
     error: &str,
+    class: Class,
 ) -> Option<Ended> {
     let over = tokio::time::sleep(wait);
     let mut over = std::pin::pin!(over);
@@ -1445,7 +1641,7 @@ async fn rate_limit_wait(
                     return Some(Ended::failure(LOST_STOP_SIGNAL.to_owned()));
                 };
                 link.tap.log(&[format!("⚠ {}", stopped(&why).1)]);
-                return Some(limited(&why, error));
+                return Some(limited(&why, error, Some(class)));
             }
             Some(nudge) = nudges.recv() => match nudge {
                 // A notice is for a turn, and none is running.
@@ -1455,7 +1651,11 @@ async fn rate_limit_wait(
                     link.tap.log(&[format!("⚠ {}: asking the agent to hand back", stopped(&why).1)]);
                     let ended = hand_back(link, stop, &why, text, window).await;
                     // One that didn't still says what ended the task's turn.
-                    return Some(if ended.handed_back { ended } else { limited(&why, error) });
+                    return Some(if ended.handed_back {
+                        ended.with_class(Some(class))
+                    } else {
+                        limited(&why, error, Some(class))
+                    });
                 }
             },
             () = &mut over => return None,
@@ -1894,6 +2094,7 @@ fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>, tap: &
     match r {
         Err(e) => Ended {
             errored: true,
+            class: Some(provider::classify(&e.to_string())),
             ..Ended::failure(format!("session/prompt failed: {e}"))
         },
         Ok(resp) => {
@@ -1916,12 +2117,14 @@ fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>, tap: &
                 handed_back: false,
                 errored: false,
                 reminded: false,
+                class: None,
             };
             match tap.refusal().filter(|_| outcome == Outcome::Success) {
                 Some(said) => Ended {
                     outcome: Outcome::Failure,
                     message: Some(format!("{REFUSED}: {said}")),
                     errored: true,
+                    class: Some(provider::classify(&said)),
                     ..ended
                 },
                 None => ended,
@@ -1934,20 +2137,36 @@ fn prompt_result(r: Result<PromptResponse, agent_client_protocol::Error>, tap: &
 mod tests {
     use super::*;
 
-    /// The waits double from RATE_LIMIT_WAIT, within the hand-back window.
+    /// The waits double from RETRY_WAIT, or take the provider's own up to
+    /// a cap, grow by at most a quarter of jitter, and stay within the
+    /// hand-back window.
     #[test]
-    fn rate_limit_backoffs() {
+    fn backoffs() {
         let secs = Duration::from_secs;
-        // (times retried, window, wait)
-        for (retried, window, want) in [
-            (0, secs(225), secs(10)),
-            (1, secs(225), secs(20)),
-            (2, secs(225), secs(40)),
-            (2, secs(3), secs(3)),
-            (0, Duration::ZERO, Duration::ZERO),
-            (u32::MAX, secs(225), secs(225)),
+        // (times retried, window, retry-after, the wait before jitter)
+        for (retried, window, after, base) in [
+            (0, secs(225), None, secs(10)),
+            (1, secs(225), None, secs(20)),
+            (2, secs(225), None, secs(40)),
+            (0, secs(225), Some(secs(30)), secs(30)),
+            (2, secs(225), Some(secs(1)), secs(1)),
+            (0, secs(225), Some(RETRY_AFTER_CAP), RETRY_AFTER_CAP),
         ] {
-            assert_eq!(rate_limit_backoff(retried, window), want, "{retried}");
+            for _ in 0..20 {
+                let wait = backoff(retried, window, after).unwrap();
+                assert!(
+                    wait >= base && wait <= base.mul_f64(1.25),
+                    "{retried} {after:?}: {wait:?}"
+                );
+            }
         }
+        // The window caps everything, jitter included.
+        assert_eq!(backoff(2, secs(3), None), Some(secs(3)));
+        assert_eq!(backoff(0, secs(3), Some(secs(30))), Some(secs(3)));
+        assert_eq!(backoff(0, Duration::ZERO, None), Some(Duration::ZERO));
+        assert_eq!(backoff(u32::MAX, secs(225), None), Some(secs(225)));
+        // A provider that asks for longer than the cap is not waited for.
+        assert_eq!(backoff(0, secs(225), Some(secs(121))), None);
+        assert_eq!(backoff(0, secs(3), Some(secs(600))), None);
     }
 }

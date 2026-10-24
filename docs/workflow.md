@@ -316,6 +316,7 @@ jobs:
       actions: read
     outputs:
       exit: ${{ steps.run.outputs.exit }}
+      failure-class: ${{ steps.run.outputs.failure-class }}
       over-budget: ${{ steps.run.outputs.over-budget }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
@@ -530,6 +531,56 @@ now goes to any open pull request's branch apply may push to
 bounds lose `repos`, which a bounds file that still names it is refused
 for: drop it. A call that pushes needs `apply-environment`, and no call
 needs `contents: write` for it any more.
+
+## Where a run is refused
+
+A run that is going to be refused should be refused before it spends a
+runner on checkouts and `secure-host`: about two minutes of setup at the
+median in one week's audit (#1842). This table says, for each refusal
+of the reusable workflow and of `run`, which job makes it, what it
+depends on, and whether the policy job could have made it from what it
+already had: the call's inputs, the bounds, the `config.toml`,
+`policy.json`, `run.json` and `task.md` it writes. Functions are named,
+not lines, which move. The pinned `cgwalters-forge/actions/secure-host`
+action's own refusals are its documentation's.
+
+| Job / step | Depends on | Where | Refuses | At policy time? |
+| --- | --- | --- | --- | --- |
+| a caller's dispatch job, before the call | the inputs, the item from the API | `.github/workflows/dispatch.yml` `target` | an unknown profile or agent, a non-numeric item, an issue where a pull request is needed, a task over the size limit | before it |
+| policy / Check the proposals mode | `proposals-artifact`, `event`, `review`, `apply-partial`, `task` | `policy.yml` | proposals with an event or review; a non-event, non-review run with an empty task | yes |
+| policy / Check that the repositories are public | `repo`, `agent-config-repo`, `item-repo`, their visibility | `policy.yml` | a target, configuration or item repository that is not public (a private target only as the private calling repository) | yes |
+| policy / Decide whether the event may start a run | the bounds' `[trigger]`, the event, the actor's role | `src/event/` (`event::run`, `decide`, `check_actor`, `guards::check`) | an event, actor, label, command, fork or base the trigger does not admit; a deadline passed (a soft refusal: `admitted=false`) | yes |
+| policy / Refuse unsupported routing, Resolve a dispatched review, Resolve the pull request a run pushes to | the event, `review`, `base`, `push-item`, the pull request from the API | `workflow/activation.cjs`, `workflow/review.cjs`, `workflow/push.cjs` | a discussion; a review off the configured base or without an exact head; a push whose pull request is not open or whose base is not a commit | yes |
+| policy / Check the request against the caller's bounds | `issue`, `item-repo`, `event`, `review*`, `push-item`, `context`, the bounds, the in-flight runs (with `dedupe`) | `policy.yml`; `src/policy.rs` `Bounds::compile`, `intersect`, `check_context`; `src/policy/dispatch.rs` `admission` | a non-numeric `issue`; an item repository with an event, review or push; a repository, base, kind, branch, output, output repository, push or `max-outputs` outside the bounds; `secondary_pull_request`; a context repository outside the bounds; an overlapping dispatch | yes |
+| policy / Write the configuration | the configuration file and the inputs | `src/config/compose.rs` `compose`, `src/config/checked.rs` `check` | an agent without inference; a `max-requests` nothing counts; Vibe or a child agent without one; `inference.front` and egress conflicts; a provider the agent cannot use; an MCP server the configuration cannot carry | yes |
+| policy / Write the task and the run's settings | `fake-profile`, `agent`, `setup`, the event's task | `policy.yml` | `fake-profile` without `agent: fake` or with a setup; an unknown profile; an event run with no task | yes |
+| apply-token / Check SAFE_OUTPUTS_PAT | `require-safe-outputs-pat`, the secret, `output-repo` | `workflow/apply-token.cjs` | a missing or unusable PAT, before the agent runs | yes |
+| register / The policy call is this workflow's commit, Register the run | the policy outputs, step debug logging | `agentic-job.yml`; `src/run/register.rs` | a call whose pieces are not one commit; a run with step debug logging on, which would print the token | the commit yes; the logging no |
+| agent / prepare | the policy outputs, `run.json`, `task.md` | `prepare/action.yml` (Require trusted upload IDs, The policy call is this action's commit, Write what the run is called) | non-numeric upload IDs; a version skew; an empty task | yes, except the skew |
+| agent / Admit the runner-user configuration | the calling repository's visibility, `policy.json`'s `private`, `config.toml`, `agent-user` | `workflow/runner-setup.py` `admit` | a private or unknown caller or target; `inference.register = "api-key"` or `[mcp.NAME]`, whose credentials the workflow does not pass; with `agent-user: runner`, `session.listen`, `sandbox.check.before-agent` or `setup.tools`, which need a second user | the configuration yes; `agent-user` is not a policy input |
+| agent / Check inference proxy reachability | `config.toml`'s proxy URL, the runner's network | `src/secure_host/inference.rs` `check` | a malformed URL; a proxy the runner cannot reach by TCP | the URL yes; the reach no |
+| agent / The host's configuration | `config.toml` | `src/config/checked.rs` `check_host` | the host checks the policy job already made (a repeat) | yes |
+| agent / secure-host | the host configuration | `secure-host/action.yml` | the removed inputs; a backslash or multi-line string in the host configuration | yes |
+| run / The session's endpoint, Prove the host is secured | `/etc/agentic-job`, `agent-user`, `runner-home`, the host's state | `run/action.yml` | a malformed session endpoint; an inconsistent user and home; `sandbox.lock-runner` off; a failed probe | `lock-runner` yes; the rest no |
+| run / The policy call is this action's commit, Read the run's settings | `run.json` | `run/action.yml` | a version skew; a setting with a line break in it | the line break yes |
+| run / Install the built-in scripted session | `fake-profile`, `agent-user` | `run/action.yml` | an unknown profile (a repeat); a profile with the sandbox user | the profile yes |
+| run / Refuse a GitHub token that can write | the token given to the agent | `run/action.yml` | a token GitHub rejects or a classic token with a write scope | no |
+| run / Run the agent | `config.toml`, `policy.json`, `task.md`, `meta.json`, `run.json`, `--runner-home`, the tokens, the installed egress policy, the output directory | `src/run/mod.rs` `Plan::load` (`config.check` again), `run_id`, `watch_item`, the task's size (`MAX_TASK_BYTES`) and emptiness, `check_private`, `refuse_without_second_user`, `separate_tokens`; `src/run/clone.rs` `check`, `check_review_head`; `src/run/upload.rs` `refuse_earlier_results`; `src/policy.rs` `Policy::load` | the configuration and policy checks again; a bad run id; an item or API URL that is not one; an oversized or blank task; a private run without proxy, policy or token; with `--runner-home`, `id-token`, `api-key`, `inference.front`, `[mcp]`, a private target, `session.listen`, `before-agent`, `setup.tools` or `[child-agent]`; a key equal to the agent's GitHub token; a bad checkout name, ref or clone URL; a review head on a non-analysis run; earlier results in the output directory | the configuration, policy, task and review head yes; `agent-user`, the tokens, the host and the directory no |
+| run / Check again that the repositories are public | the repositories' visibility after the agent worked | `run/action.yml` | a repository that became private | no, by design |
+| run / upload | what the agent produced | `src/run/upload.rs` | an upload with a secret or private key in it | no |
+| check, apply | the agent's outputs, the forge | `check.yml`, `apply.yml`, `src/check/` | outputs outside the policy; `create_check_run` for another repository; a push to another repository; a partial run with nothing to mark partial | `create_check_run` and the push repository yes; the rest no |
+
+What refuses after `secure-host` on inputs the policy job had: the
+configuration-only rules of `runner-setup.py admit` (`api-key`, `[mcp]`;
+a private target), `lock-runner` off, a line break in a `run.json`
+setting, a task over 256 KiB or blank (the policy job checks only that
+it is not empty), the repeated configuration and policy checks in `run`,
+the item of `watch-item`, an unknown `fake-profile`, and in apply
+`create_check_run` for another repository and a push to one. The
+configuration half of `refuse_without_second_user` is decidable too;
+`agent-user`, which decides the other half, is an input of the agent job
+alone. Moving those into the policy job, as one admission function `run`
+calls too, is open work (#1842).
 
 ## What has run, and what has not
 
@@ -1616,9 +1667,55 @@ The agent job passes with a warning, and `summary.json` still says
 state, not text from the agent's machine. The exit state does not say
 which of the request, task and spending limits or the error it was, so
 the marking does not either. `summary.json` does, and so does the commit's message
-where the agent gave no reason of its own for stopping. A stopped run that handed
+where the agent gave no reason of its own for stopping; the
+`failure-class` output ([below](#why-a-run-failed)) says the kind. A stopped run that handed
 back neither a pull request nor a comment has nothing to carry them,
 and the apply job fails rather than apply it unmarked.
+
+### Why a run failed
+
+A run that failed for an infrastructure reason used to show, in the
+workflow's UI, only `agentic-job run ended with exit state 1`: the cause
+was in `summary.json` and `condensed.log` in the `agent-run` artifact,
+and a run that died of a rate limit looked like one whose agent had
+crashed (#1842). Now the run action's result step reads `summary.json`
+and names, in its error or warning annotation, the kind of the failure
+the run ended on and how often the task was sent again after a model
+provider's failure; the failures follow in the step's log, each on a
+line that starts with a fixed word, and `summary.md` is the job's
+summary as before.
+
+The kind is also the run action's `failure-class` output, which
+`agent.yml` and `agentic-job.yml` pass on, and which the status comment
+names (`failed (...; failure class: inference_rate_limited)`). It is one
+of `summary.json`'s failure kinds, the binary's fixed words (`FAILURE_KINDS`
+in `run/summary.rs`): `timeout`, `budget`, `stall` or `agent_exit`, or,
+for a model provider's failure the session could not get past
+([harness.md](harness.md#limits)), `inference_rate_limited`,
+`inference_overloaded`, `inference_unreachable`, `inference_quota` or
+`inference_unauthorized`. The action checks the word against that list
+before it becomes an output, and `apply.yml`'s `conclude` checks it again
+before it goes into the comment, as it does `secret-at` and `over-budget`:
+where and what kind, never the agent's words, which stay in the summary
+and the log. A test (`tests/failure_class.rs`) holds the three lists to
+one. Empty for a run that ended well.
+
+What a caller does with it is the caller's. The reusable workflow cannot
+retry a whole run: the run token is single-use, and re-running the
+agent's job alone is refused ([the run token](#the-run-token)). A
+dispatcher that reads `failure-class` can requeue a run that ended on
+`inference_rate_limited`, `inference_overloaded` or `inference_unreachable`,
+which a wait clears, and should not requeue one that ended on
+`inference_quota` or `inference_unauthorized`, which it will not; the
+`resends` and `resend_wait_s` fields of `summary.json` say how much the
+session already waited. A run whose agent handed back after the failure
+is filed `budget` or `timeout`, with the class in `summary.json`'s
+`provider_error`: a partial result, not a failure to repeat. The class
+is a fixed word, but it is read from words the agent controls (the error
+it answers with, what it says, its standard error): an agent, or
+content it was shown, can make a run end `inference_rate_limited`. A
+requeue spends another runner and more inference, so bound the number
+of times a dispatcher requeues one item, as it would any retry.
 
 A stopped run cannot clean up after its own commands, so the hand-back
 of any run leaves untracked binary files (a `__pycache__`, say) out of
@@ -1676,6 +1773,7 @@ the fork branch's one-parent commit and checked tree are the evidence.
 `handlers` is the configuration the handlers ran with.
 
 The workflow's outputs are `exit` (the exit state of `run`),
+`failure-class` ([above](#why-a-run-failed)),
 `pull-request`, `applied-artifact-id`, `blocked` (see below) and `result-url`: the URL of the pull
 request, or else of the first comment or issue apply made or found made, also
 in the run summary. With `issue` set to a number of the output repository, a

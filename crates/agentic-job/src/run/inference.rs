@@ -489,19 +489,26 @@ pub struct Identity {
     pub max_requests: Option<u64>,
 }
 
-/// How often, and how far apart, a request to the proxy is tried.
+/// How often a request to the proxy is tried, and the wait before the
+/// second try, which doubles for each next one (with jitter, up to
+/// [`MAX_RETRY_WAIT`]): a proxy that is restarting is back within
+/// seconds, one that is overloaded wants to be left alone a while.
 #[derive(Debug, Clone, Copy)]
 pub struct Retry {
     pub attempts: u32,
     pub delay: Duration,
 }
 
+/// The longest one wait between tries grows to.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(32);
+
 impl Default for Retry {
-    /// The old tree's: a proxy that is restarting is back within seconds.
+    /// About 14 seconds in all (2, 4 and 8 s): what a registration, a
+    /// key check or an MCP check waits for a proxy that is restarting.
     fn default() -> Self {
         Self {
             attempts: 4,
-            delay: Duration::from_secs(3),
+            delay: Duration::from_secs(2),
         }
     }
 }
@@ -520,19 +527,43 @@ pub type Stopped<'a> = &'a dyn Fn() -> bool;
 pub const NEVER: Stopped<'static> = &|| false;
 
 impl Retry {
+    /// For the call that ends the run at the proxy: about a minute in
+    /// all (2, 4, 8, 16 and 32 s). A finished run has been lost to a
+    /// proxy that restarted for a few seconds just then (#1796), and
+    /// nothing of it is uploaded until the run is ended.
+    pub fn end_of_run() -> Self {
+        Self {
+            attempts: 6,
+            delay: Duration::from_secs(2),
+        }
+    }
+
+    /// The wait before try N (from 1): the delay, doubled for each
+    /// earlier wait, capped, and with jitter.
+    fn wait(self, n: u32) -> Duration {
+        let doubled = self
+            .delay
+            .saturating_mul(2u32.saturating_pow(n.saturating_sub(1)))
+            .min(MAX_RETRY_WAIT);
+        crate::session::provider::jittered(doubled)
+    }
+
     /// Tries until an attempt settles it, the tries are used up, or
     /// STOPPED says to go no further: a registration that is retried for
     /// minutes after its run was told to stop would leave a run at the
-    /// proxy that nobody ends.
+    /// proxy that nobody ends. An error after the last try says how many
+    /// there were and how long they took.
     pub(super) fn run<T>(
         self,
         stopped: Stopped,
         mut attempt: impl FnMut(u32) -> Attempt<T>,
     ) -> Result<T> {
+        let started = std::time::Instant::now();
         let mut last = String::from("no attempt was made");
-        for n in 0..self.attempts.max(1) {
+        let attempts = self.attempts.max(1);
+        for n in 0..attempts {
             if n > 0 {
-                std::thread::sleep(self.delay);
+                std::thread::sleep(self.wait(n));
             }
             ensure!(!stopped(), "stopped; the last try said: {last}");
             match attempt(n) {
@@ -541,7 +572,10 @@ impl Retry {
                 Attempt::Failed(why) => bail!(why),
             }
         }
-        bail!(last)
+        bail!(
+            "{last} (after {attempts} tries over {}s)",
+            started.elapsed().as_secs()
+        )
     }
 }
 
@@ -1890,7 +1924,10 @@ mod tests {
             tries += 1;
             Attempt::Again(format!("try {tries}"))
         });
-        assert_eq!((got.unwrap_err().to_string().as_str(), tries), ("try 3", 3));
+        assert_eq!(
+            (got.unwrap_err().to_string().as_str(), tries),
+            ("try 3 (after 3 tries over 0s)", 3)
+        );
         let mut tries = 0;
         let got: Result<()> = quick.run(NEVER, |_| {
             tries += 1;
@@ -1909,5 +1946,32 @@ mod tests {
         assert_eq!(tries.get(), 1);
         let err = got.unwrap_err().to_string();
         assert_eq!(err, "stopped; the last try said: not yet");
+    }
+
+    /// The waits double from the delay, up to the cap, with at most a
+    /// quarter of jitter; the end-of-run call gets about a minute in all.
+    #[test]
+    fn retry_waits_grow() {
+        let retry = Retry::end_of_run();
+        let secs = Duration::from_secs;
+        for (n, base) in [(1, 2), (2, 4), (3, 8), (4, 16), (5, 32), (6, 32)] {
+            let wait = retry.wait(n);
+            assert!(
+                wait >= secs(base) && wait <= secs(base).mul_f64(1.25),
+                "try {n}: {wait:?}"
+            );
+        }
+        let in_all: Duration = (1..retry.attempts).map(|n| retry.wait(n)).sum();
+        assert!(
+            in_all >= secs(62) && in_all <= secs(78),
+            "end of run: {in_all:?}"
+        );
+        let in_all: Duration = (1..Retry::default().attempts)
+            .map(|n| Retry::default().wait(n))
+            .sum();
+        assert!(
+            in_all >= secs(14) && in_all <= secs(18),
+            "default: {in_all:?}"
+        );
     }
 }

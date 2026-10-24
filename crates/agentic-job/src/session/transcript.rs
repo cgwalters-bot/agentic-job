@@ -22,6 +22,7 @@ use super::budget::{Limits, Repeats, Stop};
 use super::clients::Clients;
 use super::compaction::Compactions;
 use super::digest::{Digest, Dir};
+use super::provider::{self, Class};
 
 /// The files a session writes to its output directory.
 pub const ACP_LOG: &str = "acp.jsonl";
@@ -71,6 +72,12 @@ struct Inner {
     compactions: Compactions,
     /// The last thing the agent said on its standard error.
     last_stderr: Option<String>,
+    /// The last words of a model provider's failure the agent let out in
+    /// the current turn, on its standard error or in a message that
+    /// starts with its `provider-error` words, and their class: what an
+    /// agent that then dies died of, more often than its last line says.
+    /// Forgotten when the next turn is sent.
+    provider_failure: Option<(Class, String)>,
     /// The first write error; the run fails with it.
     error: Option<String>,
 }
@@ -126,6 +133,7 @@ impl Tap {
                 digest: Digest::new(),
                 compactions: Compactions::default(),
                 last_stderr: None,
+                provider_failure: None,
                 error: None,
             }),
             limits,
@@ -161,6 +169,24 @@ impl Tap {
         let Some(msg) = &record.msg else { return };
         let lines = inner.digest.feed(ts, dir, msg);
         inner.log(&lines);
+        // A failure the agent let out before this turn is not what a
+        // later turn ends on: a line of an earlier turn that recovered
+        // would otherwise file an unrelated crash as the provider's.
+        if dir == Dir::Send && msg["method"] == "session/prompt" {
+            inner.provider_failure = None;
+        }
+        // A message that says the provider refused, remembered for an
+        // agent that dies after saying so (`provider_failure`).
+        if dir == Dir::Recv
+            && let Some(prefix) = self.provider_error.as_deref()
+            && let Some(said) = inner
+                .digest
+                .last_message()
+                .filter(|s| s.starts_with(prefix))
+        {
+            let said = said.to_owned();
+            inner.provider_failure = Some((provider::classify(&said), said));
+        }
         if let Some(stop) = inner.digest.cost_usd.and_then(|c| self.limits.overspent(c)) {
             set_stop(&self.stop, stop);
         }
@@ -204,6 +230,12 @@ impl Tap {
         inner.note(r);
         if !line.trim().is_empty() {
             inner.last_stderr = Some(line.to_owned());
+            // Only words that fit a class: the agent's stack trace after
+            // them is not what the provider said.
+            let class = provider::classify(line);
+            if class != Class::Other {
+                inner.provider_failure = Some((class, line.to_owned()));
+            }
         }
     }
 
@@ -235,6 +267,12 @@ impl Tap {
     /// that died, usually why.
     pub fn last_stderr(&self) -> Option<String> {
         self.inner().last_stderr.clone()
+    }
+
+    /// The last model provider's failure the agent let out, by class and
+    /// in its words (`Inner::provider_failure`); none if it let out none.
+    pub fn provider_failure(&self) -> Option<(Class, String)> {
+        self.inner().provider_failure.clone()
     }
 
     /// Ends the transcript: the digest's last lines are logged, and what
