@@ -401,6 +401,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
             name: "vibe".into(),
             agent: spec,
             model: config.model.clone(),
+            fallback_model: None,
             config_options: config
                 .options
                 .iter()

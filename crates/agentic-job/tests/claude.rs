@@ -117,6 +117,7 @@ fn pinned_claude_acp_offers_file_tools() {
             name: "claude".into(),
             agent: spec,
             model: None,
+            fallback_model: None,
             config_options: Vec::new(),
             cwd: work.clone(),
             prompt: "Write the requested file and stop.".into(),

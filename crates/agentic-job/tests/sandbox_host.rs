@@ -1217,6 +1217,7 @@ fn session_view(config: &Config, entry: &Entry) {
         name: "fake".into(),
         agent: session::agents::parse(&registry, "fake").unwrap(),
         model: None,
+        fallback_model: None,
         config_options: Vec::new(),
         cwd: work.clone(),
         prompt: "Probe the filesystem view".into(),

@@ -279,12 +279,15 @@ pub fn mark_stopped_early(mut outcome: Object, harness: Option<&RunResult>) -> O
             .as_deref()
             .filter(|message| !message.is_empty())
             .unwrap_or(harness.result.as_str());
+        // A run its provider stopped says so itself, and was at no limit.
+        let at = if harness.provider_stopped() {
+            ""
+        } else {
+            "the run was stopped at a limit: "
+        };
         outcome.set(
             "stopped_early",
-            json!(format!(
-                "the run was stopped at a limit: {}",
-                cut(&squeeze(why), MAX_REASON_CHARS)
-            )),
+            json!(format!("{at}{}", cut(&squeeze(why), MAX_REASON_CHARS))),
         );
     }
     outcome
@@ -713,6 +716,14 @@ pub struct Change {
 }
 
 impl Change {
+    /// Whether a patch was handed back, for the run's repository or the
+    /// secondary one.
+    pub fn handed_back_patch(&self) -> bool {
+        [&self.patch, &self.secondary_patch]
+            .iter()
+            .any(|patch| patch["bytes"].is_u64())
+    }
+
     fn drop_patch(&mut self, base: &str, why: String) {
         self.patch = json!({"base": base, "error": why});
         self.dropped = Some(why);
@@ -1768,6 +1779,7 @@ mod tests {
             provider_error: None,
             resends: 0,
             resend_wait_s: 0,
+            fallback_model: None,
         }
     }
 
@@ -2204,9 +2216,41 @@ mod tests {
 
     #[test]
     fn a_run_stopped_at_a_limit_is_marked() {
+        use crate::session::provider::Class;
         let stopped = harness(Outcome::Timeout, Some("hit the timeout; cancelled"));
+        let failed = |class| RunResult {
+            provider_error: Some(class),
+            ..harness(
+                Outcome::Failure,
+                Some("session/prompt failed: API Error: 529 Overloaded"),
+            )
+        };
+        // A run its provider failed, of a known class, is stopped by it;
+        // the agent's own failure, or one that ended otherwise, is not.
+        let by_provider = failed(Class::Overloaded).stopped_by_provider().unwrap();
+        assert_eq!(by_provider.result, Outcome::Budget);
+        assert_eq!(by_provider.provider_error, Some(Class::Overloaded));
+        assert!(by_provider.provider_stopped());
+        assert!(!stopped.provider_stopped());
+        assert!(failed(Class::Quota).stopped_by_provider().is_some());
+        assert!(failed(Class::Other).stopped_by_provider().is_none());
+        for outcome in [Outcome::Success, Outcome::Timeout, Outcome::Budget] {
+            let ended = RunResult {
+                result: outcome,
+                ..failed(Class::Overloaded)
+            };
+            assert!(ended.stopped_by_provider().is_none(), "{outcome:?}");
+        }
         // (the outcome, how the session ended, the outcome's stopped_early)
         let cases = [
+            (
+                json!({}),
+                Some(&by_provider),
+                json!(
+                    "the model provider stopped the run: the provider was overloaded, and the \
+                     agent could not hand back"
+                ),
+            ),
             (
                 json!({}),
                 Some(&stopped),

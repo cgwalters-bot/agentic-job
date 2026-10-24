@@ -89,6 +89,8 @@ struct Setup<'a> {
     config_options: &'a [(&'a str, &'a str)],
     /// The model the session selects.
     model: Option<&'a str>,
+    /// The model it switches to on a lasting overload.
+    fallback_model: Option<&'a str>,
     /// The registry's `provider-error` for the agent.
     provider_error: Option<&'a str>,
     /// The file, under the test's directory, whose existence is the
@@ -367,6 +369,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         name: "fake".to_owned(),
         agent: session::agents::parse(&registry, "fake").unwrap(),
         model: setup.model.map(str::to_owned),
+        fallback_model: setup.fallback_model.map(str::to_owned),
         config_options: setup
             .config_options
             .iter()
@@ -811,6 +814,7 @@ fn a_cap_nothing_counts_is_refused() {
         name: "fake".to_owned(),
         agent: session::agents::builtin("fake").unwrap(),
         model: None,
+        fallback_model: None,
         config_options: Vec::new(),
         cwd: dir.path().to_owned(),
         prompt: String::new(),
@@ -1808,7 +1812,8 @@ fn a_stalled_turn_is_sent_again_once() {
 /// (the agent's rate-limit error, or an error or a refusal whose words
 /// say rate-limited, overloaded or unreachable, for any agent) is sent
 /// again after a wait, on the same session, up to three times, the wait
-/// the provider's own where it names one; then, or for any other error,
+/// the provider's own where it names one; an overload longer, and then on
+/// the run's fallback model if it names one; then, or for any other error,
 /// the agent is asked to hand back as after any error, and at once
 /// after a failure no wait clears. The class of the failure the run ended
 /// on is in its result, an agent that dies of one included, and a wait
@@ -1820,6 +1825,7 @@ fn a_rate_limited_turn_is_sent_again() {
     const ALWAYS: &str = r#"[{"rate_limit": "Rate limit exceeded"}]"#;
     const FAILED: &str = r#"[{"say": "Working."}, {"fail": "Internal error"}]"#;
     const OVERLOADED: &str = r#"[{"say": "Working."}, {"fail": "AI_RetryError: Failed after 3 attempts. Last error: Service Unavailable"}]"#;
+    const ALWAYS_OVERLOADED: &str = r#"[{"fail": "API Error: 529 Overloaded"}]"#;
     const CLOSED: &str = r#"[{"say": "Working."}, {"fail": "socket hang up"}]"#;
     const RETRY_AFTER: &str =
         r#"[{"say": "Working."}, {"fail": "Rate limit exceeded. Retry-After: 1"}]"#;
@@ -1854,6 +1860,9 @@ fn a_rate_limited_turn_is_sent_again() {
         /// `provider_error` and `resends` in the result.
         class: Option<&'static str>,
         resends: u64,
+        /// The run's fallback model, and the result's `fallback_model`.
+        fallback: Option<&'static str>,
+        switched: Option<&'static str>,
     }
     let case = Case {
         name: "",
@@ -1870,6 +1879,8 @@ fn a_rate_limited_turn_is_sent_again() {
         log: &[],
         class: None,
         resends: 1,
+        fallback: None,
+        switched: None,
     };
     let cases = [
         Case {
@@ -1913,6 +1924,63 @@ fn a_rate_limited_turn_is_sent_again() {
             script: OVERLOADED,
             notices: &[PROVIDER],
             log: &["the provider was overloaded; sending the task again"],
+            ..case
+        },
+        // Waited out for longer than a rate limit, and then the agent,
+        // which needs the provider to hand back too, cannot: the run
+        // hands back its working tree itself (tests/run.rs).
+        Case {
+            name: "always overloaded",
+            script: ALWAYS_OVERLOADED,
+            later: ALWAYS_OVERLOADED,
+            status: 1,
+            result: "failure",
+            message: &["session/prompt failed: API Error: 529 Overloaded"],
+            notices: &[
+                PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER, HAND_BACK,
+            ],
+            log: &["(6 of 6)", "asking the agent to hand back in 3s"],
+            class: Some("overloaded"),
+            resends: 6,
+            ..case
+        },
+        // With a fallback model, the agent is switched to it after the
+        // waits, keeping its session, and the task sent again at once:
+        // the fake agent's `spare` model serves what the other failed.
+        Case {
+            name: "always overloaded, then switched to the fallback and done",
+            script: ALWAYS_OVERLOADED,
+            later: ALWAYS_OVERLOADED,
+            fallback: Some("spare"),
+            notices: &[
+                PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER,
+            ],
+            log: &[
+                "(6 of 6)",
+                "the provider stayed overloaded; switched the agent to model spare, sending the task again",
+            ],
+            switched: Some("spare"),
+            resends: 7,
+            ..case
+        },
+        // One the agent will not switch to leaves it to hand back.
+        Case {
+            name: "always overloaded, and the fallback not taken",
+            script: ALWAYS_OVERLOADED,
+            later: ALWAYS_OVERLOADED,
+            fallback: Some("ignored"),
+            status: 1,
+            result: "failure",
+            message: &["session/prompt failed: API Error: 529 Overloaded"],
+            notices: &[
+                PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER, PROVIDER, HAND_BACK,
+            ],
+            log: &[
+                "the agent could not be switched to the fallback model ignored: the agent still runs fake",
+                "asking the agent to hand back in 3s",
+            ],
+            class: Some("overloaded"),
+            resends: 6,
             ..case
         },
         Case {
@@ -2021,10 +2089,16 @@ fn a_rate_limited_turn_is_sent_again() {
                 timeout_s: c.timeout_s,
                 rate_limit_code: c.code,
                 provider_error: c.provider_error,
+                fallback_model: c.fallback,
                 ..Setup::default()
             },
         );
         assert_result(&r, c.status, c.result);
+        assert_eq!(
+            r.result.get("fallback_model").and_then(Value::as_str),
+            c.switched,
+            "{name}"
+        );
         let said = r.result["message"].as_str();
         if c.message.is_empty() {
             assert_eq!(said, None, "{name}");
@@ -2064,12 +2138,14 @@ fn a_rate_limited_turn_is_sent_again() {
             assert_eq!(params["sessionId"], "fake-session", "{name}");
             assert_eq!(params["prompt"][1]["text"], "Do the fake task.\n", "{name}");
         }
-        // Each resend was announced with its wait; so was a wait a limit
-        // then interrupted.
+        // Each resend was announced with its wait, but the one on the
+        // fallback model, which has none; so was a wait a limit then
+        // interrupted.
         let announced = r
             .log
             .matches(&format!("sending the task again in {}s", c.wait_s))
-            .count() as u64;
+            .count() as u64
+            + u64::from(c.switched.is_some());
         assert!(
             announced == c.resends || announced == c.resends + 1,
             "{name}: {announced} announced for {} resend(s): {}",

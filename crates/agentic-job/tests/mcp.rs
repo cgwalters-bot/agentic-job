@@ -594,6 +594,7 @@ fn session_with(mode: &str, servers: Vec<HttpMcp>) -> (Value, String, Value) {
         name: "fake".to_owned(),
         agent: session::agents::parse(&registry, "fake").unwrap(),
         model: None,
+        fallback_model: None,
         config_options: Vec::new(),
         cwd: dir.path().to_owned(),
         prompt: "Call the tool.\n".to_owned(),

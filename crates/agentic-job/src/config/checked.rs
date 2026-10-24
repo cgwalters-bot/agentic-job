@@ -440,6 +440,12 @@ mod tests {
             );
         }
 
+        // Claude Code may fall back to another model on overload.
+        let text = format!(
+            "[agent]\nname = \"claude\"\nmodel = \"fable\"\nfallback-model = \"opus\"\n{PROXY}{OIDC}{CAPPED}{DIRECT}"
+        );
+        checked(&text).unwrap();
+
         let text = format!(
             "[agent]\nname = \"opencode\"\nmodel = \"m\"\nskills = true\n{PROXY}{OIDC}{CAPPED}{DIRECT}"
         );
@@ -504,6 +510,20 @@ mod tests {
             (
                 format!("{FAKE}skills = true\n{CAPPED}"),
                 "agent.skills is not supported for fake",
+            ),
+            (
+                format!(
+                    "[agent]\nname = \"opencode\"\nmodel = \"m\"\nfallback-model = \"n\"\n{PROXY}{OIDC}{CAPPED}"
+                ),
+                "agent.fallback-model is not supported for opencode",
+            ),
+            (
+                format!("{FAKE}model = \"m\"\nfallback-model = \"m\"\n{CAPPED}"),
+                "agent.fallback-model must name a model other than agent.model",
+            ),
+            (
+                format!("{FAKE}fallback-model = \"\"\n{CAPPED}"),
+                "agent.fallback-model must name a model other than agent.model",
             ),
             (
                 format!("{FAKE}config-ref = \"main\"\n{CAPPED}"),

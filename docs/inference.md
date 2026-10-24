@@ -96,6 +96,16 @@ Under `token-file` there is nothing to end and the upload goes ahead.
 All of these requests go straight to the proxy, ignoring `HTTP_PROXY`,
 and follow no redirect.
 
+The host and port of `url`, `anthropic-url` and `openai-url`
+(`host:port`) are redacted from the run's logs and files as its secrets
+are, except under `api-key`, whose URL is the provider's public one. A
+URL that names no port is written without one, and is not matched:
+give the gateway's port explicitly to have it redacted. They are no credential, but the address of a
+gateway on a private network, and an agent's error names it: Claude
+Code's 529 message did, in a public job log (#1860). As with every
+redacted string, a published file that still holds one after the
+redaction, such as a patch, stops the upload.
+
 ## Registering without proof
 
 `plain` is for a client with no identity token. The request is `POST

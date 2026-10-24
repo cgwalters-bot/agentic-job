@@ -578,6 +578,31 @@ fn secrets(
         }))
 }
 
+/// The host and port of each inference URL ENDPOINT names, as a URL
+/// writes them. They are not credentials, but the address of a private
+/// gateway that only the network a runner joins can reach, and an agent's
+/// error names it: Claude Code's 529 message reached a public job log with
+/// it (#1860). Redacting them keeps the logs from mapping that network.
+/// Not under `api-key`, whose URL is the provider's public one: a
+/// literal is refused wherever it cannot be redacted, a patch included.
+fn inference_addresses(endpoint: Option<&Endpoint>) -> Vec<String> {
+    let hosts = endpoint
+        .filter(|endpoint| !matches!(endpoint.mode, inference::Mode::ApiKey { .. }))
+        .map(Endpoint::hosts)
+        .and_then(Result::ok);
+    hosts
+        .into_iter()
+        .flatten()
+        .map(|(host, port)| {
+            if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            }
+        })
+        .collect()
+}
+
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
         let mut config = load_config(&args.config)?;
@@ -1045,7 +1070,8 @@ impl Plan {
             mcp.map(|(local, credential)| (local.token(), credential)),
         )
         .chain(run.map(|run| run.agent_token().expose().to_owned()))
-        .chain(own_tokens());
+        .chain(own_tokens())
+        .chain(inference_addresses(self.endpoint.as_ref()));
         let redactor = log::Shared::new(
             Redactor::new(secrets).context("building the redaction of the run's secrets")?,
         );
@@ -1095,6 +1121,7 @@ impl Plan {
             name: self.kind.as_str().to_owned(),
             agent: spec,
             model: prepared.model,
+            fallback_model: self.agent.fallback_model.clone(),
             config_options: prepared
                 .options
                 .into_iter()
@@ -1126,6 +1153,9 @@ impl Plan {
     /// transcript and the summary, redacted, and moved to where they are
     /// uploaded from if they pass the gate. An error is a run of which
     /// nothing may be uploaded, and nothing is then there to upload.
+    /// `true` for a run its model provider stopped that handed back a
+    /// change all the same ([`RunResult::stopped_by_provider`]): it ends
+    /// as one stopped at a limit.
     ///
     /// The agent's files are read by commands of the sandbox user, which
     /// the caller stops afterwards: they run programs of the agent's
@@ -1138,13 +1168,31 @@ impl Plan {
         egress_from: u64,
         settled: &Settled,
         stopped: &AtomicBool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let staging = &self.staging;
         let harness_dir = self.work.join(HARNESS_DIR);
         let runner = Stoppable {
             sandbox: &self.sandbox,
             stopped,
         };
+        // A run whose model provider failed it, and whose agent could not
+        // hand back for that, is collected as one stopped at a limit: its
+        // change, if it has one, is handed back as a partial one.
+        let provider_stopped = (!session.internal_error)
+            .then(|| session.result.stopped_by_provider())
+            .flatten();
+        // Its message becomes the outcome's `stopped_early`, and with it
+        // the pull request's body and the patch, which are not redacted
+        // but refused when they hold a secret: it may quote an error that
+        // names the gateway.
+        let mut harness = provider_stopped
+            .clone()
+            .unwrap_or_else(|| session.result.as_ref().clone());
+        harness.message = harness.message.map(|message| {
+            session
+                .redactor
+                .with(|redactor| redactor.redact(&message).into_owned())
+        });
         let change = if session.internal_error {
             eprintln!("warning: no change handed back: the session ended in an internal error");
             handback::Change::default()
@@ -1156,7 +1204,7 @@ impl Plan {
                 policy: &self.policy,
                 commit: &self.commit,
                 run_id: &self.run_id,
-                harness: Some(session.result.as_ref()),
+                harness: Some(&harness),
                 run_dir: &staging.run(),
                 safe_outputs: &staging.safe_outputs(),
             })?;
@@ -1177,6 +1225,15 @@ impl Plan {
             }
             change
         };
+        // One that changed nothing, or whose change was not handed back,
+        // still failed: there is nothing partial to go on from.
+        let provider_stopped = provider_stopped.filter(|_| change.handed_back_patch());
+        if let Some(stopped) = &provider_stopped {
+            eprintln!(
+                "warning: {}: handing back the working tree as a partial change",
+                stopped.message.as_deref().unwrap_or_default()
+            );
+        }
 
         let transcript = staging.transcript();
         for name in [session::ACP_LOG, session::STDERR_LOG, session::RESULT_FILE] {
@@ -1190,11 +1247,16 @@ impl Plan {
             }
         }
         // In place of whatever result the failed session wrote, if any,
-        // so that the summary says why it failed. Redacted below with the
-        // rest: the error may quote what the agent wrote.
-        if session.internal_error {
+        // so that the summary says why it failed, or how its provider
+        // stopped it. Redacted below with the rest: the error may quote
+        // what the agent wrote.
+        let rewritten = match &provider_stopped {
+            Some(stopped) => Some(stopped),
+            None => session.internal_error.then_some(session.result.as_ref()),
+        };
+        if let Some(result) = rewritten {
             let path = transcript.join(session::RESULT_FILE);
-            std::fs::write(&path, serde_json::to_string_pretty(&session.result)? + "\n")
+            std::fs::write(&path, serde_json::to_string_pretty(result)? + "\n")
                 .with_context(|| format!("writing {}", path.display()))?;
         }
         // What the agent wrote to its own logs while the session ran.
@@ -1351,7 +1413,7 @@ impl Plan {
             summary["result"].as_str().unwrap_or_default(),
             session.redactor.count()
         );
-        Ok(())
+        Ok(provider_stopped.is_some())
     }
 }
 
@@ -1640,7 +1702,11 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                     let done = done.unwrap_or_else(|panic| {
                         Err(anyhow::Error::from(panic).context("taking the run's results"))
                     });
-                    (Stage::Finished(exit), Some(done))
+                    let exit = match done {
+                        Ok(true) => Exit::Limit,
+                        _ => exit,
+                    };
+                    (Stage::Finished(exit), Some(done.map(drop)))
                 }
             }
         }
@@ -1935,6 +2001,37 @@ mod tests {
             assert!(!redacted.contains(secret), "{redacted}");
         }
         assert_eq!(redactor.count(), 4);
+    }
+
+    /// The inference gateway's host and port are redacted from an agent's
+    /// error that names them, as Claude Code's 529 message does (#1860);
+    /// a provider's public URL under `api-key` is not.
+    #[test]
+    fn the_inference_gateways_address_is_redacted() {
+        let endpoint = |url: &str, mode| Endpoint {
+            url: url.to_owned(),
+            mode,
+            anthropic_url: format!("{url}/anthropic"),
+            openai_url: "http://[fd7a:115c:a1e0::1]:18081".to_owned(),
+            front: false,
+        };
+        let gateway = endpoint("http://100.64.0.7:18080", inference::Mode::Plain);
+        let mut redactor = Redactor::new(inference_addresses(Some(&gateway))).unwrap();
+        let line = "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}} \
+                    from http://100.64.0.7:18080/anthropic/v1/messages and [fd7a:115c:a1e0::1]:18081";
+        assert_eq!(
+            redactor.redact(line),
+            "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}} \
+             from http://[REDACTED]/anthropic/v1/messages and [REDACTED]"
+        );
+        let provider = endpoint(
+            "https://api.anthropic.com",
+            inference::Mode::ApiKey {
+                provider: crate::config::Provider::Anthropic,
+            },
+        );
+        assert_eq!(inference_addresses(Some(&provider)), Vec::<String>::new());
+        assert_eq!(inference_addresses(None), Vec::<String>::new());
     }
 
     /// The run's item is watched only where the configuration asks, with

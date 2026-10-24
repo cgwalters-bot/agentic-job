@@ -956,6 +956,19 @@ pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
         "agent.skills is not supported for {}",
         kind.as_str()
     );
+    // Vibe's and opencode's models are defined in their configuration,
+    // which defines only the run's own.
+    if let Some(fallback) = &agent.fallback_model {
+        ensure!(
+            matches!(kind, Kind::Claude | Kind::Fake),
+            "agent.fallback-model is not supported for {}",
+            kind.as_str()
+        );
+        ensure!(
+            !fallback.is_empty() && agent.model.as_ref() != Some(fallback),
+            "agent.fallback-model must name a model other than agent.model"
+        );
+    }
     match (kind, source_request(agent)?) {
         (Kind::Vibe, None) => {
             ensure!(

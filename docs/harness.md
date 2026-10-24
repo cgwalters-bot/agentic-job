@@ -327,6 +327,22 @@ error as the reason; if it doesn't, the run fails with the error. A
 limit the run reaches meanwhile stops it as any other time, and a bridge
 client's prompts meanwhile are refused.
 
+The agent's word is not needed to keep its change, though: handing back
+needs the model too, and two runs lost 45 minutes of work to a provider
+that stayed overloaded (#1860). A run that failed on a model provider's
+failure of a known class (any but `other`, an agent that died of one
+included) and whose working tree has a change is handed back as if
+stopped at a limit: exit state 3, `harness.json` and `summary.json`
+with result `budget` and a message starting "the model provider stopped
+the run" that names the class but not the error's words, the default
+partial pull request with that as `stopped_early`, and its checkpoint
+under `ready_when_complete`. Like a run whose agent handed back, it is
+filed as `budget`, a partial result to continue rather than a run to
+repeat, with the class in `provider_error`. The session's own
+`harness.json` under `work/` keeps the failure. A run
+that changed nothing, whose change was not handed back, or that failed
+for anything else, still fails with exit state 1.
+
 A model provider's failure that a wait may clear gets a few retries
 before that, for every agent. The session sorts the error's words, or
 the agent's, into a class (`session/provider.rs`): `rate_limited` (HTTP
@@ -342,7 +358,10 @@ of the first three is sent again on the same session, labelled `rate
 limited` or `provider error`, behind a note, after a wait of 10, 20 and
 40 seconds plus up to a quarter of jitter, or as long as the provider
 said to (`retry-after`), each no longer than the hand-back window: three
-times, and then the turn is taken as one that ended on an error. A
+times, and then the turn is taken as one that ended on an error. An
+`overloaded` provider is out of capacity for a while rather than
+refusing the run, and is waited out for about four minutes: six times,
+the waits growing to a minute each. A
 provider that asks for more than two minutes is not waited for at all.
 Runs had ended on a 429 that a minute's wait would have cleared (#1339).
 A `quota` or `unauthorized` failure is never waited on: nothing within
@@ -361,6 +380,19 @@ spent waiting, a wait a limit interrupted included. `summary.json` files
 the failure of a run that did not hand back under `inference_` and the
 class, and the run action and the status comment carry that word on
 ([workflow.md](workflow.md#why-a-run-failed)).
+
+An overload that outlasts its waits can be worked around rather than
+handed back: `fallback-model` in `[agent]` (for example `opus` for a run
+of `fable`; Claude Code and the fake agent only, whose models are names
+the provider resolves) has the session switch the agent to that model
+through its `model` session config option (ACP's
+`session/set_config_option`, which claude-agent-acp serves), so that it
+keeps its context, and send the task again at once, the waits starting
+over. It switches once; an agent that refuses the switch, reports no
+model or still the one it ran is asked to hand back as without one.
+`fallback_model` in `harness.json` and `summary.json` names the model
+the agent then said it ran, and `model` in `summary.json` names it too,
+so that pacing charges the pool the run went on with.
 
 Nor is a task's turn that stalls left to the timeout. Vibe has no read
 timeout on its model requests, and one waited six minutes on idle

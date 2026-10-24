@@ -525,6 +525,11 @@ pub struct Agent {
     /// An entry of the session's registry: `claude`, `opencode` or `fake`.
     pub name: String,
     pub model: Option<String>,
+    /// The model the session switches the agent to when the provider
+    /// stays overloaded past its waits (#1860), such as `opus` for a run
+    /// of `fable`: only for Claude Code (and the fake agent), whose model
+    /// is a name the provider resolves, not one its configuration defines.
+    pub fallback_model: Option<String>,
     /// A public repository holding the agent's configuration, as the URL
     /// to clone: the binary builds no forge URL.
     pub config_repo: Option<String>,
@@ -551,6 +556,7 @@ impl Default for Agent {
         Self {
             name: String::new(),
             model: None,
+            fallback_model: None,
             config_repo: None,
             config_ref: None,
             config_path: None,

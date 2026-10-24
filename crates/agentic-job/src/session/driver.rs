@@ -50,8 +50,13 @@
 //! at once. Runs have ended there although a minute's wait would likely
 //! have cleared the limit (#1339). The session waits, longer each time
 //! and with some jitter, or as long as the provider said to, and sends
-//! the task again on the same session, a few times (`PROVIDER_RETRIES`),
-//! before the turn is taken as one that ended on an error. A usage limit
+//! the task again on the same session, a few times (`PROVIDER_RETRIES`,
+//! for a few minutes when it was overloaded: `OVERLOAD_RETRIES`), before
+//! the turn is taken as one that ended on an error. An overload that
+//! outlasts its waits has the agent switched, once, to the run's fallback
+//! model if it names one (`Options::fallback_model`), through its model
+//! session config option, so that it keeps its context, and the task sent
+//! again on it, the waits starting over. A usage limit
 //! or a refused credential is not waited on: nothing within the run
 //! clears them. The waits take from the run's time like any other, and a
 //! limit reached in one stops the run as ever. The class of the failure
@@ -75,8 +80,8 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, HttpHeader, Implementation, InitializeRequest, McpServer,
     McpServerHttp, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest,
-    StopReason, TextContent,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionId, SetSessionConfigOptionRequest, StopReason, TextContent,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Dispatch, Handled, Lines, UntypedMessage,
@@ -167,11 +172,24 @@ const PROVIDER_ERROR_NOTE: &str = "Your previous turn ended because a model requ
 /// one that has not is unlikely to soon, and the agent should hand back
 /// while it has time to.
 const PROVIDER_RETRIES: u32 = 3;
+/// The same for an overloaded provider (Anthropic's 529), which is not
+/// refusing the run but out of capacity for a while: two runs worked 45
+/// minutes and then lost their change to a few minutes of it (#1860).
+/// With the waits capped at `MAX_RETRY_WAIT`, about four minutes in all
+/// (10, 20, 40, 60, 60 and 60 s), still within the run's time: near a
+/// limit the agent hands back instead of waiting on.
+const OVERLOAD_RETRIES: u32 = 6;
 /// The wait before the first time it is sent again, doubled for each
 /// next one (10, 20 and 40 s) plus jitter (`provider::jittered`), and
 /// never longer than the hand-back window, so that a short run is not
 /// held up for it.
 const RETRY_WAIT: Duration = Duration::from_secs(10);
+/// The longest of those waits, before jitter.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
+/// How long the agent gets to switch to the fallback model: a session
+/// config option is set at once, and the run's limits go unwatched
+/// meanwhile.
+const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest `retry-after` of the provider's own that is waited for in
 /// place of the computed wait: one that asks for longer is not waited
 /// on at all, and the agent hands back instead, as after a failure no
@@ -220,8 +238,12 @@ impl Outcome {
     }
 }
 
+/// What the message of a run its model provider stopped starts with
+/// ([`RunResult::stopped_by_provider`]).
+pub const PROVIDER_STOPPED: &str = "the model provider stopped the run";
+
 /// `harness.json`: how the session went, for the run's summary.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {
     pub schema: String,
     pub agent: String,
@@ -259,6 +281,10 @@ pub struct RunResult {
     pub resends: u32,
     #[serde(default)]
     pub resend_wait_s: u64,
+    /// The model the agent was switched to when its provider stayed
+    /// overloaded (`Options::fallback_model`), as the agent named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
 }
 
 impl RunResult {
@@ -297,6 +323,7 @@ impl RunResult {
             provider_error: None,
             resends: 0,
             resend_wait_s: 0,
+            fallback_model: None,
         }
     }
 
@@ -308,6 +335,41 @@ impl RunResult {
                 .message
                 .as_deref()
                 .is_some_and(|m| m.starts_with(STALLED))
+    }
+
+    /// For a run that failed on a model provider's failure of a known
+    /// class, after which its agent could not hand back (as when the
+    /// provider is down, and handing back needs it too): the run stopped
+    /// there, as a run is at a limit, so that its working tree is handed
+    /// back as a partial change rather than lost (#1860). The agent's word
+    /// is never needed to keep its change. `None` for any other result,
+    /// one the agent's own failure (`other`) ended included. The message
+    /// leaves out the error's words, which go into the pull request: they
+    /// may name the gateway, a redacted string a patch must not hold, and
+    /// the transcript has them.
+    pub fn stopped_by_provider(&self) -> Option<Self> {
+        let class = self.provider_error.filter(|class| class.kind().is_some())?;
+        if self.result != Outcome::Failure {
+            return None;
+        }
+        Some(Self {
+            result: Outcome::Budget,
+            message: Some(format!(
+                "{PROVIDER_STOPPED}: the provider {}, and the agent could not hand back",
+                class.describe()
+            )),
+            handed_back: false,
+            ..self.clone()
+        })
+    }
+
+    /// Whether the run is one [`Self::stopped_by_provider`] made.
+    pub fn provider_stopped(&self) -> bool {
+        self.result == Outcome::Budget
+            && self
+                .message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(PROVIDER_STOPPED))
     }
 }
 
@@ -343,6 +405,9 @@ pub struct Options {
     pub agent: AgentSpec,
     /// The model (default: the agent's own).
     pub model: Option<String>,
+    /// The model the agent is switched to when its provider stays
+    /// overloaded past the waits: none to have it hand back instead.
+    pub fallback_model: Option<String>,
     /// Session config options set after the model, by id and value: an
     /// agent may take one it does not list in `session/new`, as Vibe does
     /// its `max_tokens`. One the agent refuses fails the session.
@@ -479,6 +544,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         name,
         agent: spec,
         model,
+        fallback_model,
         config_options,
         cwd,
         prompt,
@@ -539,6 +605,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         cwd: &cwd,
         model: model.as_deref(),
         model_by_env: spec.model_env.is_some(),
+        fallback_model: fallback_model.as_deref(),
         config_options: &config_options,
         prompt: &prompt,
         notices: spec.notices,
@@ -636,16 +703,19 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         mut message,
         handed_back,
         reminded,
-        class,
+        mut class,
         ..
     } = ended;
     let transcript = tap.finish();
     if stop_reason.is_none() {
         stop_reason = transcript.stop_reason;
     }
+    // The run failed of that, not of the provider: nor is its working
+    // tree handed back as if the provider had stopped it.
     if let Some(e) = transcript.write_error {
         outcome = Outcome::Failure;
         message = Some(e);
+        class = None;
     }
     // What is left running may still be writing the files a caller is
     // about to read: no result of such a session stands.
@@ -679,6 +749,11 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         provider_error: class.filter(|_| outcome != Outcome::Success),
         resends: resends.count.load(Ordering::Relaxed),
         resend_wait_s: resends.waited_ms.load(Ordering::Relaxed) / 1000,
+        fallback_model: resends
+            .fallback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(),
     };
     let path = out.join(RESULT_FILE);
     std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
@@ -701,6 +776,8 @@ struct Task<'a> {
     model: Option<&'a str>,
     /// The model went into the agent's environment.
     model_by_env: bool,
+    /// `Options::fallback_model`.
+    fallback_model: Option<&'a str>,
     config_options: &'a [(String, String)],
     prompt: &'a str,
     /// The agent takes a prompt sent during a turn (`AgentSpec::notices`).
@@ -1018,12 +1095,14 @@ struct Stalls {
     retried: AtomicU32,
 }
 
-/// The times the task was sent again after a provider's failure, and the
-/// waits before them, for the run's result.
+/// The times the task was sent again after a provider's failure, the
+/// waits before them, and the model the agent was switched to after
+/// them, for the run's result.
 #[derive(Default)]
 struct Resends {
     count: AtomicU32,
     waited_ms: AtomicU64,
+    fallback: Mutex<Option<String>>,
 }
 
 /// What the session goes on to after the task's turn, with a bridge.
@@ -1131,9 +1210,20 @@ fn backoff(retried: u32, window: Duration, retry_after: Option<Duration>) -> Opt
     let wait = match retry_after {
         Some(after) if after > RETRY_AFTER_CAP => return None,
         Some(after) => after,
-        None => RETRY_WAIT.saturating_mul(2u32.saturating_pow(retried)),
+        None => RETRY_WAIT
+            .saturating_mul(2u32.saturating_pow(retried))
+            .min(MAX_RETRY_WAIT),
     };
     Some(provider::jittered(wait).min(window))
+}
+
+/// How many times in all the task is sent again after a provider's
+/// failure, when the last was of CLASS.
+fn retries(class: Class) -> u32 {
+    match class {
+        Class::Overloaded => OVERLOAD_RETRIES,
+        _ => PROVIDER_RETRIES,
+    }
 }
 
 /// Waits until UNTIL, or forever without one.
@@ -1185,9 +1275,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         stalls,
         resends,
     } = signals;
-    let sid = tokio::select! {
+    let (sid, model_option) = tokio::select! {
         r = setup(&cx, task) => match r {
-            Ok(sid) => sid,
+            Ok(started) => started,
             Err(ended) => return ended,
         },
         why = wait_stop(&mut stop) => {
@@ -1227,8 +1317,11 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     let mut heard = tap.heard();
     let quiet_for = |limit: Duration| tokio::time::Instant::now() + limit;
     let mut quiet_until = task.stall.map(quiet_for);
-    // The times the task was sent again after a provider's failure.
+    // The times the task was sent again after a provider's failure, since
+    // the session started or switched to the fallback model, and whether
+    // it tried to.
     let mut resent = 0;
+    let mut switch_tried = false;
     let next = loop {
         tokio::select! {
             // In this order: a turn that has ended is not sent a notice,
@@ -1240,8 +1333,35 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 // client's to go on from.
                 let failed = provider_failure(&r, task.rate_limit_code, tap);
                 let class = failed.as_ref().map(|(class, _)| *class);
+                // An overload that outlasted its waits has the agent
+                // switched to the fallback model, once, and the task sent
+                // again on it at once, the waits starting over. One the
+                // agent cannot switch to leaves the turn ended on the error.
+                if let (Some((Class::Overloaded, error)), Some(fallback)) = (&failed, task.fallback_model)
+                    && !client_cancelled
+                    && !switch_tried
+                    && resent >= retries(Class::Overloaded)
+                {
+                    switch_tried = true;
+                    match switch_model(&cx, &sid, model_option.as_ref(), fallback).await {
+                        Ok(current) => {
+                            tap.log(&[digest::cut(&format!(
+                                "⚠ {error}: the provider stayed overloaded; switched the agent to model {current}, sending the task again"
+                            ))]);
+                            *resends.fallback.lock().unwrap_or_else(|e| e.into_inner()) = Some(current);
+                            resends.count.fetch_add(1, Ordering::Relaxed);
+                            resent = 0;
+                            response.set(cx.send_request(task_again(&sid, PROVIDER_ERROR_NOTE, LABEL_PROVIDER_ERROR, task.prompt)).block_task());
+                            quiet_until = task.stall.map(quiet_for);
+                            continue;
+                        }
+                        Err(why) => tap.log(&[digest::cut(&format!(
+                            "⚠ the agent could not be switched to the fallback model {fallback}: {why}"
+                        ))]),
+                    }
+                }
                 let again = failed.filter(|(class, _)| {
-                    class.transient() && !client_cancelled && resent < PROVIDER_RETRIES
+                    class.transient() && !client_cancelled && resent < retries(*class)
                 });
                 let Some((class, error)) = again else {
                     break Next::Answered(r, class);
@@ -1257,9 +1377,10 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 };
                 resent += 1;
                 tap.log(&[digest::cut(&format!(
-                    "⚠ {error}: the provider {}; sending the task again in {}s ({resent} of {PROVIDER_RETRIES})",
+                    "⚠ {error}: the provider {}; sending the task again in {}s ({resent} of {})",
                     class.describe(),
-                    wait.as_secs()
+                    wait.as_secs(),
+                    retries(class)
                 ))]);
                 // An agent that exits meanwhile failed with the error.
                 *pending_error.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -1992,9 +2113,12 @@ where
     }
 }
 
-/// initialize, session/new and the model: the session's id, or how it
-/// failed.
-async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, Ended> {
+/// initialize, session/new and the model: the session's id and its model
+/// option, or how it failed.
+async fn setup(
+    cx: &ConnectionTo<Agent>,
+    task: &Task<'_>,
+) -> Result<(SessionId, Option<ModelOption>), Ended> {
     let fail =
         |what: &str, e: agent_client_protocol::Error| Ended::failure(format!("{what} failed: {e}"));
     // fs and terminal are left unadvertised (the defaults), so agents use
@@ -2040,42 +2164,36 @@ async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, E
         .await
         .map_err(|e| fail("session/new", e))?;
     let sid = new.session_id;
+    let mut model_option = new
+        .config_options
+        .iter()
+        .flatten()
+        .find(|o| o.category == Some(SessionConfigOptionCategory::Model))
+        .map(|o| ModelOption {
+            id: o.id.clone(),
+            current: current_value(o).map(str::to_owned),
+        });
     // Where the agent has no environment variable for it, the model is a
     // session config option.
     if let (Some(model), false) = (task.model, task.model_by_env) {
-        let option = new
-            .config_options
-            .iter()
-            .flatten()
-            .find(|o| o.category == Some(SessionConfigOptionCategory::Model))
-            .ok_or_else(|| {
-                Ended::failure(format!(
-                    "the agent has no model option to select {model} with"
-                ))
-            })?;
-        let req = SetSessionConfigOptionRequest::new(sid.clone(), option.id.clone(), model);
-        let set = cx
-            .send_request(req)
-            .block_task()
+        let option = model_option.as_mut().ok_or_else(|| {
+            Ended::failure(format!(
+                "the agent has no model option to select {model} with"
+            ))
+        })?;
+        let current = select_model(cx, &sid, &option.id, model)
             .await
             .map_err(|e| fail(&format!("selecting model {model}"), e))?;
         // An agent that takes the selection but runs another model (#562:
         // Vibe reported, and told the model it was, its built-in default)
         // would spend the run on a model the caller did not ask for.
-        let current = set
-            .config_options
-            .iter()
-            .find(|o| o.id == option.id)
-            .and_then(|o| match &o.kind {
-                SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
-                _ => None,
-            });
-        if current != Some(model) {
+        if current.as_deref() != Some(model) {
             return Err(Ended::failure(format!(
                 "the agent runs {}, not the requested model {model}",
-                current.unwrap_or("an unreported model")
+                current.as_deref().unwrap_or("an unreported model")
             )));
         }
+        option.current = current;
     }
     for (id, value) in task.config_options {
         let req = SetSessionConfigOptionRequest::new(sid.clone(), id.clone(), value.as_str());
@@ -2084,7 +2202,68 @@ async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, E
             .await
             .map_err(|e| fail(&format!("setting {id} to {value}"), e))?;
     }
-    Ok(sid)
+    Ok((sid, model_option))
+}
+
+/// The agent's model session config option, and the model it says the
+/// session runs, if it says.
+struct ModelOption {
+    id: SessionConfigId,
+    current: Option<String>,
+}
+
+/// The value a select option has.
+fn current_value(option: &SessionConfigOption) -> Option<&str> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
+        _ => None,
+    }
+}
+
+/// Sets the session's model option OPTION to MODEL: the model the agent
+/// then says it runs, if it says.
+async fn select_model(
+    cx: &ConnectionTo<Agent>,
+    sid: &SessionId,
+    option: &SessionConfigId,
+    model: &str,
+) -> Result<Option<String>, agent_client_protocol::Error> {
+    let req = SetSessionConfigOptionRequest::new(sid.clone(), option.clone(), model);
+    let set = cx.send_request(req).block_task().await?;
+    Ok(set
+        .config_options
+        .iter()
+        .find(|o| o.id == *option)
+        .and_then(current_value)
+        .map(str::to_owned))
+}
+
+/// Switches the session to the fallback model MODEL, for a provider that
+/// stayed overloaded: the model the agent then runs, or why it does not.
+/// Not held to MODEL's very name as the run's own model is: Claude Code
+/// takes an alias (`opus`) and reports the model it stands for. An agent
+/// that reports none, or still the model it ran (#562), was not switched.
+async fn switch_model(
+    cx: &ConnectionTo<Agent>,
+    sid: &SessionId,
+    option: Option<&ModelOption>,
+    model: &str,
+) -> Result<String, String> {
+    let option = option.ok_or("the agent has no model option")?;
+    let switched = tokio::time::timeout(
+        MODEL_SWITCH_TIMEOUT,
+        select_model(cx, sid, &option.id, model),
+    )
+    .await
+    .map_err(|_| format!("no answer in {}s", MODEL_SWITCH_TIMEOUT.as_secs()))?
+    .map_err(|e| e.to_string())?;
+    match switched {
+        None => Err("the agent reports no model".to_owned()),
+        Some(current) if Some(&current) == option.current.as_ref() => {
+            Err(format!("the agent still runs {current}"))
+        }
+        Some(current) => Ok(current),
+    }
 }
 
 /// How a turn ended, from its answer and from what the agent said last
@@ -2148,6 +2327,8 @@ mod tests {
             (0, secs(225), None, secs(10)),
             (1, secs(225), None, secs(20)),
             (2, secs(225), None, secs(40)),
+            (3, secs(225), None, MAX_RETRY_WAIT),
+            (u32::MAX, secs(225), None, MAX_RETRY_WAIT),
             (0, secs(225), Some(secs(30)), secs(30)),
             (2, secs(225), Some(secs(1)), secs(1)),
             (0, secs(225), Some(RETRY_AFTER_CAP), RETRY_AFTER_CAP),
@@ -2164,9 +2345,22 @@ mod tests {
         assert_eq!(backoff(2, secs(3), None), Some(secs(3)));
         assert_eq!(backoff(0, secs(3), Some(secs(30))), Some(secs(3)));
         assert_eq!(backoff(0, Duration::ZERO, None), Some(Duration::ZERO));
-        assert_eq!(backoff(u32::MAX, secs(225), None), Some(secs(225)));
+        assert_eq!(backoff(u32::MAX, secs(3), None), Some(secs(3)));
         // A provider that asks for longer than the cap is not waited for.
         assert_eq!(backoff(0, secs(225), Some(secs(121))), None);
         assert_eq!(backoff(0, secs(3), Some(secs(600))), None);
+        // Overload is waited out for a few minutes, the rest for about one.
+        let waited = |class| -> Duration {
+            (0..retries(class))
+                .map(|n| backoff(n, secs(3600), None).unwrap())
+                .sum()
+        };
+        let overload = waited(Class::Overloaded);
+        assert!(
+            overload >= secs(250) && overload <= secs(313),
+            "{overload:?}"
+        );
+        let limited = waited(Class::RateLimited);
+        assert!(limited >= secs(70) && limited <= secs(88), "{limited:?}");
     }
 }

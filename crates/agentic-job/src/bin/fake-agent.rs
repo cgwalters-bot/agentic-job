@@ -9,7 +9,9 @@
 //! ```text
 //! fake-agent demo          play the built-in session (fake-agent-demo.json),
 //!                          or the one in ~/.config/fake-agent/demo.json
-//!                          if there is one: `agentic-job run` starts the
+//!                          if there is one, and in later prompt turns the
+//!                          one in ~/.config/fake-agent/later.json if there
+//!                          is one: `agentic-job run` starts the
 //!                          fake agent only this way, and its tests have
 //!                          sessions of their own to play; it writes a
 //!                          line to its log in ~/.local/state/fake-agent/log
@@ -58,7 +60,8 @@
 //! came; and an `exit` the
 //! process with that status, as an agent that crashed. A `fail` has the
 //! turn, when it ends, answered with a JSON-RPC error of that message,
-//! as an agent whose model request failed; a `rate_limit` likewise, with
+//! as an agent whose model request failed, except on the model `spare`;
+//! a `rate_limit` likewise, with
 //! Vibe's code for a rate-limited request. A `finish` ends
 //! the turn as done and then the process with that status, as an agent
 //! that doesn't wait for its client to hang up. An `mcp` step lists the
@@ -92,6 +95,9 @@ const DEMO: &str = include_str!("fake-agent-demo.json");
 /// Under the home directory: a session for `demo` to play in place of
 /// the built-in one.
 const DEMO_OVERRIDE: &str = ".config/fake-agent/demo.json";
+/// Beside it: what `demo` plays in every later prompt turn, if there is
+/// one, in place of `later_default`.
+const LATER_OVERRIDE: &str = ".config/fake-agent/later.json";
 const NAME: &str = "fake-agent";
 /// Its log, in FAKE_LOG_DIR.
 const LOG_FILE: &str = "fake-agent.log";
@@ -107,6 +113,9 @@ const IGNORED_MODEL: &str = "ignored";
 /// A model whose selection it accepts with an answer naming no model,
 /// which the session must refuse too.
 const UNREPORTED_MODEL: &str = "unreported";
+/// A model with capacity to spare: on it a `fail` step does not fail the
+/// turn, as a fallback model serves an overloaded provider's requests.
+const SPARE_MODEL: &str = "spare";
 /// How long a scripted request waits for the client's answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `fs` mode waits for each answer: an unanswered request hangs.
@@ -186,7 +195,7 @@ fn parse_mode(args: &[String]) -> Result<Mode> {
     Ok(match args.as_slice() {
         ["demo"] => {
             write_log();
-            Mode::Script(demo_script()?, later_default())
+            Mode::Script(demo_script()?, demo_later()?)
         }
         ["script", file] => Mode::Script(read_script(file)?, later_default()),
         ["script", file, later] => Mode::Script(read_script(file)?, read_script(later)?),
@@ -208,6 +217,15 @@ fn demo_script() -> Result<Vec<Step>> {
     match own.as_deref().map(std::fs::read_to_string) {
         Some(Ok(text)) => parse_script(&text).with_context(|| format!("in ~/{DEMO_OVERRIDE}")),
         _ => parse_script(DEMO).context("in the built-in demo"),
+    }
+}
+
+/// What `demo` plays in later prompt turns: the user's own if there is one.
+fn demo_later() -> Result<Vec<Step>> {
+    let own = std::env::var_os("HOME").map(|home| Path::new(&home).join(LATER_OVERRIDE));
+    match own.as_deref().map(std::fs::read_to_string) {
+        Some(Ok(text)) => parse_script(&text).with_context(|| format!("in ~/{LATER_OVERRIDE}")),
+        _ => Ok(later_default()),
     }
 }
 
@@ -426,7 +444,7 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
             Some("session/prompt") => {
                 conn.cancelled = false;
                 conn.in_turn = true;
-                let stop = prompt(conn, mode, turns, &cwd)?;
+                let stop = prompt(conn, mode, turns, &cwd, &model)?;
                 conn.in_turn = false;
                 turns += 1;
                 // The prompts taken during the turn end with it.
@@ -453,8 +471,8 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
     }
 }
 
-/// Runs prompt turn number TURN (from 0); returns its stop reason.
-fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<String> {
+/// Runs prompt turn number TURN (from 0) on MODEL; returns its stop reason.
+fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path, model: &str) -> Result<String> {
     match mode {
         Mode::Script(..) | Mode::NoMcp(_) => {
             let steps = match mode {
@@ -478,6 +496,7 @@ fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<Strin
                         conn.finish = Some(*status);
                         return Ok(END_TURN.to_owned());
                     }
+                    Step::Fail(_) if model == SPARE_MODEL => {}
                     Step::Fail(message) => conn.fail = Some((INTERNAL_ERROR, message.clone())),
                     Step::RateLimit(message) => {
                         conn.fail = Some((RATE_LIMIT_ERROR, message.clone()))

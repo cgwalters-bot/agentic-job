@@ -240,11 +240,13 @@ pub fn summarize(inputs: &Inputs) -> Value {
     // words, is what a caller decides on. Not so for a run whose agent
     // then handed back: that is a partial result at a limit (`timeout`,
     // `budget`), to continue rather than to repeat, and the class stays
-    // in `provider_error`. Words that fit no class (`other`) leave it the
-    // agent's failure, as before.
+    // in `provider_error`. So is a run the provider stopped that handed
+    // back its working tree all the same (`RunResult::stopped_by_provider`).
+    // Words that fit no class (`other`) leave it the agent's failure, as
+    // before.
     let provider = inputs
         .result
-        .filter(|r| !r.handed_back)
+        .filter(|r| !r.handed_back && !r.provider_stopped())
         .and_then(|r| r.provider_error)
         .and_then(Class::kind);
     let ended = |default: &'static str, message: String| {
@@ -410,6 +412,12 @@ pub fn summarize(inputs: &Inputs) -> Value {
         "resend_wait_s".into(),
         json!(inputs.result.map_or(0, |r| r.resend_wait_s)),
     );
+    // The model the agent was switched to on an overload, which `model`
+    // then names too: the pool the rest of the run drew on.
+    s.insert(
+        "fallback_model".into(),
+        json!(inputs.result.and_then(|r| r.fallback_model.as_deref())),
+    );
     s.insert("notices".into(), json!(digest.notices));
     // The links of the updates of the run's item the agent was sent.
     s.insert("updates".into(), json!(digest.updates));
@@ -569,7 +577,17 @@ pub fn markdown(s: &Value) -> String {
         } else {
             "the agent didn't hand back, so its change is whatever the working tree held"
         };
-        out.extend([String::new(), format!("Stopped at a limit: {handed_back}.")]);
+        // The model provider's failure, if the run ended on one, stopped
+        // it or came before the limit that did.
+        let by_provider = s["provider_error"]
+            .as_str()
+            .is_some_and(|class| class != Class::Other.as_str());
+        let stopped = if by_provider {
+            "Stopped early after the model provider's failure"
+        } else {
+            "Stopped at a limit"
+        };
+        out.extend([String::new(), format!("{stopped}: {handed_back}.")]);
     }
     if s["reminded"] == true {
         out.extend([
@@ -595,6 +613,16 @@ pub fn markdown(s: &Value) -> String {
                 "The model provider failed the agent's request {resends} time(s) in a way a wait \
                  may clear; the task was sent again after each, after {}s of waiting in all.",
                 s["resend_wait_s"].as_u64().unwrap_or(0)
+            ),
+        ]);
+    }
+    if !s["fallback_model"].is_null() {
+        out.extend([
+            String::new(),
+            format!(
+                "The model provider stayed overloaded, so the agent was switched to the fallback \
+                 model {}.",
+                code(&json!(named(&s["fallback_model"])))
             ),
         ]);
     }
@@ -853,6 +881,7 @@ mod tests {
             provider_error: None,
             resends: 0,
             resend_wait_s: 0,
+            fallback_model: None,
         }
     }
 
@@ -1334,6 +1363,20 @@ Redacted 1 string(s).
                 None,
             ),
             (handed_back, "timeout", None),
+            // Nor one the provider stopped that handed back its tree.
+            (
+                ended(
+                    Outcome::Failure,
+                    "session/prompt failed: API Error: 529 Overloaded",
+                    Some(Class::Overloaded),
+                    6,
+                    250,
+                )
+                .stopped_by_provider()
+                .unwrap(),
+                "budget",
+                None,
+            ),
         ];
         for (result, kind, tried) in cases {
             let s = summarize(&Inputs {
@@ -1368,6 +1411,20 @@ Redacted 1 string(s).
                 result.resends > 0,
                 "{md}"
             );
+            // A run stopped early after the provider's failure is not
+            // said to have been stopped at a limit.
+            let early = s["stopped_early"] == true;
+            let by_provider = result.provider_error.is_some_and(|c| c.kind().is_some());
+            assert_eq!(
+                md.contains("\nStopped early after the model provider's failure: "),
+                early && by_provider,
+                "{md}"
+            );
+            assert_eq!(
+                md.contains("\nStopped at a limit: "),
+                early && !by_provider,
+                "{md}"
+            );
         }
         // A run that got past the failure and ended well files none.
         let passed = RunResult {
@@ -1387,6 +1444,25 @@ Redacted 1 string(s).
         assert!(markdown(&s).contains(
             "failed the agent's request 1 time(s) in a way a wait may clear; the task \
                  was sent again after each, after 10s of waiting in all."
+        ));
+        assert_eq!(s["fallback_model"], Value::Null);
+        assert!(!markdown(&s).contains("fallback model"));
+        // One that got past it on the fallback model says so.
+        let switched = RunResult {
+            fallback_model: Some("opus".to_owned()),
+            ..passed
+        };
+        let s = summarize(&Inputs {
+            records: &records,
+            result: Some(&switched),
+            measured: &measured,
+            outcome: &json!({}),
+            usage: None,
+        });
+        assert_eq!(s["fallback_model"], "opus");
+        assert!(markdown(&s).contains(
+            "The model provider stayed overloaded, so the agent was switched to the fallback \
+             model `opus`."
         ));
         for class in Class::ALL {
             if let Some(kind) = class.kind() {

@@ -1095,6 +1095,140 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
     assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
 }
 
+/// A run whose model provider fails past the waits, so that its agent
+/// cannot hand back either, still hands back the change in its working
+/// tree (#1860): exit state 3, a partial pull request with a checkpoint,
+/// which the check accepts, with the provider's failure as the reason,
+/// filed as a partial result (`budget`) and not as a failure to repeat.
+/// One that changed nothing fails, as before. The gateway's address,
+/// which the agent's error names, early or late, is in nothing the run
+/// wrote or said, and nothing is refused for it.
+#[test]
+fn a_change_outlives_its_providers_failure() {
+    let change =
+        json!({"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}});
+    let overloaded = |url: &str| {
+        format!(
+            "API Error: 529 {{\"type\":\"error\",\"error\":{{\"type\":\"overloaded_error\",\
+             \"message\":\"Overloaded\"}}}} from {url}/v1/messages"
+        )
+    };
+    let refused = |url: &str| {
+        let address = url.trim_start_matches("http://");
+        format!("connect ECONNREFUSED {address}")
+    };
+    // (the case, what the agent does before the provider fails, its
+    // error, the exit, how the summary files it, the times it was resent,
+    // what the provider did)
+    type Error = fn(&str) -> String;
+    let cases: [(_, _, Error, _, _, _, _); 3] = [
+        (
+            "provider-changed",
+            vec![canary(), change.clone()],
+            overloaded,
+            3,
+            "budget",
+            6,
+            "was overloaded",
+        ),
+        (
+            "provider-unchanged",
+            vec![canary()],
+            overloaded,
+            EXIT_FAILURE,
+            "inference_overloaded",
+            6,
+            "",
+        ),
+        (
+            "provider-unreachable",
+            vec![canary(), change],
+            refused,
+            3,
+            "budget",
+            3,
+            "was unreachable",
+        ),
+    ];
+    for (name, steps, error, exit, kind, resends, did) in cases {
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let address = proxy.url.trim_start_matches("http://").to_owned();
+        let failed = json!({"fail": error(&proxy.url)});
+        // A minute's run: three seconds to hand back in, and each wait
+        // as long.
+        let config =
+            own_config(&plain(&proxy)).replace("timeout-minutes = 5", "timeout-minutes = 1");
+        let job = Job::new(name);
+        job.own_repository();
+        let mut prs = pull_requests();
+        prs["create_pull_request"]["ready_when_complete"] = json!(true);
+        job.allow(prs);
+        let mut steps = steps;
+        steps.push(failed.clone());
+        job.script(&json!(steps));
+        // Every later turn, the task sent again and the hand-back, too.
+        let later = job.path(HOME_DIR).join(".config/fake-agent/later.json");
+        std::fs::write(later, json!([failed]).to_string()).unwrap();
+        let got = job.own_run(&config);
+        assert_eq!(got.code, Some(exit), "{name}: {}", got.all());
+        assert!(!got.all().contains(&address), "{name}: {}", got.all());
+        for (path, content) in job.written() {
+            assert!(
+                path.contains("/out/work/") || !contains(&content, &address),
+                "{name}: {path}"
+            );
+        }
+        let summary = job.json("out/run/summary.json");
+        assert_eq!(summary["failures"][0]["kind"], kind, "{name}");
+        assert_eq!(summary["resends"], resends, "{name}");
+        let harness = job.json("out/work/harness/harness.json");
+        assert_eq!(harness["result"], "failure", "{name}");
+        if exit == EXIT_FAILURE {
+            assert_eq!(summary["result"], "failure", "{name}");
+            assert!(!job.path(PATCH).exists(), "{name}");
+            continue;
+        }
+        assert_eq!(summary["result"], "budget", "{name}");
+        assert_eq!(summary["stopped_early"], true, "{name}");
+        let why = format!(
+            "the model provider stopped the run: the provider {did}, and the agent could not \
+             hand back"
+        );
+        let why = why.as_str();
+        let outcome = job.json("out/run/outcome.json");
+        assert!(
+            outcome["stopped_early"]
+                .as_str()
+                .is_some_and(|s| s.starts_with(why)),
+            "{outcome:#}"
+        );
+        let outputs = job.text("out/safe-outputs/outputs.jsonl");
+        let request: Value = serde_json::from_str(outputs.lines().next().unwrap()).unwrap();
+        assert_eq!(request["type"], "create_pull_request");
+        let body = request["body"].as_str().unwrap();
+        assert!(
+            body.contains(&format!("Partial change: the run stopped early ({why}")),
+            "{body}"
+        );
+        assert!(body.contains("\"reason\":\"incomplete\""), "{body}");
+        assert!(job.text(PATCH).contains("+Hello."));
+        let collected = collected(&job);
+        let check = Command::new(BIN)
+            .arg("check")
+            .args(["--policy", "policy.json", "--outputs", "out/safe-outputs"])
+            .arg("--collected")
+            .arg(&collected)
+            .args(["--report", "verdict.json"])
+            .current_dir(&job.dir)
+            .output()
+            .unwrap();
+        let verdict = job.json("verdict.json");
+        assert_eq!(check.status.code(), Some(EXIT_SUCCESS), "{verdict:#}");
+        assert_eq!(verdict["patch"]["files"], json!(["GREETING.md"]));
+    }
+}
+
 /// A policy's secondary pull request: `run` clones its repository beside
 /// the target, tells the agent where, and hands back its change as a patch
 /// of its own, against the commit it cloned, with the request that names
