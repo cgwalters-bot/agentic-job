@@ -53,11 +53,13 @@ that SHA from the target repository without forge credentials, never from an
 author-supplied fork URL or branch name. The base supplies trusted instructions;
 the head remains untrusted data. No job permissions or token access change.
 This does not enable fork end-to-end CI or make a verdict merge authorization.
-The real reviewer reads the diff and surrounding code and reports findings; it
-does not run existing test suites, formatters or linters to confirm they pass,
-or look up or report CI results. It may build and run code to test whether a
+The real reviewer first tries the change as a user would, from the docs and
+`--help` alone, and reports what it tried, as in
+[the verdict](review.md#the-verdict). It then reads the diff and surrounding
+code and reports findings; it does not run existing test suites, formatters
+or linters to confirm they pass, or look up or report CI results. It may build and run code to test whether a
 specific concern holds, such as a function failing under a condition no test
-covers, and reports what it ran and what it showed only for that concern.
+covers, and reports what it ran and what it showed for that concern.
 It omits the `Verification:` paragraph. CI remains a separate required
 check, combined with review by the merge gate, not by the reviewer.
 

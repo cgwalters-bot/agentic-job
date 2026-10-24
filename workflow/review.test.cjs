@@ -55,7 +55,7 @@ test('scripted review reports the checked-out SHA', () => {
   }
 });
 
-test('automatic and dispatched review prompts allow concern-specific experiments, not routine verification', () => {
+test('automatic and dispatched review prompts try the change and allow concern-specific experiments, not routine verification', () => {
   const standing = fs.readFileSync(path.join(__dirname, 'review.md'), 'utf8');
   const dispatch = fs.readFileSync(path.join(__dirname, '../.github/workflows/dispatch.yml'), 'utf8');
   const instructions = dispatch.match(/const instructions = profile === 'review'\s+\? '([^']+)'/)[1];
@@ -63,11 +63,11 @@ test('automatic and dispatched review prompts allow concern-specific experiments
     assert.match(prompt, /do not set item_number or other routing fields: the workflow fixes the target\./);
   }
   for (const prompt of [standing, instructions]) {
-    assert.match(prompt, /Read the diff and the code around it, and report findings only\./);
+    // Try it as a user before the code (#1817): its report must not be forbidden.
+    assert.match(prompt, /Before reading the code, try the change as a user would\.[^]*without reading the\s+implementation, exercise the changed behavior from the\s+docs and --help alone[^]*Where trying is not possible[^]*do not skip it silently\.[^]*If the main claim fails when tried because of the change,\s+that is a blocker; a failure of the sandbox itself goes under Tried only\.\s+Then read the diff and the code around it, and report findings and what you\s+tried\./);
     assert.match(prompt, /Do not run existing test suites, formatters or linters to confirm they pass\./);
-    assert.match(prompt, /Build and run code when needed to test whether a specific concern holds,/);
-    assert.match(prompt, /for example whether a function can fail under a condition no test covers\./);
-    assert.match(prompt, /Report what you ran and what it showed, only for that concern\./);
+    assert.match(prompt, /Build and run code when needed to test whether a specific concern holds,\s+for example whether a function can fail under a condition no test covers\./);
+    assert.match(prompt, /Report what you ran and what it showed for that concern\./);
     assert.match(prompt, /Do not look up or report CI results\./);
     assert.match(prompt, /Do not include a `?Verification:`? paragraph\./);
     assert.match(prompt, /exact admitted head SHA/);
@@ -94,7 +94,7 @@ test('automatic and dispatched review prompts allow concern-specific experiments
     assert.match(prompt, /When there is a blocker, the fix may take\s+important findings and nits along\./);
     assert.doesNotMatch(prompt, /\bP[0-3]\b/);
     assert.doesNotMatch(prompt, /VERDICT: CHANGES when there is\s+something actionable/);
-    assert.doesNotMatch(prompt, /Do not build|Run relevant tests|what you verified or could not verify/);
+    assert.doesNotMatch(prompt, /Do not build|Run relevant tests|what you verified or could not verify|report findings only|only for that concern/);
   }
   // Whether its approval merges is the owner's merge policy (#556), stated
   // after the task, not prose the reviewer weighs.

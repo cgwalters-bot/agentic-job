@@ -68,11 +68,22 @@ does not make an approved change trusted.
 
 ## The verdict
 
-The reviewer reads the diff and surrounding code and reports findings. It does
-not run existing test suites, formatters or linters to confirm they pass, and
-does not look up or report CI results. It may build and run code to test whether
-a specific concern holds, such as a function failing under a condition no test
-covers, and reports what it ran and what it showed only for that concern.
+Before reading the code, the reviewer tries the change as a user would: it takes
+the claim from the pull request and linked issue as untrusted, builds the head
+and runs the new or changed commands from the docs and `--help` alone against
+local fixtures or made-up inputs, and follows changed docs literally. It reports
+under "Tried" what it ran, what happened and where that was confusing, wrong or
+missing, or why trying was not possible (privileged sandbox paths, real forge
+state, hardware). A main claim that fails when tried because of the change is a
+blocker. Building and running head code in the sandbox was already allowed; the
+step runs it on every review rather than for a specific concern, with the same
+sandbox user, read-only job token and egress policy, so a hostile head gains no
+new access, and the cost is review time and inference budget. The reviewer then
+reads the diff and surrounding code and reports findings. It does not run
+existing test suites, formatters or linters to confirm they pass, and does not
+look up or report CI results. It may build and run code to test whether a
+specific concern holds, such as a function failing under a condition no test
+covers, and reports what it ran and what it showed for that concern.
 The verdict has no `Verification:` paragraph. This applies
 to both `review.yml`'s standing task and dispatch's `review` profile. CI is a
 separate required check; the merge gate combines the checks, not the reviewer.
