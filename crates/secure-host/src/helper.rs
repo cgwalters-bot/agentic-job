@@ -269,7 +269,8 @@ pub fn parse_log_size(text: &str) -> Option<Option<u64>> {
 fn root_config<F: HostFile>() -> Result<F> {
     let path = Path::new(ROOT_COPY);
     roots_alone(path)?;
-    F::load(path).context("`agentic-job sandbox setup` writes this file")
+    F::load(path)
+        .context("setup (`secure-host setup`, `agentic-job sandbox setup`) writes this file")
 }
 
 /// Refuses unless every directory root looks programs up in is root's

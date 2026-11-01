@@ -13,8 +13,9 @@ builds that source. `build-binary: true` forces a build.
 | Command | Runs as | Does |
 | --- | --- | --- |
 | `policy --allow FILE --repo OWNER/NAME --clone-url URL --base BRANCH --kind branch\|analysis --outputs LIST --max-outputs N` | anyone | Checks one run's request against the caller's bounds and prints `policy.json`. `--outputs` takes `all` and `--max-outputs` takes `max`, for whatever the bounds allow. |
-| `config [--host] [--from FILE] [--string TABLE.KEY=VALUE]... [--integer ...]... [--boolean ...]... [--list ...]...` | anyone | Writes TOML from a file and individual settings. `--host` checks only the host configuration. |
+| `config [--host] [--prepared] [--from FILE] [--string TABLE.KEY=VALUE]... [--integer ...]... [--boolean ...]... [--list ...]...` | anyone | Writes TOML from a file and individual settings. `--host` checks only the host configuration; `--prepared` writes `[sandbox.prepared]` from the run's tables, for `sandbox prepare`. |
 | `sandbox setup --config FILE` | root | Prepares the host the agent runs on, and copies the configuration to `/etc/agentic-job/`. |
+| `sandbox prepare --config FILE` | root | Before the secure-host image, which holds no agent code: installs the packages, `[setup] npm` and `agents` and Vibe, writes the agent's managed settings and installs this binary as the helper that the image's setup keeps (`[sandbox.prepared]`). Refuses `setup.tools`, which needs the sandbox user. |
 | `sandbox check [--record\|--unless-passed]` | the runner's user | Probes the sandbox as the sandbox user, with positive controls where the host provides them. `--record` leaves a record when all probes pass, and `--unless-passed` (run's) probes nothing when it finds that record, against the same configuration, with nothing having entered the sandbox user since ([sandbox-check.md](sandbox-check.md)). |
 | `run --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent in the sandbox and takes what it hands back. |
 | `collect --policy FILE --outputs DIR --collected FILE` | anyone | Validates and sanitizes the handed-back requests as gh-aw's collector does, in check.yml and for a caller off GitHub ([safe-outputs.md](safe-outputs.md#off-github)). Exit 1 if it refused a line. |
@@ -65,6 +66,11 @@ read as TOML, so an input that holds a quote or a table header cannot
 add a key. Empty settings leave the file unchanged. Use `--host` when
 composing a configuration for `secure-host` without an agent.
 
+The `secure-host` binary, from the same workspace and release, is the
+host's side alone: `supported`, `apt`, `world-write`, `setup`, `check`,
+`config` and the image's entrypoint `image`, with no command that runs
+an agent ([secure-host.md](secure-host.md#the-secure-host-binary)).
+
 ## Files read
 
 **`--allow`**, the caller's bounds: the hosts a clone URL may name, globs
@@ -79,7 +85,7 @@ contains no secret.
 
 | Table | Holds |
 | --- | --- |
-| `[sandbox]` | the sandbox user and its groups, directories to close, services to stop; `[sandbox.check]` has what the probes need and what they accept, `before-agent`, `fetch-repo` and `containers` ([sandbox-check.md](sandbox-check.md#the-egress-policy-and-containers)) |
+| `[sandbox]` | the sandbox user and its groups, directories to close, services to stop; `[sandbox.check]` has what the probes need and what they accept, `before-agent`, `fetch-repo` and `containers` ([sandbox-check.md](sandbox-check.md#the-egress-policy-and-containers)); `[sandbox.prepared]`, which `config --prepared` writes, says that `sandbox prepare` ran and what the run's tables ask of the host's rules: `refuse` (the broker under `inference.front`) and `serve-port` (the session bridge's) |
 | `[egress]` | `proxy` (whether the egress proxy runs), `direct` (addresses reached without it), `policy`, `rust-proxy` (the binary's own proxy in place of mitmproxy; on by default, `false` needs `python3-venv` in `[setup] packages`) |
 | `[setup]` | `packages`, `npm`, `agents` (pinned in the binary), and a `script` for toolchains; optional `tools` for a caller-pinned installer ([toolchains](dispatch.md#giving-runs-a-toolchain)); `repo-packages` only in a file given to `agentic-job config`, which adds the `--repo` entry to `packages` |
 | `[inference]` | `url`; `register`, one of `github-oidc`, `plain` and `token-file`, with no default; `audience`; `token-file`; `identity-proxy`; `anthropic-url` and `openai-url` |

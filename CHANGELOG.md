@@ -9,6 +9,19 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The secure-host image holds the new `secure-host` binary, the host's
+  side with no agent code (`supported`, `apt`, `world-write`, `setup`,
+  `check`, `config`, `image`), which releases also publish. For one release
+  it answers to `/agentic-job` in the image and `agentic-job` on the host,
+  for the pinned cgwalters-forge/actions/secure-host. An agent job with
+  such an image runs `agentic-job sandbox prepare` before it, which
+  installs the agents, their managed settings and agentic-job as the
+  helper, and `config --host --prepared` writes `[sandbox.prepared]` for
+  the image's setup, which refuses a job's tables without it.
+  `agentic-job secure-host image` is gone; the published
+  image and the action's pin move only after a release
+  (docs/secure-host.md#the-secure-host-binary).
+
 - The secure-host forwarder picks up the config-volume SELinux relabel fix
   (actions#190), allowing setup to read its configuration on enforcing hosts
   such as RHEL 10 (#2925). The pinned secure-host image remains v0.6.4.

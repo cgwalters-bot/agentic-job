@@ -9,7 +9,8 @@ are in [interface.md](interface.md); deployment is in [workflow.md](workflow.md)
 
 `crates/agentic-job` contains the library and the `agentic-job` binary.
 The same crate builds `fake-agent`, the scripted ACP agent used by tests.
-Releases publish both binaries for the reusable workflow's scripted runs.
+Releases publish both binaries for the reusable workflow's scripted runs,
+and `secure-host`, the binary of `crates/secure-host` that the image holds.
 
 `crates/secure-host` is the host's side, for any job that runs code it
 does not trust: it depends on nothing that runs an agent (no ACP,
@@ -47,10 +48,26 @@ gives `egress::start` the binary and command that run the proxy; its
 the host's tables and the helper and the way in check the run tables,
 unset the run's credentials and serve `session-serve`; and its
 `sandbox/setup.rs` implements `setup::Program`, which reads and checks the file for setup and adds
-the agents, npm, Vibe, caller tools, managed settings and the session's
-serve at fixed points of setup's order. The image and the
-`secure-host` binary still live in agentic-job's `secure_host/`, and
-the run token's probes in `run/probe.rs`.
+the agents, npm, Vibe, caller tools and managed settings at fixed
+points of setup's order. Setup itself writes where a served port is
+published (the session's endpoint).
+
+The crate is also the `secure-host` binary (`main.rs`, `cli.rs`): its
+steps, `config` (`compose.rs`, whose settings agentic-job's `config`
+takes too), setup and the probes, reading the host's tables of any file
+as `config::Host`, which leaves a program's tables be once its step ran
+and refuses them otherwise; and the image's
+entrypoint (`image.rs`), which installs it on the host and runs setup
+through `nsenter`. The image holds no agent code, so an agent job runs
+agentic-job's part first (`sandbox prepare`), which installs agentic-job
+as the helper and says so in `[sandbox.prepared]`
+(`config::Prepared`): setup then keeps that helper, and holds the
+egress proxy and the network rules to what the table says the run's
+tables ask. For one release the binary also answers to agentic-job's
+name, in the image and on the host, for what the pinned action calls
+([secure-host.md](secure-host.md#the-secure-host-binary)). agentic-job's
+`secure_host/` keeps its `secure-host` subcommands and the inference
+check, and `run/probe.rs` the run token's probes.
 
 `crates/safe-outputs` is gh-aw's safe-output contract as a library: the
 request vocabulary and forge profile (`vocabulary.rs`), gh-aw's
@@ -82,7 +99,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `redact.rs` | Secret redaction |
-| `sandbox/setup.rs`, `sandbox/setup/` | agentic-job's part of secure-host's setup: the agents, tools, managed settings and session |
+| `sandbox/setup.rs`, `sandbox/setup/` | agentic-job's part of secure-host's setup: the agents, tools and managed settings; alone, before the image, `sandbox prepare` |
 | `sandbox/mod.rs`, `sandbox/session.rs` | agentic-job's side of secure-host's helper, way in and probes: its configuration, exit states and `session-serve` |
 | `session/` | ACP transport, permissions, limits, transcript and digest |
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |

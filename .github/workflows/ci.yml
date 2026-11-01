@@ -619,8 +619,8 @@ jobs:
           path: ${{ runner.temp }}/dist
       - name: The configuration with its switches off
         run: |
-          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
-          "$RUNNER_TEMP/agentic-job" config --host --from secure-host/hosted.toml \
+          install -m 0755 "$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl" "$RUNNER_TEMP/secure-host-bin"
+          "$RUNNER_TEMP/secure-host-bin" config --from secure-host/hosted.toml \
             --boolean sandbox.lock-runner=false --boolean egress.proxy=false > "$RUNNER_TEMP/options.toml"
       - name: Secure the host from the image archive
         uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
@@ -657,17 +657,17 @@ jobs:
           path: ${{ runner.temp }}/dist
       - name: The hosted configuration without the sandbox user
         run: |
-          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
-          "$RUNNER_TEMP/agentic-job" config --host --from secure-host/hosted.toml \
+          install -m 0755 "$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl" "$RUNNER_TEMP/secure-host-bin"
+          "$RUNNER_TEMP/secure-host-bin" config --from secure-host/hosted.toml \
             --boolean sandbox.create-user=false > "$RUNNER_TEMP/no-user.toml"
       - name: Secure the host from the image archive
         uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
         with:
           config: ${{ runner.temp }}/no-user.toml
           image-archive: ${{ runner.temp }}/image/secure-host.tar
-      - run: agentic-job sandbox check
+      - run: secure-host check
       - name: No sandbox user, and sudo is the helper rule alone
-        run: agentic-job sandbox probe no-user no-user
+        run: secure-host probe no-user no-user
 
   # The action as another repository names it, which a pull request
   # cannot do for its own commit: after a push to main, from main. The
@@ -2044,9 +2044,16 @@ jobs:
           if ! [ "${pid:-0}" -gt 1 ] 2> /dev/null; then echo "::error::egress-proxy.service has no main process"; exit 1; fi
           if kill "$pid"; then echo "::error::the runner's user signalled the egress proxy"; exit 1; fi
           systemctl is-active --quiet egress-proxy.service
+      # The image's binary is secure-host's, by both its names on the
+      # host: agentic-job's name is its for one release (crates/secure-host/src/image.rs).
       - name: The setup outlived the container
         run: |
-          cmp /usr/local/bin/agentic-job "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl"
+          for name in secure-host agentic-job; do
+            cmp "/usr/local/bin/$name" "$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl"
+          done
+          if cmp -s "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" /usr/local/bin/secure-host; then
+            echo "::error::the image installed agentic-job, not secure-host"; exit 1
+          fi
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
 
@@ -2158,8 +2165,8 @@ jobs:
         with:
           name: secure-host-image
           path: ${{ runner.temp }}/image
-      # The probe is this revision's binary: the control runs it before
-      # secure-host installs it, and every later probe runs that one.
+      # The probe is this revision's secure-host binary: the control runs
+      # it before the image installs it, and every later probe runs that one.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentic-job
@@ -2171,8 +2178,8 @@ jobs:
         run: sudo install -m 0666 -o root -g root /dev/null /var/tmp/agentic-job-confine-root-file
       - name: Before the lock each route works (control)
         run: |
-          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
-          "$RUNNER_TEMP/agentic-job" sandbox probe control before
+          install -m 0755 "$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl" "$RUNNER_TEMP/secure-host-bin"
+          "$RUNNER_TEMP/secure-host-bin" probe control before
       # The action's own hosted.toml, as a caller that names no config
       # gets it: under the lock it turns on the metadata, diagnostics and
       # runner-read rules by itself. The image loads the world-write
@@ -2182,13 +2189,14 @@ jobs:
         uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
         with:
           image-archive: ${{ runner.temp }}/image/secure-host.tar
-      - run: agentic-job sandbox check --record
+      - name: The image's binary proves it again by its own name (the action's by agentic-job's)
+        run: secure-host check --record
       - name: A run step is confined
-        run: agentic-job sandbox probe confined run-step
+        run: secure-host probe confined run-step
       # The default still makes the sandbox user: entered the one way
       # there is, it has no sudo and no metadata service.
       - name: The sandbox user exists, without sudo or the metadata service
-        run: agentic-job sandbox probe sandbox-user sandbox-user
+        run: secure-host probe sandbox-user sandbox-user
       # Its post step runs after the upload below, and fails the job if a
       # route is open; its record is in that step's log. The ingress check
       # (docs/workflow-ingress.md) accepts this ignore only while every line

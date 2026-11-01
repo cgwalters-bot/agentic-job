@@ -166,6 +166,8 @@ mod tests {
 pub enum Command {
     /// Create the sandbox user, close its routes to credentials and root
     Setup(setup::Args),
+    /// As root, before the secure-host image: install the agents, their managed settings and this binary as the helper
+    Prepare(setup::PrepareArgs),
     /// Probe the sandbox as the sandbox user, each probe with a positive control
     Check(check::Args),
     /// Run secure-host's setup or probes, and add their time to the job summary
@@ -186,6 +188,7 @@ impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
             Self::Setup(args) => setup::run(args),
+            Self::Prepare(args) => setup::prepare(args),
             Self::Check(args) => check::run(args),
             Self::Timed(args) => timed::run(args),
             Self::ProbeLocal => local::run().map(|()| Exit::Success),

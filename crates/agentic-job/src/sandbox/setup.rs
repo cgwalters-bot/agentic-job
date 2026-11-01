@@ -1,15 +1,21 @@
 //! `agentic-job sandbox setup`: secure-host's host setup
 //! ([`::secure_host::setup`]), with what agentic-job adds to it through
-//! [`Program`]: the agents and tools it installs, the agent's managed
-//! settings and a session's bridge. secure-host's module says what setup
-//! closes and in what order; it is re-exported here at the paths callers
-//! know.
+//! [`Program`]: the agents and tools it installs and the agent's managed
+//! settings. secure-host's module says what setup closes and in what
+//! order; it is re-exported here at the paths callers know.
+//!
+//! `agentic-job sandbox prepare` does agentic-job's part alone, as root,
+//! before the secure-host image, which holds no agent code: the agents,
+//! the managed settings, and this binary as the helper, with the run's
+//! tables the helper reads. The image's setup then keeps that helper
+//! (`[sandbox.prepared]`, which `config --host --prepared` writes).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
+use rustix::fs::Mode;
 
 pub use ::secure_host::setup::{
     CONFIG_DIR, CRYPTO_POLICIES, DISK_GROUP, OTHER_WRITE, READ_ONLY_GROUPS, ROOT_GROUPS, RootGroup,
@@ -18,7 +24,8 @@ pub use ::secure_host::setup::{
     subuid_ranges, writable_crypto_policies,
 };
 use ::secure_host::setup::{
-    MODE_FILE, Plan, Program, install_file, install_packages, make_roots_alone, timed,
+    MODE_FILE, Plan, Program, ROOT_UMASK, install_file, install_packages, install_self,
+    make_roots_alone, timed,
 };
 
 use super::egress;
@@ -27,7 +34,7 @@ use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
 use crate::run::inference::Endpoint;
-use crate::session::bridge::{self, Listen};
+use crate::session::bridge;
 
 pub mod agents;
 mod tools;
@@ -46,35 +53,53 @@ pub struct Args {
     pub host_only: bool,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct PrepareArgs {
+    /// The run's configuration (TOML), with `[sandbox.prepared]`, as
+    /// `agentic-job config --host --prepared` writes it
+    #[arg(long, value_name = "FILE")]
+    pub config: PathBuf,
+}
+
 /// The proxy of `[egress]`, as the root-owned copy of this binary and
-/// the image's (`secure-host/Containerfile`) run it.
-pub const EGRESS_PROXY: egress::ProxyBinary = egress::ProxyBinary {
-    host: SELF_COPY,
-    image: "/agentic-job",
-    command: &["sandbox", "egress-proxy"],
-};
+/// the image's (`secure-host/Containerfile`) run it: secure-host's, whose
+/// image binary and this one both answer to `sandbox egress-proxy`.
+pub const EGRESS_PROXY: egress::ProxyBinary = ::secure_host::setup::PROXY;
 
 pub fn run(args: &Args) -> Result<Exit> {
     ::secure_host::setup::run(|| read(args), args.egress_image.as_deref())?;
     Ok(Exit::Success)
 }
 
-/// The configuration, read and checked as the preflight's first step.
-fn read(args: &Args) -> Result<Plan<Job>> {
-    let text = fs::read_to_string(&args.config)
-        .with_context(|| format!("reading {}", args.config.display()))?;
-    let config = if args.host_only {
+/// The configuration at PATH, read and checked; HOST_ONLY holds it to
+/// [`config::HostConfig`].
+fn load(path: &Path, host_only: bool) -> Result<(String, Config, config::checked::Host)> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let config = if host_only {
         config::HostConfig::parse(&text).map(Config::from)
     } else {
         Config::parse(&text)
     }
-    .with_context(|| format!("in {}", args.config.display()))?;
+    .with_context(|| format!("in {}", path.display()))?;
+    let host = config.check_host()?;
+    Ok((text, config, host))
+}
+
+/// The configuration, read and checked as the preflight's first step.
+fn read(args: &Args) -> Result<Plan<Job>> {
+    let (text, config, host) = load(&args.config, args.host_only)?;
+    // Setup would keep a helper no step of this one installed.
+    ensure!(
+        config.sandbox.prepared.is_none(),
+        "sandbox.prepared is for secure-host's setup after `agentic-job sandbox prepare`; \
+         `sandbox setup` does both itself: leave it out"
+    );
     let config::checked::Host {
         direct,
         refused,
         session,
         install_vibe,
-    } = config.check_host()?;
+    } = host;
     Ok(Plan {
         text,
         direct,
@@ -85,8 +110,60 @@ fn read(args: &Args) -> Result<Plan<Job>> {
         program: Job {
             config,
             install_vibe,
-            session,
         },
+    })
+}
+
+/// `agentic-job sandbox prepare`: as root, before secure-host's setup,
+/// which it leaves the rest to, what setup's [`Program`] stages would do
+/// as root on the open network: apt's bounded waits and the packages,
+/// which the agents' installs may need, the agents, the managed settings,
+/// and this binary as the helper. The file must say so
+/// (`[sandbox.prepared]`), or secure-host's setup would install itself
+/// over that helper.
+pub fn prepare(args: &PrepareArgs) -> Result<Exit> {
+    ensure!(
+        host::is_root(),
+        "`sandbox prepare` must run as root, before secure-host takes it away"
+    );
+    // Root's umask is the caller's, and some images build with 000.
+    rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
+    ensure!(
+        !Path::new(CONFIG_DIR).exists(),
+        "{CONFIG_DIR} already exists: `sandbox prepare` runs before secure-host's setup, on a fresh machine"
+    );
+    let job = prepared_job(&args.config)?;
+    job.preflight()?;
+    // Before the first package, as the image does it before setup.
+    timed("apt", || {
+        ::secure_host::apt::configure(Path::new(::secure_host::apt::APT))
+    })?;
+    timed("packages", || install_packages(&job.config.setup.packages))?;
+    job.install()?;
+    timed("configuration", || job.configure())?;
+    timed("install-self", install_self)?;
+    println!(
+        "agentic-job's part of setup is done; {SELF_COPY} is the helper secure-host's setup keeps"
+    );
+    Ok(Exit::Success)
+}
+
+/// `sandbox prepare`'s configuration, at PATH, read and checked.
+fn prepared_job(path: &Path) -> Result<Job> {
+    let (_, config, host) = load(path, false)?;
+    ensure!(
+        config.sandbox.prepared.is_some(),
+        "sandbox.prepared is not set, so secure-host's setup would install itself as the helper \
+         over this one: write the file with `agentic-job config --host --prepared`"
+    );
+    ensure!(
+        config.setup.tools.is_none(),
+        "setup.tools installs as the sandbox user, which secure-host's setup makes after this \
+         step: `agentic-job sandbox setup` does both"
+    );
+    Ok(Job {
+        config,
+        install_vibe: host.install_vibe,
     })
 }
 
@@ -94,8 +171,6 @@ fn read(args: &Args) -> Result<Plan<Job>> {
 struct Job {
     config: Config,
     install_vibe: bool,
-    /// A session run's: its bridge is served on the tailnet.
-    session: Option<Listen>,
 }
 
 impl Program for Job {
@@ -108,10 +183,6 @@ impl Program for Job {
     }
 
     fn preflight(&self) -> Result<()> {
-        ensure!(
-            self.session.is_none() || host::has_program("tailscale"),
-            "session.listen needs tailscale: the session's client reaches it over the tailnet"
-        );
         if !self.config.setup.agents.is_empty() {
             agents::check_platform()?;
         }
@@ -147,55 +218,9 @@ impl Program for Job {
         Ok(())
     }
 
-    fn serve(&self) -> Result<()> {
-        if self.session.is_some() {
-            timed("session-serve", serve_session)?;
-        }
-        Ok(())
-    }
-
     fn configure(&self) -> Result<()> {
         write_managed_settings(&self.config)
     }
-}
-
-/// Publishes the address. The run's trusted guard enables serve only while
-/// it holds the bridge listener, and revokes it before releasing that port.
-fn serve_session() -> Result<()> {
-    let status: serde_json::Value = serde_json::from_str(&host::run(
-        Command::new("tailscale").args(["status", "--json"]),
-    )?)
-    .context("reading tailscale status")?;
-    let endpoint = format!("wss://{}/", session_name(&status)?);
-    install_file(
-        Path::new(bridge::ENDPOINT_FILE),
-        format!("{endpoint}\n").as_bytes(),
-        MODE_FILE,
-        None,
-    )?;
-    println!("The session's client connects at {endpoint}");
-    Ok(())
-}
-
-/// This machine's tailnet name, which must have a certificate: without
-/// one, `tailscale serve --https` waits for a capability that never comes,
-/// so the run would only time out later with no cause.
-fn session_name(status: &serde_json::Value) -> Result<&str> {
-    let name = status["Self"]["DNSName"]
-        .as_str()
-        .map(|name| name.trim_end_matches('.'))
-        .filter(|name| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
-        })
-        .context("tailscale status names no DNS name for this machine")?;
-    let certified = status["CertDomains"]
-        .as_array()
-        .is_some_and(|domains| domains.iter().any(|domain| domain.as_str() == Some(name)));
-    ensure!(certified, "{}", super::session::HTTPS_DISABLED);
-    Ok(name)
 }
 
 /// The path and content of the agent's managed settings for CONFIG, if
@@ -266,6 +291,45 @@ fn install_vibe() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// `[sandbox.prepared]` divides the work: `sandbox prepare` needs it,
+    /// and `sandbox setup`, which does both parts, refuses it.
+    #[test]
+    fn the_prepared_table_divides_the_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let prepared = "[sandbox.prepared]\n";
+        let tools = "[setup.tools]\nrepository = \"https://example.com/tools\"\n\
+                     revision = \"0123456789012345678901234567890123456789\"\nrecipe = \"install\"\n";
+        for (text, prepare, setup) in [
+            ("", Err("sandbox.prepared is not set"), Ok(())),
+            (prepared, Ok(()), Err("`sandbox setup` does both itself")),
+            (
+                &format!("{prepared}{tools}"),
+                Err("setup.tools installs as the sandbox user"),
+                Err("`sandbox setup` does both itself"),
+            ),
+        ] {
+            fs::write(&path, text).unwrap();
+            let args = Args {
+                config: path.clone(),
+                egress_image: None,
+                host_only: false,
+            };
+            for (got, want) in [
+                (prepared_job(&path).map(drop), prepare),
+                (read(&args).map(drop), setup),
+            ] {
+                match (got, want) {
+                    (Ok(()), Ok(())) => {}
+                    (Err(err), Err(want)) => {
+                        assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}")
+                    }
+                    (got, want) => panic!("{text:?}: {got:?}, not {want:?}"),
+                }
+            }
+        }
+    }
+
     /// The proxy secure-host starts is this binary's `sandbox
     /// egress-proxy`, with every option it may be given.
     #[test]
@@ -277,39 +341,6 @@ mod tests {
                 let args = egress::rust_proxy_args(binary, command, true, transparent, refused);
                 let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(&args);
                 assert!(parsed.is_ok(), "{parsed:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn the_session_name_needs_a_dns_name_with_a_certificate() {
-        let name = "runner.tail1234.ts.net";
-        let status = |dns: &str, certs: serde_json::Value| serde_json::json!({"Self": {"DNSName": dns}, "CertDomains": certs});
-        let disabled = Err("HTTPS certificates disabled");
-        for (status, wanted) in [
-            (
-                status("runner.tail1234.ts.net.", serde_json::json!([name])),
-                Ok(name),
-            ),
-            (
-                status("runner.tail1234.ts.net.", serde_json::Value::Null),
-                disabled,
-            ),
-            (
-                status("runner.tail1234.ts.net.", serde_json::json!(["other"])),
-                disabled,
-            ),
-            (
-                status("Runner!.", serde_json::json!(["Runner!"])),
-                Err("no DNS name"),
-            ),
-        ] {
-            match (session_name(&status), wanted) {
-                (Ok(got), Ok(wanted)) => assert_eq!(got, wanted),
-                (Err(error), Err(wanted)) => {
-                    assert!(format!("{error:#}").contains(wanted), "{error:#}")
-                }
-                (got, wanted) => panic!("{status}: got {got:?}, wanted {wanted:?}"),
             }
         }
     }

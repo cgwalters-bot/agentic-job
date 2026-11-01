@@ -50,7 +50,11 @@ this repository boots a VM as the sandbox user.
 
 ## What setup does for an agent
 
-Besides the host's setup, `sandbox setup`:
+Besides the host's setup, `sandbox setup` does the following. Before a
+secure-host image that holds no agent code, `sandbox prepare` does the
+first two alone, with the agent's managed settings, and the image's
+setup the last two; it refuses `setup.tools`
+([the agent job](secure-host.md#the-agent-job)):
 
 - installs `setup.npm`, as root and on the open network; npm versions
   must be exact;

@@ -122,9 +122,12 @@ the next in the same major version.
   it requires `front` or `api-key` and stops a long upstream 429 followed
   by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).
 - **The secure-host configuration**, the action's `config` input
-  (`agentic-job config --host`): `[sandbox]`, `[egress]` and `[setup]`
-  of the runner configuration, and nothing else
-  ([secure-host](secure-host.md)). With no `config`, the forwarder selects
+  (`agentic-job config --host`, `secure-host config`): `[sandbox]`,
+  `[egress]` and `[setup]` of the runner configuration, and nothing else
+  ([secure-host](secure-host.md)). The secure-host binary also reads a
+  job's whole file, which an agent job passes it with
+  `[sandbox.prepared]`: it holds its own tables to their keys and leaves
+  the rest to the program that wrote the file. With no `config`, the forwarder selects
   its Ubuntu 26.04 or RHEL 10 / CentOS Stream 10 cloud file by exact
   `ID` and supported `VERSION_ID` (never `ID_LIKE`); an unsupported host
   has no default. An explicit file replaces the selected default whole.

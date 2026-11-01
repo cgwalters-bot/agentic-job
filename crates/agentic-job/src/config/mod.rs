@@ -18,7 +18,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 // secure-host's now, at the paths callers know.
-pub use ::secure_host::config::{HostFile, ROOT_COPY, Sandbox, SandboxCheck};
+pub use ::secure_host::config::{HostFile, Prepared, ROOT_COPY, Refusal, Sandbox, SandboxCheck};
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -375,15 +375,10 @@ impl Setup {
         if let Some(tools) = &self.tools {
             tools.validate()?;
         }
+        ::secure_host::config::check_packages(&self.packages)?;
         let plain = |name: &str| {
             !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace)
         };
-        for package in &self.packages {
-            ensure!(
-                plain(package),
-                "setup.packages: {package:?} is not a package name"
-            );
-        }
         for spec in &self.npm {
             let version = spec
                 .rsplit_once('@')

@@ -1,5 +1,5 @@
-//! `agentic-job sandbox setup`: create the sandbox user and close its
-//! routes to credentials and root. Run as root, once, on a machine that is
+//! `secure-host setup` and `agentic-job sandbox setup`: create the
+//! sandbox user and close its routes to credentials and root. Run as root, once, on a machine that is
 //! thrown away after the job. With `sandbox.create-user = false` it makes
 //! no user and hardens the runner's alone, all the same but for the
 //! stages that are the sandbox user's.
@@ -17,8 +17,11 @@
 //! says what that closes, and its probes.md how the probes prove it.
 //!
 //! What the program built on this crate adds (agentic-job's agents,
-//! tools, managed settings and session) comes in through [`Program`],
-//! at fixed points of [`run`]'s order.
+//! tools and managed settings) comes in through [`Program`], at fixed
+//! points of [`run`]'s order; or the program does it in a step of its own
+//! before, and the file says so ([`config::Prepared`]), as before the
+//! secure-host binary's setup ([`run_host`]), which reads no program's
+//! tables.
 
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -88,17 +91,116 @@ pub trait Program {
         Ok(())
     }
 
-    /// After the network rules, which keep the sandbox user from
-    /// [`Plan::served_port`]; called only when there is one.
-    fn serve(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Root's files the program reads later, written just before the
     /// configuration's root-owned copy.
     fn configure(&self) -> Result<()> {
         Ok(())
     }
+}
+
+/// The proxy of `[egress]`, as the secure-host binary's root-owned copy
+/// and its image (`secure-host/Containerfile`) run it. `sandbox
+/// egress-proxy`, which agentic-job answers too: with
+/// [`config::Prepared`] the copy at [`SELF_COPY`] is that program's.
+pub const PROXY: egress::ProxyBinary = egress::ProxyBinary {
+    host: SELF_COPY,
+    image: crate::image::IMAGE_BINARY,
+    command: &["sandbox", "egress-proxy"],
+};
+
+/// The secure-host binary's own [`Program`]: nothing but the host's
+/// tables ([`config::Host`]).
+struct Host(config::Host);
+
+impl Program for Host {
+    type File = config::Host;
+
+    const PROXY: egress::ProxyBinary = PROXY;
+
+    fn file(&self) -> &config::Host {
+        &self.0
+    }
+}
+
+/// `secure-host setup`: the host's setup from CONFIG, a host's file or a
+/// job's ([`config::Host`]), with the egress proxy from EGRESS_IMAGE.
+pub fn run_host(config: &Path, egress_image: Option<&str>) -> Result<()> {
+    run(
+        || {
+            let text = fs::read_to_string(config)
+                .with_context(|| format!("reading {}", config.display()))?;
+            let host = config::Host::parse(&text)
+                .and_then(|host| Ok((host.check()?, host)))
+                .with_context(|| format!("in {}", config.display()));
+            let (direct, host) = host?;
+            let keys = host.program_keys();
+            if !keys.is_empty() {
+                println!(
+                    "Left to the program whose file this is, and not set up here: {}",
+                    keys.join(", ")
+                );
+            }
+            let prepared = host.sandbox.prepared.as_ref();
+            Ok(Plan {
+                text,
+                direct,
+                refused: prepared.map(config::Prepared::refused).unwrap_or_default(),
+                served_port: prepared.and_then(|prepared| prepared.serve_port),
+                packages: host.setup.packages.clone(),
+                script: host.setup.script.clone(),
+                program: Host(host),
+            })
+        },
+        egress_image,
+    )
+}
+
+/// Where setup leaves the address a client reaches [`Plan::served_port`]
+/// at, `wss://NAME/` for the runner's tailnet name, for the job to
+/// publish: agentic-job's session bridge.
+pub const SERVE_ENDPOINT: &str = "/etc/agentic-job/session-endpoint";
+
+pub const HTTPS_DISABLED: &str =
+    "the tailnet has HTTPS certificates disabled; enable them in the admin console";
+
+/// Writes [`SERVE_ENDPOINT`]. What serves the port later (agentic-job's
+/// helper, `session-serve`) does so only while its step holds the
+/// listener, and revokes it before releasing the port.
+fn serve_endpoint() -> Result<()> {
+    let status: serde_json::Value = serde_json::from_str(&host::run(
+        Command::new("tailscale").args(["status", "--json"]),
+    )?)
+    .context("reading tailscale status")?;
+    let endpoint = format!("wss://{}/", tailnet_name(&status)?);
+    install_file(
+        Path::new(SERVE_ENDPOINT),
+        format!("{endpoint}\n").as_bytes(),
+        MODE_FILE,
+        None,
+    )?;
+    println!("The session's client connects at {endpoint}");
+    Ok(())
+}
+
+/// This machine's tailnet name, which must have a certificate: without
+/// one, `tailscale serve --https` waits for a capability that never comes,
+/// so the run would only time out later with no cause.
+fn tailnet_name(status: &serde_json::Value) -> Result<&str> {
+    let name = status["Self"]["DNSName"]
+        .as_str()
+        .map(|name| name.trim_end_matches('.'))
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
+        })
+        .context("tailscale status names no DNS name for this machine")?;
+    let certified = status["CertDomains"]
+        .as_array()
+        .is_some_and(|domains| domains.iter().any(|domain| domain.as_str() == Some(name)));
+    ensure!(certified, "{HTTPS_DISABLED}");
+    Ok(name)
 }
 
 /// Root's: the configuration `run` reads, and what else setup leaves for
@@ -313,7 +415,7 @@ const MODE_PROGRAM: u32 = 0o755;
 /// What sudo wants of a file in sudoers.d.
 const MODE_SUDOERS: u32 = 0o440;
 
-const ROOT_UMASK: u32 = 0o022;
+pub const ROOT_UMASK: u32 = 0o022;
 
 /// Package mirrors time out now and then, and one timeout would
 /// otherwise fail the whole run.
@@ -404,6 +506,10 @@ fn setup<P: Program>(
             None
         };
         plan.program.preflight()?;
+        ensure!(
+            plan.served_port.is_none() || host::has_program("tailscale"),
+            "a served port needs tailscale (session.listen): the session's client reaches it over the tailnet"
+        );
         if config.close_resolved {
             resolved::bus_policy(&runner.name)?;
         }
@@ -489,7 +595,11 @@ fn setup<P: Program>(
         timed("close-resolved", || resolved::close(&runner.name))?;
     }
     timed("install-self", || {
-        install_self()?;
+        if config.prepared.is_some() {
+            keep_program_helper(Path::new(SELF_COPY))?;
+        } else {
+            install_self()?;
+        }
         // The helper's copy, the configuration it reads and the programs it
         // runs are what the runner's one sudo rule gives root to: their
         // directories are made root's alone first, or setup refuses.
@@ -548,7 +658,7 @@ fn setup<P: Program>(
     // After the rules, which keep the sandbox user from what it serves;
     // with no port for them to close, nothing is served.
     if plan.served_port.is_some() {
-        program.serve()?;
+        timed("session-serve", serve_endpoint)?;
     }
     if !write_uids.is_empty() {
         println!(
@@ -1501,7 +1611,32 @@ pub fn make_roots_alone(path: &Path) -> Result<()> {
     helper::roots_alone(path)
 }
 
-fn install_self() -> Result<()> {
+/// With [`config::Prepared`]: the program's step installed its own
+/// binary at PATH as the helper, which the runner's one sudo rule will
+/// name. It must be there as a file of its own; the caller then makes it
+/// root's alone with its directories, or refuses.
+fn keep_program_helper(path: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "{}: sandbox.prepared says a program's step installed the helper there, and none did",
+            path.display()
+        )
+    })?;
+    ensure!(
+        meta.is_file(),
+        "{} is not a regular file: sandbox.prepared keeps it as the helper",
+        path.display()
+    );
+    println!(
+        "sandbox.prepared: the helper is the program's, which its step installed at {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Installs this program as the helper, at [`SELF_COPY`]: setup's own,
+/// or a program's step before it ([`config::Prepared`]).
+pub fn install_self() -> Result<()> {
     let own = std::env::current_exe().context("finding this program's own file")?;
     let bytes = fs::read(&own).with_context(|| format!("reading {}", own.display()))?;
     let dest = Path::new(SELF_COPY);
@@ -1719,6 +1854,57 @@ pub fn install_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With `[sandbox.prepared]` the helper is the program's file, and
+    /// setup refuses rather than go on without one, or through a link.
+    #[test]
+    fn a_prepared_host_keeps_only_a_helper_that_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("agentic-job");
+        let err = keep_program_helper(&helper).unwrap_err();
+        assert!(format!("{err:#}").contains("none did"), "{err:#}");
+        fs::write(&helper, "binary").unwrap();
+        keep_program_helper(&helper).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&helper, &link).unwrap();
+        let err = keep_program_helper(&link).unwrap_err();
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+        let err = keep_program_helper(dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+    }
+
+    #[test]
+    fn the_served_name_needs_a_dns_name_with_a_certificate() {
+        let name = "runner.tail1234.ts.net";
+        let status = |dns: &str, certs: serde_json::Value| serde_json::json!({"Self": {"DNSName": dns}, "CertDomains": certs});
+        let disabled = Err("HTTPS certificates disabled");
+        for (status, wanted) in [
+            (
+                status("runner.tail1234.ts.net.", serde_json::json!([name])),
+                Ok(name),
+            ),
+            (
+                status("runner.tail1234.ts.net.", serde_json::Value::Null),
+                disabled,
+            ),
+            (
+                status("runner.tail1234.ts.net.", serde_json::json!(["other"])),
+                disabled,
+            ),
+            (
+                status("Runner!.", serde_json::json!(["Runner!"])),
+                Err("no DNS name"),
+            ),
+        ] {
+            match (tailnet_name(&status), wanted) {
+                (Ok(got), Ok(wanted)) => assert_eq!(got, wanted),
+                (Err(error), Err(wanted)) => {
+                    assert!(format!("{error:#}").contains(wanted), "{error:#}")
+                }
+                (got, wanted) => panic!("{status}: got {got:?}, wanted {wanted:?}"),
+            }
+        }
+    }
 
     #[test]
     fn crypto_policies_are_left_writable_by_their_owner_only() {

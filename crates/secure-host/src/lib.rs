@@ -5,19 +5,23 @@
 //! agentic-job depends on it, never the other way round. It holds the
 //! host setup ([`setup`]), the network rules, the egress proxy and the
 //! helper among it, and the probes that prove it ([`check`]); agentic-job
-//! adds its agents and session through [`setup::Program`]. The image
-//! still lives in agentic-job's `secure_host` module, and agentic-job's
+//! adds its agents through [`setup::Program`], or in a step of its own
+//! before ([`config::Prepared`]). The `secure-host` binary ([`cli`]) and
+//! its image's entrypoint ([`image`]) are here too, and agentic-job's
 //! `sandbox` re-exports these at their old paths. docs/layout.md has the
 //! map.
 
 pub mod apt;
 pub mod check;
+pub mod cli;
+pub mod compose;
 pub mod config;
 pub mod egress;
 pub mod enter;
 pub mod files;
 pub mod helper;
 pub mod host;
+pub mod image;
 pub mod local;
 pub mod network;
 pub mod platform;

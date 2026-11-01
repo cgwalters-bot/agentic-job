@@ -1,4 +1,4 @@
-//! `agentic-job sandbox probe`: what a step of a job secured by
+//! `secure-host probe` (`agentic-job sandbox probe`): what a step of a job secured by
 //! secure-host tries, as the runner's own user: the routes to root (sudo,
 //! the container daemon, a root-owned world-writable file), to the cloud
 //! metadata service, to the environment of a process an earlier step left
@@ -505,7 +505,7 @@ mod tests {
         let steps = |key: &str| {
             let script = dir.join(format!("{key}.mjs"));
             let script = fs::read_to_string(script).unwrap();
-            let spawned = format!("'sandbox', 'probe', 'confined', '{key}'");
+            let spawned = format!("spawnSync('secure-host', ['probe', 'confined', '{key}']");
             action.contains(&format!("\n  {key}: {key}.mjs\n")) && script.contains(&spawned)
         };
 

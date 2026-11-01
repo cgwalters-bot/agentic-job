@@ -1,7 +1,8 @@
 //! `agentic-job secure-host`: the steps of the `secure-host` action that
 //! come after it has fetched this binary and before `sandbox setup`. Each
 //! refuses as the script it replaced did: one message, exit status 1.
-//! `image` is the secure-host image's entrypoint, which runs them.
+//! The secure-host image's entrypoint is the secure-host binary's
+//! (`secure-host image`), which holds no agent code.
 //!
 //! Started as `secure-host` (a copy or link of the binary by that name),
 //! it offers only [`Host`]: those steps, then setup from a host's own
@@ -16,7 +17,6 @@ use clap::{Parser, Subcommand};
 use crate::exit::Exit;
 use crate::sandbox;
 
-pub mod image;
 pub mod inference;
 
 // What the secure-host crate holds already, at the paths callers know.
@@ -31,12 +31,6 @@ pub enum Command {
         /// The configuration `agentic-job config --host` wrote
         config: PathBuf,
     },
-    /// The secure-host image's entrypoint: install this binary on the host
-    /// mounted at /host and set the host up through its `nsenter -t 1`
-    Image {
-        /// The configuration `agentic-job config --host` wrote, a path on the host
-        config: PathBuf,
-    },
 }
 
 /// The commands that secure a host, without `run`, `inference` or any
@@ -49,19 +43,7 @@ pub enum Host {
     /// As root: bound apt's network waits and keep it off the Azure mirror
     Apt,
     /// As root: load the world-write policy OBJECT through bpftool, and prove it took effect
-    WorldWrite {
-        /// The policy object, `world_write.bpf.o`, that came with this binary
-        object: PathBuf,
-        /// Also refuse a read (`/proc/PID/environ`) by a process of the runner's
-        /// user of another of its processes that is not its descendant; the
-        /// Runner.Worker this command runs under is exempt
-        #[arg(long)]
-        deny_runner_reads: bool,
-        /// Exempt the one Runner.Worker on the host, not an ancestor: for a
-        /// loader the Worker did not start, such as the image's
-        #[arg(long, requires = "deny_runner_reads")]
-        sole_worker: bool,
-    },
+    WorldWrite(::secure_host::cli::WorldWrite),
     /// As root: `sandbox setup` from a file with only `[sandbox]`, `[egress]` and `[setup]`
     Setup {
         /// The host's configuration (TOML); copied to /etc/agentic-job/
@@ -104,42 +86,16 @@ impl Command {
                     Ok(Exit::Failure)
                 }
             },
-            Self::Image { config } => match image::run(config) {
-                Ok(()) => Ok(Exit::Success),
-                Err(err) => {
-                    eprintln!("secure-host image: {err:#}");
-                    Ok(Exit::Failure)
-                }
-            },
         }
     }
 }
 
 impl Host {
     pub fn run(&self) -> Result<Exit> {
-        match self {
-            Self::Supported => {
-                if platform::supported_file(Path::new(platform::OS_RELEASE)) {
-                    return Ok(Exit::Success);
-                }
-                eprintln!("{}", platform::REFUSAL);
-            }
-            Self::Apt => match apt::configure(Path::new(apt::APT)) {
-                Ok(()) => return Ok(Exit::Success),
-                Err(err) => eprintln!("configuring apt for CI: {err:#}"),
-            },
-            Self::WorldWrite {
-                object,
-                deny_runner_reads,
-                sole_worker,
-            } => match world_write::load(object, *deny_runner_reads, *sole_worker) {
-                Ok(()) => return Ok(Exit::Success),
-                Err(err) => {
-                    world_write::report_refusal(&err, &mut world_write::run_command, &mut |line| {
-                        eprintln!("{line}")
-                    })
-                }
-            },
+        let succeeded = match self {
+            Self::Supported => ::secure_host::cli::supported(),
+            Self::Apt => ::secure_host::cli::apt(),
+            Self::WorldWrite(args) => args.run(),
             // These two fail as `sandbox` does, with an error.
             Self::Setup { config } => {
                 return sandbox::setup::run(&sandbox::setup::Args {
@@ -149,8 +105,12 @@ impl Host {
                 });
             }
             Self::Check(args) => return sandbox::check::run(args),
-        }
-        Ok(Exit::Failure)
+        };
+        Ok(if succeeded {
+            Exit::Success
+        } else {
+            Exit::Failure
+        })
     }
 }
 

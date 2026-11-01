@@ -204,7 +204,7 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
     let path = Path::new(config::ROOT_COPY);
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))
-        .context("`agentic-job sandbox setup` writes this file")?;
+        .context("setup (`secure-host setup`, `agentic-job sandbox setup`) writes this file")?;
     let config = parse(&text).with_context(|| format!("in {}", path.display()))?;
     let record = job_record(record::binary, |name| std::env::var(name).ok(), &text);
     let checked = once(args.mode(), record.as_ref(), || {

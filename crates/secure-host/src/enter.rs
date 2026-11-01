@@ -81,7 +81,7 @@ impl Entry {
         );
         let name = &sandbox.user;
         let user = User::lookup(name)?
-            .with_context(|| format!("no user {name}: `agentic-job sandbox setup` creates it"))?;
+            .with_context(|| format!("no user {name}: setup (`secure-host setup`, `agentic-job sandbox setup`) creates it"))?;
         ensure!(user.uid != 0, "the sandbox user {name} is root by uid");
         let proxy = if config.egress().proxy {
             network::proxy_environment(&direct)

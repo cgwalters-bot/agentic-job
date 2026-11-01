@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail, ensure};
+pub use ::secure_host::compose::Setting;
+use ::secure_host::compose::{Kind, set};
+use anyhow::{Context, Result, ensure};
 use toml::{Table, Value};
 
 use super::{Config, Register};
@@ -63,6 +65,11 @@ pub struct Args {
     /// with no second user runs it itself
     #[arg(long)]
     pub no_script: bool,
+    /// Write `[sandbox.prepared]` from the run's tables: for an agent job
+    /// whose `sandbox prepare` runs before the secure-host image, whose
+    /// setup reads none of them
+    #[arg(long)]
+    pub prepared: bool,
     /// The repository the run works on, OWNER/NAME: chooses its entry of
     /// `setup.repo-packages`
     #[arg(long, value_name = "OWNER/NAME")]
@@ -135,102 +142,6 @@ fn repo_packages(table: &mut Table, repo: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// One `KEY=VALUE` of the command line: the tables down to the key, and
-/// the text to set it from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Setting {
-    path: Vec<String>,
-    value: String,
-}
-
-impl Setting {
-    /// Splits at the first `=`: everything after it is the value, more
-    /// `=` included. The key is `TABLE.KEY`, of the letters, digits, `-`
-    /// and `_` that every key of the configuration is made of.
-    fn parse(text: &str) -> Result<Self> {
-        let (key, value) = text
-            .split_once('=')
-            .with_context(|| format!("{text:?} is not KEY=VALUE"))?;
-        let path: Vec<String> = key.split('.').map(str::to_owned).collect();
-        let plain = |part: &String| {
-            !part.is_empty()
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        };
-        ensure!(
-            path.len() >= 2 && path.iter().all(plain),
-            "{key:?} is not TABLE.KEY"
-        );
-        Ok(Self {
-            path,
-            value: value.to_owned(),
-        })
-    }
-
-    fn key(&self) -> String {
-        self.path.join(".")
-    }
-}
-
-/// What a setting's text is turned into.
-#[derive(Debug, Clone, Copy)]
-enum Kind {
-    String,
-    Integer,
-    List,
-    Boolean,
-}
-
-impl Kind {
-    /// The value TEXT stands for, or none for a text that sets nothing:
-    /// an input of a workflow that was left out arrives as an empty
-    /// string, and must leave the caller's file as it is.
-    fn value(self, setting: &Setting) -> Result<Option<Value>> {
-        let text = &setting.value;
-        Ok(match self {
-            _ if text.trim().is_empty() => None,
-            Self::String => Some(Value::String(text.clone())),
-            Self::Integer => {
-                let number: u32 = text.trim().parse().with_context(|| {
-                    format!("{}: {text:?} is not a whole number", setting.key())
-                })?;
-                Some(Value::Integer(number.into()))
-            }
-            Self::List => Some(Value::Array(
-                text.split_whitespace()
-                    .map(|word| Value::String(word.to_owned()))
-                    .collect(),
-            )),
-            // The two words a workflow's boolean input arrives as, and
-            // nothing a reader would have to guess at.
-            Self::Boolean => Some(Value::Boolean(match text.trim() {
-                "true" => true,
-                "false" => false,
-                _ => bail!("{}: {text:?} is neither true nor false", setting.key()),
-            })),
-        })
-    }
-}
-
-/// Puts VALUE at PATH of TABLE, in place of what is there, making the
-/// tables on the way.
-fn set(table: &mut Table, path: &[String], value: Value) -> Result<()> {
-    let Some((key, tables)) = path.split_last() else {
-        bail!("a setting with no key");
-    };
-    let mut at = table;
-    for name in tables {
-        at = at
-            .entry(name)
-            .or_insert_with(|| Value::Table(Table::new()))
-            .as_table_mut()
-            .with_context(|| format!("{name} is not a table"))?;
-    }
-    at.insert(key.clone(), value);
-    Ok(())
-}
-
 /// Convert decimal dollars without floating-point rounding increasing the cap.
 /// The configuration and broker protocol still use whole AIC (one cent).
 fn dollar_budget(text: &str) -> Result<u32> {
@@ -288,30 +199,45 @@ fn inference_address(table: &mut Table, address: &str) -> Result<()> {
     Ok(())
 }
 
+/// `--prepared`: `[sandbox.prepared]` in TABLE, in place of any there,
+/// from its run tables ([`Config::prepared`]).
+fn prepared(table: &mut Table) -> Result<()> {
+    if let Some(sandbox) = table.get_mut("sandbox").and_then(Value::as_table_mut) {
+        sandbox.remove("prepared");
+    }
+    let text = toml::to_string(&table).context("writing the configuration")?;
+    let prepared = Config::parse(&text)?.prepared()?;
+    let mut out = Table::new();
+    if !prepared.refuse.is_empty() {
+        let refuse = prepared.refuse.into_iter().map(|refusal| {
+            Value::Table(Table::from_iter([
+                ("host".to_owned(), Value::String(refusal.host)),
+                ("port".to_owned(), Value::Integer(refusal.port.into())),
+            ]))
+        });
+        out.insert("refuse".into(), Value::Array(refuse.collect()));
+    }
+    if let Some(port) = prepared.serve_port {
+        out.insert("serve-port".into(), Value::Integer(port.into()));
+    }
+    set(
+        table,
+        &["sandbox".into(), "prepared".into()],
+        Value::Table(out),
+    )
+}
+
 /// The configuration of ARGS as TOML, checked.
 fn compose(args: &Args) -> Result<String> {
-    let mut table = match &args.from {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
-        }
-        None => Table::new(),
-    };
-    let settings = [
-        (Kind::String, &args.string),
-        (Kind::Integer, &args.integer),
-        (Kind::List, &args.list),
-        (Kind::Boolean, &args.boolean),
-    ];
-    for (kind, list) in settings {
-        for setting in list {
-            if let Some(value) = kind.value(setting)? {
-                set(&mut table, &setting.path, value)
-                    .with_context(|| format!("setting {}", setting.key()))?;
-            }
-        }
-    }
+    let mut table = ::secure_host::compose::table(
+        args.from.as_deref(),
+        [
+            (Kind::String, &args.string),
+            (Kind::Integer, &args.integer),
+            (Kind::List, &args.list),
+            (Kind::Boolean, &args.boolean),
+        ],
+    )?;
     repo_packages(&mut table, args.repo.as_deref())?;
     if let Some(usd) = args.budget_usd.as_deref().filter(|s| !s.trim().is_empty()) {
         set(
@@ -329,23 +255,8 @@ fn compose(args: &Args) -> Result<String> {
     {
         setup.remove("script");
     }
-    // The secure-host image runs a host file's script from the host's
-    // root, not from this directory: a relative path, as the policy job
-    // composes it, would name another file there or none.
-    if args.host
-        && let Some(script) = table
-            .get_mut("setup")
-            .and_then(Value::as_table_mut)
-            .and_then(|setup| setup.get_mut("script"))
-        && let Some(path) = script.as_str().map(PathBuf::from)
-        && path.is_relative()
-    {
-        let dir = std::env::current_dir().context("setup.script: the current directory")?;
-        let path = dir.join(path);
-        let path = path
-            .to_str()
-            .context("setup.script: the current directory is not UTF-8")?;
-        *script = Value::String(path.to_owned());
+    if args.host {
+        ::secure_host::compose::absolute_script(&mut table)?;
     }
     // Default only an absent key: an explicit list (even an empty one)
     // is the caller's network policy, not ours to expand.
@@ -375,6 +286,9 @@ fn compose(args: &Args) -> Result<String> {
                 Value::Array(vec![Value::String(url)]),
             )?;
         }
+    }
+    if args.prepared {
+        prepared(&mut table)?;
     }
     let text = toml::to_string(&table).context("writing the configuration")?;
     // As its readers will see it: parsed from the text that is printed.
@@ -428,6 +342,7 @@ mod tests {
             boolean: Vec::new(),
             host: false,
             no_script: false,
+            prepared: false,
             repo: None,
             inference_address: None,
         }
@@ -649,6 +564,70 @@ mod tests {
             ));
             assert_eq!(config.egress.direct, ["http://100.64.0.3:18080"]);
         }
+    }
+
+    /// `--prepared` writes what secure-host's setup must hold the host to
+    /// for the run's tables, which it does not read, and secure-host's
+    /// file reads the same back; one that no longer says what the run's
+    /// tables do is refused by every reader of the file.
+    #[test]
+    fn the_prepared_table_says_what_the_run_asks_of_the_host() {
+        let session = "[session]\nlisten = true\noperators = [\"op@github\"]\n\
+                       origins = [\"https://review.example.ts.net\"]\n";
+        let front = "[inference]\nurl = \"http://100.64.0.1:18080\"\nregister = \"plain\"\n\
+                     front = true\n";
+        for (file, refused, port) in [
+            ("", false, None),
+            (session, false, Some(crate::session::bridge::PORT)),
+            (front, true, None),
+        ] {
+            let mut from = tempfile::NamedTempFile::new().unwrap();
+            write!(from, "{file}").unwrap();
+            let host = Args {
+                prepared: true,
+                ..host_args(&[], &[])
+            };
+            let host = Args {
+                from: Some(from.path().to_owned()),
+                string: settings(RUN),
+                ..host
+            };
+            let text = compose(&host).unwrap_or_else(|err| panic!("{file:?}: {err:#}"));
+            let config = Config::parse(&text).unwrap();
+            let prepared = config.sandbox.prepared.as_ref().unwrap();
+            assert_eq!(prepared.serve_port, port, "{file:?}");
+            assert_eq!(!prepared.refuse.is_empty(), refused, "{file:?}");
+            assert!(
+                prepared
+                    .refuse
+                    .iter()
+                    .all(|refusal| refusal.host == "100.64.0.1" && refusal.port == 18080),
+                "{:?}",
+                prepared.refuse
+            );
+            let read = ::secure_host::config::Host::parse(&text).unwrap();
+            read.check().unwrap();
+            assert_eq!(read.sandbox.prepared.as_ref(), Some(prepared));
+            // Composed again, the file stays as it is.
+            std::fs::write(from.path(), &text).unwrap();
+            assert_eq!(compose(&host).unwrap(), text);
+        }
+        // A session's file whose table predates its `session.listen`.
+        let stale = format!("[agent]\nname = \"fake\"\n{session}[sandbox.prepared]\n");
+        let err = Config::parse(&stale).unwrap().check_host().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("config --host --prepared"),
+            "{err:#}"
+        );
+        let mut from = tempfile::NamedTempFile::new().unwrap();
+        write!(from, "{stale}").unwrap();
+        let host = Args {
+            from: Some(from.path().to_owned()),
+            string: settings(RUN),
+            ..host_args(&[], &[])
+        };
+        let err = compose(&host).unwrap_err();
+        assert!(format!("{err:#}").contains("sandbox.prepared"), "{err:#}");
     }
 
     #[test]

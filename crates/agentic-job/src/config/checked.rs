@@ -19,13 +19,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::{Config, Limits as LimitsTable, Provider};
+use crate::config::{Prepared, Refusal};
 use crate::run::agent::{self, Kind};
 use crate::run::handback;
 use crate::run::inference::{Endpoint, Mode};
 use crate::run::mcp::Server;
 use crate::sandbox::network::{self, Direct};
 use crate::session::Limits;
-use crate::session::bridge::Listen;
+use crate::session::bridge::{self, Listen};
 use crate::session::steer;
 
 /// What `sandbox setup` takes from a configuration it may act on.
@@ -208,8 +209,7 @@ impl Config {
         Ok(Some(model.to_owned()))
     }
 
-    /// The tables that say how the machine is set up, checked.
-    pub fn check_host(&self) -> Result<Host> {
+    fn host_tables(&self) -> Result<Host> {
         self.sandbox.validate()?;
         self.setup.validate()?;
         // Each runs as the sandbox user, which setup would not make.
@@ -239,13 +239,7 @@ impl Config {
             !self.session.listen || !self.agent.name.is_empty(),
             "session.listen needs agent.name: only `run` holds the port setup serves"
         );
-        ensure!(
-            !self.egress.write_policy
-                || (self.egress.proxy && self.egress.rust_proxy && self.sandbox.lock_runner),
-            "egress.write-policy needs egress.proxy, egress.rust-proxy and sandbox.lock-runner: \
-             the runner's traffic goes through the Rust proxy's own listener, under rules a \
-             runner's user with sudo could remove"
-        );
+        self.egress.validate(self.sandbox.lock_runner)?;
         // Setup starts the egress proxy with them.
         let refused = match self.inference.front {
             true => Endpoint::from_config(&self.inference)?
@@ -261,6 +255,51 @@ impl Config {
             refused,
             session: Listen::from_config(&self.session)?,
         })
+    }
+
+    /// The tables that say how the machine is set up, checked, and
+    /// `[sandbox.prepared]` with them: it is what secure-host's setup
+    /// holds the host's rules to in place of the run's tables, which it
+    /// does not read, so it must say what they do ([`Self::prepared`]),
+    /// or the sandbox user would reach a broker or a bridge port this
+    /// file means to close.
+    pub fn check_host(&self) -> Result<Host> {
+        let host = self.host_tables()?;
+        if let Some(said) = &self.sandbox.prepared {
+            let want = Self::prepared_for(&host);
+            let sorted = |prepared: &Prepared| {
+                let mut refused = prepared.refused();
+                refused.sort();
+                (refused, prepared.serve_port)
+            };
+            ensure!(
+                sorted(said) == sorted(&want),
+                "sandbox.prepared does not say what inference.front and session.listen ask of \
+                 the host: write it with `agentic-job config --host --prepared`"
+            );
+        }
+        Ok(host)
+    }
+
+    /// `[sandbox.prepared]` for this file's run tables, as `config
+    /// --prepared` writes it: the broker under `inference.front`, and the
+    /// bridge's port with `session.listen`.
+    pub fn prepared(&self) -> Result<Prepared> {
+        Ok(Self::prepared_for(&self.host_tables()?))
+    }
+
+    fn prepared_for(host: &Host) -> Prepared {
+        Prepared {
+            refuse: host
+                .refused
+                .iter()
+                .map(|(host, port)| Refusal {
+                    host: host.clone(),
+                    port: *port,
+                })
+                .collect(),
+            serve_port: host.session.is_some().then_some(bridge::PORT),
+        }
     }
 
     /// The whole configuration, checked: [`Config::check_host`], and

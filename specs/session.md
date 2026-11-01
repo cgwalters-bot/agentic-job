@@ -66,7 +66,9 @@ listens and the operator's client connects to it. The bridge is part of `run`,
 the process that already holds the agent's ACP connection
 ([bridge.rs](../crates/agentic-job/src/session/bridge.rs)). It listens on
 loopback port 7790 only. `sandbox setup`, which has root, writes the address
-`wss://NAME/` for the runner's tailnet name to `/etc/agentic-job/session-endpoint`.
+`wss://NAME/` for the runner's tailnet name to `/etc/agentic-job/session-endpoint`;
+before a secure-host image of this source, `[sandbox.prepared] serve-port` has
+the image's setup write it.
 Setup prints it in the job's log. The run action puts it in the job's
 summary and its `session-endpoint` output, and `agentic-job.yml` passes that on
 as a job and workflow output. Summaries and outputs resolve only when the job

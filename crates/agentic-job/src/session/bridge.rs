@@ -55,8 +55,10 @@ use crate::config;
 /// outgoing connection holds it.
 pub const PORT: u16 = 7790;
 /// Where `sandbox setup` leaves the address the client connects to,
-/// `wss://NAME/` for the runner's tailnet name, for the job to publish.
-pub const ENDPOINT_FILE: &str = "/etc/agentic-job/session-endpoint";
+/// `wss://NAME/` for the runner's tailnet name, for the job to publish:
+/// secure-host's setup writes it for [`PORT`], which it keeps from the
+/// sandbox user.
+pub use ::secure_host::setup::SERVE_ENDPOINT as ENDPOINT_FILE;
 /// What `tailscale serve` sets to the tailnet login of a user's device
 /// (`tailscale serve --help`); it drops one the client sent.
 pub const LOGIN_HEADER: &str = "Tailscale-User-Login";
