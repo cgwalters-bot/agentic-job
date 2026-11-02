@@ -874,6 +874,27 @@ fn requests_refused() -> String {
     )
 }
 
+/// Why REQUESTS, as read, are not taken at all: a file that is refused,
+/// or one over [`MAX_LINES`] nonblank lines. Refused whole rather than
+/// cut short, so that no prefix of them is published (#2750).
+fn requests_not_taken(requests: &AgentFile) -> Option<String> {
+    match requests {
+        AgentFile::Refused => Some(requests_refused()),
+        // The byte cap bounds this read; only seek the first excess line.
+        AgentFile::Taken(bytes)
+            if request_lines(&String::from_utf8_lossy(bytes))
+                .nth(MAX_LINES)
+                .is_some() =>
+        {
+            Some(format!(
+                "~/{AGENT_OUTPUTS} exceeds {MAX_LINES} nonblank lines: \
+                 none of its requests is taken, nor a change without them"
+            ))
+        }
+        _ => None,
+    }
+}
+
 struct Git<'a> {
     runner: &'a dyn Runner,
     dir: &'a str,
@@ -1341,10 +1362,10 @@ fn missing(
     // Before what counts as left: a requests file that is not taken is
     // left, and would otherwise pass as the hand-back of a change that
     // `collect` then drops with it, with nobody having told the agent.
-    if read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES) == AgentFile::Refused {
+    let requests = read_agent_file(runner, &home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
+    if let Some(why) = requests_not_taken(&requests) {
         return Some(format!(
-            "{} Rewrite it as one regular file within that limit before handing back.",
-            requests_refused()
+            "{why}. Rewrite it as one regular file within those limits before handing back."
         ));
     }
     (!has_output(runner, home, checkout, policy)).then(|| "No hand-back was left.".to_owned())
@@ -1524,23 +1545,8 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     // taken ends the hand-back here, with the reason in the result: the
     // outcome is still the agent's report, and is saved.
     let requests = read_agent_file(runner, &request.home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
-    let agent_text = match &requests {
-        AgentFile::Taken(bytes) => String::from_utf8_lossy(bytes),
-        _ => std::borrow::Cow::Borrowed(""),
-    };
-    // Refuse before making any fallback carrier, including a replacement's.
-    // The byte cap bounds this read; only seek the first excess nonblank line.
-    let refused = if requests == AgentFile::Refused {
-        Some(requests_refused())
-    } else if request_lines(&agent_text).nth(MAX_LINES).is_some() {
-        Some(format!(
-            "~/{AGENT_OUTPUTS} exceeds {MAX_LINES} nonblank lines: \
-             none of its requests is taken, nor a change without them"
-        ))
-    } else {
-        None
-    };
-    if let Some(why) = refused {
+    // Refused before making any fallback carrier, a replacement's included.
+    if let Some(why) = requests_not_taken(&requests) {
         let mut text = serde_json::to_string(&outcome).context("writing the outcome")?;
         text.push('\n');
         write(&request.run_dir.join(OUTCOME_FILE), text.as_bytes())?;
@@ -1559,6 +1565,10 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
         }
         return Ok(change);
     }
+    let agent_text = requests
+        .taken()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     // An explicit replacement is the complete series, not a working-tree
     // fixup. Never reset/squash the producer's checkout on this path.
     let replacement_path = request.home.join(REPLACEMENT_PATH);
@@ -2035,7 +2045,6 @@ mod tests {
         let noop_only = self::policy(Kind::Branch, json!({"noop": {"max": 1}}));
         let got = build_outputs("", &noop_only, true, &outcome, RUN_ID);
         assert_eq!((got.text.as_str(), got.wants_patch), ("", false));
-        // No more lines are passed on than the cap.
     }
 
     /// Under `ready_when_complete`, a pull request made up for work the
@@ -2869,6 +2878,11 @@ mod tests {
                 "requests over the cap",
                 "echo two >> a.txt; truncate -s 1048577 ../../out/safe-outputs.jsonl",
                 Some("safe-outputs.jsonl is not a regular file of at most 1024 KiB"),
+            ),
+            (
+                "requests over the line cap",
+                "echo two >> a.txt; yes '{\"type\":\"noop\"}' | head -n 1001 > ../../out/safe-outputs.jsonl",
+                Some("safe-outputs.jsonl exceeds 1000 nonblank lines"),
             ),
         ];
         for (case, script, expected) in cases {
@@ -3981,9 +3995,9 @@ mod tests {
         assert_eq!(redactor.count(), 4);
     }
 
-    /// A requests file the agent left that is not taken drops the
-    /// hand-back whole, with the reason: not a pull request made up from
-    /// the outcome in place of what the agent wrote (#1463).
+    /// A requests file over [`MAX_LINES`] nonblank lines drops the
+    /// hand-back whole on every path, before any fallback request or
+    /// replacement carrier is made: no prefix is published (#2750).
     #[test]
     fn request_line_cap_refuses_the_whole_artifact_before_any_carrier() {
         let noop = "{\"type\":\"noop\",\"message\":\"Done\"}\n";
@@ -4049,6 +4063,9 @@ mod tests {
         }
     }
 
+    /// A requests file the agent left that is not taken drops the
+    /// hand-back whole, with the reason: not a pull request made up from
+    /// the outcome in place of what the agent wrote (#1463).
     #[test]
     fn requests_that_are_not_taken_drop_the_hand_back_whole() {
         let pull = policy(Kind::Branch, pull_requests());
