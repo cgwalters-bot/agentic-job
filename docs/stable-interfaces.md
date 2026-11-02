@@ -45,6 +45,8 @@ Inputs:
 Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`
 ([the apply job and its token](workflow.md#the-apply-job-and-its-token)).
+It also serves the optional early token check and legacy status comments,
+never the agent or check job.
 Optional `STATUS_TOKEN`, `REVIEW_TOKEN`, `PUSH_TOKEN` and `PUBLICATION_TOKEN`
 bind the four fixed roles when `role-bindings` is nonempty; there is no legacy
 fallback in that mode. The JSON binds every role to a positive `actor_id` and
@@ -57,7 +59,7 @@ calling repository; architecture-specific and special runners are not remapped.
 
 `status-comment` preserves opening whole-line hidden caller comments, except
 tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
-[status provenance contract](workflow.md).
+[status provenance contract](workflow.md#optional-threat-detection).
 
 Not stable: `budget`, deprecated in favour of `budget-usd`;
 `fake-profile`, `expect-check-refusal` and
@@ -118,10 +120,12 @@ inputs and agentic-job commands are unchanged.
 A run hands back requests in gh-aw's
 [safe-output format](https://github.github.com/gh-aw/reference/safe-outputs/):
 one JSON object a line, its `type` and that type's fields. The types and
-their fields are those of gh-aw at the pinned commit, as
+their collector fields are those of gh-aw at the pinned commit, as
 [`validation.json`](../safe-outputs/validation.json) records and
 `agentic-job collect` checks. On GitHub, apply accepts every type the
-bounds can allow:
+bounds can allow, subject to the stricter per-operation target, field and
+limit checks in [safe outputs](safe-outputs.md). The validation table alone
+is not the full acceptance contract:
 
 `create_pull_request`, `create_issue`, `create_discussion`,
 `add_comment`, `close_issue`, `close_pull_request`, `add_labels`,
@@ -201,7 +205,10 @@ What a producer leaves for `run` to take
   at most 1 MiB and 1000 lines.
 - `out/outcome.json`, at most 64 KiB: `summary`, `tests` (each a
   `command`, `exit_code` and `duration_s`), `stopped_early` (null or why),
-  and `checkpoint` (`complete`, `done`, `left`, `next`).
+  and, where `ready_when_complete` asks for one, `checkpoint` (`complete`,
+  `done`, `left`, `next`). An open checkpoint keeps work draft; malformed
+  checkpoint fences in a PR body or push message refuse only under that bound
+  ([ready or draft](safe-outputs.md#ready-or-draft)).
 
 A job other than the agent's hands back through `proposals-artifact`:
 an artifact holding `outputs.jsonl`, and optionally `base.json` and one

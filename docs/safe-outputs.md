@@ -8,7 +8,9 @@ pull request with this change, post this comment, or report that it did
 nothing or lacked a tool. Those are *safe outputs*. The idea, the format
 and the type names are
 [gh-aw's](https://github.github.com/gh-aw/reference/safe-outputs/), and
-so is the code that validates and applies them. This page says what is
+the collector is a compatible Rust implementation, and GitHub apply uses
+gh-aw's pinned handlers or opt-in native handlers. Forgejo and GitLab use
+native publishers. This page says what is
 taken from gh-aw, what is added, and what gh-aw's scripts need. How a
 caller uses the result is in [workflow.md](workflow.md); the
 requirements behind it are
@@ -55,8 +57,9 @@ agentic-job workflow's TOML bounds file. For example:
 `repo` is one exact repository and `item` one positive issue/PR number, never a
 producer-selected target. `max_outputs` defaults to zero and cannot exceed 1000;
 `outputs` defaults to empty and uses the library's existing per-type limits.
-Optional trusted `api_url` defaults to `https://api.github.com`; HTTPS is required
-except for loopback HTTP publishers used by tests. It is a credential destination:
+Optional trusted `api_url` defaults to `https://api.github.com`; comment apply
+requires HTTPS except for literal loopback HTTP publishers used by tests.
+Check does not validate that URL. It is a credential destination:
 never accept it from the producer. Unknown context keys refuse.
 
 The input is unchanged gh-aw JSONL, for example
@@ -319,7 +322,8 @@ fields = ["Status", "Turn", "Run", "Result"]
 
 Both lists must be explicit and nonempty. Each request includes `project`,
 `target_repo` equal to the run's exact `repo`, `content_type: "issue"`, a positive
-integer `content_number`, and a nonempty `fields` object. Values may be strings or
+integer `content_number` no greater than 2,147,483,647, and a nonempty `fields`
+object. Values may be strings or
 numbers; null/clearing is not supported by the pinned handler. Field options and types must already exist on
 GitHub. The handler can add the issue to the named project if it is not there.
 Other repositories, unlisted projects or fields, draft/PR content, aliases,
@@ -454,7 +458,7 @@ only with `apply-partial`), or when the pull request's body holds a
 checkpoint. The agent writes one when it nears a limit, as the hand-back
 notice says, or knows the work is unfinished; a pull request made up from
 an outcome whose `stopped_early` is set, or that has no summary, gets one
-too. A checkpoint is shown, not hidden:
+too, under `ready_when_complete`. A checkpoint is shown, not hidden:
 
 ````markdown
 ```checkpoint
@@ -469,7 +473,8 @@ is not `"complete": true`, the pull request made up from the outcome, and
 the agent's own request if its body or message holds no checkpoint,
 end with it as `incomplete`, each field cut to 400 characters. So do they,
 with the outcome's `stopped_early` as what is left, when the run stopped
-early, even after the agent marked its checkpoint complete. `check` refuses the hand-back for a malformed checkpoint,
+early, even after the agent marked its checkpoint complete. With
+`ready_when_complete`, `check` refuses the hand-back for a malformed checkpoint,
 a second one, a line starting like the fence with more on it, or one over
 8 KiB, rather than take it for complete work. Apply records the reason in
 `applied.json`'s `checkpoint`: the exit state's (`runtime` for 124, `cap`
@@ -480,8 +485,8 @@ A push to a pull request (a continuation) works the same way, its commit
 message holding the checkpoint. Once the push is verified, apply marks the
 pull request ready for complete work and converts it to a draft at a
 checkpoint, with the apply credential, which then needs pull-request write
-access. It is the one place apply takes a pull request out of draft, and
-needs no bound of its own: what decides is the exit state and check's
+access. This automatic transition needs no separate mark-ready bound:
+what decides is `ready_when_complete`, the exit state and check's
 report, not a request, and the [review](review.md) job remains the merge
 gate. A run stopped at a limit still pushes nothing (RC-020). A run that
 ends with neither complete work nor a checkpoint, nor any output its run
@@ -1317,9 +1322,10 @@ checks the hand-backs of two real runs (`safe-outputs/fixtures`).
 that `git am --3way` follows renames, that the base commit is only the
 hand-back's claim
 ([#17](https://github.com/cgwalters-forge/agentic-job/issues/17)), or
-whose the patch's `From:` line is, which it holds to nothing
+whether the patch's `From:` line identifies its real author
 ([#22](https://github.com/cgwalters-forge/agentic-job/issues/22)). The
-first two are settled by the apply job and the third is not:
+first two are settled by the apply job; `commit_author`, when configured,
+pins the declared author but does not prove authorship:
 [what the apply job does before it writes](workflow.md#what-the-apply-job-does-before-it-writes).
 
 ## Who applies
@@ -1334,9 +1340,11 @@ Apply runs gh-aw's pinned handlers on the
 checked outputs, or [agentic-job's own](#agentic-jobs-own-handlers) for
 the types the bounds route to them, and nothing else that came from the
 agent's machine.
-The workflow declares one secret, names it only in that job, and never
-uses `secrets: inherit`, which would hand every secret of the caller to
-the agent's job too. Which token, and how to set it up, is in
+The workflow explicitly forwards `SAFE_OUTPUTS_PAT` and the optional role
+secrets, never `secrets: inherit`. The legacy PAT also reaches the separate
+`apply-token` precheck when requested and the notify/conclude status steps;
+in role mode those status steps use `STATUS_TOKEN`. Neither agent nor check
+receives these secrets. Which token, and how to set it up, is in
 [the apply job and its token](workflow.md#the-apply-job-and-its-token).
 If it is a classic personal access token of a bot account, everything
 that account can do is reachable from the apply job.
@@ -1614,7 +1622,7 @@ comments on an issue, a pull request or a discussion to the applier,
 which knows who may be mentioned where it posts; in the other types,
 such as `noop`, `missing_tool` and `missing_data`, it wraps them in code.
 For Forgejo and GitLab, the applier is `apply`, described below.
-On GitHub, gh-aw's handlers remain the applier.
+On GitHub, gh-aw's handlers or the opt-in native handlers apply them.
 
 ### Neutral inline comments
 
@@ -1932,7 +1940,8 @@ for a token that may not set labels.
 
 Not done: re-run detection (a
 re-run with a pull request or a push is refused at its branch; one with
-comments or a new issue posts them again) and reviews.
+comments or a new issue posts them again), review replies, thread resolution
+and approval verdicts. Single-line inline comments are supported as described above.
 
 ### Publishing to GitLab
 
@@ -2083,7 +2092,8 @@ The length and link limits are the same as Forgejo's.
 
 Not done, each a later slice of
 [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786):
-review discussions, marking a merge request ready, re-run detection for notes and new issues, and an end-to-end test
+review replies and thread resolution, marking a merge request ready,
+re-run detection for notes and new issues, and an end-to-end test
 against a GitLab instance.
 
 ## Neutral profile
@@ -2149,10 +2159,12 @@ protected files and dot-folders, and `commit_author`. A check run's
 `name`, a discussion's `category` and `projects` are GitHub's.
 
 Apply acts as one identity per role, which the caller's configuration
-maps to a credential; a request never chooses one. Only apply holds it:
+maps to a credential; a request never chooses one. Producer and check hold
+none of these write credentials; trusted status jobs may also hold the status
+credential (or the legacy PAT):
 
-- GitHub: `SAFE_OUTPUTS_PAT` (or the job token), later a role app token
-  ([tracker#766](https://github.com/cgwalters-forge/tracker/issues/766)).
+- GitHub: `SAFE_OUTPUTS_PAT` (or the job token), or the caller-bound
+  [role credentials](#caller-bound-publisher-roles), including supported App tokens.
 - Forgejo: a bot user's token.
 - GitLab: a project or group access token, a bot member with a role.
 
@@ -2162,10 +2174,9 @@ a fork identity that may push, and an upstream one that may only open
 pull requests. On Forgejo and GitLab those are the `fork_push` and
 `publication` [role tokens](#forgejo-and-gitlab-roles).
 
-The Forgejo publisher above implements only its listed subset of this
-contract, and the [GitLab one](#publishing-to-gitlab) all of it but
-`create_pull_request_review_comment`,
-with GitLab's mentions and quick actions broken.
+Both publishers implement the listed neutral types, including
+`create_pull_request_review_comment`, with the field restrictions above.
+GitLab's mentions and quick actions are broken before publication.
 
 ## Library boundary
 
@@ -2310,7 +2321,7 @@ checks `memory.json` and the checkpoint, and writes `Verdict`; `apply/`'s
 commands, the files they read and the tokens they take from the
 environment, the status comment (`status.rs`), the result
 (`result.rs`), the guard against applying twice (`applied.rs`) and the
-GitHub modules not yet moved; `handback.rs`, run identity, artifacts
+readiness and issue-reference integration; `handback.rs`, run identity, artifacts
 and checkpoints.
 
 The per-forge bounds of [#2107](https://github.com/cgwalters-forge/agentic-job/pull/2107)
