@@ -18,6 +18,8 @@ stop-services = [
     "uuidd.service",
     "iscsid.socket",
     "iscsid.service",
+    "acpid.socket",
+    "acpid.service",
 ]
 close-resolved = true
 

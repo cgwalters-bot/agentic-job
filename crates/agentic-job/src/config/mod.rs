@@ -702,7 +702,22 @@ mod tests {
     #[test]
     fn a_host_file_has_only_the_machines_tables() {
         // Read at test time: secure-host/ is outside crates/.
-        for name in ["hosted.toml", "rhel-cloud.toml"] {
+        // Units each stops whose listeners `local-sockets` would refuse:
+        // acpid's is on some hosted runners only.
+        for (name, units) in [
+            ("hosted.toml", &["acpid.socket", "acpid.service"][..]),
+            (
+                "rhel-cloud.toml",
+                &[
+                    "cockpit.socket",
+                    "cockpit.service",
+                    "sssd-kcm.socket",
+                    "sssd-kcm.service",
+                    "gssproxy.service",
+                    "sshd-unix-local.socket",
+                ][..],
+            ),
+        ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../secure-host")
                 .join(name);
@@ -713,19 +728,12 @@ mod tests {
             assert!(host.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
             if name == "rhel-cloud.toml" {
                 assert!(host.sandbox.check.allow_sockets.is_empty());
-                for unit in [
-                    "cockpit.socket",
-                    "cockpit.service",
-                    "sssd-kcm.socket",
-                    "sssd-kcm.service",
-                    "gssproxy.service",
-                    "sshd-unix-local.socket",
-                ] {
-                    assert!(
-                        host.sandbox.stop_services.iter().any(|s| s == unit),
-                        "{unit}"
-                    );
-                }
+            }
+            for unit in units {
+                assert!(
+                    host.sandbox.stop_services.iter().any(|s| s == unit),
+                    "{name}: {unit}"
+                );
             }
             assert_eq!(Config::from(host), Config::parse(&text).unwrap());
         }

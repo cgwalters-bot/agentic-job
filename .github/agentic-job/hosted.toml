@@ -24,6 +24,8 @@ stop-services = [
     "uuidd.service",
     "iscsid.socket",
     "iscsid.service",
+    "acpid.socket",
+    "acpid.service",
 ]
 # systemd-resolved, which the whole runner resolves names with, resolves
 # them for any user, around the egress proxy: setup leaves it to root and
