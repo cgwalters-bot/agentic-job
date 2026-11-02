@@ -140,7 +140,9 @@ Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
 `the_checker_refuses_another_upload_digest`.
 
 **RC-005 — Hand-back files.** Check MUST accept only `outputs.jsonl`, optional
-`base.json` and at most one `aw-BRANCH.patch`, or the replacement form of RC-023.
+`base.json`, at most one `aw-BRANCH.patch` and, for the policy's secondary
+pull request, `secondary-base.json` and its patch, or the replacement form of
+RC-023; and, where the policy allows memory, `memory.json` beside either.
 It MUST refuse unexpected files,
 symlinks, directories, oversized files and PEM private keys; it MUST report
 other recognized secret-shaped strings as warnings by file and line, not refuse them.
@@ -148,7 +150,9 @@ A pull-request request MUST have exactly its named patch and valid base
 metadata matching the policy repository/base and patch header; a patch without
 a pull-request request MUST be refused.
 Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
-`what_is_refused` and `links_and_directories_are_not_read`;
+`what_is_refused`, `links_and_directories_are_not_read`,
+`a_secondary_pull_request_is_held_to_its_own_bounds` and
+`memory_is_checked_where_the_policy_allows_it`;
 [files.rs](../crates/secure-host/src/files.rs), `reads_only_regular_files_within_the_cap`.
 
 **RC-006 — Collected requests.** Check MUST refuse any collector errors,
@@ -191,15 +195,18 @@ Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
 
 **RC-009 — Token placement.** Check MUST remain read-only and receive no
 secrets. The agent job MUST use only its job token for reads (RC-014), and only
-apply MAY consume `SAFE_OUTPUTS_PAT`; its checkout and handler
+apply MAY apply proposals with `SAFE_OUTPUTS_PAT`; the policy call's notify job
+and apply's conclude MAY use it only as their status token. Without
+`role-bindings`, apply's checkout and handler
 API steps MUST select that explicitly passed secret when nonempty, otherwise
-`github.token`, independently of the optional apply environment. Event status
+`github.token`, independently of the optional apply environment; with them,
+the bound role tokens take its place. Event status
 jobs can also write, but are not proposal appliers.
 Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
-`workflow_shapes` and `the_review_caller_keeps_token_separation`;
+`workflow_shapes`, `the_review_caller_keeps_token_separation` and
+`role_and_legacy_workflow_credential_expressions`;
 [apply.test.cjs](../workflow/apply.test.cjs),
-`apply alone consumes the optional safe outputs PAT with job-token fallback`
-and the `credential expression wiring: PAT ...` cases.
+`apply uses the optional PAT with fallback, status receives it separately`.
 
 **RC-010 — Repository-aware patch guard.** Before handing a patch to gh-aw's
 handler, apply MUST verify that the claimed base is an ancestor of the target
@@ -214,9 +221,9 @@ Enforcement: [apply.test.cjs](../workflow/apply.test.cjs),
 **RC-011 — Non-patch apply.** Comment-only apply MUST skip repository steps,
 including checkout. Issue closing and label addition MUST retain the checked
 repository and caps, not use `output-repo` or triggering-event destinations.
-Enforcement: [apply.test.cjs](../workflow/apply.test.cjs),
-`comment-only apply skips every repository step, including checkout` and
-`issue actions keep checked repository and caps, not output-repo or event targets`.
+Enforcement: [apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs),
+`comment_only_apply_skips_every_repository_step_including_checkout` and
+`issue_actions_keep_checked_repository_and_caps`.
 
 **RC-012 — Issue payload bounds.** Check MUST require explicit repository and
 positive integer targets for `close_issue`, `add_labels`, `remove_labels`,
@@ -242,7 +249,7 @@ nonempty `allowed` list names exactly, at most `max` per request.
 Enforcement: tests `person_actions_name_only_allowed_logins` and
 `person_actions_require_allowed_logins`.
 
-**RC-024 — Check run bounds.** Bounds MUST pin a `create_check_run` name, and
+**RC-028 — Check run bounds.** Bounds MUST pin a `create_check_run` name, and
 apply MUST name the run from it. Check MUST refuse another name, the `success`
 conclusion, and a target other than a positive integer `pull_request_number`.
 Apply MUST refuse the type when the run's repository is not the calling one.
@@ -250,8 +257,8 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 `check_runs_keep_the_pinned_name_and_no_success`,
 [policy.rs](../crates/agentic-job/src/policy.rs) test
 `pinned_outputs_take_their_pin_from_the_bounds`, and
-[apply.test.cjs](../workflow/apply.test.cjs)
-`a check run keeps its pinned name and posts only in the run repository`.
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs)
+`check_run_keeps_pinned_name_and_run_repository`.
 
 **RC-025 — Discussion bounds.** Bounds MUST pin a `create_discussion`
 category. Check MUST refuse a request naming another category or repository.
@@ -279,8 +286,8 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 [policy.rs](../crates/agentic-job/src/policy.rs) tests
 `hidden_comments_name_their_reasons` and
 `per_type_destinations_and_protection_are_not_offered`,
-[apply.test.cjs](../workflow/apply.test.cjs)
-`a comment is hidden only on the triggering item, for the pinned reasons`,
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs)
+`hide_comment_and_review_threads_are_held_to_triggering_item`,
 [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)
 `review_thread_types_are_refused_for_an_events_item_elsewhere`, and
 [handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
@@ -299,9 +306,9 @@ Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs) test
 `review_threads_take_only_a_max`,
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 `review_threads_stay_on_the_triggering_pull_request`,
-[apply.test.cjs](../workflow/apply.test.cjs)
-`review threads are held to the triggering pull request` and
-`a reply to a review comment off the run's pull request refuses the run before anything is applied`,
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs)
+`hide_comment_and_review_threads_are_held_to_triggering_item`,
+[applied.rs](../crates/agentic-job/src/apply/applied.rs) test `refusals`,
 [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)
 `review_thread_types_are_refused_for_an_events_item_elsewhere`,
 [handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
@@ -324,20 +331,26 @@ the handlers apply them here (closing with no comment, labels only that
 exist, the issue's item found or added and its field set).
 Review comments and replies (RC-027) are not looked for, and a re-run posts
 them again; a resolved thread stays resolved.
-Conclude, which a re-run of apply runs again, MUST post its status or
-refusal comment once per run and call: named `agentic-job-concluded:
-RUNID/DIGEST16` (over the artifact prefix), hidden last in the body, and
-edited, not posted again, when a comment of `github-actions[bot]` ends with
-that name.
+Conclude, which a re-run of apply runs again, MUST edit the item's one
+status comment, usually notify's, rather than post another, and post it
+only where there is none: the comment ends with the hidden `<!-- agentic-job-status -->` marker, is
+looked for only among the status credential's own comments, and is not
+overwritten by an older run than the one that last wrote it.
 For `push_to_pull_request_branch`, the guard MUST leave out the push when
 the fetched fork branch holds the checked tree as exactly one commit on the
 policy's pinned head. The final check MUST re-fetch and verify that same
 parent and tree even when the guard left it out. This reuses the guard and
 its `already_applied` report, not a second marker scheme.
-Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), tests from
-`a posted body hides the name the guard put last` to `a pull request
-without a checked patch stops the guard`, `closing an issue again posts
-nothing`, and the `conclude posts its comment once` cases;
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a posted body
+hides the name the guard put last, and only that name` and `another call of
+the same run posting the same comment does not leave it out`;
+[applied.rs](../crates/agentic-job/src/apply/applied.rs), tests
+`a_re_run_after_a_half_applied_attempt_applies_only_what_was_not`,
+`closing_retries_close_what_is_open`,
+`a_pull_request_from_the_runs_branch_is_left_out_while_open_or_merged` and
+`an_issue_an_earlier_attempt_opened_is_found_by_its_name`;
+[status.rs](../crates/agentic-job/src/apply/status.rs), tests `writes` and
+`refused_or_superseded_status_edit_does_not_supply_provenance`;
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), test `what_is_refused`;
 the e2e-dispatch-verify step `The re-run left out what was applied, and the
 comment is there once` in [ci.yml](../.github/workflows/ci.yml), which re-runs
@@ -346,8 +359,11 @@ apply's guard and not its handlers; and `AtMostOnce` and
 
 **RC-019 — Finding the result from the issue.** For a caller-named `issue`
 (a number of the output repository or of `item-repo`, checked by policy), apply MUST end a pull
-request's body with `Refs OWNER/NAME#N` in its own words, never a closing
-keyword nor agent text, before the guard names it. The pull request handler
+request's body, before the guard names it, with a reference line of its own:
+`Closes #N` for an issue of the output repository, which a merge closes, and
+`Refs OWNER/NAME#N` for one of `item-repo`. A body that already has that
+line, or for an issue of the output repository a `Refs #N` or `Part of #N`
+line, which leaves the issue open, is left as it is. The pull request handler
 MUST have `auto_close_issue: false`, including for issue-triggered events.
 Apply MUST give the URL of
 what it made (the pull request, else the first comment or issue, an earlier
@@ -381,18 +397,18 @@ Cross-repository status still requires the caller's status credential; no fixed
 item means only a summary. Ordinary noops and missing-tool declines stay green
 and respect notification settings. Apply MUST post no separate result notice;
 conclude's status includes the sanitized reason when reporting no result.
-Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request
-refers to the issue the caller named, and closes nothing`, `a pull request's
-handler pushes only to the fork, and there is none without one`, `issue
-actions keep checked repository and caps, not output-repo or event targets`
-(where a comment is posted), `a comment on
-an item in another repository is looked for there`, the `the result of
-...` cases, `the issue is linked to what a run made once, by the token that
-posts`, the `a run that handed back ...` cases, `a run with no result says
-so once per run and call, by the token that posts`, `a run with no result
-quotes its reason through the pinned gh-aw sanitizer`, `the reason of a run
-with no result is sanitized as the handlers sanitize a comment` and the
-`conclude says ...` cases; [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), tests from `the
+generated reference links an implementation to the caller issue` to `a pull
+request of a caller that passes no issue links nothing, and the run says so`,
+`a pull request's handler pushes only to the fork, and there is none without
+one` and `every sanitizer keeps the links the policy keeps`;
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs),
+`issue_actions_keep_checked_repository_and_caps` (where a comment is posted),
+`issue_linking_executes_only_policy_binary_artifacts_from_this_run` and
+`conclude_says_how_run_ended`; [applied.rs](../crates/agentic-job/src/apply/applied.rs),
+`a_comment_is_looked_for_where_it_goes_and_not_where_none_can_be_found`;
+[result.rs](../crates/agentic-job/src/apply/result.rs), `result_url`,
+`missing_data` and `no_result_reason`; [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
 `the_dispatch_caller_fixes_capabilities_and_token_boundary`,
 `the_dispatch_callers_inputs_and_outputs_are_wired` and
 the issue and `item-repo` cases of
@@ -454,13 +470,11 @@ and `a_push_head_is_fetched_by_its_commit_onto_the_default_branch`;
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), `a_push_on_the_pinned_head_is_accepted`
 and `what_is_refused_of_a_push`; [handback.rs](../crates/agentic-job/src/run/handback.rs),
 `a_push_is_handed_back_as_a_patch_the_check_accepts`;
-[apply.test.cjs](../workflow/apply.test.cjs), `a push is applied to the
-policy pull request from apply's fork, never as a pull request, never with
-workflows`, `a push goes to its pull request's head repository, the
-identity's fork as a new pull request's`, `a push is verified on the branch it went to: one commit on the pinned
-head, with the checked tree`, `a partial run's push is not applied, whatever
-else it posts` and `target base fetching never advances the
-output repository and a stale base is refused`;
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs),
+`push_uses_policy_pull_request_and_apply_fork_without_workflows`,
+`pushed_branch_is_one_commit_on_pinned_head_with_checked_tree`,
+`partial_push_is_not_applied_whatever_else_it_posts` and
+`target_base_fetch_never_advances_output_repository_and_refuses_stale_base`;
 [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs), the push cases of
 `the_request_step_tells_the_policy_command_its_token_and_targets` and
 `the_dispatch_caller_fixes_capabilities_and_token_boundary`.
@@ -507,9 +521,9 @@ Enforcement: [checkpoint.rs](../crates/agentic-job/src/check/checkpoint.rs),
 `ready_when_complete_is_explicit_and_only_tightens`;
 [handback.rs](../crates/agentic-job/src/run/handback.rs),
 `made_up_partial_work_is_a_checkpoint_where_complete_work_opens_ready`;
-[apply.test.cjs](../workflow/apply.test.cjs), `complete work opens ready; a
-checkpoint or a stopped run opens a draft` and `a continuation that completes
-marks its pull request ready; one at a checkpoint makes it a draft`;
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs),
+`complete_work_opens_ready_checkpoint_or_stopped_run_opens_draft`;
+[readiness.rs](../crates/agentic-job/src/apply/readiness.rs), `continuation_readiness`;
 [session.rs](../crates/agentic-job/tests/session.rs),
 `a_turn_that_ends_without_the_required_output`.
 
@@ -547,16 +561,18 @@ itself and open the pull request from it, forking nothing and leaving its
 Actions setting alone; the repository's `push` and `pull_request` workflows
 then run the agent's commit with its secrets, a write token and OIDC, which
 is the repository's to accept. Another account's token MUST still fork it.
-Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request is
-opened from a fork the token owns, made if missing and reached by git`, `an
-owner's pull request is pushed in its own repository only where the
-repository accepts it`, `a
-pull request's handler pushes only to the fork, and there is none without
-one`, `the pull request is looked for from the branch gh-aw names in the fork,
-prefix normalized`, `a pull request without a fork to open it from stops the
-guard` and `the job fails unless every output was applied and a pull request
-asked for was opened`, and `target base fetching never advances the output
-repository and a stale base is refused`; [policy.rs](../crates/agentic-job/src/policy.rs), test
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `the fork step
+decides where a patch goes, with policy binary, before the patch is fetched`,
+`a pull request's handler pushes only to the fork, and there is none without
+one` and `the job fails unless every output was applied, a pull request asked
+for was opened, and missing data is blocked`;
+[push.rs](../crates/safe-outputs/src/apply/push.rs), `targets` and `refusals`;
+[applied.rs](../crates/agentic-job/src/apply/applied.rs),
+`the_pull_request_is_looked_for_from_the_branch_gh_aw_names_in_the_fork` and
+the no-fork case of `refusals`;
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs),
+`target_base_fetch_never_advances_output_repository_and_refuses_stale_base`;
+[policy.rs](../crates/agentic-job/src/policy.rs), test
 `what_the_job_token_cannot_apply_is_refused` (RC-018);
 [dispatch.rs](../crates/agentic-job/src/dispatch.rs), the `without its
 variables` cases of test `refusals`;
@@ -577,7 +593,7 @@ human edits to the proposed workflow still require review.
 
 ### 3.4 The caller's own agent job
 
-**RC-022 — Untrusted logs.** Agent messages under `run` and probe
+**RC-029 — Untrusted logs.** Agent messages under `run` and probe
 diagnostics that contain sandbox text MUST NOT set runner outputs, install
 masks or create workflow annotations. Whatever of them `run` or `check`
 writes to a runner log MUST have both runner command syntaxes (`::` and
@@ -624,9 +640,9 @@ Enforcement: [workflows.rs](../crates/agentic-job/tests/workflows.rs),
 `wrapper_forwards_policy_settings_without_reinterpretation`,
 `caller_network_credentials_are_spent_before_the_agent` and
 `agent_configuration_provenance_and_step_gates_are_preserved`;
-[apply.test.cjs](../workflow/apply.test.cjs), `check and apply refuse a
-policy call of another commit, and apply an empty checked ID` and `apply
-takes only this run's check output, whatever the caller wired`;
+[apply_workflow.rs](../crates/agentic-job/tests/apply_workflow.rs),
+`check_and_apply_refuse_policy_from_another_commit_and_empty_checked_id` and
+`apply_takes_only_this_runs_check_output_whatever_caller_wired`;
 [specs](../specs/README.md), `BrokenWiring`;
 `the_dispatch_caller_fixes_capabilities_and_token_boundary` in
 [workflows.rs](../crates/agentic-job/tests/workflows.rs).

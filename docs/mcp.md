@@ -10,12 +10,13 @@ This is the first part of
 [#120](https://github.com/cgwalters-forge/agentic-job/issues/120): one
 server, reached over MCP's streamable HTTP, with one secret.
 
-The reusable workflow refuses an `[mcp.*]` server for now, and passes
-`MCP_TOKEN` to no job: its agent job runs the agent as the runner's
-user, which could read the credential from `run`, until the host keeps
-the runner's processes from reading each other
-([workflow.md](workflow.md)). What follows is what the binary does for
-a caller that composes its own agent job with a sandbox user.
+The reusable workflow passes `MCP_TOKEN` to no job, so a run with an
+`[mcp.*]` server does not start there, whatever its `agent-user`. With
+the default `agent-user: runner`, `run` refuses the server outright:
+the agent, as the runner's user, could read the credential from `run`.
+That holds until the host keeps the runner's processes from reading
+each other ([workflow.md](workflow.md)). What follows is what the binary
+does for a caller that composes its own agent job with a sandbox user.
 
 ## Configuration
 
@@ -53,7 +54,7 @@ Before the agent starts, `run` checks the credential with the server, as
 it checks a provider's key: it initializes a session, lists the tools, and
 ends that session. The run does not start, and nothing is spent, if the
 server refuses the credential, cannot be reached after a few tries, or
-lists no tool of a name that `allowed` names. The error quotes the
+leaves out of its list any tool that `allowed` names. The error quotes the
 server's refusal with the credential cut out.
 
 Then `run` serves a proxy on a port of the loopback address, as the

@@ -98,8 +98,8 @@ the corpus inputs, rather than committing whole task conversations.
 
 Claude currently runs through `claude-agent-acp`, not native stream-json.
 This renderer uses that recorded protocol. Native stream-json ingestion,
-subagent-turn nesting (not exposed as separate turns by the current adapter),
-and agent-specific opencode/vibe fidelity remain follow-ups. No sandbox transcript
+subagent nesting for opencode and vibe, which do not say which call started
+a message, and agent-specific opencode/vibe fidelity remain follow-ups. No sandbox transcript
 collection or additional permissions are introduced.
 
 ### Agent adapters
@@ -126,7 +126,7 @@ Mid-turn notices are not supported. That broker model uses text-only tools
 rather than inheriting Medium 3.5's capabilities. Its context window is
 its entry of `context-windows` in `[agent]` in the repository-owned
 configuration, for the main agent and the child alike, and Vibe compacts
-at three quarters of it. `config check` refuses a window over 1,048,576,
+at three quarters of it. `agentic-job config` refuses a window over 1,048,576,
 which keeps a request under the broker's 16 MiB body limit.
 Without an entry a model gets a conservative 32k, compacted at 24k, at
 which a GLM research task compacted 18 times and lost its findings
@@ -289,7 +289,8 @@ reports). Three tables are refused before the agent starts:
 At 60% and 80% of the more used of the time and the requests, an agent
 whose entry says `notices = true` is told so in a prompt of its own.
 Claude Code is not: its adapter would end the running turn for one. At
-95% of the timeout, within ten requests of the cap, or once the agent
+95% of the timeout, within ten requests of the cap (a quarter of a cap
+under 40), or once the agent
 starts more tasks than allowed, the turn is cancelled and one more
 prompt asks the agent to hand back what it has. At the limit the
 session is cancelled. Spending over `budget` stops it at once, with no
@@ -503,7 +504,7 @@ model = "zai-glm-5-3"
 
 `sandbox setup` installs the same pinned Vibe 2.26.1 runtime whether
 Vibe is the main agent, the child, or both. Other child names are refused
-by `config check` and setup: only Vibe has a supported child installer.
+by `agentic-job config` and setup: only Vibe has a supported child installer.
 
 The child uses `[inference] url` plus `/mistral/v1`, not the main
 agent's `openai-url` or `anthropic-url`. The
