@@ -2349,6 +2349,22 @@ or not newer than every `v` tag (`just release-check`), and a run whose
 `v` tags changed while it built. It then tags main's commit `vVERSION`
 and publishes the binaries with notes listing the pull requests merged
 since the previous version.
+
+The concrete skew failure is an older image's `agentic-job` on the agent's
+PATH refusing configuration written by the newer policy. The optional
+`release.yml` job detects this after publishing and attesting the image.
+Set its dispatch input `check-forwarder-image` to `true` to enable it
+(default is false). It checks
+the default branch forwarder against the newest numeric `vMAJOR.MINOR.PATCH`
+tag, not the unreleased workspace version, and fails naming both tags.
+Locally, with all tags fetched, run
+`git tag --list 'v*' | cargo run --quiet --locked -p agentic-job --bin release-check -- --forwarder-image`.
+The check has read-only permissions, fetches only the pinned upstream
+`Containerfile.pin` (30 seconds, at most 1 MiB, no redirects), and runs no
+image or upstream code. It does not change publication order or repair
+the pin: a follow-up forwarder commit must select the newly built image.
+The released tag still trails by one; a failure does not undo publication.
+
 On main, a version-tagged workflow selects that version's attested
 release assets, as described at the [start of this page](#running-it-on-github),
 not its `build-DIGEST` release. Full-commit and branch pins retain the
