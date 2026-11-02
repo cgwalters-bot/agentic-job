@@ -55,7 +55,7 @@ Besides the host's setup, `sandbox setup`:
 - installs `setup.npm`, as root and on the open network; npm versions
   must be exact;
 - installs `setup.agents` from npm tarballs pinned in the binary
-  (`src/sandbox/setup/agents.toml`): every package of each agent by its
+  ([pins](../crates/agentic-job/src/sandbox/setup/agents.toml)): every package of each agent by its
   SHA-512 integrity, unpacked by `agentic-job` into
   `/opt/agentic-job/agents` with no npm and no install script, its
   programs linked in `/usr/local/bin`; a tarball that does not match its
@@ -66,8 +66,12 @@ Besides the host's setup, `sandbox setup`:
   (below) on the user's manager and every `run0` command;
 - runs `setup.script` as the sandbox user, never as root.
 
-Start setup from a root shell, or from a systemd unit after boot, such
-as:
+On a fresh disposable supported host, first load the matching world-write
+object as described in [standalone host setup](secure-host.md#on-a-host-that-is-not-a-github-actions-runner);
+`sandbox setup` does not load it and refuses to proceed without its pins.
+Start setup with sudo as the runner's user, or from a root shell or a
+systemd unit after boot. For the latter two, set `sandbox.runner-user` in
+the configuration to the existing non-root user whose job this is. A unit:
 
 ```ini
 [Unit]
@@ -75,6 +79,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
+ExecStart=/usr/local/bin/agentic-job secure-host world-write /path/to/world_write.bpf.o
 ExecStart=/usr/local/bin/agentic-job sandbox setup --config /etc/agentic-job-setup.toml
 
 [Install]
@@ -169,8 +174,10 @@ runner's hardening it adds that the code:
   credential, since its commands start from `run0` with a fixed
   environment;
 - reaches the network only as the rules for its uids allow: never the
-  metadata service or the tailnet, and only through the egress proxy when
-  that is on;
+  metadata service; with the proxy on, only loopback, the proxy and
+  configured `egress.direct` endpoints. Without the proxy, other network
+  access is open except for the tailnet restrictions when direct entries
+  are configured;
 - leaves nothing running after the run: cron, at and lingering are denied,
   and the supervisor stops every process of its uid (`helper reap`).
 
@@ -317,11 +324,11 @@ time, whichever process attempts the write, so it holds before PAM forks.
 
 ## What is tested
 
-`sandbox check` probes the host as the sandbox user, each probe with
-a positive control
+`sandbox check` probes the host as the sandbox user, with positive controls
+where the host provides them
 ([probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#the-sandbox-users-probes)).
-`run` does not repeat it: before the agent starts
-it runs only its own probes that the run token is nowhere but the
+`run` does not repeat it unless `[sandbox.check] before-agent` asks: before
+the agent starts it otherwise runs only its own probes that the run token is nowhere but the
 agent's configuration (the `token-*` probes of
 [sandbox-check.md](sandbox-check.md#runs-token-probes)). Those need a sandbox
 user: under `--runner-home`, which the reusable workflow passes unless

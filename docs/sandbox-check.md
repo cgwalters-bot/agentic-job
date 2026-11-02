@@ -22,17 +22,20 @@ That costs a full check's time. A probe or a control that comes out
 wrong fails the check: exit state 1.
 
 The run action calls it again, as `sandbox check --unless-passed`,
-before the agent starts. Secure-host's check, `sandbox check --record`,
-leaves a record in `RUNNER_TEMP`, `agentic-job-sandbox-checked`, when
+before the agent starts. A check with `--record` leaves a record in
+`RUNNER_TEMP`, `agentic-job-sandbox-checked`, when
 all its probes passed: the job's run ID, attempt and name, the binary's
 version and a fingerprint of its bytes, and the installed configuration
-it probed. A record means exactly that secure-host's check passed and
+it probed. The pinned secure-host action runs its check without
+`--record`, so after it the run action's check probes again
+([inputs](secure-host.md#inputs-and-outputs)).
+A record means exactly that a check with `--record` passed and
 nothing has entered the sandbox user since, and it spares at most one
 check: only `--record` writes one, every check removes it before
 anything else, whether it takes it or not, and `run` removes it before
 the agent runs anything. A check with
 `--unless-passed` that finds the same record makes no probe; without it
-(secure-host ran with `check: false`, the configuration or the binary
+(no check with `--record` ran, the configuration or the binary
 changed, a step of the sandbox user's or an agent ran, or the run is in
 another job) it probes as usual, and leaves no record, so a second
 `run` in the job probes again. A step of the sandbox user's (`sandbox

@@ -8,8 +8,9 @@ install hook, and what protects a job from one protects it from the
 others. So the hardening is a step of its own that any job can run
 before untrusted steps, whether or not an agent runs afterwards:
 [`cgwalters-forge/actions/secure-host`](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
-which runs the image this repository builds. Every step after it, the
-agent included, is the runner's user's.
+which runs the image this repository builds. Later workflow steps run as
+the runner's user; an agent can instead use the separate sandbox user
+with `agent-user: sandbox`.
 
 That action's README and documents are the documentation of record for
 the host: what setup changes, the lock, the world-write policy, the rule
@@ -95,15 +96,28 @@ next image release:
 
 ## On a host that is not a GitHub Actions runner
 
-A self-hosted CI job, or a VM of its own, secures its host with the
-binary alone, as root and then as the user the later steps run as:
+A self-hosted CI job, or a VM of its own, needs the binary **and its matching
+`world_write.bpf.o`**, from a verified release or a trusted source build
+([provenance](#where-the-binary-and-image-come-from)). On a fresh disposable
+[supported host](#what-main-has-that-the-pinned-image-does-not-yet), load the
+object as root before setup, then check as the user the later steps run as:
 
 ```sh
+sudo agentic-job secure-host world-write /path/to/world_write.bpf.o
 sudo agentic-job sandbox setup --config FILE
 agentic-job sandbox check
 ```
 
-Neither needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
+These are host-changing commands, not commands to run inside an existing
+sandbox. The loader needs kernel BTF, BPF privileges, `runuser` and bpftool
+(which it installs if missing); setup does not activate BPF itself and
+refuses missing policy pins. The loader checks modify-return tracing links,
+enables the root-device map and proves a denied write with writable controls
+([loader](../crates/secure-host/src/world_write.rs)). Host admission alone is
+not runtime evidence: the policy has hosted Ubuntu 26.04 evidence, not a
+RHEL 10 or CentOS Stream 10 runtime proof.
+
+None of these commands needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
 `Runner.Worker` process. What changes without them:
 
 - With no `Runner.Worker`, `sandbox.unlink-worker-diagnostics` has no
@@ -113,7 +127,13 @@ Neither needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
 - The runner-read rule exempts exactly one `Runner.Worker`, so where the
   secure-host image's loader runs, a host without one sets
   `sandbox.deny-runner-reads = false`; the loader refuses it otherwise
-  and names this key. `sandbox setup` alone never loads the rule.
+  and names this key. The standalone loader above leaves the runner-read
+  rule off; `sandbox setup` alone never loads it, even when the key is true.
+  With a Worker and that rule required, pass `--deny-runner-reads` to the
+  loader (`--sole-worker` too if the loader is not its descendant).
+- Started from a root shell or a systemd unit rather than sudo as the
+  runner's user, setup needs `sandbox.runner-user` naming an existing
+  non-root user; otherwise it cannot identify whose job to harden.
 - The check record that lets a later check in the same job skip its
   probes ([sandbox-check.md](sandbox-check.md)) needs `RUNNER_TEMP` and
   `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` and `GITHUB_JOB`. Without them
@@ -188,12 +208,12 @@ is refused a POST, and its hand-back is uploaded and applied.
 
 ## Inputs and outputs
 
-The forwarder's inputs are the new action's; every one is optional.
+The forwarder exposes these three inputs of the new action; every one is optional.
 
 | Input | What it sets |
 | --- | --- |
 | `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
-| `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
+| `check` | `false` skips `sandbox check`. Default `true`. The pinned action does not pass `--record`, so it leaves no passing record for the run action's `--unless-passed` check; that check probes again ([record mechanism](sandbox-check.md)) |
 | `image-archive` | An image archive, as `podman load` takes it, run in place of the pinned image, unverified: for a job that built it, as CI's do |
 
 It has no outputs. The action knows nothing of inference or sessions: an
