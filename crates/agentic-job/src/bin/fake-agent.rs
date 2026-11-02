@@ -40,6 +40,7 @@
 //!  {"write": {"title": "Write", "path": "{cwd}/x", "content": "..."}},
 //!  {"cost": {"usd": 0.01}},
 //!  {"task": "Review the change"},
+//!  {"task_pending": "Review still running"},
 //!  "compact",
 //!  {"context": {"used": 24000, "size": 32768}},
 //!  {"sleep": 1.5},
@@ -53,8 +54,9 @@
 //! ```
 //!
 //! A `task` is a subagent's tool call as opencode reports one, done at
-//! once. A `compact` is a compaction of its context as Vibe 2.26.1
-//! reports one, and a `context` a `usage_update` of the context's size.
+//! once; `task_pending` leaves it open. A `compact` is a compaction of its
+//! context as Vibe 2.26.1 reports one, and a `context` a `usage_update` of
+//! the context's size.
 //! A `sleep` (seconds) ends early when the client cancels the turn.
 //! A `stop` ends the turn there with that stop reason, even after a
 //! cancel, as an agent whose last reply was complete when the cancel
@@ -163,6 +165,7 @@ enum Step {
         usd: f64,
     },
     Task(String),
+    TaskPending(String),
     Compact,
     Context {
         used: u64,
@@ -587,14 +590,16 @@ fn play(
             conn.update(cost_update(*usd));
             return Ok(());
         }
-        Step::Task(description) => {
+        Step::Task(description) | Step::TaskPending(description) => {
             conn.update(json!({"sessionUpdate": "tool_call", "toolCallId": id,
                 "title": "task", "kind": "think", "status": "pending",
                 "rawInput": {"description": description}}));
-            conn.update(
-                json!({"sessionUpdate": "tool_call_update", "toolCallId": id,
-                "title": description, "status": "completed"}),
-            );
+            if matches!(step, Step::Task(_)) {
+                conn.update(
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": id,
+                    "title": description, "status": "completed"}),
+                );
+            }
             return Ok(());
         }
         Step::Compact => {
@@ -726,6 +731,7 @@ fn play(
         Step::Say(_)
         | Step::Cost { .. }
         | Step::Task(_)
+        | Step::TaskPending(_)
         | Step::Compact
         | Step::Context { .. }
         | Step::Sleep(_)

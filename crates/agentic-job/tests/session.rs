@@ -1049,6 +1049,7 @@ fn a_long_upstream_rate_limit_stops_silence_without_a_stall_retry() {
     for (name, responses, enabled, stopped) in [
         ("long", vec![(429, Some("36000"))], true, true),
         ("short-stall", vec![(429, Some("36000"))], true, true),
+        ("silent-task", vec![(429, Some("600"))], true, true),
         ("exit-on-cancel", vec![(429, Some("36000"))], true, true),
         ("short", vec![(429, Some("120"))], true, false),
         (
@@ -1061,9 +1062,15 @@ fn a_long_upstream_rate_limit_stops_silence_without_a_stall_retry() {
     ] {
         let script = format!(
             r#"[
+            {}
             {{"write": {{"title": "Write", "path": "{{dir}}/work/partial.txt", "content": "partial\n"}}}},
             {}
         ]"#,
+            if name == "silent-task" {
+                r#"{"task_pending": "Review"},"#
+            } else {
+                ""
+            },
             if name == "exit-on-cancel" {
                 r#"{"exit_on_cancel": 7}"#
             } else {
@@ -1075,7 +1082,11 @@ fn a_long_upstream_rate_limit_stops_silence_without_a_stall_retry() {
             Setup {
                 files: &[("script.json", &script)],
                 timeout_s: 600,
-                stall_s: Some(if name == "short-stall" { 30 } else { 120 }),
+                stall_s: Some(if matches!(name, "short-stall" | "silent-task") {
+                    30
+                } else {
+                    120
+                }),
                 rate_responses: Some(&responses),
                 observe_rate_limits: enabled,
                 ..Setup::default()
@@ -1096,13 +1107,18 @@ fn a_long_upstream_rate_limit_stops_silence_without_a_stall_retry() {
             "{name}"
         );
         assert_eq!(r.result["stall_retries"], 0, "{name}");
+        assert_eq!(r.result["stalls"], 0, "{name}");
         assert_eq!(r.result["resends"], 0, "{name}");
         if stopped {
             assert!(
                 r.result["message"]
                     .as_str()
                     .unwrap()
-                    .contains("retry-after 36000s"),
+                    .contains(if name == "silent-task" {
+                        "retry-after 600s"
+                    } else {
+                        "retry-after 36000s"
+                    }),
                 "{}",
                 r.result
             );
@@ -2088,11 +2104,33 @@ fn a_stalled_turn_is_sent_again_once() {
     const DONE: &str = r#"[{"say": "Done."}]"#;
     const QUIET_TOOL: &str =
         r#"[{"execute": {"title": "Bash", "command": "sleep 3"}}, {"say": "Done."}]"#;
+    const QUIET_TASK: &str = r#"[{"task_pending": "Review"}, {"sleep": 60}]"#;
+    // Progress keeps the wait moving even with a single request in flight.
+    const ACTIVE_TASK: &str = r#"[{"task_pending": "Review"}, {"sleep": 0.4}, {"say": "Thinking."}, {"sleep": 0.4}, {"say": "Still thinking."}, {"sleep": 0.4}, {"say": "Done."}]"#;
     // Leaves the output the run requires, then answers the cancel with
     // end_turn, as opencode does (#2149): still a stall, not the end.
-    const PARTIAL_THEN_END_TURN: &str = r#"[{"write": {"title": "Write", "path": "{cwd}/partial.txt", "content": "partial\n"}}, {"sleep": 60}, {"stop": "end_turn"}]"#;
+    const PARTIAL_THEN_END_TURN: &str = r#"[{"write": {"title": "Write", "path": "{cwd}/partial.txt", "content": "partial\n"}}, {"task_pending": "Review"}, {"sleep": 60}, {"stop": "end_turn"}]"#;
     // (name, first turn, later turns, result, the message's start, stalls, retries)
     let cases = [
+        ("a silent subagent", QUIET_TASK, DONE, "success", None, 1, 1),
+        (
+            "a subagent silent again after cancellation",
+            QUIET_TASK,
+            QUIET_TASK,
+            "failure",
+            Some("the agent stalled: nothing from it for 1s in its turn, and again"),
+            2,
+            1,
+        ),
+        (
+            "an active subagent",
+            ACTIVE_TASK,
+            DONE,
+            "success",
+            None,
+            0,
+            0,
+        ),
         ("one stall, then done", STALL, DONE, "success", None, 1, 1),
         (
             "two stalls",

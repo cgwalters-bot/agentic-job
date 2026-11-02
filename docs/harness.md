@@ -418,14 +418,17 @@ for 70 minutes after its last tool call (#2149), and a hung claude run
 holds its board slot until the job's limit (tracker#369). An agent entry
 with `stall-timeout` (seconds; Vibe's is 120, opencode's and Claude
 Code's 600, the fake agent has none) has a turn in which nothing comes
-from the agent for that long, with no tool call running, cancelled and the task sent again once on the same session,
+from the agent for that long, with no tool call other than a subagent's task
+running, cancelled and the task sent again once on the same session,
 labelled `stalled`, behind a note that the last turn stalled; a cancel
 answered with `end_turn`, as opencode answers one, is still a stall. A second
 stall, or a cancel the agent does not answer, fails the run with a
 message that starts `the agent stalled`, and `summary.json` files it as
 a `stall` failure rather than `agent_exit`. `stalls` and `stall_retries`
 in `harness.json` and `summary.json` count both. Only the task's turn is
-watched; the hand-back, reminder and client turns are not.
+watched; the hand-back, reminder and client turns are not. A subagent task
+can hang on inference too, so it does not exempt the turn; any update from
+the agent resets the wait, including streamed text and subagent progress.
 
 Nor is a task's turn that ends well without the output the run requires.
 A run whose policy allows any output requires one: a request in

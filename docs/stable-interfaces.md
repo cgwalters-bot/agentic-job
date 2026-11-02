@@ -205,6 +205,10 @@ A run stopped before its first model request (five minutes with a known zero
 proxy count) exits 4, the retryable not-started state. Its collected
 `outcome.json` records the failure in `summary` and `stopped_early`, even if
 the agent left a success claim. No such deadline applies without a count.
+A task's turn that sends nothing for the agent's configured `stall-timeout`
+is cancelled and retried once on the same session; a second stall fails
+with failure kind `stall`. An open subagent task does not exempt the turn,
+but a running tool such as a build does. Any agent update resets the wait.
 
 What a producer leaves for `run` to take
 ([what the agent does](safe-outputs.md#what-the-agent-does)):

@@ -37,8 +37,8 @@
 //!
 //! An agent whose entry has a `stall-timeout` (`AgentSpec::stall_timeout`)
 //! and sends nothing for that long during the task's turn, with no tool
-//! call of its running, is taken to be stuck in a model request that will
-//! not end soon: Vibe has waited minutes on idle connections, with no
+//! call other than a subagent task running, is taken to be stuck in a model
+//! request that will not end soon: Vibe has waited minutes on idle connections, with no
 //! timeout of its own, and runs ended there on the job's timeout. The turn
 //! is cancelled and the task sent again, once, on the same session, so the
 //! work so far is kept; a second stall fails the run, saying so (`Stalls`).
@@ -1513,7 +1513,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     && pending.delay > RETRY_AFTER_CAP
                     && pending.at.elapsed() >= RATE_LIMIT_QUIET
                     && last_heard.elapsed() >= RATE_LIMIT_QUIET
-                    && !tap.tool_running()
+                    && !tap.work_running()
                     && !cancelling.load(Ordering::Relaxed)
                 {
                     let message = format!(
@@ -1532,10 +1532,11 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
             () = quiet(quiet_until) => {
                 let Some(limit) = task.stall else { continue };
                 quiet_until = Some(quiet_for(limit));
-                // A tool may run for longer than the limit, and only the
-                // model is waited for here; nor is a turn the client is
-                // cancelling taken for stalled.
-                if tap.tool_running() || cancelling.load(Ordering::Relaxed) {
+                // A tool may run for longer than the limit. A subagent task
+                // alone does not exempt the turn: it can hang on inference
+                // too, while any progress it reports resets the wait above.
+                // Nor is a turn the client is cancelling taken for stalled.
+                if tap.work_running() || cancelling.load(Ordering::Relaxed) {
                     continue;
                 }
                 // A shorter stall timeout must not resend a task while

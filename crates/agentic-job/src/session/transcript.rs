@@ -222,10 +222,9 @@ impl Tap {
         self.heard.subscribe()
     }
 
-    /// Whether a tool call the agent started has not finished: a quiet
-    /// agent may be waiting for it rather than for its model.
-    pub fn tool_running(&self) -> bool {
-        self.inner().digest.tool_running()
+    /// Whether a tool call other than a subagent's task has not finished.
+    pub fn work_running(&self) -> bool {
+        self.inner().digest.work_running()
     }
 
     /// A line of the agent's standard error.

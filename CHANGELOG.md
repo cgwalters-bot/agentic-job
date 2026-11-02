@@ -38,6 +38,8 @@ says what a caller may rely on across versions.
 
 ## v0.6.5 - 2026-11-02
 
+- A silent subagent task no longer disables `stall-timeout`: the stalled
+  turn is cancelled and retried once on the same session, keeping its work.
 - Runs with a known proxy request count of zero stop after five minutes with
   `no_requests` and retryable exit 4, logging bounded process state and last
   output before killing the agent. Direct providers without counts are unchanged.

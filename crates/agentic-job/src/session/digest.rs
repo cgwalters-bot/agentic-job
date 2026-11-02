@@ -55,6 +55,8 @@ pub struct ToolCall {
     /// The title the call started with: some agents (opencode) put the
     /// tool's name there.
     first_title: String,
+    /// It starts a subagent (TASK_TOOLS), as it was when first seen.
+    task: bool,
     raw_input: Value,
     raw_output: Value,
     content: Value,
@@ -206,6 +208,7 @@ impl ToolCall {
             message: None,
             title: String::new(),
             first_title: String::new(),
+            task: false,
             raw_input: Value::Null,
             raw_output: Value::Null,
             content: Value::Null,
@@ -500,11 +503,12 @@ impl Digest {
                     self.calls.len() - 1
                 });
                 self.calls[i].merge(update);
-                let call = &self.calls[i];
+                let call = &mut self.calls[i];
                 if new
                     && TASK_TOOLS.contains(&call.display_name().to_ascii_lowercase().as_str())
                     && TASK_KINDS.contains(&call.kind.as_str())
                 {
+                    call.task = true;
                     self.tasks += 1;
                 }
                 self.tool_status(i, ts, update, out);
@@ -637,6 +641,15 @@ impl Digest {
     /// One the agent never reports finished counts as running.
     pub fn tool_running(&self) -> bool {
         self.calls.iter().any(|call| call.end.is_none())
+    }
+
+    /// Whether a tool call other than a subagent's task is running. A task
+    /// can hang on inference too (tracker run 41372541048), so an open task
+    /// alone must not exempt a silent turn from the stall timeout.
+    pub fn work_running(&self) -> bool {
+        self.calls
+            .iter()
+            .any(|call| call.end.is_none() && !call.task)
     }
 
     /// The first line of the agent's last message in the current turn,
@@ -1231,6 +1244,10 @@ mod tests {
             ]
         );
         assert_eq!(d.tasks, 3);
+        assert!(d.work_running());
+        // A subagent's task alone is no work of its own.
+        let (alone, _) = lines(&[task("t1", json!({"title": "task", "kind": "think"}))]);
+        assert!(alone.tool_running() && !alone.work_running());
         assert_eq!(d.notices, ["60%", "80%", "hand back"]);
         // The one that found no turn went unread.
         assert_eq!(d.updates, ["https://x/1#c1", "https://x/1#c2"]);
