@@ -576,7 +576,11 @@ mod tests {
         fn same_network_fork(&mut self) {
             self.new_pull_request();
             self.edit("GET /repos/o/r", "fork", json!(true));
-            self.edit("GET /repos/o/r", "source", json!({"full_name": "upstream/r"}));
+            self.edit(
+                "GET /repos/o/r",
+                "source",
+                json!({"full_name": "upstream/r"}),
+            );
             self.edit(FORK, "parent", json!({"full_name": "another/r"}));
             self.edit(FORK, "source", json!({"full_name": "UPSTREAM/R"}));
         }
