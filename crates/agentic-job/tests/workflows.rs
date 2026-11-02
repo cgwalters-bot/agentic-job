@@ -1679,6 +1679,14 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
     }
     for (at, wanted) in [
         (
+            "safe-outputs/aw-agent-run-1.patch, line 3 (known run secret: GH_TOKEN)\n",
+            "safe-outputs/aw-agent-run-1.patch, line 3 (known run secret: GH_TOKEN)",
+        ),
+        (
+            "safe-outputs/aw-agent-run-1.patch, line 3 (pattern: private key header)\n",
+            "safe-outputs/aw-agent-run-1.patch, line 3 (pattern: private key header)",
+        ),
+        (
             "safe-outputs/aw-agent-run-1.patch, line 3\n",
             "safe-outputs/aw-agent-run-1.patch, line 3",
         ),
@@ -1689,6 +1697,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
         ("safe-outputs/a`@b`.patch, line 3\n", ""),
         ("../x, line 3\n", ""),
         ("safe-outputs/x.patch, line 3 $(exit 9)\n", ""),
+        ("safe-outputs/x.patch, line 3 (known run secret: `x`)\n", ""),
     ] {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("out")).unwrap();

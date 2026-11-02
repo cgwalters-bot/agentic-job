@@ -580,11 +580,20 @@ fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
 }
 
 /// The values of the credentials this process was started with.
-fn own_tokens() -> impl Iterator<Item = String> {
+fn own_tokens() -> impl Iterator<Item = (&'static str, String)> {
     std::env::vars_os().filter_map(|(name, value)| {
         name.to_str()?
             .ends_with(TOKEN_VAR_SUFFIX)
-            .then(|| value.into_string().ok())
+            .then(|| {
+                value.into_string().ok().map(|value| {
+                    let label = if name == "GH_TOKEN" {
+                        "GH_TOKEN"
+                    } else {
+                        "environment *_TOKEN"
+                    };
+                    (label, value)
+                })
+            })
             .flatten()
     })
 }
@@ -598,15 +607,33 @@ fn secrets(
     token: Option<&inference::Token>,
     identity: &Identity,
     mcp: Option<(&inference::Token, &str)>,
-) -> impl Iterator<Item = String> {
+) -> impl Iterator<Item = (&'static str, String)> {
     token
-        .map(|token| token.expose().to_owned())
+        .map(|token| ("inference run token", token.expose().to_owned()))
         .into_iter()
-        .chain(identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
-        .chain(identity.run_token.iter().map(|t| t.expose().to_owned()))
-        .chain(identity.api_key.iter().map(|key| key.trim().to_owned()))
+        .chain(
+            identity
+                .oidc
+                .iter()
+                .map(|oidc| ("OIDC request bearer", oidc.bearer.clone())),
+        )
+        .chain(
+            identity
+                .run_token
+                .iter()
+                .map(|t| ("configured run token", t.expose().to_owned())),
+        )
+        .chain(
+            identity
+                .api_key
+                .iter()
+                .map(|key| ("provider API key", key.trim().to_owned())),
+        )
         .chain(mcp.into_iter().flat_map(|(token, credential)| {
-            [token.expose().to_owned(), credential.trim().to_owned()]
+            [
+                ("MCP proxy token", token.expose().to_owned()),
+                ("MCP server credential", credential.trim().to_owned()),
+            ]
         }))
 }
 
@@ -1137,11 +1164,20 @@ impl Plan {
             &self.identity,
             mcp.map(|(local, credential)| (local.token(), credential)),
         )
-        .chain(run.map(|run| run.agent_token().expose().to_owned()))
+        .chain(run.map(|run| {
+            (
+                "agent inference token",
+                run.agent_token().expose().to_owned(),
+            )
+        }))
         .chain(own_tokens())
-        .chain(inference_addresses(self.endpoint.as_ref()));
+        .chain(
+            inference_addresses(self.endpoint.as_ref())
+                .into_iter()
+                .map(|address| ("private inference address", address)),
+        );
         let redactor = log::Shared::new(
-            Redactor::new(secrets).context("building the redaction of the run's secrets")?,
+            Redactor::new_named(secrets).context("building the redaction of the run's secrets")?,
         );
         let condensed = self.staging.run().join(CONDENSED_FILE);
         let condensed = std::fs::File::create(&condensed)
@@ -2108,7 +2144,7 @@ mod tests {
         };
         let credential = format!("{}-{}", "test-mcp-not-secret", "fedcba9876543210");
         let mcp_token = inference::Token::new("agentic-job-mcp-0123456789abcdef").unwrap();
-        let mut redactor = Redactor::new(secrets(
+        let mut redactor = Redactor::new_named(secrets(
             Some(&token),
             &identity,
             Some((&mcp_token, &format!("{credential}\n"))),
@@ -2120,13 +2156,17 @@ mod tests {
             mcp_token.expose()
         );
         let redacted = redactor.redact(&line).into_owned();
-        for secret in [
-            key.as_str(),
-            token.expose(),
-            &credential,
-            mcp_token.expose(),
+        for (secret, source) in [
+            (key.as_str(), "provider API key"),
+            (token.expose(), "inference run token"),
+            (&credential, "MCP server credential"),
+            (mcp_token.expose(), "MCP proxy token"),
         ] {
             assert!(!redacted.contains(secret), "{redacted}");
+            assert_eq!(
+                redactor.find_rule_in(secret.as_bytes()).unwrap(),
+                Some((1, format!("known run secret: {source}")))
+            );
         }
         assert_eq!(redactor.count(), 4);
     }

@@ -14,6 +14,9 @@ says what a caller may rely on across versions.
   `inference_rate_limited` without resending the task. A later successful
   model request clears it. Requires `inference.front` or `api-key`.
 
+- Upload-gate refusals name the known run secret's source or the private-key
+  rule in the error and run summary, never the matched text (#2828).
+
 - An opt-in post-release check (`check-forwarder-image: true`) fails with both
   tags when the secure-host forwarder's image differs from the newest `v` tag.
 

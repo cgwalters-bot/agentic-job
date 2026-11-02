@@ -1141,8 +1141,9 @@ jobs:
               printf '%s\n' "no-result-reason=$NO_RESULT_REASON" >> "$GITHUB_OUTPUT"
             fi
           fi
-          # Where, never what: the run action wrote it, and it is checked again here.
-          [[ ! "$SECRET_AT" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]] || [ "$reaction" != confused ] ||
+          # Location and public rule, never the match; allow no Markdown or shell syntax.
+          rule='(known run secret: [A-Za-z_* -]{1,64}|pattern: private key header)'
+          [[ ! "$SECRET_AT" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+(\ \($rule\))?$ ]] || [ "$reaction" != confused ] ||
             text="$text Nothing was uploaded: a secret or a private key is in \`$SECRET_AT\`."
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           # One line, already neutralized by apply.

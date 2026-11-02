@@ -74,6 +74,7 @@ pub struct Gate {
 #[derive(Debug)]
 pub struct SecretAt {
     place: String,
+    rule: String,
     handed_back: bool,
 }
 
@@ -84,11 +85,7 @@ impl std::fmt::Display for SecretAt {
         } else {
             "survived redaction in"
         };
-        write!(
-            f,
-            "a secret of the run's or a private key {how} {}",
-            self.place
-        )
+        write!(f, "{} {how} {}", self.rule, self.place)
     }
 }
 
@@ -99,7 +96,7 @@ impl std::error::Error for SecretAt {}
 pub fn record_secret_at(out: &Path, err: &anyhow::Error) -> Result<()> {
     if let Some(found) = err.downcast_ref::<SecretAt>() {
         let path = out.join(SECRET_AT_FILE);
-        std::fs::write(&path, format!("{}\n", found.place))
+        std::fs::write(&path, format!("{} ({})\n", found.place, found.rule))
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
@@ -224,12 +221,13 @@ impl Staging {
             for (name, path) in Self::files(&dir)? {
                 let file = Self::open(&path)?;
                 let found = redactor
-                    .with(|redactor| redactor.find_line_in(file))
+                    .with(|redactor| redactor.find_rule_in(file))
                     .with_context(|| format!("reading {}", path.display()))?;
                 // The line and not the string: this error is published.
-                if let Some(line) = found {
+                if let Some((line, rule)) = found {
                     return Err(SecretAt {
                         place: format!("{label}/{name}, line {line}"),
+                        rule,
                         handed_back: label == SAFE_OUTPUTS_DIR,
                     }
                     .into());
@@ -527,7 +525,7 @@ mod tests {
                 OPEN,
                 1,
                 "is in what the agent handed back, safe-outputs/aw-agent-run-1.patch, line 2",
-                Some("safe-outputs/aw-agent-run-1.patch, line 2"),
+                Some("safe-outputs/aw-agent-run-1.patch, line 2 (pattern: private key header)"),
             ),
             (
                 "a private key in bytes that are not text",
@@ -539,7 +537,7 @@ mod tests {
                 OPEN,
                 1,
                 "survived redaction in run/condensed.log",
-                Some("run/condensed.log, line 1"),
+                Some("run/condensed.log, line 1 (pattern: private key header)"),
             ),
             (
                 "a secret of the run's own, which has no shape, in the hand-back",
@@ -547,7 +545,7 @@ mod tests {
                 OPEN,
                 1,
                 "is in what the agent handed back, safe-outputs/outputs.jsonl",
-                Some("safe-outputs/outputs.jsonl, line 1"),
+                Some("safe-outputs/outputs.jsonl, line 1 (known run secret: run value)"),
             ),
             (
                 "the same in a log that is not text, which redaction skips",
@@ -560,7 +558,7 @@ mod tests {
                 OPEN,
                 1,
                 "survived redaction in transcript/agent-stderr.log",
-                Some("transcript/agent-stderr.log, line 1"),
+                Some("transcript/agent-stderr.log, line 1 (known run secret: run value)"),
             ),
             (
                 "a link among the results",
@@ -595,6 +593,43 @@ mod tests {
             assert_eq!(recorded, place.map(|place| format!("{place}\n")), "{name}");
             // Left by this run, it is not taken for the next one's.
             assert_eq!(refuse_earlier_results(out.out()).is_err(), place.is_some());
+        }
+    }
+
+    #[test]
+    fn refusals_name_the_rule_without_the_match() {
+        let key = private_key();
+        let shaped = token();
+        // A known value wins even if it also matches the private-key rule.
+        for (value, named, rule) in [
+            (LITERAL, true, "known run secret: provider API key"),
+            (shaped.as_str(), true, "known run secret: provider API key"),
+            (key.as_str(), true, "known run secret: provider API key"),
+            (key.as_str(), false, "pattern: private key header"),
+        ] {
+            for handed_back in [false, true] {
+                let out = Out::new();
+                let content = format!("innocent\n{value}\n");
+                if handed_back {
+                    out.hand_back("outputs.jsonl", &content);
+                } else {
+                    // Non-text files bypass redaction, but not the gate.
+                    let bytes = [b"\xff".as_slice(), content.as_bytes()].concat();
+                    std::fs::write(out.staging.transcript().join("agent.log"), bytes).unwrap();
+                }
+                let redactor = Shared::new(
+                    Redactor::new_named(named.then_some(("provider API key", value))).unwrap(),
+                );
+                let err = out.staging.check(OPEN, &redactor).unwrap_err();
+                record_secret_at(out.out(), &err).unwrap();
+                let summary = std::fs::read_to_string(out.out().join(SECRET_AT_FILE)).unwrap();
+                for diagnostic in [format!("{err:#}"), format!("{err:?}"), summary] {
+                    assert!(diagnostic.contains(rule), "{diagnostic}");
+                    assert!(diagnostic.contains("line 2"), "{diagnostic}");
+                    assert!(!diagnostic.contains(value), "diagnostic contains the match");
+                }
+                assert_eq!(out.names(), ["secret-at", "work"]);
+            }
         }
     }
 

@@ -1466,7 +1466,7 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
             "secret",
             json!([canary(), leak, {"say": "Done."}]),
             true,
-            "a secret of the run's or a private key is in what the agent handed back, \
+            "pattern: private key header is in what the agent handed back, \
              safe-outputs/aw-agent-run-4242.patch",
         ),
         (

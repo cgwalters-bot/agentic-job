@@ -257,12 +257,13 @@ runs:
         [[ "$class" =~ ^(timeout|budget|stall|agent_exit|inference_(rate_limited|overloaded|unreachable|quota|unauthorized))$ ]] || class=
         [ -z "$class" ] || echo "failure-class=$class" >> "$GITHUB_OUTPUT"
         # Nothing of such a run is uploaded, its summary included: the
-        # place alone, which the log has already, says where to look.
+        # place and public rule label, never the match, say what failed.
         at=
         # sed reads to the end: `head -n 1` exiting early can kill the
         # first head with SIGPIPE (uutils head splices), failing the step.
-        [ ! -e "$JOB_DIR/out/secret-at" ] || at=$(head -c 200 "$JOB_DIR/out/secret-at" | sed -n 1p)
-        if [[ "$at" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]]; then
+        [ ! -e "$JOB_DIR/out/secret-at" ] || at=$(head -c 512 "$JOB_DIR/out/secret-at" | sed -n 1p)
+        rule='(known run secret: [A-Za-z_* -]{1,64}|pattern: private key header)'
+        if [[ "$at" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+(\ \($rule\))?$ ]]; then
           echo "Nothing of this run was uploaded: a secret or a private key is in $at." >> "$GITHUB_STEP_SUMMARY"
           echo "secret-at=$at" >> "$GITHUB_OUTPUT"
         fi

@@ -264,6 +264,8 @@ pub struct Redactor {
     /// The literals and [`PRIVATE_KEY`]: what is refused where it cannot
     /// be redacted.
     refused: BytesRegex,
+    /// Public source labels, in the order of `refused`'s capture groups.
+    literal_names: Vec<&'static str>,
     /// What [`stream`] needs to look ahead: the longest match that spans
     /// a newline.
     overlap: usize,
@@ -274,27 +276,49 @@ impl Redactor {
     /// A redactor for the patterns and for `literals`, the values of the
     /// credentials the caller itself holds.
     pub fn new<S: AsRef<str>>(literals: impl IntoIterator<Item = S>) -> Result<Self, regex::Error> {
-        let literals: BTreeSet<String> = literals
+        Self::new_named(literals.into_iter().map(|value| ("run value", value)))
+    }
+
+    /// Like [`Self::new`], with fixed, public source names, never credential
+    /// values or agent-provided text. Only these names leave the scanner.
+    pub fn new_named<S: AsRef<str>>(
+        literals: impl IntoIterator<Item = (&'static str, S)>,
+    ) -> Result<Self, regex::Error> {
+        let literals: BTreeSet<(String, &'static str)> = literals
             .into_iter()
-            .map(|literal| literal.as_ref().to_owned())
-            .filter(|literal| literal.len() >= MIN_LITERAL_BYTES)
+            .map(|(name, literal)| (literal.as_ref().to_owned(), name))
+            .filter(|(literal, _)| literal.len() >= MIN_LITERAL_BYTES)
             .collect();
         // Longest first: of two literals, one within the other, the whole
         // of the longer is replaced.
-        let mut literals: Vec<String> = literals.into_iter().collect();
-        literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
-        let overlap = literals.first().map_or(0, String::len).max(MAX_PEM_BYTES);
-        let literals: Vec<String> = literals.iter().map(|l| regex::escape(l)).collect();
+        let mut literals: Vec<_> = literals.into_iter().collect();
+        literals.sort_by_key(|(literal, _)| std::cmp::Reverse(literal.len()));
+        let overlap = literals
+            .first()
+            .map_or(0, |(l, _)| l.len())
+            .max(MAX_PEM_BYTES);
+        let literal_names = literals.iter().map(|(_, name)| *name).collect();
+        let literals: Vec<String> = literals.iter().map(|(l, _)| regex::escape(l)).collect();
         let rule = alternation(
             literals
                 .iter()
                 .map(String::as_str)
                 .chain(PATTERNS.iter().copied()),
         );
-        let refused = alternation(literals.iter().map(String::as_str).chain([PRIVATE_KEY]));
+        // Each alternative has one capture, so a match can be identified
+        // without retaining or formatting any of its bytes. Literals precede
+        // the pattern: a known credential must not look like only a shape.
+        let refused = alternation(
+            literals
+                .iter()
+                .map(String::as_str)
+                .chain([PRIVATE_KEY])
+                .map(|rule| format!("({rule})")),
+        );
         Ok(Self {
             bytes: BytesRegex::new(&format!("(?-u){rule}"))?,
             refused: BytesRegex::new(&format!("(?-u){refused}"))?,
+            literal_names,
             overlap,
             count: 0,
         })
@@ -311,11 +335,30 @@ impl Redactor {
     /// read in pieces: a location to report where the string itself may
     /// not be shown. Other shapes are [`shaped_lines`]'s to report.
     pub fn find_line_in(&self, input: impl Read) -> io::Result<Option<usize>> {
+        Ok(self.find_rule_in(input)?.map(|(line, _)| line))
+    }
+
+    /// The first refusal's line and public rule label, never its match.
+    pub fn find_rule_in(&self, input: impl Read) -> io::Result<Option<(usize, String)>> {
         let mut line = 1;
         let mut found = None;
         stream(&self.refused, self.overlap, input, |bytes, secret| {
             if secret {
-                found = Some(line);
+                let captures = self
+                    .refused
+                    .captures(bytes)
+                    .expect("stream found a refusal");
+                let rule = self
+                    .literal_names
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, name)| {
+                        captures
+                            .get(i + 1)
+                            .map(|_| format!("known run secret: {name}"))
+                    })
+                    .unwrap_or_else(|| "pattern: private key header".to_owned());
+                found = Some((line, rule));
                 return Ok(false);
             }
             line += bytes.iter().filter(|&&b| b == b'\n').count();

@@ -276,8 +276,12 @@ for a private key or a `praxis-run-` broker run token the change adds or
 `out/` holds: `run` refuses its own by value, and the agent cannot tell
 it from another by shape. Other run secrets (an `api-key` run's token,
 the MCP proxy token) have no listed shape, so a hand-back holding one is
-refused only at upload. The final refusal names the file and line too, never
-the string: in the job's log, its summary and, through the run action's
+refused only at upload. The final refusal names the file, line and rule, never
+the string: `known run secret: SOURCE` distinguishes a value held by the run
+from `pattern: private key header`. Source names are fixed public labels, not
+credential values; other environment tokens use `environment *_TOKEN` rather
+than arbitrary environment variable names. These appear in the job's log,
+its summary and, through the run action's
 `secret-at` output, the status comment, since such a run uploads nothing
 else to look in.
 
