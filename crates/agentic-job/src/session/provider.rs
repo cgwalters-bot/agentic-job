@@ -25,6 +25,73 @@ use std::time::Duration;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+/// Longest provider-requested wait the harness will wait out.
+pub const RETRY_AFTER_CAP: Duration = Duration::from_secs(120);
+
+/// An upstream model response, not agent-authored log text. Only one
+/// pending observation is retained, and a successful response clears it.
+#[derive(Debug, Clone, Copy)]
+pub struct LongRateLimit {
+    pub at: tokio::time::Instant,
+    pub delay: Duration,
+}
+
+impl LongRateLimit {
+    pub fn from_response(status: u16, retry_after: Option<&str>) -> Option<Self> {
+        if status != 429 {
+            return None;
+        }
+        let value = retry_after?.trim();
+        let delay = value
+            .parse::<u64>()
+            .ok()
+            .map(Duration::from_secs)
+            .or_else(|| {
+                let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+                (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                    .to_std()
+                    .ok()
+            })?;
+        (delay > RETRY_AFTER_CAP).then(|| Self {
+            at: tokio::time::Instant::now(),
+            delay,
+        })
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_long_valid_429_arms_the_guard() {
+        for (status, header, expected) in [
+            (429, None, None),
+            (429, Some("garbage"), None),
+            (429, Some("-1"), None),
+            (429, Some("0"), None),
+            (429, Some("120"), None),
+            (429, Some("121"), Some(121)),
+            (429, Some("36000"), Some(36000)),
+            (200, Some("36000"), None),
+            (503, Some("36000"), None),
+            (429, Some("18446744073709551616"), None),
+        ] {
+            assert_eq!(
+                LongRateLimit::from_response(status, header).map(|v| v.delay.as_secs()),
+                expected,
+                "{status} {header:?}"
+            );
+        }
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        assert!(LongRateLimit::from_response(429, Some(&future)).is_some());
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc2822();
+        assert!(LongRateLimit::from_response(429, Some(&past)).is_none());
+    }
+}
+
 /// What a failed model request was, by what can be done about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

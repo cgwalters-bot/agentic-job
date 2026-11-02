@@ -196,7 +196,10 @@ const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// place of the computed wait: one that asks for longer is not waited
 /// on at all, and the agent hands back instead, as after a failure no
 /// wait clears.
-const RETRY_AFTER_CAP: Duration = Duration::from_secs(120);
+const RETRY_AFTER_CAP: Duration = provider::RETRY_AFTER_CAP;
+
+/// Long rate limits need one minute of ACP silence before stopping.
+const RATE_LIMIT_QUIET: Duration = Duration::from_secs(60);
 
 /// Why the agent has not left the output its run requires; `None` when done. It runs
 /// commands (as the sandbox user), so it is called off the runtime, and
@@ -433,6 +436,8 @@ pub struct Options {
     /// `Limits::max_requests`
     /// needs one: a cap with nothing to count is refused.
     pub requests: Option<watch::Receiver<Option<u64>>>,
+    /// Opt-in observation of the run's own upstream model responses.
+    pub rate_limit: Option<watch::Receiver<Option<provider::LongRateLimit>>>,
     pub launch: Launch,
     /// The clients attached to the session; none for a task run.
     pub clients: Clients,
@@ -561,6 +566,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         permissions,
         limits,
         requests,
+        rate_limit,
         launch,
         mut clients,
         bridge,
@@ -625,6 +631,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         output,
         restate: restate.filter(|_| spec.notices),
         mcp_servers: &mcp_servers,
+        rate_limit: rate_limit.as_ref(),
     };
     let started = chrono::Utc::now();
     let stalls = Arc::new(Stalls::default());
@@ -813,6 +820,7 @@ struct Task<'a> {
     /// `Options::restate`, for an agent that takes notices.
     restate: Option<Restate>,
     mcp_servers: &'a [HttpMcp],
+    rate_limit: Option<&'a watch::Receiver<Option<provider::LongRateLimit>>>,
 }
 
 /// Speaks ACP with a started agent, over its standard input and output,
@@ -1343,6 +1351,8 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     let mut heard = tap.heard();
     let quiet_for = |limit: Duration| tokio::time::Instant::now() + limit;
     let mut quiet_until = task.stall.map(quiet_for);
+    let mut last_heard = tokio::time::Instant::now();
+    let mut rate_tick = tokio::time::interval(Duration::from_secs(1));
     // The times the task was sent again after a provider's failure, since
     // the session started or switched to the fallback model, and whether
     // it tried to.
@@ -1493,8 +1503,31 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     conversation = None;
                 }
             },
-            Ok(()) = heard.changed(), if quiet_until.is_some() => {
+            Ok(()) = heard.changed(), if quiet_until.is_some() || task.rate_limit.is_some() => {
+                last_heard = tokio::time::Instant::now();
                 quiet_until = task.stall.map(quiet_for);
+            }
+            _ = rate_tick.tick(), if task.rate_limit.is_some() => {
+                let pending = task.rate_limit.and_then(|rx| *rx.borrow());
+                if let Some(pending) = pending
+                    && pending.delay > RETRY_AFTER_CAP
+                    && pending.at.elapsed() >= RATE_LIMIT_QUIET
+                    && last_heard.elapsed() >= RATE_LIMIT_QUIET
+                    && !tap.tool_running()
+                    && !cancelling.load(Ordering::Relaxed)
+                {
+                    let message = format!(
+                        "the inference proxy rate-limited a model request (HTTP 429, retry-after {}s, cap {}s); nothing from the agent for {}s: not sending the task again",
+                        pending.delay.as_secs(), RETRY_AFTER_CAP.as_secs(), RATE_LIMIT_QUIET.as_secs()
+                    );
+                    tap.log(&[format!("⚠ {message}")]);
+                    // A child may close its transport instead of answering
+                    // cancellation. Preserve the class on that path too.
+                    *pending_error.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Pending { error: message.clone(), class: Some(Class::RateLimited) });
+                    let _ = cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await;
+                    return Ended::failure(message).with_class(Some(Class::RateLimited));
+                }
             }
             () = quiet(quiet_until) => {
                 let Some(limit) = task.stall else { continue };
@@ -1503,6 +1536,13 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 // model is waited for here; nor is a turn the client is
                 // cancelling taken for stalled.
                 if tap.tool_running() || cancelling.load(Ordering::Relaxed) {
+                    continue;
+                }
+                // A shorter stall timeout must not resend a task while
+                // the long-rate-limit guard is waiting for its quiet window.
+                if task.rate_limit.and_then(|rx| *rx.borrow())
+                    .is_some_and(|pending| pending.delay > RETRY_AFTER_CAP)
+                {
                     continue;
                 }
                 let first = stalls.seen.fetch_add(1, Ordering::Relaxed) == 0;

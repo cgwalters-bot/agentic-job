@@ -80,6 +80,9 @@ struct Setup<'a> {
     count_requests: bool,
     /// Jump past the startup deadline after giving the scripted agent time to start.
     advance_startup_clock: bool,
+    /// Replay upstream responses, then advance through one minute of silence.
+    rate_responses: Option<&'a [(u16, Option<&'a str>)]>,
+    observe_rate_limits: bool,
     /// A counter exists but cannot currently supply a reading; no request cap.
     unavailable_count: bool,
     max_tasks: Option<usize>,
@@ -432,6 +435,13 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     let log = Captured::default();
     // As in run's registration, accounting starts at a known count.
     let (count, requests) = watch::channel((!setup.unavailable_count).then_some(0));
+    let (rate_tx, rate_rx) = watch::channel(None);
+    let rate_responses = setup.rate_responses.map(|responses| {
+        responses
+            .iter()
+            .map(|(status, delay)| (*status, delay.map(str::to_owned)))
+            .collect::<Vec<_>>()
+    });
     let (bridge, client) = setup
         .client
         .map(|(client, idle)| bridge_and_client(client, idle, setup.refused_first, setup.connect))
@@ -460,6 +470,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             max_repeats: setup.max_repeats,
         },
         requests: (setup.count_requests || setup.unavailable_count).then_some(requests),
+        rate_limit: setup.observe_rate_limits.then_some(rate_rx),
         launch: setup.launch,
         clients: Clients::none(),
         bridge,
@@ -478,7 +489,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         mcp_servers: Vec::new(),
         watch: setup.watch,
     };
-    let mut builder = if setup.advance_startup_clock {
+    let mut builder = if setup.advance_startup_clock || rate_responses.is_some() {
         tokio::runtime::Builder::new_current_thread()
     } else {
         tokio::runtime::Builder::new_multi_thread()
@@ -486,6 +497,34 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     let runtime = builder.enable_all().build().unwrap();
     let start = Instant::now();
     let returned = runtime.block_on(async {
+        let rate_clock = rate_responses.map(|responses| {
+            let ready = path("work/partial.txt");
+            tokio::spawn(async move {
+                // Advance only after the real child has entered its turn.
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !ready.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                for (status, delay) in responses {
+                    rate_tx.send_replace(session::provider::LongRateLimit::from_response(
+                        status,
+                        delay.as_deref(),
+                    ));
+                }
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+                // Give a shorter stall watchdog a chance to fire first.
+                for _ in 0..10 {
+                    tokio::task::yield_now().await;
+                }
+                tokio::time::advance(Duration::from_secs(30)).await;
+                tokio::time::resume();
+            })
+        });
         let clock = setup.advance_startup_clock.then(|| {
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(300)).await;
@@ -498,6 +537,9 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         let returned = session::run(options).await;
         counter.abort();
         if let Some(clock) = clock {
+            clock.abort();
+        }
+        if let Some(clock) = rate_clock {
             clock.abort();
         }
         returned
@@ -998,6 +1040,76 @@ fn an_agent_that_exits_when_done() {
     }
 }
 
+/// Replays the failure shape recorded in tracker run 41517937001:
+/// a completed tool at 20:22:07.925Z, a 429 at 20:22:08.334Z, then
+/// no ACP until the stall cancellation ten minutes later. The recording
+/// does not include the HTTP headers: the delays here are injected.
+#[test]
+fn a_long_upstream_rate_limit_stops_silence_without_a_stall_retry() {
+    for (name, responses, enabled, stopped) in [
+        ("long", vec![(429, Some("36000"))], true, true),
+        ("short-stall", vec![(429, Some("36000"))], true, true),
+        ("exit-on-cancel", vec![(429, Some("36000"))], true, true),
+        ("short", vec![(429, Some("120"))], true, false),
+        (
+            "recovered",
+            vec![(429, Some("36000")), (200, None)],
+            true,
+            false,
+        ),
+        ("disabled", vec![(429, Some("36000"))], false, false),
+    ] {
+        let script = format!(
+            r#"[
+            {{"write": {{"title": "Write", "path": "{{dir}}/work/partial.txt", "content": "partial\n"}}}},
+            {}
+        ]"#,
+            if name == "exit-on-cancel" {
+                r#"{"exit_on_cancel": 7}"#
+            } else {
+                r#"{"sleep": 1.5}, {"say": "Done."}"#
+            }
+        );
+        let r = run(
+            &["script", "{dir}/script.json"],
+            Setup {
+                files: &[("script.json", &script)],
+                timeout_s: 600,
+                stall_s: Some(if name == "short-stall" { 30 } else { 120 }),
+                rate_responses: Some(&responses),
+                observe_rate_limits: enabled,
+                ..Setup::default()
+            },
+        );
+        assert_result(
+            &r,
+            if stopped { 1 } else { 0 },
+            if stopped { "failure" } else { "success" },
+        );
+        assert_eq!(
+            r.result["provider_error"],
+            if stopped {
+                json!("rate_limited")
+            } else {
+                Value::Null
+            },
+            "{name}"
+        );
+        assert_eq!(r.result["stall_retries"], 0, "{name}");
+        assert_eq!(r.result["resends"], 0, "{name}");
+        if stopped {
+            assert!(
+                r.result["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("retry-after 36000s"),
+                "{}",
+                r.result
+            );
+        }
+    }
+}
+
 /// A cap on model requests with nothing counting them would be no cap:
 /// the session is not run at all.
 #[test]
@@ -1019,6 +1131,7 @@ fn a_cap_nothing_counts_is_refused() {
             ..Limits::default()
         },
         requests: None,
+        rate_limit: None,
         launch: Launch::Direct,
         clients: Clients::none(),
         bridge: None,

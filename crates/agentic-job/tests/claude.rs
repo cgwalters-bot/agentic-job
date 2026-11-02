@@ -131,6 +131,7 @@ fn pinned_claude_acp_offers_file_tools() {
                 max_repeats: None,
             },
             requests: None,
+            rate_limit: None,
             launch: Launch::Direct,
             clients: Clients::none(),
             bridge: None,

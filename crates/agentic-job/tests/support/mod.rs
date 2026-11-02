@@ -574,6 +574,18 @@ fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<S
             ),
         ),
         ("GET", true) => (200, "application/json", "", "{\"data\":[]}".to_owned()),
+        ("POST", true) if model.as_deref() == Some("long-rate-limit") => (
+            429,
+            "application/json",
+            "retry-after: 36000\r\n",
+            "Too Many Requests".into(),
+        ),
+        ("POST", true) if model.as_deref() == Some("short-rate-limit") => (
+            429,
+            "application/json",
+            "retry-after: 120\r\n",
+            "Too Many Requests".into(),
+        ),
         // A model the key may not use, as a provider that quotes the key
         // it refuses says it: in a few bytes, or at a length the proxy
         // will not read whole (its MAX_REFUSAL_BYTES, 64 KiB), or

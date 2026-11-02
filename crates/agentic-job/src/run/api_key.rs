@@ -469,6 +469,7 @@ struct State {
     /// The cap on the run's model requests, `limits.max-requests`.
     max_requests: Option<u64>,
     admission: Mutex<Admission>,
+    rate_limit: tokio::sync::watch::Sender<Option<crate::session::provider::LongRateLimit>>,
 }
 
 /// What decides whether a connection is served and a request forwarded,
@@ -569,6 +570,7 @@ impl Local {
             quoted,
             max_requests,
             admission: Mutex::default(),
+            rate_limit: tokio::sync::watch::channel(None).0,
         });
         let serving = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -604,6 +606,12 @@ impl Local {
 
     pub fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    pub fn rate_limit(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::session::provider::LongRateLimit>> {
+        self.state.rate_limit.subscribe()
     }
 
     /// In front of a broker, the only addresses it is reached at.
@@ -861,6 +869,27 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
             ),
         )
     })?;
+    if counted {
+        let status = answer.status().as_u16();
+        if status == 429 || answer.status().is_success() {
+            let observed = crate::session::provider::LongRateLimit::from_response(
+                status,
+                answer
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok()),
+            );
+            state.rate_limit.send_modify(|pending| {
+                // Repeated refusals must not postpone detection forever.
+                *pending = observed.map(|mut next| {
+                    if let Some(previous) = pending {
+                        next.at = previous.at;
+                    }
+                    next
+                });
+            });
+        }
+    }
     pass_back(stream, answer, &state.quoted)
 }
 

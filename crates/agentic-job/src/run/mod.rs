@@ -170,6 +170,7 @@ struct Plan {
     child: Option<String>,
     limits: Limits,
     endpoint: Option<Endpoint>,
+    stop_long_retry_after: bool,
     /// Where the sandbox user connects around the egress proxy, which
     /// under `inference.front` may be no address of the broker's.
     direct: Vec<crate::sandbox::network::Direct>,
@@ -768,6 +769,7 @@ impl Plan {
             limits,
             endpoint,
             direct: host.direct,
+            stop_long_retry_after: config.inference.stop_long_retry_after,
             container_image: config
                 .sandbox
                 .check
@@ -1199,6 +1201,11 @@ impl Plan {
             permissions: Policy::for_task(&self.sandbox.home)?,
             limits: self.limits.clone(),
             requests,
+            rate_limit: self
+                .endpoint
+                .as_ref()
+                .filter(|_| self.stop_long_retry_after)
+                .and_then(|_| run.and_then(|run| run.rate_limit())),
             launch: self.sandbox.launch()?,
             clients: Clients::none(),
             bridge,

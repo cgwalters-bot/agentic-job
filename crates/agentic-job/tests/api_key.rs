@@ -25,6 +25,48 @@ const QUICK: Retry = Retry {
     delay: Duration::from_millis(10),
 };
 
+#[test]
+fn only_model_responses_arm_and_clear_a_long_rate_limit() {
+    let mock = MockProvider::start(Provider::Openai);
+    let run = register(&mock, Provider::Openai, Some(key())).unwrap();
+    let agent = run.agent_endpoint(&endpoint(&mock.url, Provider::Openai));
+    let observation = run.rate_limit().unwrap();
+    let bearer = format!("Bearer {}", run.agent_token().expose());
+    let headers = [("authorization", bearer.as_str())];
+    for (model, pending) in [
+        ("short-rate-limit", false),
+        ("long-rate-limit", true),
+        ("long-rate-limit", true),
+        ("m", false),
+        ("long-rate-limit", true),
+        ("short-rate-limit", false),
+    ] {
+        let prior = *observation.borrow();
+        let (status, ..) = ask(
+            &agent.url,
+            "POST",
+            "/responses",
+            &headers,
+            &serde_json::json!({"model": model}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(status, if model == "m" { 200 } else { 429 });
+        let current = *observation.borrow();
+        assert_eq!(current.is_some(), pending, "{model}");
+        if let Some(current) = current {
+            assert_eq!(current.delay.as_secs(), 36000);
+            if let Some(prior) = prior {
+                assert_eq!(current.at, prior.at, "repeated refusals postpone detection");
+            }
+            ask(&agent.url, "GET", "/models", &headers, "").unwrap();
+            assert!(
+                observation.borrow().is_some(),
+                "a model list cleared the failure"
+            );
+        }
+    }
+}
+
 fn endpoint(url: &str, provider: Provider) -> Endpoint {
     Endpoint {
         url: url.to_owned(),

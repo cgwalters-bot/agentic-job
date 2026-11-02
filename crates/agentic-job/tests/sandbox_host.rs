@@ -1260,6 +1260,7 @@ fn session_view(config: &Config, entry: &Entry) {
             ..Limits::default()
         },
         requests: None,
+        rate_limit: None,
         launch: Launch::Sandbox {
             user: sandbox.user.clone(),
             wrapper: sandbox.wrapper(&work).unwrap(),

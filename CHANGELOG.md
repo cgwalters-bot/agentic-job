@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Opt-in `inference.stop-long-retry-after` stops a silent agent after a
+  model 429 requests more than 120 seconds of waiting, reporting
+  `inference_rate_limited` without resending the task. A later successful
+  model request clears it. Requires `inference.front` or `api-key`.
+
 - An opt-in post-release check (`check-forwarder-image: true`) fails with both
   tags when the secure-host forwarder's image differs from the newest `v` tag.
 

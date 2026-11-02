@@ -606,6 +606,7 @@ fn session_with(mode: &str, servers: Vec<HttpMcp>) -> (Value, String, Value) {
             ..Limits::default()
         },
         requests: None,
+        rate_limit: None,
         launch: Launch::Direct,
         clients: Clients::none(),
         bridge: None,

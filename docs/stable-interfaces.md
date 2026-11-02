@@ -101,6 +101,9 @@ the next in the same major version.
   `[sandbox]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
   `[limits]`, `[session]` and `[commit]`
   ([files read](interface.md#files-read)).
+  `[inference] stop-long-retry-after` is an optional boolean, default false;
+  it requires `front` or `api-key` and stops a long upstream 429 followed
+  by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).
 - **The secure-host configuration**, the action's `config` input
   (`agentic-job config --host`): `[sandbox]`, `[egress]` and `[setup]`
   of the runner configuration, and nothing else

@@ -117,6 +117,9 @@ pub struct Inference {
     /// own in front of the broker, which the sandbox user may then not
     /// reach, so that the agent never holds the run token.
     pub front: bool,
+    /// Stop a silent child agent sleeping on a long upstream rate limit.
+    /// Requires the local proxy (`front` or `api-key`); off by default.
+    pub stop_long_retry_after: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

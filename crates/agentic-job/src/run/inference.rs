@@ -305,6 +305,7 @@ impl Endpoint {
             openai_url,
             provider,
             front,
+            stop_long_retry_after,
         } = inference;
         let front = *front;
         if url.is_empty() {
@@ -316,7 +317,8 @@ impl Endpoint {
                     && provider.is_none()
                     && anthropic_url.is_none()
                     && openai_url.is_none()
-                    && !front,
+                    && !front
+                    && !stop_long_retry_after,
                 "inference.url is not set, and the rest of [inference] means nothing without it"
             );
             return Ok(None);
@@ -338,6 +340,10 @@ impl Endpoint {
             );
             Ok(())
         };
+        ensure!(
+            !stop_long_retry_after || front || *register == Register::ApiKey,
+            "inference.stop-long-retry-after needs inference.front or register = \"api-key\" to observe model responses"
+        );
         if *register != Register::ApiKey {
             unused("provider", provider.is_some())?;
         }
@@ -1179,6 +1185,13 @@ impl Run {
         self.local.as_ref().map(Local::address)
     }
 
+    /// Model-response observations from the run's local proxy, if any.
+    pub fn rate_limit(
+        &self,
+    ) -> Option<watch::Receiver<Option<crate::session::provider::LongRateLimit>>> {
+        self.local.as_ref().map(Local::rate_limit)
+    }
+
     /// Under `inference.front`, every address the broker is reached at:
     /// its names as they resolved when the run was fronted.
     pub fn broker_addresses(&self) -> Vec<std::net::SocketAddr> {
@@ -1640,6 +1653,26 @@ mod tests {
                 identity_proxy: Some("http://squid.example:3128".into()),
             }
         );
+    }
+
+    #[test]
+    fn long_rate_limit_detection_requires_local_observation() {
+        for (mode, accepted) in [
+            ("", false),
+            ("url = \"http://broker\"\nregister = \"plain\"", false),
+            (
+                "url = \"http://broker\"\nregister = \"plain\"\nfront = true",
+                true,
+            ),
+            (
+                "url = \"http://127.0.0.1\"\nregister = \"api-key\"\nprovider = \"openai\"",
+                true,
+            ),
+        ] {
+            let config = inference(&format!("{mode}\nstop-long-retry-after = true"));
+            assert_eq!(Endpoint::from_config(&config).is_ok(), accepted, "{mode}");
+        }
+        assert!(!inference("").stop_long_retry_after);
     }
 
     /// A configuration that names no mode is refused, and so is one whose

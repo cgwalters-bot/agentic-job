@@ -43,6 +43,7 @@
 //!  "compact",
 //!  {"context": {"used": 24000, "size": 32768}},
 //!  {"sleep": 1.5},
+//!  {"exit_on_cancel": 7},
 //!  {"stop": "refusal"},
 //!  {"exit": 7},
 //!  {"fail": "message"},
@@ -168,6 +169,7 @@ enum Step {
         size: u64,
     },
     Sleep(f64),
+    ExitOnCancel(i32),
     Stop(String),
     Exit(i32),
     Fail(String),
@@ -629,6 +631,12 @@ fn play(
             }
             return Ok(());
         }
+        Step::ExitOnCancel(status) => {
+            while !conn.cancelled {
+                conn.recv(Some(SLEEP_SLICE));
+            }
+            std::process::exit(*status);
+        }
         // Ends the turn or the process: `prompt` takes these itself.
         Step::Stop(_) | Step::Exit(_) | Step::Fail(_) | Step::RateLimit(_) | Step::Finish(_) => {
             return Ok(());
@@ -721,6 +729,7 @@ fn play(
         | Step::Compact
         | Step::Context { .. }
         | Step::Sleep(_)
+        | Step::ExitOnCancel(_)
         | Step::Stop(_)
         | Step::Exit(_)
         | Step::Fail(_)

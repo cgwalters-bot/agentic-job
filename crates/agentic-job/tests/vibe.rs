@@ -419,6 +419,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
                 max_repeats: None,
             },
             requests: Some(requests_count),
+            rate_limit: None,
             launch: Launch::Direct,
             clients: Clients::none(),
             bridge: None,

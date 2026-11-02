@@ -135,6 +135,29 @@ Under `token-file` there is nothing to end and the upload goes ahead.
 All of these requests go straight to the proxy, ignoring `HTTP_PROXY`,
 and follow no redirect.
 
+### Long rate-limit waits
+
+A child agent can sleep for hours on a provider's `Retry-After` without
+answering its turn. The ordinary stall watchdog would cancel and repeat
+that task, wasting runner time before misclassifying it as a stall.
+`stop-long-retry-after = true` in `[inference]` opts into stopping this
+case; it is off by default and configuration checking refuses it without
+`front = true` or `register = "api-key"`, where the local proxy can observe
+the run's own upstream model responses. Direct broker mode has no such
+observation and is unchanged.
+
+Only an upstream model POST response with HTTP 429 and a valid
+`Retry-After` over the session's 120-second cap arms the guard. It accepts
+integer seconds or an HTTP date. It retains one timestamp and delay, not
+response bodies or agent log text. A later 2xx model response or a 429
+with a short or missing delay clears it; model-list responses do not.
+After both the observation and the last ACP activity are at least 60
+seconds old, with no tool running, a one-second check cancels the turn
+and ends with `inference_rate_limited`, naming the supplied delay. The
+existing bounded cancellation grace applies. It does not resend the task
+or ask the unavailable model for another hand-back turn: the normal
+provider-failure path collects any partial work already left.
+
 The agent's own requests go through the egress proxy unless
 `egress.direct` opens the broker. The proxy resolves names with the
 host's resolver, but the rules for its uid refuse it DNS to any but the
