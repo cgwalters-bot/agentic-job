@@ -116,6 +116,8 @@ pub const RESULT_SCHEMA: &str = "bot-harness-result/v1";
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How often the budget is checked.
 const BUDGET_TICK: Duration = Duration::from_millis(250);
+/// An agent stuck before inference must not hold a runner for the full run timeout.
+const FIRST_REQUEST_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// How long an agent whose streams closed gets to exit, so that the
 /// failure can say how it did.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
@@ -211,6 +213,8 @@ pub type Restate = OutputCheck;
 pub enum Outcome {
     Success,
     Failure,
+    #[serde(rename = "no_requests")]
+    NoRequests,
     Timeout,
     Budget,
     Cancelled,
@@ -221,6 +225,7 @@ impl Outcome {
         match self {
             Outcome::Success => "success",
             Outcome::Failure => "failure",
+            Outcome::NoRequests => "no_requests",
             Outcome::Timeout => "timeout",
             Outcome::Budget => "budget",
             Outcome::Cancelled => "cancelled",
@@ -231,6 +236,7 @@ impl Outcome {
     pub fn exit(self) -> Exit {
         match self {
             Outcome::Success => Exit::Success,
+            Outcome::NoRequests => Exit::NotStarted,
             Outcome::Timeout => Exit::Timeout,
             Outcome::Budget => Exit::Limit,
             Outcome::Failure | Outcome::Cancelled => Exit::Failure,
@@ -462,7 +468,7 @@ async fn watch_budget(
     nudges: mpsc::UnboundedSender<Nudge>,
 ) {
     let mut budget = Budget::new(limits);
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(BUDGET_TICK);
     loop {
         tick.tick().await;
@@ -472,6 +478,9 @@ async fn watch_budget(
             tasks: tap.tasks(),
             repeats: tap.repeats(),
         };
+        if usage.elapsed >= FIRST_REQUEST_DEADLINE && usage.requests == Some(0) {
+            return set_stop(&stop, Stop::NoRequests);
+        }
         // The session may be over: nobody is left to nudge.
         let _ = match budget.check(&usage) {
             Some(Signal::Stop(why)) => return set_stop(&stop, why),
@@ -644,6 +653,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
                 stderr,
             } = streams;
             let stderr = tokio::spawn(drain_stderr(stderr, tap.clone()));
+            let mut deadline = stop_rx.clone();
             let signals = Signals {
                 stop: stop_rx,
                 nudges: nudge_rx,
@@ -654,15 +664,23 @@ pub async fn run(opts: Options) -> Result<RunResult> {
                 stalls: stalls.clone(),
                 resends: resends.clone(),
             };
-            let (ended, exited) = drive(
-                &mut agent,
-                (stdin, stdout),
-                &tap,
-                task,
-                permissions,
-                signals,
-            )
-            .await;
+            // No inference ever started: unlike a spent budget, this cannot
+            // become success when an agent answers cancellation with end_turn.
+            // Latch the stop before diagnostics, and log before killing it.
+            let (mut ended, mut exited) = tokio::select! {
+                biased;
+                Ok(_) = deadline.wait_for(|why| *why == Some(Stop::NoRequests)) => {
+                    (Ended::stopped(&Stop::NoRequests, false), None)
+                }
+                result = drive(&mut agent, (stdin, stdout), &tap, task, permissions, signals) => result,
+            };
+            watcher.abort();
+            if *deadline.borrow() == Some(Stop::NoRequests) {
+                ended = Ended::stopped(&Stop::NoRequests, false);
+                exited = None;
+                tap.log(&[agent.diagnostics(sandbox.as_ref()).state().await]);
+                tap.log_last_output();
+            }
             // The group started here is the wrapper's, which may be
             // root's and out of this user's reach: the sandbox user's
             // processes are killed first, so the wrapper is not waited
@@ -1125,6 +1143,10 @@ async fn next_from_client(conversation: &mut Option<Conversation>) -> Option<Fro
 fn stopped(why: &Stop) -> (Outcome, String) {
     match why {
         Stop::Timeout => (Outcome::Timeout, "hit the timeout".to_owned()),
+        Stop::NoRequests => (
+            Outcome::NoRequests,
+            "the agent made no model request within the first five minutes".to_owned(),
+        ),
         Stop::Budget(m) => (Outcome::Budget, m.clone()),
     }
 }

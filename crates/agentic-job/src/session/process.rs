@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use rustix::process::{Pid, Signal, kill_process_group};
+use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
@@ -22,6 +23,8 @@ use crate::sandbox::root::Root;
 
 /// How long a killed process gets to be gone.
 const KILL_GRACE: Duration = Duration::from_secs(10);
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(2);
+const DIAGNOSTIC_BYTES: u64 = 8192;
 const ROOT_UID: u32 = 0;
 /// The state of a zombie in `/proc/PID/stat`.
 const ZOMBIE: &str = "Z";
@@ -170,6 +173,13 @@ pub(super) fn spawn(argv: &[String], env: &BTreeMap<String, String>) -> Result<(
 }
 
 impl Agent {
+    pub fn diagnostics(&self, sandbox: Option<&SandboxUser>) -> Diagnostics {
+        Diagnostics {
+            group: self.group,
+            uid: sandbox.map(|s| s.uid),
+        }
+    }
+
     /// Waits for the process to exit.
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
@@ -194,6 +204,58 @@ impl Agent {
     /// Waits for a killed process to be gone, for a while.
     pub async fn gone(mut self) {
         let _ = tokio::time::timeout(KILL_GRACE, self.child.wait()).await;
+    }
+}
+
+/// Process selectors copied before the agent is borrowed by the protocol driver.
+pub(super) struct Diagnostics {
+    group: Option<Pid>,
+    uid: Option<u32>,
+}
+
+impl Diagnostics {
+    /// Capture the launcher, its children and, with run0, the sandbox user's processes.
+    /// Bound both the diagnostic output and time before killing the session.
+    pub async fn state(&self) -> String {
+        let Some(group) = self.group else {
+            return "agent process state: no process group".to_owned();
+        };
+        let mut command = Command::new("ps");
+        let pid = group.as_raw_nonzero().to_string();
+        command.args([
+            "-o",
+            "pid,ppid,stat,wchan:32,comm",
+            "-p",
+            &pid,
+            "--ppid",
+            &pid,
+        ]);
+        if let Some(uid) = self.uid {
+            command.args(["-u", &uid.to_string()]);
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let captured = async {
+            let mut child = command.spawn()?;
+            let stdout = child.stdout.take().context("ps has no stdout")?;
+            let mut bytes = Vec::new();
+            stdout
+                .take(DIAGNOSTIC_BYTES)
+                .read_to_end(&mut bytes)
+                .await?;
+            Ok::<_, anyhow::Error>(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        match tokio::time::timeout(DIAGNOSTIC_TIMEOUT, captured).await {
+            Ok(Ok(state)) => format!(
+                "agent process state (pid {}):\n{state}",
+                group.as_raw_nonzero()
+            ),
+            Ok(Err(error)) => format!("agent process state unavailable: {error:#}"),
+            Err(_) => "agent process state unavailable: ps timed out".to_owned(),
+        }
     }
 }
 

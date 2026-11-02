@@ -198,6 +198,11 @@ and rechecks before posting. See [neutral inline comments](safe-outputs.md#neutr
 
 ## Hand-back files
 
+A run stopped before its first model request (five minutes with a known zero
+proxy count) exits 4, the retryable not-started state. Its collected
+`outcome.json` records the failure in `summary` and `stopped_early`, even if
+the agent left a success claim. No such deadline applies without a count.
+
 What a producer leaves for `run` to take
 ([what the agent does](safe-outputs.md#what-the-agent-does)):
 

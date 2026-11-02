@@ -160,6 +160,7 @@ pub const TURN_LABELS: [&str; 5] = [
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
     Timeout,
+    NoRequests,
     /// With what was used up, as the run's result says it.
     Budget(String),
 }

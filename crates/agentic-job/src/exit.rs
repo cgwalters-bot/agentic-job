@@ -17,7 +17,8 @@ pub enum Exit {
     /// handed back after a turn that ended on an error.
     Limit,
     /// `run`: the run never started (sandbox probe, proxy registration or
-    /// clone failed), so it is safe to retry. `run` maps the errors of that
+    /// clone failed), or the agent made no model request before its startup
+    /// deadline, so it is safe to retry. `run` maps the errors of that
     /// phase to this itself: an `Err` out of a command is [`ERROR`].
     NotStarted,
     /// `run`: the timeout stopped the agent.

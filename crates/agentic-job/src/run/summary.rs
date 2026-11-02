@@ -357,6 +357,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
         failure
     };
     match result {
+        Outcome::NoRequests => {
+            failures.push(json!({"kind": "stall", "message": why("the agent made no model request within the first five minutes")}));
+        }
         Outcome::Timeout => {
             failures.push(ended("timeout", why("the agent hit the timeout")));
         }
@@ -1487,6 +1490,14 @@ Redacted 1 string(s).
         // (how the session ended, stopped early, the kind of its failure)
         let cases = [
             (result(Outcome::Success, None, false), false, None),
+            (
+                result(Outcome::NoRequests, None, false),
+                false,
+                Some((
+                    "stall",
+                    "the agent made no model request within the first five minutes",
+                )),
+            ),
             (
                 result(Outcome::Timeout, Some("hit the timeout"), true),
                 true,

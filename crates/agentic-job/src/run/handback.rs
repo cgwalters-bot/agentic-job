@@ -290,6 +290,15 @@ pub fn mark_stopped_early(mut outcome: Object, harness: Option<&RunResult>) -> O
     let Some(harness) = harness else {
         return outcome;
     };
+    if harness.result == Outcome::NoRequests {
+        let why = harness
+            .message
+            .as_deref()
+            .unwrap_or("the agent made no model request");
+        outcome.set("summary", json!(why));
+        outcome.set("stopped_early", json!(why));
+        return outcome;
+    }
     let stopped = matches!(harness.result, Outcome::Timeout | Outcome::Budget);
     let said = outcome.get("stopped_early").is_some_and(truthy);
     if stopped && !said {
@@ -1921,6 +1930,17 @@ mod tests {
 
     fn object(value: Value) -> Object {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn no_requests_overrides_a_success_claim() {
+        let why = "the agent made no model request within the first five minutes";
+        let got = mark_stopped_early(
+            object(json!({"summary": "success", "stopped_early": null})),
+            Some(&harness(Outcome::NoRequests, Some(why))),
+        );
+        assert_eq!(got.text("summary"), Some(why));
+        assert_eq!(got.text("stopped_early"), Some(why));
     }
 
     fn harness(result: Outcome, message: Option<&str>) -> RunResult {

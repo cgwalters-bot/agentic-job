@@ -52,6 +52,14 @@ with `--runner-home`, only the agent's process group: what the agent
 detached from it runs until the job ends. What
 `run` leaves under `--out` is in [layout.md](layout.md#run).
 
+An agent that makes no model request in its first five minutes must not hold
+a runner until the full timeout. When the inference proxy's count is known
+and still zero, the budget watcher ends the session as `no_requests`, with
+retryable exit 4 and a `stall` failure in the summary, not success. Before
+killing it, the session logs bounded process state (including the sandbox
+user's processes) and its last stdout and stderr. No deadline applies when
+the count is unavailable, including direct providers without a run API.
+
 A run that allows outputs gets one reminder if it ends without a hand-back,
 then fails if none is left. A fix can leave a change for the pull request's
 branch, a replacement series, or a `noop` or `missing_data` request with a

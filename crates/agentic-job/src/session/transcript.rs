@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use super::budget::{Limits, Repeats, Stop};
 use super::clients::Clients;
 use super::compaction::Compactions;
-use super::digest::{Digest, Dir};
+use super::digest::{self, Digest, Dir};
 use super::provider::{self, Class};
 
 /// The files a session writes to its output directory.
@@ -72,6 +72,7 @@ struct Inner {
     compactions: Compactions,
     /// The last thing the agent said on its standard error.
     last_stderr: Option<String>,
+    last_stdout: Option<String>,
     /// The last words of a model provider's failure the agent let out in
     /// the current turn, on its standard error or in a message that
     /// starts with its `provider-error` words, and their class: what an
@@ -133,6 +134,7 @@ impl Tap {
                 digest: Digest::new(),
                 compactions: Compactions::default(),
                 last_stderr: None,
+                last_stdout: None,
                 provider_failure: None,
                 error: None,
             }),
@@ -161,6 +163,9 @@ impl Tap {
             msg,
         };
         let mut inner = self.inner();
+        if dir == Dir::Recv {
+            inner.last_stdout = Some(digest::cut(line));
+        }
         let r = serde_json::to_writer(&mut inner.acp, &record)
             .map_err(std::io::Error::from)
             .and_then(|()| writeln!(inner.acp))
@@ -267,6 +272,18 @@ impl Tap {
     /// that died, usually why.
     pub fn last_stderr(&self) -> Option<String> {
         self.inner().last_stderr.clone()
+    }
+
+    /// Startup-failure diagnostics use the same bounded, redacted log as the session.
+    pub fn log_last_output(&self) {
+        let mut inner = self.inner();
+        let message = inner.last_stdout.as_deref().unwrap_or("(none)");
+        let stderr = inner.last_stderr.as_deref().unwrap_or("(none)");
+        let lines = [
+            format!("last agent stdout: {}", digest::cut(message)),
+            format!("last agent stderr: {}", digest::cut(stderr)),
+        ];
+        inner.log(&lines);
     }
 
     /// The last model provider's failure the agent let out, by class and

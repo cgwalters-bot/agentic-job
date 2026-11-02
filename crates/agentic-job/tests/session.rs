@@ -78,6 +78,10 @@ struct Setup<'a> {
     /// Cap the model requests at `MAX_REQUESTS`, counted in the file
     /// `requests`, which the agent's own script writes.
     count_requests: bool,
+    /// Jump past the startup deadline after giving the scripted agent time to start.
+    advance_startup_clock: bool,
+    /// A counter exists but cannot currently supply a reading; no request cap.
+    unavailable_count: bool,
     max_tasks: Option<usize>,
     max_repeats: Option<usize>,
     permissions: Option<&'a str>,
@@ -427,7 +431,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     }
     let log = Captured::default();
     // As in run's registration, accounting starts at a known count.
-    let (count, requests) = watch::channel(Some(0));
+    let (count, requests) = watch::channel((!setup.unavailable_count).then_some(0));
     let (bridge, client) = setup
         .client
         .map(|(client, idle)| bridge_and_client(client, idle, setup.refused_first, setup.connect))
@@ -455,7 +459,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             max_tasks: setup.max_tasks,
             max_repeats: setup.max_repeats,
         },
-        requests: setup.count_requests.then_some(requests),
+        requests: (setup.count_requests || setup.unavailable_count).then_some(requests),
         launch: setup.launch,
         clients: Clients::none(),
         bridge,
@@ -474,15 +478,28 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         mcp_servers: Vec::new(),
         watch: setup.watch,
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let mut builder = if setup.advance_startup_clock {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    let runtime = builder.enable_all().build().unwrap();
     let start = Instant::now();
     let returned = runtime.block_on(async {
+        let clock = setup.advance_startup_clock.then(|| {
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(301)).await;
+                tokio::time::resume();
+            })
+        });
         let counter = tokio::spawn(count_requests(path("requests"), count));
         let returned = session::run(options).await;
         counter.abort();
+        if let Some(clock) = clock {
+            clock.abort();
+        }
         returned
     });
     let elapsed = start.elapsed();
@@ -505,6 +522,56 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         result,
         records,
         dir,
+    }
+}
+
+#[test]
+fn first_request_deadline() {
+    for (mode, count_requests, requests, output, advance, expected) in [
+        ("slow-init", true, "0", false, true, "no_requests"),
+        ("script", true, "0", false, true, "no_requests"),
+        ("script", true, "0", true, true, "no_requests"),
+        ("script", true, "1", false, true, "success"),
+        ("script", false, "0", false, true, "success"),
+        ("script", false, "unavailable", false, true, "success"),
+        ("script", true, "0", false, false, "success"),
+    ] {
+        let args = if mode == "script" {
+            vec![mode, "{dir}/script.json"]
+        } else {
+            vec![mode]
+        };
+        let r = run(
+            &args,
+            Setup {
+                count_requests,
+                advance_startup_clock: advance,
+                unavailable_count: requests == "unavailable",
+                output: output.then_some("handback.json"),
+                timeout_s: 900,
+                files: &[
+                    ("requests", requests),
+                    ("script.json", r#"[{"sleep": 1}, {"stop": "end_turn"}]"#),
+                    (
+                        "handback.json",
+                        r#"{"summary": "success", "stopped_early": null}"#,
+                    ),
+                ],
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, if expected == "no_requests" { 4 } else { 0 }, expected);
+        if expected == "no_requests" {
+            assert!(r.log.contains("agent process state (pid"), "{}", r.log);
+            assert!(r.log.contains("last agent stdout:"), "{}", r.log);
+            assert!(r.log.contains("last agent stderr:"), "{}", r.log);
+            assert!(
+                r.result["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no model request")
+            );
+        }
     }
 }
 
