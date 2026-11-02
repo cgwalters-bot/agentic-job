@@ -62,9 +62,11 @@ That is a test fixture pin, not a claim that the old deployment is unchanged.
 
 ## Open work
 
-With a merge queue, restore hosted admission coverage for the event caller,
-the review verdict and dispatch's review profile: PRs skip E2E and merge groups
-exercise only the event caller's policy refusal instead. Use a trusted, human-approved execution path
+Queued execution has run ([41239144677](https://github.com/cgwalters-forge/agentic-job/actions/runs/41239144677));
+the gap is hosted admission coverage for the event caller, the review verdict
+and dispatch's review profile. PRs skip E2E with the queue enabled; merge groups
+exercise the event caller's policy refusal, skip `e2e-review` and run only
+dispatch's research profile, not its review profile. Use a trusted, human-approved execution path
 without granting unreviewed PR code write or OIDC authority. This is follow-up
 to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464),
 not coverage demonstrated by local tests; no open issue tracks it.

@@ -704,8 +704,12 @@ Read this before relying on it.
   their read-only token cannot run those jobs. No PAT is forwarded to them.
 - Not yet verified: `apply-environment` (the live caller passes a variable,
   but its resolved value is not confirmed by the cited evidence).
-- Not yet verified: a `merge_group` run. No merge queue is configured
-  yet, so CI has only run the pull request and push paths.
+- This repository has a merge queue: successful `merge_group` run
+  [41239144677](https://github.com/cgwalters-forge/agentic-job/actions/runs/41239144677)
+  ran the write-capable E2E jobs and passed `required-checks` and `ci`.
+  It skipped `e2e-review`, ran dispatch's research profile only, and stopped
+  `e2e-event` at policy refusal; it does not prove the remaining
+  [admission paths](plan.md#open-work).
 - Not tried at all: a network join in a composed caller other than
   `review.yml`, and applying a `create_issue`:
   that type is checked through `collect` and `check` in CI (the
@@ -1623,10 +1627,17 @@ file.
 
 Every agent's pull request but one in an
 [owned repository](#a-repository-the-applying-account-owns) is then a
-fork's, and so is treated as one everywhere. This repository's CI skips the end-to-end jobs for it, as
-they need a write token and an OIDC token, and then fails its required
-`ci` check unless it changes only documentation: a maintainer runs them
-from a branch of this repository with the same commits before merging. The event callers and the review caller refuse a
+fork's, and so is treated as one everywhere. With this repository's merge queue,
+CI skips write/OIDC-capable E2E jobs on pull requests, forks included, and runs
+them on the merge group before landing (except documentation-only changes).
+In [ci.yml](../.github/workflows/ci.yml), `changes` detects the base's effective
+queue rule; `required-checks` permits only the corresponding gated skips and
+the required `ci` sentinel demands its success. Without a queue, a fork's
+non-documentation pull request fails that gate and needs same-repository
+branch testing instead. No PAT is forwarded to fork PRs. Queued execution is
+not proof of [event/review admission coverage](plan.md#open-work), nor a
+substitute for [human approval before enqueueing](#ci-runner-use).
+The event callers and the review caller refuse a
 fork's pull request unless their bounds say `forks = true`
 ([events](events.md)), so an agent's pull request is reviewed by a
 person or by a caller that admits forks.
@@ -2153,10 +2164,14 @@ and does not yet exercise them. Its fixture-only handler path still needs
 the same checker report, fetched-base ancestry check and trial comparison
 before it can serve as evidence for these protections.
 
-The patch's `From:` line is not proof of anything: `check` holds it to
-nothing ([#22](https://github.com/cgwalters-forge/agentic-job/issues/22)),
-and a machine that can upload a hand-back can write any author there.
-Who opened the pull request is the token's owner.
+To stop an agent declaring another identity, bounds can set `commit_author`:
+`run` uses that configured identity and `check` refuses a patch whose `From:`
+differs from the pin ([patch.rs](../crates/safe-outputs/src/check/patch.rs),
+[bounds and replacement-series exception](safe-outputs.md#the-bounds-and-the-policy)).
+Without a pin, the agent's commit configuration supplies the declared author.
+Neither configuration nor pinning is cryptographic proof of authorship: a
+machine that can upload a hand-back can write the pinned name and address too.
+Who opened the pull request is the token's owner, not proof of who wrote it.
 
 The exit state that decides between a whole and a partial run comes from
 the agent's machine. A machine that lied about it could have a partial
