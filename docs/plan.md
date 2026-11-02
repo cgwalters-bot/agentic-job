@@ -64,12 +64,14 @@ That is a test fixture pin, not a claim that the old deployment is unchanged.
 
 Queued execution has run ([41239144677](https://github.com/cgwalters-forge/agentic-job/actions/runs/41239144677));
 the gap is hosted admission coverage for the event caller, the review verdict
-and dispatch's review profile. PRs skip E2E with the queue enabled; merge groups
-exercise the event caller's policy refusal, skip `e2e-review` and run only
-dispatch's research profile, not its review profile. Use a trusted, human-approved execution path
-without granting unreviewed PR code write or OIDC authority. This is follow-up
+and dispatch's review profile. CI now wires queued scripted dispatch review to
+the run-owned scratch PR and checks its actual head and published verdict.
+Its read-only verifier also exercises event/review admission using that PR's
+payload and refuses the actual merge-group event; `e2e-review` remains PR-only.
+These are wiring claims, not hosted proof: a successful `merge_group` run of
+this revision is still needed. No PR gains write or OIDC authority. This is follow-up
 to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464),
-not coverage demonstrated by local tests; no open issue tracks it.
+not coverage demonstrated by local tests; [#2808](https://github.com/cgwalters-forge/agentic-job/issues/2808) tracks it.
 
 Host gaps left open when the sandbox and run follow-ups closed, also
 untracked:

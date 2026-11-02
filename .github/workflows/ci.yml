@@ -1077,6 +1077,7 @@ jobs:
       pull-requests: write # create this run's scratch PR
     outputs:
       pr: ${{ steps.scratch.outputs.pr }}
+      head: ${{ steps.scratch.outputs.head }}
       branch: ${{ steps.scratch.outputs.branch }}
       login: ${{ steps.scratch.outputs.login }}
     env:
@@ -1115,7 +1116,7 @@ jobs:
             gh api -X DELETE "$root/git/refs/heads/$BRANCH"
             exit 1
           fi
-          printf 'pr=%s\nbranch=%s\nlogin=%s\n' "$pr" "$BRANCH" "$login" >> "$GITHUB_OUTPUT"
+          printf 'pr=%s\nhead=%s\nbranch=%s\nlogin=%s\n' "$pr" "$head" "$BRANCH" "$login" >> "$GITHUB_OUTPUT"
 
   # Both people outputs target the run-owned PR, not the shared scratch issue.
   e2e-people:
@@ -1189,12 +1190,12 @@ jobs:
   # PAT, which CI does not hold. Not triage: it takes the same path as
   # research, with other profile text.
   e2e-dispatch:
-    needs: changes
+    needs: [changes, e2e-scratch]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(github.event_name == 'pull_request' && '["research","review"]' || '["research"]') }}
+        profile: ${{ fromJSON(github.event_name != 'push' && '["research","review"]' || '["research"]') }}
     permissions:
       contents: read # what dispatch.yml asks for: no profile pushes with the job token
       issues: write
@@ -1206,7 +1207,7 @@ jobs:
       task: Exercise the shipped scripted dispatch caller; no model is needed.
       scripted: true
       repo: ${{ github.repository }}
-      item: ${{ matrix.profile == 'review' && format('{0}', github.event.pull_request.number) || '64' }}
+      item: ${{ matrix.profile == 'review' && needs.e2e-scratch.outputs.pr || '64' }}
       kind: ${{ matrix.profile }}
 
   # The composed example: a caller-owned agent job with a privileged step
@@ -1418,7 +1419,7 @@ jobs:
   # waits for this job even when verification fails.
   e2e-dispatch-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, static, e2e-dispatch, e2e-compose, e2e-full]
+    needs: [changes, static, e2e-scratch, e2e-dispatch, e2e-compose, e2e-full]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -1442,7 +1443,9 @@ jobs:
           RUN: actions/runs/${{ github.run_id }}
           RESULT: ${{ needs.e2e-dispatch.result }}
           COMPOSE_RESULT: ${{ needs.e2e-compose.result }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event_name != 'push' && needs.e2e-scratch.outputs.pr || '' }}
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ needs.e2e-scratch.outputs.head }}
           REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
           # The configuration the scripted dispatch ran with.
           CONFIG: .github/agentic-job/hosted.toml
@@ -1455,8 +1458,11 @@ jobs:
             jq -c --arg run "$RUN" '[.[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run))) | .body]'; }
           # Research and the composed example each comment once.
           comments 64 | jq -e 'map(select(contains("Scripted dispatch completed."))) | length == 2'
-          [ -n "$PR" ] || exit 0
+          [ "$EVENT" != push ] || exit 0
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo '::error::missing scratch PR'; exit 1; }
           [[ "$REVIEW_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no reviewed head: '$REVIEW_HEAD'"; exit 1; }
+          test "$REVIEW_HEAD" = "$HEAD_SHA"
+          test "$(gh api "repos/$GH_REPO/pulls/$PR" --jq .head.sha)" = "$REVIEW_HEAD"
           verdict=$(comments "$PR" | jq -er 'map(select(startswith("VERDICT: APPROVE\nREASON: Scripted dispatch")))
             | if length == 1 then .[0] else error("\(length) scripted verdicts, not one") end')
           grep -qF "Reviewed SHA: $REVIEW_HEAD" <<< "$verdict"
@@ -1471,6 +1477,33 @@ jobs:
           if grep -qF '"cargo"' <<< "$packages"; then
             grep -qE '^Toolchain: cargo [0-9]' <<< "$verdict" || { echo "::error::the review sandbox must have a working cargo"; exit 1; }
           fi
+      # Exercise event -> review admission with the real scratch PR as data,
+      # not by pretending merge_group has a pull_request. No workflow input
+      # override, write token, or change to the production event allowlist.
+      - name: Admit a scratch PR review and refuse the actual merge-group event
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.e2e-scratch.outputs.pr }}
+          HEAD_SHA: ${{ needs.e2e-scratch.outputs.head }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          bin=$RUNNER_TEMP/agentic-job
+          dir=$RUNNER_TEMP/review-admission
+          mkdir "$dir"
+          touch "$dir/outputs" "$dir/refused"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$dir/pull.json"
+          gh api "users/$ACTOR" > "$dir/sender.json"
+          jq -n --slurpfile pull "$dir/pull.json" --slurpfile sender "$dir/sender.json" '{action: "synchronize", number: $pull[0].number, repository: $pull[0].base.repo, pull_request: $pull[0], sender: $sender[0]}' > "$dir/pr-event.json"
+          "$bin" event --allow workflow/review.toml --event-name pull_request --event "$dir/pr-event.json" --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" --out "$dir"
+          "$bin" review admit --decision "$dir/event.json" --base main --output "$dir/outputs"
+          jq -e --arg sha "$HEAD_SHA" --argjson pr "$PR" '.admitted == true and .head.sha == $sha and .item.number == $pr' "$dir/event.json"
+          grep -Fx "review-head=$HEAD_SHA" "$dir/outputs"
+          state=0
+          "$bin" event --allow workflow/review.toml --event-name merge_group --event "$GITHUB_EVENT_PATH" --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" --out "$dir" || state=$?
+          test "$state" = 1
+          "$bin" review admit --decision "$dir/event.json" --base main --output "$dir/refused"
+          grep -Fx 'admitted=false' "$dir/refused"
       - name: Bound the hosted end-to-end agent job
         env:
           GH_TOKEN: ${{ github.token }}

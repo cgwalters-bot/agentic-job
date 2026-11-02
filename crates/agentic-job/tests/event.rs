@@ -782,8 +782,17 @@ const REVIEW_CASES: &[ReviewCase] = &[
         refused: None,
     },
     ReviewCase {
+        name: "the scratch PR payload used by queued dispatch verification",
+        event_name: "pull_request",
+        event: "pull_request-same-repo.json",
+        actor: "alice",
+        permission: None,
+        pull_request: None,
+        refused: None,
+    },
+    ReviewCase {
         name: "another bot's pull request",
-        event_name: "pull_request_target",
+        event_name: "pull_request",
         event: "pull_request-same-repo.json",
         actor: "renovate[bot]",
         permission: None,
@@ -862,8 +871,7 @@ const REVIEW_CASES: &[ReviewCase] = &[
         pull_request: Some("pull-13-fork.json"),
         refused: None,
     },
-    // CI's e2e-review runs on pull requests only: these refusals are not
-    // exercised end to end. The event name is checked before the payload.
+    // The queued verifier checks this refusal with the actual queue payload.
     ReviewCase {
         name: "a merge group",
         event_name: "merge_group",
@@ -941,6 +949,43 @@ fn review_caller_bounds_gate_roles() {
         };
         let dir = tempfile::tempdir().expect("scratch directory");
         let mut event = review_fixture(case.event);
+        if case.name == "the scratch PR payload used by queued dispatch verification" {
+            // Run the workflow's actual jq construction on a PR API response.
+            let script =
+                std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+            let line = script
+                .lines()
+                .find(|line| line.contains("--slurpfile pull "))
+                .expect("PR event construction");
+            let filter = line.split('\'').nth(1).expect("jq filter");
+            let pull = dir.path().join("pull.json");
+            let sender = dir.path().join("sender.json");
+            std::fs::write(&pull, event["pull_request"].to_string()).expect("PR response");
+            std::fs::write(&sender, event["sender"].to_string()).expect("sender response");
+            let output = Command::new("jq")
+                .args(["-n", "--slurpfile", "pull"])
+                .arg(pull)
+                .args(["--slurpfile", "sender"])
+                .arg(sender)
+                .arg(filter)
+                .output()
+                .expect("jq runs");
+            assert!(output.status.success(), "{output:?}");
+            event = serde_json::from_slice(&output.stdout).expect("constructed event");
+        }
+        if case.event_name == "merge_group" {
+            event = serde_json::json!({
+                "action": "checks_requested",
+                "merge_group": {
+                    "head_sha": "1111111111111111111111111111111111111111",
+                    "head_ref": "refs/heads/gh-readonly-queue/main/pr-15-2222222",
+                    "base_sha": "2222222222222222222222222222222222222222",
+                    "base_ref": "refs/heads/main"
+                },
+                "repository": {"full_name": "cgwalters-forge/agentic-job"},
+                "sender": {"login": case.actor, "type": "User"}
+            });
+        }
         event["sender"]["login"] = case.actor.into();
         if case.actor.ends_with("[bot]") {
             event["sender"]["type"] = "Bot".into();
@@ -999,6 +1044,34 @@ fn review_caller_bounds_gate_roles() {
                 assert!(got.contains(case.event_name), "{name}: {got:?}");
             }
         }
+        // The same narrowing as policy.yml and the read-only queued verifier:
+        // an unauthorized event must not become an admitted review.
+        let outputs = dir.path().join("outputs");
+        std::fs::write(&outputs, "").expect("output file");
+        let output = Command::new(BIN)
+            .args(["review", "admit", "--base", "main", "--decision"])
+            .arg(dir.path().join("event.json"))
+            .arg("--output")
+            .arg(&outputs)
+            .output()
+            .expect("review admission runs");
+        assert!(output.status.success(), "{name}: {output:?}");
+        let lines = std::fs::read_to_string(outputs).expect("admission outputs");
+        let admitted = !cross && case.refused.is_none();
+        assert!(
+            lines.contains(&format!("admitted={admitted}\n")),
+            "{name}: {lines}"
+        );
+        let head = if admitted {
+            decision["head"]["sha"].as_str().expect("exact head")
+        } else {
+            assert!(!dir.path().join("task.md").exists(), "{name}");
+            ""
+        };
+        assert!(
+            lines.contains(&format!("review-head={head}\n")),
+            "{name}: {lines}"
+        );
     }
 }
 
