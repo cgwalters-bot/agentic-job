@@ -146,13 +146,19 @@ const RUNNER_WRITES: &[(&str, RunnerHosts, &[&str])] = &[
     // (secure-host-write-policy and e2e-write-policy), and to
     // productionresultssa30 in
     // https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049
-    // (secure-host-write-policy). DNS existence alone is not evidence of
+    // (secure-host-write-policy). On 2 Nov the same job downloaded from
+    // productionresultssa32 in
+    // https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777
+    // (job 125385760141, 16:00:47Z). Its failed upload did not name a host;
+    // this redirect verifies 32, not the upload destination.
+    // DNS existence alone is not evidence of
     // GitHub ownership: admit no neighboring accounts.
     (
         "GitHub Actions results storage (runner)",
         RunnerHosts::Hosts(&[
             "productionresultssa30.blob.core.windows.net",
             "productionresultssa31.blob.core.windows.net",
+            "productionresultssa32.blob.core.windows.net",
         ]),
         &["PUT"],
     ),
@@ -540,8 +546,11 @@ impl Policy {
         {
             return Decision::allow(&rule.name);
         }
-        let what = if read { "a read with a body" } else { &method };
-        Decision::deny(&format!("{what} to an endpoint not in the write allowlist"))
+        let body = if read { " (a read with a body)" } else { "" };
+        // Only the connection host, never the path or a signed URL's query.
+        Decision::deny(&format!(
+            "{method}{body} to {host}: endpoint not in the write allowlist"
+        ))
     }
 }
 
@@ -992,7 +1001,7 @@ mod tests {
             };
             assert_eq!(
                 runner.request(&request).allowed,
-                n == 30 || n == 31,
+                (30..=32).contains(&n),
                 "{host}"
             );
         }
@@ -1022,6 +1031,18 @@ mod tests {
             ("PUT", "productionresultssa20.blob.core.windows.net", false),
             ("PUT", "productionresultssa30.blob.core.windows.net", true),
             ("PUT", "productionresultssa31.blob.core.windows.net", true),
+            ("PUT", "productionresultssa32.blob.core.windows.net", true),
+            ("POST", "productionresultssa32.blob.core.windows.net", false),
+            (
+                "PUT",
+                "a.productionresultssa32.blob.core.windows.net",
+                false,
+            ),
+            (
+                "PUT",
+                "productionresultssa32.blob.core.windows.net.example",
+                false,
+            ),
             ("POST", "productionresultssa31.blob.core.windows.net", false),
             (
                 "PUT",
@@ -1092,19 +1113,26 @@ mod tests {
                 .reason,
             "git fetch (smart HTTP)"
         );
-        assert_eq!(
-            policy.request(&post("a.org", "/")).reason,
-            "POST to an endpoint not in the write allowlist"
-        );
-        assert_eq!(
-            policy
-                .request(&Request {
-                    has_body: true,
-                    ..get("a.org")
-                })
-                .reason,
-            "a read with a body to an endpoint not in the write allowlist"
-        );
+        for (method, has_body, websocket, what) in [
+            ("post", false, false, "POST"),
+            ("PUT", true, false, "PUT"),
+            ("GET", true, false, "GET (a read with a body)"),
+            ("GET", false, true, "WEBSOCKET"),
+        ] {
+            let decision = policy.request(&Request {
+                method,
+                host: "A.ORG.:443",
+                path: "/private/path?sig=do-not-print#fragment",
+                has_body,
+                websocket,
+                ..Request::default()
+            });
+            assert!(!decision.allowed);
+            assert_eq!(
+                decision.reason,
+                format!("{what} to a.org: endpoint not in the write allowlist")
+            );
+        }
         assert_eq!(policy.connect("github.com").reason, TUNNEL);
     }
 

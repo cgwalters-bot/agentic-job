@@ -2076,6 +2076,18 @@ jobs:
           key: secure-host-write-policy-${{ github.run_id }}-${{ github.run_attempt }}
           fail-on-cache-miss: true
 
+      # Upload failure can prevent an artifact containing the proxy log.
+      # Print only destinations, not paths or signed URL query strings.
+      - name: Refused destinations from the last 64 KiB of the proxy log
+        if: ${{ failure() }}
+        run: |
+          size=$(sudo /usr/local/libexec/agentic-job helper egress-log-size)
+          if [[ "$size" =~ ^[0-9]+$ ]]; then
+            from=$((size > 65536 ? size - 65536 : 0))
+            sudo /usr/local/libexec/agentic-job helper egress-log --from "$from" |
+              head -c 65536 | jq -Rc 'fromjson? | select(.decision == "deny") | {method, host}'
+          fi
+
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file, the
   # cloud metadata service, an earlier step's process's environment and

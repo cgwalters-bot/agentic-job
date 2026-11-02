@@ -83,10 +83,11 @@ next image release:
   default; use an image built from this source until the pin moves.
 - Under `egress.write-policy`, the runner's storage writes go only to the
   results service's twenty `productionresultssaN` accounts from gh-aw,
-  `productionresultssa31` and `productionresultssa30`, verified through
+   `productionresultssa30`, `productionresultssa31` and `productionresultssa32`, verified through
   GitHub's artifact service redirects in CI runs
   [40611370113](https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113)
-  and [40812985049](https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049)
+   [40812985049](https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049)
+   and [41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777)
   (DNS existence alone does not establish ownership;
   [#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
   [tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),

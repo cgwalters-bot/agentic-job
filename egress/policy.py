@@ -214,8 +214,9 @@ class Policy:
         for rule in self.writes:
             if rule.matches(method, host, path):
                 return Decision(True, rule.name)
-        what = "a read with a body" if method in READ_METHODS else method
-        return Decision(False, f"{what} to an endpoint not in the write allowlist")
+        body = " (a read with a body)" if method in READ_METHODS else ""
+        # Never include the path or a signed URL's query in a refusal.
+        return Decision(False, f"{method}{body} to {host}: endpoint not in the write allowlist")
 
 
 def read_denylist(path: Path) -> frozenset:

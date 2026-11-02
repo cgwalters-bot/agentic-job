@@ -3853,7 +3853,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"printf '\\n\[egress\]\\nwrite-policy = true\\n'",
             r"uses: \./secure-host # zizmor: ignore\[self-repository\] .*\n        with:\n          config: \$\{\{ runner\.temp \}\}/write-policy\.toml\n          image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
         ],
-        &[r"continue-on-error|\|\| true|\n {6,8}(?:- )?if: |--proxy|-x |_PROXY: "],
+        &[r"continue-on-error|\|\| true|--proxy|-x |_PROXY: "],
     ),
     (
         "secure-host/hosted.toml",
@@ -4166,6 +4166,28 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
         ],
     ),
 ];
+
+#[test]
+fn write_policy_only_conditions_failure_diagnostics() {
+    let text = workflow("ci.yml");
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let steps = doc["jobs"]["secure-host-write-policy"]["steps"]
+        .as_vec()
+        .unwrap();
+    let diagnostic = "Refused destinations from the last 64 KiB of the proxy log";
+    assert_eq!(steps.last().unwrap()["name"].as_str(), Some(diagnostic));
+    for (index, step) in steps.iter().enumerate() {
+        if index == steps.len() - 1 {
+            assert_eq!(step["if"].as_str(), Some("${{ failure() }}"));
+            assert!(step["run"].as_str().unwrap().contains("helper egress-log"));
+            assert!(step["uses"].is_badvalue());
+        } else {
+            // Probes and uploads must run normally; a skipped probe proves nothing.
+            assert!(step["if"].is_badvalue(), "conditional probe: {step:?}");
+            assert_ne!(step["name"].as_str(), Some(diagnostic));
+        }
+    }
+}
 
 #[test]
 fn workflow_shapes() {

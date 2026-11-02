@@ -176,8 +176,17 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(self.policy.request(method="GET", host="a.org", path="/").reason, "read")
         d = self.policy.request(method="POST", host="github.com", path="/a/b/git-upload-pack")
         self.assertEqual(d.reason, "git fetch (smart HTTP)")
-        d = self.policy.request(method="POST", host="a.org", path="/")
-        self.assertIn("not in the write allowlist", d.reason)
+        for method, extra, what in [
+            ("post", {}, "POST"),
+            ("PUT", {"has_body": True}, "PUT"),
+            ("GET", {"has_body": True}, "GET (a read with a body)"),
+            ("GET", {"websocket": True}, "WEBSOCKET"),
+        ]:
+            with self.subTest(method=method, extra=extra):
+                d = self.policy.request(method=method, host="A.ORG.:443",
+                                        path="/private/path?sig=do-not-print#fragment", **extra)
+                self.assertFalse(d.allowed)
+                self.assertEqual(d.reason, f"{what} to a.org: endpoint not in the write allowlist")
 
     def test_glob(self):
         cases = [

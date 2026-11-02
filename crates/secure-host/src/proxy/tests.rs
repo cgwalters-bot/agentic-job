@@ -468,7 +468,10 @@ async fn redirected_connections() {
     let (status, denied, _) = send(&mut sender, request("POST", "/a", "secure.test", "x")).await;
     assert_eq!(
         (status, denied.as_deref()),
-        (403, Some("POST to an endpoint not in the write allowlist"))
+        (
+            403,
+            Some("POST to secure.test: endpoint not in the write allowlist")
+        )
     );
     assert_eq!(fixture.secure.take(), ["GET /a"]);
 
@@ -820,17 +823,17 @@ async fn refusals_in_and_of_tunnels() {
         (
             "secure.test",
             request("POST", "/other", "secure.test", "x"),
-            "POST to an endpoint not in the write allowlist",
+            "POST to secure.test: endpoint not in the write allowlist",
         ),
         (
             "secure.test",
-            request("PUT", "/upload", "secure.test", "x"),
-            "PUT to an endpoint not in the write allowlist",
+            request("PUT", "/upload?sig=do-not-print", "secure.test", "x"),
+            "PUT to secure.test: endpoint not in the write allowlist",
         ),
         (
             "secure.test",
             with_body,
-            "a read with a body to an endpoint not in the write allowlist",
+            "GET (a read with a body) to secure.test: endpoint not in the write allowlist",
         ),
     ];
     for (sni, request, reason) in cases {
@@ -915,7 +918,7 @@ async fn websockets_need_a_write_rule() {
         (status, denied.as_deref()),
         (
             403,
-            Some("WEBSOCKET to an endpoint not in the write allowlist")
+            Some("WEBSOCKET to secure.test: endpoint not in the write allowlist")
         )
     );
 

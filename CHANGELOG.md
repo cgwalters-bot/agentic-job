@@ -23,6 +23,11 @@ says what a caller may rely on across versions.
 - Apply accepts the applying account's existing fork in the output repository's
   fork network even when its parent differs, retaining the ownership and
   Actions-off checks (#2801).
+
+- Egress write refusals name the method and destination host without signed
+  URL queries. The runner's results-storage PUT rule also admits the exact
+  `productionresultssa32` account, verified by a GitHub artifact redirect (#2811).
+
 - The hosted configurations (`secure-host/hosted.toml` and the agent's
   `.github/agentic-job/hosted.toml`) stop `acpid.socket` and `acpid.service`,
   whose local socket on some hosted runners failed `local-sockets` (#2790).
