@@ -12,6 +12,9 @@ says what a caller may rely on across versions.
 - Runs with a known proxy request count of zero stop after five minutes with
   `no_requests` and retryable exit 4, logging bounded process state and last
   output before killing the agent. Direct providers without counts are unchanged.
+- The `secure-host` forwarder runs the secure-host v0.6.4 image, so the
+  agent's `agentic-job` on PATH is no longer 0.6.3, which refused the
+  v0.6.4 policy's hand-back configuration (#2771).
 - Capture refuses request files over 1000 nonblank lines whole, including
   their changes or replacement series, instead of publishing a truncated prefix.
   `handback check` reports the refusal even without a working-tree change (#2750).

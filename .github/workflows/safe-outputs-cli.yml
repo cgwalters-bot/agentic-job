@@ -34,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Secure the host
-        uses: cgwalters-forge/actions/secure-host@636b20b87bc94417999062ada22700ef4d6a8836 # main, with secure-host:v0.6.3
+        uses: cgwalters-forge/actions/secure-host@de677fefc15c16cb85302bbb9a64732e44d78d75 # main, with secure-host:v0.6.4
       - name: Build the standalone CLI
         run: cargo build --locked -p safe-outputs --bin safe-outputs
       - name: Construct and check a non-agent request without a write credential

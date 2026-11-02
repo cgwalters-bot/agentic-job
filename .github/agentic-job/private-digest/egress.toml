@@ -13,7 +13,7 @@ mode = "allowlist"
 # github.com for the clone, api.github.com for the agent's REST reads
 # with the job's read token, which reads only this repository.
 # Red Hat's public registry for config.toml's pinned container probe image.
-# The pinned v0.6.3 host also requires npm/cargo fetches to pass when installed.
+# The pinned v0.6.4 host also requires npm/cargo fetches to pass when installed.
 # These are additional destinations that can receive source in a GET, not
 # write rules. Review them as confidentiality destinations before adoption.
 allow = [

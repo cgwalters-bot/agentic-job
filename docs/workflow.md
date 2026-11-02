@@ -67,9 +67,6 @@ separate jobs on separate machines. The apply job's additional checks are
    ([requirements.md](requirements.md#actors-and-trust)); the workflow
    still passes no inference key or MCP credential, and refuses a
    private caller or target and `fake-profile` there.
-   The pinned image still needs `sandbox.deny-runner-metadata = true`
-   to close metadata to the runner's user
-   ([main versus the pinned image](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)).
 3. **check**, on a machine the agent never touched. `agentic-job collect`
    validates and sanitizes the producer's requests, as gh-aw's collector
    would, then `agentic-job check` holds them and the patch to the policy.

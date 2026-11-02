@@ -65,7 +65,7 @@ forward keeps the old action. At `@main` or a later commit:
 
 ### What main has that the pinned image does not yet
 
-The action's documents describe the image it pins (v0.6.3). Main has
+The action's documents describe the image it pins (v0.6.4). Main has
 changed the host since, and a forwarder caller gets these only with the
 next image release:
 
@@ -81,19 +81,6 @@ next image release:
   exceptions. An explicit `config` still replaces the default whole.
   The pinned image does not yet admit CentOS Stream 10, even with this
   default; use an image built from this source until the pin moves.
-- `sandbox.deny-runner-metadata`, `sandbox.unlink-worker-diagnostics`
-  and `sandbox.deny-runner-reads` follow `sandbox.lock-runner` unless a
-  configuration sets them, and setup and `sandbox check` print what each
-  one set false leaves a later step. A host that runs no single
-  `Runner.Worker` must set `deny-runner-reads = false`. In the pinned
-  image each is off unless set true, and the forwarder's
-  [`hosted.toml`](../secure-host/hosted.toml) sets none of them: unless
-  the caller's configuration (the policy job's, for the agent job) sets
-  them true, through the forwarder today every later step, the agent
-  included, still
-  reaches the cloud metadata service, can read the environment of a
-  process an earlier step left running, and can have `Runner.Worker`
-  dump its memory.
 - Under `egress.write-policy`, the runner's storage writes go only to the
   results service's twenty `productionresultssaN` accounts from gh-aw,
   `productionresultssa31` and `productionresultssa30`, verified through
@@ -104,14 +91,6 @@ next image release:
   [#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
   [tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),
   not to every Azure storage account.
-- The sandbox user is refused EC2's IPv6 metadata address
-  unconditionally
-  ([#1467](https://github.com/cgwalters-forge/agentic-job/pull/1467)),
-  not only with `sandbox.deny-runner-metadata`.
-- `sandbox.create-user = false` skips the sandbox user for a host that
-  runs nothing as another user
-  ([what it adds](sandbox.md#what-the-sandbox-user-adds)); the pinned
-  image predates the key and always makes the user.
 
 ## On a host that is not a GitHub Actions runner
 

@@ -146,7 +146,7 @@ checkout before handing it to the host image, which reads it from `/`.
 Container and subordinate-UID probes remain enabled even though the digest
 itself does not use containers. The configuration pins the official UBI minimal
 probe image by digest, and the allowlist admits `registry.access.redhat.com`
-for its manifests and layers. The pinned v0.6.3 host also expects successful
+for its manifests and layers. The pinned v0.6.4 host also expects successful
 package fetches when npm or cargo is installed, so `registry.npmjs.org`,
 `index.crates.io` and `static.crates.io` are allowed for those probes.
 No registry write rule is added. Like GitHub, these registries and their
