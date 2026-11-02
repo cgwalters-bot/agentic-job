@@ -147,7 +147,7 @@ gh-aw's, which send the same requests
 
 Off GitHub, `agentic-job apply --forge forgejo` publishes
 `add_comment`, `create_pull_request`, `push_to_pull_request_branch`,
-`create_issue`, `add_labels`, `remove_labels`, `close_issue` and
+`create_pull_request_review_comment`, `create_issue`, `add_labels`, `remove_labels`, `close_issue` and
 `close_pull_request`, writes nothing for `noop`, `missing_tool` and
 `missing_data`, and refuses the rest
 ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)). With
@@ -159,7 +159,7 @@ pre-write checks remain in place. Repository label listings accept up to
 1000 labels and refuse overflow before writes.
 `agentic-job apply --forge gitlab` publishes `add_comment`, to the
 caller's `--comment-target` of the `--comment-target-kind` it names,
-`create_pull_request`, `push_to_pull_request_branch`, `create_issue`,
+`create_pull_request`, `push_to_pull_request_branch`, `create_pull_request_review_comment`, `create_issue`,
 `close_issue`, `close_pull_request`, and `add_labels` and
 `remove_labels`, which there name their item by exactly one of
 `issue_number` and `pull_request_number`, never `item_number`; it writes
@@ -187,8 +187,8 @@ that mode, an identical GitLab status suppresses a write only if the
 status role's actor set it
 ([Forgejo and GitLab roles](safe-outputs.md#forgejo-and-gitlab-roles)).
 
-Both non-GitHub publishers also accept `create_pull_request_review_comment`
-when listed with a `max` in bounds. Check requires the trusted caller's
+For `create_pull_request_review_comment`, both non-GitHub publishers require
+the type listed with a `max` in bounds. Check requires the trusted caller's
 `--comment-repo`, `--comment-target` and `--review-head` and records
 `inline_target: {repo, number, head}` in its report; apply requires the same
 fixed target. Only single-line `path`, `line`, optional `side` (`RIGHT` by
@@ -202,7 +202,8 @@ What a producer leaves for `run` to take
 ([what the agent does](safe-outputs.md#what-the-agent-does)):
 
 - `out/safe-outputs.jsonl` under the agent's home: the requests above,
-  at most 1 MiB and 1000 lines.
+  at most 1 MiB and 1000 nonblank lines. Capture currently truncates excess
+  lines rather than refusing them ([capture limits](safe-outputs.md#what-the-agent-does)).
 - `out/outcome.json`, at most 64 KiB: `summary`, `tests` (each a
   `command`, `exit_code` and `duration_s`), `stopped_early` (null or why),
   and, where `ready_when_complete` asks for one, `checkpoint` (`complete`,

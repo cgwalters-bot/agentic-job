@@ -1229,6 +1229,10 @@ request it did, a `noop` or an open checkpoint among them. A session
 that reminds the agent of a missing hand-back names the file and the
 limit to it first.
 
+Keep requests within 1000 nonblank lines: capture currently takes only the
+first 1000, without refusing an overflow. `handback check` checks that
+captured result too, so it does not detect requests lost beyond that limit.
+
 The brief tells the agent to leave a part of a change that check would
 refuse out and say so, except when it is the whole task: then the agent
 makes it anyway, so that the run fails with check naming the file rather
