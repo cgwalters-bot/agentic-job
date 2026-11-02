@@ -1738,6 +1738,50 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
     }
 }
 
+/// Split the bounded writer's output across the reader's first-line exit.
+/// An early-closing reader makes poll wake on POLLERR, then the next write
+/// raises SIGPIPE; a draining reader waits for and consumes the second write.
+#[test]
+fn run_drains_the_bounded_secret_location_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("out")).unwrap();
+    std::fs::write(dir.path().join("out/secret-at"), "").unwrap();
+    executable(&dir.path().join("agentic-job"), "#!/bin/sh\nexit 1\n");
+    executable(
+        &dir.path().join("head"),
+        r#"#!/usr/bin/python3
+import os, select, signal, sys
+if sys.argv[1:] != ['-c', '512', os.environ['JOB_DIR'] + '/out/secret-at']:
+    os.execv('/usr/bin/head', ['head'] + sys.argv[1:])
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+os.write(1, b'safe-outputs/change.patch, line 3\n')
+poll = select.poll(); poll.register(1, select.POLLERR); poll.poll(1000)
+os.write(1, b'x' * (512 - len(b'safe-outputs/change.patch, line 3\n')))
+open('writer-finished', 'w').close()
+"#,
+    );
+    let output = dir.path().join("output");
+    let summary = dir.path().join("summary");
+    let search = format!("{}:/usr/bin:/bin", dir.path().display());
+    let result = run_step(
+        "run/action.yml",
+        "Run the agent",
+        dir.path(),
+        &[
+            ("PATH", &search),
+            ("JOB_DIR", path(dir.path())),
+            ("GITHUB_OUTPUT", path(&output)),
+            ("GITHUB_STEP_SUMMARY", path(&summary)),
+        ],
+    );
+    assert!(result.status.success(), "{result:?}");
+    assert!(dir.path().join("writer-finished").exists());
+    assert_eq!(
+        std::fs::read_to_string(output).unwrap(),
+        "exit=1\nsecret-at=safe-outputs/change.patch, line 3\n"
+    );
+}
+
 #[test]
 fn network_refuses_debug_logging_before_minting() {
     let file = ".github/agentic-job/network/action.yml";
