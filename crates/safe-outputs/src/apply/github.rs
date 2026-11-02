@@ -786,7 +786,19 @@ impl Github {
             fork["fork"] == Value::Bool(true)
                 && same(&fork["owner"]["login"], me)
                 && owner(&name).eq_ignore_ascii_case(me)
-                && same(&fork["parent"]["full_name"], repo),
+                && (same(&fork["parent"]["full_name"], repo) || {
+                    // GitHub keeps one fork per account per network. An existing
+                    // fork can have a different parent when REPO is itself a fork.
+                    let target = self.get(&format!("/repos/{repo}"))?;
+                    let source = if target["fork"] == Value::Bool(true) {
+                        target["source"]["full_name"].as_str()
+                    } else {
+                        Some(repo)
+                    };
+                    source.is_some_and(|source| {
+                        !source.is_empty() && same(&fork["source"]["full_name"], source)
+                    })
+                }),
             "the forge answered a fork of {repo} for {me} with {name:?}, which is not {me}'s own fork of it"
         );
         ensure!(

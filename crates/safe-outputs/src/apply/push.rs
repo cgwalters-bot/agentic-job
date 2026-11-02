@@ -573,6 +573,14 @@ mod tests {
             self.config = json!({CREATE_PULL_REQUEST: {"max": 1}});
         }
 
+        fn same_network_fork(&mut self) {
+            self.new_pull_request();
+            self.edit("GET /repos/o/r", "fork", json!(true));
+            self.edit("GET /repos/o/r", "source", json!({"full_name": "upstream/r"}));
+            self.edit(FORK, "parent", json!({"full_name": "another/r"}));
+            self.edit(FORK, "source", json!({"full_name": "UPSTREAM/R"}));
+        }
+
         fn run(self) -> (Result<Target>, Vec<String>) {
             // git finds `bot/r` there, as the forge's fork with a branch.
             let (root, _) = repository();
@@ -684,6 +692,20 @@ mod tests {
             (
                 "a new pull request, from the identity's fork",
                 Case::new_pull_request,
+                pushed_to("bot/r", None),
+            ),
+            (
+                "the identity's fork with a different parent in the same network",
+                Case::same_network_fork,
+                pushed_to("bot/r", None),
+            ),
+            (
+                "the identity's fork whose source is the non-fork target",
+                |c| {
+                    c.same_network_fork();
+                    c.edit("GET /repos/o/r", "fork", json!(false));
+                    c.edit(FORK, "source", json!({"full_name": "O/R"}));
+                },
                 pushed_to("bot/r", None),
             ),
             (
@@ -1052,9 +1074,33 @@ mod tests {
             ),
             // What the forge answers with is the user's repository in the network.
             (
+                "a fork in a different network",
+                |c| {
+                    c.same_network_fork();
+                    c.edit(FORK, "source", json!({"full_name": "unrelated/r"}));
+                },
+                "which is not bot's own fork of it",
+            ),
+            (
+                "a fork without a source when the parent differs",
+                |c| {
+                    c.same_network_fork();
+                    c.edit(FORK, "source", Value::Null);
+                },
+                "which is not bot's own fork of it",
+            ),
+            (
+                "a fork target without a source when the parent differs",
+                |c| {
+                    c.same_network_fork();
+                    c.edit("GET /repos/o/r", "source", Value::Null);
+                },
+                "which is not bot's own fork of it",
+            ),
+            (
                 "a fork that is not one",
                 |c| {
-                    c.new_pull_request();
+                    c.same_network_fork();
                     c.edit(FORK, "fork", json!(false));
                 },
                 "which is not bot's own fork of it",
@@ -1062,7 +1108,7 @@ mod tests {
             (
                 "another user's repository",
                 |c| {
-                    c.new_pull_request();
+                    c.same_network_fork();
                     c.edit(FORK, "owner", json!({"login": "other"}));
                 },
                 "which is not bot's own fork of it",

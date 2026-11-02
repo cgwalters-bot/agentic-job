@@ -12,6 +12,9 @@ says what a caller may rely on across versions.
 - An opt-in post-release check (`check-forwarder-image: true`) fails with both
   tags when the secure-host forwarder's image differs from the newest `v` tag.
 
+- Apply accepts the applying account's existing fork in the output repository's
+  fork network even when its parent differs, retaining the ownership and
+  Actions-off checks (#2801).
 - The hosted configurations (`secure-host/hosted.toml` and the agent's
   `.github/agentic-job/hosted.toml`) stop `acpid.socket` and `acpid.service`,
   whose local socket on some hosted runners failed `local-sockets` (#2790).

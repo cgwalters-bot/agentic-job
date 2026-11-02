@@ -767,7 +767,11 @@ mod tests {
             (forked(with("owner", json!({"login": "other"}))), not_fork),
             (forked(with("full_name", json!("owner/name"))), not_fork),
             (
-                forked(with("parent", json!({"full_name": "other/name"}))),
+                [
+                    forked(with("parent", json!({"full_name": "other/name"}))),
+                    vec![(200, json!({"fork": false}).to_string())],
+                ]
+                .concat(),
                 not_fork,
             ),
             (
