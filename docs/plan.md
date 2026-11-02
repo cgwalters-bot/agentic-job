@@ -7,19 +7,54 @@ Real-agent runs and calls from another repository have happened, as
 reported in the [README](../README.md#what-is-real-today). They are not
 evidence that every runner image or caller configuration works.
 
-## Deployment and cutover
+The 1.0 bar is
+[tracker#596](https://github.com/cgwalters-forge/tracker/issues/596):
+a fresh deploy passes, the README alone suffices, v1.0 is released with
+stable formats and no JavaScript, and every open issue here is either a
+sub-issue of that epic or marked post-1.0 (P2), with none in
+`needs-design`. Its open sub-issues here are
+[#556](https://github.com/cgwalters-forge/agentic-job/issues/556),
+[#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) and the
+README-linked documentation audits
+[#2738](https://github.com/cgwalters-forge/agentic-job/issues/2738) to
+[#2741](https://github.com/cgwalters-forge/agentic-job/issues/2741), which
+continue [#2199](https://github.com/cgwalters-forge/agentic-job/issues/2199)
+after [#2435](https://github.com/cgwalters-forge/agentic-job/pull/2435) and
+[#2558](https://github.com/cgwalters-forge/agentic-job/pull/2558).
+Other work belongs to its own epic: the session and chat path, which
+tracker#596 leaves to [tracker#528](https://github.com/cgwalters-forge/tracker/issues/528),
+now to [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976);
+secure-host's split and security hardening to
+[tracker#674](https://github.com/cgwalters-forge/tracker/issues/674);
+other forges to [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786);
+the safe-outputs split to
+[tracker#1047](https://github.com/cgwalters-forge/tracker/issues/1047);
+review pacing ([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163))
+to [tracker#939](https://github.com/cgwalters-forge/tracker/issues/939);
+and the Ubuntu 26.04 rollout
+([#2400](https://github.com/cgwalters-forge/agentic-job/issues/2400)), whose
+live Renovate proof is still open, to
+[tracker#1054](https://github.com/cgwalters-forge/tracker/issues/1054).
 
-The operator's caller in `bootc-dev/cgwalters-devspace-sandbox` has run
-on RHEL 10 ([what has run](workflow.md#what-has-run-and-what-has-not),
-part of [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)).
-Its research and implement runs show sandbox setup and checks on 4 and 16
-cores, inference registration, request accounting and ending the
-registration, and a comment applied in that repository. They do not show a
-pull request applied from a fork, including into the `cgwalters-forge`
-midstream forks; the chat session on RHEL; a 64-core run; or homegit's run
-readers. Finish validating those. Compare representative tasks with the old runner before switching the
-default dispatch path. Keep the old path available for rollback; remove
-it only after the replacement has enough successful runs.
+## Deployment
+
+The cutover epic for agentic-job and agent-board
+([tracker#528](https://github.com/cgwalters-forge/tracker/issues/528)) was
+closed on 23 Oct as mostly done, its remainder superseded by
+[tracker#890](https://github.com/cgwalters-forge/tracker/issues/890). The old
+devspace runner (`devspace.yml` in that repository) still runs, as late as
+30 Oct for a session. Running agentic-job
+from `bootc-dev/cgwalters-devspace-sandbox` on bootc-dev's RHEL 10 runners
+is [#589](https://github.com/cgwalters-forge/agentic-job/issues/589), under
+the P2 epic [tracker#57](https://github.com/cgwalters-forge/tracker/issues/57).
+The operator chose that path on 30 Oct, for bootc's fix and rebase rounds
+first; it waits for the operator's review-required ruleset on that
+repository's `main`. Its earlier research and implement runs
+([what has run](workflow.md#what-has-run-and-what-has-not)) show sandbox
+setup and checks on 4 and 16 cores, inference registration and request
+accounting, and a comment applied there. They do not show a pull request
+applied from a fork, including into the `cgwalters-forge` midstream forks;
+the chat session on RHEL; or a 64-core run.
 
 The parity tests still use cgwalters-devspace-sandbox at
 [df1e867](https://github.com/cgwalters-forge/cgwalters-devspace-sandbox/tree/df1e867bb551ed8e36bd535f6d304a0861f54913).
@@ -32,75 +67,44 @@ the review verdict and dispatch's review profile: PRs skip E2E and merge groups
 exercise only the event caller's policy refusal instead. Use a trusted, human-approved execution path
 without granting unreviewed PR code write or OIDC authority. This is follow-up
 to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464),
-not coverage demonstrated by local tests.
+not coverage demonstrated by local tests; no open issue tracks it.
 
-[Sandbox gaps (#21)](https://github.com/cgwalters-forge/agentic-job/issues/21)
-left open: other local DNS stubs' upstreams, UDP listeners and bus
-services that ask polkit nothing, and a test of a whole setup on an
-image's user. [Run gaps (#20)](https://github.com/cgwalters-forge/agentic-job/issues/20)
-include why a file made under `umask 077` came out 0664 on ubuntu-26.04,
-host probes that `run` repeats only when asked (`before-agent`), proxies
-for anything but the identity-token request, stalled request counts, and a test of `run` with
-an agent that holds the token. Streaming files through redaction and the
-upload gate ([#899](https://github.com/cgwalters-forge/agentic-job/issues/899))
-is done, except that one line is still held in memory whole.
+Host gaps left open when the sandbox and run follow-ups closed, also
+untracked:
+[#729](https://github.com/cgwalters-forge/agentic-job/pull/729) left other
+local DNS stubs' upstreams and bus services that ask polkit nothing, and
+does not probe UDP listeners; the RHEL listeners belong in that caller's
+configuration. [#741](https://github.com/cgwalters-forge/agentic-job/pull/741)
+left why a file made under `umask 077` came out 0664 on ubuntu-26.04, host
+probes that `run` repeats only when asked (`before-agent`), proxies for
+anything but the identity-token request, and a test of `run` reaching its
+probes through an agent stand-in. Streaming redaction and the upload gate
+([#909](https://github.com/cgwalters-forge/agentic-job/pull/909)) still
+holds one line in memory whole.
 
-[Apply checks (#17)](https://github.com/cgwalters-forge/agentic-job/issues/17)
-need review against the base, file-list and rename checks already implemented.
-[Setup performance (#108)](https://github.com/cgwalters-forge/agentic-job/issues/108)
-still tracks feed-pin maintenance; source-attested releases exist, and the
-host-wide walk is gone, replaced by the access-time world-write policy.
+Setup in Rust ([#882](https://github.com/cgwalters-forge/agentic-job/issues/882))
+and the Rust egress proxy as the default
+([#919](https://github.com/cgwalters-forge/agentic-job/issues/919)) are done,
+but `[egress] rust-proxy = false` still installs mitmproxy from PyPI
+([egress.rs](../crates/secure-host/src/egress.rs)). Agents still install with npm
+([setup.rs](../crates/agentic-job/src/sandbox/setup.rs)); a prebuilt image
+where every step is non-root is
+[#137](https://github.com/cgwalters-forge/agentic-job/issues/137), with the
+unproven prototype in draft
+[#144](https://github.com/cgwalters-forge/agentic-job/pull/144).
 
-[Setup in Rust (#882)](https://github.com/cgwalters-forge/agentic-job/issues/882):
-our setup code should be the binary's, with no package fetches beyond an
-agent's. Ranked by expected time saved and fetches removed (estimates from one hosted job's
-61 s `packages` stage, not yet measured per slice): install agents from
-pinned, checksummed tarballs instead of a distribution's npm; remove the
-Python egress proxy (`python3-venv` and PyPI at setup), now that the Rust
-one is the default, keeping every egress test
-([#919](https://github.com/cgwalters-forge/agentic-job/issues/919)); a prebuilt image or cached layer
-([#144](https://github.com/cgwalters-forge/agentic-job/issues/144)).
-secure-host's root steps run no Node any more, which saved little time, since
-hosted images ship Node: `sandbox timed`
-replaced `setup-timing.mjs --run`, `agentic-job secure-host` replaced
-`platform.mjs`, `apt.mjs` and root's bpftool loader `world-write.mjs`, and
-the shell script `binary.sh` replaced `binary.mjs`, which gets the binary,
-and `github.mjs`, which prepared gh and retried GitHub throttling for it;
-`agentic-job secure-host inference` replaced `inference-preflight.py`.
-
-Done from the gh-aw gaps: the agent reads GitHub with a read-only token
-([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), a label
-starts a run and is consumed
-([#117](https://github.com/cgwalters-forge/agentic-job/issues/117)), and the
-offline audit and cost summary exist
-([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)), and one
-remote MCP server is served with a credential the agent never holds
-([mcp.md](mcp.md), the first part of
-[#120](https://github.com/cgwalters-forge/agentic-job/issues/120)).
-The remaining gh-aw gaps have separate issues: more output
-types and bounds ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)),
-threat detection ([#114](https://github.com/cgwalters-forge/agentic-job/issues/114)),
-private repositories ([#115](https://github.com/cgwalters-forge/agentic-job/issues/115)),
-egress allowlists ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)),
-workflow-integrated run guards and organization bounds
-([#118](https://github.com/cgwalters-forge/agentic-job/issues/118)), memory
-([#119](https://github.com/cgwalters-forge/agentic-job/issues/119): memory hand-back
-and check exist; store and restore remain), MCP integrations
-beyond [one remote server](mcp.md) (stdio servers, more secrets, Playwright;
-[#120](https://github.com/cgwalters-forge/agentic-job/issues/120)), a conclusion job and
-maintenance ([#121](https://github.com/cgwalters-forge/agentic-job/issues/121)).
-Per-author or per-window limits on admitted runs need a fresh design under
-[#118](https://github.com/cgwalters-forge/agentic-job/issues/118): the unwired
-`cooldown`/`max-runs-per-user` history protocol was removed with the pull
-request review ([#466](https://github.com/cgwalters-forge/agentic-job/issues/466)).
-Until then [review](review.md) starts automatic reviews only for the owner,
-members, collaborators and bots the repository lists by id, and the
-broker's shared cap bounds spending.
-
-[`workflows check`](workflows-check.md) runs in the required ingress `vet`
-job from base-branch code with base exemptions
-([#508](https://github.com/cgwalters-forge/agentic-job/issues/508)). Callers
-can opt in with the documented pinned job and a required-check ruleset.
+The gh-aw gap issues (#112 to #122) are closed, leaving untracked: storing
+and restoring the checked memory file
+([#119](https://github.com/cgwalters-forge/agentic-job/issues/119)), and MCP
+servers started from a command, more than one secret, and Playwright
+([mcp.md](mcp.md), [#120](https://github.com/cgwalters-forge/agentic-job/issues/120)).
+Run guards ([#118](https://github.com/cgwalters-forge/agentic-job/issues/118))
+were not planned: pacing belongs to the scheduler, and per-run caps bound
+spend. The unwired cooldown and per-user history were removed with the pull
+request review ([#466](https://github.com/cgwalters-forge/agentic-job/issues/466)),
+so per-author limits on reviews would need a new design, with no issue yet
+(#2163 paces reviews by pool, not by author); until then [review](review.md) starts automatic reviews only for the owner,
+members, collaborators and bots the repository lists by id.
 
 Pushing to a pull request's branch
 ([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) is off in
@@ -116,10 +120,10 @@ and a scripted run is given none, so that case needs one first.
 
 Pull requests from a fork ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340))
 have run live from one caller, with a classic PAT that has the `repo` and
-`workflow` scopes; without `workflow`, a push to a fork that is behind in
-a workflow file is untried
-([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)). CI
-does not run them: it needs an end-to-end
+`workflow` scopes. The docs require `workflow`, since apply never syncs a
+fork and a stale fork's push can bring in a workflow change; a PAT without
+it is untried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
+CI does not run them: it needs an end-to-end
 job that opens one from a fork again, with a bot PAT held in an
 environment that a fork's pull request cannot reach. The recommended
 credential is a classic `repo` PAT of a dedicated account; a fine-grained
@@ -129,10 +133,14 @@ fork's Actions and open the pull request are known.
 
 ### secure-host as a standalone project
 
-Before secure-host can become its own project
-([#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735)),
-it has gaps against what the OpenSSF expects of a hosted project. They
-are ranked in [#1736](https://github.com/cgwalters-forge/agentic-job/issues/1736#issuecomment-6330752528)
+[#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) is a
+`needs-design` epic parked under
+[tracker#674](https://github.com/cgwalters-forge/tracker/issues/674). It
+does not meet tracker#596's no-`needs-design` bar; whether it is exempt or
+marked P2 is the operator's call.
+
+Before secure-host can become its own project, it has gaps against what
+the OpenSSF expects of a hosted project. They are ranked in [#1736](https://github.com/cgwalters-forge/agentic-job/issues/1736#issuecomment-6330752528)
 and listed here in that order, because no run can file them as issues
 (dispatch.toml allows no `create_issue` output). Each item says where it
 lands: in this repository now; with the operator, because it changes
@@ -206,9 +214,12 @@ of #1735 creates. Sizes are the comment's.
 ## Interactive sessions
 
 A session run waits for one operator's prompts after its task's turn, over
-the tailnet ([session runs](../specs/session.md)); the chat pane and writes
-during a session are not built. [interactive.md](interactive.md) keeps
-the rest of the design.
+the tailnet ([session runs](../specs/session.md)); writes during a session
+are specified, not built, and no end-to-end session has run over a real
+tailnet. [#536](https://github.com/cgwalters-forge/agentic-job/issues/536)
+tracks the rest, waiting on the operator's dispatch credential, tailnet
+changes and cgwalters-forge/actions#29. [interactive.md](interactive.md)
+keeps the rest of the design.
 
 ## What needs the operator
 
@@ -216,9 +227,13 @@ Deployment policy, environment tokens, proxy admission and Tailscale SSH
 access belong to the operator, as do most of
 [secure-host's gaps as a standalone project](#secure-host-as-a-standalone-project).
 Per-run App tokens are deferred
-([tracker#403](https://github.com/cgwalters-forge/tracker/issues/403)); an
-applier off GitHub is separate work
-([tracker#427](https://github.com/cgwalters-forge/tracker/issues/427)).
+([tracker#403](https://github.com/cgwalters-forge/tracker/issues/403)).
+Forgejo and GitLab publishers exist
+([apply](../crates/safe-outputs/src/apply/), under
+[tracker#786](https://github.com/cgwalters-forge/tracker/issues/786)); a
+GitLab end-to-end job ([#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111))
+waits for the operator's gitlab.com test group and token
+([#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110)).
 A caller's own agent job ([the pieces](workflow.md#the-pieces-and-an-agent-job-of-your-own))
 can be admitted by the broker only by repository, not by its workflow
 file, which widens admission ([inference admission](inference.md#which-workflows-a-broker-admits));
