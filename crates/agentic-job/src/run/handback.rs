@@ -57,7 +57,7 @@ const MEMORY_ENTRY_BYTES: usize = 2 + 64 + 1;
 /// file as well.
 pub const MAX_OUTPUTS_BYTES: usize = 1 << 20;
 pub const MAX_OUTCOME_BYTES: usize = 64 << 10;
-/// The most lines of the requests file that are passed on.
+/// The most nonblank lines allowed in the requests file.
 pub const MAX_LINES: usize = 1000;
 /// The file of the run's results that holds the agent's outcome.
 pub const OUTCOME_FILE: &str = "outcome.json";
@@ -486,6 +486,7 @@ fn split_message(message: &str) -> (String, String) {
 /// branch, and a request made from its outcome when it changed files
 /// without asking for one. A line that is not a JSON object stays as it
 /// is, for the check to refuse.
+/// Capture has already refused files with more than [`MAX_LINES`] nonblank lines.
 pub fn build_outputs(
     agent_text: &str,
     policy: &Policy,
@@ -503,11 +504,7 @@ pub fn build_outputs(
     }
     let mut message = None;
     let mut secondary = None;
-    let mut lines: Vec<String> = agent_text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(MAX_LINES)
+    let mut lines: Vec<String> = request_lines(agent_text)
         .map(|line| {
             let Ok(mut item) = serde_json::from_str::<Object>(line) else {
                 return line.to_owned();
@@ -597,6 +594,10 @@ pub fn build_outputs(
         message,
         secondary,
     }
+}
+
+fn request_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty())
 }
 
 /// Whether LINE of the agent's text may not stand in a commit's message
@@ -1523,11 +1524,26 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     // taken ends the hand-back here, with the reason in the result: the
     // outcome is still the agent's report, and is saved.
     let requests = read_agent_file(runner, &request.home.join(AGENT_OUTPUTS), MAX_OUTPUTS_BYTES);
-    if requests == AgentFile::Refused {
+    let agent_text = match &requests {
+        AgentFile::Taken(bytes) => String::from_utf8_lossy(bytes),
+        _ => std::borrow::Cow::Borrowed(""),
+    };
+    // Refuse before making any fallback carrier, including a replacement's.
+    // The byte cap bounds this read; only seek the first excess nonblank line.
+    let refused = if requests == AgentFile::Refused {
+        Some(requests_refused())
+    } else if request_lines(&agent_text).nth(MAX_LINES).is_some() {
+        Some(format!(
+            "~/{AGENT_OUTPUTS} exceeds {MAX_LINES} nonblank lines: \
+             none of its requests is taken, nor a change without them"
+        ))
+    } else {
+        None
+    };
+    if let Some(why) = refused {
         let mut text = serde_json::to_string(&outcome).context("writing the outcome")?;
         text.push('\n');
         write(&request.run_dir.join(OUTCOME_FILE), text.as_bytes())?;
-        let why = requests_refused();
         let mut change = Change {
             files,
             requests_dropped: Some(why.clone()),
@@ -1543,10 +1559,6 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
         }
         return Ok(change);
     }
-    let agent_text = requests
-        .taken()
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
     // An explicit replacement is the complete series, not a working-tree
     // fixup. Never reset/squash the producer's checkout on this path.
     let replacement_path = request.home.join(REPLACEMENT_PATH);
@@ -2024,9 +2036,6 @@ mod tests {
         let got = build_outputs("", &noop_only, true, &outcome, RUN_ID);
         assert_eq!((got.text.as_str(), got.wants_patch), ("", false));
         // No more lines are passed on than the cap.
-        let many = "{\"type\":\"noop\"}\n".repeat(MAX_LINES + 5);
-        let got = build_outputs(&many, &policy, false, &outcome, RUN_ID);
-        assert_eq!(got.text.lines().count(), MAX_LINES);
     }
 
     /// Under `ready_when_complete`, a pull request made up for work the
@@ -3975,6 +3984,71 @@ mod tests {
     /// A requests file the agent left that is not taken drops the
     /// hand-back whole, with the reason: not a pull request made up from
     /// the outcome in place of what the agent wrote (#1463).
+    #[test]
+    fn request_line_cap_refuses_the_whole_artifact_before_any_carrier() {
+        let noop = "{\"type\":\"noop\",\"message\":\"Done\"}\n";
+        for (name, prefix, tail, refused) in [
+            ("cap", noop, "", false),
+            ("cap plus one", noop, noop, true),
+            ("blank lines", " \r\n\t\n", "", false),
+            (
+                "cap with blanks",
+                " \r\n{\"type\":\"noop\",\"message\":\"Done\"}\r\n\t\n",
+                "",
+                false,
+            ),
+            ("malformed at cap", noop, "not JSON", false),
+            ("malformed after cap", noop, "not JSON", true),
+        ] {
+            let count = MAX_LINES - usize::from(name == "malformed at cap");
+            let requests = format!("{}{tail}", prefix.repeat(count));
+            for path in ["analysis", "changed", "replacement"] {
+                let (home, mut policy, mail) = replacement_home();
+                if path == "analysis" {
+                    policy = self::policy(Kind::Analysis, json!({"noop": {"max": 1}}));
+                } else if path == "changed" {
+                    policy = self::policy(Kind::Branch, pull_requests());
+                } else {
+                    let series =
+                        json!({"base_commit": home.checkout.base_commit, "commits": [mail]});
+                    std::fs::write(home.path(REPLACEMENT_PATH), series.to_string()).unwrap();
+                }
+                std::fs::write(home.path(AGENT_OUTPUTS), &requests).unwrap();
+                let change = home.collect(&policy, &config::Commit::default());
+                assert_eq!(change.requests_dropped.is_some(), refused, "{name}/{path}");
+                if refused {
+                    assert_eq!(
+                        change.requests_dropped.as_deref(),
+                        Some(
+                            "~/out/safe-outputs.jsonl exceeds 1000 nonblank lines: none of its requests is taken, nor a change without them"
+                        )
+                    );
+                    assert!(home.handed_back().is_empty(), "{name}/{path}");
+                    assert!(!change.handed_back_patch(), "{name}/{path}");
+                } else {
+                    if path == "analysis" && name == "blank lines" {
+                        assert!(home.handed_back().is_empty());
+                        continue;
+                    }
+                    let captured =
+                        std::fs::read_to_string(home.path("safe-outputs/outputs.jsonl")).unwrap();
+                    let mut expected = request_lines(&requests)
+                        .map(|line| format!("{line}\n"))
+                        .collect::<String>();
+                    if path != "analysis" {
+                        // The existing fallback still goes at the boundary; it
+                        // must never turn an overflow refusal into publication.
+                        let carrier = captured.lines().last().unwrap();
+                        assert!(carrier.contains(super::carrier(&policy, RUN_ID).0));
+                        expected.push_str(&format!("{carrier}\n"));
+                    }
+                    assert_eq!(captured, expected, "{name}/{path}");
+                    assert_eq!(change.handed_back_patch(), path != "analysis");
+                }
+            }
+        }
+    }
+
     #[test]
     fn requests_that_are_not_taken_drop_the_hand_back_whole() {
         let pull = policy(Kind::Branch, pull_requests());

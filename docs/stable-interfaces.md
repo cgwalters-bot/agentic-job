@@ -202,8 +202,9 @@ What a producer leaves for `run` to take
 ([what the agent does](safe-outputs.md#what-the-agent-does)):
 
 - `out/safe-outputs.jsonl` under the agent's home: the requests above,
-  at most 1 MiB and 1000 nonblank lines. Capture currently truncates excess
-  lines rather than refusing them ([capture limits](safe-outputs.md#what-the-agent-does)).
+  at most 1 MiB and 1000 nonblank lines. Capture refuses an over-limit file
+  whole, with its change or replacement series; it does not retain a prefix.
+  See [capture limits](safe-outputs.md#what-the-agent-does).
 - `out/outcome.json`, at most 64 KiB: `summary`, `tests` (each a
   `command`, `exit_code` and `duration_s`), `stopped_early` (null or why),
   and, where `ready_when_complete` asks for one, `checkpoint` (`complete`,

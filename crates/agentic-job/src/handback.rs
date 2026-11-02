@@ -389,6 +389,13 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
             run_dir: &results,
             safe_outputs: &outputs,
         })?;
+        if let Some(why) = change.requests_dropped {
+            report.problems.push(Problem {
+                at: home.join(AGENT_OUTPUTS).display().to_string(),
+                what: why,
+                fix: GUIDE_FIX.to_owned(),
+            });
+        }
         if let Some(why) = change.dropped {
             report.problems.push(Problem {
                 at: "the change".to_owned(),
@@ -1234,6 +1241,23 @@ mod tests {
         };
         let cases = [
             case("clean", "echo two >> a.txt", pull("Why.")),
+            Case {
+                want: Some("exceeds 1000 nonblank lines"),
+                ..case(
+                    "line overflow without a change",
+                    "true",
+                    "{\"type\":\"noop\",\"message\":\"Done\"}\n".repeat(capture::MAX_LINES + 1),
+                )
+            },
+            Case {
+                want: Some("exceeds 1000 nonblank lines"),
+                ..case(
+                    "line overflow with a change",
+                    "echo two >> a.txt",
+                    "{\"type\":\"noop\",\"message\":\"Done\"}\n".repeat(capture::MAX_LINES)
+                        + "not JSON",
+                )
+            },
             Case {
                 name: "untracked binary litter is left out",
                 ..case(

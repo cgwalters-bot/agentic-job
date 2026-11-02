@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Capture refuses request files over 1000 nonblank lines whole, including
+  their changes or replacement series, instead of publishing a truncated prefix.
+  `handback check` reports the refusal even without a working-tree change (#2750).
 - Apply leaves a continued pull request draft under `ready_when_complete` if
   it has a `hold` label (case-insensitive) or its labels cannot be read,
   recording why without failing the applied push (#2690).

@@ -1180,6 +1180,12 @@ hand-back is `outputs.jsonl`, `base.json` and at most one
 its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
+Capture accepts at most 1 MiB and 1000 nonblank request lines (blank lines
+are ignored). Overflow refuses the requests whole, with any change or
+replacement series, before making a fallback request; no prefix is published.
+`handback check` reports that refusal. Downstream collection still validates
+every captured request under the existing byte and policy count bounds.
+
 With `[commit] format = true` in the runner configuration (off by
 default), a branch run whose change has Rust in it (a new or changed
 `.rs` file, or a commit of the agent's that touches one) is formatted
@@ -1220,7 +1226,8 @@ handed back all the same. A hand-back of memory alone is uploaded like
 any other.
 
 The requests file is read the same way, and one the agent left that is
-not taken (a link, not a regular file, over 1 MiB, or unreadable) drops
+not taken (a link, not a regular file, over 1 MiB or 1000 nonblank lines,
+or unreadable) drops
 the whole hand-back, with the reason in the run's summary
 (`requests_dropped`, and `patch.error` for the change). The run does not
 make up a pull request from the outcome in its place: that would hand
@@ -1229,9 +1236,8 @@ request it did, a `noop` or an open checkpoint among them. A session
 that reminds the agent of a missing hand-back names the file and the
 limit to it first.
 
-Keep requests within 1000 nonblank lines: capture currently takes only the
-first 1000, without refusing an overflow. `handback check` checks that
-captured result too, so it does not detect requests lost beyond that limit.
+Keep requests within 1000 nonblank lines: capture refuses an overflow whole,
+before making a fallback request. `handback check` reports that refusal too.
 
 The brief tells the agent to leave a part of a change that check would
 refuse out and say so, except when it is the whole task: then the agent
