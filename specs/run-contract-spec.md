@@ -144,8 +144,10 @@ Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
 pull request, `secondary-base.json` and its patch, or the replacement form of
 RC-023; and, where the policy allows memory, `memory.json` beside either.
 It MUST refuse unexpected files,
-symlinks, directories, oversized files and PEM private keys; it MUST report
-other recognized secret-shaped strings as warnings by file and line, not refuse them.
+symlinks, directories, oversized files and PEM private keys. In other hand-back
+files, it MUST report other recognized secret-shaped strings as warnings by
+file and line, not refuse them. In `memory.json`, it MUST instead refuse
+recognized secret-shaped strings in decoded file names or text.
 A pull-request request MUST have exactly its named patch and valid base
 metadata matching the policy repository/base and patch header; a patch without
 a pull-request request MUST be refused.
@@ -360,7 +362,8 @@ apply's guard and not its handlers; and `AtMostOnce` and
 **RC-019 — Finding the result from the issue.** For a caller-named `issue`
 (a number of the output repository or of `item-repo`, checked by policy), apply MUST end a pull
 request's body, before the guard names it, with a reference line of its own:
-`Closes #N` for an issue of the output repository, which a merge closes, and
+`Closes #N` for an issue of the output repository, which a merge into its
+default branch closes, and
 `Refs OWNER/NAME#N` for one of `item-repo`. A body that already has that
 line, or for an issue of the output repository a `Refs #N` or `Part of #N`
 line, which leaves the issue open, is left as it is. The pull request handler
@@ -765,8 +768,7 @@ These limitations are not additional guarantees:
   request's place is not named, and a run whose `create_issue` max allows
   one may open it again on a re-run that gets past the run's branch.
   Conclude's reactions are not removed, so a re-run that ends otherwise
-  leaves both; and "Re-run all jobs" runs `notify` again, which posts a
-  second status comment.
+  leaves both.
 - Whether a supplied job, App or fine-grained token can write is not
   detectable before the run: GitHub reports scopes only for classic tokens,
   and validates an empty write's body before it authorizes it (422, not
