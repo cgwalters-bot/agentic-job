@@ -12,15 +12,23 @@ The 1.0 bar is
 a fresh deploy passes, the README alone suffices, v1.0 is released with
 stable formats and no JavaScript, and every open issue here is either a
 sub-issue of that epic or marked post-1.0 (P2), with none in
-`needs-design`. Its open sub-issues here are
+`needs-design`. Acceptance and operator decisions remain with
 [#556](https://github.com/cgwalters-forge/agentic-job/issues/556),
 [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) and the
 README-linked documentation audits
 [#2738](https://github.com/cgwalters-forge/agentic-job/issues/2738) to
-[#2741](https://github.com/cgwalters-forge/agentic-job/issues/2741), which
+[#2739](https://github.com/cgwalters-forge/agentic-job/issues/2739), which
 continue [#2199](https://github.com/cgwalters-forge/agentic-job/issues/2199)
 after [#2435](https://github.com/cgwalters-forge/agentic-job/pull/2435) and
 [#2558](https://github.com/cgwalters-forge/agentic-job/pull/2558).
+The harness/MCP/skills/run-contract audit
+[#2740](https://github.com/cgwalters-forge/agentic-job/issues/2740) and
+readiness-index/backlog reconciliation
+[#2741](https://github.com/cgwalters-forge/agentic-job/issues/2741) are closed;
+they are not outstanding audit owners. Merged implementation and closed
+documentation work do not establish fresh-deploy acceptance, v1.0 publication
+or caller configuration. Those remain tracker#596's acceptance questions;
+Issue #556 owns merge-policy/ruleset work and #2026 the remaining JavaScript decisions.
 Other work belongs to its own epic: the session and chat path, which
 tracker#596 leaves to [tracker#528](https://github.com/cgwalters-forge/tracker/issues/528),
 now to [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976);
@@ -64,14 +72,15 @@ That is a test fixture pin, not a claim that the old deployment is unchanged.
 
 Queued execution has run ([41239144677](https://github.com/cgwalters-forge/agentic-job/actions/runs/41239144677));
 the gap is hosted admission coverage for the event caller, the review verdict
-and dispatch's review profile. CI now wires queued scripted dispatch review to
+and dispatch's review profile. [CI](../.github/workflows/ci.yml) now wires queued scripted dispatch review to
 the run-owned scratch PR and checks its actual head and published verdict.
 Its read-only verifier also exercises event/review admission using that PR's
 payload and refuses the actual merge-group event; `e2e-review` remains PR-only.
-These are wiring claims, not hosted proof: a successful `merge_group` run of
-this revision is still needed. No PR gains write or OIDC authority. This is follow-up
-to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464),
-not coverage demonstrated by local tests; [#2808](https://github.com/cgwalters-forge/agentic-job/issues/2808) tracks it.
+These are wiring claims, not hosted proof. No PR gains write or OIDC authority. This is follow-up
+to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464).
+[#2808](https://github.com/cgwalters-forge/agentic-job/issues/2808) owns the remaining acceptance: a successful hosted `merge_group` run
+of this revision showing dispatch review, head/verdict verification and cleanup. Local tests and the
+earlier queued run do not establish that proof; docs-only changes skip E2E too.
 
 Host gaps left open when the sandbox and run follow-ups closed, also
 untracked:

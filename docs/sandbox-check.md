@@ -21,26 +21,32 @@ which must fail; any failure stops the run before the agent starts.
 That costs a full check's time. A probe or a control that comes out
 wrong fails the check: exit state 1.
 
-The run action calls it again, as `sandbox check --unless-passed`,
-before the agent starts. A check with `--record` leaves a record in
-`RUNNER_TEMP`, `agentic-job-sandbox-checked`, when
-all its probes passed: the job's run ID, attempt and name, the binary's
-version and a fingerprint of its bytes, and the installed configuration
-it probed. The pinned secure-host action runs its check without
-`--record`, so after it the run action's check probes again
-([inputs](secure-host.md#inputs-and-outputs)).
-A record means exactly that a check with `--record` passed and
-nothing has entered the sandbox user since, and it spares at most one
-check: only `--record` writes one, every check removes it before
-anything else, whether it takes it or not, and `run` removes it before
-the agent runs anything. A check with
-`--unless-passed` that finds the same record makes no probe; without it
-(no check with `--record` ran, the configuration or the binary
-changed, a step of the sandbox user's or an agent ran, or the run is in
-another job) it probes as usual, and leaves no record, so a second
-`run` in the job probes again. A step of the sandbox user's (`sandbox
-exec -- make check`) or an agent can leave behind what the probes look
-for, a process or a detached container. The threat is the sandbox user writing a record of a
+The [run action](../run/action.yml) calls `sandbox check --unless-passed`
+before the agent starts. The shipped [secure-host forwarder](../secure-host/action.yml)
+pins [actions at c763a895](https://github.com/cgwalters-forge/actions/blob/c763a8950778743f51857a37b2a59daf9e96ee23/secure-host/action.yml),
+whose `Prove it` step calls plain `agentic-job sandbox check`, **without
+`--record`**. It leaves no reusable record: normally the run action probes
+again, even with secure-host's default `check: true`
+([inputs](secure-host.md#inputs-and-outputs)). This is the integration
+mismatch noted in [#2743](https://github.com/cgwalters-forge/agentic-job/pull/2743),
+not evidence of record reuse by the shipped pin.
+
+Reuse is conditional: an explicit `sandbox check --record` that passes all
+probes can leave `RUNNER_TEMP/agentic-job-sandbox-checked`. The
+[record handling](../crates/secure-host/src/check/record.rs) matches the job's
+run ID, attempt and name, the binary's version and a non-cryptographic
+fingerprint of its bytes, and the exact installed configuration text.
+It requires an absolute `RUNNER_TEMP` and job identifiers; inability to
+fingerprint or write the record leaves the next check to probe normally.
+The [check](../crates/secure-host/src/check/mod.rs) consumes a record before
+probing, whether it matches or not. Only `--record` writes one;
+`--unless-passed` skips probes only on a match and never writes another.
+Changed configuration, another build or job, a missing or consumed record
+therefore causes normal probing. [`run`](../crates/agentic-job/src/run/enter.rs)
+removes it before entering either agent user, so it spares at most one check.
+Do not reuse a record across sandbox-user work (`sandbox exec -- make check`,
+say): that work can leave a process or detached container for probes to find.
+The threat is the sandbox user writing a record of a
 check that never passed: `RUNNER_TEMP` is closed to it, which the
 check that wrote the record proved
 ([the job's work directories](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#the-jobs-work-directories)).
@@ -49,18 +55,21 @@ file of the runner's user in a directory of its own that no one else can
 write in, which is where those probes look, and a link in its place is
 not followed.
 
-What the record does not stop is the runner's user itself. Steps of
-that user between secure-host and `run` run unprobed, and any of them
+When reuse is enabled, what the record does not stop is the runner's user
+itself. Steps of that user between the recorded check and `run` run
+unprobed, and any of them
 can write a record `run` takes, since everything in it is
 known to that user, or loosen what the probes proved (the home or
-workspace modes, a loopback listener) without `run` noticing. Before the
-record, `run` caught such a step; now it is the caller's to avoid, or
+workspace modes, a loopback listener) without `run` noticing. Without
+reuse, the run action probes after such a step; with reuse it is the caller's to avoid, or
 to catch with `before-agent`. Such a
 step already holds the job's credentials, so this loses a second look,
-not a privilege. In the reusable workflow nothing runs in between. A
+not a privilege. A
 caller job that runs repository code as the runner's user before `run`
 (`make check`, say) should
-give secure-host `check: false`, so that `run` probes after that code.
+give secure-host `check: false` and leave no record, so that `run` probes
+after that code. The shipped pin already leaves no record even with
+`check: true`.
 
 ## The egress policy and containers
 
