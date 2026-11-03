@@ -67,8 +67,9 @@ outputs:
   secret-at:
     description: >-
       For a run that uploaded nothing because a secret or a private key was in what it would have
-      published, where: the file and line ("safe-outputs/aw-agent-run-1.patch, line 3"), never
-      the string; empty otherwise
+      published, where: the file and line with an optional parenthesized public rule label
+      ("safe-outputs/aw-agent-run-1.patch, line 3 (known run secret: GH_TOKEN)"), never the
+      matched string; legacy file/line-only values remain valid; empty otherwise
     value: ${{ steps.run.outputs.secret-at }}
   session-endpoint:
     description: >-

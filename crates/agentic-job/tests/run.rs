@@ -1453,13 +1453,22 @@ fn a_planted_link_reads_nothing_of_the_runners() {
 
 /// A run of which something may not be published leaves nothing where
 /// uploads are taken from, and says why: a private key in what the agent
-/// handed back, which cannot be redacted; a fake agent's run
+/// handed back, which cannot be redacted; a known run credential; a fake agent's run
 /// in which the redaction found nothing; a run the proxy did not end.
 #[test]
 fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
     let change = json!({"write": {"title": "Write", "path": "{cwd}/FAKE.md", "content": "x\n"}});
     let leak = json!({"execute": {"title": "Bash",
         "command": "printf -- '-----BEGIN %s-----\\n' 'PRIVATE KEY' > key.pem"}});
+    // No credential shape: only production collection of the child's
+    // GH_TOKEN can make the upload gate recognize this harmless value.
+    let credential = [
+        "dummy",
+        "run",
+        "credential",
+        &std::process::id().to_string(),
+    ]
+    .join("-");
     // (the case, the session, whether the proxy ends the run, the reason)
     let cases = [
         (
@@ -1467,6 +1476,14 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
             json!([canary(), leak, {"say": "Done."}]),
             true,
             "pattern: private key header is in what the agent handed back, \
+             safe-outputs/aw-agent-run-4242.patch",
+        ),
+        (
+            "credential",
+            json!([canary(), {"write": {"title": "Write", "path": "{cwd}/FAKE.md",
+                "content": format!("{credential}\n")}}, {"say": "Done."}]),
+            true,
+            "known run secret: GH_TOKEN is in what the agent handed back, \
              safe-outputs/aw-agent-run-4242.patch",
         ),
         (
@@ -1492,7 +1509,15 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
         job.own_repository();
         job.allow(pull_requests());
         job.script(&steps);
-        let got = job.own_run(&own_config(&plain(&proxy)));
+        let mut command = job.own_command(&own_config(&plain(&proxy)));
+        if case == "credential" {
+            command.env(GITHUB_TOKEN_VAR, &credential);
+        }
+        let got = Finished::of(command.output().unwrap());
+        assert!(
+            !got.all().contains(&credential),
+            "{case}: credential in diagnostics"
+        );
         assert_eq!(got.code, Some(EXIT_ERROR), "{case}: {}", got.all());
         assert!(got.stderr.contains(want), "{case}: {}", got.all());
         assert!(
@@ -1501,6 +1526,15 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
             got.all()
         );
         assert!(job.nothing_published(), "{case}");
+        if case == "credential" {
+            let at = job.text("out/secret-at");
+            assert!(!at.contains(&credential), "credential in secret-at");
+            assert!(
+                at.starts_with("safe-outputs/aw-agent-run-4242.patch, line "),
+                "{at}"
+            );
+            assert!(at.ends_with(" (known run secret: GH_TOKEN)\n"), "{at}");
+        }
         assert!(!got.all().contains(&canary_text()), "{case}: {}", got.all());
         let left = processes_in(&job.path(HOME_DIR));
         assert!(left.is_empty(), "{case}: {left:?}");
