@@ -381,11 +381,15 @@ fn compose(args: &Args) -> Result<String> {
     let config = Config::parse(&text)?;
     if args.host {
         config.check_host()?;
-        // Formatting belongs to `run`, not host setup. The released
-        // secure-host image still parses the older commit table strictly.
+        // Formatting and the upload exception belong to `run`, not host
+        // setup. The released secure-host image parses these tables strictly
+        // and does not know these run-only keys.
         // Validate first so an invalid setting is not silently discarded.
         if let Some(commit) = table.get_mut("commit").and_then(Value::as_table_mut) {
             commit.remove("format");
+        }
+        if let Some(inference) = table.get_mut("inference").and_then(Value::as_table_mut) {
+            inference.remove("allow-base-address-lines");
         }
         return toml::to_string(&table).context("writing the host configuration");
     } else {
@@ -923,6 +927,44 @@ mod tests {
         }
         // Do not hide invalid run settings while making a host file.
         assert!(compose(&host_args(&["commit.format=not-a-boolean"], &[])).is_err());
+    }
+
+    #[test]
+    fn host_config_omits_run_only_address_reuse_for_the_released_image() {
+        for enabled in [false, true] {
+            let run = Args {
+                boolean: settings(&[&format!("inference.allow-base-address-lines={enabled}")]),
+                ..args(
+                    None,
+                    &[
+                        "agent.name=fake",
+                        "inference.url=http://127.0.0.1:9999",
+                        "inference.register=plain",
+                    ],
+                    LIMITS,
+                    &[],
+                )
+            };
+            assert_eq!(composed(&run).inference.allow_base_address_lines, enabled);
+            let host = Args { host: true, ..run };
+            let text = compose(&host).unwrap();
+            let table: Table = toml::from_str(&text).unwrap();
+            assert!(
+                table["inference"].get("allow-base-address-lines").is_none(),
+                "{text}"
+            );
+            assert_eq!(
+                table["inference"]["url"].as_str(),
+                Some("http://127.0.0.1:9999")
+            );
+        }
+        assert!(
+            compose(&host_args(
+                &["inference.allow-base-address-lines=not-a-boolean"],
+                &[]
+            ))
+            .is_err()
+        );
     }
 
     /// A host's file needs no agent and no limits, which a run's does;

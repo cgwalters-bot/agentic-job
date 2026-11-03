@@ -23,6 +23,9 @@ use crate::files::{self, ReadError};
 /// What a secret is replaced with.
 pub const REPLACEMENT: &str = "[REDACTED]";
 
+/// Public label for endpoint literals, which are not credentials.
+pub const INFERENCE_ADDRESS: &str = "private inference address";
+
 /// Shorter literals would redact ordinary words.
 const MIN_LITERAL_BYTES: usize = 8;
 
@@ -264,6 +267,9 @@ pub struct Redactor {
     /// The literals and [`PRIVATE_KEY`]: what is refused where it cannot
     /// be redacted.
     refused: BytesRegex,
+    /// Independent credential search: an allowed address must not mask an
+    /// overlapping token or private key.
+    credential_refused: BytesRegex,
     /// Public source labels, in the order of `refused`'s capture groups.
     literal_names: Vec<&'static str>,
     /// What [`stream`] needs to look ahead: the longest match that spans
@@ -298,6 +304,18 @@ impl Redactor {
             .map_or(0, |(l, _)| l.len())
             .max(MAX_PEM_BYTES);
         let literal_names = literals.iter().map(|(_, name)| *name).collect();
+        let credential_refused = alternation(
+            literals
+                .iter()
+                .map(|(literal, name)| {
+                    if *name == INFERENCE_ADDRESS {
+                        r"(\b\B)".to_owned()
+                    } else {
+                        format!("({})", regex::escape(literal))
+                    }
+                })
+                .chain([format!("({PRIVATE_KEY})")]),
+        );
         let literals: Vec<String> = literals.iter().map(|(l, _)| regex::escape(l)).collect();
         let rule = alternation(
             literals
@@ -318,6 +336,7 @@ impl Redactor {
         Ok(Self {
             bytes: BytesRegex::new(&format!("(?-u){rule}"))?,
             refused: BytesRegex::new(&format!("(?-u){refused}"))?,
+            credential_refused: BytesRegex::new(&format!("(?-u){credential_refused}"))?,
             literal_names,
             overlap,
             count: 0,
@@ -340,14 +359,47 @@ impl Redactor {
 
     /// The first refusal's line and public rule label, never its match.
     pub fn find_rule_in(&self, input: impl Read) -> io::Result<Option<(usize, String)>> {
+        self.find_rule(input, &self.refused, &BTreeSet::new())
+    }
+
+    /// Like `find_rule_in`, allowing only endpoint matches on authenticated
+    /// patch lines. Credentials are searched independently, even if they
+    /// overlap an address.
+    pub fn find_rule_in_public_lines(
+        &self,
+        input: impl Read,
+        credentials: impl Read,
+        public: &BTreeSet<usize>,
+    ) -> io::Result<Option<(usize, String)>> {
+        if public.is_empty() {
+            return self.find_rule_in(input);
+        }
+        if let Some(found) =
+            self.find_rule(credentials, &self.credential_refused, &BTreeSet::new())?
+        {
+            return Ok(Some(found));
+        }
+        self.find_rule(input, &self.refused, public)
+    }
+
+    fn find_rule(
+        &self,
+        input: impl Read,
+        refused: &BytesRegex,
+        public: &BTreeSet<usize>,
+    ) -> io::Result<Option<(usize, String)>> {
         let mut line = 1;
         let mut found = None;
-        stream(&self.refused, self.overlap, input, |bytes, secret| {
+        stream(refused, self.overlap, input, |bytes, secret| {
             if secret {
-                let captures = self
-                    .refused
-                    .captures(bytes)
-                    .expect("stream found a refusal");
+                let captures = refused.captures(bytes).expect("stream found a refusal");
+                if public.contains(&line)
+                    && self.literal_names.iter().enumerate().any(|(i, name)| {
+                        *name == INFERENCE_ADDRESS && captures.get(i + 1).is_some()
+                    })
+                {
+                    return Ok(true);
+                }
                 let rule = self
                     .literal_names
                     .iter()
@@ -964,6 +1016,24 @@ mod tests {
             shaped_lines(many.as_bytes()).unwrap().len(),
             MAX_SHAPE_WARNINGS
         );
+    }
+
+    #[test]
+    fn public_address_lines_cannot_mask_overlapping_credentials() {
+        let address = "inference.example.test:8443";
+        for credential in ["example.test:8443", "inference.example"] {
+            let redactor = Redactor::new_named([
+                (INFERENCE_ADDRESS, address),
+                ("provider API key", credential),
+            ])
+            .unwrap();
+            let line = format!("+{address}\n");
+            let found = redactor
+                .find_rule_in_public_lines(line.as_bytes(), line.as_bytes(), &BTreeSet::from([1]))
+                .unwrap()
+                .unwrap();
+            assert_eq!(found, (1, "known run secret: provider API key".to_owned()));
+        }
     }
 
     #[test]

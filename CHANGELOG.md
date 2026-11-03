@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Opt-in `[inference] allow-base-address-lines` permits inference addresses on exact base-file lines retained
+  or moved within that file; extra copies and new files still fail. Logs remain
+  redacted, and tokens and private keys have no base-content exception (#2863).
+
 - Replacement-series apply accepts a checked base snapshot between the policy
   snapshot and the trusted current base-branch head, so main advancing during a rebase
   round no longer blocks it. Missing commit arrays are diagnosed separately.

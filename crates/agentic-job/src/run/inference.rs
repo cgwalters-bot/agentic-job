@@ -306,6 +306,7 @@ impl Endpoint {
             provider,
             front,
             stop_long_retry_after,
+            allow_base_address_lines: _,
         } = inference;
         let front = *front;
         if url.is_empty() {

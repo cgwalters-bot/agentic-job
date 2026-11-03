@@ -285,6 +285,13 @@ its summary and, through the run action's
 `secret-at` output, the status comment, since such a run uploads nothing
 else to look in.
 
+Inference addresses are not credentials. For patches, the upload gate allows
+only exact base-file lines retained or moved within that same file, using
+bounded evidence captured before the agent starts. It still refuses new files,
+changed lines and extra copies, and independently scans for tokens and private
+keys even on allowed lines. Logs and transcripts remain redacted; see
+[inference address redaction](inference.md#what-run-does).
+
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the
 rules of each type. gh-aw's compiler writes those into the workflows it

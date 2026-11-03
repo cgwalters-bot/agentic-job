@@ -120,6 +120,9 @@ pub struct Inference {
     /// Stop a silent child agent sleeping on a long upstream rate limit.
     /// Requires the local proxy (`front` or `api-key`); off by default.
     pub stop_long_retry_after: bool,
+    /// Allow inference addresses only on retained or moved exact base-file
+    /// lines at upload. Logs stay redacted; credentials are never exempt.
+    pub allow_base_address_lines: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -501,6 +504,22 @@ mod tests {
         author = "A Bot <bot@example.com>"
         trailers = ["Generated-by: AI"]
     "#;
+
+    #[test]
+    fn base_address_lines_are_opt_in() {
+        assert!(
+            !toml::from_str::<Config>("")
+                .unwrap()
+                .inference
+                .allow_base_address_lines
+        );
+        assert!(
+            toml::from_str::<Config>("[inference]\nallow-base-address-lines = true\n")
+                .unwrap()
+                .inference
+                .allow_base_address_lines
+        );
+    }
 
     #[test]
     fn empty_is_the_defaults() {

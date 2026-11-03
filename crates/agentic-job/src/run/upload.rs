@@ -209,6 +209,19 @@ impl Staging {
     /// REDACTOR is the run's, which knows the secrets the run holds and
     /// how many it replaced.
     pub fn check(&self, gate: Gate, redactor: &Shared) -> Result<()> {
+        self.check_with_public_addresses(
+            gate,
+            redactor,
+            &super::public_addresses::PublicAddresses::default(),
+        )
+    }
+
+    pub(super) fn check_with_public_addresses(
+        &self,
+        gate: Gate,
+        redactor: &Shared,
+        public: &super::public_addresses::PublicAddresses,
+    ) -> Result<()> {
         ensure!(
             gate.ended,
             "the run was not ended at the inference proxy, so its token may still be live"
@@ -220,11 +233,37 @@ impl Staging {
         ] {
             for (name, path) in Self::files(&dir)? {
                 let file = Self::open(&path)?;
+                let mut text = String::new();
+                let allowed = if label == SAFE_OUTPUTS_DIR && file.size() <= (1 << 20) {
+                    // Invalid UTF-8 receives no exception and is still scanned.
+                    if Self::open(&path)?
+                        .take((1 << 20) + 1)
+                        .read_to_string(&mut text)
+                        .is_ok()
+                    {
+                        public.allowed_lines(&name, &text)
+                    } else {
+                        Default::default()
+                    }
+                } else {
+                    Default::default()
+                };
+                let credentials = Self::open(&path)?;
                 let found = redactor
-                    .with(|redactor| redactor.find_rule_in(file))
+                    .with(|redactor| {
+                        redactor.find_rule_in_public_lines(file, credentials, &allowed)
+                    })
                     .with_context(|| format!("reading {}", path.display()))?;
                 // The line and not the string: this error is published.
-                if let Some((line, rule)) = found {
+                if let Some((line, mut rule)) = found {
+                    if rule == format!("known run secret: {}", redact::INFERENCE_ADDRESS)
+                        && text
+                            .split('\n')
+                            .nth(line - 1)
+                            .is_some_and(|line| public.contains_address_on(line))
+                    {
+                        rule.push_str(" (address already present in patch base; occurrence is not an unchanged or moved base-file line)");
+                    }
                     return Err(SecretAt {
                         place: format!("{label}/{name}, line {line}"),
                         rule,
@@ -682,6 +721,166 @@ mod tests {
             format!("{err:#}").contains("safe-outputs/outputs.jsonl, line 1"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn inference_addresses_only_pass_on_existing_base_file_lines() {
+        use std::process::Command;
+
+        use super::super::{clone::Checkout, enter::Unconfined, public_addresses::PublicAddresses};
+
+        const ADDRESS: &str = "inference.example.test:8443";
+        let endpoint = format!("endpoint = {ADDRESS}\n");
+        let credential = token();
+        let key = private_key();
+        let cases = [
+            (
+                "move",
+                endpoint.clone(),
+                "config",
+                format!("after\n{endpoint}"),
+                true,
+            ),
+            (
+                "context",
+                endpoint.clone(),
+                "config",
+                format!("{endpoint}changed\n"),
+                true,
+            ),
+            (
+                "delete",
+                endpoint.clone(),
+                "config",
+                "after\n".to_owned(),
+                true,
+            ),
+            (
+                "delete a line like a signature",
+                format!("- \n{endpoint}"),
+                "config",
+                format!("{endpoint}after\n"),
+                true,
+            ),
+            ("new file", endpoint.clone(), "new", endpoint.clone(), false),
+            (
+                "duplicate",
+                endpoint.clone(),
+                "config",
+                format!("{endpoint}{endpoint}after\n"),
+                false,
+            ),
+            (
+                "changed line",
+                endpoint.clone(),
+                "config",
+                format!("other = {ADDRESS}\nafter\n"),
+                false,
+            ),
+            (
+                "token",
+                format!("{endpoint}{credential}\n"),
+                "config",
+                format!("after\n{endpoint}{credential}\n"),
+                false,
+            ),
+            (
+                "key",
+                format!("{endpoint}{key}\n"),
+                "config",
+                format!("after\n{endpoint}{key}\n"),
+                false,
+            ),
+            (
+                "same line token",
+                format!("{ADDRESS} {credential}\n"),
+                "config",
+                format!("after\n{ADDRESS} {credential}\n"),
+                false,
+            ),
+        ];
+        for (case, before, target, after, passes) in cases {
+            let out = Out::new();
+            let repo = out.out().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .current_dir(&repo)
+                    .env("GIT_AUTHOR_NAME", "Test")
+                    .env("GIT_AUTHOR_EMAIL", "test@example.test")
+                    .env("GIT_COMMITTER_NAME", "Test")
+                    .env("GIT_COMMITTER_EMAIL", "test@example.test")
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{case}: {:?}", output.stderr);
+                String::from_utf8(output.stdout).unwrap()
+            };
+            git(&["init", "-q"]);
+            std::fs::write(repo.join("config"), format!("{before}after\n")).unwrap();
+            git(&["add", "config"]);
+            git(&["-c", "core.hooksPath=/dev/null", "commit", "-qm", "Base"]);
+            let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+            let checkout = Checkout {
+                dir: repo.clone(),
+                base_commit: base.clone(),
+                secondary: None,
+            };
+            let name = "aw-agent-run-1.patch";
+            let public = PublicAddresses::capture(
+                &Unconfined,
+                &checkout,
+                &[name.to_owned()],
+                &[ADDRESS.to_owned()],
+            )
+            .unwrap();
+            std::fs::write(repo.join(target), after).unwrap();
+            git(&["add", "--all"]);
+            let diff = git(&["diff", "--cached", "--no-ext-diff", "--no-renames"]);
+            let patch = format!(
+                "From {} Mon Sep 17 00:00:00 2001\nX-GH-AW-Base-Commit: {base}\nFrom: Test <test@example.test>\nDate: Tue, 3 Nov 2026 00:00:00 +0000\nSubject: [PATCH] Test\n\n---\n{diff}",
+                "2".repeat(40)
+            );
+            out.hand_back(name, &patch);
+            let redactor = Shared::new(
+                Redactor::new_named([
+                    (redact::INFERENCE_ADDRESS, ADDRESS),
+                    ("provider API key", credential.as_str()),
+                ])
+                .unwrap(),
+            );
+            // All endpoint text remains redacted outside the patch.
+            std::fs::write(out.staging.transcript().join("acp.jsonl"), ADDRESS).unwrap();
+            out.staging.redact(&redactor).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(out.staging.transcript().join("acp.jsonl")).unwrap(),
+                redact::REPLACEMENT
+            );
+            let result = out
+                .staging
+                .check_with_public_addresses(OPEN, &redactor, &public);
+            assert_eq!(result.is_ok(), passes, "{case}: {result:?}");
+            if passes {
+                // The exception is absent by default.
+                assert!(out.staging.check(OPEN, &redactor).is_err(), "{case}");
+                out.staging.publish(out.out(), &GO).unwrap();
+                assert!(out.out().join(SAFE_OUTPUTS_DIR).join(name).is_file());
+            } else if case == "new file" || case == "duplicate" || case == "changed line" {
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.contains("address already present in patch base"),
+                    "{error}"
+                );
+                assert!(!error.contains(ADDRESS));
+            }
+            // An address in a request is never a base-file line.
+            out.hand_back("outputs.jsonl", ADDRESS);
+            assert!(
+                out.staging
+                    .check_with_public_addresses(OPEN, &redactor, &public)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

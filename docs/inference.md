@@ -183,7 +183,15 @@ give the gateway's port explicitly to have it redacted. They are no credential, 
 gateway on a private network, and an agent's error names it: Claude
 Code's 529 message did, in a public job log (#1860). As with every
 redacted string, a published file that still holds one after the
-redaction, such as a patch, stops the upload.
+redaction stops the upload. The opt-in `[inference] allow-base-address-lines = true`
+(default false) allows exact base-file lines retained or moved within the same
+file in a patch. The upload gate captures those lines before
+the agent starts, with at most 1 MiB of evidence per checkout; only validated
+patches up to 1 MiB and 50 files qualify. New files, changed lines and extra
+copies still fail, even if the address occurs elsewhere in the base. A refusal
+notes when the base already contains an inference address, without quoting it.
+This exception never applies to tokens or private keys, logs, transcripts,
+requests or replacement commit series.
 
 ## Registering without proof
 

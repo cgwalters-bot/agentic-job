@@ -50,6 +50,7 @@ pub mod log;
 pub mod mcp;
 mod prices;
 pub mod probe;
+mod public_addresses;
 pub mod register;
 mod session_markdown;
 pub mod summary;
@@ -171,6 +172,7 @@ struct Plan {
     limits: Limits,
     endpoint: Option<Endpoint>,
     stop_long_retry_after: bool,
+    allow_base_address_lines: bool,
     /// Where the sandbox user connects around the egress proxy, which
     /// under `inference.front` may be no address of the broker's.
     direct: Vec<crate::sandbox::network::Direct>,
@@ -216,6 +218,7 @@ struct Plan {
 /// What the preparation leaves for the session.
 struct Prepared {
     checkout: Checkout,
+    public_addresses: public_addresses::PublicAddresses,
     cwd: PathBuf,
     /// The model the session asks the agent for.
     model: Option<String>,
@@ -245,6 +248,7 @@ struct Session {
     /// known to be finished.
     internal_error: bool,
     checkout: Checkout,
+    public_addresses: public_addresses::PublicAddresses,
     model: Option<String>,
     /// What replaced the secrets in the session's log, and its count.
     redactor: log::Shared,
@@ -797,6 +801,7 @@ impl Plan {
             endpoint,
             direct: host.direct,
             stop_long_retry_after: config.inference.stop_long_retry_after,
+            allow_base_address_lines: config.inference.allow_base_address_lines,
             container_image: config
                 .sandbox
                 .check
@@ -1131,7 +1136,23 @@ impl Plan {
             }
             None => None,
         };
+        // Under the names the hand-back writes its patches by.
+        let mut patches = vec![handback::patch_name(&self.policy, &self.run_id)];
+        if let Some(secondary) = &self.policy.secondary_pull_request {
+            patches.push(handback::secondary_patch_name(secondary, &self.run_id));
+        }
+        let public_addresses = if self.allow_base_address_lines {
+            public_addresses::PublicAddresses::capture(
+                &self.sandbox,
+                &checkout,
+                &patches,
+                &inference_addresses(self.endpoint.as_ref()),
+            )?
+        } else {
+            public_addresses::PublicAddresses::default()
+        };
         Ok(Prepared {
+            public_addresses,
             cwd,
             checkout,
             model: configuration.model,
@@ -1174,7 +1195,7 @@ impl Plan {
         .chain(
             inference_addresses(self.endpoint.as_ref())
                 .into_iter()
-                .map(|address| ("private inference address", address)),
+                .map(|address| (crate::redact::INFERENCE_ADDRESS, address)),
         );
         let redactor = log::Shared::new(
             Redactor::new_named(secrets).context("building the redaction of the run's secrets")?,
@@ -1532,7 +1553,9 @@ impl Plan {
             ended: settled.dead,
             fake_agent: self.kind == Kind::Fake,
         };
-        if let Err(err) = staging.check(gate, &session.redactor) {
+        if let Err(err) =
+            staging.check_with_public_addresses(gate, &session.redactor, &session.public_addresses)
+        {
             if let Err(why) = upload::record_secret_at(&self.out, &err) {
                 eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
             }
@@ -1722,6 +1745,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         Ok(Ok(Err(err))) => Stage::NotStarted(err),
         Ok(Ok(Ok(prepared))) => {
             let (checkout, model) = (prepared.checkout.clone(), prepared.model.clone());
+            let public_addresses = prepared.public_addresses.clone();
             match plan.session(prepared, shared.run().as_ref(), shared.mcp().as_deref()) {
                 Err(err) => Stage::Broken(err),
                 // Dropped on a signal, the session kills the wrapper it
@@ -1745,6 +1769,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                                 result: Box::new(result),
                                 internal_error: true,
                                 checkout,
+                                public_addresses,
                                 model,
                                 redactor,
                                 started,
@@ -1755,6 +1780,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                             result: Box::new(result),
                             internal_error: false,
                             checkout,
+                            public_addresses,
                             model,
                             redactor,
                             started,

@@ -481,6 +481,16 @@ pub fn carrier(policy: &Policy, run_id: &str) -> (&'static str, String) {
     }
 }
 
+/// The name of the patch that carries a run's own change.
+pub fn patch_name(policy: &Policy, run_id: &str) -> String {
+    patch_file_name(&carrier(policy, run_id).1)
+}
+
+/// The name of the patch that carries a run's change to TARGET.
+pub fn secondary_patch_name(target: &crate::policy::Secondary, run_id: &str) -> String {
+    patch_file_name_in(&target.repo, &target.branch(&run_branch(run_id)))
+}
+
 /// A push's `message` as the title and body of its commit.
 fn split_message(message: &str) -> (String, String) {
     let message = message.trim();
@@ -1738,7 +1748,7 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
                     commit: base,
                 };
                 patches.push((
-                    patch_file_name(&carrier(policy, run_id).1),
+                    patch_name(policy, run_id),
                     patch,
                     BASE_FILE,
                     serde_json::to_string(&base_file).context("writing the base")?,
@@ -1780,7 +1790,7 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
                     commit: tree_base,
                 };
                 patches.push((
-                    patch_file_name_in(&target.repo, &target.branch(&run_branch(run_id))),
+                    secondary_patch_name(target, run_id),
                     patch,
                     SECONDARY_BASE_FILE,
                     serde_json::to_string(&base_file).context("writing the base")?,
@@ -3249,6 +3259,12 @@ mod tests {
         let other = r#"{"type":"create_pull_request","repo":"o/other","title":"T","body":"B"}"#;
         let own_patch = "aw-agent-run-42.patch";
         let tool_patch = "aw-o-tool-agentic-job-agent-run-42.patch";
+        // The names `run` registers base-file evidence under.
+        assert_eq!(patch_name(&policy, RUN_ID), own_patch);
+        assert_eq!(
+            secondary_patch_name(policy.secondary_pull_request.as_ref().unwrap(), RUN_ID),
+            tool_patch
+        );
         // (case, change of the run's checkout, change of the secondary
         // clone, requests, the hand-back's patches, why the change or the
         // secondary change is dropped, and what check refuses)
@@ -3473,6 +3489,8 @@ mod tests {
         .unwrap();
         let change = home.collect(&policy, &config::Commit::default());
         assert_eq!(change.dropped, None);
+        // Named for the pull request's branch, not the run's.
+        assert_eq!(patch_name(&policy, RUN_ID), "aw-agent-run-12.patch");
         let patch =
             std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-12.patch")).unwrap();
         assert!(
