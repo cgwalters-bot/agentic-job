@@ -1348,6 +1348,123 @@ mod tests {
         const PUSH_PATCH: &str = "aw-agent-run-12.patch";
 
         #[test]
+        fn checked_replacement_trial_survives_base_branch_advancing() {
+            use safe_outputs::apply::replacement::{TrialArgs, git, trial};
+
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            let run = |args: &[&str]| git(&repo, args).unwrap();
+            run(&["init", "-q", "--initial-branch=main"]);
+            let commit = |file: &str| {
+                std::fs::write(repo.join(file), format!("{file}\n")).unwrap();
+                run(&["add", file]);
+                run(&[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    file,
+                ]);
+                run(&["rev-parse", "HEAD"])
+            };
+            let older = commit("older.txt");
+            let pinned = commit("pinned.txt");
+            let base = commit("base.txt");
+            run(&["checkout", "-qb", "proposal"]);
+            commit("a.txt");
+            let first = run(&[
+                "format-patch",
+                "--stdout",
+                "--no-signature",
+                "--no-renames",
+                "-1",
+            ]) + "\n";
+            commit("b.txt");
+            let second = run(&[
+                "format-patch",
+                "--stdout",
+                "--no-signature",
+                "--no-renames",
+                "-1",
+            ]) + "\n";
+            let tree = run(&["rev-parse", "HEAD^{tree}"]);
+            let proposal_head = run(&["rev-parse", "HEAD"]);
+            run(&["checkout", "-q", "main"]);
+            let current = commit("advanced.txt");
+
+            let mut policy = push_policy();
+            let config = policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap();
+            config.replacement_max_commits = 2;
+            config.replacement_base = Some(pinned.clone());
+            let series = json!({"base_commit": base, "commits": [first, second]});
+            let verdict = Handback {
+                items: vec![push()],
+                files: vec![(replacement::REPLACEMENT_FILE, series.to_string())],
+                ..Handback::default()
+            }
+            .check_against(&policy);
+            assert!(verdict.ok, "{:?}", verdict.errors);
+            let report = temp.path().join("report.json");
+            std::fs::write(&report, serde_json::to_vec(&verdict).unwrap()).unwrap();
+            let series_file = temp.path().join("replacement.json");
+            std::fs::write(&series_file, series.to_string()).unwrap();
+            let config_file = temp.path().join("config.json");
+            std::fs::write(
+                &config_file,
+                serde_json::to_vec(&policy.safe_outputs).unwrap(),
+            )
+            .unwrap();
+            let mut args = TrialArgs {
+                report,
+                series: series_file,
+                config: config_file,
+                current_base: current.clone(),
+                remote: repo.to_str().unwrap().into(),
+                temp: temp.path().into(),
+            };
+            let built = trial(&args, &repo, &crate::apply::read_checked).unwrap();
+            assert_eq!(built.tree, tree);
+            assert_eq!(
+                run(&["rev-list", "--count", &format!("{base}..{}", built.head)]),
+                "2"
+            );
+            // A producer's branch is not an admitted base snapshot.
+            args.current_base = pinned.clone();
+            let error = trial(&args, &repo, &crate::apply::read_checked).unwrap_err();
+            assert!(error.to_string().contains("not an ancestor"), "{error:#}");
+            // No claim in the series supplies the trusted current base.
+            args.current_base.clear();
+            assert!(trial(&args, &repo, &crate::apply::read_checked).is_err());
+
+            args.current_base = current;
+            for (claimed, reason) in [
+                (older, "does not descend from the policy snapshot"),
+                (proposal_head, "not an ancestor of the trusted current base"),
+            ] {
+                let mut series = series.clone();
+                series["base_commit"] = claimed.into();
+                let verdict = Handback {
+                    items: vec![push()],
+                    files: vec![(replacement::REPLACEMENT_FILE, series.to_string())],
+                    ..Handback::default()
+                }
+                .check_against(&policy);
+                assert!(verdict.ok, "{:?}", verdict.errors);
+                std::fs::write(&args.report, serde_json::to_vec(&verdict).unwrap()).unwrap();
+                std::fs::write(&args.series, series.to_string()).unwrap();
+                let error = trial(&args, &repo, &crate::apply::read_checked).unwrap_err();
+                assert!(error.to_string().contains(reason), "{error:#}");
+            }
+        }
+
+        #[test]
         fn replacement_series_are_individually_bounded() {
             let mut policy = push_policy();
             let config = policy

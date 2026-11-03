@@ -719,7 +719,9 @@ the file `replacement.json`. Its strict JSON shape is:
 
 `BASE_SHA` must be the base branch head read by the policy job (the run's
 brief names it), or the current head of the PR's base branch resolved by
-trusted apply. Policy resolves the branch ref, not the PR's possibly stale
+trusted apply. A newer snapshot between the policy head and the current head
+is also accepted after apply proves both ancestry relationships.
+Policy resolves the branch ref, not the PR's possibly stale
 base SHA, and run fetches that snapshot into the producer checkout. Each string is one plain
 `git format-patch --stdout --no-signature --no-renames -1 COMMIT` mail with
 a valid `Date:` header, no cover letter and no base header. This is the full
@@ -744,10 +746,12 @@ same tree, refuses the replacement. The final remote head is verified.
 
 The policy base remains an admitted snapshot if the branch advances. A fix
 run may also fetch a newer head and rebase onto it; apply independently reads
-the PR's base branch and its current head, and refuses any other base before
-materializing or pushing. Check validates the claimed full commit ID, not its
-forge membership. A head that moves again before apply resolves it requires
-a new proposal or the policy snapshot. This prevents an arbitrary producer
+the PR's base branch and its current head. A base other than those exact
+heads must be between them, proved by ancestry before materializing or pushing.
+Check validates the claimed full commit ID, not its
+forge membership. A head that advances again before apply resolves it does
+not invalidate the earlier snapshot; a rewritten history that no longer
+contains it requires a new proposal or the policy snapshot. This prevents an arbitrary producer
 commit from becoming the root of the replacement series.
 
 `push_to_pull_request_branch` lets a follow-up run fix an open pull request:

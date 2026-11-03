@@ -101,18 +101,17 @@ pub fn trial(
     let base = report["base_commit"].as_str().unwrap_or("");
     let pinned = config["replacement_base"].as_str().unwrap_or("");
     let max = config["replacement_max_commits"].as_u64().unwrap_or(0);
-    let (Some(commits), Some(commit_files)) = (
-        series["commits"].as_array(),
-        report["commit_files"].as_array(),
-    ) else {
-        bail!("Unchecked replacement series");
-    };
-    // Fetch only the policy's snapshot or the base trusted apply resolved,
-    // and only for a series check bound commit by commit.
+    let commits = series["commits"]
+        .as_array()
+        .context("Unchecked replacement series: series.commits is missing or not an array")?;
+    let commit_files = report["commit_files"].as_array().context(
+        "Unchecked replacement series: report.patch.commit_files is missing or not an array",
+    )?;
+    // Fetch only full commit IDs, and only for a series check bound
+    // commit by commit. A non-pinned base must belong to the base branch.
     ensure!(
         COMMIT_RE.is_match(base)
-            && !pinned.is_empty()
-            && (base == pinned || base == args.current_base)
+            && COMMIT_RE.is_match(pinned)
             && series["base_commit"].as_str() == Some(base)
             && max > 0
             && commits.len() == commit_files.len()
@@ -133,6 +132,31 @@ pub fn trial(
         })
         .collect::<Result<Vec<_>>>()?;
     git(repo, &["fetch", "--no-tags", &args.remote, base])?;
+    if base != pinned && base != args.current_base {
+        // The base branch can advance while the producer works. Accept
+        // its earlier snapshot only after proving it belongs to the
+        // history of the head trusted apply resolved, never an arbitrary
+        // producer commit or a commit of the PR's own branch.
+        ensure!(
+            COMMIT_RE.is_match(&args.current_base),
+            "Unchecked replacement series: no trusted current base for ancestry validation"
+        );
+        git(
+            repo,
+            &["fetch", "--no-tags", &args.remote, &args.current_base],
+        )?;
+        git(repo, &["fetch", "--no-tags", &args.remote, pinned])?;
+        git(repo, &["merge-base", "--is-ancestor", pinned, base]).context(
+            "Unchecked replacement series: base does not descend from the policy snapshot",
+        )?;
+        git(
+            repo,
+            &["merge-base", "--is-ancestor", base, &args.current_base],
+        )
+        .context(
+            "Unchecked replacement series: base is not an ancestor of the trusted current base",
+        )?;
+    }
     materialize(base, &mails, &paths, &args.temp, repo)
 }
 
@@ -412,7 +436,12 @@ mod tests {
             ("", 1.into(), moved.as_str()),
         ] {
             let error = trial(&args(pinned, max, current), &repo, &read).unwrap_err();
-            assert_eq!(error.to_string(), "Unchecked replacement series");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Unchecked replacement series"),
+                "{error:#}"
+            );
         }
         // A report that does not bind this series: another base, another
         // commit count, or no paths at all.
@@ -429,12 +458,33 @@ mod tests {
                 &moved,
                 serde_json::json!({"base_commit": "HEAD", "commit_files": both}),
             ),
-            (&moved, serde_json::json!({"base_commit": moved})),
         ] {
             let mut unbound = args(pinned, 2.into(), "");
             unbound.report = write(&unbound.report, &serde_json::json!({ "patch": patch }));
             let error = trial(&unbound, &repo, &read).unwrap_err();
-            assert_eq!(error.to_string(), "Unchecked replacement series");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Unchecked replacement series"),
+                "{error:#}"
+            );
+        }
+
+        for (field, expected) in [
+            ("commits", "series.commits"),
+            ("commit_files", "report.patch.commit_files"),
+        ] {
+            let unbound = args(&moved, 1.into(), "");
+            if field == "commits" {
+                write(&unbound.series, &serde_json::json!({"base_commit": moved}));
+            } else {
+                write(
+                    &unbound.report,
+                    &serde_json::json!({"patch": {"base_commit": moved}}),
+                );
+            }
+            let error = trial(&unbound, &repo, &read).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
         }
 
         let pushed = || run(Path::new(remote), &["rev-parse", "refs/heads/agent-run-1"]);

@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Replacement-series apply accepts a checked base snapshot between the policy
+  snapshot and the trusted current base-branch head, so main advancing during a rebase
+  round no longer blocks it. Missing commit arrays are diagnosed separately.
+
 - Opt-in `inference.stop-long-retry-after` stops a silent agent after a
   model 429 requests more than 120 seconds of waiting, reporting
   `inference_rate_limited` without resending the task. A later successful
