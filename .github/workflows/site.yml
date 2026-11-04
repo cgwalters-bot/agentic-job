@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
       # Includes actions#190: :z relabels the config volume on SELinux hosts.
       - uses: cgwalters-forge/actions/secure-host@c763a8950778743f51857a37b2a59daf9e96ee23 # main, with secure-host:v0.6.4
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: just@1.58.0
       # Builds the site, which site-check below then checks.
