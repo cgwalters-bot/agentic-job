@@ -1123,8 +1123,8 @@ fn chat_part(part: &Map<String, Value>) -> Result<(), Refusal> {
     }
 }
 
-/// Writes the provider's answer to the agent. A success streams as it
-/// arrives, in chunks: a model's answer is long, and read as it comes. A
+/// Writes the provider's answer to the agent. A success streams with a
+/// bounded lookbehind to remove credentials even across read boundaries. A
 /// refusal is read whole first, and every form of the credential
 /// (QUOTED) cut out of it: some providers quote the key they refuse, as
 /// in "not permitted for key …", and passed on as it is that would hand
@@ -1146,26 +1146,35 @@ fn pass_back(
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
     for (name, value) in answer.headers() {
         if let (true, Ok(value)) = (KEPT_ANSWER_HEADERS.contains(&name.as_str()), value.to_str()) {
-            head.push_str(&format!("{name}: {value}\r\n"));
+            let value = mcp::cut(value.as_bytes().to_vec(), quoted);
+            head.push_str(&format!("{name}: {}\r\n", String::from_utf8_lossy(&value)));
         }
+    }
+    for encoding in answer.headers().get_all("content-encoding") {
+        // Multiple fields and comma-separated codings both describe the
+        // representation. Never inspect just the first field, or treat a
+        // non-text field as an absent encoding.
+        let identity = encoding.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .all(|coding| coding.trim().eq_ignore_ascii_case("identity"))
+        });
+        ensure_ok(identity, || {
+            let encoding = mcp::cut(encoding.as_bytes().to_vec(), quoted);
+            Refusal(
+                502,
+                format!(
+                    "the answer (HTTP {status}) is {}-encoded and cannot be inspected",
+                    String::from_utf8_lossy(&encoding)
+                ),
+            )
+        })?;
     }
     if (200..300).contains(&status) {
         head.push_str("transfer-encoding: chunked\r\nconnection: close\r\n\r\n");
-        let _ = stream_back(stream, head, answer.into_body().into_reader());
+        let _ = stream_back(stream, head, answer.into_body().into_reader(), quoted);
         return Ok(());
     }
-    let encoding = answer
-        .headers()
-        .get("content-encoding")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("identity")
-        .to_owned();
-    ensure_ok(encoding.eq_ignore_ascii_case("identity"), || {
-        Refusal(
-            502,
-            format!("the answer (HTTP {status}) is {encoding}-encoded and cannot be read whole"),
-        )
-    })?;
     let body = answer
         .into_body()
         .into_with_config()
@@ -1192,19 +1201,61 @@ fn pass_back(
     Ok(())
 }
 
-/// Writes HEAD, then BODY as it arrives, in chunks.
-fn stream_back(mut stream: &TcpStream, head: String, mut body: impl Read) -> std::io::Result<()> {
+/// Writes HEAD, then BODY as it arrives. Only a suffix that could begin a
+/// credential is held between reads (less than the longest quoted form).
+/// At clean EOF, an incomplete match is ordinary response data: even a
+/// closing JSON brace can begin a valid credential. On read failure the
+/// pending suffix is never written, nor is a successful chunk terminator.
+/// This is literal/JSON redaction, not protection from an upstream that
+/// deliberately encodes the credential in some other way.
+fn stream_back(
+    mut stream: impl Write,
+    head: String,
+    mut body: impl Read,
+    quoted: &[Vec<u8>],
+) -> std::io::Result<()> {
     stream.write_all(head.as_bytes())?;
     let mut buffer = vec![0; 16 << 10];
+    let mut pending = Vec::new();
     loop {
         let n = body.read(&mut buffer)?;
+        pending.extend_from_slice(&buffer[..n]);
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < pending.len() {
+            let rest = &pending[at..];
+            // Wait for a potentially longer form before choosing a match.
+            // Empty forms are not credentials and must never stall the scan.
+            if n != 0
+                && quoted
+                    .iter()
+                    .any(|form| form.len() > rest.len() && form.starts_with(rest))
+            {
+                break;
+            }
+            if let Some(length) = quoted
+                .iter()
+                .filter(|form| !form.is_empty() && rest.starts_with(form))
+                .map(Vec::len)
+                .max()
+            {
+                out.extend_from_slice(mcp::CUT.as_bytes());
+                at += length;
+            } else {
+                out.push(pending[at]);
+                at += 1;
+            }
+        }
+        pending.drain(..at);
+        if !out.is_empty() {
+            write!(stream, "{:x}\r\n", out.len())?;
+            stream.write_all(&out)?;
+            stream.write_all(b"\r\n")?;
+        }
+        stream.flush()?;
         if n == 0 {
             break;
         }
-        write!(stream, "{n:x}\r\n")?;
-        stream.write_all(&buffer[..n])?;
-        stream.write_all(b"\r\n")?;
-        stream.flush()?;
     }
     stream.write_all(b"0\r\n\r\n")?;
     stream.flush()
@@ -1213,6 +1264,115 @@ fn stream_back(mut stream: &TcpStream, head: String, mut body: impl Read) -> std
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unchunk(bytes: &[u8]) -> Vec<u8> {
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut out = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let length = usize::from_str_radix(line.trim(), 16).unwrap();
+            if length == 0 {
+                break;
+            }
+            let mut chunk = vec![0; length];
+            reader.read_exact(&mut chunk).unwrap();
+            out.extend(chunk);
+            let mut ending = [0; 2];
+            reader.read_exact(&mut ending).unwrap();
+            assert_eq!(&ending, b"\r\n");
+        }
+        out
+    }
+
+    #[test]
+    fn streaming_credentials_are_cut_at_every_read_boundary() {
+        let forms = mcp::quoted("fixture-credential/\"\\<&>");
+        for form in &forms {
+            let mut body = b"data: ".to_vec();
+            body.extend(form);
+            body.extend(form);
+            body.extend_from_slice(b"\n\n");
+            for split in 0..=body.len() {
+                let reader = std::io::Cursor::new(&body[..split])
+                    .chain(std::io::Cursor::new(&body[split..]));
+                let mut wire = Vec::new();
+                stream_back(&mut wire, String::new(), reader, &forms).unwrap();
+                assert_eq!(
+                    unchunk(&wire),
+                    format!("data: {0}{0}\n\n", mcp::CUT).as_bytes(),
+                    "split {split}, form {form:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_flushes_safe_bytes_and_withholds_pending_bytes_on_failure() {
+        struct Failed;
+        impl Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("upstream disconnected"))
+            }
+        }
+        let forms = mcp::quoted("fixture-credential");
+        let body = b"data: ordinary answer\n\nfixture-cre";
+        let mut wire = Vec::new();
+        let failed = std::io::Cursor::new(body).chain(Failed);
+        assert!(stream_back(&mut wire, String::new(), failed, &forms).is_err());
+        // The safe event was flushed before the failing read, but neither
+        // the credential prefix nor a successful chunk terminator was sent.
+        assert_eq!(wire, b"17\r\ndata: ordinary answer\n\n\r\n");
+        wire.clear();
+        stream_back(&mut wire, String::new(), &body[..], &forms).unwrap();
+        assert_eq!(unchunk(&wire), body);
+    }
+
+    #[test]
+    fn streaming_without_credentials_preserves_the_body() {
+        let body = vec![b'x'; 64 << 10];
+        for forms in [vec![], vec![vec![]], mcp::quoted("fixture-credential")] {
+            let mut wire = Vec::new();
+            stream_back(&mut wire, String::new(), &body[..], &forms).unwrap();
+            assert_eq!(unchunk(&wire), body);
+        }
+    }
+
+    #[test]
+    fn streaming_eof_preserves_json_framing_that_begins_a_credential() {
+        for first in *b"}]\"0" {
+            let key = format!("{}fixture-credential", char::from(first));
+            let forms = mcp::quoted(&key);
+            for body in [b"{\"answer\":0}".as_slice(), b"[]", b"\"answer\"", b"0"] {
+                for split in 0..=body.len() {
+                    let reader = std::io::Cursor::new(&body[..split])
+                        .chain(std::io::Cursor::new(&body[split..]));
+                    let mut wire = Vec::new();
+                    stream_back(&mut wire, String::new(), reader, &forms).unwrap();
+                    assert_eq!(unchunk(&wire), body, "first {first}, split {split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_eof_cuts_complete_matches_before_incomplete_longer_forms() {
+        let forms = vec![b"fixture".to_vec(), b"fixture-longer".to_vec()];
+        for (body, want) in [
+            ("fixture", mcp::CUT.to_owned()),
+            ("fixture-longer", mcp::CUT.to_owned()),
+            ("fixture-long", format!("{}-long", mcp::CUT)),
+            ("fix", "fix".to_owned()),
+        ] {
+            for split in 0..=body.len() {
+                let reader = std::io::Cursor::new(&body.as_bytes()[..split])
+                    .chain(std::io::Cursor::new(&body.as_bytes()[split..]));
+                let mut wire = Vec::new();
+                stream_back(&mut wire, String::new(), reader, &forms).unwrap();
+                assert_eq!(unchunk(&wire), want.as_bytes(), "{body}, split {split}");
+            }
+        }
+    }
 
     #[test]
     fn keys() {

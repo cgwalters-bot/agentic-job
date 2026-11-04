@@ -432,7 +432,19 @@ without the egress proxy. For each request the proxy:
   admitted, so that requests sent at once cannot pass the cap together;
 - drops every credential the agent sent, adds the key, and passes the
   answer back as it streams, with its content type, request id and
-  `retry-after` and no other header of the provider's. A refusal of the
+  `retry-after` and no other header of the provider's. Both the forwarded
+  headers and successful bodies have the credential cut out, as literal
+  bytes or in the JSON-escaped forms used for refusals. Streaming holds
+  only a suffix that could start a credential, shorter than its longest
+  escaped form, beside a 16 KiB read buffer; ordinary events are flushed
+  without waiting for the whole response. At clean EOF an incomplete match
+  is released unchanged: even a closing JSON brace can begin a credential,
+  and redacting it would corrupt an ordinary answer. A read failure cuts
+  the connection short without releasing the pending suffix or completing
+  the HTTP chunk stream. Encoded responses are refused with 502 rather
+  than forwarding bytes the proxy cannot inspect. This does not defend
+  against a provider deliberately returning a differently encoded secret.
+  A refusal of the
   provider's is read whole first, under 64 KiB and not compressed, and
   the key cut out of it, as some providers quote the key they refuse; any
   other refusal is answered 502 instead.

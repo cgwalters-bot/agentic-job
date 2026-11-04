@@ -554,6 +554,7 @@ fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<S
             key()
         )
     };
+    let quoted_header = format!("request-id: {}\r\n", key());
     let (status, kind, extra, text) = match (method.as_str(), given == Some(key())) {
         // As GitHub's API answers a job token without the permission.
         (_, false) if provider == Provider::Github => (
@@ -601,6 +602,18 @@ fn answer_provider(provider: Provider, mut stream: TcpStream, seen: &Mutex<Vec<S
             "application/json",
             "content-encoding: gzip\r\n",
             not_permitted(0),
+        ),
+        ("POST", true) if model.as_deref() == Some("success-quotes-key") => (
+            200,
+            "text/event-stream",
+            quoted_header.as_str(),
+            format!("data: {}\n\n", key()),
+        ),
+        ("POST", true) if model.as_deref() == Some("success-compressed") => (
+            200,
+            "text/event-stream",
+            "content-encoding: gzip\r\n",
+            key(),
         ),
         _ => (
             200,

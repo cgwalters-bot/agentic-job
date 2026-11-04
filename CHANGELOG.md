@@ -22,6 +22,12 @@ says what a caller may rely on across versions.
   lines removed, retained or moved in the same file. New keys and cross-file
   copies still refuse; known run secrets are never exempt (#2914).
 
+- Local inference proxies redact credentials in successful streaming responses
+  and forwarded response headers, and refuse encoded successes they cannot
+  inspect. Streaming retains only a possible credential prefix between reads.
+  This is preparatory work for token-free sandbox proxy access (#2903), not
+  removal of the agent's existing run tokens.
+
 - Checked no-write-only outcomes retain long sanitized reports collapsed in the
   opted-in item status comment instead of cutting them at 1000 characters.
   Rendered report/body budgets disclose overflow and link the retained artifact;

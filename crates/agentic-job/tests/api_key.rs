@@ -11,12 +11,12 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use agentic_job::config::{Provider, Register};
-use agentic_job::run::api_key::API_KEY_VAR;
+use agentic_job::run::api_key::{API_KEY_VAR, ApiKey, Local, Upstream};
 use agentic_job::run::inference::{Ended, Endpoint, Identity, Mode, NEVER, Retry, Run};
 use support::{ANSWER, MockProvider, key};
 
@@ -262,6 +262,192 @@ fn an_openai_compatible_provider_gets_the_key_as_its_bearer() {
         forwarded.headers["authorization"],
         format!("Bearer {}", key())
     );
+}
+
+/// Successful answers must not return the upstream credential either;
+/// their status does not make an opaque encoding safe to forward.
+#[test]
+fn successful_streams_do_not_expose_the_upstream_key() {
+    let mock = MockProvider::start(Provider::Anthropic);
+    let run = register(&mock, Provider::Anthropic, Some(key())).unwrap();
+    let agent = run.agent_endpoint(&endpoint(&mock.url, Provider::Anthropic));
+    for (model, expected_status, expected_text) in [
+        ("success-quotes-key", 200, "data: [the credential]\n\n"),
+        ("success-compressed", 502, "gzip-encoded"),
+    ] {
+        let (status, headers, text) = ask(
+            &agent.anthropic_url,
+            "POST",
+            "/v1/messages",
+            &[
+                ("x-run-token", run.token().expose()),
+                ("content-type", "application/json"),
+            ],
+            &format!("{{\"model\":\"{model}\",\"max_tokens\":1}}"),
+        )
+        .unwrap();
+        assert_eq!(status, expected_status, "{text}");
+        if status == 200 {
+            assert_eq!(headers["request-id"], "[the credential]");
+        }
+        assert!(text.contains(expected_text), "{text}");
+        assert!(!text.contains(&key()), "{text}");
+    }
+    assert_eq!(run.usage().unwrap().model_requests(), Some(2));
+}
+
+/// Consume one complete request before replying, so closing the mock
+/// provider does not reset a connection with unread request bytes.
+fn consume_request(stream: &TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    reader.read_exact(&mut vec![0; length]).unwrap();
+}
+
+#[test]
+fn every_response_content_encoding_is_checked() {
+    for status in [200, 403] {
+        for (encodings, expected) in [
+            ("", status),
+            ("content-encoding: identity\r\n", status),
+            ("content-encoding: Identity, identity\r\n", status),
+            (
+                "content-encoding: identity\r\ncontent-encoding: identity\r\n",
+                status,
+            ),
+            (
+                "content-encoding: identity\r\ncontent-encoding: gzip\r\n",
+                502,
+            ),
+            ("content-encoding: identity, gzip\r\n", 502),
+            ("content-encoding: \r\n", 502),
+            ("content-encoding: identity,\r\n", 502),
+            ("content-encoding: \u{0080}\r\n", 502),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let root = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                consume_request(&stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\n{encodings}content-length: 2\r\nconnection: close\r\n\r\nok"
+                )
+                .unwrap();
+            });
+            let local = Local::start(
+                Upstream::Provider {
+                    provider: Provider::Openai,
+                    root,
+                    key: ApiKey::new(&key()).unwrap(),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            let (got, _, text) = ask(
+                &local.url(),
+                "GET",
+                "/models",
+                &[(
+                    "authorization",
+                    &format!("Bearer {}", local.token().expose()),
+                )],
+                "",
+            )
+            .unwrap();
+            assert_eq!(got, expected, "{status}, {encodings:?}: {text}");
+            upstream.join().unwrap();
+        }
+    }
+}
+
+/// The provider waits for the client to consume the safe event before
+/// sending the rest: buffering the whole answer would time out this test.
+#[test]
+fn http_streams_flush_before_eof_and_fail_closed_on_disconnect() {
+    const SAFE: &[u8] = b"data: ordinary answer\n\n";
+    for abrupt in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}", listener.local_addr().unwrap());
+        let (release, released) = std::sync::mpsc::channel();
+        let credential = key();
+        let split = credential.len() / 2;
+        let upstream = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                SAFE.len() + credential.len() + 2
+            )
+            .unwrap();
+            stream.write_all(SAFE).unwrap();
+            stream.write_all(&credential.as_bytes()[..split]).unwrap();
+            stream.flush().unwrap();
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            if !abrupt {
+                stream.write_all(&credential.as_bytes()[split..]).unwrap();
+                stream.write_all(b"\n\n").unwrap();
+            }
+        });
+        let local = Local::start(
+            Upstream::Provider {
+                provider: Provider::Openai,
+                root,
+                key: ApiKey::new(&key()).unwrap(),
+            },
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let http: ureq::Agent = ureq::Agent::config_builder()
+            .proxy(None)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into();
+        let answer = http
+            .post(format!("{}/responses", local.url()))
+            .header(
+                "authorization",
+                format!("Bearer {}", local.token().expose()),
+            )
+            .send("{}")
+            .unwrap();
+        assert_eq!(answer.status(), 200);
+        let mut reader = answer.into_body().into_reader();
+        let mut first = vec![0; SAFE.len()];
+        reader.read_exact(&mut first).unwrap();
+        assert_eq!(first, SAFE);
+        release.send(()).unwrap();
+        let mut rest = Vec::new();
+        let result = reader.read_to_end(&mut rest);
+        if abrupt {
+            assert!(
+                result.is_err(),
+                "a cut-off upstream became a complete answer"
+            );
+            assert!(rest.is_empty(), "credential prefix leaked: {rest:?}");
+        } else {
+            result.unwrap();
+            assert_eq!(rest, b"[the credential]\n\n");
+        }
+        assert_eq!(local.requests(), 1, "response chunks are not requests");
+        upstream.join().unwrap();
+    }
 }
 
 /// A refusal of the provider's that quotes the key reaches the agent with
