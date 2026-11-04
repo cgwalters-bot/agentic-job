@@ -266,6 +266,8 @@ runs:
         rule='(known run secret: [A-Za-z_* -]{1,64}|pattern: private key header)'
         if [[ "$at" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+(\ \($rule\))?$ ]]; then
           echo "Nothing of this run was uploaded: a secret or a private key is in $at." >> "$GITHUB_STEP_SUMMARY"
+          [ ! -d "$JOB_DIR/out/refused-handback/safe-outputs" ] ||
+            echo "Recovery files remain private on the runner at out/refused-handback; ephemeral runner removal deletes them." >> "$GITHUB_STEP_SUMMARY"
           echo "secret-at=$at" >> "$GITHUB_OUTPUT"
         fi
     # Re-check visibility before uploading: a repository can become private

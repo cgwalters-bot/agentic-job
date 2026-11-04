@@ -111,7 +111,9 @@ the next in the same major version.
   ([files read](interface.md#files-read)).
   `[inference] allow-base-address-lines` is an optional boolean, default false;
   it is now a legacy no-op. Hand-backs always replace inference endpoint literals
-  with `<inference-address>`; credential refusals remain unchanged
+  with `<inference-address>`. Separate agent-facing inference and MCP proxy
+  tokens are also replaced; upstream credential and private-key refusals remain
+  and retain work privately on the operator's host
   ([inference](inference.md#what-run-does)).
   `[inference] stop-long-retry-after` is an optional boolean, default false;
   it requires `front` or `api-key` and stops a long upstream 429 followed

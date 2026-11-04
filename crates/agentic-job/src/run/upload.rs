@@ -12,7 +12,8 @@
 //!   hand-back: none of the values the run holds, and no private key.
 //!   The first two were redacted, as far as they are text, of those and
 //!   of anything else shaped like a credential; the hand-back's inference
-//!   addresses alone are replaced with a placeholder, so a credential there,
+//!   addresses and agent-facing proxy tokens are replaced with placeholders,
+//!   so an upstream credential there,
 //!   or in a file that is not text, fails the run. Any other shape in the
 //!   hand-back is most likely a test fixture, since the run holds no
 //!   credential but its own: it is a warning ([`Staging::shape_warnings`]);
@@ -23,8 +24,11 @@
 //! `OUT/run`, `OUT/transcript.tar.zst` and `OUT/safe-outputs` exist only
 //! for a run whose results may be public. Whether the target is public
 //! at all is the workflow's to check, which can ask the forge.
+//! Secret refusals retain staging under `OUT/refused-handback`, mode 0700,
+//! on the operator's host storage, never in the public upload paths.
 
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -44,6 +48,7 @@ pub const SAFE_OUTPUTS_DIR: &str = "safe-outputs";
 /// Without it a person learns only from the job's log which file to
 /// look at in a run that handed back nothing (#720).
 pub const SECRET_AT_FILE: &str = "secret-at";
+pub const REFUSED_DIR: &str = "refused-handback";
 /// Under `OUT/work`: where those are put together.
 const STAGING_DIR: &str = "staging";
 const TRANSCRIPT_DIR: &str = "transcript";
@@ -111,7 +116,10 @@ fn published(out: &Path) -> [PathBuf; 3] {
 /// uploaded from there must be this run's and have passed this run's
 /// gate.
 pub fn refuse_earlier_results(out: &Path) -> Result<()> {
-    for path in published(out).into_iter().chain([out.join(SECRET_AT_FILE)]) {
+    for path in published(out)
+        .into_iter()
+        .chain([out.join(SECRET_AT_FILE), out.join(REFUSED_DIR)])
+    {
         ensure!(
             std::fs::symlink_metadata(&path).is_err(),
             "{} exists: --out must not hold the results of an earlier run",
@@ -172,13 +180,14 @@ impl Staging {
         Ok(())
     }
 
-    /// Keep work that quotes a runtime endpoint, without publishing that
-    /// endpoint. Scan the original first: replacement must not hide credentials.
+    /// Keep work that quotes an endpoint or agent-facing proxy token. Scan all
+    /// originals first: replacement must not hide upstream credentials or keys,
+    /// and a refusal must retain the unmodified hand-back.
     /// Files remain bounded, no-follow regular-file reads, as at the gate.
-    pub fn redact_handback_addresses(&self, redactor: &Shared) -> Result<usize> {
-        let mut count = 0;
-        for (name, path) in Self::files(&self.safe_outputs())? {
-            let original = Self::open(&path)?;
+    pub fn redact_handback(&self, redactor: &Shared) -> Result<usize> {
+        let files = Self::files(&self.safe_outputs())?;
+        for (name, path) in &files {
+            let original = Self::open(path)?;
             let found = redactor.with(|r| r.find_credential_rule_in(original))?;
             if let Some((line, rule)) = found {
                 return Err(SecretAt {
@@ -188,15 +197,49 @@ impl Staging {
                 }
                 .into());
             }
+        }
+        let mut count = 0;
+        for (_, path) in files {
             let mut replaced = tempfile::NamedTempFile::new_in(&self.root)?;
             let original = Self::open(&path)?;
-            let found = redactor.with(|r| r.redact_addresses(original, &mut replaced))?;
+            let found = redactor.with(|r| r.redact_handback(original, &mut replaced))?;
             if found > 0 {
                 replaced.persist(&path)?;
             }
             count += found;
         }
         Ok(count)
+    }
+
+    /// Preserve refused work on private operator storage, not in an artifact
+    /// readable by everyone who can read the repository. Never overwrite an
+    /// earlier refusal; startup refuses this OUT on subsequent attempts.
+    pub fn record_refusal(&self, out: &Path, err: &anyhow::Error) -> Result<()> {
+        if err.downcast_ref::<SecretAt>().is_none() {
+            return Ok(());
+        }
+        let retained = out.join(REFUSED_DIR);
+        let preserve: Result<()> = (|| {
+            ensure!(
+                std::fs::symlink_metadata(&retained).is_err(),
+                "{} already exists",
+                retained.display()
+            );
+            std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::rename(&self.root, &retained).with_context(|| {
+                format!("retaining refused hand-back at {}", retained.display())
+            })?;
+            eprintln!(
+                "Refused hand-back retained privately at {}",
+                retained.display()
+            );
+            Ok(())
+        })();
+        // Try both independently: a full disk may prevent writing the marker
+        // even when renaming the existing files succeeds, or vice versa.
+        let marker = record_secret_at(out, err);
+        preserve?;
+        marker
     }
 
     /// The files of DIR, by name. Anything that is not a regular file is
@@ -742,7 +785,7 @@ mod tests {
                 std::fs::read_to_string(out.staging.transcript().join("acp.jsonl")).unwrap(),
                 redact::REPLACEMENT
             );
-            let result = out.staging.redact_handback_addresses(&redactor);
+            let result = out.staging.redact_handback(&redactor);
             assert_eq!(result.is_ok(), passes, "{result:?}");
             if passes {
                 assert_eq!(result.unwrap(), 2);
@@ -759,6 +802,130 @@ mod tests {
                     std::fs::read_to_string(out.staging.safe_outputs().join(name)).unwrap(),
                     patch
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_facing_tokens_are_redacted_and_uploaded() {
+        for label in [redact::AGENT_INFERENCE_TOKEN, redact::MCP_PROXY_TOKEN] {
+            let out = Out::new();
+            let value = token();
+            let redactor = Shared::new(Redactor::new_named([(label, &value)]).unwrap());
+            for name in ["aw-agent-run-1.patch", "outputs.jsonl"] {
+                out.hand_back(name, &format!("before {value} after\n"));
+            }
+            assert_eq!(out.staging.redact_handback(&redactor).unwrap(), 2);
+            out.staging.check(OPEN, &redactor).unwrap();
+            out.staging.publish(out.out(), &GO).unwrap();
+            let placeholder = if label == redact::AGENT_INFERENCE_TOKEN {
+                "<agent-inference-token>"
+            } else {
+                "<mcp-proxy-token>"
+            };
+            for name in ["aw-agent-run-1.patch", "outputs.jsonl"] {
+                let text =
+                    std::fs::read_to_string(out.out().join(SAFE_OUTPUTS_DIR).join(name)).unwrap();
+                assert_eq!(text, format!("before {placeholder} after\n"));
+            }
+            assert!(!out.out().join(REFUSED_DIR).exists());
+        }
+    }
+
+    #[test]
+    fn isolation_leaks_are_refused_and_retained_privately() {
+        let key = private_key();
+        for (label, value) in [
+            ("inference run token", "broker-run-token-value"),
+            ("GH_TOKEN", "github-job-token-value"),
+            ("environment *_TOKEN", "another-held-token-value"),
+            ("provider API key", "provider-api-key-value"),
+            ("MCP server credential", "upstream-mcp-token-value"),
+            ("key", key.as_str()),
+        ] {
+            let out = Out::new();
+            let agent_token = "agent-facing-token-value";
+            // The first file would be redacted if preflight were not whole-handback.
+            out.hand_back("a.patch", agent_token);
+            out.hand_back("z.patch", value);
+            let mut literals = vec![(redact::AGENT_INFERENCE_TOKEN, agent_token)];
+            if label != "key" {
+                literals.push((label, value));
+            }
+            let redactor = Shared::new(Redactor::new_named(literals).unwrap());
+            let err = out.staging.redact_handback(&redactor).expect_err(label);
+            out.staging.record_refusal(out.out(), &err).unwrap();
+            assert_eq!(out.names(), [REFUSED_DIR, SECRET_AT_FILE, "work"]);
+            let retained = out.out().join(REFUSED_DIR);
+            assert_eq!(
+                std::fs::metadata(&retained).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            for (name, expected) in [("a.patch", agent_token), ("z.patch", value)] {
+                assert_eq!(
+                    std::fs::read_to_string(retained.join(SAFE_OUTPUTS_DIR).join(name)).unwrap(),
+                    expected
+                );
+            }
+            assert!(refuse_earlier_results(out.out()).is_err());
+            // A new staging attempt cannot erase the retained copy.
+            Staging::create(&out.out().join("work")).unwrap();
+            assert!(retained.join(SAFE_OUTPUTS_DIR).join("z.patch").is_file());
+            assert!(published(out.out()).iter().all(|path| !path.exists()));
+        }
+    }
+
+    #[test]
+    fn token_redaction_cannot_hide_an_overlapping_isolation_leak() {
+        for label in [redact::AGENT_INFERENCE_TOKEN, redact::MCP_PROXY_TOKEN] {
+            let out = Out::new();
+            let value = "prefix-overlapping-token-value-suffix";
+            out.hand_back("outputs.jsonl", value);
+            let redactor = Shared::new(
+                Redactor::new_named([(label, value), ("GH_TOKEN", "overlapping-token-value")])
+                    .unwrap(),
+            );
+            let err = out.staging.redact_handback(&redactor).unwrap_err();
+            assert!(err.to_string().contains("GH_TOKEN"));
+            out.staging.record_refusal(out.out(), &err).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(
+                    out.out()
+                        .join(REFUSED_DIR)
+                        .join(SAFE_OUTPUTS_DIR)
+                        .join("outputs.jsonl")
+                )
+                .unwrap(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn retention_and_diagnostic_failures_are_independent() {
+        for fail_marker in [false, true] {
+            let out = Out::new();
+            out.hand_back("outputs.jsonl", LITERAL);
+            let err = out.staging.redact_handback(&redactor(0)).unwrap_err();
+            let blocked = if fail_marker {
+                SECRET_AT_FILE
+            } else {
+                REFUSED_DIR
+            };
+            std::fs::create_dir(out.out().join(blocked)).unwrap();
+            assert!(out.staging.record_refusal(out.out(), &err).is_err());
+            assert!(refuse_earlier_results(out.out()).is_err());
+            if fail_marker {
+                assert!(
+                    out.out()
+                        .join(REFUSED_DIR)
+                        .join(SAFE_OUTPUTS_DIR)
+                        .join("outputs.jsonl")
+                        .is_file()
+                );
+            } else {
+                assert!(out.staging.safe_outputs().join("outputs.jsonl").is_file());
+                assert!(out.out().join(SECRET_AT_FILE).is_file());
             }
         }
     }

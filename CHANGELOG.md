@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Hand-backs also replace the agent-facing inference and MCP proxy tokens with
+  placeholders. Run tokens, upstream credentials and private keys still refuse
+  publication; refused work is retained in mode-0700 `OUT/refused-handback` on
+  the operator's host, never in a public artifact (#2902).
+
 - Checked no-write-only outcomes retain long sanitized reports collapsed in the
   opted-in item status comment instead of cutting them at 1000 characters.
   Rendered report/body budgets disclose overflow and link the retained artifact;

@@ -605,12 +605,22 @@ fn own_tokens() -> impl Iterator<Item = (&'static str, String)> {
 /// server's credential.
 fn secrets(
     token: Option<&inference::Token>,
+    agent_token: Option<&inference::Token>,
     identity: &Identity,
     mcp: Option<(&inference::Token, &str)>,
 ) -> impl Iterator<Item = (&'static str, String)> {
     token
+        // With api-key, token() is the local proxy's token, not a broker
+        // credential. It is registered below under its agent-facing role only.
+        .filter(|_| identity.api_key.is_none())
         .map(|token| ("inference run token", token.expose().to_owned()))
         .into_iter()
+        .chain(agent_token.map(|token| {
+            (
+                crate::redact::AGENT_INFERENCE_TOKEN,
+                token.expose().to_owned(),
+            )
+        }))
         .chain(
             identity
                 .oidc
@@ -631,7 +641,7 @@ fn secrets(
         )
         .chain(mcp.into_iter().flat_map(|(token, credential)| {
             [
-                ("MCP proxy token", token.expose().to_owned()),
+                (crate::redact::MCP_PROXY_TOKEN, token.expose().to_owned()),
                 ("MCP server credential", credential.trim().to_owned()),
             ]
         }))
@@ -1161,15 +1171,10 @@ impl Plan {
         let mcp = mcp.zip(self.mcp_credential.as_deref());
         let secrets = secrets(
             run.map(|run| run.token()),
+            run.map(|run| run.agent_token()),
             &self.identity,
             mcp.map(|(local, credential)| (local.token(), credential)),
         )
-        .chain(run.map(|run| {
-            (
-                "agent inference token",
-                run.agent_token().expose().to_owned(),
-            )
-        }))
         .chain(own_tokens())
         .chain(
             inference_addresses(self.endpoint.as_ref())
@@ -1440,13 +1445,14 @@ impl Plan {
             );
         }
         staging.redact(&session.redactor)?;
-        let address_replacements = staging
-            .redact_handback_addresses(&session.redactor)
-            .inspect_err(|err| {
-                if let Err(why) = upload::record_secret_at(&self.out, err) {
-                    eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
-                }
-            })?;
+        let handback_replacements =
+            staging
+                .redact_handback(&session.redactor)
+                .inspect_err(|err| {
+                    if let Err(why) = staging.record_refusal(&self.out, err) {
+                        eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
+                    }
+                })?;
 
         // From the redacted copies, so that the summary quotes nothing
         // of the session that the transcript does not have.
@@ -1524,7 +1530,7 @@ impl Plan {
             usage: settled.usage.as_ref(),
         });
         let shaped = staging.shape_warnings()?;
-        summary["inference_address_replacements"] = json!(address_replacements);
+        summary["handback_replacements"] = json!(handback_replacements);
         if !shaped.is_empty() {
             summary[summary::SECRET_SHAPED] = json!(shaped);
         }
@@ -1541,7 +1547,7 @@ impl Plan {
             fake_agent: self.kind == Kind::Fake,
         };
         if let Err(err) = staging.check(gate, &session.redactor) {
-            if let Err(why) = upload::record_secret_at(&self.out, &err) {
+            if let Err(why) = staging.record_refusal(&self.out, &err) {
                 eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
             }
             return Err(err);
@@ -2154,6 +2160,7 @@ mod tests {
         let mcp_token = inference::Token::new("agentic-job-mcp-0123456789abcdef").unwrap();
         let mut redactor = Redactor::new_named(secrets(
             Some(&token),
+            Some(&token),
             &identity,
             Some((&mcp_token, &format!("{credential}\n"))),
         ))
@@ -2166,7 +2173,7 @@ mod tests {
         let redacted = redactor.redact(&line).into_owned();
         for (secret, source) in [
             (key.as_str(), "provider API key"),
-            (token.expose(), "inference run token"),
+            (token.expose(), crate::redact::AGENT_INFERENCE_TOKEN),
             (&credential, "MCP server credential"),
             (mcp_token.expose(), "MCP proxy token"),
         ] {
@@ -2177,6 +2184,64 @@ mod tests {
             );
         }
         assert_eq!(redactor.count(), 4);
+    }
+
+    #[test]
+    fn handback_secret_roles_follow_the_inference_mode() {
+        let broker = inference::Token::new("broker-token-for-test").unwrap();
+        let local = inference::Token::new("local-token-for-agent").unwrap();
+        let provider_key = "provider-key-for-test";
+        for (mode, run_token, agent_token, api_key, redactable) in [
+            (
+                "api-key",
+                &local,
+                &local,
+                Some(provider_key.to_owned()),
+                true,
+            ),
+            ("fronted broker", &broker, &local, None, true),
+            ("direct broker", &broker, &broker, None, false),
+        ] {
+            let identity = Identity {
+                api_key,
+                ..Identity::default()
+            };
+            let redactor =
+                Redactor::new_named(secrets(Some(run_token), Some(agent_token), &identity, None))
+                    .unwrap();
+            let agent_value = agent_token.expose();
+            assert_eq!(
+                redactor
+                    .find_credential_rule_in(agent_value.as_bytes())
+                    .unwrap()
+                    .is_none(),
+                redactable,
+                "{mode}"
+            );
+            if redactable {
+                let mut output = Vec::new();
+                assert_eq!(
+                    redactor
+                        .redact_handback(agent_value.as_bytes(), &mut output)
+                        .unwrap(),
+                    1,
+                    "{mode}"
+                );
+                assert_eq!(output, b"<agent-inference-token>", "{mode}");
+            }
+            let upstream = if mode == "api-key" {
+                provider_key
+            } else {
+                broker.expose()
+            };
+            assert!(
+                redactor
+                    .find_credential_rule_in(upstream.as_bytes())
+                    .unwrap()
+                    .is_some(),
+                "{mode}"
+            );
+        }
     }
 
     /// The inference gateway's host and port are redacted from an agent's

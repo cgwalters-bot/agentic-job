@@ -28,6 +28,20 @@ pub const INFERENCE_ADDRESS: &str = "private inference address";
 
 pub const INFERENCE_PLACEHOLDER: &str = "<inference-address>";
 
+pub const AGENT_INFERENCE_TOKEN: &str = "agent inference token";
+pub const MCP_PROXY_TOKEN: &str = "MCP proxy token";
+
+/// Only the local, agent-facing proxy credentials may be sanitized in work.
+/// The broker run token and upstream credentials must still reveal isolation failures.
+fn handback_placeholder(name: &str) -> Option<&'static str> {
+    match name {
+        INFERENCE_ADDRESS => Some(INFERENCE_PLACEHOLDER),
+        AGENT_INFERENCE_TOKEN => Some("<agent-inference-token>"),
+        MCP_PROXY_TOKEN => Some("<mcp-proxy-token>"),
+        _ => None,
+    }
+}
+
 /// Shorter literals would redact ordinary words.
 const MIN_LITERAL_BYTES: usize = 8;
 
@@ -272,7 +286,8 @@ pub struct Redactor {
     /// Independent credential search: a redacted address must not mask an
     /// overlapping token or private key.
     credential_refused: BytesRegex,
-    addresses: BytesRegex,
+    handback_literals: BytesRegex,
+    handback_placeholders: Vec<&'static str>,
     /// Public source labels, in the order of `refused`'s capture groups.
     literal_names: Vec<&'static str>,
     /// What [`stream`] needs to look ahead: the longest match that spans
@@ -307,22 +322,26 @@ impl Redactor {
             .map_or(0, |(l, _)| l.len())
             .max(MAX_PEM_BYTES);
         let literal_names = literals.iter().map(|(_, name)| *name).collect();
-        let addresses = alternation(
+        let handback_placeholders = literals
+            .iter()
+            .filter_map(|(_, name)| handback_placeholder(name))
+            .collect();
+        let handback_literals = alternation(
             literals
                 .iter()
-                .filter(|(_, name)| *name == INFERENCE_ADDRESS)
-                .map(|(literal, _)| regex::escape(literal)),
+                .filter(|(_, name)| handback_placeholder(name).is_some())
+                .map(|(literal, _)| format!("({})", regex::escape(literal))),
         );
-        let addresses = if addresses.is_empty() {
+        let handback_literals = if handback_literals.is_empty() {
             r"\b\B".to_owned()
         } else {
-            addresses
+            handback_literals
         };
         let credential_refused = alternation(
             literals
                 .iter()
                 .map(|(literal, name)| {
-                    if *name == INFERENCE_ADDRESS {
+                    if handback_placeholder(name).is_some() {
                         r"(\b\B)".to_owned()
                     } else {
                         format!("({})", regex::escape(literal))
@@ -351,7 +370,8 @@ impl Redactor {
             bytes: BytesRegex::new(&format!("(?-u){rule}"))?,
             refused: BytesRegex::new(&format!("(?-u){refused}"))?,
             credential_refused: BytesRegex::new(&format!("(?-u){credential_refused}"))?,
-            addresses: BytesRegex::new(&format!("(?-u){addresses}"))?,
+            handback_literals: BytesRegex::new(&format!("(?-u){handback_literals}"))?,
+            handback_placeholders,
             literal_names,
             overlap,
             count: 0,
@@ -377,24 +397,39 @@ impl Redactor {
         self.find_rule(input, &self.refused)
     }
 
-    /// Scan original bytes before address replacement, so even an overlapping
+    /// Scan original bytes before hand-back replacement, so even an overlapping
     /// credential or private-key header cannot be hidden by the replacement.
     pub fn find_credential_rule_in(&self, input: impl Read) -> io::Result<Option<(usize, String)>> {
         self.find_rule(input, &self.credential_refused)
     }
 
-    /// Replace only endpoint literals; never sanitize credentials in a hand-back.
-    pub fn redact_addresses(&self, input: impl Read, mut output: impl Write) -> io::Result<usize> {
+    /// Replace endpoints and agent-facing proxy tokens, not upstream credentials.
+    pub fn redact_handback(&self, input: impl Read, mut output: impl Write) -> io::Result<usize> {
         let mut count = 0;
-        stream(&self.addresses, self.overlap, input, |bytes, matched| {
-            if matched {
-                count += 1;
-                output.write_all(INFERENCE_PLACEHOLDER.as_bytes())?;
-            } else {
-                output.write_all(bytes)?;
-            }
-            Ok(true)
-        })?;
+        stream(
+            &self.handback_literals,
+            self.overlap,
+            input,
+            |bytes, matched| {
+                if matched {
+                    count += 1;
+                    let captures = self
+                        .handback_literals
+                        .captures(bytes)
+                        .expect("stream found a literal");
+                    let placeholder = self
+                        .handback_placeholders
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, placeholder)| captures.get(i + 1).map(|_| *placeholder))
+                        .expect("each hand-back literal has a placeholder");
+                    output.write_all(placeholder.as_bytes())?;
+                } else {
+                    output.write_all(bytes)?;
+                }
+                Ok(true)
+            },
+        )?;
         Ok(count)
     }
 

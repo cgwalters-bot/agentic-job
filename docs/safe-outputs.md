@@ -260,8 +260,10 @@ hosts whose links would be redacted, before the session ends.
 
 Secrets are not filtered by shape either, beyond redacting logs. `run`
 refuses to upload anything while the hand-back or a file that could not
-be redacted holds a value the run itself holds, its run token among
-them: that one would be a real leak. Check and `run` refuse a PEM
+be redacted holds an upstream credential the run itself holds, its run token
+among them: that one would be a real leak. The separate agent-facing inference
+and MCP proxy tokens are replaced before upload, as described below.
+Check and `run` refuse a PEM
 private key anywhere in the outputs, code included, since one cannot be
 a harmless fixture. Any other credential-shaped string (a `ghp_`, `sk-`
 or `AKIA` token, a JWT) is most likely a test fixture, and lost runs
@@ -274,22 +276,34 @@ the string, in check's report and summary and in the run's summary.
 by file and line in the change's diff and in `out/`, and exits 1 only
 for a private key or a `praxis-run-` broker run token the change adds or
 `out/` holds: `run` refuses its own by value, and the agent cannot tell
-it from another by shape. Other run secrets (an `api-key` run's token,
-the MCP proxy token) have no listed shape, so a hand-back holding one is
-refused only at upload. The final refusal names the file, line and rule, never
+it from another by shape. Known upstream credentials without a listed shape
+are refused only at upload. The final refusal names the file, line and rule, never
 the string: `known run secret: SOURCE` distinguishes a value held by the run
 from `pattern: private key header`. Source names are fixed public labels, not
 credential values; other environment tokens use `environment *_TOKEN` rather
 than arbitrary environment variable names. These appear in the job's log,
 its summary and, through the run action's
 `secret-at` output, the status comment, since such a run uploads nothing
-else to look in.
+else to look in publicly. On a secret refusal, `run` moves its staging directory
+to `OUT/refused-handback` with mode 0700 on the operator's host storage. It
+contains the hand-back, run files and transcript, not a publishable artifact.
+Another run using that `OUT` is refused rather than erasing the recovery copy.
+Keep `OUT` on private persistent storage for recovery; the shipped Actions
+uploads deliberately exclude this directory. An ephemeral runner's removal
+also removes its local recovery copy: this is not remote private artifact storage.
 
 Inference addresses are not credentials. Before upload, hand-back patches,
-PR bodies and safe outputs replace them with `<inference-address>`; the run
-summary includes one line counting the replacements. The original bytes are
-independently scanned for known credentials and private keys before replacement,
-so redaction cannot hide an overlapping credential. `allow-base-address-lines`
+PR bodies and safe outputs replace them with `<inference-address>`. The separate
+agent-facing inference and MCP proxy tokens become `<agent-inference-token>`
+and `<mcp-proxy-token>`; the run summary counts all these replacements.
+Publication still requires confirmation that the inference run ended at the
+proxy. The original bytes of every hand-back file are independently scanned
+for upstream credentials and private keys before any replacement, so redaction
+cannot hide an overlapping credential and a refusal retains the original work.
+`GH_TOKEN`, other held `*_TOKEN` values, broker run tokens, provider API keys
+and upstream MCP credentials remain refusals. If a token has both an agent-facing
+and an upstream role (direct broker mode), the upstream refusal wins.
+`allow-base-address-lines`
 is now a legacy no-op. A placeholder may break a build or patch application;
 review or continuation must repair that rather than discard the work. All
 other bounds and check/apply refusals remain. Logs and transcripts keep their
