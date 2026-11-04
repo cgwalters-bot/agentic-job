@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Checked no-write-only outcomes retain long sanitized reports collapsed in the
+  opted-in item status comment instead of cutting them at 1000 characters.
+  Rendered report/body budgets disclose overflow and link the retained artifact;
+  short blocked outcomes and notification opt-outs are unchanged. The shipped
+  implement dispatch profile also permits one caller-bounded item comment (#2892).
+
 - Opt-in `[inference] allow-base-address-lines` permits inference addresses on exact base-file lines retained
   or moved within that file; extra copies and new files still fail. Logs remain
   redacted, and tokens and private keys have no base-content exception (#2863).

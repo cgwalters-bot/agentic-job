@@ -1381,3 +1381,237 @@ fn comment_only_apply_skips_every_repository_step_including_checkout() {
         0,
     );
 }
+
+/// Exercise checked no-write data through the CLI's real job-output encoding,
+/// conclude's actual shell, and the status writer against a local forge.
+#[test]
+fn no_write_reports_reach_one_status_comment_without_reclassifying_outcomes() {
+    use agentic_job::apply::status::{MAX_BODY_BYTES, Status};
+    use safe_outputs::apply::testing::forge;
+    use std::collections::BTreeMap;
+
+    let long = format!("{}END OF INVENTORY", "inventory line\n".repeat(1500));
+    for (items, results, blocked, refused, published) in [
+        (
+            json!([{"type":"noop", "message":"nothing to change"}]),
+            "success/success/success",
+            "",
+            "",
+            true,
+        ),
+        (
+            json!([{"type":"noop", "message":long}]),
+            "success/success/success",
+            "",
+            "",
+            true,
+        ),
+        (
+            json!([{"type":"noop", "message":long}, {"type":"missing_tool", "tool":"scanner", "reason":"unavailable"}]),
+            "success/success/success",
+            "",
+            "",
+            true,
+        ),
+        (
+            json!([{"type":"missing_data", "reason":"need logs"}]),
+            "success/success/success",
+            "true",
+            "",
+            true,
+        ),
+        (
+            json!([{"type":"missing_data", "reason":"need logs"}, {"type":"noop", "message":long}]),
+            "success/success/success",
+            "true",
+            "",
+            true,
+        ),
+        (
+            json!([{"type":"missing_data", "reason":"need logs"}, {"type":"missing_tool", "reason":"need scanner"}, {"type":"noop", "message":long}]),
+            "success/success/failure",
+            "",
+            "",
+            true,
+        ),
+        (
+            json!([{"type":"noop", "message":long}]),
+            "failure/success/skipped",
+            "",
+            "",
+            false,
+        ),
+        (
+            json!([{"type":"noop", "message":long}]),
+            "success/failure/skipped",
+            "",
+            "refused by policy",
+            false,
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        json_file(
+            dir.path(),
+            "applied.json",
+            &json!({"made":[], "already_applied":[], "pull_request":null}),
+        );
+        json_file(dir.path(), "agent_output.json", &json!({"items":items}));
+        let output = dir.path().join("result");
+        let summary = dir.path().join("summary");
+        fs::write(&output, "").unwrap();
+        fs::write(&summary, "").unwrap();
+        let run_url = "https://github.com/caller/repo/actions/runs/100";
+        let result = Command::new(BIN)
+            .args(["result", "--dir"])
+            .arg(dir.path())
+            .arg("--output")
+            .arg(&output)
+            .arg("--summary")
+            .arg(&summary)
+            .env("RUN_URL", run_url)
+            .env("CHECKED_ARTIFACT_ID", "99")
+            .env("GH_AW_SAFE_OUTPUTS_URLS", "allowed-or-code-region")
+            .output()
+            .unwrap();
+        status(&result, 0);
+        let fields = fs::read_to_string(&output).unwrap();
+        let fields: BTreeMap<_, _> = fields
+            .lines()
+            .map(|line| line.split_once('=').unwrap())
+            .collect();
+        let ended = dir.path().join("ended");
+        status(
+            &run_step(
+                dir.path(),
+                "How the run ended",
+                &[
+                    ("RESULTS", results),
+                    ("EXIT", "0"),
+                    ("PR", ""),
+                    ("PR_REPO", ""),
+                    ("NO_RESULT", fields["no-result"]),
+                    ("NO_RESULT_REASON", fields["no-result-reason"]),
+                    ("MISSING_DATA", fields["missing-data"]),
+                    ("BLOCKED", blocked),
+                    ("REFUSAL", refused),
+                    ("WORKFLOW", "audit"),
+                    ("RUN_URL", run_url),
+                    ("GITHUB_OUTPUT", ended.to_str().unwrap()),
+                ],
+            ),
+            0,
+        );
+        let ended = fs::read_to_string(ended).unwrap();
+        let ended: BTreeMap<_, _> = ended
+            .lines()
+            .map(|line| line.split_once('=').unwrap())
+            .collect();
+        assert_eq!(ended.contains_key("no-result-reason"), published);
+        let env = BTreeMap::from([
+            ("REPO", "owner/item"),
+            ("ITEM", "42"),
+            ("GITHUB_RUN_ID", "100"),
+            ("TEXT", ended["text"]),
+            (
+                "NO_RESULT_REASON",
+                ended.get("no-result-reason").copied().unwrap_or(""),
+            ),
+        ]);
+        let update = Status::from_env(|key| {
+            env.get(key)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .unwrap();
+        assert!(update.body.len() <= MAX_BODY_BYTES);
+        if published && items.to_string().contains("END OF INVENTORY") {
+            assert!(update.body.contains("END OF INVENTORY"));
+            assert!(update.body.contains("<details>"));
+            assert!(update.body.contains(&format!("{run_url}/artifacts/99")));
+        }
+        if blocked == "true" {
+            assert!(
+                update
+                    .body
+                    .starts_with("<!-- agentic-job-outcome: blocked -->")
+            );
+        } else if results.ends_with("failure") || !refused.is_empty() {
+            assert!(update.body.starts_with('❌'));
+        }
+        if !published {
+            assert!(!update.body.contains("END OF INVENTORY"));
+        }
+        let list = "GET /repos/owner/item/issues/42/comments?per_page=100&page=1";
+        let post = "POST /repos/owner/item/issues/42/comments";
+        let patch = "PATCH /repos/owner/item/issues/comments/5";
+        let (github, requests) = forge(BTreeMap::from([
+            (list.into(), (200, json!([]))),
+            (post.into(), (201, json!({"id":5}))),
+        ]));
+        update.upsert(&github, "bot", &mut |_| {}).unwrap();
+        let writes: Vec<_> = requests
+            .try_iter()
+            .filter(|r| r.line.starts_with("POST "))
+            .collect();
+        assert_eq!(writes.len(), 1);
+        let body = writes[0].body["body"].as_str().unwrap();
+        assert_eq!(body, update.body);
+        // Retry edits the same item/comment; a newer run is not overwritten.
+        for newer in [false, true] {
+            let body = if newer {
+                body.replace("run: 100", "run: 101")
+            } else {
+                body.to_owned()
+            };
+            let (github, requests) = forge(BTreeMap::from([
+                (
+                    list.into(),
+                    (200, json!([{"id":5,"user":{"login":"bot"},"body":body}])),
+                ),
+                (patch.into(), (200, json!({"id":5}))),
+            ]));
+            update.upsert(&github, "bot", &mut |_| {}).unwrap();
+            let writes: Vec<_> = requests
+                .try_iter()
+                .filter(|r| !r.line.starts_with("GET "))
+                .collect();
+            assert_eq!(writes.len(), usize::from(!newer));
+            if !newer {
+                assert!(writes[0].line.starts_with(patch));
+                assert_eq!(writes[0].body["body"], update.body);
+            }
+        }
+    }
+}
+
+#[test]
+fn cross_repository_report_status_never_borrows_the_job_token() {
+    let dir = TempDir::new().unwrap();
+    let summary = dir.path().join("summary");
+    fs::write(&summary, "").unwrap();
+    let result = Command::new(BIN)
+        .arg("status")
+        .env_remove("APPLY_ROLE_BINDINGS")
+        .env_remove("STATUS_TOKEN")
+        .env("GITHUB_REPOSITORY", "caller/repo")
+        .env("REPO", "owner/item")
+        .env("ITEM", "42")
+        .env("GITHUB_RUN_ID", "100")
+        .env("TEXT", "ended")
+        .env(
+            "NO_RESULT_REASON",
+            serde_json::to_string(&"long report ".repeat(2000)).unwrap(),
+        )
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        // No forge should even be contacted without a caller credential.
+        .env("GH_TOKEN", "")
+        .env("GITHUB_API_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+    status(&result, 0);
+    assert!(
+        fs::read_to_string(summary)
+            .unwrap()
+            .contains("cross-repository target requires")
+    );
+}

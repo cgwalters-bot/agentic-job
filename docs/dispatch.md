@@ -99,7 +99,7 @@ The scripted session is implement's.
 A target with issues turned off can take its item from another repository:
 `-f item-repo=OWNER/TRACKER` with an issue number there, for `implement`,
 `triage` and `research`. The issue's text, the status comment and a
-triage or research comment are that repository's; a pull request is the
+triage, research or implement comment are that repository's; a pull request is the
 target's. Policy refuses an item repository the bounds' `repos` do not
 list, and it needs `APPLY_ENVIRONMENT` like any other repository.
 
@@ -130,6 +130,14 @@ reason and run link in the bounded status comment even with notifications off
 (cross-repository items need the caller's `SAFE_OUTPUTS_PAT`). Otherwise the
 run stays green and status remains opt-in. The run summary also holds the
 reason. Reviews normally have no status comment, except for missing-data runs.
+
+Short no-write reasons stay inline (1000 UTF-16 units); longer checked reports
+are collapsed as sanitized literal text in the same status comment, not a
+separate noop publication. The rendered report has a 48,000-byte budget and the
+whole comment a 60,000-byte budget, including escaping and markers. Overflow is
+disclosed and links the retained checked-outputs report artifact; see
+[the outcome contract](workflow.md#what-the-apply-job-does-before-it-writes).
+Ordinary success noops still respect `notify: none` and `notify: reaction`.
 
 An agent whose change does only part of the issue starts a line of the PR
 body with `Part of #N` (or `Refs #N`), and apply then adds no closing line.
@@ -421,7 +429,11 @@ clean check job.
 Real reviewers start in the base checkout with the pinned head beside it.
 Other profiles allow one each of noop, missing_tool and missing_data, three
 outputs total; implement permits one draft PR, fix one push to the dispatched
-pull request's branch, triage/research one comment.
+pull request's branch, triage/research one comment. Implement also permits one
+`add_comment` on the dispatched item for comment-only tasks, still within three
+total requests and the caller bounds' `add_comment.max = 1`. This explicit
+profile capability, not plan text, authorizes the comment; targets and tokens
+are unchanged. Callers without that bound cannot grant it by asking in prose.
 Comment routing is fixed to the dispatched item, not agent-supplied fields.
 Triage may also close up to 30 issues of the target `repo` (not the item
 repository) that it finds finished or overtaken, each `close_issue` carrying

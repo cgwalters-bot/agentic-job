@@ -942,6 +942,7 @@ jobs:
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
           GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECKED_ARTIFACT_ID: ${{ fromJSON(inputs.check).outputs.artifact-id }}
         run: |
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
           "$RUNNER_TEMP/apply-binary/agentic-job" result --dir "$GH_AW_TMP" --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"

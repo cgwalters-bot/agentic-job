@@ -60,6 +60,14 @@ calling repository; architecture-specific and special runners are not remapped.
 `status-comment` preserves opening whole-line hidden caller comments, except
 tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
 [status provenance contract](workflow.md#optional-threat-detection).
+With `notify: comment` and a notified numeric item, checked no-write-only
+(`noop`, `missing_tool`, `missing_data`) reasons up to 1000 UTF-16 units are
+inline; longer sanitized reports are collapsed in the same status comment.
+The rendered report budget is 48,000 UTF-8 bytes and the total body budget is
+60,000 bytes, including escaping and all markers. Overflow explicitly links the
+retained checked-outputs artifact. Noops do not become general publisher writes;
+notification opt-outs and blocked/missing-data exceptions are unchanged
+([outcomes](workflow.md#what-the-apply-job-does-before-it-writes)).
 
 Not stable: `budget`, deprecated in favour of `budget-usd`;
 `fake-profile`, `expect-check-refusal` and

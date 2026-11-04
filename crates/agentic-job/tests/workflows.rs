@@ -2412,8 +2412,13 @@ fn the_result_step_passes_no_token() {
         [
             "GH_AW_SAFE_OUTPUTS_URLS",
             "GH_AW_ALLOWED_DOMAINS",
-            "RUN_URL"
+            "RUN_URL",
+            "CHECKED_ARTIFACT_ID"
         ]
+    );
+    assert_eq!(
+        result["env"]["CHECKED_ARTIFACT_ID"].as_str(),
+        Some("${{ fromJSON(inputs.check).outputs.artifact-id }}")
     );
     assert_eq!(
         result["env"]["GH_AW_ALLOWED_DOMAINS"].as_str(),
@@ -2439,6 +2444,43 @@ fn the_result_step_passes_no_token() {
     for credential in ["secrets.", "token", "TOKEN"] {
         assert!(!step.contains(credential), "{credential}: {step}");
     }
+}
+
+#[test]
+fn no_result_reports_keep_notification_opt_outs_and_fixed_targets() {
+    let doc = definition("apply.yml");
+    let status = named_step(&doc, "Edit the status comment");
+    let gate = expression(&status["if"]).replace("fromJSON(inputs.policy)", "policy");
+    for (notify, notified, missing, item, expected) in [
+        ("comment", "true", "false", "42", "true"),
+        ("none", "true", "false", "42", "false"),
+        ("reaction", "true", "false", "42", "false"),
+        ("comment", "false", "false", "42", "false"),
+        // Existing blocked/missing-data reporting is independent of opt-in.
+        ("none", "false", "true", "42", "true"),
+        ("none", "false", "true", "*", "false"),
+        ("none", "false", "true", "", "false"),
+    ] {
+        let context = [
+            ("policy.notify", Expr::text(notify)),
+            ("policy.notified", Expr::text(notified)),
+            ("policy.notify-item", Expr::text(item)),
+            ("needs.apply.outputs.missing-data", Expr::text(missing)),
+        ];
+        assert_eq!(evaluate(&gate, &context).render(), expected);
+    }
+    assert_eq!(
+        status["env"]["REPO"].as_str(),
+        Some("${{ fromJSON(inputs.policy).notify-repo }}")
+    );
+    assert_eq!(
+        status["env"]["ITEM"].as_str(),
+        Some("${{ fromJSON(inputs.policy).notify-item }}")
+    );
+    assert_eq!(
+        status["env"]["NO_RESULT_REASON"].as_str(),
+        Some("${{ steps.ended.outputs.no-result-reason }}")
+    );
 }
 
 #[test]
@@ -6374,7 +6416,7 @@ fn the_dispatch_caller_fixes_capabilities_and_token_boundary() {
         (
             "implement",
             "branch",
-            "create_pull_request,noop,missing_tool,missing_data",
+            "create_pull_request,add_comment,noop,missing_tool,missing_data",
             "3",
             "",
             "",

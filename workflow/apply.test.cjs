@@ -711,7 +711,7 @@ function resultOutputs(items, pr = null) {
     for (const file of ['output', 'summary']) writeFileSync(join(dir, file), '');
     const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('Say where what the run made is')],
       { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_OUTPUT: join(dir, 'output'), GITHUB_STEP_SUMMARY: join(dir, 'summary'),
-        GH_AW_SAFE_OUTPUTS_URLS: 'allowed-or-code-region', RUN_URL: 'https://github.com/caller/repo/actions/runs/7' });
+        GH_AW_SAFE_OUTPUTS_URLS: 'allowed-or-code-region', CHECKED_ARTIFACT_ID: '99', RUN_URL: 'https://github.com/caller/repo/actions/runs/7' });
     assert.equal(ran.status, 0, ran.stdout + ran.stderr);
     return Object.fromEntries(readFileSync(join(dir, 'output'), 'utf8').trimEnd().split('\n')
       .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));

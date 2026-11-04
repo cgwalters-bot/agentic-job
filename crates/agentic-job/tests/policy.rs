@@ -530,7 +530,7 @@ fn dispatch_profiles_use_the_example_bounds() {
     for (kind, outputs, repo, code) in [
         (
             "branch",
-            "create_pull_request,noop,missing_tool,missing_data",
+            "create_pull_request,add_comment,noop,missing_tool,missing_data",
             "cgwalters-forge/agentic-job",
             0,
         ),

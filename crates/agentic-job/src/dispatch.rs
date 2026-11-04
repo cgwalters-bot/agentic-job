@@ -105,9 +105,9 @@ change is pushed to that branch as one commit. Use noop, missing_tool or missing
 /// that read skills (docs/skills.md), so the task only names it; the
 /// others keep the one-line contract.
 const IMPLEMENT_SKILL: &str = "Use the implement skill. Implement proposes one draft pull \
-request. Use noop, missing_tool or missing_data when needed.";
+request, or one add_comment for a comment-only task. Use noop, missing_tool or missing_data when needed.";
 
-const OTHER: &str = "Implement proposes one draft pull request. Research leaves the tree clean \
+const OTHER: &str = "Implement proposes one draft pull request, or one add_comment for a comment-only task. Research leaves the tree clean \
 and returns one add_comment. Use noop, missing_tool or missing_data when needed.";
 
 const REVIEW_ROUTING: &str = " Set only type and body on add_comment; do not set item_number or \
@@ -633,8 +633,8 @@ mod tests {
     #[test]
     fn the_task_of_each_profile() {
         let triage = "Triage leaves the tree clean and returns one add_comment. It may also close issues of owner/repo that it finds finished or overtaken, with one close_issue each giving repo \"owner/repo\", issue_number, state_reason completed or not_planned, and a body saying why. Use noop, missing_tool or missing_data when needed.";
-        let other = "Implement proposes one draft pull request. Research leaves the tree clean and returns one add_comment. Use noop, missing_tool or missing_data when needed.";
-        let skill = "Use the implement skill. Implement proposes one draft pull request. Use noop, missing_tool or missing_data when needed.";
+        let other = "Implement proposes one draft pull request, or one add_comment for a comment-only task. Research leaves the tree clean and returns one add_comment. Use noop, missing_tool or missing_data when needed.";
+        let skill = "Use the implement skill. Implement proposes one draft pull request, or one add_comment for a comment-only task. Use noop, missing_tool or missing_data when needed.";
         let fix = "Fix works in a checkout of the pull request's branch at its pinned head; the change is pushed to that branch as one commit. Use noop, missing_tool or missing_data when needed.";
         for (profile, agent, data, skills, instructions) in [
             ("implement", "fake", issue(), false, other),

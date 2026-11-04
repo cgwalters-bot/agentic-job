@@ -37,6 +37,19 @@ const JOB_TOKEN_AUTHOR: &str = "github-actions[bot]";
 
 const STATUS_TOKEN_ENV: &str = "STATUS_TOKEN";
 
+/// Conservative UTF-8 byte budget below GitHub's 65,536-character limit.
+/// Counts the complete rendered body, including caller markers, quoting,
+/// escaping, cost and run markers. Bytes also bound UTF-16 units and scalars.
+pub const MAX_BODY_BYTES: usize = 60_000;
+
+fn check_body(body: &str) -> Result<()> {
+    ensure!(
+        body.len() <= MAX_BODY_BYTES,
+        "status comment exceeds the {MAX_BODY_BYTES}-byte total body budget (including caller markers)"
+    );
+    Ok(())
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
@@ -57,9 +70,9 @@ pub fn body(text: &str, reason: Option<&str>, cost: Option<&str>, run: &str) -> 
         .filter(|cost| is_cost(cost))
         .map(|cost| format!("\n\n<!-- agentic-job-cost: {run} {cost} -->"))
         .unwrap_or_default();
-    Ok(format!(
-        "{text}{reason}{cost}\n\n<!-- agentic-job-run: {run} -->\n\n{MARKER}"
-    ))
+    let body = format!("{text}{reason}{cost}\n\n<!-- agentic-job-run: {run} -->\n\n{MARKER}");
+    check_body(&body)?;
+    Ok(body)
 }
 
 /// `usd=N partial=B`, N a decimal of at most 16 digits on either side of
@@ -155,6 +168,7 @@ impl Status {
         summary: &mut dyn FnMut(&str),
     ) -> Result<Value> {
         let repo = &self.repo;
+        check_body(&self.body)?;
         if let Some(comment) = self.named(github, author, summary) {
             return self.edit(github, &comment);
         }
@@ -243,6 +257,7 @@ impl Status {
             format!("{}\n\n{}", kept.join("\n"), self.body)
         };
         let id = comment["id"].as_u64().context("the comment has no id")?;
+        check_body(&body)?;
         github.send(
             "PATCH",
             &format!("/repos/{}/issues/comments/{id}", self.repo),
@@ -728,6 +743,35 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:#}").contains("exceeded 20 pages"), "{err:#}");
         assert_eq!(requests.try_iter().count(), MAX_PAGES as usize);
+    }
+
+    #[test]
+    fn total_body_budget_includes_preserved_markers() {
+        let overhead = body("", None, Some("usd=1 partial=false"), "100")
+            .unwrap()
+            .len();
+        for (extra, ok) in [(0, true), (1, false)] {
+            let text = "x".repeat(MAX_BODY_BYTES - overhead + extra);
+            assert_eq!(
+                body(&text, None, Some("usd=1 partial=false"), "100").is_ok(),
+                ok
+            );
+        }
+        let mut update = status("100", "5");
+        update.body = body(&"😀".repeat(14_000), None, None, "100").unwrap();
+        let old = format!("<!-- {} -->\n\nold", "x".repeat(5000));
+        let (github, requests) = forge(BTreeMap::from([(
+            NAMED.into(),
+            (200, comment(5, JOB_TOKEN_AUTHOR, &old)),
+        )]));
+        assert!(
+            update
+                .upsert(&github, JOB_TOKEN_AUTHOR, &mut |_| {})
+                .unwrap_err()
+                .to_string()
+                .contains("including caller markers")
+        );
+        assert!(requests.try_iter().all(|r| r.line.starts_with("GET ")));
     }
 
     #[test]

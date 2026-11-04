@@ -129,7 +129,12 @@ and proposals-only runs) have one bot status comment, found by a hidden marker
 and edited at start and finish across runs. It links the Actions run and the
 result, or names the failed jobs/check refusal. For a run that hands back only
 `missing_data`, `missing_tool` or `noop`, it includes the agent's reason, using
-the same sanitizer as other agent text, limited to 1000 characters and quoted.
+the same sanitizer as other agent text. Reasons up to 1000 UTF-16 units stay
+inline and quoted; longer reports are collapsed as escaped literal text, with
+the run link in the same comment. The rendered report has a 48,000-byte budget;
+overflow is explicitly disclosed with a link to the retained checked-outputs
+artifact, not silently discarded. Noops remain no-write requests: only this
+existing, opted-in status path publishes their reason on the fixed policy item.
 The same reason remains in the run summary; apply posts no separate notice.
 The shipped dispatch caller opts in except for reviews, which remain silent.
 Status comments prefer the explicitly supplied `SAFE_OUTPUTS_PAT`, including
@@ -1946,13 +1951,26 @@ might, has to pass its item as `issue`, not only as `comment-target`. When notif
 enabled, conclude puts the result link in the item's single status comment.
 A link that cannot be posted fails no run.
 A run whose checked outputs are only `noop`, `missing_tool` or
-`missing_data` makes nothing anyone would see: its run summary says "No
+`missing_data` creates no separate result: its run summary says "No
 result" with the agent's reason, sanitized as gh-aw's handlers sanitize
-it (mentions, HTML comments and URLs off its allowlist neutralized, cut
-at 1000 characters) and quoted line by line. Policy's binary,
+it (mentions, HTML comments and URLs off its allowlist neutralized).
+Reasons up to 1000 UTF-16 units are quoted line by line. Longer reports,
+including ordinary 15–22 KB inventories, are HTML-escaped inside a collapsed
+literal report so agent text cannot close the container or introduce live
+HTML/controller markers. Policy's binary,
 `agentic-job result`, writes these outputs and the summary from
 `applied.json` and the checked outputs, in a step given no token. With
-`notify: comment`, the status comment includes the quoted reason.
+`notify: comment` on a notified numeric item, the status comment includes the
+reason, with the run link, using the same lookup, retry and newer-run protection.
+The rendered report is at most 48,000 UTF-8 bytes, counting escaping, its
+container, artifact link and reserved overflow notice. The complete status body
+is bounded to 60,000 UTF-8 bytes (below GitHub's 65,536-character limit), counting
+quoting, Unicode, cost/run/status markers and preserved caller markers. Oversized
+trusted status metadata or caller markers refuse the status write rather than
+exceed this total. Report overflow keeps a whole-character/entity prefix and
+explicitly links the full retained report in this run's checked-outputs artifact
+(`agent_output.json`), subject to Actions artifact retention. The summary has the
+same bounded rendering. Refused outputs are never read back into this path.
 When these outputs are `missing_data` with at most `noop` beside it, and the
 hand-back has no patch or memory, the run is blocked: it could not proceed
 because a prerequisite is not merged, a decision is needed or the work belongs

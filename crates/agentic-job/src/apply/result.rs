@@ -6,8 +6,8 @@
 //! A run with none whose checked outputs are only `noop`, `missing_tool`
 //! or `missing_data` has no result: the agent's reason, which is its own
 //! text, is passed through gh-aw's sanitizer as its handlers run it
-//! (`sanitizeContent(text, 1000)`, which with a numeric bound wraps every
-//! mention) and quoted line by line. Nothing here writes to the forge:
+//! (with every mention neutralized) and quoted line by line for a short
+//! reason, or escaped in a collapsed report. Nothing here writes to the forge:
 //! the step has no token.
 
 use std::io::Write as _;
@@ -19,7 +19,7 @@ use serde_json::{Map, Value};
 
 use super::publish::Links;
 use super::{ADD_COMMENT, CREATE_ISSUE, NO_WRITE};
-use crate::collect::sanitize::{Mentions, sanitize_with};
+use crate::collect::sanitize::{Mentions, sanitize_with, utf16_len};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{MISSING_DATA, PUSH_TO_PULL_REQUEST_BRANCH};
@@ -28,8 +28,12 @@ use crate::policy::{MISSING_DATA, PUSH_TO_PULL_REQUEST_BRANCH};
 /// on the collector's result.
 const MAX_JSON: u64 = 4 << 20;
 
-/// What the reason is cut to, as the step's `sanitizeContent` call cut it.
+/// Inline reasons retain the old 1000 UTF-16-unit threshold.
 const MAX_REASON: usize = 1000;
+
+/// Bound rendered report bytes, not input characters: HTML escaping can expand
+/// text sixfold. Leave room in status's total budget for trusted metadata.
+const MAX_REPORT_BYTES: usize = 48_000;
 
 const CREATE_DISCUSSION: &str = "create_discussion";
 
@@ -134,7 +138,7 @@ fn said(item: &Map<String, Value>) -> Result<String> {
 }
 
 /// The report for DIR, with the run's page RUN_URL and LINKS kept.
-fn report(dir: &Path, run_url: &str, links: &Links) -> Result<Report> {
+fn report(dir: &Path, run_url: &str, artifact_url: &str, links: &Links) -> Result<Report> {
     let applied: Applied = read_json(&dir.join("applied.json"))?;
     let posted = applied
         .already_applied
@@ -180,13 +184,14 @@ fn report(dir: &Path, run_url: &str, links: &Links) -> Result<Report> {
         .collect::<Result<Vec<_>>>()?
         .join("\n");
     let said = if said.is_empty() { "none given" } else { &said };
-    let sanitized = sanitize_with(said, MAX_REASON, &Mentions::All, &|host| links.keeps(host));
-    let reason = sanitized
-        .replace("\r\n", "\n")
-        .split(['\r', '\n'])
-        .map(|line| format!("> {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let sanitized = sanitize_with(said, MAX_JSON as usize, &Mentions::All, &|host| {
+        links.keeps(host)
+    });
+    let reason = if utf16_len(&sanitized) > MAX_REASON {
+        collapsed(&sanitized, artifact_url)
+    } else {
+        quoted(&sanitized)
+    };
     outputs.push(("no-result", "true".into()));
     outputs.push(("missing-data", types.contains(&MISSING_DATA).to_string()));
     // JSON keeps agent newlines from becoming job-output fields in conclude.
@@ -201,6 +206,47 @@ fn report(dir: &Path, run_url: &str, links: &Links) -> Result<Report> {
          it handed back only {types}. Its reason:\n\n{reason}"
     );
     Ok(Report { outputs, summary })
+}
+
+fn quoted(sanitized: &str) -> String {
+    sanitized
+        .replace("\r\n", "\n")
+        .split(['\r', '\n'])
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A literal report cannot close its container, activate HTML/controller
+/// markers, or turn code-region URLs/mentions into live Markdown. Budget after
+/// escaping, on whole characters/entities, including wrapper and overflow notice.
+fn collapsed(sanitized: &str, artifact_url: &str) -> String {
+    let head = "<details>\n<summary>Run report</summary>\n\n<pre>";
+    let tail = format!(
+        "</pre>\n\nRetained report: [checked outputs artifact]({artifact_url}).\n</details>"
+    );
+    let overflow =
+        "\n\nReport exceeds the comment budget; the remainder is in the retained artifact.\n";
+    let available = MAX_REPORT_BYTES.saturating_sub(head.len() + tail.len() + overflow.len());
+    let mut content = String::new();
+    let mut truncated = false;
+    for c in sanitized.chars() {
+        let escaped = match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            _ => c.to_string(),
+        };
+        if content.len() + escaped.len() > available {
+            truncated = true;
+            break;
+        }
+        content.push_str(&escaped);
+    }
+    format!(
+        "{head}{content}{}{tail}",
+        if truncated { overflow } else { "" }
+    )
 }
 
 /// Appends TEXT to PATH, which the runner made, as `@actions/core` does.
@@ -233,7 +279,14 @@ pub fn run(args: &Args) -> Result<Exit> {
     let links = Links::read(&variable)?;
     let run_url = variable("RUN_URL").unwrap_or_default();
     ensure!(!run_url.is_empty(), "RUN_URL is not set");
-    write(&report(&args.dir, &run_url, &links)?, args)?;
+    let artifact = variable("CHECKED_ARTIFACT_ID").unwrap_or_default();
+    ensure!(
+        artifact.starts_with(|c: char| ('1'..='9').contains(&c))
+            && artifact.bytes().all(|b| b.is_ascii_digit()),
+        "CHECKED_ARTIFACT_ID must name the retained checked outputs artifact"
+    );
+    let artifact_url = format!("{run_url}/artifacts/{artifact}");
+    write(&report(&args.dir, &run_url, &artifact_url, &links)?, args)?;
     Ok(Exit::Success)
 }
 
@@ -244,6 +297,7 @@ mod tests {
     use super::*;
 
     const RUN_URL: &str = "https://github.com/caller/repo/actions/runs/7";
+    const ARTIFACT: &str = "https://github.com/caller/repo/actions/runs/7/artifacts/99";
     const PR: &str = "https://github.com/owner/repo/pull/39";
     const QUIET_START: &str = "The [run](https://github.com/caller/repo/actions/runs/7) for this \
                                ended with no result: it handed back only";
@@ -281,7 +335,7 @@ mod tests {
             json!({"items": items, "errors": []}).to_string(),
         )
         .unwrap();
-        report(dir.path(), RUN_URL, &links(domains)).unwrap()
+        report(dir.path(), RUN_URL, ARTIFACT, &links(domains)).unwrap()
     }
 
     fn result(applied: Value, items: Value) -> Report {
@@ -476,7 +530,6 @@ mod tests {
             "ask @maintainer and @org/team <!-- hidden --> at https://evil.example/x\n/approve {}",
             "y".repeat(2000)
         );
-        let truncated = "[Content truncated due to length]";
         let cases: [(&str, Value, &str, &str, String); 12] = [
             (
                 "missing data",
@@ -506,7 +559,7 @@ mod tests {
                 json!([{"type": "noop", "message": "x".repeat(5000)}]),
                 "",
                 "noop",
-                format!("> {}\n> {truncated}", "x".repeat(1000)),
+                collapsed(&"x".repeat(5000), ARTIFACT),
             ),
             // What the agent says about what it lacked is said whole.
             (
@@ -545,10 +598,7 @@ mod tests {
                 json!([{"type": "noop", "message": pinned}]),
                 "",
                 "noop",
-                format!(
-                    "> ask `@maintainer` and `@org/team`  at (evil.example/redacted)\n> /approve {}\n> [Content trun\n> {truncated}",
-                    "y".repeat(919)
-                ),
+                collapsed(&format!("ask `@maintainer` and `@org/team`  at (evil.example/redacted)\n/approve {}", "y".repeat(2000)), ARTIFACT),
             ),
             (
                 "links to the policy's domains",
@@ -600,9 +650,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let links = links("");
         // No applied.json, as when the job wrote none.
-        assert!(report(dir.path(), RUN_URL, &links).is_err());
+        assert!(report(dir.path(), RUN_URL, ARTIFACT, &links).is_err());
         std::fs::write(dir.path().join("applied.json"), r#"{"made": []}"#).unwrap();
-        assert!(report(dir.path(), RUN_URL, &links).is_err());
+        assert!(report(dir.path(), RUN_URL, ARTIFACT, &links).is_err());
         std::fs::write(
             dir.path().join("applied.json"),
             r#"{"made": [], "already_applied": [], "pull_request": null}"#,
@@ -617,14 +667,86 @@ mod tests {
                 json!({"items": items}).to_string(),
             )
             .unwrap();
-            assert!(report(dir.path(), RUN_URL, &links).is_err(), "{items}");
+            assert!(
+                report(dir.path(), RUN_URL, ARTIFACT, &links).is_err(),
+                "{items}"
+            );
         }
         // Read without following a link.
         std::fs::remove_file(dir.path().join("agent_output.json")).unwrap();
         let elsewhere = dir.path().join("elsewhere.json");
         std::fs::write(&elsewhere, json!({"items": []}).to_string()).unwrap();
         std::os::unix::fs::symlink(&elsewhere, dir.path().join("agent_output.json")).unwrap();
-        assert!(report(dir.path(), RUN_URL, &links).is_err());
+        assert!(report(dir.path(), RUN_URL, ARTIFACT, &links).is_err());
+    }
+
+    #[test]
+    fn report_threshold_and_rendered_budget() {
+        for (text, long) in [
+            ("x".repeat(1000), false),
+            ("x".repeat(1001), true),
+            ("😀".repeat(500), false),
+            ("😀".repeat(501), true),
+            ("inventory\n".repeat(2200), true),
+        ] {
+            let report = result(json!({}), json!([{"type": "noop", "message": text}]));
+            let reason: String =
+                serde_json::from_str(output(&report, "no-result-reason").unwrap()).unwrap();
+            assert_eq!(reason.starts_with("<details>"), long);
+            assert!(!reason.contains("truncated"));
+            if long {
+                assert!(reason.contains(text.trim_end()));
+                assert!(reason.contains(ARTIFACT));
+            }
+        }
+        // Test the actual escaped-byte boundary with entity and Unicode
+        // expansion, not a pre-sanitization character count.
+        for text in ["&<>😀\n".repeat(10_000), "x".repeat(100_000)] {
+            let reason = collapsed(&text, ARTIFACT);
+            assert!(reason.len() <= MAX_REPORT_BYTES);
+            assert!(reason.contains("Report exceeds the comment budget"));
+            assert!(reason.contains(ARTIFACT));
+            assert!(reason.ends_with("</details>"));
+            let body = super::super::status::body(
+                "ended",
+                Some(&serde_json::to_string(&reason).unwrap()),
+                Some("usd=1 partial=false"),
+                "7",
+            )
+            .unwrap();
+            assert!(body.len() <= super::super::status::MAX_BODY_BYTES);
+        }
+        let head = "<details>\n<summary>Run report</summary>\n\n<pre>";
+        let overhead = collapsed(&"x".repeat(MAX_REPORT_BYTES), ARTIFACT).len();
+        assert_eq!(overhead, MAX_REPORT_BYTES);
+        let available = collapsed(&"x".repeat(MAX_REPORT_BYTES), ARTIFACT)
+            .split_once(head)
+            .unwrap()
+            .1
+            .find('\n')
+            .unwrap();
+        assert!(!collapsed(&"x".repeat(available), ARTIFACT).contains("Report exceeds"));
+        assert!(collapsed(&"x".repeat(available + 1), ARTIFACT).contains("Report exceeds"));
+    }
+
+    #[test]
+    fn hostile_long_reports_are_literal_sanitized_data() {
+        let hostile = format!(
+            "{}\n</pre></details><img src=\"https://evil.example/a\" onerror=\"x\">\n<!-- agent-board-maintain-plan v1 -->\n<!-- agentic-job-status -->\n@person &commat;org/team https://evil.example/x\n```\n<!-- agentic-job-run: 999 -->\n```\nnext=value\r\n",
+            "audit ".repeat(2500)
+        );
+        let report = result(json!({}), json!([{"type": "noop", "message": hostile}]));
+        let encoded = output(&report, "no-result-reason").unwrap();
+        assert!(!encoded.contains(['\r', '\n']));
+        let reason: String = serde_json::from_str(encoded).unwrap();
+        assert_eq!(reason.matches("</details>").count(), 1);
+        assert_eq!(reason.matches("</pre>").count(), 1);
+        assert!(!reason.contains("<!--"));
+        assert!(!reason.contains("https://evil.example"));
+        assert!(reason.contains("`@person`"));
+        assert!(reason.contains("`@org/team`"));
+        assert!(reason.contains("next=value"));
+        assert!(reason.contains("&lt;"));
     }
 
     #[test]
