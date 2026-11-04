@@ -574,7 +574,7 @@ max = 1
 name = "agent verdict"
 ```
 
-The name is 1–64 characters, without control characters or surrounding
+The name is 1–64 bytes of UTF-8, without control characters or surrounding
 whitespace. gh-aw's handler takes it from apply's configuration, never from
 the request; check refuses a request that names another one, and the
 `success` conclusion. Other conclusions remain the agent's, and GitHub counts
@@ -602,7 +602,7 @@ max = 1
 category = "Agent reports"
 ```
 
-The category is 1–64 characters, without control characters or surrounding
+The category is 1–64 bytes of UTF-8, without control characters or surrounding
 whitespace; when two bounds files both allow the type, theirs must be the
 same. gh-aw's handler takes a request's own `category` over its
 configuration's, so check refuses a request naming any other than the exact
