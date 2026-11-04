@@ -881,6 +881,15 @@ jobs:
             --boolean egress.write-policy="$WRITE_POLICY" \
             > "$JOB_DIR/config.toml"
           cat "$JOB_DIR/config.toml"
+      # Trusted evidence is captured before the producer, never from proposals.
+      # The fetch is unauthenticated and does not check out or execute code.
+      - name: Capture opted-in public base secret evidence
+        if: ${{ steps.event.outputs.admitted != 'false' }}
+        run: |
+          config=()
+          if [ -f "$JOB_DIR/config.toml" ]; then config=(--config "$JOB_DIR/config.toml"); fi
+          "$JOB_DIR/bin/agentic-job" capture-base-secrets "${config[@]}" \
+            --policy "$JOB_DIR/policy.json" --run-id "$GITHUB_RUN_ID" --output "$JOB_DIR/public-base.json"
       # What the agent job's actions read of this call, so that its job
       # passes them nothing but the upload IDs: the task (for an
       # event-triggered run the one the decision wrote, the caller's task
@@ -940,6 +949,7 @@ jobs:
             .agentic-job/event.json
             .agentic-job/task.md
             .agentic-job/config.toml
+            .agentic-job/public-base.json
             .agentic-job/run.json
           retention-days: 30
           if-no-files-found: error

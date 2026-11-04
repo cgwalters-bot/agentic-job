@@ -414,6 +414,8 @@ impl Setup {
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Commit {
+    /// Permit exact public-base secret-shaped patch lines, never run secrets.
+    pub allow_base_secret_lines: bool,
     /// Who the commit is by, as `Name <address>`. Without it,
     /// `agent <agent@localhost>`, as in the old tree.
     pub author: Option<String>,

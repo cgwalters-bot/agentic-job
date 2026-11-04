@@ -264,8 +264,9 @@ be redacted holds an upstream credential the run itself holds, its run token
 among them: that one would be a real leak. The separate agent-facing inference
 and MCP proxy tokens are replaced before upload, as described below.
 Check and `run` refuse a PEM
-private key anywhere in the outputs, code included, since one cannot be
-a harmless fixture. Any other credential-shaped string (a `ghp_`, `sk-`
+private key anywhere in the outputs, code included, unless the caller opts in
+to the narrowly scoped [public-base exception](#public-base-secret-evidence).
+Any other credential-shaped string (a `ghp_`, `sk-`
 or `AKIA` token, a JWT) is most likely a test fixture, and lost runs
 all their work when it was refused
 ([#720](https://github.com/cgwalters-forge/agentic-job/issues/720)): it
@@ -309,6 +310,45 @@ review or continuation must repair that rather than discard the work. All
 other bounds and check/apply refusals remain. Logs and transcripts keep their
 current redaction; see
 [inference address redaction](inference.md#what-run-does).
+
+### Public-base secret evidence
+
+The threat is a producer laundering a new private key through an already-public
+header, a different file or forged base history. The option
+`[commit] allow-base-secret-lines = true` is off by default. It permits only exact
+base-file lines in structurally validated patch hunks: removals, retained
+context and moves consuming removals in the same file. New files, extra copies,
+changed lines, mail messages, requests and replacement series get no exception.
+PEM keys additionally require the entire unchanged block in the hunk, including
+for removals: a producer can invent old body lines, so authenticating only the
+header could disclose a new key before patch application refuses it. A matching
+footer must follow the header. Header-only fixtures and limited context that
+does not contain the whole block fail closed; quoting syntax cannot prove that
+a string closes.
+Known run-secret values
+remain refused, even on an otherwise eligible line. Other token shapes remain
+warnings, not newly forbidden strings.
+
+The trusted policy job captures evidence before the producer starts using
+`capture-base-secrets --config FILE --policy FILE --run-id ID --output FILE`.
+It fetches the public base without credentials and never checks out or executes
+target code. Evidence contains exact line/block SHA-256 digests and occurrence
+counts, scoped by base commit, patch name and file. Capture bounds are 1 MiB of
+matching lines, 50 files, 1 MiB total secret-bearing file contents and 1 MiB
+serialized evidence; git operations have timeouts. Exceeding a bound refuses.
+Private targets cannot enable this exception. Secondary patches are not covered
+by the policy job's evidence. A base branch advancing between capture and run
+can conservatively refuse the allowance; rerun to capture the new base.
+
+`check --base-secret-evidence FILE` reads this file from the trusted policy
+artifact, **never from the proposals artifact**. A standalone caller must keep
+this argument and file outside the producer's control. Omit it to retain the
+default refusal. `run` separately captures the same bounded evidence from its
+base checkout before starting the agent for its upload gate and local handback
+check. Logs/transcripts stay redacted. Each allowance reports
+“base already contains this; allowed” with its location, never its value.
+This repository enables the option in `.github/agentic-job/hosted.toml` so runs
+can delete already-public corpus fixtures without admitting new keys.
 
 One file is derived from gh-aw:
 [`safe-outputs/validation.json`](../safe-outputs/validation.json), the

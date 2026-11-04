@@ -17,6 +17,7 @@
 //! strings are warnings: see [`redact`]); its memory and checkpoint
 //! ([`memory`], [`checkpoint`]); and the report.
 
+pub mod base;
 pub mod checkpoint;
 pub mod memory;
 
@@ -31,6 +32,7 @@ use crate::exit::Exit;
 use crate::files;
 use crate::policy::{Forge, Load, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
 use crate::redact;
+use crate::run::public_addresses::PublicAddresses;
 use safe_outputs::check::inline::CheckedTarget;
 use safe_outputs::check::{Collected, Publishers, Trusted};
 
@@ -86,6 +88,9 @@ pub struct Args {
     /// whose branch a secondary pull request may be on
     #[arg(long, value_name = "ID")]
     pub run_id: Option<String>,
+    /// Trusted pre-agent public-base evidence, never a file from --outputs
+    #[arg(long, value_name = "FILE")]
+    pub base_secret_evidence: Option<PathBuf>,
 }
 
 /// What `check` decided. `--report` holds this as JSON.
@@ -334,7 +339,35 @@ fn check_outputs_to(
     comment: Option<(&str, u64)>,
     run_id: Option<&str>,
 ) -> Result<Verdict> {
-    let mut verdict = verdict_of(dir, collected, policy, comment, run_id)?;
+    check_outputs_with_public(
+        dir,
+        collected,
+        policy,
+        comment,
+        run_id,
+        &PublicAddresses::default(),
+    )
+}
+
+pub(crate) fn check_run_outputs_with_public(
+    dir: &Path,
+    collected: &Path,
+    policy: &Policy,
+    run_id: &str,
+    public: &PublicAddresses,
+) -> Result<Verdict> {
+    check_outputs_with_public(dir, collected, policy, None, Some(run_id), public)
+}
+
+fn check_outputs_with_public(
+    dir: &Path,
+    collected: &Path,
+    policy: &Policy,
+    comment: Option<(&str, u64)>,
+    run_id: Option<&str>,
+    public: &PublicAddresses,
+) -> Result<Verdict> {
+    let mut verdict = verdict_of(dir, collected, policy, comment, run_id, public)?;
     verdict.blocked = verdict.is_blocked();
     Ok(verdict)
 }
@@ -345,6 +378,7 @@ fn verdict_of(
     policy: &Policy,
     comment: Option<(&str, u64)>,
     run_id: Option<&str>,
+    public: &PublicAddresses,
 ) -> Result<Verdict> {
     let mut errors = Vec::new();
     let mut names = std::fs::read_dir(dir)
@@ -364,11 +398,35 @@ fn verdict_of(
             continue;
         };
         match files::read_regular(&dir.join(name), max_bytes_of(name, policy)) {
-            // A private key cannot be a harmless fixture.
-            Ok(content) if redact::is_private_key(&content) => {
-                errors.push(format!("a secret-shaped string in {name}: a private key"));
-            }
             Ok(content) => {
+                let allowed = if !policy.private && is_patch_file_name(name) {
+                    std::str::from_utf8(&content)
+                        .map(|text| public.allowed_secret_lines(name, text))
+                        .unwrap_or_default()
+                } else {
+                    BTreeSet::new()
+                };
+                let mut refused = false;
+                for (index, line) in content.split(|&b| b == b'\n').enumerate() {
+                    if redact::is_private_key(line) {
+                        if allowed.contains(&(index + 1)) {
+                            eprintln!(
+                                "{name}, line {}: base already contains this; allowed",
+                                index + 1
+                            );
+                            warnings.push(format!(
+                                "{name}, line {}: base already contains this; allowed",
+                                index + 1
+                            ));
+                        } else {
+                            refused = true;
+                        }
+                    }
+                }
+                if refused {
+                    errors.push(format!("a secret-shaped string in {name}: a private key"));
+                    continue;
+                }
                 let shaped = redact::shaped_lines(&content[..])
                     .with_context(|| format!("searching {name}"))?;
                 warnings.extend(
@@ -461,12 +519,24 @@ fn verdict_of(
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
     let comment = args.comment_repo.as_deref().zip(args.comment_target);
-    let mut verdict = check_outputs_to(
+    let public = args
+        .base_secret_evidence
+        .as_deref()
+        .map(|path| {
+            let bytes = files::read_regular(path, 1 << 20)
+                .map_err(|err| anyhow::anyhow!("base secret evidence {err}"))?;
+            serde_json::from_slice::<PublicAddresses>(&bytes)
+                .context("reading trusted base secret evidence")
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut verdict = check_outputs_with_public(
         &args.outputs,
         &args.collected,
         &policy,
         comment,
         args.run_id.as_deref(),
+        &public,
     )?;
     if policy.forge != crate::policy::Forge::Github
         && verdict

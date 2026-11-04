@@ -298,6 +298,120 @@ fn a_hand_back_within_the_policy_is_accepted() {
 }
 
 #[test]
+fn public_base_evidence_cannot_complete_an_incomplete_key() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let run = Run::new();
+    let repo = run.path("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.test")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.test")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    let header = ["-----BEGIN ", "PRIVATE KEY", "-----"].concat();
+    let footer = ["-----END ", "PRIVATE KEY", "-----"].concat();
+    let first = format!("const end = '{footer}'; const key = `{header}\n");
+    std::fs::write(repo.join("fixture"), format!("{first}`;\n")).unwrap();
+    git(&["add", "fixture"]);
+    git(&["-c", "core.hooksPath=/dev/null", "commit", "-qm", "Base"]);
+    let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let mut policy: Value =
+        serde_json::from_slice(&std::fs::read(run.path("policy.json")).unwrap()).unwrap();
+    policy["clone_url"] = format!("file://{}", repo.display()).into();
+    policy["max_patch_bytes"] = (1 << 20).into();
+    std::fs::write(run.path("policy.json"), policy.to_string()).unwrap();
+    std::fs::write(
+        run.path("config.toml"),
+        "[commit]\nallow-base-secret-lines = true\n",
+    )
+    .unwrap();
+    let capture = Command::new(BIN)
+        .arg("capture-base-secrets")
+        .arg("--config")
+        .arg(run.path("config.toml"))
+        .arg("--policy")
+        .arg(run.path("policy.json"))
+        .args(["--run-id", "7", "--output"])
+        .arg(run.path("evidence.json"))
+        .output()
+        .unwrap();
+    assert!(capture.status.success(), "{:?}", capture.stderr);
+
+    // Generate a real key only at runtime; none of its body was in the base.
+    let key =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let body = STANDARD.encode(key.as_ref());
+    std::fs::write(
+        repo.join("fixture"),
+        format!("{first}{body}\n{footer}\n`;\n"),
+    )
+    .unwrap();
+    let added = git(&["diff", "--no-ext-diff", "--no-renames"]);
+    // Even a removed header must not authenticate invented old body lines.
+    // Such a patch can disclose the key before git am eventually refuses it.
+    let removed = format!(
+        "diff --git a/fixture b/fixture\nindex 1234567..abcdef0 100644\n--- a/fixture\n+++ b/fixture\n@@ -1,4 +1 @@\n-{first}-{body}\n-{footer}\n-`;\n+after\n"
+    );
+    std::fs::write(
+        run.path("out/base.json"),
+        serde_json::json!({"repo": "bootc-dev/bootc", "ref": "main", "commit": base}).to_string(),
+    )
+    .unwrap();
+    for (case, diff) in [("added body", added), ("invented removed body", removed)] {
+        let patch = format!(
+            "From {} Mon Sep 17 00:00:00 2001\nX-GH-AW-Base-Commit: {base}\nFrom: Test <test@example.test>\nDate: Tue, 3 Nov 2026 00:00:00 +0000\nSubject: [PATCH] Test\n\n---\n{diff}",
+            "2".repeat(40)
+        );
+        std::fs::write(run.path("out/aw-agent-run-7.patch"), patch).unwrap();
+        for evidence in [false, true] {
+            let mut command = Command::new(BIN);
+            command
+                .arg("check")
+                .arg("--policy")
+                .arg(run.path("policy.json"))
+                .arg("--outputs")
+                .arg(run.path("out"))
+                .arg("--collected")
+                .arg(data("check/collected.json"))
+                .arg("--report")
+                .arg(run.path("verdict.json"));
+            if evidence {
+                command
+                    .arg("--base-secret-evidence")
+                    .arg(run.path("evidence.json"));
+            }
+            let result = command.output().unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "{case}, evidence={evidence}: {:?}",
+                result.stderr
+            );
+            assert!(
+                run.verdict()["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| { error.as_str().unwrap().contains("private key") }),
+                "{}",
+                run.verdict()
+            );
+        }
+    }
+}
+
+#[test]
 fn a_hand_back_outside_the_policy_is_refused_with_its_reasons() {
     let run = Run::new();
     std::fs::write(run.path("out/notes.txt"), "hi").unwrap();

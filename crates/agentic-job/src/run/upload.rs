@@ -27,6 +27,7 @@
 //! Secret refusals retain staging under `OUT/refused-handback`, mode 0700,
 //! on the operator's host storage, never in the public upload paths.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result, bail, ensure};
 
 use super::log::Shared;
+use super::public_addresses::PublicAddresses;
 use crate::files::{self, ReadError};
 use crate::redact;
 
@@ -54,6 +56,8 @@ const STAGING_DIR: &str = "staging";
 const TRANSCRIPT_DIR: &str = "transcript";
 /// The largest file that is published.
 const MAX_FILE_BYTES: u64 = 1 << 30;
+/// The largest hand-back file that public-base evidence may exempt lines of.
+const MAX_BASE_BYTES: u64 = 1 << 20;
 /// zstd's default level.
 const COMPRESSION_LEVEL: i32 = 3;
 const FILE_MODE: u32 = 0o644;
@@ -185,10 +189,22 @@ impl Staging {
     /// and a refusal must retain the unmodified hand-back.
     /// Files remain bounded, no-follow regular-file reads, as at the gate.
     pub fn redact_handback(&self, redactor: &Shared) -> Result<usize> {
+        self.redact_handback_with_public(redactor, &PublicAddresses::default())
+    }
+
+    /// Like [`Self::redact_handback`], allowing authenticated public-base keys.
+    pub fn redact_handback_with_public(
+        &self,
+        redactor: &Shared,
+        public: &PublicAddresses,
+    ) -> Result<usize> {
         let files = Self::files(&self.safe_outputs())?;
         for (name, path) in &files {
             let original = Self::open(path)?;
-            let found = redactor.with(|r| r.find_credential_rule_in(original))?;
+            let literals = Self::open(path)?;
+            let (base, _) = Self::base_secret_lines(path, name, public)?;
+            let found = redactor
+                .with(|r| r.find_credential_rule_in_base_lines(original, literals, &base))?;
             if let Some((line, rule)) = found {
                 return Err(SecretAt {
                     place: format!("{SAFE_OUTPUTS_DIR}/{name}, line {line}"),
@@ -264,6 +280,26 @@ impl Staging {
         Ok(found)
     }
 
+    /// The lines of handed-back file NAME that PUBLIC shows unchanged from
+    /// the public base, and its text. Invalid UTF-8 or a file over 1 MiB
+    /// receives no exception and is still scanned.
+    fn base_secret_lines(
+        path: &Path,
+        name: &str,
+        public: &PublicAddresses,
+    ) -> Result<(BTreeSet<usize>, String)> {
+        let mut text = String::new();
+        if Self::open(path)?.size() > MAX_BASE_BYTES
+            || Self::open(path)?
+                .take(MAX_BASE_BYTES + 1)
+                .read_to_string(&mut text)
+                .is_err()
+        {
+            return Ok(Default::default());
+        }
+        Ok((public.allowed_secret_lines(name, &text), text))
+    }
+
     /// Opened to be read in pieces, up to [`MAX_FILE_BYTES`].
     fn open(path: &Path) -> Result<files::Regular> {
         match files::open_regular(path, MAX_FILE_BYTES) {
@@ -279,6 +315,17 @@ impl Staging {
     /// REDACTOR is the run's, which knows the secrets the run holds and
     /// how many it replaced.
     pub fn check(&self, gate: Gate, redactor: &Shared) -> Result<()> {
+        self.check_with_public_addresses(gate, redactor, &PublicAddresses::default())
+    }
+
+    /// Like [`Self::check`], exempting the patch lines PUBLIC shows are
+    /// exact public-base lines; never known run secrets.
+    pub(super) fn check_with_public_addresses(
+        &self,
+        gate: Gate,
+        redactor: &Shared,
+        public: &PublicAddresses,
+    ) -> Result<()> {
         ensure!(
             gate.ended,
             "the run was not ended at the inference proxy, so its token may still be live"
@@ -290,8 +337,25 @@ impl Staging {
         ] {
             for (name, path) in Self::files(&dir)? {
                 let file = Self::open(&path)?;
+                let literals = Self::open(&path)?;
+                let (base, text) = if label == SAFE_OUTPUTS_DIR {
+                    Self::base_secret_lines(&path, &name, public)?
+                } else {
+                    Default::default()
+                };
+                for line in &base {
+                    if text
+                        .split('\n')
+                        .nth(line - 1)
+                        .is_some_and(|line| redact::is_private_key(line.as_bytes()))
+                    {
+                        eprintln!(
+                            "{label}/{name}, line {line}: base already contains this; allowed"
+                        );
+                    }
+                }
                 let found = redactor
-                    .with(|redactor| redactor.find_rule_in(file))
+                    .with(|redactor| redactor.find_rule_in_base_lines(file, literals, &base))
                     .with_context(|| format!("reading {}", path.display()))?;
                 // The line and not the string: this error is published.
                 if let Some((line, rule)) = found {
@@ -926,6 +990,338 @@ mod tests {
             } else {
                 assert!(out.staging.safe_outputs().join("outputs.jsonl").is_file());
                 assert!(out.out().join(SECRET_AT_FILE).is_file());
+            }
+        }
+    }
+
+    #[test]
+    fn public_base_secret_lines_pass_both_gates_without_allowing_new_keys() {
+        use super::super::{clone::Checkout, enter::Unconfined, public_addresses::PublicAddresses};
+        use serde_json::json;
+
+        let header = ["-----BEGIN ", "RSA PRIVATE KEY", "-----"].concat();
+        let fixture =
+            format!("const fixture = '{header}fixture bytes-----END RSA PRIVATE KEY-----';\n");
+        let new_fixture = fixture.replace("RSA", "EC");
+        let block = format!("{header}\nBASEBODY\n-----END RSA PRIVATE KEY-----\n");
+        let long_quoted_block = format!(
+            "const KEY = `{header}\nBASEBODY\n{}-----END RSA PRIVATE KEY-----`;\n",
+            "unchanged\n".repeat(10)
+        );
+        let triple_quoted_block = format!(
+            "KEY = \"\"\"{header}\"\nBASEBODY\n{}-----END RSA PRIVATE KEY-----\"\"\"\n",
+            "unchanged\n".repeat(10)
+        );
+        let cases = [
+            (
+                "footer before incomplete header",
+                format!("const end = '-----END RSA PRIVATE KEY-----'; const key = `{header}\n`;\n"),
+                Some(format!(
+                    "const end = '-----END RSA PRIVATE KEY-----'; const key = `{header}\nNEWBODY\n-----END RSA PRIVATE KEY-----\n`;\n"
+                )),
+                "config",
+                false,
+            ),
+            (
+                "mismatched footer before incomplete header",
+                format!("{header}\nBASEBODY\n-----END EC PRIVATE KEY-----\n"),
+                Some(format!(
+                    "{header}\nBASEBODY\n-----END EC PRIVATE KEY-----\nNEWBODY\n-----END RSA PRIVATE KEY-----\n"
+                )),
+                "config",
+                false,
+            ),
+            ("delete file", fixture.clone(), None, "config", true),
+            (
+                "delete line",
+                fixture.clone(),
+                Some("after\n".into()),
+                "config",
+                true,
+            ),
+            (
+                "retain",
+                fixture.clone(),
+                Some(format!("{fixture}changed\n")),
+                "config",
+                true,
+            ),
+            (
+                "move",
+                fixture.clone(),
+                Some(format!("after\n{fixture}")),
+                "config",
+                true,
+            ),
+            (
+                "new key",
+                fixture.clone(),
+                Some(new_fixture.clone()),
+                "config",
+                false,
+            ),
+            (
+                "new file",
+                fixture.clone(),
+                Some(fixture.clone()),
+                "new",
+                false,
+            ),
+            (
+                "duplicate",
+                fixture.clone(),
+                Some(format!("{fixture}{fixture}after\n")),
+                "config",
+                false,
+            ),
+            (
+                "changed surrounding bytes",
+                fixture.clone(),
+                Some(format!("other {fixture}")),
+                "config",
+                false,
+            ),
+            ("delete PEM", block.clone(), None, "config", true),
+            (
+                "delete bare header",
+                format!("{header}\n"),
+                None,
+                "config",
+                false,
+            ),
+            (
+                "invented removed body",
+                format!("{header}\n"),
+                None,
+                "config",
+                false,
+            ),
+            (
+                "changed quoted PEM body",
+                format!("const KEY = '{block}';\n"),
+                Some(format!(
+                    "const KEY = '{}';\nafter\n",
+                    block.replace("BASEBODY", "NEWBODY")
+                )),
+                "config",
+                false,
+            ),
+            (
+                "changed quoted PEM with footer outside context",
+                long_quoted_block.clone(),
+                Some(format!(
+                    "{}after\n",
+                    long_quoted_block.replace("BASEBODY", "NEWBODY")
+                )),
+                "config",
+                false,
+            ),
+            (
+                "changed triple-quoted PEM with footer outside context",
+                triple_quoted_block.clone(),
+                Some(format!(
+                    "{}after\n",
+                    triple_quoted_block.replace("BASEBODY", "NEWBODY")
+                )),
+                "config",
+                false,
+            ),
+            (
+                "move PEM",
+                block.clone(),
+                Some(format!("after\n{block}")),
+                "config",
+                true,
+            ),
+            (
+                "changed PEM body",
+                block.clone(),
+                Some(format!("{}after\n", block.replace("BASEBODY", "NEWBODY"))),
+                "config",
+                false,
+            ),
+            (
+                "copied PEM",
+                block.clone(),
+                Some(block.clone()),
+                "new",
+                false,
+            ),
+        ];
+        for (case, before, after, target, passes) in cases {
+            let out = Out::new();
+            let repo = out.out().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .env("GIT_AUTHOR_NAME", "Test")
+                    .env("GIT_AUTHOR_EMAIL", "test@example.test")
+                    .env("GIT_COMMITTER_NAME", "Test")
+                    .env("GIT_COMMITTER_EMAIL", "test@example.test")
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{case}: {:?}", output.stderr);
+                String::from_utf8(output.stdout).unwrap()
+            };
+            git(&["init", "-q"]);
+            std::fs::write(repo.join("config"), format!("{before}after\n")).unwrap();
+            if case == "delete file" {
+                // Irrelevant public certificates must not exhaust the
+                // secret-bearing-file budget before a producer starts.
+                for index in 0..51 {
+                    std::fs::write(
+                        repo.join(format!("certificate-{index}")),
+                        "-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n",
+                    )
+                    .unwrap();
+                }
+            }
+            git(&["add", "--all"]);
+            git(&["-c", "core.hooksPath=/dev/null", "commit", "-qm", "Base"]);
+            let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+            let checkout = Checkout {
+                dir: repo.clone(),
+                base_commit: base.clone(),
+                secondary: None,
+            };
+            let name = "aw-agent-run-1.patch";
+            let mut public = PublicAddresses::default();
+            public
+                .capture_secrets(&Unconfined, &checkout, &[name.to_owned()])
+                .unwrap();
+            let evidence = serde_json::to_vec(&public).unwrap();
+            assert!(!String::from_utf8_lossy(&evidence).contains(&header));
+            let public: PublicAddresses = serde_json::from_slice(&evidence).unwrap();
+            if let Some(after) = after {
+                std::fs::write(repo.join(target), after).unwrap();
+            } else {
+                std::fs::remove_file(repo.join(target)).unwrap();
+            }
+            git(&["add", "--all"]);
+            let diff = if case == "invented removed body" {
+                format!(
+                    "diff --git a/config b/config\nindex 1234567..abcdef0 100644\n--- a/config\n+++ b/config\n@@ -1,4 +1 @@\n-{header}\n-NEWBODY\n------END RSA PRIVATE KEY-----\n-after\n+after\n"
+                )
+            } else {
+                git(&["diff", "--cached", "--no-ext-diff", "--no-renames"])
+            };
+            let patch = format!(
+                "From {} Mon Sep 17 00:00:00 2001\nX-GH-AW-Base-Commit: {base}\nFrom: Test <test@example.test>\nDate: Tue, 3 Nov 2026 00:00:00 +0000\nSubject: [PATCH] Test\n\n---\n{diff}",
+                "2".repeat(40)
+            );
+            out.hand_back(name, &patch);
+            let redactor = Shared::new(Redactor::new::<&str>([]).unwrap());
+            // Address replacement scans the original first, with the same
+            // allowance as the gate.
+            let result = out.staging.redact_handback_with_public(&redactor, &public);
+            assert_eq!(result.is_ok(), passes, "replace {case}: {result:?}");
+            assert!(
+                out.staging
+                    .redact_handback_with_public(&redactor, &PublicAddresses::default())
+                    .is_err(),
+                "replace default {case}"
+            );
+            let result = out
+                .staging
+                .check_with_public_addresses(OPEN, &redactor, &public);
+            assert_eq!(result.is_ok(), passes, "upload {case}: {result:?}");
+            assert!(
+                out.staging.check(OPEN, &redactor).is_err(),
+                "default {case}"
+            );
+            // A known run value remains a refusal, including one overlapping
+            // the allowed header itself.
+            let known =
+                Shared::new(Redactor::new_named([("provider API key", "RSA PRIVATE")]).unwrap());
+            assert!(
+                out.staging
+                    .redact_handback_with_public(&known, &public)
+                    .is_err(),
+                "known value replace {case}"
+            );
+            assert!(
+                out.staging
+                    .check_with_public_addresses(OPEN, &known, &public)
+                    .is_err(),
+                "known value {case}"
+            );
+
+            let mut policy = crate::policy::tests::policy();
+            policy.max_patch_bytes = 1 << 20;
+            if case == "delete file" {
+                // The policy job captures from a separate unauthenticated git
+                // fetch before the producer, not from its handback files.
+                let policy_file = out.out().join("policy.json");
+                let config_file = out.out().join("config.toml");
+                let evidence_file = out.out().join("base-secrets.json");
+                let mut capture_policy = policy.clone();
+                capture_policy.clone_url = format!("file://{}", repo.display());
+                capture_policy.base = git(&["symbolic-ref", "--short", "HEAD"]).trim().to_owned();
+                std::fs::write(&policy_file, serde_json::to_vec(&capture_policy).unwrap()).unwrap();
+                std::fs::write(&config_file, "[commit]\nallow-base-secret-lines = true\n").unwrap();
+                let mut args = crate::check::base::Args {
+                    config: None,
+                    policy: policy_file,
+                    run_id: "1".into(),
+                    output: evidence_file.clone(),
+                };
+                crate::check::base::run(&args).unwrap();
+                let disabled: PublicAddresses =
+                    serde_json::from_slice(&std::fs::read(&evidence_file).unwrap()).unwrap();
+                assert!(disabled.allowed_secret_lines(name, &patch).is_empty());
+                args.config = Some(config_file);
+                crate::check::base::run(&args).unwrap();
+                let captured: PublicAddresses =
+                    serde_json::from_slice(&std::fs::read(&evidence_file).unwrap()).unwrap();
+                assert_eq!(
+                    captured.allowed_secret_lines(name, &patch),
+                    public.allowed_secret_lines(name, &patch)
+                );
+                capture_policy.private = true;
+                std::fs::write(&args.policy, serde_json::to_vec(&capture_policy).unwrap()).unwrap();
+                assert!(crate::check::base::run(&args).is_err());
+            }
+            out.hand_back(
+                "base.json",
+                &json!({"repo": policy.repo, "ref": policy.base, "commit": base}).to_string(),
+            );
+            let request = json!({"type": "create_pull_request", "title": "Test", "body": "Why.", "branch": "agent-run-1"});
+            out.hand_back("outputs.jsonl", &format!("{request}\n"));
+            let collected = out.out().join("collected.json");
+            std::fs::write(
+                &collected,
+                json!({"items": [request], "errors": []}).to_string(),
+            )
+            .unwrap();
+            let verdict = crate::check::check_run_outputs_with_public(
+                &out.staging.safe_outputs(),
+                &collected,
+                &policy,
+                "1",
+                &public,
+            )
+            .unwrap();
+            assert_eq!(verdict.ok, passes, "check {case}: {:?}", verdict.errors);
+            if passes {
+                assert!(
+                    verdict
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("base already contains this; allowed")),
+                    "{case}"
+                );
+                assert!(
+                    !crate::check::check_run_outputs(
+                        &out.staging.safe_outputs(),
+                        &collected,
+                        &policy,
+                        "1"
+                    )
+                    .unwrap()
+                    .ok
+                );
             }
         }
     }

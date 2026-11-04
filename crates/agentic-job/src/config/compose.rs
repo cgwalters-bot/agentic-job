@@ -387,6 +387,7 @@ fn compose(args: &Args) -> Result<String> {
         // Validate first so an invalid setting is not silently discarded.
         if let Some(commit) = table.get_mut("commit").and_then(Value::as_table_mut) {
             commit.remove("format");
+            commit.remove("allow-base-secret-lines");
         }
         if let Some(inference) = table.get_mut("inference").and_then(Value::as_table_mut) {
             inference.remove("allow-base-address-lines");
@@ -913,20 +914,30 @@ mod tests {
     }
 
     #[test]
-    fn host_config_omits_run_only_formatting_for_the_released_image() {
-        for enabled in [false, true] {
-            let run = Args {
-                boolean: settings(&[&format!("commit.format={enabled}")]),
-                ..args(None, RUN, LIMITS, &[])
-            };
-            assert_eq!(composed(&run).commit.format, enabled);
-            let host = Args { host: true, ..run };
-            let text = compose(&host).unwrap();
-            let table: Table = toml::from_str(&text).unwrap();
-            assert!(table["commit"].get("format").is_none(), "{text}");
+    fn host_config_omits_run_only_commit_settings_for_the_released_image() {
+        for key in ["format", "allow-base-secret-lines"] {
+            for enabled in [false, true] {
+                let run = Args {
+                    boolean: settings(&[&format!("commit.{key}={enabled}")]),
+                    ..args(None, RUN, LIMITS, &[])
+                };
+                let commit = composed(&run).commit;
+                assert_eq!(
+                    if key == "format" {
+                        commit.format
+                    } else {
+                        commit.allow_base_secret_lines
+                    },
+                    enabled
+                );
+                let host = Args { host: true, ..run };
+                let text = compose(&host).unwrap();
+                let table: Table = toml::from_str(&text).unwrap();
+                assert!(table["commit"].get(key).is_none(), "{text}");
+            }
+            // Do not hide invalid run settings while making a host file.
+            assert!(compose(&host_args(&[&format!("commit.{key}=not-a-boolean")], &[])).is_err());
         }
-        // Do not hide invalid run settings while making a host file.
-        assert!(compose(&host_args(&["commit.format=not-a-boolean"], &[])).is_err());
     }
 
     #[test]

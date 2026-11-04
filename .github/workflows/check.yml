@@ -217,6 +217,7 @@ jobs:
           case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
           set +e
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
+            --base-secret-evidence "$JOB_DIR/public-base.json" \
             --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" --run-id "$GITHUB_RUN_ID" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           statuses=("${PIPESTATUS[@]}")
           set -e

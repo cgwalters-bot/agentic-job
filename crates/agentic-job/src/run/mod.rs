@@ -50,6 +50,7 @@ pub mod log;
 pub mod mcp;
 mod prices;
 pub mod probe;
+pub(crate) mod public_addresses;
 pub mod register;
 mod session_markdown;
 pub mod summary;
@@ -216,6 +217,7 @@ struct Plan {
 /// What the preparation leaves for the session.
 struct Prepared {
     checkout: Checkout,
+    public_base: public_addresses::PublicAddresses,
     cwd: PathBuf,
     /// The model the session asks the agent for.
     model: Option<String>,
@@ -245,6 +247,7 @@ struct Session {
     /// known to be finished.
     internal_error: bool,
     checkout: Checkout,
+    public_base: public_addresses::PublicAddresses,
     model: Option<String>,
     /// What replaced the secrets in the session's log, and its count.
     redactor: log::Shared,
@@ -1038,13 +1041,26 @@ impl Plan {
         configuration
             .files
             .extend(home_files(self.kind, &self.agent, github.as_deref())?);
+        let mut patches = vec![handback::patch_name(&self.policy, &self.run_id)];
+        if let Some(secondary) = &self.policy.secondary_pull_request {
+            patches.push(handback::secondary_patch_name(secondary, &self.run_id));
+        }
+        let mut public_base = public_addresses::PublicAddresses::default();
+        if self.commit.allow_base_secret_lines {
+            ensure!(
+                !self.policy.private,
+                "base secret allowances require a public target"
+            );
+            public_base.capture_secrets(&self.sandbox, &checkout, &patches)?;
+        }
         configuration.files.push(agent::HomeFile {
             path: crate::handback::RUN_FILE,
-            content: Some(crate::handback::run_file(
+            content: Some(crate::handback::run_file_with_public(
                 &self.policy,
                 &checkout,
                 &self.run_id,
                 &self.commit,
+                &public_base,
             )?),
         });
         let child = self.child.as_deref().and_then(|model| {
@@ -1142,6 +1158,7 @@ impl Plan {
             None => None,
         };
         Ok(Prepared {
+            public_base,
             cwd,
             checkout,
             model: configuration.model,
@@ -1445,14 +1462,13 @@ impl Plan {
             );
         }
         staging.redact(&session.redactor)?;
-        let handback_replacements =
-            staging
-                .redact_handback(&session.redactor)
-                .inspect_err(|err| {
-                    if let Err(why) = staging.record_refusal(&self.out, err) {
-                        eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
-                    }
-                })?;
+        let handback_replacements = staging
+            .redact_handback_with_public(&session.redactor, &session.public_base)
+            .inspect_err(|err| {
+                if let Err(why) = staging.record_refusal(&self.out, err) {
+                    eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
+                }
+            })?;
 
         // From the redacted copies, so that the summary quotes nothing
         // of the session that the transcript does not have.
@@ -1546,7 +1562,9 @@ impl Plan {
             ended: settled.dead,
             fake_agent: self.kind == Kind::Fake,
         };
-        if let Err(err) = staging.check(gate, &session.redactor) {
+        if let Err(err) =
+            staging.check_with_public_addresses(gate, &session.redactor, &session.public_base)
+        {
             if let Err(why) = staging.record_refusal(&self.out, &err) {
                 eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
             }
@@ -1736,6 +1754,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         Ok(Ok(Err(err))) => Stage::NotStarted(err),
         Ok(Ok(Ok(prepared))) => {
             let (checkout, model) = (prepared.checkout.clone(), prepared.model.clone());
+            let public_base = prepared.public_base.clone();
             match plan.session(prepared, shared.run().as_ref(), shared.mcp().as_deref()) {
                 Err(err) => Stage::Broken(err),
                 // Dropped on a signal, the session kills the wrapper it
@@ -1759,6 +1778,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                                 result: Box::new(result),
                                 internal_error: true,
                                 checkout,
+                                public_base,
                                 model,
                                 redactor,
                                 started,
@@ -1769,6 +1789,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                             result: Box::new(result),
                             internal_error: false,
                             checkout,
+                            public_base,
                             model,
                             redactor,
                             started,

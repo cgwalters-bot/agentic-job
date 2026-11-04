@@ -68,6 +68,8 @@ packages = ["nftables", "podman", "uidmap"]
 "cgwalters-forge/agentic-job" = ["cargo", "rustfmt", "rust-clippy"]
 
 [commit]
+# Permit cleanup of already-public fixtures, not new keys or cross-file copies.
+allow-base-secret-lines = true
 # GitHub's own Actions bot, whose noreply address it attributes for any
 # caller; a caller wanting another author sets it in its own config or
 # pins it in a bounds file (docs/safe-outputs.md#the-bounds-and-the-policy).

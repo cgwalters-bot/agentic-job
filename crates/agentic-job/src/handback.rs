@@ -136,6 +136,8 @@ const MAX_RUN_FILE_BYTES: u64 = 1 << 20;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunFile {
+    #[serde(default)]
+    public_base: crate::run::public_addresses::PublicAddresses,
     policy: Policy,
     checkout: PathBuf,
     /// The commit the change is against.
@@ -194,6 +196,16 @@ pub fn run_file(
     run_id: &str,
     commit: &config::Commit,
 ) -> Result<String> {
+    run_file_with_public(policy, checkout, run_id, commit, &Default::default())
+}
+
+pub(crate) fn run_file_with_public(
+    policy: &Policy,
+    checkout: &Checkout,
+    run_id: &str,
+    commit: &config::Commit,
+    public: &crate::run::public_addresses::PublicAddresses,
+) -> Result<String> {
     let mut policy = Policy {
         clone_url: String::new(),
         context: Vec::new(),
@@ -203,6 +215,7 @@ pub fn run_file(
         secondary.clone_url = String::new();
     }
     let mut file = json!({
+        "public_base": public,
         "policy": policy,
         "checkout": checkout.dir,
         "base": checkout.base_commit,
@@ -319,6 +332,7 @@ fn fix_for(reason: &str, collector: bool) -> &'static str {
 /// `check`'s `check_outputs`, then the scan of the final gate's patterns.
 fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     let mut report = Report::default();
+    let mut base_shapes_checked = false;
     let policy = &run.policy;
     let outcome = home.join(AGENT_OUTCOME);
     let outcome_fix = "write one JSON object: `{\"summary\": \"...\", \"tests\": [...], \
@@ -445,7 +459,21 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
             report
                 .problems
                 .extend(over_handler_limits(&collected.items));
-            let verdict = check::check_run_outputs(&outputs, &path, policy, &run.run_id)?;
+            let verdict = check::check_run_outputs_with_public(
+                &outputs,
+                &path,
+                policy,
+                &run.run_id,
+                &run.public_base,
+            )?;
+            base_shapes_checked = verdict.ok && verdict.patch.is_some();
+            report.notes.extend(
+                verdict
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.contains("base already contains this; allowed"))
+                    .cloned(),
+            );
             report
                 .problems
                 .extend(verdict.errors.iter().map(|error| Problem {
@@ -465,7 +493,14 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
         }
     }
 
-    let mut found = scan(&run.checkout, &run.base, home)?;
+    let mut found = scan_change(&run.checkout, &run.base)?;
+    // The exact captured patch was checked above, including authenticated base
+    // allowances. The advisory diff scan has no evidence and would otherwise
+    // contradict that verdict. Output JSON still receives its ordinary scan.
+    if base_shapes_checked {
+        found.retain(|finding| finding.pattern != redact::PRIVATE_KEY);
+    }
+    scan_out(home, &mut found)?;
     if let Some(tree) = &checkout.secondary {
         // Located by the clone as well: a path alone could be either's.
         found.extend(
@@ -1051,6 +1086,7 @@ mod tests {
             native_handlers: Vec::new(),
         };
         let run = RunFile {
+            public_base: Default::default(),
             policy,
             checkout,
             base,

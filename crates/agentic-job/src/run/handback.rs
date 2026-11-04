@@ -2939,6 +2939,7 @@ mod tests {
             author: Some("A Bot <bot@example.com>".into()),
             trailers: vec!["Generated-by: AI".into()],
             format: false,
+            allow_base_secret_lines: false,
         };
         sh(
             &home.checkout.dir,

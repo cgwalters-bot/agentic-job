@@ -109,6 +109,9 @@ the next in the same major version.
   `[sandbox]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
   `[limits]`, `[session]` and `[commit]`
   ([files read](interface.md#files-read)).
+  `[commit] allow-base-secret-lines` is an optional boolean, default false;
+  it permits exact public-base secret-shaped patch lines within the same file,
+  never known run secrets ([safe outputs](safe-outputs.md#public-base-secret-evidence)).
   `[inference] allow-base-address-lines` is an optional boolean, default false;
   it is now a legacy no-op. Hand-backs always replace inference endpoint literals
   with `<inference-address>`. Separate agent-facing inference and MCP proxy

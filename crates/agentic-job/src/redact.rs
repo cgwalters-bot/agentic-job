@@ -288,6 +288,9 @@ pub struct Redactor {
     credential_refused: BytesRegex,
     handback_literals: BytesRegex,
     handback_placeholders: Vec<&'static str>,
+    /// Literal-only scan so an exempt PEM header cannot hide a known value
+    /// beginning inside it and extending beyond it.
+    credential_literals: BytesRegex,
     /// Public source labels, in the order of `refused`'s capture groups.
     literal_names: Vec<&'static str>,
     /// What [`stream`] needs to look ahead: the longest match that spans
@@ -337,7 +340,7 @@ impl Redactor {
         } else {
             handback_literals
         };
-        let credential_refused = alternation(
+        let credential_literals = alternation(
             literals
                 .iter()
                 .map(|(literal, name)| {
@@ -347,8 +350,9 @@ impl Redactor {
                         format!("({})", regex::escape(literal))
                     }
                 })
-                .chain([format!("({PRIVATE_KEY})")]),
+                .chain([r"(\b\B)".to_owned()]),
         );
+        let credential_refused = format!("{credential_literals}|({PRIVATE_KEY})");
         let literals: Vec<String> = literals.iter().map(|(l, _)| regex::escape(l)).collect();
         let rule = alternation(
             literals
@@ -372,6 +376,7 @@ impl Redactor {
             credential_refused: BytesRegex::new(&format!("(?-u){credential_refused}"))?,
             handback_literals: BytesRegex::new(&format!("(?-u){handback_literals}"))?,
             handback_placeholders,
+            credential_literals: BytesRegex::new(&format!("(?-u){credential_literals}"))?,
             literal_names,
             overlap,
             count: 0,
@@ -394,13 +399,51 @@ impl Redactor {
 
     /// The first refusal's line and public rule label, never its match.
     pub fn find_rule_in(&self, input: impl Read) -> io::Result<Option<(usize, String)>> {
-        self.find_rule(input, &self.refused)
+        self.find_rule(input, &self.refused, &BTreeSet::new())
+    }
+
+    /// Scan original bytes before hand-back replacement without base exceptions.
+    pub fn find_credential_rule_in(&self, input: impl Read) -> io::Result<Option<(usize, String)>> {
+        self.find_rule(input, &self.credential_refused, &BTreeSet::new())
     }
 
     /// Scan original bytes before hand-back replacement, so even an overlapping
     /// credential or private-key header cannot be hidden by the replacement.
-    pub fn find_credential_rule_in(&self, input: impl Read) -> io::Result<Option<(usize, String)>> {
-        self.find_rule(input, &self.credential_refused)
+    /// Exact base lines may exempt private key headers, as in
+    /// [`Self::find_rule_in_base_lines`].
+    pub fn find_credential_rule_in_base_lines(
+        &self,
+        input: impl Read,
+        literals: impl Read,
+        base: &BTreeSet<usize>,
+    ) -> io::Result<Option<(usize, String)>> {
+        self.find_rule_in_base(input, literals, &self.credential_refused, base)
+    }
+
+    /// Exact base lines may exempt shapes, but never known credential values.
+    pub fn find_rule_in_base_lines(
+        &self,
+        input: impl Read,
+        literals: impl Read,
+        base: &BTreeSet<usize>,
+    ) -> io::Result<Option<(usize, String)>> {
+        self.find_rule_in_base(input, literals, &self.refused, base)
+    }
+
+    fn find_rule_in_base(
+        &self,
+        input: impl Read,
+        literals: impl Read,
+        refused: &BytesRegex,
+        base: &BTreeSet<usize>,
+    ) -> io::Result<Option<(usize, String)>> {
+        if !base.is_empty()
+            && let Some(found) =
+                self.find_rule(literals, &self.credential_literals, &BTreeSet::new())?
+        {
+            return Ok(Some(found));
+        }
+        self.find_rule(input, refused, base)
     }
 
     /// Replace endpoints and agent-facing proxy tokens, not upstream credentials.
@@ -437,22 +480,32 @@ impl Redactor {
         &self,
         input: impl Read,
         refused: &BytesRegex,
+        base: &BTreeSet<usize>,
     ) -> io::Result<Option<(usize, String)>> {
         let mut line = 1;
         let mut found = None;
         stream(refused, self.overlap, input, |bytes, secret| {
             if secret {
                 let captures = refused.captures(bytes).expect("stream found a refusal");
-                let rule = self
-                    .literal_names
-                    .iter()
-                    .enumerate()
-                    .find_map(|(i, name)| {
-                        captures
-                            .get(i + 1)
-                            .map(|_| format!("known run secret: {name}"))
-                    })
-                    .unwrap_or_else(|| "pattern: private key header".to_owned());
+                let literal = self.literal_names.iter().enumerate().find_map(|(i, name)| {
+                    captures
+                        .get(i + 1)
+                        .map(|_| format!("known run secret: {name}"))
+                });
+                if literal.is_none() && base.contains(&line) {
+                    // The PEM regex can consume multiple patch lines (and
+                    // another header). Every header needs its own evidence;
+                    // exempting the first must not swallow a new key later.
+                    for (offset, piece) in bytes.split(|&byte| byte == b'\n').enumerate() {
+                        if is_private_key(piece) && !base.contains(&(line + offset)) {
+                            found = Some((line + offset, "pattern: private key header".to_owned()));
+                            return Ok(false);
+                        }
+                    }
+                    line += bytes.iter().filter(|&&byte| byte == b'\n').count();
+                    return Ok(true);
+                }
+                let rule = literal.unwrap_or_else(|| "pattern: private key header".to_owned());
                 found = Some((line, rule));
                 return Ok(false);
             }
@@ -1072,10 +1125,53 @@ mod tests {
             .unwrap();
             let line = format!("+{address}\n");
             let found = redactor
-                .find_credential_rule_in(line.as_bytes())
+                .find_credential_rule_in_base_lines(
+                    line.as_bytes(),
+                    line.as_bytes(),
+                    &BTreeSet::new(),
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(found, (1, "known run secret: provider API key".to_owned()));
+        }
+    }
+
+    #[test]
+    fn base_key_headers_cannot_hide_later_keys_or_overlapping_known_values() {
+        let header = ["-----BEGIN ", "RSA PRIVATE KEY", "-----"].concat();
+        let end = "-----END RSA PRIVATE KEY-----";
+        // The gate's scan and the one before address replacement.
+        for credential in [false, true] {
+            let find = |redactor: &Redactor, text: &str| {
+                let (input, base) = (text.as_bytes(), &BTreeSet::from([1]));
+                if credential {
+                    redactor.find_credential_rule_in_base_lines(input, input, base)
+                } else {
+                    redactor.find_rule_in_base_lines(input, input, base)
+                }
+                .unwrap()
+            };
+            for (text, line) in [
+                (format!("-{header}\n+{header}\nBODY\n{end}\n"), 2),
+                (format!("-{header}\nBODY\n{end}\n+{header}\n"), 4),
+            ] {
+                let redactor = Redactor::new::<&str>([]).unwrap();
+                assert_eq!(
+                    find(&redactor, &text),
+                    Some((line, "pattern: private key header".to_owned()))
+                );
+            }
+            let text = format!("+{header}tail-of-known-value\n");
+            let redactor =
+                Redactor::new_named([("provider API key", "PRIVATE KEY-----tail-of-known-value")])
+                    .unwrap();
+            assert_eq!(
+                find(&redactor, &text),
+                Some((1, "known run secret: provider API key".to_owned()))
+            );
+            // The exempt header alone passes.
+            let redactor = Redactor::new::<&str>([]).unwrap();
+            assert_eq!(find(&redactor, &format!("-{header}\n")), None);
         }
     }
 
