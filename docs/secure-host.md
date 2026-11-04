@@ -18,9 +18,8 @@ against reading another runner process, egress and the probes
 ([where each section went](#where-the-host-documentation-went)). This
 page keeps what concerns agentic-job alone: the forwarder, how the agent
 job uses the action, and where the binary and image come from. Those
-documents describe the image the action pins, which can lag this
-repository's main; they cover main's later host changes when the pin
-moves.
+documents describe the pinned image, which can lag this repository's
+main branch. They cover later host changes when the pin moves.
 
 ## The public action forwards to cgwalters-forge/actions/secure-host
 
@@ -137,14 +136,14 @@ None of these commands needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
 - The check record that lets a later check in the same job skip its
   probes ([sandbox-check.md](sandbox-check.md)) needs `RUNNER_TEMP` and
   `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` and `GITHUB_JOB`. Without them
-  there is no record, and every check makes its probes.
+  there is no record, and every check runs its probes.
 - `sandbox timed` is the GitHub action's wrapper, which times setup and
   the probes for the job summary; a plain host does not need it.
 
 ## The agent job
 
 The agent job (`agent.yml`, which `agentic-job.yml` and `review.yml`
-call) runs the forwarder, with the policy job's configuration but
+call) runs the forwarder with the policy job's configuration except for
 `setup.script`, and then the agent as the runner's user
 (`run --runner-home`, the run action's default `agent-user: runner`).
 The image would run `setup.script` as its second user, from the host's
@@ -184,7 +183,7 @@ input, or `egress.write-policy` in its `config` file, when the agent must
 not send what it reads where it likes. It holds the agent, the setup
 script and every later step of the job.
 
-It holds the agent less than the sandbox user is held. The agent is the
+It restricts the agent less than it restricts the sandbox user. The agent is the
 runner's uid, so it gets the runner's own write rules: it can write to
 the Actions service with a token of its own, such as another
 repository's runtime token, and upload what it read there, and the
@@ -199,7 +198,7 @@ a private caller or target with the write policy on
 on the tailnet when the file names none, so that the broker is reached
 at its own address; a provider's API under `register = "api-key"`, or a
 broker at a public address, needs a `[[write]]` rule of the caller's.
-The proxy's authority reaches the agent two ways: the system's store,
+The agent trusts the proxy through two sources: the system's store,
 which curl, git and OpenSSL read, and `NODE_EXTRA_CA_CERTS` and
 `REQUESTS_CA_BUNDLE`, which `run --runner-home` adds to the agent's
 otherwise cleared environment. CI's `e2e-write-policy` job runs the

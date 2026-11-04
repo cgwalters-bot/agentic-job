@@ -44,9 +44,9 @@ allowed = ["search_issues", "get_issue"]
 
 The caller's own agent job gives the secret only to its `run` step, as
 `run`'s input `mcp-token` and the variable `AGENTIC_JOB_MCP_TOKEN` of
-`agentic-job run`. The sandbox
-user's commands are started without that variable. A run with `[mcp.*]`
-and no credential does not start, and says which variable it wanted.
+`agentic-job run`. Commands running as the sandbox user do not receive
+that variable. A run with `[mcp.*]` and no credential does not start,
+and names the missing variable.
 
 ## What `run` does
 
@@ -64,9 +64,9 @@ named `NAME`. Its brief names the server and the allowed tools. An agent
 that does not take HTTP MCP servers (`mcpCapabilities.http`) fails before
 its first prompt. `run` does not fall back to anything else.
 
-Before the agent starts, probes check two things. No process of the
-sandbox user's holds the credential. The run's token for the proxy is in
-no file or process of that user's.
+Before the agent starts, probes check two things: no sandbox-user process
+holds the credential, and none of that user's files or processes contains
+the run's token for the proxy.
 
 The proxy takes only the run's token, as `Authorization: Bearer`, and
 only while the run lasts. It answers only `POST` and `DELETE` on its one

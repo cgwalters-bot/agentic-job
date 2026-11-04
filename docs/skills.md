@@ -5,7 +5,7 @@
 A run can give its agent procedures as [Agent Skills](https://agentskills.io/)
 (a `SKILL.md` with a `name` and a `description`) and the subagents they
 use, so that a task names the procedure ("Use the implement skill")
-instead of spelling it out in every caller's prompt. The text lives once,
+instead of spelling it out in every caller's prompt. The text is kept in one place,
 in this repository or the configured agent configuration repository.
 
 | Skill or subagent | Source | What it does |
@@ -22,9 +22,9 @@ harnesses get the embedded procedures above, and also the root `skills/`
 tree from `[agent] config-repo`. `fake` refuses the option because it
 cannot use skills.
 
-The runner owns the current harness's user skills directory: each run
-replaces that tree, including when the option is off or no configuration
-repository is named. Other harnesses' directories are left alone. Embedded
+The runner owns the current harness's user skills directory. Each run
+replaces that tree, even when the option is off or no configuration
+repository is specified. Other harnesses' directories are left alone. Embedded
 procedures win over source files at the same paths.
 
 To use agenthome's skills, set `agent.config-repo` (or the caller's

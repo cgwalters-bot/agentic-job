@@ -38,9 +38,9 @@ probe` (what CI's `confined` job tries as the runner's user), and
 user, whose general sudo access setup removes by default. A narrow sudo
 rule permits the root-owned helper to enter the sandbox with `run0`, reap
 its processes and read the proxy's fixed log. Without `--runner-home`,
-everything it does in the agent's files (the clone, git, reading the
-outcome and the requests) it does as the sandbox user, so that a link
-the agent planted cannot make it read the runner's files. The reusable
+it performs all operations in the agent's files (the clone, git, reading the
+outcome and the requests) as the sandbox user. This prevents a link planted
+by the agent from making it read the runner's files. The reusable
 workflow, by default (`agent-user: runner`), and `review.yml` pass
 `--runner-home`: `run` uses no sandbox
 user, the agent is the runner's user and can read and change the
@@ -53,9 +53,9 @@ and the check on another machine
 [sandbox-check.md](sandbox-check.md#the-helper) describes the helper, and the action's
 [lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock) its limits.
 
-`check` is half the check on purpose. Which request types exist, how
-many of each, and the sanitizing of their text are gh-aw's rules, which
-`collect` ports and is held to by fixtures. `--collected` is what
+`check` intentionally handles only half the validation. gh-aw's rules define
+request types, counts and text sanitization. `collect` ports these rules,
+and fixtures verify that it follows them. `--collected` is what
 `collect` made of the outputs, and is given by path so that it is never
 taken from what the agent's machine uploaded. [safe-outputs.md](safe-outputs.md) has both halves.
 
@@ -72,10 +72,10 @@ for repositories and base branches, a ceiling per output type and in
 all, the patch's size and file limits.
 [This repository's](../.github/agentic-job/allow.toml) is an example.
 
-**`--config`**, TOML with these tables. A key that is not known is
-refused. `run` reads only the copy `sandbox setup` left in
-`/etc/agentic-job/`, which the sandbox user cannot change and which
-holds no secret.
+**`--config`**, TOML with these tables. Unknown keys are refused.
+`run` reads only the copy `sandbox setup` left in
+`/etc/agentic-job/`. The sandbox user cannot change it, and it
+contains no secret.
 
 | Table | Holds |
 | --- | --- |

@@ -467,7 +467,7 @@ Runs are grouped per kind, repository and item with `cancel-in-progress: false`,
 so a second dispatch for an item waits for the first; no group is shared
 across items.
 
-It reads only the caller's repository variables, and holds no token or secret:
+It reads only the caller's repository variables and has no token or secret:
 
 - `AGENT_RUNNER`: the agent job's runner labels as JSON, for example
   `["agentic-job"]`. There is no default label; unset, the run fails to start.
@@ -510,8 +510,8 @@ plays every shipped session; `cargo test -p agentic-job review`
 covers hostile review routing and output cases.
 CI calls the **same dispatch.yml**, running research wherever it runs its
 end-to-end jobs, plus review on PRs; triage takes the same path with other
-profile text. Not implement: CI holds no PAT to
-fork with. Its separate verifier checks the issue comments and the review
+profile text. CI does not run implement because it has no PAT to
+create forks. Its separate verifier checks the issue comments and the review
 verdict, then existing CI cleanup removes the comments. Fork PRs skip these
 jobs.
 These tests do not prove real-model quality or connectivity to a private broker.

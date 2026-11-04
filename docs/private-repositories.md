@@ -9,8 +9,7 @@ caller can opt one kind of private run in: its own private repository as the
 target, with `private = true` in every bounds file, the egress domain allowlist
 on the agent machine and its runner's logs kept private. Such a run hands back
 comments, reviews and other non-patch outputs, not a patch or a project
-update. Each checked
-condition below is refused when it does not hold.
+update. The run is refused if any checked condition below fails.
 
 ## What is published today
 
@@ -86,16 +85,16 @@ private target only if all of these hold, each checked where it is enforced:
   out). Forgejo's and GitLab's apply push only to that fork, and only if
   the fork is private ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo),
   [to GitLab](safe-outputs.md#publishing-to-gitlab)).
-  It refuses `update_project` too: a project's fields are read by the
-  project's audience, which nothing confines to the repository's.
+  It also refuses `update_project`: a project's audience can read its
+  fields, and that audience is not limited to the repository's audience.
   The run action repeats the visibility check before upload.
 - **The proxy limits where the source can go.** `run` refuses a private
   policy unless the sandbox uses the egress proxy (`egress.proxy`) and the
   policy file the proxy enforces sets `[egress] mode = "allowlist"`
   ([domain allowlist](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#opt-in-domain-allowlist)), selected by
-  `egress.policy` in the caller's configuration. That file may keep no
-  `[[write]]` rule but git fetch's `POST` to paths ending in
-  `/git-upload-pack`: any other rule is a channel to what its endpoint stores.
+  `egress.policy` in the caller's configuration. That file may contain only
+  `[[write]]` rules for git fetch's `POST` to paths ending in
+  `/git-upload-pack`: any other rule can send data to storage at its endpoint.
   The shipped GraphQL rule, for example, would pass a mutation that another
   token posts to a public issue, so `gh`'s GraphQL reads are unavailable;
   REST reads (`gh api`) still work. Review every allowed domain, the inference
@@ -106,7 +105,7 @@ private target only if all of these hold, each checked where it is enforced:
   public-only. `run` refuses
   a private policy without the job's read token (`github-reads`, the default).
   It clones the target with a git credential helper scoped to the target's
-  clone URL, which reads that token from the sandbox user's file of it. The
+  clone URL. The helper reads the token from the sandbox user's token file. The
   token is never in a command line, URL or configuration value. The job token
   can read only the calling repository and expires with the job; no PAT is
   added. Policy and check keep read-only access; only apply holds a write

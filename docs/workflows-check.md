@@ -7,7 +7,7 @@ ordinary, hand-written workflow files the job shape guarantee that the
 [compiler](compiler.md) used to give. The rules come from workflow-compiler's
 [`src/shape.rs` and `lib/gha.ncl`](https://github.com/cgwalters-forge/workflow-compiler/tree/448c60c769577b345db2ad0028997f743daa5973).
 Those files checked compiled output independently of its source. This
-command checks the files themselves, so nothing is generated. It reads
+command checks workflow files directly; it does not generate them. It reads
 every `.yml` and `.yaml` file directly in `ROOT/.github/workflows`, the
 only place GitHub reads, with the extension in any case. It exits 0
 when nothing is refused and 1 when something is, including a workflow

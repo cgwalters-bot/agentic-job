@@ -34,12 +34,12 @@ its provider settings.
 It sends the task as one prompt and advertises no filesystem or
 terminal capability, so the agent uses its own tools inside the
 sandbox. Every message in both directions is recorded as it passes.
-That limits no tool: Claude Code still offers its own Read, Edit and
-Write, in the working directory the session names, which
-`just claude-acp-test` checks against the pinned adapter and a loopback
+This does not restrict the agent's tools: Claude Code still offers its own
+Read, Edit and Write in the session's working directory.
+`just claude-acp-test` checks this against the pinned adapter and a loopback
 stub. The run's prompt tells every agent to change files with its edit
 tools, and `shell_edits` in `summary.json` flags a change made without
-one call of them.
+calling any of them.
 
 It answers permission requests from a policy: allow, except a `git
 push` and an edit, delete or move outside the sandbox user's home. An
@@ -47,10 +47,10 @@ allow is the agent's "allow once", never "allow always". This is for
 tidiness and for the record, since an agent only asks when it chooses
 to: the [sandbox](sandbox.md) is the boundary.
 
-When the session ends it kills every process of the sandbox user, or,
-with `--runner-home`, only the agent's process group: what the agent
-detached from it runs until the job ends. What
-`run` leaves under `--out` is in [layout.md](layout.md#run).
+When the session ends, it kills every process of the sandbox user, or,
+with `--runner-home`, only the agent's process group. In the latter case,
+processes the agent detached from its group run until the job ends.
+[layout.md](layout.md#run) describes what `run` leaves under `--out`.
 
 An agent that makes no model request in its first five minutes must not hold
 a runner until the full timeout. When the inference proxy's count is known
@@ -88,8 +88,8 @@ and stays below GitHub's 1 MiB limit: assistant prose is retained first, then
 head and tail blocks. If assistant prose alone exceeds the limit, each message
 is abbreviated; the artifact keeps it.
 
-A subagent's messages and tool calls render inside the call that started it,
-where the agent says which that is (Claude Code does; opencode and vibe
+A subagent's messages and tool calls render inside the call that started it
+when the agent identifies that call (Claude Code does; opencode and vibe
 report only the call's output). Each step shows the context's tokens as the
 agent reports them. Where it reports the session's running cost in USD, each
 reading shows what the turn added, and the three costliest turns are bold;

@@ -357,9 +357,9 @@ the forge no longer serves, no `rustfmt` on the runner) runs the review. A
 
 `agentic-job review carry` fetches the base branch and both heads into a
 scratch repository with the job's read token (`contents: read`, and
-`statuses: read` for the previous head's status), and runs git and
+`statuses: read` for the previous head's status). It runs git and
 rustfmt from an empty directory, so no configuration, hook, attribute or
-toolchain file of the heads applies and nothing of theirs runs; rustfmt
+toolchain file from either head applies, and none of their code runs. rustfmt
 only parses the head's Rust files, outside the sandbox. The status then
 says `Approval of SHA carried forward: rebase` or `format`. Where
 [real reviews](#real-reviews-and-the-poll-contract) are on, `submit`

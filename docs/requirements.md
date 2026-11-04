@@ -15,7 +15,7 @@ setup packages, inference proxy and apply credential. They are trusted.
 The CI platform, kernel, systemd, sudo, nftables, toolchain, mitmproxy,
 gh-aw scripts and inference proxy are also trusted.
 
-The agent and every text it reads are untrusted. Assume prompt injection
+The agent and all text it reads are untrusted. Assume prompt injection
 succeeds. The agent has no forge write credential. Its run token is the
 only intended secret in reach. It proposes outputs; a clean job checks
 them before a separate job applies them. Event notification jobs also
@@ -90,8 +90,8 @@ without proof; `token-file` has no request accounting or revocation by `run`.
 
 secure-host's lock meets this for every later step, the agent included
 ([R4 there](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r4-the-runners-user-loses-root-before-untrusted-steps-run)).
-The agent needs no root: the root-owned helper's fixed operations are
-what `run` uses to enter and clean up after the sandbox user
+The agent doesn't need root: `run` uses the root-owned helper's fixed
+operations to enter and clean up after the sandbox user
 ([the helper](sandbox-check.md#the-helper)).
 
 ### R5. Nothing of the agent's outlives the run
@@ -137,8 +137,8 @@ fetched by a checksum at that commit when the release source digest
 matches, or built from that source. Pinning is maintained by review;
 there is no compiler enforcing it on caller workflows.
 [`workflows check`](workflows-check.md) refuses unpinned actions in
-a repository that runs it. Downloads an
-action performs require separate review.
+a repository that runs it. Downloads performed by an
+action require separate review.
 
 ### R10. What the guarantees depend on
 

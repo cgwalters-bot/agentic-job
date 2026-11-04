@@ -235,13 +235,13 @@ if a workflow passes it, and `register` refuses with it set as well
 agent job the token reaches `run` alone, and the agent gets it as its
 own, as it always did.
 
-What is left: a run whose agent job never starts stays registered until
-the broker expires it; re-running the agent's job alone hands it the
-token of a run that has ended, which `run` refuses, so re-run all jobs.
-[review.yml](../.github/workflows/review.yml) does as `agentic-job.yml`
-does, with a register job of its own and a call of `agent.yml`; a
-[composed agent job](#the-pieces-and-an-agent-job-of-your-own) holds no
-`id-token`, and one that needs a run token calls `agent.yml` too.
+If the agent job never starts, the run stays registered until the broker
+expires it. Re-running only the agent's job passes it the token for an
+ended run, which `run` refuses, so re-run all jobs.
+[review.yml](../.github/workflows/review.yml) follows the same pattern as
+`agentic-job.yml`, with its own register job and a call to `agent.yml`. A
+[composed agent job](#the-pieces-and-an-agent-job-of-your-own) has no
+`id-token`; one that needs a run token also calls `agent.yml`.
 
 ## Context repositories
 
@@ -1180,7 +1180,7 @@ job for the identity token, for the proxy, whether or not the run uses
 one ([the run token](#the-run-token)).
 GitHub refuses the whole call when any of them is missing, even with
 `github-reads: false`. The policy, register, agent and check jobs take
-no more than that, and of them only register and check's detector the
+no more than that. Of these, only register and check's detector take the
 identity token. Activate, notify, conclude and apply name no
 permissions and so keep whatever the call was granted, the identity
 token included: each can mint OIDC tokens for any audience, alongside
@@ -1222,7 +1222,7 @@ otherwise: the job proves to the proxy that it is a CI job with its
 identity token, for the audience `inference-audience`, which the agent's
 user cannot obtain. `plain` sends the run's name and no proof, and
 `token-file` reads a token from `inference-token-file` on the runner;
-both have to be chosen by name. `api-key` needs no proxy of anyone's:
+both have to be chosen by name. `api-key` doesn't need an external proxy:
 `inference-url` is the provider's API root, `inference-provider` the API
 it speaks, and its key. This workflow refuses `api-key` for now and
 passes the secret `INFERENCE_API_KEY` to no job

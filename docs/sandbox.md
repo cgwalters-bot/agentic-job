@@ -40,7 +40,7 @@ until it is no longer the boundary
 ([background](https://github.com/cgwalters-forge/gh-aw/issues/1)). So
 the host is hardened and the agent gets an ordinary login session on it.
 
-What the code does for those two is small. For podman, setup requires
+Supporting those two takes little code. For podman, setup requires
 that the sandbox user has subordinate uids and names them in the network
 rules, and `run0` gives each command the session rootless podman relies
 on; podman itself is a package the caller lists. For KVM, the sandbox
@@ -89,9 +89,9 @@ WantedBy=multi-user.target
 Not from cloud-init's `runcmd`: on CentOS Stream 10, setup started there
 failed when `run0` could not start a transient service unit to run
 `setup.script` as the sandbox user, while the same setup worked from a
-unit like the one above. Why is not yet known
+unit like the one above. The cause is not yet known
 ([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810));
-setup does not refuse cloud-init, but that failure's message says this.
+setup does not refuse cloud-init, but the error message explains this limitation.
 
 `egress.direct` lists endpoints the sandbox user reaches without the
 proxy, each an IPv4 address and port on the tailnet; it is for the
@@ -353,7 +353,7 @@ For an agent in particular:
 
 - The agent can read whatever is world-readable on the host, and connect
   to whatever listens for every local user unless the caller stops it.
-- With `egress.proxy = false` the sandbox user's network is open but for
+- With `egress.proxy = false` the sandbox user's network is open except for
   the metadata service and, when `egress.direct` has entries, the
   tailnet.
 - The boundary is a second Unix user on one kernel, on a VM used for one

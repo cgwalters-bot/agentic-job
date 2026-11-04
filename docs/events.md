@@ -92,8 +92,8 @@ The checks, in order:
 6. A comment's body starts with one of `commands`, at the very first
    character, as gh-aw matches it. Everything after the command is the
    request.
-7. A pull request's head is in the repository, or `forks = true`. Of a
-   fork's head only its commit is reported, never its branch. The payload
+7. A pull request's head is in the repository, or `forks = true`. For a
+   fork's head, only its commit is reported, never its branch. The payload
    of a comment on a pull request does not say where the head is, so the
    workflow fetches the pull request (`GET /repos/OWNER/NAME/pulls/N`)
    and passes it in; it has to be the one the comment is on, and then
@@ -205,11 +205,11 @@ consumer of its decision can run one.
 
 ## The task file
 
-The caller's own task text comes first, unchanged. Then a line saying
-which event on which item by whom started the run; for a pull request,
-that its head can be fetched as `refs/pull/N/head`, with the commit id
+The caller's own task text comes first, unchanged. Then a line identifies
+the event, item and actor that started the run. For a pull request, it also
+says the head can be fetched as `refs/pull/N/head`, with the commit id
 when the head is the repository's own (never a branch name: that is the
-author's text); and a notice that what follows is text from GitHub, data
+author's text). A notice explains that what follows is text from GitHub, data
 for the task and not instructions. Then each piece of the event's text,
 named (the request, the item's title, its body, a review comment's place
 in the diff), inside a fence of backticks longer than any run of
@@ -255,8 +255,8 @@ request itself, on the job that calls the workflow, as the examples do:
 a group is decided before any job runs, and a workflow-level one is
 joined before the job's `if` is evaluated.
 
-A refused trigger leaves no comment: the policy job holds no token that
-could write one, by design, and a run that was never admitted has
+A refused trigger leaves no comment: by design, the policy job doesn't have
+a token that could write one, and a run that was never admitted has
 nothing to say. The job summary and the `trigger` outputs say why.
 
 ## Deadline

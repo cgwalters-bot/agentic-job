@@ -7,16 +7,16 @@ it: a credential in the sandbox is one a prompt injection can send
 somewhere, and one with no spending cap. So inference goes through a
 proxy that holds the provider credential. The agent gets the proxy's
 URL and a token for this run. The proxy checks the token, adds the real
-credential, forwards the request and counts what the run uses; when the
-run is ended its token admits nothing more.
+credential, forwards the request and counts what the run uses. When the
+run ends, its token no longer grants access.
 
 The proxy is either
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker),
-which its operator runs and which the agent's runner has to reach (how to
-run one is in its README), or, for a caller with only a provider's API
-key, one that `run` serves itself ([below](#a-provider-api-key)). The
+run by its operator and reachable from the agent's runner (its README
+explains how to run one), or, for a caller with only a provider's API
+key, a proxy served by `run` itself ([below](#a-provider-api-key)). The
 agent sees the same thing either way: an address and a token for the run.
-The reusable workflow on main uses a broker alone: it refuses a key
+The reusable workflow on main uses only a broker: it refuses a key
 ([below](#a-provider-api-key)).
 
 [`tests/inference.rs`](../crates/agentic-job/tests/inference.rs) exercises registration with a mock proxy. Real-agent
@@ -101,7 +101,7 @@ needs no token. A run that cannot register never started
 ([exit state 4](interface.md#exit-states)). `run` warns if the run
 expires at the proxy before the agent's timeout.
 
-The token stays in memory and goes into one file of the sandbox user's
+The token stays in memory and is written to one of the sandbox user's files
 ([layout.md](layout.md#run)). While the agent works `run` reads `GET
 /v1/runs/self` every five seconds; the record's `requests` plus
 `unmetered` is the count the request cap reads. A count that cannot be
@@ -113,7 +113,7 @@ within 210 seconds of the last successful poll (plus scheduling delay).
 This prevents missing accounting from silently disabling the request cap;
 it is not a broker-side hard spending limit.
 
-Whatever way the run ends, `run` then sends `DELETE /v1/runs/self`,
+However the run ends, `run` then sends `DELETE /v1/runs/self`,
 with the same retries. A 401 means the proxy no longer knows the token,
 which ends it without a usage record. The proxy keeps runs in memory, so
 a restart while the agent works refuses its model requests from then on,
@@ -179,9 +179,9 @@ The host and port of `url`, `anthropic-url` and `openai-url`
 (`host:port`) are redacted from the run's logs and files as its secrets
 are, except under `api-key`, whose URL is the provider's public one. A
 URL that names no port is written without one, and is not matched:
-give the gateway's port explicitly to have it redacted. They are no credential, but the address of a
-gateway on a private network, and an agent's error names it: Claude
-Code's 529 message did, in a public job log (#1860).
+give the gateway's port explicitly to have it redacted. These addresses aren't
+credentials, but they identify a gateway on a private network. An agent's error
+can expose it: Claude Code's 529 message did, in a public job log (#1860).
 In hand-backs, the upload gate replaces these addresses with the fixed
 placeholder `<inference-address>` instead of discarding the run. This includes
 patches, PR bodies, safe-output requests and replacement commit series. The
@@ -213,8 +213,8 @@ has an `unproven` section. That is absent by default. A broker without it
 answers 401; `run` then says the policy must
 admit unproven runs.
 
-A name stays taken until a day after its run expires, and asking for it
-again is a 409, which `run` does not retry. Within one registration, a
+A name stays taken until a day after its run expires. Asking for it
+again returns a 409, which `run` does not retry. Within one registration, a
 try that got no answer may have taken the name, so the next asks for
 `NAME.retry1`; the run the lost reply registered is left at the broker,
 since nobody holds its token. Starting `run` again with the same
@@ -389,8 +389,8 @@ inference without detection. `run` reads the key as
 callers that pass it still parse, and give it to no job.
 
 `run` reads the key from its environment and asks the provider for its
-list of models with it, retried as a registration is. A missing key, one
-that is not a key, and one the provider refuses (401 or 403) stop the
+list of models with it, retried as a registration is. A missing or invalid
+key, or one the provider refuses (401 or 403), stops the
 run before the agent starts, with the variable's name and the provider's
 answer, the key cut out of it. `agentic-job check-key --config FILE`
 makes the same check, so that a step before `sandbox setup` can fail on
