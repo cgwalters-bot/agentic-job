@@ -11,8 +11,8 @@
 //! - **no secret is left** in the results, the transcript or the
 //!   hand-back: none of the values the run holds, and no private key.
 //!   The first two were redacted, as far as they are text, of those and
-//!   of anything else shaped like a credential; the hand-back cannot be (a
-//!   patch with a string replaced no longer applies), so a secret there,
+//!   of anything else shaped like a credential; the hand-back's inference
+//!   addresses alone are replaced with a placeholder, so a credential there,
 //!   or in a file that is not text, fails the run. Any other shape in the
 //!   hand-back is most likely a test fixture, since the run holds no
 //!   credential but its own: it is a warning ([`Staging::shape_warnings`]);
@@ -172,6 +172,33 @@ impl Staging {
         Ok(())
     }
 
+    /// Keep work that quotes a runtime endpoint, without publishing that
+    /// endpoint. Scan the original first: replacement must not hide credentials.
+    /// Files remain bounded, no-follow regular-file reads, as at the gate.
+    pub fn redact_handback_addresses(&self, redactor: &Shared) -> Result<usize> {
+        let mut count = 0;
+        for (name, path) in Self::files(&self.safe_outputs())? {
+            let original = Self::open(&path)?;
+            let found = redactor.with(|r| r.find_credential_rule_in(original))?;
+            if let Some((line, rule)) = found {
+                return Err(SecretAt {
+                    place: format!("{SAFE_OUTPUTS_DIR}/{name}, line {line}"),
+                    rule,
+                    handed_back: true,
+                }
+                .into());
+            }
+            let mut replaced = tempfile::NamedTempFile::new_in(&self.root)?;
+            let original = Self::open(&path)?;
+            let found = redactor.with(|r| r.redact_addresses(original, &mut replaced))?;
+            if found > 0 {
+                replaced.persist(&path)?;
+            }
+            count += found;
+        }
+        Ok(count)
+    }
+
     /// The files of DIR, by name. Anything that is not a regular file is
     /// an error: all of this was written here.
     fn files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -209,19 +236,6 @@ impl Staging {
     /// REDACTOR is the run's, which knows the secrets the run holds and
     /// how many it replaced.
     pub fn check(&self, gate: Gate, redactor: &Shared) -> Result<()> {
-        self.check_with_public_addresses(
-            gate,
-            redactor,
-            &super::public_addresses::PublicAddresses::default(),
-        )
-    }
-
-    pub(super) fn check_with_public_addresses(
-        &self,
-        gate: Gate,
-        redactor: &Shared,
-        public: &super::public_addresses::PublicAddresses,
-    ) -> Result<()> {
         ensure!(
             gate.ended,
             "the run was not ended at the inference proxy, so its token may still be live"
@@ -233,37 +247,11 @@ impl Staging {
         ] {
             for (name, path) in Self::files(&dir)? {
                 let file = Self::open(&path)?;
-                let mut text = String::new();
-                let allowed = if label == SAFE_OUTPUTS_DIR && file.size() <= (1 << 20) {
-                    // Invalid UTF-8 receives no exception and is still scanned.
-                    if Self::open(&path)?
-                        .take((1 << 20) + 1)
-                        .read_to_string(&mut text)
-                        .is_ok()
-                    {
-                        public.allowed_lines(&name, &text)
-                    } else {
-                        Default::default()
-                    }
-                } else {
-                    Default::default()
-                };
-                let credentials = Self::open(&path)?;
                 let found = redactor
-                    .with(|redactor| {
-                        redactor.find_rule_in_public_lines(file, credentials, &allowed)
-                    })
+                    .with(|redactor| redactor.find_rule_in(file))
                     .with_context(|| format!("reading {}", path.display()))?;
                 // The line and not the string: this error is published.
-                if let Some((line, mut rule)) = found {
-                    if rule == format!("known run secret: {}", redact::INFERENCE_ADDRESS)
-                        && text
-                            .split('\n')
-                            .nth(line - 1)
-                            .is_some_and(|line| public.contains_address_on(line))
-                    {
-                        rule.push_str(" (address already present in patch base; occurrence is not an unchanged or moved base-file line)");
-                    }
+                if let Some((line, rule)) = found {
                     return Err(SecretAt {
                         place: format!("{label}/{name}, line {line}"),
                         rule,
@@ -724,124 +712,23 @@ mod tests {
     }
 
     #[test]
-    fn inference_addresses_only_pass_on_existing_base_file_lines() {
-        use std::process::Command;
-
-        use super::super::{clone::Checkout, enter::Unconfined, public_addresses::PublicAddresses};
-
+    fn inference_addresses_are_replaced_without_hiding_credentials() {
         const ADDRESS: &str = "inference.example.test:8443";
-        let endpoint = format!("endpoint = {ADDRESS}\n");
         let credential = token();
         let key = private_key();
-        let cases = [
-            (
-                "move",
-                endpoint.clone(),
-                "config",
-                format!("after\n{endpoint}"),
-                true,
-            ),
-            (
-                "context",
-                endpoint.clone(),
-                "config",
-                format!("{endpoint}changed\n"),
-                true,
-            ),
-            (
-                "delete",
-                endpoint.clone(),
-                "config",
-                "after\n".to_owned(),
-                true,
-            ),
-            (
-                "delete a line like a signature",
-                format!("- \n{endpoint}"),
-                "config",
-                format!("{endpoint}after\n"),
-                true,
-            ),
-            ("new file", endpoint.clone(), "new", endpoint.clone(), false),
-            (
-                "duplicate",
-                endpoint.clone(),
-                "config",
-                format!("{endpoint}{endpoint}after\n"),
-                false,
-            ),
-            (
-                "changed line",
-                endpoint.clone(),
-                "config",
-                format!("other = {ADDRESS}\nafter\n"),
-                false,
-            ),
-            (
-                "token",
-                format!("{endpoint}{credential}\n"),
-                "config",
-                format!("after\n{endpoint}{credential}\n"),
-                false,
-            ),
-            (
-                "key",
-                format!("{endpoint}{key}\n"),
-                "config",
-                format!("after\n{endpoint}{key}\n"),
-                false,
-            ),
-            (
-                "same line token",
-                format!("{ADDRESS} {credential}\n"),
-                "config",
-                format!("after\n{ADDRESS} {credential}\n"),
-                false,
-            ),
-        ];
-        for (case, before, target, after, passes) in cases {
+        for (extra, passes) in [
+            ("", true),
+            (credential.as_str(), false),
+            (key.as_str(), false),
+        ] {
             let out = Out::new();
-            let repo = out.out().join("repo");
-            std::fs::create_dir(&repo).unwrap();
-            let git = |args: &[&str]| {
-                let output = Command::new("git")
-                    .current_dir(&repo)
-                    .env("GIT_AUTHOR_NAME", "Test")
-                    .env("GIT_AUTHOR_EMAIL", "test@example.test")
-                    .env("GIT_COMMITTER_NAME", "Test")
-                    .env("GIT_COMMITTER_EMAIL", "test@example.test")
-                    .args(args)
-                    .output()
-                    .unwrap();
-                assert!(output.status.success(), "{case}: {:?}", output.stderr);
-                String::from_utf8(output.stdout).unwrap()
-            };
-            git(&["init", "-q"]);
-            std::fs::write(repo.join("config"), format!("{before}after\n")).unwrap();
-            git(&["add", "config"]);
-            git(&["-c", "core.hooksPath=/dev/null", "commit", "-qm", "Base"]);
-            let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
-            let checkout = Checkout {
-                dir: repo.clone(),
-                base_commit: base.clone(),
-                secondary: None,
-            };
             let name = "aw-agent-run-1.patch";
-            let public = PublicAddresses::capture(
-                &Unconfined,
-                &checkout,
-                &[name.to_owned()],
-                &[ADDRESS.to_owned()],
-            )
-            .unwrap();
-            std::fs::write(repo.join(target), after).unwrap();
-            git(&["add", "--all"]);
-            let diff = git(&["diff", "--cached", "--no-ext-diff", "--no-renames"]);
-            let patch = format!(
-                "From {} Mon Sep 17 00:00:00 2001\nX-GH-AW-Base-Commit: {base}\nFrom: Test <test@example.test>\nDate: Tue, 3 Nov 2026 00:00:00 +0000\nSubject: [PATCH] Test\n\n---\n{diff}",
-                "2".repeat(40)
-            );
+            let patch = format!("@@ -1 +1 @@\n-old\n+{ADDRESS} {extra}\n");
             out.hand_back(name, &patch);
+            out.hand_back(
+                "outputs.jsonl",
+                &format!("{{\"type\":\"create_pull_request\",\"body\":\"{ADDRESS}\"}}\n"),
+            );
             let redactor = Shared::new(
                 Redactor::new_named([
                     (redact::INFERENCE_ADDRESS, ADDRESS),
@@ -849,37 +736,30 @@ mod tests {
                 ])
                 .unwrap(),
             );
-            // All endpoint text remains redacted outside the patch.
             std::fs::write(out.staging.transcript().join("acp.jsonl"), ADDRESS).unwrap();
             out.staging.redact(&redactor).unwrap();
             assert_eq!(
                 std::fs::read_to_string(out.staging.transcript().join("acp.jsonl")).unwrap(),
                 redact::REPLACEMENT
             );
-            let result = out
-                .staging
-                .check_with_public_addresses(OPEN, &redactor, &public);
-            assert_eq!(result.is_ok(), passes, "{case}: {result:?}");
+            let result = out.staging.redact_handback_addresses(&redactor);
+            assert_eq!(result.is_ok(), passes, "{result:?}");
             if passes {
-                // The exception is absent by default.
-                assert!(out.staging.check(OPEN, &redactor).is_err(), "{case}");
+                assert_eq!(result.unwrap(), 2);
+                out.staging.check(OPEN, &redactor).unwrap();
                 out.staging.publish(out.out(), &GO).unwrap();
-                assert!(out.out().join(SAFE_OUTPUTS_DIR).join(name).is_file());
-            } else if case == "new file" || case == "duplicate" || case == "changed line" {
-                let error = result.unwrap_err().to_string();
-                assert!(
-                    error.contains("address already present in patch base"),
-                    "{error}"
+                for file in [name, "outputs.jsonl"] {
+                    let text = std::fs::read_to_string(out.out().join(SAFE_OUTPUTS_DIR).join(file))
+                        .unwrap();
+                    assert!(text.contains(redact::INFERENCE_PLACEHOLDER));
+                    assert!(!text.contains(ADDRESS));
+                }
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(out.staging.safe_outputs().join(name)).unwrap(),
+                    patch
                 );
-                assert!(!error.contains(ADDRESS));
             }
-            // An address in a request is never a base-file line.
-            out.hand_back("outputs.jsonl", ADDRESS);
-            assert!(
-                out.staging
-                    .check_with_public_addresses(OPEN, &redactor, &public)
-                    .is_err()
-            );
         }
     }
 

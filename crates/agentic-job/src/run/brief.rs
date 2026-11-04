@@ -281,6 +281,8 @@ pub fn hand_back(
     text.push_str(
         "\n- Never write a private key, a fake one in a test included: build it at run time from \
          parts. Other credential-shaped strings are reported as warnings.\n\n\
+         Checkpoint early rather than lose work; never abandon a finished change over a fixable \
+         concern. Read inference addresses from the environment, not copied into code.\n\n\
          Before you end your turn, run `agentic-job handback check` and fix what it reports \
          until it exits 0. It makes the checks the run makes after your session, on your \
          change, requests, report and checkpoint, and says how to fix each problem; run it as \
@@ -896,6 +898,9 @@ mod brief_tests {
             "\"checkpoint\": {\"complete\": false",
             "set `complete` to true last",
             "Never write a private key, a fake one in a test included",
+            "Checkpoint early rather than lose work",
+            "never abandon a finished change over a fixable concern",
+            "Read inference addresses from the environment, not copied into code",
             "run `agentic-job handback check` and fix what it reports until it exits 0",
             "`agentic-job handback guide` prints these rules in full",
         ] {

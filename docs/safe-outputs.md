@@ -285,11 +285,15 @@ its summary and, through the run action's
 `secret-at` output, the status comment, since such a run uploads nothing
 else to look in.
 
-Inference addresses are not credentials. For patches, the upload gate allows
-only exact base-file lines retained or moved within that same file, using
-bounded evidence captured before the agent starts. It still refuses new files,
-changed lines and extra copies, and independently scans for tokens and private
-keys even on allowed lines. Logs and transcripts remain redacted; see
+Inference addresses are not credentials. Before upload, hand-back patches,
+PR bodies and safe outputs replace them with `<inference-address>`; the run
+summary includes one line counting the replacements. The original bytes are
+independently scanned for known credentials and private keys before replacement,
+so redaction cannot hide an overlapping credential. `allow-base-address-lines`
+is now a legacy no-op. A placeholder may break a build or patch application;
+review or continuation must repair that rather than discard the work. All
+other bounds and check/apply refusals remain. Logs and transcripts keep their
+current redaction; see
 [inference address redaction](inference.md#what-run-does).
 
 One file is derived from gh-aw:

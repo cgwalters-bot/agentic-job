@@ -110,8 +110,9 @@ the next in the same major version.
   `[limits]`, `[session]` and `[commit]`
   ([files read](interface.md#files-read)).
   `[inference] allow-base-address-lines` is an optional boolean, default false;
-  it allows only retained or moved exact base-file endpoint lines at upload,
-  never credentials or new occurrences ([inference](inference.md#what-run-does)).
+  it is now a legacy no-op. Hand-backs always replace inference endpoint literals
+  with `<inference-address>`; credential refusals remain unchanged
+  ([inference](inference.md#what-run-does)).
   `[inference] stop-long-retry-after` is an optional boolean, default false;
   it requires `front` or `api-key` and stops a long upstream 429 followed
   by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).

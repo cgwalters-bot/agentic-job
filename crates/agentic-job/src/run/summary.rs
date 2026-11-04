@@ -1005,6 +1005,12 @@ pub fn markdown(s: &Value) -> String {
     if let Some(n) = s["redactions"].as_u64().filter(|n| *n > 0) {
         out.extend([String::new(), format!("Redacted {n} string(s).")]);
     }
+    if let Some(n) = s["inference_address_replacements"].as_u64() {
+        out.extend([
+            String::new(),
+            format!("Replaced {n} inference address occurrence(s) in the hand-back."),
+        ]);
+    }
     out.join("\n") + "\n"
 }
 
@@ -1304,6 +1310,7 @@ mod tests {
             "failures": [{"kind": "tool_error", "message": "Bash: boom"}],
             "permissions": {"allowed": 2, "denied": [{"tool": "Bash", "summary": "git push", "rule": "no-push"}]},
             "tests": [], "egress_denied": [{"domain": "evil.example", "count": 2}], "redactions": 1,
+            "inference_address_replacements": 3,
             "patch": {"base": "abc", "error": "the change is over 64 bytes"},
             "requests_dropped": "~/out/safe-outputs.jsonl is not a regular file",
             "secret_shaped": ["safe-outputs/aw-x.patch, line 3: matches `AKIA[0-9A-Z]{16}`"],
@@ -1348,6 +1355,8 @@ Secret-shaped strings handed back (kept: the run holds no credential of their sh
 - safe-outputs/aw-x.patch, line 3: matches `AKIA[0-9A-Z]{16}`
 
 Redacted 1 string(s).
+
+Replaced 3 inference address occurrence(s) in the hand-back.
 "
         );
         // A caller that names neither the run nor its machine.

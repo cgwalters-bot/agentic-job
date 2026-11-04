@@ -181,17 +181,21 @@ are, except under `api-key`, whose URL is the provider's public one. A
 URL that names no port is written without one, and is not matched:
 give the gateway's port explicitly to have it redacted. They are no credential, but the address of a
 gateway on a private network, and an agent's error names it: Claude
-Code's 529 message did, in a public job log (#1860). As with every
-redacted string, a published file that still holds one after the
-redaction stops the upload. The opt-in `[inference] allow-base-address-lines = true`
-(default false) allows exact base-file lines retained or moved within the same
-file in a patch. The upload gate captures those lines before
-the agent starts, with at most 1 MiB of evidence per checkout; only validated
-patches up to 1 MiB and 50 files qualify. New files, changed lines and extra
-copies still fail, even if the address occurs elsewhere in the base. A refusal
-notes when the base already contains an inference address, without quoting it.
-This exception never applies to tokens or private keys, logs, transcripts,
-requests or replacement commit series.
+Code's 529 message did, in a public job log (#1860).
+In hand-backs, the upload gate replaces these addresses with the fixed
+placeholder `<inference-address>` instead of discarding the run. This includes
+patches, PR bodies, safe-output requests and replacement commit series. The
+summary reports the number of replacements without quoting an address.
+`[inference] allow-base-address-lines` is accepted as a legacy no-op; no
+base-file evidence or opt-in is needed. Logs and transcripts keep their current
+redaction. Known tokens, provider API keys and private keys still refuse upload,
+including when they overlap an address in the original hand-back.
+
+A placeholder can break a build, or prevent a patch from applying if an address
+was in its context or removed lines. Preserving the work is preferable to losing
+the run: review or continuation must repair it before merge. Do not copy runtime
+addresses into code; read them from the environment instead. File, size, path and
+type bounds and independent check/apply validation are unchanged.
 
 ## Registering without proof
 

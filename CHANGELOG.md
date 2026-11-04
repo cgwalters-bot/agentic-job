@@ -15,9 +15,10 @@ says what a caller may rely on across versions.
   short blocked outcomes and notification opt-outs are unchanged. The shipped
   implement dispatch profile also permits one caller-bounded item comment (#2892).
 
-- Opt-in `[inference] allow-base-address-lines` permits inference addresses on exact base-file lines retained
-  or moved within that file; extra copies and new files still fail. Logs remain
-  redacted, and tokens and private keys have no base-content exception (#2863).
+- Hand-backs replace inference addresses with `<inference-address>` rather than
+  discarding the run, and report the replacement count. Credentials and private
+  keys still refuse upload; logs keep their current redaction.
+  `[inference] allow-base-address-lines` is now a legacy no-op (#2899).
 
 - Replacement-series apply accepts a checked base snapshot between the policy
   snapshot and the trusted current base-branch head, so main advancing during a rebase

@@ -120,8 +120,7 @@ pub struct Inference {
     /// Stop a silent child agent sleeping on a long upstream rate limit.
     /// Requires the local proxy (`front` or `api-key`); off by default.
     pub stop_long_retry_after: bool,
-    /// Allow inference addresses only on retained or moved exact base-file
-    /// lines at upload. Logs stay redacted; credentials are never exempt.
+    /// Legacy no-op. Hand-backs now replace inference addresses unconditionally.
     pub allow_base_address_lines: bool,
 }
 
