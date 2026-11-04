@@ -318,22 +318,30 @@ the revision must be a full commit hash, not a branch or tag. This prevents
 a moving ref from replacing setup code without a caller configuration change.
 The caller must review that commit and its manifest: pinning does not make
 its code or dependencies trustworthy. The agenthome `install-tools` interface
-is a Justfile recipe using Node, installing into `$HOME/.local/bin` and
+is a Justfile recipe installing into `$HOME/.local/bin` and
 `$HOME/.local/share/agenthome`; its manifest detects existing tools and pins
 release checksums and direct package versions. Transitive PyPI dependencies
-remain resolver-trusted.
+remain resolver-trusted. From agenthome commit
+[7e6a40c](https://github.com/cgwalters-forge/agenthome/commit/7e6a40c658a99f7b0ea482f940d2e60ca6571260)
+the recipe builds and runs agenthome's Rust installer with
+`cargo run --locked`, so the crates.io dependencies its `Cargo.lock` pins,
+and their build scripts and proc macros, are part of that setup code too.
 
 This code and its dependencies have pre-lockdown network access, including
 metadata services and the tailnet, and are outside the filesystem view.
 Treat them as trusted host setup, not as untrusted task code.
 
-The runner image or `setup.packages` must provide Git, just, Node, curl,
-tar and unzip. After package installation and privilege denial, setup fetches
+The runner image or `setup.packages` must provide Git, just, curl, tar and
+unzip, and for a pin at or after 7e6a40c Cargo with Rust 1.85 or newer, or
+Node for an older pin. The recipe's PATH is only
+`$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin`, so a distribution `cargo`
+works if it is new enough, but the runner's rustup toolchain is not found.
+After package installation and privilege denial, setup fetches
 the pinned repository and runs the recipe as the sandbox user with a clean
 environment, outside the sandbox command entry and before network rules.
-It can fetch PyPI and GitHub releases without changing sandbox egress policy.
-Each Git phase has a 120-second timeout; the recipe has 600 seconds, with a
-10-second forced-kill grace. Any failure stops setup before agent inference.
+It can fetch crates.io, PyPI and GitHub releases without changing sandbox
+egress policy. Each Git phase has a 120-second timeout; the recipe has 600
+seconds, a cold Cargo build included, with a 10-second forced-kill grace. Any failure stops setup before agent inference.
 Installer transcripts are discarded to bound memory and prevent workflow-command
 injection; setup logs phase starts and the failing exit status instead.
 The checkout stays in `$HOME/.agenthome-tools`; the sandbox PATH prepends
