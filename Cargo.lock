@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-job"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1575,7 +1575,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "safe-outputs"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "anyhow",
  "base64",
@@ -1631,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "secure-host"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "anyhow",
  "bytes",
