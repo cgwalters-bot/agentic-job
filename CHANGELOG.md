@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The secure-host forwarder picks up the config-volume SELinux relabel fix
+  (actions#190), allowing setup to read its configuration on enforcing hosts
+  such as RHEL 10 (#2925). The pinned secure-host image remains v0.6.4.
+
 - Hand-backs also replace the agent-facing inference and MCP proxy tokens with
   placeholders. Run tokens, upstream credentials and private keys still refuse
   publication; refused work is retained in mode-0700 `OUT/refused-handback` on

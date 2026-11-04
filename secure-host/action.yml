@@ -131,7 +131,8 @@ runs:
     # `egress: write-policy` the new action also copies the proxy's
     # trust-store variables from /etc/egress-proxy/runner.env into
     # GITHUB_ENV, refusing any other name.
-    - uses: cgwalters-forge/actions/secure-host@de677fefc15c16cb85302bbb9a64732e44d78d75 # main, with secure-host:v0.6.4
+    # Includes actions#190: :z relabels the config volume on SELinux hosts.
+    - uses: cgwalters-forge/actions/secure-host@c763a8950778743f51857a37b2a59daf9e96ee23 # main, with secure-host:v0.6.4
       with:
         config: ${{ steps.config.outputs.path }}
         check: ${{ inputs.check }}
