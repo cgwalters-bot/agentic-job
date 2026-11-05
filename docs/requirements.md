@@ -16,13 +16,19 @@ The CI platform, kernel, systemd, sudo, nftables, toolchain, mitmproxy,
 gh-aw scripts and inference proxy are also trusted.
 
 The agent and all text it reads are untrusted. Assume prompt injection
-succeeds. The agent has no forge write credential. Its run token is the
-only intended secret in reach. It proposes outputs; a clean job checks
+succeeds. The agent must have no forge write credential. Current broker runs
+still expose a run token and, by default, a GitHub read token; this does **not**
+meet [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903)'s no-credentials goal.
+It proposes outputs; a clean job checks
 them before a separate job applies them. Event notification jobs also
 have write access, but never consume agent-written outputs.
 
-Two ways to run it differ in what separates the agent from `run`; the
-reusable workflow's `agent-user` input chooses ([workflow.md](workflow.md)).
+The operator chose runner-only execution on 4 November 2026
+([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)).
+At this documentation snapshot, [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
+is still open: the checkout retains the old second-user implementation.
+Do not adopt it as an escape from runner-mode refusals. The migration and
+acceptance gaps are recorded in [the dated inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
 
 - `runner`, the default: `run --runner-home`, and the agent is the
   runner's own user, as any deterministic step after secure-host is.
@@ -37,11 +43,9 @@ reusable workflow's `agent-user` input chooses ([workflow.md](workflow.md)).
   ([secure-host.md](secure-host.md#the-egress-write-policy-for-an-agent-job)).
   `run` refuses what would need the second user, a private target included
   ([`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs)).
-- `sandbox`: `run` without `--runner-home` starts the agent as the
-  second Unix user secure-host makes by default, on the same kernel, so
-  that a uid separates it from `run`, the job's steps and their files.
-  This also admits what needs that uid: a session, `[setup] tools` and
-  probes before the agent.
+- The legacy `sandbox` mode remains in this checkout, pending #2991; it is
+  not the runner-only contract and is not a supported migration target.
+  Neither `hidepid=2` nor environment filtering isolates same-UID processes.
 
 R1 to R3 and R7 below say what holds in each, the runner's user first.
 
@@ -51,22 +55,20 @@ R1 to R3 and R7 below say what holds in each, the runner's user first.
 
 The reusable workflow fixes the agent job's steps. The caller cannot
 insert a shell or action there. With the runner's user as the agent,
-the setup script runs as that user after secure-host; with the sandbox
-user, secure-host runs it as the sandbox user. Packages and npm install hooks run as root before the lock and
+the setup script runs as that user after secure-host. Packages and npm install hooks run as root before the lock and
 must be trusted by the caller. A standalone action cannot enforce the
 ordering of steps around it.
 
-### R2. The agent runs as another user, in a session of its own
+### R2. The agent is the runner's user, not an isolated supervisor client
 
-Met only with the sandbox user. With the runner's user, the default,
-entry is `env -i` with a fixed environment at the runner's own uid. With
-the sandbox user (`run` without `--runner-home`), entry uses
-`run0 --pipe` and a PAM session, with that fixed environment. Either way `ACTIONS_*` variables are refused. Sandbox sudo and polkit are denied.
-Host probes test the uid boundary and reachable local listeners; they
-do not cover every service behind the system bus or all UDP listeners.
+The old separate-user requirement is superseded by #2989. Runner entry clears
+the inherited environment at the runner's UID. `ACTIONS_*` configuration
+variables are refused, but clearing them does not protect earlier same-UID
+processes, memory or files. Host probes are not proof of supervisor isolation;
+they do not cover every service behind the system bus or all UDP listeners.
 See the action's [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#local-sockets).
 
-### R3. The sandbox holds no credential but its run token
+### R3. No reachable credentials is a goal, not the current guarantee
 
 With the runner's user, the default, the agent can read every file of
 that user and `run`'s environment, so the job holds only read-only
@@ -77,10 +79,11 @@ the runner's user is refused metadata too with
 yet in the image the forwarder pins:
 [what main has](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)),
 and `run` refuses `[sandbox.check] before-agent`, so host probes do not
-repeat. With the sandbox user, the runner's files and processes are
-unreadable to the agent, and `run` probes the token's location. The
-reusable workflow passes no inference key or MCP credential on with
-either. Either way
+repeat. The reusable workflow passes no inference key or MCP credential.
+Caller-owned steps can still expose credentials; these are not made safe by
+secure-host. The credentialless client and readiness gate remain
+[#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) and
+[#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000). In runner mode
 the target is cloned without credentials
 ([sandbox-check.md](sandbox-check.md)).
 [Inference modes](inference.md) differ: `plain` permits new registrations
@@ -90,17 +93,16 @@ without proof; `token-file` has no request accounting or revocation by `run`.
 
 secure-host's lock meets this for every later step, the agent included
 ([R4 there](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r4-the-runners-user-loses-root-before-untrusted-steps-run)).
-The agent doesn't need root: `run` uses the root-owned helper's fixed
-operations to enter and clean up after the sandbox user
+The agent doesn't need root. Runner mode uses no helper user switch or UID-wide
+reaping; the remaining host helper has fixed operations, not generic root execution
 ([the helper](sandbox-check.md#the-helper)).
 
 ### R5. Nothing of the agent's outlives the run
 
-The supervisor reaps the agent's processes before reading the hand-back:
-every process of the sandbox user, or with `--runner-home` only the
-agent's process group, so what the agent detached from it runs until
-the job ends. Cron, at and lingering are denied to the sandbox user;
-setup does not put the runner's user on the cron or at deny lists.
+The supervisor stops only the agent's process group in runner mode, so what
+the agent detached from it can run until the job ends. UID-wide cleanup in
+the legacy implementation is not a runner-mode guarantee. Setup does not
+put the runner's user on the cron or at deny lists.
 Session and signal-cleanup tests cover this; the machine must still be destroyed after one job.
 
 ### R6. The agent's instructions come from files it cannot change
@@ -115,7 +117,7 @@ a trusted ref, not an untrusted pull request's merge commit.
 
 The supervisor reads agent files with size bounds, as its own user with
 `--runner-home` (where the agent is the same user and could change
-anything `run` holds) and as the sandbox user without it, turns the working tree into a patch with hooks disabled, redacts evidence
+anything `run` holds), turns the working tree into a patch with hooks disabled, redacts evidence
 and gates uploads. `collect`, gh-aw's collector ported, sanitizes requests; `check` enforces
 policy and parses the patch. The exit state is untrusted, and patch
 authorship is not validated
@@ -147,15 +149,15 @@ The host's dependencies are secure-host's
 Trust and protect the caller ref containing bounds and setup configuration.
 Give each job minimal permissions; notification and apply jobs inherit
 the caller's grant. Limit an apply environment to trusted refs. Targets
-must be public unless the caller opts its own private repository in under the
-conditions of [private repositories](private-repositories.md).
+must be public for runner execution; a policy-level private opt-in does not
+override the launch refusal ([private repositories](private-repositories.md)).
 [workflow.md](workflow.md) explains these settings.
 
 ### R11. Lints are not boundaries
 
 As for any job ([R11 there](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r11-lints-are-not-boundaries)). For the
 agent, sandbox entry drops the job environment regardless of a caller's
-secrets, shell or environment.
+secrets, shell or environment. This is not isolation from same-UID state.
 
 ### R12. Untrusted text never becomes privileged code
 

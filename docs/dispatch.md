@@ -261,6 +261,13 @@ the apply job uses its job token instead; no environment is needed.
 
 ## Giving runs a toolchain
 
+Use distribution `setup.packages`/`repo-packages`, or a caller-owned
+`setup.script` after lockdown as the runner. **Do not enable `[setup.tools]`**
+or use a second user: runner mode refuses it, and #2989 supersedes that path.
+The installer discussion below is legacy implementation reference pending
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991), not an adoption
+recipe. Preserve trusted setup pins and never run target-selected setup as root.
+
 A sandbox has only what the runner image and the runner configuration
 (`AGENT_CONFIG`, by default this repository's
 [hosted.toml](../.github/agentic-job/hosted.toml), which gives only this
@@ -295,16 +302,15 @@ what is installed as root. For the same reason
 toolchain the distribution lacks needs a `setup` script of the caller's
 (the reusable workflow's input; the shipped dispatch caller passes none),
 which runs unprivileged, never as root: in the reusable workflow as the
-runner's user, in an agent job of your own as the sandbox user.
+runner's user. The old sandbox-user path is pending removal, not an alternative.
 
-The reusable workflow refuses `[setup.tools]` for now: its agent job has
-no sandbox user to run the recipe as, until the host keeps the runner's
-processes from reading each other ([workflow.md](workflow.md)). What
-follows is what the binary does for a caller that composes its own agent
-job with a sandbox user.
+The reusable workflow and `run --runner-home` refuse `[setup.tools]`.
+The following is **historical implementation reference**, not an opt-in recipe.
+The operator superseded the second-user path; a future host-read rule does not
+by itself authorize this installer or credentialed modes.
 
-For an agenthome tools manifest, opt in through that same caller-owned
-configuration on the default branch, not through dispatcher workflow inputs:
+The legacy agenthome tools manifest used caller-owned configuration on the
+default branch, not dispatcher workflow inputs:
 
 ```toml
 [setup.tools]

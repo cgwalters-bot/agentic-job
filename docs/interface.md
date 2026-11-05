@@ -10,13 +10,21 @@ builds that source. `build-binary: true` forces a build.
 
 ## Commands
 
+Runner-only execution uses `run --runner-home DIR`. It does not isolate the
+supervisor from the same-UID agent. The operator superseded the second-user
+direction in [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) is still open
+as of 5 November 2026. The legacy commands/tables described below are a source
+inventory, not advice to use a second user. The migration's breaking-key errors
+are [listed in the plan](plan.md#breaking-keys-and-safe-refusals).
+
 | Command | Runs as | Does |
 | --- | --- | --- |
 | `policy --allow FILE --repo OWNER/NAME --clone-url URL --base BRANCH --kind branch\|analysis --outputs LIST --max-outputs N` | anyone | Checks one run's request against the caller's bounds and prints `policy.json`. `--outputs` takes `all` and `--max-outputs` takes `max`, for whatever the bounds allow. |
 | `config [--host] [--from FILE] [--string TABLE.KEY=VALUE]... [--integer ...]... [--boolean ...]... [--list ...]...` | anyone | Writes TOML from a file and individual settings. `--host` checks only the host configuration. |
 | `sandbox setup --config FILE` | root | Prepares the host the agent runs on, and copies the configuration to `/etc/agentic-job/`. |
 | `sandbox check [--record\|--unless-passed]` | the runner's user | Probes the sandbox as the sandbox user, with positive controls where the host provides them. `--record` leaves a record when all probes pass, and `--unless-passed` (run's) probes nothing when it finds that record, against the same configuration, with nothing having entered the sandbox user since ([sandbox-check.md](sandbox-check.md)). |
-| `run --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent in the sandbox and takes what it hands back. |
+| `run --runner-home DIR --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent as this user and takes what it hands back. |
 | `collect --policy FILE --outputs DIR --collected FILE` | anyone | Validates and sanitizes the handed-back requests as gh-aw's collector does, in check.yml and for a caller off GitHub ([safe-outputs.md](safe-outputs.md#off-github)). Exit 1 if it refused a line. |
 | `check --policy FILE --outputs DIR --collected FILE [--report FILE] [--comment-repo OWNER/NAME --comment-target N --review-head SHA] [--run-summary FILE]` | anyone | Checks handed-back outputs and patch against the policy. Neutral inline comments require the trusted caller's fixed item and admitted head, recorded in the report. A run summary that passes its checks is sanitized into the report for GitLab's apply to post ([safe outputs](safe-outputs.md#publishing-to-gitlab)). |
 | `apply --forge forgejo --server URL --repo OWNER/NAME --policy FILE --checked DIR --run-url URL [--comment-target N] [--push-repo OWNER/NAME] [--status STATE --status-sha SHA]` | the apply job | Publishes checked comments, issues, labels and closing, and a pull request from the bounds' fork or a push to its open one, to Forgejo with `FORGEJO_TOKEN`, or per-role tokens under `APPLY_ROLE_BINDINGS` ([roles](safe-outputs.md#forgejo-and-gitlab-roles)), then the caller's commit status ([safe outputs](safe-outputs.md#publishing-to-forgejo)). |
@@ -66,6 +74,21 @@ add a key. Empty settings leave the file unchanged. Use `--host` when
 composing a configuration for `secure-host` without an agent.
 
 ## Files read
+
+This minimal deterministic configuration parses today and is admitted for a
+public runner-mode job. It requires no inference or credential; `config`
+acceptance is not host setup or live sandbox proof:
+
+```toml
+[agent]
+name = "fake"
+[limits]
+timeout-minutes = 5
+max-requests = 0
+uncapped = true
+[egress]
+write-policy = true
+```
 
 **`--allow`**, the caller's bounds: the hosts a clone URL may name, globs
 for repositories and base branches, a ceiling per output type and in

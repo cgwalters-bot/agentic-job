@@ -9,8 +9,10 @@ others. So the hardening is a step of its own that any job can run
 before untrusted steps, whether or not an agent runs afterwards:
 [`cgwalters-forge/actions/secure-host`](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
 which runs the image this repository builds. Later workflow steps run as
-the runner's user; an agent can instead use the separate sandbox user
-with `agent-user: sandbox`.
+the runner's user, which is also the agent's user. The former second-user
+direction is superseded by [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
+its removal PR [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
+is still open at this snapshot. Do not adopt the legacy mode.
 
 That action's README and documents are the documentation of record for
 the host: what setup changes, the lock, the world-write policy, the rule
@@ -148,9 +150,8 @@ call) runs the forwarder with the policy job's configuration except for
 (`run --runner-home`, the run action's default `agent-user: runner`).
 The image would run `setup.script` as its second user, from the host's
 root, so the job runs it itself, after secure-host, in the agent's home.
-With `agent-user: sandbox` the forwarder gets the script too, by an
-absolute path (`agentic-job config --host` resolves a relative one), the
-image runs it as the sandbox user, and the agent is that user. The image also
+The legacy second-user script path remains in this checkout pending #2991,
+but is not the runner-only contract. The image also
 installs its own binary in `/usr/local/bin` over the one `prepare` put
 there, so `run` starts the policy job's binary from the job directory.
 The composed example (`example-compose.yml`) has the same steps, and
@@ -163,7 +164,9 @@ service only where the configuration leaves it open
 the action's
 [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#what-a-later-step-can-count-on-and-what-it-cannot)
 says, nothing between it and the job's own tokens. So the agent job
-holds none worth stealing. It has no `id-token`: a `register` job before
+must not hold credentials it expects to hide from the agent. It still holds
+the run token and, by default, a read-only forge token; credentialless
+admission is future work, not a claim of this setup. It has no `id-token`: a `register` job before
 it registers with the inference broker and passes on only the broker's
 run token, as a secret of the agent's job
 ([the run token](workflow.md#the-run-token)); `review.yml` calls the same
@@ -188,8 +191,8 @@ runner's uid, so it gets the runner's own write rules: it can write to
 the Actions service with a token of its own, such as another
 repository's runtime token, and upload what it read there, and the
 pinned image's storage rule admits every Azure storage account
-([above](#what-main-has-that-the-pinned-image-does-not-yet)). Only
-a second user would close that channel, so the agent job still refuses
+([above](#what-main-has-that-the-pinned-image-does-not-yet)). There is no
+supported second-user escape from that channel. The agent job refuses
 a private caller or target with the write policy on
 ([private-repositories.md](private-repositories.md#opting-in)).
 

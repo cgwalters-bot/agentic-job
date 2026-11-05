@@ -1555,6 +1555,60 @@ fn runner_admission_precedes_setup_and_setup_is_isolated() {
 }
 
 #[test]
+fn documented_runner_configs_parse_and_obey_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join(".agentic-job-source/workflow");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::copy(
+        root().join("workflow/runner-setup.py"),
+        source.join("runner-setup.py"),
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join(".agentic-job")).unwrap();
+    std::fs::write(dir.path().join(".agentic-job/policy.json"), "{}").unwrap();
+    let config = dir.path().join(".agentic-job/config.toml");
+    let home = dir.path().join("agent-home");
+    for (file, admitted) in [("docs/interface.md", true), ("docs/mcp.md", false)] {
+        let doc = std::fs::read_to_string(root().join(file)).unwrap();
+        let example = doc
+            .split_once("```toml\n")
+            .unwrap()
+            .1
+            .split_once("```")
+            .unwrap()
+            .0;
+        std::fs::write(&config, example).unwrap();
+        // Parse through the real CLI, not only Python's TOML reader: schema
+        // validity is distinct from permission to launch in runner mode.
+        let parsed = Command::new(BIN)
+            .args(["config", "--from"])
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(parsed.status.success(), "{file}: {parsed:?}");
+        std::fs::write(&config, parsed.stdout).unwrap();
+        let result = run_step(
+            "agent.yml",
+            "Admit the runner-user configuration",
+            dir.path(),
+            &[
+                ("CALLER_PRIVATE", "false"),
+                ("AGENT_USER", "runner"),
+                ("AGENT_HOME", path(&home)),
+            ],
+        );
+        assert_eq!(result.status.success(), admitted, "{file}: {result:?}");
+        if !admitted {
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("[mcp.NAME]"),
+                "{result:?}"
+            );
+        }
+        assert!(!home.exists(), "admission must not perform setup");
+    }
+}
+
+#[test]
 fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
     for user in ["runner", "sandbox"] {
         for exit in [0, 1, 3, 4, 124] {

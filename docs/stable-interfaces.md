@@ -18,6 +18,12 @@ and the rest), the agent's brief, the built-in skills, and the
 
 ## The reusable workflow
 
+Runner-only migration note (5 November 2026): `agent-user: runner` is the
+current default. The retained `sandbox` option is superseded by #2989 and
+pending removal in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991),
+not a supported escape for private, session, child-agent or credentialed
+inference/MCP launch. See [breaking keys](plan.md#breaking-keys-and-safe-refusals).
+
 [`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml),
 called with `workflow_call`. Its `description:` fields and
 [workflow.md](workflow.md#a-caller) document each input.
@@ -72,9 +78,10 @@ notification opt-outs and blocked/missing-data exceptions are unchanged
 Not stable: `budget`, deprecated in favour of `budget-usd`;
 `fake-profile`, `expect-check-refusal` and
 `secure-host-image-artifact-id`, which exist for this repository's
-tests; and `inference-provider`, `inference-register: api-key`,
-`INFERENCE_API_KEY` and `MCP_TOKEN`, which the workflow accepts and
-refuses or does not pass on for now
+tests; `inference-provider` and `inference-register: api-key`, which parse but
+are refused by runner admission (GitHub billing implies `api-key`); and the
+compatibility secrets `INFERENCE_API_KEY` and `MCP_TOKEN`, which are declared
+but forwarded to no job
 ([refused for now](inference.md#a-provider-api-key)).
 
 ## The review workflow's dispatch

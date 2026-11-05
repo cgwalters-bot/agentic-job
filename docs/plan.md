@@ -46,6 +46,131 @@ live Renovate proof is still open, to
 
 ## Deployment
 
+## Runner-only hardening inventory (2026-11-05)
+
+Snapshot: agentic-job `48ce32b35c91f876fa7b5c5a4e0b1a5034aefb27`;
+25 open issues returned by `gh issue list --state open --limit 300` on
+5 November 2026. This is a proposed disposition, **not** a label/close operation.
+The [hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
+and [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) are
+acceptance owners, not permission to build another local proxy. The operator's
+[decision](https://github.com/cgwalters-forge/agentic-job/pull/2913#issuecomment-6641663846)
+requires no reachable credentials. The source-address recommendation on #2903
+is research, not an approved identity/deployment contract.
+
+Crucially, [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
+is **open, not merged** at this snapshot. Current source still creates the
+legacy user and accepts its keys. Its latest reviewed head is `8781322`;
+the earlier review found unenforced proxy policy and missing private-launch
+coverage. Neither review approval nor this documentation proves fresh-host
+acceptance. Runner-mode credential refusals already exist in
+[`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs), and the
+reusable agent job already has no OIDC permission. Complete removal and a
+release/pin migration must precede calling the deployment runner-only.
+
+### Proposed issue dispositions
+
+Each row accounts for one then-open issue. Keep operator holds and valid
+unrelated work; do not mass-close issues based on this table.
+
+| Issue | Proposed disposition and remaining acceptance/owner question |
+| --- | --- |
+| [#3001](https://github.com/cgwalters-forge/agentic-job/issues/3001) | This documentation/contract-test slice of tracker#1311; reconcile again when #2991 lands. No deployment or issue metadata changes. |
+| [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000) | tracker#1311 readiness gate: prove actual runner/subuid enforcement and refuse reachable CI/GitHub/supervisor credentials, with positive controls; retain as implementation owner. |
+| [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) | tracker#1311 client: endpoint-only settings/accounting after broker#60; no lifecycle bearer on same-UID runner, no fallback proxy. |
+| [#2997](https://github.com/cgwalters-forge/agentic-job/issues/2997) | tracker#1311 downstream usability, not a credential blocker. Preserve measured-build work; require before/after benchmarks before a split. Ask reporter for revision, pod limits and throttling/OOM evidence for the unconfirmed three-hour stall. |
+| [#2996](https://github.com/cgwalters-forge/agentic-job/issues/2996) | tracker#1311 GitLab docs owner; preserve needs-human. Need supported credentialless prerequisites and a checked caller, not a copy of the old TF two-user/key workaround. |
+| [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | tracker#1311 downstream evidence umbrella; preserve needs-human. Reported v0.6.5 GitLab/TF successes are historical two-user/API-key evidence, not runner-only acceptance. Retain #2996/#2997 and closed #2994/#2995 deliverables. |
+| [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) | tracker#1311 removal owner, implementation in open #2991. Require Ubuntu and RHEL rhel10-kvm-smoke setup/run proof before completion; do not duplicate removal here. |
+| [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | Keep needs-human acceptance umbrella. Operator must approve non-replayable identity/listener and trusted off-agent lifecycle owner in [broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60); [broker#61](https://github.com/cgwalters-bot/praxis-credential-broker/issues/61) owns external MCP. Old title's local proxy is superseded. |
+| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215), keep needs-human: which disposable VM/KVM deployment and caller-owned profile may run midstream jobs? Contract-only until answered; no arbitrary runner selectors. |
+| [#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) | [tracker#596](https://github.com/cgwalters-forge/tracker/issues/596); concrete corrections already present in sandbox-check's pin-linked record discussion and this plan's #2740/#2741 history. Propose operator verification then closure, retaining needs-human until verified; not new host acceptance. |
+| [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | [tracker#674](https://github.com/cgwalters-forge/tracker/issues/674) egress diagnostics/host evidence owner. Preserve exact-account allowlisting; verify refusal names host/method without signed query and release/image pin reaches callers. DNS existence alone is not evidence. |
+| [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | tracker#674 publication follow-up to #2070/#2642; enable prepare on published and archive paths only once the released image accepts it, then hosted proof for both. |
+| [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398) | [tracker#1047](https://github.com/cgwalters-forge/tracker/issues/1047), operator-gated P2 adoption: authorize destination/infrastructure and provide tested immutable standalone revision; preserve local library until then. |
+| [#2397](https://github.com/cgwalters-forge/agentic-job/issues/2397) | tracker#1047 deterministic live proof, not another CLI. Operator dispatches safe-outputs-cli.yml with publish=true and links run/comment on #64; offline tests do not settle it. |
+| [#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) | [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786), retain GitLab apply E2E owner after #2110; require real publication, bound status and cleanup, not mock success. |
+| [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110) | tracker#786 operator prerequisite: create test group/bot fork and main/queue-only gitlab-e2e environment with GITLAB_TEST_TOKEN and GITLAB_TEST_GROUP; keep needs-human/P0. |
+| [#2071](https://github.com/cgwalters-forge/agentic-job/issues/2071) | tracker#674 table rename owner after extraction: warned [sandbox] alias, reject both tables, preserve defaults. Its old request to keep runner-sandbox is superseded by #2989; do not restore a user to satisfy that stale sentence. |
+| [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) | tracker#674 standalone binary/image owner; reuse reference draft #2642, not a duplicate split. Require no agent dependency and static/image/archive/published/hosted E2E evidence. |
+| [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | tracker#596, preserve needs-human: human removes key-bearing legacy corpus fixture; operator decides whether pinned gh-aw JS drivers are exempt. Do not weaken hand-back scans or delete valid parity coverage here. |
+| [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) | tracker#674 standalone-project epic; retain needs-design. Operator owns destination/name, governance and disclosure commitments; #2070/#2656 remain implementation/publication owners. |
+| [#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618) | Keep needs-human. Reconcile with #2903/#3000: do not lift key/MCP refusals merely because a reads rule or hidepid test passes. Operator must decide whether any residual non-credential isolation research remains after off-agent lifecycle design. |
+| [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) | [tracker#57](https://github.com/cgwalters-forge/tracker/issues/57) RHEL deployment owner; preserve needs-human/ruleset hold. Need runner-only rhel10-kvm-smoke setup, fix/rebase/fork and chat evidence; no write to that external caller in this slice. |
+| [#556](https://github.com/cgwalters-forge/agentic-job/issues/556) | tracker#596 merge-policy/ruleset owner; preserve needs-human. Confirm protected policy/CODEOWNERS and operator ruleset separately; credential work is not authority to relax it. |
+| [#536](https://github.com/cgwalters-forge/agentic-job/issues/536) | [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976) sessions, preserve needs-human. Runner mode refuses session.listen; do not restore a second user/bridge to unblock chat. Writes remain specified, not built. |
+| [#137](https://github.com/cgwalters-forge/agentic-job/issues/137) | tracker#1311 compatible plain-CI image work; retain prototype [#144](https://github.com/cgwalters-forge/agentic-job/pull/144). Operator decides publication; need actual non-root nested Podman/checkout/socket/process proof, not a credential isolation claim. |
+
+Closed [#2994](https://github.com/cgwalters-forge/agentic-job/issues/2994)
+diagnostics and [#2995](https://github.com/cgwalters-forge/agentic-job/issues/2995)
+GitLab summary publication are in this checkout's Unreleased changelog. Keep
+their existing owners/evidence, not duplicate implementation. Neither establishes
+credentialless TF/GitLab launch or live publication of this revision.
+
+### Breaking keys and safe refusals
+
+Today the legacy parser still accepts `sandbox.create-user`, `user`, `groups`,
+`allow-existing-user`, `filesystem-view`, `sandbox.check.before-agent` and
+`setup.tools`. **Do not describe their removal errors as landed.** #2991 proposes
+rejecting them by name with a diagnostic citing #2989, including explicit false
+values; callers must delete them, not set false. It also rejects
+`agent-user: sandbox` and requires `--runner-home`. The probe-only
+`sandbox.check.control-url`, `fetch-repo`, `allow-sockets` and `allow-tcp-ports`
+remain accepted/ignored in that proposal for the old image. Refusing those keys
+too waits for image migration; [host] is #2071, not a currently accepted rename.
+
+Current safe refusal examples: runner admission rejects `register = "api-key"`
+and `[mcp.NAME]` before setup without needing a secret; the
+[MCP example](mcp.md#configuration) is tested as a refusal, not an enablement.
+`run --runner-home` refuses OIDC request credentials, `inference.front`, a
+private target, `session.listen`, `before-agent`, `setup.tools` and child-agent.
+Do not remove `--runner-home` to evade the refusal. A private bounds opt-in or
+successful `config` parse does not grant launch support.
+
+### Read-only caller audit and migration owners
+
+Read main at tracker `fb7b0170e6906ed2ad20391838b123a97ecd0a19` and actions
+`f05e2372d3bd5540406d444e26c70ba8c845b07d` through the GitHub API. No external
+repository was modified. Runtime broker addresses are deliberately not copied.
+Links below name those inspected revisions, not a claim about future main.
+
+| Repository/file | Observed setting/pin | Outstanding migration or operator question |
+| --- | --- | --- |
+| actions [cgwalters-agentic-job.yml](https://github.com/cgwalters-forge/actions/blob/f05e2372d3bd5540406d444e26c70ba8c845b07d/.github/workflows/cgwalters-agentic-job.yml) | run `agent-user: sandbox`; agent `id-token: write`; non-review `inference-api-key` from INFERENCE_API_KEY; policy/check/apply at `3f9f6425119b97bb3620a38fe0adc8e79be7dc8e` (v0.6.11) | actions wrapper owner must move all three pins together to a tested release containing #2991, set `agent-user: runner`/runner-home, move OIDC registration/network authorization out of agent job, drop key forwarding and keep api-key refused. Strip setup.script from host config and run it after lockdown as runner. A pin-only bump would fail or misstate the boundary. |
+| actions [cgwalters-review.yml](https://github.com/cgwalters-forge/actions/blob/f05e2372d3bd5540406d444e26c70ba8c845b07d/.github/workflows/cgwalters-review.yml) | same v0.6.11 policy/check/apply pin, run `agent-user: sandbox`, agent OIDC permission, pinned tailnet step | Same separate-register/runner migration; retain empty agent GitHub token, exact-head checks, admission bounds and deterministic submit. |
+| actions [secure-host/Containerfile.pin](https://github.com/cgwalters-forge/actions/blob/f05e2372d3bd5540406d444e26c70ba8c845b07d/secure-host/Containerfile.pin) | v0.6.9, digest `008d34bf9598ef83d7859772200f26637814d2cd105028457208ddc87d69788b`; action egress defaults off and check omits --record | Release/image owner must publish and attest tested runner-only host image, then move digest/tag together and forwarder pin here. #2070/#2656 own standalone/prepare adoption; do not assume latest actions main is this checkout's effective pin. |
+| actions [secure-host/hosted.toml](https://github.com/cgwalters-forge/actions/blob/f05e2372d3bd5540406d444e26c70ba8c845b07d/secure-host/hosted.toml) | lock-runner, deny-runner-metadata, deny-runner-reads true; no explicit removed-user keys | No active key deletion found. Keep host controls; absent user keys do not prevent the old image's default user creation. Explicit egress input must still select write-policy where required. |
+| tracker [.github/agentic-job/hosted.toml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/agentic-job/hosted.toml), supervisor.toml, acp-experiment.toml | allow-sockets set; setup.tools example commented, not active; no active create-user/user/groups/allow-existing-user/filesystem-view/before-agent/setup.tools in any of the eight top-level TOMLs | Tracker config owner: remove stale commented tools advice; retain probe compatibility until image migration, then reconcile ignored keys. No active removed-key deletion found; do not manufacture one. |
+| tracker [.github/agentic-job/acp-experiment.toml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/agentic-job/acp-experiment.toml) | child-agent name=vibe, model=zai-glm-5-3; limits.max-requests=400 | Disable that experiment/profile during migration; runner refuses child-agent. Do not revive UID-wide reaping to retain it. |
+| tracker [.github/workflows/dispatch.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/dispatch.yml), session.yml, supervisor.yml | actions cgwalters-agentic-job wrapper at main; session dispatch requests session=true | Tracker/actions owners must coordinate wrapper rollout and freeze a tested immutable revision. Hold session=true requests (including supervisor's optional session path) rather than falling back to a second user. Inert session operators/origins/watch-item are not session.listen. |
+| tracker [.github/workflows/review.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/review.yml) | actions cgwalters-review at `02d0342d682cf1c265668d7823009ae1936c4061` | Move only to a reviewed wrapper containing the runner/register migration; preserve review.toml and review-command.toml policy. A moving non-review wrapper update does not migrate this pin. |
+
+Devspace's `rhel10-kvm-smoke.toml` remains #2989/#589's owner question, outside
+the allowed tracker/actions audit. Who supplies its tested migration revision
+and RHEL run? Which external lifecycle owner and identity listener will support
+GitLab/TF without leaving CI/provider credentials in runner-readable state?
+These are not answered by removing TOML keys or approving a bot's research.
+
+### Acceptance evidence and missing proof
+
+| Evidence | Status and limits |
+| --- | --- |
+| Documented fake/MCP configs and runner admission | **Passed**, `cargo test --locked -p agentic-job --test workflows documented_runner_configs_parse_and_obey_admission` (exit 0): parses fenced examples, admits fake and refuses MCP before setup. No privileged launch proof. |
+| Standalone documented MCP refusal | **Passed**, `cargo test --locked -p agentic-job --test run documented_mcp_config_is_refused_before_runner_launch -- --exact` (exit 0): no MCP credential, runner-home or harness launch; the expected Rust admission error is required. |
+| Existing runner fake-agent integration | **Passed** in `just check`: same-user environment clearing, clone/hand-back and OIDC/child refusal using fixtures and loopback broker. Does not prove same-UID memory isolation. |
+| Workspace/config/workflow consistency and fmt | **Passed**, `umask 077 && just fmt && just check` (exit 0), including all 80 workflow tests and workspace Clippy with warnings denied. An earlier 300s attempt timed out; default umask 0002 then failed three unchanged secure-host record tests; private umask resolves their temporary-directory assumption, not a hardening bug fix. Privileged tests stayed ignored and configured real-agent tests can return early. |
+| Markdown/site helper checks | **Passed**, `npx --yes markdownlint-cli2 '**/*.md'` (exit 0); `node --test site/links.test.mjs site/index.test.mjs` (exit 0, 8 tests). Site helper tests are not a full relative-link/fragment scan. |
+| Python egress | **Passed with skip**, `python3 -m unittest discover -s egress -v` (exit 0): 11 passed, live mitmproxy test skipped because mitmproxy is absent. |
+| Full offline fragments and shared workflow lint | **Skipped**, lychee/actionlint/zizmor unavailable locally; no workflow files changed. No full offline-fragment success or shared-lint execution claimed. |
+| Ubuntu fresh-host runner-only behavior | **Unrun here.** #2991 is open; need actual runner and subordinate-UID metadata/egress negative controls, setup-script CA trust, teardown and E2E at the released revision. Do not run destructive setup in this existing sandbox. |
+| RHEL/CentOS rhel10-kvm-smoke and SELinux/BPF | **Missing.** Earlier RHEL jobs in workflow.md predate this migration. Need secure-host plus post-lock setup script and runner launch evidence on enforcing image; static admission is not runtime proof. |
+| Testing Farm | **Missing.** #2993's reported v0.6.5 run uses a second user/API key; hidepid stacking is not same-UID proof. Need no readable tmt/CI credentials and externally owned identity/lifecycle, with controls. |
+| GitLab | **Missing live runner-only and current apply/summary proof.** Mock publisher tests and downstream old-topology pipeline do not replace #2110/#2111 and #2996 acceptance. |
+| Attested standalone image | **Missing.** Current source has no standalone host binary. Require #2070 build/dependency proof, publication/provenance verification at exact digest, both image paths and #2656 prepare proof after pin migration. |
+| Credentialless inference/accounting/MCP | **Future, unverified.** Require approved broker#60/#61 contracts, real peer preservation, spoof/shared/reused-identity refusals, positive inference/tools, usage outage failure, expiry/revocation and known-value credential-access controls. No local proxy or scan-only proof. |
+
+## Deployment history
+
 The cutover epic for agentic-job and agent-board
 ([tracker#528](https://github.com/cgwalters-forge/tracker/issues/528)) was
 closed on 23 Oct as mostly done, its remainder superseded by

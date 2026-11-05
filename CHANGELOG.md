@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Clarify the runner-only credential boundary and current launch refusals.
+  Record the still-open #2991 migration, caller key/pin gaps and a dated
+  hardening acceptance inventory; credentialless inference/MCP remain future
+  work, not a property established by documentation or static checks (#3001).
+
 - GitLab callers can post the run's `summary.md` as a note on their issue
   or merge request, where GitLab renders it. Without the note it is only a
   zip download, because GitLab has no job summary. Off by default:

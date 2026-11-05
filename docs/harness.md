@@ -19,17 +19,17 @@ unit tests alone do not show that an adapter works.
 
 It starts the agent through the wrapper `run` gives it and speaks ACP
 over the agent's standard input and output; nothing listens on the
-network. Without `--runner-home` the wrapper is `run0` and the agent is
-the sandbox user, while the session runs as the runner's user, so the
-agent cannot alter the transcript or the limits. The reusable workflow,
-by default (`agent-user: runner`), and `review.yml` pass
-`--runner-home`: the agent is the runner's user
+network. The runner-only path uses `--runner-home`: the agent is the runner's user
 too, so it can write the session's files, the transcript and limits
-included, read `run`'s environment and stop `run`; the record is then
+included, read same-UID process state and `run`'s environment and stop `run`; the record is then
 evidence of what the agent let through, not a guarantee
 ([requirements.md](requirements.md#actors-and-trust)). The agent's
 environment holds none of the job's `ACTIONS_*` variables and none of
-its provider settings.
+its inherited provider settings. Clearing those variables does not hide
+credentials in same-UID files, processes or memory. The old `run0` path remains
+in this checkout pending [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991),
+but is not a migration target. No second user should be introduced to bypass
+the runner-mode refusals below.
 
 It sends the task as one prompt and advertises no filesystem or
 terminal capability, so the agent uses its own tools inside the
@@ -47,8 +47,7 @@ allow is the agent's "allow once", never "allow always". This is for
 tidiness and for the record, since an agent only asks when it chooses
 to: the [sandbox](sandbox.md) is the boundary.
 
-When the session ends, it kills every process of the sandbox user, or,
-with `--runner-home`, only the agent's process group. In the latter case,
+When the session ends in runner mode, it kills only the agent's process group.
 processes the agent detached from its group run until the job ends.
 [layout.md](layout.md#run) describes what `run` leaves under `--out`.
 
@@ -74,8 +73,8 @@ session's existing limits and do not replace output validation.
 The session is included in the run summary by default. Set
 `render-session = false` in `[agent]` in the repository-owned sandbox
 configuration to opt out; there is no dispatcher input.
-The trusted runner renders its redacted ACP copy,
-not files written by the sandbox user. User and assistant text is prose;
+The runner renders its redacted ACP copy, not agent-supplied Markdown, but
+the same-UID agent can tamper with that copy too. User and assistant text is prose;
 reasoning and tools are collapsed separately. Tools show arguments, measured
 duration, reported status and exit code when available, and at most 8192 bytes
 of output with an omitted-byte count. Transcript punctuation is encoded to

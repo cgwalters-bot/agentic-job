@@ -811,6 +811,36 @@ fn a_run_as_its_own_user_in_the_home_given() {
     assert!(!job.path("home").exists());
 }
 
+#[test]
+fn documented_mcp_config_is_refused_before_runner_launch() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let doc = std::fs::read_to_string(root.join("docs/mcp.md")).unwrap();
+    let config = doc
+        .split_once("```toml\n")
+        .unwrap()
+        .1
+        .split_once("```")
+        .unwrap()
+        .0;
+    let job = Job::new("documented-mcp-refused");
+    let got = Finished::of(
+        job.own_command(config)
+            .env_remove(MCP_TOKEN_VAR)
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains("--runner-home") && got.stderr.contains("an [mcp] server"),
+        "{}",
+        got.all()
+    );
+    assert!(!job.path(HOME_DIR).exists());
+    assert!(!job.path("out/work/harness/harness.json").exists());
+}
+
 /// The reason a change is dropped can quote what the agent wrote, and
 /// the agent can write the run token: a `replacement.json` whose
 /// `commits` is a string is refused by naming the string. The job's log

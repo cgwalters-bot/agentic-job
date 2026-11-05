@@ -60,13 +60,12 @@ separate jobs on separate machines. The apply job's additional checks are
    what may be uploaded. The job holds nothing the agent may not read:
    read-only permissions, no `id-token`, no secret but the run token.
    `run` refuses what would need a second user there: `api-key`, an MCP
-   server, a private target, a session. With `agent-user: sandbox`,
-   secure-host runs the setup script as the second user it makes, and
-   `run`, without `--runner-home`, drives the agent as that user, which
-   admits a session, `[setup] tools` and probes before the agent
-   ([requirements.md](requirements.md#actors-and-trust)); the workflow
-   still passes no inference key or MCP credential, and refuses a
-   private caller or target and `fake-profile` there.
+   server, a private target, a session, fronting and a child agent.
+   `agent-user: sandbox` remains in this checkout but is superseded by
+   [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
+   do not use it to bypass these refusals. [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
+   is still open as of 5 November 2026. See the
+   [migration inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
 3. **check**, on a machine the agent never touched. `agentic-job collect`
    validates and sanitizes the producer's requests, as gh-aw's collector
    would, then `agentic-job check` holds them and the patch to the policy.
@@ -77,6 +76,13 @@ separate jobs on separate machines. The apply job's additional checks are
     a branch and a draft pull request, comments.
 
 ## Which tokens reach what
+
+This table describes current credential-bearing behavior, **not** achievement
+of the operator's no-credentials goal. A read-only token can still be stolen.
+`github-reads: false` stops forwarding it, not the runner's access to same-UID
+CI processes. Endpoint-only inference and a fail-closed readiness gate remain
+[#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) and
+[#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000).
 
 | Where | What it holds |
 | --- | --- |
@@ -260,10 +266,10 @@ not a field a dispatcher may supply.
 
 Input is limited to 16 KiB and eight distinct repositories, with case-insensitive
 duplicate rejection. Before starting the agent, `run` fetches each exact commit
-as the sandbox user, as it clones the target, with depth one and without
+as the runner's user, as it clones the target, with depth one and without
 submodules into `work/context/OWNER/REPO`, beside the writable `work/TARGET`
 clone. A fresh sandbox is required; existing context is not reused. The clones
-are then marked read-only with `chmod -R a-w`, as the sandbox user: a hint, not a
+are then marked read-only with `chmod -R a-w`, as the runner's user: a hint, not a
 boundary. Context is a reference copy of public source at a recorded commit;
 nothing is collected, pushed or applied from it, so an agent that edits it only
 misleads itself. This grants no additional token permissions or network access.
@@ -1029,9 +1035,9 @@ is built from that same commit, so the pin covers both. Never pass
 For now a real agent in this workflow needs a broker: the agent job
 refuses a provider's API key (`inference-register: api-key`) and GitHub's
 billing (`inference-provider: github`, which sets `api-key`), as
-[above](#running-it-on-github). Those modes are what the binary does for
-an agent job of your own with a sandbox user
-([inference.md](inference.md#a-provider-api-key)). Opencode also needs
+[above](#running-it-on-github). Those retained legacy modes are not a supported
+second-user workaround ([inference.md](inference.md#a-provider-api-key)).
+Opencode also needs
 its `model`, which has no default.
 
 Before replacing `agent: fake` with a broker, ask the inference and network
