@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The secure-host forwarder and site CI now select the reviewed actions#180
+  pin and attested v0.6.9 image, bringing method/host-only write-refusal
+  diagnostics to callers without printing signed URLs. No storage accounts
+  are added; identifying the failed artifact-upload destination still needs
+  a fresh run using this deployment (#2811).
+
 - A rebase fix round can hand back a replacement series for a pull request
   that grew past `max_patch_files`: bounds may set `replacement_max_files`
   on `push_to_pull_request_branch` (off by default, at most 500) for the

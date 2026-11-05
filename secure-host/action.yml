@@ -132,7 +132,8 @@ runs:
     # trust-store variables from /etc/egress-proxy/runner.env into
     # GITHUB_ENV, refusing any other name.
     # Includes actions#190: :z relabels the config volume on SELinux hosts.
-    - uses: cgwalters-forge/actions/secure-host@c763a8950778743f51857a37b2a59daf9e96ee23 # main, with secure-host:v0.6.4
+    # Includes actions#180: v0.6.9 reports refused methods/hosts without signed URLs.
+    - uses: cgwalters-forge/actions/secure-host@466a490e983ff07e6fb076fa4bd8b4d5f918fcd6 # main, with secure-host:v0.6.9
       with:
         config: ${{ steps.config.outputs.path }}
         check: ${{ inputs.check }}

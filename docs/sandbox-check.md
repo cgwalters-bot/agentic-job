@@ -32,7 +32,7 @@ wrong fails the check: exit state 1.
 
 The [run action](../run/action.yml) calls `sandbox check --unless-passed`
 before the agent starts. The shipped [secure-host forwarder](../secure-host/action.yml)
-pins [actions at c763a895](https://github.com/cgwalters-forge/actions/blob/c763a8950778743f51857a37b2a59daf9e96ee23/secure-host/action.yml),
+pins [actions at 466a490e](https://github.com/cgwalters-forge/actions/blob/466a490e983ff07e6fb076fa4bd8b4d5f918fcd6/secure-host/action.yml),
 whose `Prove it` step calls plain `agentic-job sandbox check`, **without
 `--record`**. It leaves no reusable record: normally the run action probes
 again, even with secure-host's default `check: true`

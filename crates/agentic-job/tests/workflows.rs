@@ -6122,6 +6122,12 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
     assert_eq!(used, [line.trim()]);
     let version =
         |found: &regex::Captures| -> [u64; 3] { [1, 2, 3].map(|i| found[i].parse().unwrap()) };
+    // #2816's method/host-only refusal diagnostics first shipped in v0.6.8.
+    // A matching pair of pins must not silently regress to a hostless image.
+    assert!(
+        version(&found) >= [0, 6, 8],
+        "{line} predates query-free write-refusal diagnostics"
+    );
     let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
     let workspace = Regex::new(r#"(?m)^version = "(\d+)\.(\d+)\.(\d+)"$"#)
         .unwrap()

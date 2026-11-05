@@ -67,7 +67,7 @@ forward keeps the old action. At `@main` or a later commit:
 
 ### What main has that the pinned image does not yet
 
-The action's documents describe the image it pins (v0.6.4). Main has
+The action's documents describe the image it pins (v0.6.9). Main has
 changed the host since, and a forwarder caller gets these only with the
 next image release:
 
@@ -83,17 +83,42 @@ next image release:
   exceptions. An explicit `config` still replaces the default whole.
   The pinned image does not yet admit CentOS Stream 10, even with this
   default; use an image built from this source until the pin moves.
-- Under `egress.write-policy`, the runner's storage writes go only to the
-  results service's twenty `productionresultssaN` accounts from gh-aw,
-   `productionresultssa30`, `productionresultssa31` and `productionresultssa32`, verified through
-  GitHub's artifact service redirects in CI runs
-  [40611370113](https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113)
-   [40812985049](https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049)
-   and [41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777)
-  (DNS existence alone does not establish ownership;
-  [#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
-  [tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),
-  not to every Azure storage account.
+
+### Deployed write-policy diagnostics
+
+The forwarder selects actions' reviewed [#180](https://github.com/cgwalters-forge/actions/pull/180)
+merge, with the attested v0.6.9 image (binary source revision
+`57119eeffa17ea41b383cfdaf8370b8abeba8868`), digest
+`sha256:008d34bf9598ef83d7859772200f26637814d2cd105028457208ddc87d69788b`.
+It includes [#2816](https://github.com/cgwalters-forge/agentic-job/pull/2816):
+write-policy refusal responses name the method and connection host, never
+the path or signed query. The upload step itself prints that response even
+when it cannot upload artifacts; no proxy-log artifact is needed for it.
+Image attestation verification, write-policy selection and token boundaries
+are unchanged by this pin update.
+
+For [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811), run a
+fresh example artifact upload with this corrected deployment, recording the
+image digest and binary revision and, if refused, the exact method/host.
+The historical hostless refusal does not establish an upload destination.
+A further exact-account, PUT-only admission needs a GitHub results-service
+signed-upload response or artifact redirect tying that account to GitHub,
+not just DNS existence. A successful run is one sample, not proof that every
+variable upload destination is admitted. Actions' example and tracker
+callers must also select the corrected deployment; this forwarder update
+does not move their pins.
+
+Under `egress.write-policy`, the runner's storage writes go only to the
+results service's twenty `productionresultssaN` accounts from gh-aw,
+`productionresultssa30`, `productionresultssa31` and `productionresultssa32`, verified through
+GitHub's artifact service redirects in CI runs
+[40611370113](https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113),
+[40812985049](https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049)
+and [41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777)
+(DNS existence alone does not establish ownership;
+[#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
+[tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),
+not to every Azure storage account.
 
 ## On a host that is not a GitHub Actions runner
 
