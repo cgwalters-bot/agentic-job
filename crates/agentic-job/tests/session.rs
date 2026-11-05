@@ -237,6 +237,8 @@ fn bridge_and_client(
         },
         listener,
         redact: Arc::new(|text: &str| text.replace(SECRET, "[REDACTED]")),
+        // Never started: this host has no session endpoint.
+        serve: |_| anyhow::bail!("no serve guard in tests"),
     };
     let thread = std::thread::spawn(move || {
         for headers in refused {
@@ -541,7 +543,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
     let client = client.map_or_else(Vec::new, |thread| thread.join().unwrap());
     Run {
-        exit: returned.result.exit(),
+        exit: session::exit(returned.result),
         elapsed,
         log,
         client,
@@ -1362,6 +1364,7 @@ impl StubItem {
             api,
             token: "read-token".to_owned(),
             interval: Duration::from_millis(100),
+            sanitize: agentic_job::event::sanitize,
         }
     }
 
@@ -2929,7 +2932,11 @@ fn a_port_that_is_taken_is_refused() {
         capability: None,
         idle: Duration::from_secs(60),
     };
-    let err = Bridge::bind(listen, Arc::new(str::to_owned)).err().unwrap();
+    let err = Bridge::bind(listen, Arc::new(str::to_owned), |_| {
+        anyhow::bail!("no serve guard in tests")
+    })
+    .err()
+    .unwrap();
     assert!(
         format!("{err:#}").contains("listening on 127.0.0.1:"),
         "{err:#}"

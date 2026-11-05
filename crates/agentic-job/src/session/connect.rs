@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use super::bridge::{MAX_MESSAGE_BYTES, MAX_QUEUED_BYTES};
-use super::driver::TURN_RUNNING;
+use super::TURN_RUNNING;
 use crate::exit::Exit;
 
 /// How long a prompt refused while a turn runs, such as the task's, waits

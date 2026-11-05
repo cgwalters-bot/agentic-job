@@ -7,6 +7,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::pin::Pin;
 use std::process::{Child, Output, Stdio};
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::helper::{Direct, Exec};
 use super::root::Root;
-use crate::session::bridge::PORT;
+use crate::session::bridge::{self, PORT};
 
 const STEP_SECONDS: &str = "30";
 const CLEANUP_GRACE: Duration = Duration::from_secs(40);
@@ -59,6 +60,12 @@ impl Guard {
         Ok(Self { control, child })
     }
 
+    /// [`Guard::start`] as the session's bridge takes it
+    /// ([`bridge::StartServe`]).
+    pub(crate) fn start_serve(listener: &TcpListener) -> Result<Box<dyn bridge::ServeGuard>> {
+        Ok(Box::new(Self::start(listener)?))
+    }
+
     pub(crate) async fn close(mut self) -> Result<()> {
         self.control.shutdown(std::net::Shutdown::Both)?;
         let deadline = tokio::time::Instant::now() + CLEANUP_GRACE;
@@ -73,6 +80,12 @@ impl Guard {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+}
+
+impl bridge::ServeGuard for Guard {
+    fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        Box::pin(Guard::close(*self))
     }
 }
 

@@ -3,6 +3,27 @@
 version = 4
 
 [[package]]
+name = "acp-session"
+version = "0.6.11"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "chrono",
+ "futures",
+ "regex",
+ "ring",
+ "rustix",
+ "secure-host",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "ureq",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -62,6 +83,7 @@ dependencies = [
 name = "agentic-job"
 version = "0.6.11"
 dependencies = [
+ "acp-session",
  "agent-client-protocol",
  "anyhow",
  "base64",

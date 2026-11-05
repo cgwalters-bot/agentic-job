@@ -36,8 +36,9 @@ use crate::config;
 
 /// The variable of `run`'s own environment that holds the server's
 /// credential. The workflow sets it on the one step that runs `run`, from
-/// the secret [`SECRET`].
-pub const TOKEN_VAR: &str = "AGENTIC_JOB_MCP_TOKEN";
+/// the secret [`SECRET`]. The session's, which leaves it out of the
+/// agent's environment.
+pub use crate::session::process::MCP_TOKEN_VAR as TOKEN_VAR;
 /// The one secret `mcp.NAME.secret` may name: the reusable workflow
 /// declares each secret it takes, and cannot look one up by a name.
 pub const SECRET: &str = "MCP_TOKEN";

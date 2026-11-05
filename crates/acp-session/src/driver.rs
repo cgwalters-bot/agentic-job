@@ -105,7 +105,7 @@ use super::process::{self, Launch};
 use super::provider::{self, Class};
 use super::steer::{self, Seen, Watch};
 use super::transcript::{Log, Tap, set_stop};
-use crate::exit::Exit;
+use super::{CLIENT_NAME, CLIENT_VERSION};
 
 pub const RESULT_FILE: &str = "harness.json";
 /// The old tree's schema name, which readers of `harness.json` check.
@@ -119,13 +119,12 @@ const FIRST_REQUEST_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// How long an agent whose streams closed gets to exit, so that the
 /// failure can say how it did.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
-const CLIENT_NAME: &str = env!("CARGO_PKG_NAME");
 const LOST_STOP_SIGNAL: &str = "the session lost its stop signal";
 const AGENT_EXITED: &str = "the agent exited";
 const CLIENT_LEFT: &str = "the client left";
 const SESSION_ENDED: &str = "the session has ended";
 const NO_CANCEL_ANSWER: &str = "the agent did not answer the cancellation";
-pub(super) const TURN_RUNNING: &str = "a turn is running: cancel it or wait for its answer";
+pub const TURN_RUNNING: &str = "a turn is running: cancel it or wait for its answer";
 const REFUSED: &str = "the model provider refused the agent's request";
 const HANDING_BACK: &str = "the task's turn ended on an error: the agent is to hand back";
 /// How long the session waits after a turn that ended on an error before
@@ -230,17 +229,6 @@ impl Outcome {
             Outcome::Timeout => "timeout",
             Outcome::Budget => "budget",
             Outcome::Cancelled => "cancelled",
-        }
-    }
-
-    /// The exit state of a run whose session ended like this.
-    pub fn exit(self) -> Exit {
-        match self {
-            Outcome::Success => Exit::Success,
-            Outcome::NoRequests => Exit::NotStarted,
-            Outcome::Timeout => Exit::Timeout,
-            Outcome::Budget => Exit::Limit,
-            Outcome::Failure | Outcome::Cancelled => Exit::Failure,
         }
     }
 }
@@ -2205,7 +2193,7 @@ async fn setup(
     // fs and terminal are left unadvertised (the defaults), so agents use
     // their own tools inside the sandbox; ACP v2 drops them anyway.
     let init = InitializeRequest::new(ProtocolVersion::V1)
-        .client_info(Implementation::new(CLIENT_NAME, env!("CARGO_PKG_VERSION")));
+        .client_info(Implementation::new(CLIENT_NAME, CLIENT_VERSION));
     let initialized = cx
         .send_request(init)
         .block_task()

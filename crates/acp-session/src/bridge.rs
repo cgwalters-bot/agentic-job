@@ -32,6 +32,8 @@
 //! reach the client once it has attached, with the run's secrets
 //! replaced; its permission requests stay with the session's policy.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -48,7 +50,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-use crate::config;
+use crate::table as config;
 
 /// The loopback port `run` listens on and its root helper serves: fixed,
 /// so that both know it, and below Linux's ephemeral range, so that no
@@ -92,7 +94,7 @@ const MAX_HANDSHAKES: usize = 16;
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// The longest message taken from the client: a prompt as large as the
 /// largest task, with room for its JSON. A longer one ends the bridge.
-pub(super) const MAX_MESSAGE_BYTES: usize = 2 * crate::run::MAX_TASK_BYTES as usize;
+pub const MAX_MESSAGE_BYTES: usize = 2 * crate::MAX_TASK_BYTES as usize;
 /// The client's requests that wait for the session at once: the reading
 /// stops beyond them.
 const INBOX: usize = 4;
@@ -103,7 +105,7 @@ const PENDING_ANSWERS: usize = INBOX;
 /// read is not to fill the memory of the process that holds the run: an
 /// agent's notification that finds no room hangs up on the client, and a
 /// response to the client waits for room, which stops the reading.
-pub(super) const MAX_QUEUED_BYTES: usize = 8 << 20;
+pub const MAX_QUEUED_BYTES: usize = 8 << 20;
 const PROTOCOL_VERSION: u64 = 1;
 const PARSE_ERROR: i64 = -32700;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -320,14 +322,27 @@ pub struct Bridge {
     /// the run before the agent starts.
     pub listener: std::net::TcpListener,
     pub redact: Redact,
+    /// Starts the host's serve guard where `sandbox setup` prepared the
+    /// host ([`ENDPOINT_FILE`]).
+    pub serve: StartServe,
 }
+
+/// Holds the host's `tailscale serve` on the bridge's listener until it
+/// is closed: the command's `sandbox::session::Guard`, which root runs.
+pub trait ServeGuard: Send {
+    /// Revokes serve. The bridge releases its listener only after.
+    fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+}
+
+/// Starts a [`ServeGuard`] on the bound listener.
+pub type StartServe = fn(&std::net::TcpListener) -> Result<Box<dyn ServeGuard>>;
 
 impl Bridge {
     /// Binds [`PORT`] on loopback, where the root helper's `tailscale serve` passes
     /// connections on. Loopback alone: the tailnet's peers come through
     /// serve, which names them; the sandbox user is kept from this port
     /// by the network rules (`sandbox::network`).
-    pub fn bind(listen: Listen, redact: Redact) -> Result<Self> {
+    pub fn bind(listen: Listen, redact: Redact, serve: StartServe) -> Result<Self> {
         let address = (std::net::Ipv4Addr::LOCALHOST, PORT);
         let listener = std::net::TcpListener::bind(address)
             .with_context(|| format!("listening on 127.0.0.1:{PORT} for the session's client"))?;
@@ -335,6 +350,7 @@ impl Bridge {
             listen,
             listener,
             redact,
+            serve,
         })
     }
 }
@@ -442,7 +458,7 @@ pub(super) struct Connected {
 /// ended: the client learns of the end at once, not when `run` exits
 /// after its hand-back.
 pub(super) struct Close {
-    guard: Option<crate::sandbox::session::Guard>,
+    guard: Option<Box<dyn ServeGuard>>,
     /// Listens, and then reads the client's messages.
     reader: tokio::task::JoinHandle<()>,
     /// The writer, once a client was let in.
@@ -497,7 +513,7 @@ impl Bridge {
     /// session, once there is one: the client attaches to it.
     pub(super) fn start(self, session_id: watch::Receiver<Option<String>>) -> Result<Connected> {
         let guard = if std::path::Path::new(ENDPOINT_FILE).exists() {
-            Some(crate::sandbox::session::Guard::start(&self.listener)?)
+            Some((self.serve)(&self.listener)?)
         } else {
             // Unprepared hosts are used by the loopback-only protocol tests.
             None
@@ -755,7 +771,7 @@ async fn read_lines(
                     "protocolVersion": PROTOCOL_VERSION,
                     "agentCapabilities": {},
                     "authMethods": [],
-                    "agentInfo": {"name": env!("CARGO_PKG_NAME"), "version": env!("CARGO_PKG_VERSION")},
+                    "agentInfo": {"name": crate::CLIENT_NAME, "version": crate::CLIENT_VERSION},
                 }),
                 ))
                 .await

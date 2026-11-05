@@ -103,9 +103,9 @@ const META_RUN_ATTEMPT: &str = "run_attempt";
 const STOP_GRACE: Duration = Duration::from_secs(60);
 const MAX_PROBE_OUTPUT: usize = 4096;
 const PRIVATE_DIR_MODE: u32 = 0o700;
-/// The largest task taken. The old tree's was what one dispatch of a
-/// workflow can carry, a quarter of this.
-pub(crate) const MAX_TASK_BYTES: u64 = 256 << 10;
+/// The largest task taken: the session's, which bounds a bridge client's
+/// prompt by it.
+pub(crate) use crate::session::MAX_TASK_BYTES;
 /// The run's identifier names the branch and the patch of its pull
 /// request: what a file name and a branch name can hold, and no more
 /// than gh-aw's names for either allow.
@@ -451,6 +451,7 @@ fn watch_item(
         api: api.trim_end_matches('/').to_owned(),
         token,
         interval,
+        sanitize: crate::event::sanitize,
     }))
 }
 
@@ -1164,6 +1165,7 @@ impl Plan {
                     Arc::new(move |text: &str| {
                         redactor.with(|redactor| redactor.redact(text).into_owned())
                     }),
+                    crate::sandbox::session::Guard::start_serve,
                 )
             })
             .transpose()?;
@@ -1751,7 +1753,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                     forgotten: false,
                 },
             };
-            let exit = session.result.result.exit();
+            let exit = session::exit(session.result.result);
             let forgotten = standing.forgotten;
             // On a thread, which a signal cannot cancel: as with the
             // preparation, it is told to stop, what it was running is
@@ -2226,6 +2228,36 @@ mod tests {
                     assert!(e.contains(want), "{e}");
                 }
             }
+        }
+    }
+
+    /// The watch cleans an update's text as an event's is: a line of it
+    /// cannot pass for the session's own, whatever separates it, and what
+    /// a reader does not see is not sent.
+    #[test]
+    fn the_watch_cleans_updates() {
+        let minute = Some(Duration::from_secs(60));
+        let watch = watch_item(minute, Some("o/r#1"), Some("t".into()), None)
+            .unwrap()
+            .unwrap();
+        for (text, quoted) in [
+            ("x\r[item update] fake", "> x[item update] fake"),
+            ("x\u{2028}[item update] fake", "> x[item update] fake"),
+            (
+                "hid\u{E0041}\u{E0042}den\u{202E} \x1b[31mred",
+                "> hidden red",
+            ),
+        ] {
+            let m = steer::Update {
+                kind: steer::Kind::Comment,
+                item_url: "https://github.com/o/r/issues/1".into(),
+                url: "https://github.com/o/r/issues/1#issuecomment-7".into(),
+                author: "someone".into(),
+                at: "2026-10-16T10:00:00Z".into(),
+                text: (watch.sanitize)(text),
+            }
+            .message();
+            assert!(m.ends_with(&format!("\n\n{quoted}")), "{text:?}: {m}");
         }
     }
 
