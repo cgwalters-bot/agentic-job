@@ -194,7 +194,7 @@ impl Forge {
     }
 
     /// Its syntax in [`mentions`].
-    fn syntax(self) -> &'static str {
+    pub fn syntax(self) -> &'static str {
         match self {
             Self::Forgejo => "forgejo",
             Self::Gitlab => "gitlab",
@@ -517,6 +517,9 @@ pub struct Report {
     pub secondary_patch: Option<ReportPatch>,
     #[serde(default)]
     pub checkpoint: Option<Value>,
+    /// The run's summary as check sanitized it, for a caller to post.
+    #[serde(default)]
+    pub run_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

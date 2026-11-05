@@ -186,7 +186,10 @@ caller's `--comment-target` of the `--comment-target-kind` it names,
 nothing for the three no-write types, and refuses the rest. With
 `--status` and `--status-sha` it sets the caller's commit status, name
 `agentic-job`, `failure` and `error` both as GitLab's `failed`, with
-distinct descriptions. GitLab statuses require GitLab 18.5+ and trusted `--status-ref` and
+distinct descriptions. With `--run-summary` it posts the run summary
+that `check --run-summary FILE` sanitized into the report as a note on
+the comment target before the status.
+GitLab statuses require GitLab 18.5+ and trusted `--status-ref` and
 `--status-pipeline-id` for an existing pipeline matching the project, SHA
 and ref, unarchived and without CI configuration errors; legacy status
 calls lacking these refuse before writes. Only the

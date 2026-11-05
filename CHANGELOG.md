@@ -9,6 +9,15 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- GitLab callers can post the run's `summary.md` as a note on their issue
+  or merge request, where GitLab renders it. Without the note it is only a
+  zip download, because GitLab has no job summary. Off by default:
+  `agentic-job check --run-summary FILE` limits it to the job summary's
+  size, leaves out a credential-shaped one, and sanitizes it into the
+  report as a comment body is sanitized, links included. `agentic-job apply
+  --forge gitlab --run-summary` then posts it with mentions and quick
+  actions broken (#2995).
+
 - `run`'s refusal of a provider key or broker token in a readable process
   now says whether `/proc`'s `hidepid` hides other users' processes and, if
   not, how to mount a procfs that does; `run` logs a note when a caller's

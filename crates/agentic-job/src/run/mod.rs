@@ -56,6 +56,8 @@ mod session_markdown;
 pub mod summary;
 pub mod upload;
 
+pub(crate) use session_markdown::SUMMARY_BYTES;
+
 use std::future::Future;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};

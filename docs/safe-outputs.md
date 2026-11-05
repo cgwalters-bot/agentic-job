@@ -2035,7 +2035,7 @@ plain note's `--comment-target-kind`; inline comments always target an MR.
 ```text
 GITLAB_TOKEN=... agentic-job apply --forge gitlab --server URL --repo GROUP/PROJECT \
   --policy policy.json --checked DIR --run-url URL \
-  [--comment-target IID --comment-target-kind issue|pull-request] \
+  [--comment-target IID --comment-target-kind issue|pull-request [--run-summary]] \
   [--push-repo GROUP/PROJECT] [--recover-pushed-commit SHA] \
   [--status STATE --status-sha SHA --status-ref REF --status-pipeline-id ID]
 ```
@@ -2087,6 +2087,25 @@ for `noop`, `missing_tool` and `missing_data`:
   description and `--run-url` as its link. GitLab has no `error`, so
   `failure` and `error` are both `failed`, with distinct descriptions;
   `pending` and `success` keep their names.
+- `--run-summary`, off by default, posts the run's `summary.md` as a
+  note on the comment target, after the requests and before the status.
+  GitHub renders that file in the job summary, but GitLab has no job
+  summary and shows a `.md` artifact as plain text. The summary still goes
+  through `check`, like every other write. The check job reads the file
+  with `check --run-summary FILE` (from the `agent-run` artifact), without
+  following a link, and limits it to the job summary's size. It refuses a
+  file that is not text or that holds a string shaped like a credential,
+  which `run`'s redaction should already have replaced. It then sanitizes
+  the file as the collector sanitizes a comment's body, so a link to a
+  host the policy does not keep is redacted; an image link would otherwise
+  send whatever the agent read to that host from every reader's browser.
+  The result goes into the report as `run_summary`. A summary that fails
+  these checks is left out with a warning, and the run's requests are
+  checked without it. Apply posts the summary only from that report, with
+  its mentions and quick actions broken as an `add_comment`'s are. It
+  leaves out a note longer than GitLab's 1,000,000 characters. A batch
+  that `check` refused posts nothing, the summary included, and a rerun
+  posts the note again.
 
 Status targeting follows GitLab's documented
 [commit status API](https://docs.gitlab.com/api/commits/#set-commit-pipeline-status)

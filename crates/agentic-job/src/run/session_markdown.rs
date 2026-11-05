@@ -14,7 +14,7 @@ use crate::session::digest::Dir;
 const OUTPUT_BYTES: usize = 8192;
 const ARG_BYTES: usize = 240;
 // The action appends setup accounting after the run's summary.
-const SUMMARY_BYTES: usize = (1 << 20) - 4096;
+pub(crate) const SUMMARY_BYTES: usize = (1 << 20) - 4096;
 const NOTICE: &str = "\nSession shortened to fit GitHub's summary limit. Full Markdown: `session.md` in the [**agent-run** artifact](#artifacts) (with the configured artifact prefix).\n";
 
 // A subagent's updates name the call that started it, and its blocks render
