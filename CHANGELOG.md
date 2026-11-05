@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `run`'s refusal of a provider key or broker token in a readable process
+  now says whether `/proc`'s `hidepid` hides other users' processes and, if
+  not, how to mount a procfs that does; `run` logs a note when a caller's
+  procfs is mounted over `/proc`. The docs cover api-key mode on multi-user
+  guests such as Testing Farm's (#2994).
+
 - The secure-host forwarder picks up the config-volume SELinux relabel fix
   (actions#190), allowing setup to read its configuration on enforcing hosts
   such as RHEL 10 (#2925). The pinned secure-host image remains v0.6.4.

@@ -46,6 +46,11 @@ const TIMEOUT_EXIT: i32 = 124;
 const PROCESSES_SCRIPT: &str = "cat /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>/dev/null; true";
 /// What those may add up to on a machine with many processes.
 const MAX_PROCESSES_BYTES: usize = 256 << 20;
+/// How `run` reads the mounts at /proc.
+const MOUNTINFO: &str = "/proc/self/mountinfo";
+/// The `hidepid` values that keep other users' command lines and
+/// environments from a process: names since Linux 5.8, numbers before.
+const HIDING_HIDEPID: &[&str] = &["noaccess", "invisible", "ptraceable", "1", "2", "4"];
 const MAX_OUTPUT: usize = 1 << 20;
 /// Any uid but root in a rootless container is a subordinate uid of the
 /// sandbox user's, as in `sandbox check`.
@@ -368,13 +373,105 @@ fn in_no_process(sandbox: &Sandbox, id: &'static str, what: &str, secret: &str) 
 /// searched for it, since that search would hand it to a process of the
 /// sandbox user's: nothing writes it there, and the probes of the agent's
 /// token show that what `run` writes for the agent is where it belongs.
+///
+/// It reads how /proc is mounted too: a note says so when a procfs is
+/// mounted over another there, the caller's own hardening, and a refusal
+/// says whether `hidepid` hides other users' processes and what to do.
 pub fn require_absent(sandbox: &Sandbox, id: &'static str, what: &str, secret: &str) -> Result<()> {
+    let proc = std::fs::read_to_string(MOUNTINFO)
+        .ok()
+        .and_then(|mountinfo| ProcMount::parse(&mountinfo));
+    if let Some(note) = proc.as_ref().and_then(ProcMount::note) {
+        eprintln!("{note}");
+    }
     let probe = in_no_process(sandbox, id, what, secret.trim())?;
     ensure!(
         report(&[probe]),
-        "{what} is where the sandbox user can read it: see the failed probes above"
+        "{what} is where the sandbox user can read it: see the failed probes above. {}",
+        hidepid_hint(proc.as_ref())
     );
     Ok(())
+}
+
+/// The procfs mounted at /proc, as /proc/self/mountinfo shows it.
+#[derive(Debug, PartialEq)]
+struct ProcMount {
+    /// Its `hidepid` option, if it shows one.
+    hidepid: Option<String>,
+    /// Whether it is mounted over another procfs there.
+    stacked: bool,
+}
+
+impl ProcMount {
+    /// The procfs on top at /proc in MOUNTINFO, the last listed there,
+    /// or None if there is none.
+    fn parse(mountinfo: &str) -> Option<Self> {
+        let mut found: Vec<Option<String>> = mountinfo
+            .lines()
+            .filter_map(|line| {
+                let (mount, fs) = line.split_once(" - ")?;
+                let mut fs = fs.split(' ');
+                if mount.split(' ').nth(4)? != "/proc" || fs.next()? != "proc" {
+                    return None;
+                }
+                let options = fs.nth(1).unwrap_or_default();
+                Some(
+                    options
+                        .split(',')
+                        .find_map(|option| option.strip_prefix("hidepid="))
+                        .map(str::to_owned),
+                )
+            })
+            .collect();
+        let hidepid = found.pop()?;
+        Some(Self {
+            hidepid,
+            stacked: !found.is_empty(),
+        })
+    }
+
+    /// Whether it keeps other users' command lines and environments
+    /// from the sandbox user.
+    fn hides(&self) -> bool {
+        self.hidepid
+            .as_deref()
+            .is_some_and(|hidepid| HIDING_HIDEPID.contains(&hidepid))
+    }
+
+    /// The job log's line for a procfs mounted over another, which
+    /// `sandbox setup` never does: the caller's own.
+    fn note(&self) -> Option<String> {
+        self.stacked.then(|| {
+            format!(
+                "note: /proc is a procfs mounted over another, the caller's own, with hidepid={}",
+                self.hidepid.as_deref().unwrap_or("off")
+            )
+        })
+    }
+}
+
+/// What a refusal of a secret in a process adds, given PROC.
+fn hidepid_hint(proc: Option<&ProcMount>) -> String {
+    match proc {
+        Some(proc) if proc.hides() => format!(
+            "/proc hides other users' processes (hidepid={}), so a process of the sandbox \
+             user's own has it: hidepid separates users, not one user's processes",
+            proc.hidepid.as_deref().unwrap_or_default()
+        ),
+        _ => {
+            let shown = match proc.and_then(|proc| proc.hidepid.as_deref()) {
+                Some(hidepid) => format!("hidepid={hidepid}"),
+                None if proc.is_some() => "no hidepid".to_owned(),
+                None => format!("no procfs at /proc in {MOUNTINFO}"),
+            };
+            format!(
+                "/proc does not hide other users' processes ({shown}): before `sandbox setup`, \
+                 mount a procfs over it with `mount -t proc -o hidepid=invisible,gid=0 proc /proc`, \
+                 as a remount of the /proc systemd mounted may change nothing \
+                 (docs/inference.md#on-a-multi-user-guest)"
+            )
+        }
+    }
 }
 
 /// The broker under `inference.front`, as its probes see it.
@@ -1057,5 +1154,67 @@ mod tests {
         assert!(report(&[probe(true), probe(true)]));
         assert!(!report(&[probe(true), probe(false)]));
         assert!(report(&[]));
+    }
+
+    /// The procfs on top at /proc decides; one under it makes it the
+    /// caller's own, which the log notes.
+    #[test]
+    fn proc_mounts_decide_the_hidepid_hint() {
+        const ROOT: &str = "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw";
+        const SYSTEMD: &str =
+            "24 22 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw";
+        const SETUP: &str =
+            "24 22 0:22 / /proc rw,nosuid shared:12 - proc proc rw,hidepid=invisible,gid=0";
+        const STACKED: &str = "90 24 0:51 / /proc rw,relatime shared:40 - proc proc rw,hidepid=2";
+        const STACKED_OFF: &str = "90 24 0:51 / /proc rw,relatime shared:40 - proc proc rw";
+        const PROC_SYS: &str = "25 24 0:23 / /proc/sys rw shared:13 - proc proc rw";
+        const NOT_PROC: &str = "91 24 0:52 / /proc rw shared:41 - tmpfs tmpfs rw";
+        // (mountinfo, hidepid, stacked, hides)
+        let cases: [(&[&str], Option<&str>, bool, bool); 8] = [
+            (&[ROOT, SYSTEMD, PROC_SYS], None, false, false),
+            (&[ROOT, SETUP, PROC_SYS], Some("invisible"), false, true),
+            (&[ROOT, SYSTEMD, STACKED], Some("2"), true, true),
+            (&[ROOT, SETUP, STACKED_OFF], None, true, false),
+            (&[ROOT, SYSTEMD, NOT_PROC], None, false, false),
+            (
+                &["24 22 0:22 / /proc rw - proc proc rw,hidepid=1"],
+                Some("1"),
+                false,
+                true,
+            ),
+            (
+                &["24 22 0:22 / /proc rw - proc proc rw,hidepid=off"],
+                Some("off"),
+                false,
+                false,
+            ),
+            (
+                &["24 22 0:22 / /proc rw - proc proc rw,hidepid=0"],
+                Some("0"),
+                false,
+                false,
+            ),
+        ];
+        for (lines, hidepid, stacked, hides) in cases {
+            let proc = ProcMount::parse(&lines.join("\n")).unwrap();
+            let want = ProcMount {
+                hidepid: hidepid.map(str::to_owned),
+                stacked,
+            };
+            assert_eq!(proc, want, "{lines:?}");
+            assert_eq!(proc.hides(), hides, "{lines:?}");
+            assert_eq!(proc.note().is_some(), stacked, "{lines:?}");
+            let hint = hidepid_hint(Some(&proc));
+            assert_eq!(hint.contains("mount -t proc"), !hides, "{hint}");
+        }
+        assert_eq!(ProcMount::parse(ROOT), None);
+        assert!(hidepid_hint(None).contains("no procfs at /proc"));
+        assert_eq!(
+            ProcMount::parse(&[SYSTEMD, STACKED].join("\n"))
+                .unwrap()
+                .note()
+                .unwrap(),
+            "note: /proc is a procfs mounted over another, the caller's own, with hidepid=2"
+        );
     }
 }

@@ -453,6 +453,44 @@ repositories uses a broker. gh-aw does the same with a proxy container
 on loopback beside the agent; here the proxy is part of `run`, so
 nothing else is started.
 
+### On a multi-user guest
+
+Some CI machines are guests whose test runner passes the job's
+environment, secrets included, on a command line: on Testing Farm, tmt
+starts its remote wrapper so. Any user may read `/proc/PID/cmdline`
+unless `/proc` hides other users' processes, so the sandbox user could
+read the provider's key there, and `run`'s `api-key-processes` probe
+refuses to start the agent. The refusal also says what `/proc/self/mountinfo`
+shows: whether the procfs at `/proc` hides other users' processes, and,
+if not, what to do.
+
+`sandbox setup` remounts `/proc` with `hidepid=invisible,gid=0`. On
+Testing Farm's guests a remount of the procfs systemd mounted has been
+seen to exit 0 and change nothing: `/proc/self/mountinfo` still shows
+no `hidepid`. The exit status is no evidence; the mount table and the
+probes are. What takes effect there is a new procfs mounted over
+`/proc`, whose options are its own, as root before `sandbox setup`:
+
+```sh
+mount -t proc -o hidepid=invisible,gid=0 proc /proc
+```
+
+`run` logs one line when it finds a procfs mounted over another at
+`/proc`, which setup never does, so that the job log shows the caller's
+own hardening was in place, and with which `hidepid`.
+
+This is a workaround, not a fix. `hidepid` separates users, nothing
+more: the key stays on the machine the agent runs on, in `run`'s
+memory and the wrapper's command line, behind the uid boundary alone.
+A process of the sandbox user's own that holds the key, such as a step
+started as that user with the job's environment, stays readable, and
+the probe still refuses. An agent that shares a uid with the processes
+holding the key, as under `run --runner-home`, gains nothing from it,
+which is why that mode refuses `api-key`. The fix is to hold the key
+outside anything the agent can read
+([#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903));
+until then, a broker keeps the key off the agent's machine.
+
 ## GitHub billing
 
 `provider = "github"` is the same proxy with a GitHub token as the key,
