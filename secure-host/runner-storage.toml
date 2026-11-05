@@ -1,0 +1,23 @@
+# What action.yml appends to egress/policy.toml for the pinned image when
+# a configuration with egress.write-policy names no egress.policy. The
+# v0.6.4 image's built-in runner writes admit only gh-aw's results
+# storage accounts, productionresultssa0 to productionresultssa19, and
+# hosted runners now upload artifacts to the ones below, which this
+# repository's proxy admits among its runner writes (RUNNER_WRITES in
+# crates/secure-host/src/proxy/policy.rs, where the evidence for each
+# is). Without them every upload-artifact step after `config` turns the
+# write policy on for an agent fails. Under the write policy the agent
+# is the runner's user, and so it gets these PUTs too, as it does under
+# a newer image's runner writes. Delete this file once the pin names an
+# image whose runner writes include them.
+
+[[write]]
+name = "GitHub Actions results storage (runner)"
+why = "Artifact uploads PUT to the signed URL the results service returns, on these accounts too."
+hosts = [
+    "productionresultssa30.blob.core.windows.net",
+    "productionresultssa31.blob.core.windows.net",
+    "productionresultssa32.blob.core.windows.net",
+]
+methods = ["PUT"]
+paths = ["/**"]
