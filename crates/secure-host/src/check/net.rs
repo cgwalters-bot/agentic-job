@@ -746,8 +746,9 @@ impl Checker<'_> {
             Attempt::refused(
                 "egress-proxy-metadata",
                 "the proxy doesn't reach the instance metadata service",
-                &proxied(&["-H", "Metadata:true", METADATA_URL]),
-            ),
+                &head(&["-H", "Metadata:true", METADATA_URL]),
+            )
+            .reached_when(proxy_reached),
             Attempt::refused(
                 "egress-proxy-wireserver",
                 "the proxy doesn't reach the WireServer",
@@ -1183,6 +1184,34 @@ fn refused_by_proxy(headers: &str) -> bool {
     status && marked
 }
 
+/// Whether a request through the egress proxy, its response headers
+/// printed ([`head`]), reached its destination: any answer but the
+/// proxy's own, which is its refusal or a 502 for a connection it could
+/// not open. Azure's metadata service answers a throttled or transient
+/// request with 429, 410 or 500, which `--fail` read as the proxy's
+/// refusal: with the proxy's rules removed, the probe once held in a
+/// tenth of a second where a reach took twice that. No answer at all,
+/// the proxy's or another's, reached nothing; the exit status, curl's
+/// timeout after the headers included, is not asked.
+fn proxy_reached(output: &Output) -> bool {
+    let headers = String::from_utf8_lossy(&output.stdout);
+    let status = headers.lines().rev().find_map(|line| {
+        let mut words = line.split_whitespace();
+        words
+            .next()
+            .is_some_and(|version| version.starts_with("HTTP/"))
+            .then(|| words.next())?
+    });
+    match status {
+        None | Some(PROXY_FAILED_STATUS) => false,
+        Some(_) => !refused_by_proxy(&headers),
+    }
+}
+
+/// The status both egress proxies answer with when the connection they
+/// were to open failed.
+const PROXY_FAILED_STATUS: &str = "502";
+
 /// The host of an http or https URL.
 pub(super) fn url_host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
@@ -1397,6 +1426,45 @@ mod tests {
         ];
         for headers in cases {
             assert!(!refused_by_proxy(headers), "{headers:?}");
+        }
+    }
+
+    /// An error status of the destination's still reached it: what made
+    /// `egress-proxy-metadata` pass with the proxy's rules removed.
+    #[test]
+    fn what_reached_through_the_proxy() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let cases = [
+            (
+                "HTTP/1.1 200 OK\r\nserver: IMDS/150.870.65.1854\r\n\r\n",
+                true,
+            ),
+            ("HTTP/1.1 429 Too many requests\r\n\r\n", true),
+            ("HTTP/1.1 410 Gone\r\n\r\n", true),
+            ("HTTP/1.1 500 Internal Server Error\r\n\r\n", true),
+            ("HTTP/1.1 403 Forbidden\r\nserver: origin\r\n\r\n", true),
+            (
+                "HTTP/1.1 502 Bad Gateway\r\nServer: mitmproxy 11.1.3\r\n\r\n",
+                false,
+            ),
+            (
+                "HTTP/1.1 403 Forbidden\r\nx-egress-denied: a private or local address\r\n\r\n",
+                false,
+            ),
+            ("", false),
+        ];
+        // curl's timeout (28) after the headers came, as an exit status.
+        let timed_out = 28 << 8;
+        for (headers, want) in cases {
+            for status in [0, timed_out] {
+                let output = Output {
+                    status: std::process::ExitStatus::from_raw(status),
+                    stdout: headers.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                };
+                assert_eq!(proxy_reached(&output), want, "{headers:?} {status}");
+            }
         }
     }
 

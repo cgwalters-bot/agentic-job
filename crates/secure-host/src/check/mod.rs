@@ -546,7 +546,7 @@ impl Checker<'_> {
         match attempt.kind {
             AttemptKind::Control => Ok(runner_reaches(&bounded_control(&argv))),
             AttemptKind::Refused | AttemptKind::RefusedInContainer => {
-                Ok(self.refusal_output(attempt, &argv)?.success())
+                Ok((attempt.reached)(&self.refusal_output(attempt, &argv)?))
             }
         }
     }
@@ -691,6 +691,9 @@ struct Attempt {
     id: String,
     what: String,
     argv: Vec<String>,
+    /// Whether a refusal's attempt got where it must not, from its
+    /// output: by default, that its command succeeded.
+    reached: fn(&Output) -> bool,
 }
 
 impl Attempt {
@@ -717,7 +720,13 @@ impl Attempt {
             id: id.into(),
             what: what.into(),
             argv: argv.iter().map(|&arg| arg.to_owned()).collect(),
+            reached: Output::success,
         }
+    }
+
+    /// A refusal, judged by `reached` rather than by its status.
+    fn reached_when(self, reached: fn(&Output) -> bool) -> Self {
+        Self { reached, ..self }
     }
 }
 

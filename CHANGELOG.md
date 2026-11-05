@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `sandbox check`'s `egress-proxy-metadata` probe now fails whenever the
+  egress proxy gets any answer from the instance metadata service, an
+  error status included; before, a throttled or transient error read as
+  the proxy's refusal, which made the probe flaky (#3080).
+
 - The secure-host forwarder and site CI now select the reviewed actions#180
   pin and attested v0.6.9 image, bringing method/host-only write-refusal
   diagnostics to callers without printing signed URLs. No storage accounts
