@@ -525,7 +525,9 @@ The run's inference budget and request cap still apply.
 
 An external runner could substitute an artifact or choose a more permissive
 target. Therefore the trusted caller fixes the target, base/head, task,
-bounds and source pin before dispatch. The external side runs only agent
+bounds, source pin and any required threat-detection model before dispatch.
+An external repository's unset `AGENTIC_JOB_DETECT_MODEL` must not disable
+the trusted caller's detection requirement. The external side runs only agent
 and check, on separate fresh machines; check runs pinned trusted code, not
 the agent's checkout. Neither stage nor VM tests gets a forge-write token,
 provider key or broker lifecycle credential. Inference endpoints come from
@@ -539,7 +541,9 @@ Check produces the existing checked-output format consumed by apply, not
 a new safe-output type. The cross-run transport must bind its artifact ID
 and digest to the admitted target/base/head and policy/source revision,
 external repository, workflow revision, run ID and attempt, plus the
-successful trusted check job. A digest supplied in an agent-authored report
+successful trusted check job and artifact release after any required
+threat detection succeeds. Apply accepts only that released artifact, not
+the check job's upload alone. A digest supplied in an agent-authored report
 does not establish provenance. The trusted apply job fetches by that exact
 identity, verifies digest and provenance using forge metadata and the
 caller's expected dispatch record, and refuses missing, mismatched, stale
@@ -591,7 +595,8 @@ Runtime acceptance remains outstanding: demonstrate an admitted external
 run and checked-artifact apply to an allowed midstream draft, then an
 update at its exact head. Negative tests must refuse unknown profiles,
 unavailable KVM/libvirt, unauthorized targets (including ostree today),
-substituted digests, wrong repository/workflow/run/attempt and moved heads.
+substituted digests, wrong repository/workflow/run/attempt, moved heads,
+and absent, failed or bypassed required threat detection.
 Also prove cleanup after cancellation/runner loss and absence of write or
 lifecycle credentials in agent/test processes. See the
 [implementation slices](plan.md#external-runner-implementation-slices).

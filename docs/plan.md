@@ -110,20 +110,21 @@ credentialless TF/GitLab launch or live publication of this revision.
 ### External-runner implementation slices
 
 The [contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract)
-is agreed, not deployed. These are issue-ready follow-ups for tracker#1215,
-**not filed issues**: this documentation run's safe outputs cannot create
-issues, locally or in the other repositories. A subsequent authorized issue
-filing pass must create/link these four slices before runtime planning.
-All repositories below are under `cgwalters-forge`.
+is agreed, not deployed. These are issue-ready follow-ups for tracker#1215's
+next epic replan, **not filed issues**. Enumerating their scope and acceptance
+criteria completes the documentation slice; filing and runtime implementation
+are separate follow-up work. All repositories below are under `cgwalters-forge`.
 
 1. **agentic-job — Bind external checked artifacts to trusted apply.**
    Extend the current checked-output transport without a new output type.
    Bind digest, external repository/workflow revision/run/attempt and check
-   result to trusted policy/source/target/base/head; verify them before
+   result to trusted policy/source/target/base/head and artifact release
+   after caller-required threat detection; verify them before
    publication without executing artifact code. Keep current byte/file/path
    limits and draft/head constraints. Acceptance: fixture-based cross-run
    success plus refusal of substitution, wrong provenance, oversized
-   metadata, wrong target and stale head. Depends on the actions transport
+   metadata, wrong target, stale head and missing or failed required detection.
+   Depends on the actions transport
    contract below; no deployed token or bounds change in this slice.
 2. **agent-board — Carry a caller-owned runner profile in job plans.**
    Extend `docs/job-plans.md` and plan/manual/scheduled dispatch together;
