@@ -20,7 +20,6 @@
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
-use std::net::Shutdown;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -40,6 +39,9 @@ const ROOT_SOCKET: &str = "/run/agentic-job-test-root.sock";
 
 /// What the shell prints after each command, with its status.
 const STATUS_MARKER: &str = "__agentic_job_test_status=";
+
+/// How long a command sent to the root service may print nothing.
+const ROOT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Sorts after the deny rules: a grant for the runner's user there wins.
 const SUDOERS_RUNNER_GRANT: &str = "/etc/sudoers.d/zzz-test-runner-grant";
@@ -102,7 +104,10 @@ fn sh_quote(text: &str) -> String {
 /// root service when it is there and through sudo otherwise. The
 /// service's shell gets the command as one script, with the input
 /// encoded into it and a status line after it, and sends back everything
-/// the command printed.
+/// the command printed. The socket is not shut for writing: once that end
+/// closes, socat relays the shell's output for only half a second more
+/// (its `-t`), less than a curl probe takes; the script's `exit` ends the
+/// shell instead, and [`ROOT_TIMEOUT`] a command that hangs.
 fn root_run(argv: &[String], input: &str) -> RootOutput {
     let command = argv
         .iter()
@@ -115,9 +120,11 @@ fn root_run(argv: &[String], input: &str) -> RootOutput {
             "printf %s {encoded} | base64 -d | {command} 2>&1\nprintf '\\n{STATUS_MARKER}%s\\n' \"$?\"\nexit\n",
         );
         socket.write_all(script.as_bytes()).unwrap();
-        socket.shutdown(Shutdown::Write).unwrap();
+        socket.set_read_timeout(Some(ROOT_TIMEOUT)).unwrap();
         let mut output = String::new();
-        socket.read_to_string(&mut output).unwrap();
+        socket
+            .read_to_string(&mut output)
+            .unwrap_or_else(|e| panic!("as root, {argv:?} did not finish: {e}: {output}"));
         let (printed, status) = output
             .rsplit_once(STATUS_MARKER)
             .unwrap_or_else(|| panic!("the root service sent no status for {argv:?}: {output}"));
