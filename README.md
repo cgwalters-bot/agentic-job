@@ -235,6 +235,7 @@ to the issue that tracks it, where one is filed, or to the page that explains it
 The [secure-host action](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
 [the agent's host](docs/sandbox.md), [run contract](specs/run-contract-spec.md),
 [MCP servers](docs/mcp.md), [dispatch profiles](docs/dispatch.md),
+[running from GitLab CI](docs/gitlab.md),
 [skills](docs/skills.md), [stable interfaces](docs/stable-interfaces.md),
 [CHANGELOG.md](CHANGELOG.md) and [what is left](docs/plan.md).
 

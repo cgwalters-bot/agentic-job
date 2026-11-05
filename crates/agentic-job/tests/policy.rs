@@ -422,6 +422,124 @@ fn readme_caller_fits_its_bounds_and_configuration() {
     assert!(stderr.contains("limits.max-requests"), "{stderr}");
 }
 
+/// docs/gitlab.md's bounds, configuration and pipeline: the bounds give
+/// a GitLab policy with the pipeline's fork, the configuration composes,
+/// and only apply, which reads no artifact of the agent's, may be given
+/// a secret.
+#[test]
+fn documented_gitlab_caller_fits_its_bounds_and_configuration() {
+    use yaml_rust2::{Yaml, YamlLoader};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let doc = std::fs::read_to_string(root.join("docs/gitlab.md")).unwrap();
+    let blocks = |fence: &str| -> Vec<&str> {
+        doc.split(fence)
+            .skip(1)
+            .map(|rest| rest.split("```").next().unwrap())
+            .collect()
+    };
+    let [bounds, config] = blocks("```toml\n")[..] else {
+        panic!("docs/gitlab.md should have the bounds and the configuration as TOML");
+    };
+    let pipeline = YamlLoader::load_from_str(blocks("```yaml\n")[0])
+        .unwrap()
+        .remove(0);
+    let fork = pipeline["variables"]["AGENTIC_JOB_FORK"].as_str().unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let allow = temp.path().join("bounds.toml");
+    std::fs::write(&allow, bounds).unwrap();
+    let output = Command::new(BIN)
+        .arg("policy")
+        .arg("--allow")
+        .arg(&allow)
+        .args(["--repo", "group/project"])
+        .args([
+            "--clone-url",
+            "https://gitlab.example.com/group/project.git",
+        ])
+        .args(["--base", "main", "--kind", "branch"])
+        .args(["--outputs", "all", "--max-outputs", "max"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["forge"], "gitlab");
+    assert_eq!(policy["push_repo"], fork);
+
+    let file = temp.path().join("config.toml");
+    std::fs::write(&file, config).unwrap();
+    let output = Command::new(BIN)
+        .arg("config")
+        .arg("--from")
+        .arg(&file)
+        .args(["--string", "inference.url=https://broker.example.com:8443"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Setup installs only the agents the file names.
+    let composed: toml::Value = toml::from_slice(&output.stdout).unwrap();
+    assert!(!composed["setup"]["agents"].as_array().unwrap().is_empty());
+
+    // Every flag the pipeline gives a command is one that command takes.
+    let command = regex::Regex::new(r#"agentic-job"? ((?:[a-z][a-z-]* )+)"#).unwrap();
+    let flag = regex::Regex::new(r"--[a-z][a-z-]*").unwrap();
+    let mut checked = 0;
+    for (_, job) in pipeline.as_hash().unwrap() {
+        for key in ["before_script", "script"] {
+            for line in job[key].as_vec().into_iter().flatten() {
+                let line = format!("{} ", line.as_str().unwrap());
+                let Some(found) = command.captures(&line) else {
+                    continue;
+                };
+                let words: Vec<&str> = found[1].split_whitespace().collect();
+                let help = Command::new(BIN).args(&words).arg("--help").output().unwrap();
+                assert!(help.status.success(), "{words:?}: {help:?}");
+                let help = String::from_utf8_lossy(&help.stdout);
+                for flag in flag.find_iter(&line[found.get(1).unwrap().end()..]) {
+                    assert!(help.contains(flag.as_str()), "{words:?} {}", flag.as_str());
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 8, "{checked}");
+
+    let needs = |job: &str| -> Vec<&str> {
+        pipeline[job]["needs"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .map(|need| need.as_str().unwrap())
+            .collect()
+    };
+    assert_eq!(needs("policy"), Vec::<&str>::new());
+    assert_eq!(needs("agent"), ["policy"]);
+    assert_eq!(needs("check"), ["agent"]);
+    assert_eq!(needs("apply"), ["check"]);
+    for job in ["policy", "agent", "check", "apply"] {
+        for key in ["environment", "id_tokens", "secrets"] {
+            assert_eq!(
+                pipeline[job][key].is_badvalue(),
+                job != "apply" || key != "environment",
+                "{job}.{key}"
+            );
+        }
+    }
+    assert!(matches!(
+        pipeline["apply"]["environment"]["name"],
+        Yaml::String(_)
+    ));
+}
+
 #[test]
 fn a_request_outside_the_bounds_prints_no_policy() {
     // The change to the request, and a part of the reason.
