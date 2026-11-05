@@ -1,21 +1,17 @@
-//! What `run` does in the sandbox: one command at a time as the sandbox
-//! user, through step 5's way in ([`crate::sandbox::enter`]), which
-//! builds the `run0` command line with the variables `[sandbox] env` and
-//! the egress proxy add.
+//! What `run` does as the agent: one command at a time as the runner's
+//! own user, the only agent user since agentic-job#2989, through
+//! `env -i` in the home `run --runner-home` gives, with the variables
+//! `[sandbox] env` adds. The job is the unit of trust
+//! (cgwalters-forge/actions/secure-host): the agent can read whatever the
+//! runner's user can anyway.
 //!
 //! This adds what `run` needs on top: a limit on what a command may
 //! write back, since the agent's files are read through it; the same
 //! command line as a wrapper for the session, which appends the agent to
 //! it; and commands that inherit none of the job's own settings.
 //!
-//! `run` reads and writes the agent's files only through this: as the
-//! runner's user, a link the agent planted could make it read the
-//! runner's files into an artifact.
-//!
-//! With `run --runner-home` there is no sandbox user: the same commands
-//! run as the runner's user, through `env -i`, in the home given. That is
-//! for a job that is the unit of trust (cgwalters-forge/actions/secure-host),
-//! where the agent can read whatever the runner's user can anyway.
+//! `run` reads and writes the agent's files only through this, which
+//! keeps `run`'s own variables out of what the agent's commands get.
 
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
@@ -27,40 +23,28 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::Config;
-use crate::sandbox::enter::Entry;
 use crate::sandbox::root::Root;
 use crate::session::Launch;
 
-/// Stands for the command in a command line that is asked for only to
-/// get what comes before it.
-const PLACEHOLDER: &str = "agentic-job-command-placeholder";
 /// How much of a command's standard error is kept, for an error message.
 const MAX_STDERR_BYTES: u64 = 64 << 10;
 /// What clears the environment of a command run as this process's own
 /// user, and moves it to its directory.
 const ENV: &str = "env";
 const LANG: &str = "C.UTF-8";
-/// The agent's home with no second user: private to the runner's user.
+/// The agent's home: private to the runner's user.
 const OWN_HOME_MODE: u32 = 0o700;
 
-/// The sandbox user, and the way in.
+/// The agent: this process's own user, in its own home, with `env`
+/// (`NAME=VALUE`) and nothing else of this process's environment. No uid
+/// is between the agent and `run`: the agent can read what `run` holds,
+/// and reading its files this way only keeps `run`'s own variables out.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     pub user: String,
     pub uid: u32,
     pub home: PathBuf,
-    way: Way,
-}
-
-#[derive(Debug, Clone)]
-enum Way {
-    /// As the sandbox user, through step 5's way in.
-    Entry(Entry),
-    /// As this process's own user, with ENV (`NAME=VALUE`) and nothing
-    /// else of its environment (`run --runner-home`). No uid is between
-    /// the agent and `run`: the agent can read what `run` holds, and
-    /// reading its files this way only keeps `run`'s own variables out.
-    Own { env: Vec<String> },
+    env: Vec<String>,
 }
 
 /// What a command run in the sandbox left.
@@ -115,9 +99,9 @@ impl Runner for Sandbox {
     }
 }
 
-/// Runs commands as this process's own user. For tests of what `run`
-/// does with a checkout: a run itself reads the agent's files only as
-/// the sandbox user.
+/// Runs commands as this process's own user, with its environment. For
+/// tests of what `run` does with a checkout: a run itself reads the
+/// agent's files only through [`Sandbox`].
 #[derive(Debug, Clone, Copy)]
 pub struct Unconfined;
 
@@ -129,25 +113,9 @@ impl Runner for Unconfined {
 }
 
 impl Sandbox {
-    /// The sandbox user of CONFIG, which `sandbox setup` created. That
-    /// it is not this process's own user is the session's to refuse
-    /// (`session::process::SandboxUser`).
-    pub fn new(config: &Config) -> Result<Self> {
-        let entry = Entry::new(config)?;
-        // After the agent, the next check probes.
-        crate::sandbox::check::forget_passed()?;
-        Ok(Self {
-            user: entry.user().name.clone(),
-            uid: entry.user().uid,
-            home: entry.home().to_owned(),
-            way: Way::Entry(entry),
-        })
-    }
-
     /// This process's own user, with HOME, which is made private to it,
-    /// as the agent's home: for a job that runs no second user. Commands
-    /// get the variables `[sandbox] env` of CONFIG sets over a fixed
-    /// language, PATH and the user's names, as the sandbox user's do.
+    /// as the agent's home. Commands get the variables `[sandbox] env` of
+    /// CONFIG sets over a fixed language, PATH and the user's names.
     pub fn own(config: &Config, home: &Path) -> Result<Self> {
         let user = crate::sandbox::host::User::current()?;
         std::fs::DirBuilder::new()
@@ -185,71 +153,45 @@ impl Sandbox {
             .chain(ca)
             .chain(config.sandbox.env.clone())
             .collect();
+        // After the agent, the next check probes.
         crate::sandbox::check::forget_passed()?;
         Ok(Self {
             user: user.name,
             uid: user.uid,
             home,
-            way: Way::Own {
-                env: env
-                    .into_iter()
-                    .map(|(name, value)| format!("{name}={value}"))
-                    .collect(),
-            },
+            env: env
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect(),
         })
-    }
-
-    /// Whether the agent runs as a second user, whose every process the
-    /// run can stop: its name then.
-    pub fn second_user(&self) -> Option<&str> {
-        match self.way {
-            Way::Entry(_) => Some(&self.user),
-            Way::Own { .. } => None,
-        }
     }
 
     /// How root is had for what a run needs of it.
     pub fn root(&self) -> Root {
-        match &self.way {
-            Way::Entry(entry) => entry.root(),
-            Way::Own { .. } => Root::detect(),
-        }
+        Root::detect()
     }
 
-    /// The command line that runs what is appended to it as the sandbox
-    /// user, in CWD: for the session, which appends the agent's own.
+    /// The command line that runs what is appended to it as the agent,
+    /// in CWD: for the session, which appends the agent's own.
     pub fn wrapper(&self, cwd: &Path) -> Result<Vec<String>> {
-        match &self.way {
-            Way::Entry(entry) => {
-                let command = entry.command(&[PLACEHOLDER.to_owned()], Some(cwd))?;
-                command_line(&command)
-            }
-            Way::Own { env } => {
-                let cwd = cwd.to_str().context("the directory is not UTF-8")?;
-                Ok([ENV, "-i", "-C", cwd]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .chain(env.iter().cloned())
-                    .collect())
-            }
-        }
+        let cwd = cwd.to_str().context("the directory is not UTF-8")?;
+        Ok([ENV, "-i", "-C", cwd]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(self.env.iter().cloned())
+            .collect())
     }
 
     /// How the session starts the agent, in the home.
     pub fn launch(&self) -> Result<Launch> {
         // The agent works where the session tells it to; the wrapper only
         // needs somewhere that exists.
-        let wrapper = self.wrapper(&self.home)?;
-        Ok(match self.way {
-            Way::Entry(_) => Launch::Sandbox {
-                user: self.user.clone(),
-                wrapper,
-            },
-            Way::Own { .. } => Launch::Own { wrapper },
+        Ok(Launch::Own {
+            wrapper: self.wrapper(&self.home)?,
         })
     }
 
-    /// Runs ARGV as the sandbox user in its home, with INPUT on its
+    /// Runs ARGV as the agent in its home, with INPUT on its
     /// standard input, and returns what it wrote, of which standard
     /// output may be at most MAX_OUTPUT bytes.
     pub fn run(&self, argv: &[&str], input: &[u8], max_output: usize) -> Result<Output> {
@@ -288,41 +230,14 @@ pub fn command(program: &str) -> Command {
     command
 }
 
-/// COMMAND as a command line, without its last argument, the
-/// placeholder. Only the program and arguments carry over to the line
-/// the session starts, so a variable or a directory set on COMMAND would
-/// be lost without a word: that is refused.
-fn command_line(command: &Command) -> Result<Vec<String>> {
-    ensure!(
-        command.get_envs().next().is_none() && command.get_current_dir().is_none(),
-        "the command into the sandbox sets variables or a directory, which its command line \
-         would drop"
-    );
-    let mut argv = std::iter::once(command.get_program())
-        .chain(command.get_args())
-        .map(|arg| {
-            arg.to_str()
-                .map(str::to_owned)
-                .context("the command line into the sandbox is not UTF-8")
-        })
-        .collect::<Result<Vec<_>>>()?;
-    ensure!(
-        argv.pop().as_deref() == Some(PLACEHOLDER),
-        "the command line into the sandbox does not end in its command"
-    );
-    Ok(argv)
-}
-
 /// A connected pair: this process's end, and the one the child inherits.
 fn socket_pair() -> std::io::Result<(UnixStream, OwnedFd)> {
     let (ours, theirs) = UnixStream::pair()?;
     Ok((ours, theirs.into()))
 }
 
-/// Runs ARGV with its standard streams on sockets, not pipes: `run0
-/// --pipe` hands them to PID 1 over D-Bus, and under SELinux PID 1 may
-/// not read a pipe made by a service such as a CI runner
-/// (`session::process::spawn` has the same need).
+/// Runs ARGV with its standard streams on sockets, not pipes, as
+/// `session::process::spawn` starts the agent.
 fn over_sockets(argv: &[String], input: &[u8], max_output: usize) -> Result<Output> {
     let (program, args) = argv.split_first().context("the command is empty")?;
     let (mut stdin, child_stdin) = socket_pair()?;
@@ -382,7 +297,6 @@ fn over_sockets(argv: &[String], input: &[u8], max_output: usize) -> Result<Outp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::host::User;
 
     fn argv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
@@ -416,54 +330,9 @@ mod tests {
         assert_eq!(u64::try_from(out.stderr.len()).unwrap(), MAX_STDERR_BYTES);
     }
 
-    /// The session's wrapper is step 5's command line up to the command,
-    /// with the directory it was asked for.
-    #[test]
-    fn the_wrapper_is_the_way_in_without_its_command() {
-        let own = Command::new("id").arg("-un").output().unwrap();
-        let own = String::from_utf8(own.stdout).unwrap();
-        // Any user that exists will do, but root: nothing is run.
-        let own = match own.trim() {
-            "root" => "nobody",
-            own => own,
-        };
-        let Ok(config) = Config::parse(&format!("[sandbox]\nuser = \"{own}\"\n")) else {
-            panic!("no configuration for {own}");
-        };
-        let sandbox = match Sandbox::new(&config) {
-            Ok(sandbox) => sandbox,
-            // A machine without a passwd line for the user: a container
-            // image without `nobody`, or a static libc's lookup.
-            Err(err) if User::lookup(own).ok().flatten().is_none() => {
-                eprintln!("skipped: {err:#}");
-                return;
-            }
-            Err(err) => panic!("{err:#}"),
-        };
-        let wrapper = sandbox.wrapper(Path::new("/somewhere")).unwrap();
-        assert_eq!(wrapper.last().map(String::as_str), Some("--"));
-        // Through sudo and run0 where setup has not run, and through the
-        // helper on a machine it locked, which a job's own tests may
-        // well run on: the helper takes the user from root's file.
-        let has = |args: &[&str]| wrapper.windows(args.len()).any(|window| window == args);
-        match sandbox.root() {
-            Root::Sudo => {
-                assert!(has(&["run0"]), "{wrapper:?}");
-                assert!(has(&["--chdir=/somewhere"]), "{wrapper:?}");
-                let user = format!("--user={own}");
-                assert!(has(&[user.as_str()]), "{wrapper:?}");
-            }
-            Root::Helper => assert!(
-                has(&["helper", "enter", "--chdir", "/somewhere"]),
-                "{wrapper:?}"
-            ),
-        }
-        assert!(!wrapper.iter().any(|arg| arg == PLACEHOLDER), "{wrapper:?}");
-    }
-
-    /// Without a sandbox user, commands are this user's, in a private
-    /// home, with the fixed variables and the configuration's over them,
-    /// and nothing of this process's own.
+    /// Commands are this user's, in a private home, with the fixed
+    /// variables and the configuration's over them, and nothing of this
+    /// process's own.
     #[test]
     fn the_own_way_in_clears_the_environment() {
         let dir = std::env::temp_dir().join(format!("agentic-job-own-{}", std::process::id()));
@@ -471,7 +340,6 @@ mod tests {
         let config =
             Config::parse("[sandbox]\nenv = { LANG = \"en_US.UTF-8\", X = \"1\" }\n").unwrap();
         let sandbox = Sandbox::own(&config, &home).unwrap();
-        assert_eq!(sandbox.second_user(), None);
         assert!(matches!(sandbox.launch().unwrap(), Launch::Own { .. }));
         let home = home.canonicalize().unwrap();
         assert_eq!(sandbox.home, home);
@@ -516,28 +384,6 @@ mod tests {
             5 + ca.len()
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Only a command's program and arguments carry over to the session's
-    /// line: one that sets more is refused, not cut short.
-    #[test]
-    fn a_wrapper_drops_nothing_of_its_command() {
-        let mut command = Command::new("run0");
-        command.args(["--", PLACEHOLDER]);
-        assert_eq!(command_line(&command).unwrap(), argv(&["run0", "--"]));
-        let mut with_env = Command::new("run0");
-        with_env.arg(PLACEHOLDER).env("X", "1");
-        let mut without_env = Command::new("run0");
-        without_env.arg(PLACEHOLDER).env_remove("X");
-        let mut in_dir = Command::new("run0");
-        in_dir.arg(PLACEHOLDER).current_dir("/");
-        for command in [with_env, without_env, in_dir] {
-            let err = command_line(&command).unwrap_err();
-            assert!(format!("{err:#}").contains("would drop"), "{err:#}");
-        }
-        let mut no_placeholder = Command::new("run0");
-        no_placeholder.arg("--");
-        assert!(command_line(&no_placeholder).is_err());
     }
 
     #[test]

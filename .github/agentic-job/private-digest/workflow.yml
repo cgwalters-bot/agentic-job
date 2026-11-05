@@ -17,10 +17,13 @@
 # What makes it a private run (docs/private-repositories.md): policy.yml
 # admits the repository only as the calling repository and passes
 # `--private`, which allow.toml opts into and which keeps the comment in
-# this repository; the agent is the sandbox user, behind config.toml's
+# this repository; the agent was the sandbox user, behind config.toml's
 # egress allowlist, with the job's token, which reads only this
-# repository; check holds the one comment to DIGEST_ISSUE. agentic-job.yml
-# refuses all of this: its agent job is the runner's user.
+# repository; check holds the one comment to DIGEST_ISSUE.
+#
+# Since the sandbox user was removed (agentic-job#2989) the agent is the
+# runner's user, and `run` refuses a private target: this caller fails at
+# its run step until a private run has a design without a second user.
 #
 # Three conditions are the operator's to establish before installing
 # it, and nothing here checks them:
@@ -148,17 +151,17 @@ jobs:
           agentic-job config --host --from .agentic-job/config.toml
           --string "egress.policy=$GITHUB_WORKSPACE/.github/agentic-job/private-digest/egress.toml"
           > "$RUNNER_TEMP/agentic-job-host.toml"
-      # The last step with root; it makes the sandbox user.
+      # The last step with root.
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           config: ${{ runner.temp }}/agentic-job-host.toml
-      # The agent as the sandbox user. No step follows it here: a step
-      # after it would be the runner's user, which holds the request token.
+      # The agent as the runner's user, which `run` refuses for a private
+      # target (see the top of this file). No step follows it here.
       - id: run
         timeout-minutes: 70
         uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
-          agent-user: sandbox
+          runner-home: ${{ runner.temp }}/agent-home
           github-token: ${{ github.token }}
 
   check:

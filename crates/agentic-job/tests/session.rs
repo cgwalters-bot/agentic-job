@@ -2,13 +2,6 @@
 //! whole session through the permission policy and into its transcript,
 //! the limits, the exit states, and protocol behavior the real agents
 //! don't readily show. The old tree's `harness/tests/fake_agent.rs`.
-//!
-//! With `AGENTIC_JOB_TEST_SANDBOX_USER` set to a user this one can become
-//! with `sudo run0`, `nothing_survives_the_session` runs the agent as that
-//! user, as a run with `agent-user: sandbox` does; the agent's binary must
-//! then be where that user can run it, named by
-//! `AGENTIC_JOB_TEST_FAKE_AGENT`. CI covers that user through the reusable
-//! workflow instead (the `e2e-sandbox` job), not with these tests.
 
 // clippy.toml lets test functions unwrap, but not the helpers they share,
 // where a panic is just as much the test's failure.
@@ -16,7 +9,6 @@
 
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -33,8 +25,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{self, Message, WebSocket};
 
 const FAKE_AGENT: &str = env!("CARGO_BIN_EXE_fake-agent");
-const SANDBOX_USER_VAR: &str = "AGENTIC_JOB_TEST_SANDBOX_USER";
-const FAKE_AGENT_VAR: &str = "AGENTIC_JOB_TEST_FAKE_AGENT";
 /// How often the test stands in for the proxy's count of model requests.
 const REQUESTS_POLL: Duration = Duration::from_millis(50);
 const MAX_REQUESTS: u64 = 100;
@@ -405,12 +395,6 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     std::fs::create_dir(path("work")).unwrap();
     for (name, content) in setup.files {
         std::fs::write(path(name), fill(content)).unwrap();
-    }
-    if matches!(setup.launch, Launch::Sandbox { .. }) {
-        // Another user's agent reads its script here and works in work/.
-        for (name, mode) in [("", 0o755), ("work", 0o777)] {
-            std::fs::set_permissions(path(name), std::fs::Permissions::from_mode(mode)).unwrap();
-        }
     }
     let program = setup.agent.as_deref().unwrap_or(FAKE_AGENT);
     let command: Vec<String> = std::iter::once(program)
@@ -2633,69 +2617,25 @@ fn a_compaction_has_the_task_restated() {
     }
 }
 
-/// The command that runs its arguments as USER in a login session of its
-/// own, as `run` enters the sandbox (the old tree's `sandboxCommand`).
-fn run0(user: &str, cwd: &Path) -> Vec<String> {
-    [
-        "sudo",
-        "run0",
-        "--pipe",
-        "--no-ask-password",
-        "--shell-prompt-prefix=",
-        &format!("--user={user}"),
-        "--property=CollectMode=inactive-or-failed",
-        &format!("--chdir={}", cwd.display()),
-        "--setenv=PATH=/usr/local/bin:/usr/bin:/bin",
-        "--",
-    ]
-    .map(str::to_owned)
-    .to_vec()
-}
-
-/// As the sandbox user where the environment names one, as a real run
-/// does; otherwise as this one.
-fn launch() -> Launch {
-    match std::env::var(SANDBOX_USER_VAR) {
-        // The agent works where the session tells it to; the wrapper only
-        // needs somewhere that exists.
-        Ok(user) => Launch::Sandbox {
-            wrapper: run0(&user, Path::new("/")),
-            user,
-        },
-        Err(_) => Launch::Direct,
-    }
-}
-
-fn processes_of(user: &str) -> String {
-    let out = Command::new("pgrep")
-        .args(["-l", "-u", user])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
-/// A process the agent leaves behind does not outlive the session: one in
-/// the background of a tool call, and one that left its session and
-/// process group, which only killing the sandbox user's processes ends.
+/// A process the agent leaves in its group does not outlive the session;
+/// one that left its session and process group does, since the agent is
+/// this user and nothing kills every process of it (agentic-job#2989).
 ///
 /// The second tool call waits until its process has left: `$!` is known
 /// before the child has called setsid, and a session that ended in
 /// between killed it with the group it was still in.
 #[test]
-fn nothing_survives_the_session() {
+fn only_the_agents_group_is_stopped() {
     const STRAYS: &str = r#"[
       {"execute": {"title": "Bash", "command": "sleep 600 >/dev/null 2>&1 </dev/null & echo $! > stray"}},
-      {"execute": {"title": "Bash", "command": "setsid sleep 600 >/dev/null 2>&1 </dev/null & echo $! > escaped; for try in $(seq 200); do [ \"$(ps -o sid= -p $! | tr -d ' ')\" != \"$!\" ] || break; sleep 0.05; done; id -un > whoami"}},
+      {"execute": {"title": "Bash", "command": "setsid sleep 600 >/dev/null 2>&1 </dev/null & echo $! > escaped; for try in $(seq 200); do [ \"$(ps -o sid= -p $! | tr -d ' ')\" != \"$!\" ] || break; sleep 0.05; done"}},
       {"say": "Left two behind."}
     ]"#;
-    let sandbox_user = std::env::var(SANDBOX_USER_VAR).ok();
     let r = run(
         SCRIPT_MODE,
         Setup {
             files: &[("script.json", STRAYS)],
             timeout_s: 60,
-            launch: launch(),
-            agent: std::env::var(FAKE_AGENT_VAR).ok(),
             ..Setup::default()
         },
     );
@@ -2705,34 +2645,18 @@ fn nothing_survives_the_session() {
         let text = std::fs::read_to_string(r.path("work").join(name)).unwrap();
         text.trim().parse().unwrap()
     };
-    let whoami = std::fs::read_to_string(r.path("work/whoami")).unwrap();
     assert!(
         !session::process::is_running(pid("stray")),
         "the background process survived"
     );
-    match &sandbox_user {
-        Some(user) => {
-            assert_eq!(whoami.trim(), user, "the agent did not run as {user}");
-            assert!(
-                !session::process::is_running(pid("escaped")),
-                "the process that left its session survived"
-            );
-            assert_eq!(processes_of(user), "", "processes of {user} survived");
-        }
-        // Without a sandbox user nothing holds a process that left the
-        // agent's group: that is what the sandbox user is for, and why
-        // the case above is no formality. Clean up.
-        None => {
-            let escaped = pid("escaped");
-            assert!(
-                session::process::is_running(escaped),
-                "the process that left its session was killed with the group"
-            );
-            let _ = Command::new("kill")
-                .args(["-KILL", &escaped.to_string()])
-                .status();
-        }
-    }
+    let escaped = pid("escaped");
+    assert!(
+        session::process::is_running(escaped),
+        "the process that left its session was killed with the group"
+    );
+    let _ = Command::new("kill")
+        .args(["-KILL", &escaped.to_string()])
+        .status();
 }
 
 /// What the agent says that the client must not see.
@@ -2746,8 +2670,7 @@ fn text_prompt(sid: &Value, text: &str) -> Value {
 /// The session's own turn, then a client on loopback: it attaches to the
 /// session already running, is refused what the bridge does not serve,
 /// and has a prompt answered with the run's secret replaced; when it
-/// hangs up the session ends as done. Where the environment names a
-/// sandbox user (`AGENTIC_JOB_TEST_SANDBOX_USER`), the agent runs as that user.
+/// hangs up the session ends as done.
 #[test]
 fn a_client_talks_to_the_session() {
     let r = run(
@@ -2758,8 +2681,6 @@ fn a_client_talks_to_the_session() {
                 ("later.json", LATER),
             ],
             timeout_s: 60,
-            launch: launch(),
-            agent: std::env::var(FAKE_AGENT_VAR).ok(),
             client: Some((
                 |client| {
                     let init = client.request(1, "initialize", json!({"protocolVersion": 1}));

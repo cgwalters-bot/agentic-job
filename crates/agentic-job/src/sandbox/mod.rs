@@ -1,8 +1,8 @@
 //! `agentic-job sandbox`: make the host safe for the agent, and prove it.
 //! Step 5 of docs/plan.md. `setup` runs as root, and ends by taking root
-//! away from the runner's user; `check` runs as the runner's user and
-//! enters the sandbox ([`enter`]) for each probe, through the one
-//! privileged command that user keeps ([`helper`], via [`root`]).
+//! away from the runner's user, the only one an agent runs as; `check`
+//! probes as that user, with the one privileged command it keeps
+//! ([`helper`], via [`root`]) for what needs root.
 
 use std::path::Path;
 
@@ -16,9 +16,7 @@ pub(crate) mod session;
 pub mod setup;
 
 // What secure-host holds already, at the paths callers know.
-pub use ::secure_host::{
-    egress, enter, host, local, network, proxy, root, view, worker_diagnostics,
-};
+pub use ::secure_host::{egress, enter, host, network, proxy, root, worker_diagnostics};
 
 /// secure-host's probes, with `run` reading root's copy of the
 /// configuration as agentic-job's.
@@ -47,11 +45,10 @@ pub mod probe {
 
     use anyhow::Result;
 
-    use crate::config::Config;
     use crate::exit::Exit;
 
     pub fn run(args: &Args) -> Result<Exit> {
-        Ok(if ::secure_host::check::confine::run::<Config>(args)? {
+        Ok(if ::secure_host::check::confine::run(args)? {
             Exit::Success
         } else {
             Exit::Failure
@@ -89,31 +86,11 @@ pub mod helper {
             Exit::Failure
         })
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::config::HostFile;
-
-        /// `run`'s alone, as the identity token's request is: never the
-        /// sandbox user's.
-        #[test]
-        fn the_runs_credentials_are_unset_in_the_sandbox() {
-            assert_eq!(
-                Config::UNSET,
-                ["AGENTIC_JOB_INFERENCE_KEY", "AGENTIC_JOB_MCP_TOKEN"]
-            );
-        }
-    }
 }
 
-/// What agentic-job's file adds for the helper and the way in: its run
-/// tables, checked with the rest; the run's credentials, unset in the
-/// sandbox; and the session bridge's `session-serve`.
+/// What agentic-job's file adds for the helper: its run tables, checked
+/// with the rest, and the session bridge's `session-serve`.
 impl HostFile for Config {
-    const UNSET: &'static [&'static str] =
-        &[crate::run::api_key::API_KEY_VAR, crate::run::mcp::TOKEN_VAR];
-
     fn load(path: &Path) -> Result<Self> {
         Config::load(path)
     }
@@ -126,16 +103,8 @@ impl HostFile for Config {
         &self.egress
     }
 
-    fn tools(&self) -> bool {
-        self.setup.tools.is_some()
-    }
-
     fn direct(&self) -> Result<Vec<network::Direct>> {
         Ok(self.check_host()?.direct)
-    }
-
-    fn session_port(&self) -> Option<u16> {
-        self.session.listen.then_some(crate::session::bridge::PORT)
     }
 
     /// Checked as `run` checks it.
@@ -146,34 +115,15 @@ impl HostFile for Config {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_probes_get_the_bridge_port_only_when_listening() {
-        for listen in [false, true] {
-            let config = Config::parse(&format!("[session]\nlisten = {listen}\n")).unwrap();
-            assert_eq!(
-                config.session_port(),
-                listen.then_some(crate::session::bridge::PORT)
-            );
-        }
-    }
-}
-
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Create the sandbox user, close its routes to credentials and root
+    /// Harden the runner's user, the agent's, closing its routes to credentials and root
     Setup(setup::Args),
-    /// Probe the sandbox as the sandbox user, each probe with a positive control
+    /// Probe the runner's user's hardening, each probe with a positive control where one can be had
     Check(check::Args),
     /// Run secure-host's setup or probes, and add their time to the job summary
     #[command(hide = true)]
     Timed(timed::Args),
-    /// Print the local sockets and ports this user connects to; `check` runs it as the sandbox user
-    #[command(hide = true)]
-    ProbeLocal,
     /// Probe, as the runner's user, the routes a step has before and after the lock; CI's `confined` job runs it
     #[command(hide = true)]
     Probe(probe::Args),
@@ -188,7 +138,6 @@ impl Command {
             Self::Setup(args) => setup::run(args),
             Self::Check(args) => check::run(args),
             Self::Timed(args) => timed::run(args),
-            Self::ProbeLocal => local::run().map(|()| Exit::Success),
             Self::Probe(args) => probe::run(args),
             Self::EgressProxy(args) => proxy::run(args).map(|()| Exit::Success),
         }

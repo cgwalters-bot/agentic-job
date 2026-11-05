@@ -4,8 +4,8 @@
 
 **Version**: 0.1.0  
 **Status**: Implementation snapshot, runner-mode boundary clarified 2026-11-05.
-The second-user removal [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
-is still open. Credentialless admission is not implemented or proven by this
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed the
+second user. Credentialless admission is not implemented or proven by this
 specification; [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903),
 [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) and
 [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000) own that gap.

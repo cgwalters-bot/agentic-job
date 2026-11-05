@@ -19,9 +19,9 @@ and the rest), the agent's brief, the built-in skills, and the
 ## The reusable workflow
 
 Runner-only migration note (5 November 2026): `agent-user: runner` is the
-current default. The retained `sandbox` option is superseded by #2989 and
-pending removal in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991),
-not a supported escape for private, session, child-agent or credentialed
+only accepted value. The `sandbox` option, superseded by #2989, was removed in
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) and is
+refused; it is no escape for private, session, child-agent or credentialed
 inference/MCP launch. See [breaking keys](plan.md#breaking-keys-and-safe-refusals).
 
 [`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml),
@@ -36,7 +36,8 @@ Inputs:
 - reviews and events: `review`, `review-task`, `review-item`,
   `review-head`, `event`;
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
-  `agent-config-path`, `agent-skills`, `agent-user`, `github-reads`,
+  `agent-config-path`, `agent-skills`, `agent-user` (only `runner` since
+  #2989), `github-reads`,
   `packages`, `npm`, `setup`, `egress-write-policy`, `session`,
   `idle-minutes`;
 - runners and the binary: `runner`, `agent-runner`, `build-binary`;
@@ -128,6 +129,11 @@ the next in the same major version.
   `[inference] stop-long-retry-after` is an optional boolean, default false;
   it requires `front` or `api-key` and stops a long upstream 429 followed
   by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).
+  The keys of the removed sandbox user (`sandbox.create-user`, `user`,
+  `groups`, `allow-existing-user`, `filesystem-view`,
+  `sandbox.check.before-agent` and `setup.tools`) are refused by name
+  since #2989; `sandbox.check.control-url`, `fetch-repo`, `allow-sockets`
+  and `allow-tcp-ports` are accepted and ignored.
 - **The secure-host configuration**, the action's `config` input
   (`agentic-job config --host`): `[sandbox]`, `[egress]` and `[setup]`
   of the runner configuration, and nothing else

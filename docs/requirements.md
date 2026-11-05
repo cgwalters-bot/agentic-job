@@ -25,9 +25,9 @@ have write access, but never consume agent-written outputs.
 
 The operator chose runner-only execution on 4 November 2026
 ([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)).
-At this documentation snapshot, [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
-is still open: the checkout retains the old second-user implementation.
-Do not adopt it as an escape from runner-mode refusals. The migration and
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed
+the old second-user implementation; do not reintroduce it as an escape from
+runner-mode refusals. The migration and
 acceptance gaps are recorded in [the dated inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
 
 - `runner`, the default: `run --runner-home`, and the agent is the
@@ -43,9 +43,9 @@ acceptance gaps are recorded in [the dated inventory](plan.md#runner-only-harden
   ([secure-host.md](secure-host.md#the-egress-write-policy-for-an-agent-job)).
   `run` refuses what would need the second user, a private target included
   ([`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs)).
-- The legacy `sandbox` mode remains in this checkout, pending #2991; it is
-  not the runner-only contract and is not a supported migration target.
-  Neither `hidepid=2` nor environment filtering isolates same-UID processes.
+- The legacy `sandbox` mode was removed in #2991, and `agent-user: sandbox`
+  is refused. Neither `hidepid=2` nor environment filtering isolates
+  same-UID processes.
 
 R1 to R3 and R7 below say what holds in each, the runner's user first.
 

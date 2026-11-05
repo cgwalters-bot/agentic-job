@@ -1,14 +1,14 @@
-//! `agentic-job sandbox check`: prove, as the sandbox user, that the
-//! sandbox holds, before an agent is started in it.
+//! `agentic-job sandbox check`: prove, as the runner's user, the only one
+//! an agent runs as since agentic-job#2989, that the host's hardening
+//! holds before an agent is started.
 //!
-//! Each probe is something the sandbox user tries and must not manage,
-//! and each has a positive control: the same attempt somewhere it should
-//! work. Without the control, a probe that fails because a program is
-//! missing reads as a protection that holds.
+//! Each probe is something the runner's user tries and must not manage,
+//! and has a positive control where one can be had: the same attempt
+//! somewhere it should work. Without the control, a probe that fails
+//! because a program is missing reads as a protection that holds.
 //!
-//! The probes are a function, [`probes`], because agentic-job's `run`
-//! repeats them with `[sandbox.check] before-agent` and the host test
-//! that removes protections calls it. None of them is of the run token:
+//! The probes are a function, [`probes`], because the host test that
+//! removes protections calls it. None of them is of the run token:
 //! those are agentic-job's own (`run::probe`), made once the token is in
 //! place. They read the host's tables of any [`HostFile`]; agentic-job's
 //! `sandbox::check` maps the result to its exit states.
@@ -27,7 +27,6 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 
 use crate::config::{self, Egress, HostFile, Sandbox};
-use crate::enter::{Entry, Output};
 use crate::host::{self, User};
 use crate::root::Root;
 
@@ -47,8 +46,8 @@ pub struct Args {
     #[arg(long, conflicts_with = "unless_passed")]
     pub record: bool,
     /// Probe nothing when the record of a check with `--record` is there,
-    /// against the same configuration, and no one has entered the sandbox
-    /// user since; probe as usual when it is not
+    /// against the same configuration, and no agent has run since; probe
+    /// as usual when it is not
     #[arg(long)]
     pub unless_passed: bool,
 }
@@ -75,28 +74,10 @@ enum Mode {
     UnlessPassed,
 }
 
-/// How many probes of a batch of independent ones run at once: each is a
-/// session of the sandbox user's, and some start a container.
+/// How many probes of a batch of independent ones run at once.
 const CONCURRENT_PROBES: usize = 8;
 
-/// Put before a control the runner's user makes beside a refusal. Every
-/// control that connected on hosted runners did so in under 0.05 s; one
-/// that cannot connect (a dropped packet, a port nothing serves) cost
-/// the refusal's whole timeout, tens of seconds of every check.
-/// Three seconds leaves over 60 times that observed latency for a slow
-/// runner; expiry only loses a note-only control, never shortens a refusal.
-const CONTROL_LIMIT: &[&str] = &["timeout", "--kill-after=1", "3"];
-
 const CANARY_BYTES: usize = 12;
-
-/// Put before every command a probe runs as the sandbox user.
-const PROBE_LIMIT: &[&str] = &["timeout", "--kill-after=10", "600"];
-
-/// Any uid other than root in a rootless container maps to a subordinate
-/// uid of the sandbox user.
-const CONTAINER_UID: &str = "1000";
-
-const CA_MOUNT: &str = "/etc/egress-proxy/ca.pem:/run/egress-ca.pem:ro";
 
 /// What one probe or control found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,40 +123,6 @@ impl Report {
         println!("note: {}", crate::workflow_commands::escaped(text));
     }
 
-    /// A control of `runner`'s: see [`Checker::control_or_note`].
-    fn control(&mut self, runner: &str, id: &str, what: &str, reached: bool) {
-        if reached {
-            self.expect(
-                Want::Succeed,
-                id,
-                format!("{runner} reaches {what} (control)"),
-                true,
-            );
-        } else {
-            self.note(&format!("{runner} can't reach {what} either (no control)"));
-        }
-    }
-
-    /// Whether each of `attempts` succeeded, in their order: one result
-    /// for each, or none reported at all.
-    fn attempts(&mut self, runner: &str, attempts: &[Attempt], succeeded: &[bool]) -> Result<()> {
-        ensure!(
-            attempts.len() == succeeded.len(),
-            "{} results for {} attempts",
-            succeeded.len(),
-            attempts.len()
-        );
-        for (attempt, &got) in attempts.iter().zip(succeeded) {
-            match attempt.kind {
-                AttemptKind::Control => self.control(runner, &attempt.id, &attempt.what, got),
-                AttemptKind::Refused | AttemptKind::RefusedInContainer => {
-                    self.expect(Want::Fail, &attempt.id, attempt.what.clone(), got);
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub fn outcomes(&self) -> &[Outcome] {
         &self.outcomes
     }
@@ -199,7 +146,7 @@ impl Report {
 pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> Result<bool> {
     ensure!(
         !host::is_root(),
-        "`sandbox check` runs as the runner's user, which it compares the sandbox user with; it enters the sandbox through the helper"
+        "`sandbox check` runs as the runner's user, whose hardening it probes; it has root do the rest through the helper"
     );
     let path = Path::new(config::ROOT_COPY);
     let text = std::fs::read_to_string(path)
@@ -240,8 +187,8 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
 }
 
 /// Removes this job's record of a passing check, if there is one: what
-/// enters the sandbox user (agentic-job's `run`) calls this first, since
-/// what that user leaves behind is what the next check has to probe.
+/// starts an agent (agentic-job's `run`) calls this first, since what the
+/// agent leaves behind is what the next check has to probe.
 pub fn forget_passed() -> Result<()> {
     forget(|name| std::env::var(name).ok())
 }
@@ -291,8 +238,8 @@ enum Checked {
 /// (its file and what it must say) before anything else, whether it
 /// takes it or not; only [`Mode::UnlessPassed`] takes it in place of the
 /// probes, and only [`Mode::Record`] writes one, after probes that all
-/// passed. So a record means that secure-host's check passed and nothing
-/// entered the sandbox user since, and it spares one check at most.
+/// passed. So a record means that secure-host's check passed and no agent
+/// ran since, and it spares one check at most.
 fn once(
     mode: Mode,
     record: Option<&JobRecord>,
@@ -322,24 +269,18 @@ fn once(
     Ok(Checked::Probed { passed })
 }
 
-/// Probes the sandbox `config` describes, as its sandbox user, from the
-/// runner's user. `Err` is a probe that could not be made at all; a
-/// probe that came out wrong is in the report.
+/// Probes the host `config` describes as the runner's user. `Err` is a
+/// probe that could not be made at all; a probe that came out wrong is in
+/// the report.
 pub fn probes<F: HostFile>(config: &F) -> Result<Report> {
-    let entry = if config.sandbox().create_user {
-        Some(Entry::new(config)?)
-    } else {
-        config.direct()?;
-        None
-    };
+    // Checked as setup checked it.
+    config.direct()?;
     let checker = Checker {
         config: Tables {
             sandbox: config.sandbox(),
             egress: config.egress(),
-            session_port: config.session_port(),
         },
-        root: entry.as_ref().map_or_else(Root::detect, Entry::root),
-        entry,
+        root: Root::detect(),
         runner: User::current()?,
         canary: canary()?,
         report: Report::default(),
@@ -357,26 +298,15 @@ fn canary() -> Result<String> {
     Ok(format!("isolation-canary-{hex}"))
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-}
-
 /// The tables of the configuration the probes read.
 #[derive(Clone, Copy)]
 struct Tables<'a> {
     sandbox: &'a Sandbox,
     egress: &'a Egress,
-    session_port: Option<u16>,
 }
 
 struct Checker<'a> {
     config: Tables<'a>,
-    /// None with `sandbox.create-user = false`: only the runner's user,
-    /// and the host, are probed.
-    entry: Option<Entry>,
     /// How root is had for the controls that need it.
     root: Root,
     runner: User,
@@ -386,14 +316,7 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn run(mut self) -> Result<Report> {
-        if self.entry.is_some() {
-            self.timed("privileges", |this| this.privileges())?;
-        } else {
-            self.report.note(
-                "sandbox.create-user = false: there is no sandbox user, so only the runner's user and the host are probed",
-            );
-            self.root_control();
-        }
+        self.root_control();
         if self.config.sandbox.lock_runner {
             self.timed("runner-privileges", |this| this.runner_privileges())?;
         }
@@ -409,241 +332,35 @@ impl Checker<'_> {
         for line in self.config.sandbox.runner_rule_opt_outs(&self.runner.name) {
             self.report.note(&line);
         }
-        if self.entry.is_none() {
-            // What of the rest needs no sandbox user to probe.
-            self.timed("runner-files", |this| {
-                this.runner_world_write()?;
-                this.host_files();
-                Ok(())
-            })?;
-            self.timed("services", |this| {
-                this.services();
-                Ok(())
-            })?;
-            if self.config.sandbox.deny_runner_metadata() {
-                self.timed("runner-metadata", |this| this.runner_metadata())?;
-            }
-            if self.config.egress.write_policy {
-                self.timed("write-policy", |this| {
-                    this.runner_write_policy();
-                    Ok(())
-                })?;
-            }
-            return Ok(self.report);
+        for key in self.config.sandbox.check.ignored() {
+            self.report.note(&format!(
+                "sandbox.check.{key} is ignored: only the removed sandbox user's probes read it (agentic-job#2989)"
+            ));
         }
-        let environs = self.timed("environments", |this| this.environments())?;
-        self.timed("job-variables", |this| this.job_variables(&environs))?;
-        self.timed("files", |this| this.files())?;
-        self.timed("schedulers", |this| this.schedulers())?;
+        self.timed("runner-files", |this| {
+            this.runner_world_write()?;
+            this.host_files();
+            Ok(())
+        })?;
         self.timed("services", |this| {
             this.services();
             Ok(())
         })?;
-        self.timed("local-services", |this| this.local_services())?;
-        self.timed("resolved", |this| this.resolved())?;
-        self.timed("tailscaled", |this| this.tailscaled())?;
-        self.timed("network", |this| this.network())?;
+        if self.config.sandbox.deny_runner_metadata() {
+            self.timed("runner-metadata", |this| this.runner_metadata())?;
+        }
+        if self.config.egress.write_policy {
+            self.timed("write-policy", |this| {
+                this.runner_write_policy();
+                Ok(())
+            })?;
+        }
         Ok(self.report)
     }
 
     fn timed<T>(&mut self, name: &str, run: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         crate::timed::stage("check", name, || run(self))
     }
-
-    /// The way into the sandbox user, which only its probes ask for.
-    fn entry(&self) -> Result<&Entry> {
-        self.entry
-            .as_ref()
-            .context("sandbox.create-user = false: no sandbox user to probe as")
-    }
-
-    fn user(&self) -> Result<&str> {
-        Ok(&self.entry()?.user().name)
-    }
-
-    /// Runs `argv` as the sandbox user, with a limit on its time: a probe
-    /// that hangs has to fail the check, not hold the job.
-    fn sandbox(&self, argv: &[&str], input: &[u8]) -> Result<Output> {
-        let limited: Vec<&str> = PROBE_LIMIT.iter().chain(argv).copied().collect();
-        self.entry()?.run(&limited, input)
-    }
-
-    fn sandbox_succeeds(&self, argv: &[&str]) -> Result<bool> {
-        Ok(self.sandbox(argv, b"")?.success())
-    }
-
-    /// Diagnostics for positive controls only: expected refusals are not errors.
-    fn sandbox_diagnosed(&self, id: &str, argv: &[&str], input: &[u8]) -> Result<bool> {
-        let output = self.sandbox(argv, input)?;
-        if !output.success() {
-            self.report.note(&format!(
-                "{id}: command {argv:?} exited {}; stderr: {}",
-                output.status,
-                bounded_stderr(&output.stderr),
-            ));
-        }
-        Ok(output.success())
-    }
-
-    fn has_podman(&self) -> bool {
-        host::has_program("podman")
-    }
-
-    /// Runs `argv` in a rootless container on the host's network, as a
-    /// subordinate uid; with the egress proxy, its authority is there too.
-    fn in_container(&self, argv: &[&str]) -> Result<bool> {
-        Ok(self.sandbox(&self.container(argv), b"")?.success())
-    }
-
-    fn container<'a>(&'a self, argv: &[&'a str]) -> Vec<&'a str> {
-        let mount: &[&str] = if self.config.egress.proxy {
-            &["--security-opt", "label=disable", "-v", CA_MOUNT]
-        } else {
-            &[]
-        };
-        let parts: [&[&str]; 4] = [
-            &[
-                "podman",
-                "run",
-                "--rm",
-                "--network=host",
-                "--user",
-                CONTAINER_UID,
-            ],
-            mount,
-            &[self.config.sandbox.check.container_image.as_str()],
-            argv,
-        ];
-        parts.concat()
-    }
-
-    /// A control for something the sandbox user must not reach: the
-    /// runner's user reaches it. Where it does not either (another
-    /// cloud, a network that already refuses it), there is no control,
-    /// and the probe says less; that is noted, not failed.
-    fn control_or_note(&mut self, id: &str, what: &str, argv: &[&str]) {
-        let reached = runner_reaches(argv);
-        self.report.control(&self.runner.name, id, what, reached);
-    }
-
-    /// Makes the independent `attempts` a few at a time, and then reports
-    /// each in their order, as they would have been one after another:
-    /// most of the time of a refusal is its own way into the sandbox,
-    /// which the next one need not wait for.
-    fn attempts(&mut self, attempts: &[Attempt]) -> Result<()> {
-        let results = self.made(attempts)?;
-        self.report.attempts(&self.runner.name, attempts, &results)
-    }
-
-    /// Whether each of `attempts` succeeded, unreported: see
-    /// [`Self::attempts`].
-    fn made(&self, attempts: &[Attempt]) -> Result<Vec<bool>> {
-        in_order(attempts, |attempt| self.make(attempt))
-    }
-
-    fn make(&self, attempt: &Attempt) -> Result<bool> {
-        let argv: Vec<&str> = attempt.argv.iter().map(String::as_str).collect();
-        match attempt.kind {
-            AttemptKind::Control => Ok(runner_reaches(&bounded_control(&argv))),
-            AttemptKind::Refused | AttemptKind::RefusedInContainer => {
-                Ok(self.refusal_output(attempt, &argv)?.success())
-            }
-        }
-    }
-
-    /// What the sandbox user's `attempt` at `argv`, which must not
-    /// succeed, came to. `Err` when its session never got to `argv`: sudo,
-    /// the helper, run0 or PAM failing to start one, which a status alone
-    /// would report as a refusal that holds; and, for one in a container,
-    /// when podman did not start the container or its command.
-    fn refusal_output(&self, attempt: &Attempt, argv: &[&str]) -> Result<Output> {
-        let id = &attempt.id;
-        let output = self.sandbox(&[&["sh", "-c", ENTER_SCRIPT, ENTERED], argv].concat(), b"")?;
-        ensure!(
-            entered(&output.stderr),
-            "{id}: the sandbox user's session never ran {argv:?}, so its refusal proves nothing (exited {}); stderr: {}",
-            output.status,
-            bounded_stderr(&output.stderr)
-        );
-        ensure!(
-            attempt.kind != AttemptKind::RefusedInContainer || started(output.status.code()),
-            "{id}: podman did not run {argv:?}, so its refusal proves nothing (exited {}); stderr: {}",
-            output.status,
-            bounded_stderr(&output.stderr)
-        );
-        Ok(output)
-    }
-}
-
-/// The line a refusal's session prints to its standard error before it
-/// makes the attempt: see [`Checker::refusal_output`].
-const ENTERED: &str = "agentic-job-sandbox-entered";
-
-/// Prints its `$0`, [`ENTERED`], and becomes the attempt.
-const ENTER_SCRIPT: &str = r#"printf '%s\n' "$0" >&2; exec "$@""#;
-
-/// Whether `stderr` has the line [`ENTER_SCRIPT`] prints, whatever the
-/// way in printed around it.
-fn entered(stderr: &[u8]) -> bool {
-    stderr
-        .split(|&byte| byte == b'\n')
-        .any(|line| line == ENTERED.as_bytes())
-}
-
-/// The statuses `podman run` exits with when the container or its command
-/// did not start, rather than the command's own: podman's error, a command
-/// that could not be run, one that was not found. The same three are
-/// `timeout`'s ([`PROBE_LIMIT`]) and the shell's for the same failures.
-const NOT_STARTED: std::ops::RangeInclusive<i32> = 125..=127;
-
-/// Whether a container attempt that exited `code` ran its command: one a
-/// signal ended (no code) did.
-fn started(code: Option<i32>) -> bool {
-    code.is_none_or(|code| !NOT_STARTED.contains(&code))
-}
-
-/// Independent host attempts and a single lane of container attempts
-/// overlap, within the same total bound. Podman startups remain serial;
-/// results (including errors) remain in the original report order.
-fn in_order<R: Send>(
-    attempts: &[Attempt],
-    make: impl Fn(&Attempt) -> Result<R> + Sync,
-) -> Result<Vec<R>> {
-    let make = |attempt: &Attempt| crate::timed::stage("check", &attempt.id, || make(attempt));
-    let together: Vec<&Attempt> = attempts
-        .iter()
-        .filter(|attempt| attempt.kind != AttemptKind::RefusedInContainer)
-        .collect();
-    let containers: Vec<&Attempt> = attempts
-        .iter()
-        .filter(|attempt| attempt.kind == AttemptKind::RefusedInContainer)
-        .collect();
-    let (made, container_results) = std::thread::scope(|scope| {
-        let make = &make;
-        let lane = scope.spawn(|| {
-            containers
-                .iter()
-                .map(|attempt| make(attempt))
-                .collect::<Vec<_>>()
-        });
-        let host_limit = CONCURRENT_PROBES - usize::from(!containers.is_empty());
-        let made = concurrently_bounded(&together, host_limit, |attempt| make(attempt));
-        let container_results = lane
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (made, container_results)
-    });
-    let (mut made, mut container_results) = (made.into_iter(), container_results.into_iter());
-    attempts
-        .iter()
-        .map(|attempt| {
-            let result = match attempt.kind {
-                AttemptKind::RefusedInContainer => container_results.next(),
-                _ => made.next(),
-            };
-            result.context("an attempt of the batch was not made")?
-        })
-        .collect()
 }
 
 /// Whether the runner's user, this process, succeeds at `argv`.
@@ -653,13 +370,6 @@ pub(crate) fn runner_reaches(argv: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// `argv`, a control's, cut short after [`CONTROL_LIMIT`]: one that has
-/// not connected by then is only a note, while the refusal it stands
-/// beside keeps its own, longer timeout.
-fn bounded_control<'a>(argv: &[&'a str]) -> Vec<&'a str> {
-    [CONTROL_LIMIT, argv].concat()
-}
-
 /// What the runner's user, this process, prints running `argv`: empty
 /// when it could not be run.
 pub(crate) fn runner_stdout(argv: &[&str]) -> String {
@@ -667,58 +377,6 @@ pub(crate) fn runner_stdout(argv: &[&str]) -> String {
         .and_then(|mut command| Ok(command.stdin(std::process::Stdio::null()).output()?))
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttemptKind {
-    /// The runner's user tries, as a control: see
-    /// [`Checker::control_or_note`].
-    Control,
-    /// The sandbox user tries, and must not manage.
-    Refused,
-    /// The same from a rootless container, made beside the host attempts but one
-    /// at a time: podman's start (its storage lock, its pause process) is
-    /// what starts made together could fail at. A container that never
-    /// started, or whose command did not, is an `Err` rather than a
-    /// refusal that holds ([`started`]).
-    RefusedInContainer,
-}
-
-/// One of a batch of probes that do not depend on each other.
-#[derive(Debug)]
-struct Attempt {
-    kind: AttemptKind,
-    id: String,
-    what: String,
-    argv: Vec<String>,
-}
-
-impl Attempt {
-    fn control(id: impl Into<String>, what: impl Into<String>, argv: &[&str]) -> Self {
-        Self::new(AttemptKind::Control, id, what, argv)
-    }
-
-    fn refused(id: impl Into<String>, what: impl Into<String>, argv: &[&str]) -> Self {
-        Self::new(AttemptKind::Refused, id, what, argv)
-    }
-
-    fn refused_in_container(id: impl Into<String>, what: impl Into<String>, argv: &[&str]) -> Self {
-        Self::new(AttemptKind::RefusedInContainer, id, what, argv)
-    }
-
-    fn new(
-        kind: AttemptKind,
-        id: impl Into<String>,
-        what: impl Into<String>,
-        argv: &[&str],
-    ) -> Self {
-        Self {
-            kind,
-            id: id.into(),
-            what: what.into(),
-            argv: argv.iter().map(|&arg| arg.to_owned()).collect(),
-        }
-    }
 }
 
 /// `run` for each of `items`, at most [`CONCURRENT_PROBES`] at a time,
@@ -767,64 +425,9 @@ fn concurrently_bounded<T: Sync, R: Send>(
     results.into_iter().map(|(_, result)| result).collect()
 }
 
-const DIAGNOSTIC_BYTES: usize = 4096;
-
-fn bounded_stderr(stderr: &[u8]) -> String {
-    let text = String::from_utf8_lossy(&stderr[..stderr.len().min(DIAGNOSTIC_BYTES)]);
-    // Escape terminal/control characters, including newlines, so a subprocess
-    // cannot forge another probe result or a workflow command in the log.
-    let mut shown = crate::workflow_commands::escaped(
-        &text
-            .chars()
-            .flat_map(char::escape_default)
-            .collect::<String>(),
-    );
-    if stderr.len() > DIAGNOSTIC_BYTES {
-        shown.push_str(" [truncated]");
-    }
-    shown
-}
-
-#[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-
-    #[test]
-    fn stderr_is_bounded_and_escaped() {
-        for (input, expected) in [
-            (b"".as_slice(), ""),
-            (b"denied\n\x1b".as_slice(), "denied\\n\\u{1b}"),
-            (b"\xff".as_slice(), "\\u{fffd}"),
-            (
-                b"::add-mask::x ##[error]y".as_slice(),
-                ": :add-mask: :x ## [error]y",
-            ),
-        ] {
-            assert_eq!(bounded_stderr(input), expected);
-        }
-        assert_eq!(
-            bounded_stderr(&vec![b'x'; DIAGNOSTIC_BYTES]),
-            "x".repeat(DIAGNOSTIC_BYTES)
-        );
-        assert_eq!(
-            bounded_stderr(&vec![b'x'; DIAGNOSTIC_BYTES + 1]),
-            format!("{} [truncated]", "x".repeat(DIAGNOSTIC_BYTES))
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn byte_search() {
-        assert!(contains(b"A=1\0HOME=/home/agent\0", b"HOME=/home/agent"));
-        assert!(!contains(b"A=1\0", b"HOME="));
-        assert!(!contains(b"short", b"much longer than the text"));
-        // An empty needle must never read as "found".
-        assert!(!contains(b"anything", b""));
-    }
 
     #[test]
     fn a_report_fails_on_a_wrong_outcome_of_either_kind() {
@@ -841,59 +444,6 @@ mod tests {
             report.failures().into_iter().collect::<Vec<_>>(),
             ["cron", "cron-control"]
         );
-    }
-
-    #[test]
-    fn a_batch_fails_on_any_refusal_that_succeeded() {
-        let attempts = [
-            Attempt::control("tcp-control", "a:1", &["true"]),
-            Attempt::refused("tcp", "agent can't reach a:1", &["false"]),
-            Attempt::control("udp-control", "b:2", &["false"]),
-            Attempt::refused("udp", "agent can't reach b:2", &["false"]),
-        ];
-        let mut report = Report::default();
-        report
-            .attempts("runner", &attempts, &[true, false, false, false])
-            .unwrap();
-        assert!(report.passed());
-        // The control that failed is a note, not an outcome.
-        let ids: Vec<&str> = report.outcomes().iter().map(|o| o.id.as_str()).collect();
-        assert_eq!(ids, ["tcp-control", "tcp", "udp"]);
-        for (index, refusal) in [(1, "tcp"), (3, "udp")] {
-            let mut results = [true, false, false, false];
-            results[index] = true;
-            let mut report = Report::default();
-            report.attempts("runner", &attempts, &results).unwrap();
-            assert_eq!(report.failures().into_iter().collect::<Vec<_>>(), [refusal]);
-        }
-        // A result short or over is no report, not a partial one.
-        for results in [
-            &[true, false, false][..],
-            &[true, false, false, false, false],
-        ] {
-            let mut report = Report::default();
-            assert!(report.attempts("runner", &attempts, results).is_err());
-            assert!(report.outcomes().is_empty());
-        }
-    }
-
-    #[test]
-    fn a_container_that_did_not_start_refused_nothing() {
-        for (code, ran) in [
-            (Some(0), true),
-            (Some(1), true),
-            // curl's "could not connect" and `timeout`'s own limit.
-            (Some(7), true),
-            (Some(124), true),
-            // podman's error, a command it could not run or did not find.
-            (Some(125), false),
-            (Some(126), false),
-            (Some(127), false),
-            (Some(128), true),
-            (None, true),
-        ] {
-            assert_eq!(started(code), ran, "{code:?}");
-        }
     }
 
     #[test]
@@ -959,181 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn results_come_back_under_their_own_attempts() {
-        use AttemptKind::{Control, Refused, RefusedInContainer};
-        let attempt = |kind, id: &str| Attempt::new(kind, id, id, &[]);
-        let many: Vec<Attempt> = (0..CONCURRENT_PROBES + 2)
-            .flat_map(|n| {
-                [
-                    attempt(Refused, &format!("r{n}")),
-                    attempt(RefusedInContainer, &format!("c{n}")),
-                ]
-            })
-            .collect();
-        for attempts in [
-            vec![],
-            vec![attempt(Control, "a")],
-            vec![attempt(RefusedInContainer, "a")],
-            vec![
-                attempt(Control, "a"),
-                attempt(RefusedInContainer, "b"),
-                attempt(Refused, "c"),
-                attempt(RefusedInContainer, "d"),
-            ],
-            vec![
-                attempt(RefusedInContainer, "a"),
-                attempt(RefusedInContainer, "b"),
-                attempt(Control, "c"),
-                attempt(Refused, "d"),
-                attempt(Refused, "e"),
-            ],
-            many,
-        ] {
-            let made = std::sync::Mutex::new(Vec::new());
-            let results = in_order(&attempts, |attempt| {
-                made.lock().unwrap().push(attempt.kind);
-                Ok(attempt.id.clone())
-            })
-            .unwrap();
-            let ids: Vec<&str> = attempts.iter().map(|a| a.id.as_str()).collect();
-            assert_eq!(results, ids);
-            let made = made.into_inner().unwrap();
-            assert_eq!(made.len(), attempts.len());
-        }
-    }
-
-    #[test]
-    fn container_lane_overlaps_host_attempts_but_never_itself() {
-        use std::sync::{
-            Mutex,
-            atomic::{AtomicUsize, Ordering},
-            mpsc,
-        };
-        let (host_tx, host_rx) = mpsc::channel();
-        let (container_tx, container_rx) = mpsc::channel();
-        let (host_rx, container_rx) = (Mutex::new(host_rx), Mutex::new(container_rx));
-        let limit = std::time::Duration::from_secs(5);
-        let containers = AtomicUsize::new(0);
-        let attempts = [
-            Attempt::control("host", "host", &[]),
-            Attempt::refused_in_container("first", "first", &[]),
-            Attempt::refused_in_container("second", "second", &[]),
-        ];
-        let results = in_order(&attempts, |attempt| {
-            if attempt.kind == AttemptKind::RefusedInContainer {
-                assert_eq!(containers.fetch_add(1, Ordering::SeqCst), 0);
-            }
-            if attempt.id == "host" {
-                host_tx.send(()).unwrap();
-                container_rx.lock().unwrap().recv_timeout(limit).unwrap();
-            } else if attempt.id == "first" {
-                container_tx.send(()).unwrap();
-                host_rx.lock().unwrap().recv_timeout(limit).unwrap();
-            }
-            if attempt.kind == AttemptKind::RefusedInContainer {
-                assert_eq!(containers.fetch_sub(1, Ordering::SeqCst), 1);
-            }
-            Ok(attempt.id.clone())
-        })
-        .unwrap();
-        assert_eq!(results, ["host", "first", "second"]);
-    }
-
-    #[test]
-    fn competing_errors_keep_input_order_across_lanes() {
-        use std::sync::{Mutex, mpsc};
-
-        for (first, second) in [
-            (AttemptKind::Refused, AttemptKind::Refused),
-            (AttemptKind::Refused, AttemptKind::RefusedInContainer),
-            (AttemptKind::RefusedInContainer, AttemptKind::Refused),
-        ] {
-            let attempts = [
-                Attempt::new(first, "first", "first", &[]),
-                Attempt::new(second, "second", "second", &[]),
-                Attempt::control("last", "last", &[]),
-            ];
-            let (tx, rx) = mpsc::channel();
-            let rx = Mutex::new(rx);
-            let err = in_order(&attempts, |attempt| {
-                match attempt.id.as_str() {
-                    "first" => {
-                        rx.lock()
-                            .unwrap()
-                            .recv_timeout(std::time::Duration::from_secs(5))
-                            .unwrap();
-                        Err(anyhow::anyhow!("first error"))
-                    }
-                    "second" => {
-                        // Publish the later error before releasing the first.
-                        let result = Err(anyhow::anyhow!("second error"));
-                        tx.send(()).unwrap();
-                        result
-                    }
-                    _ => Ok(true),
-                }
-            })
-            .unwrap_err();
-            assert_eq!(err.to_string(), "first error", "{first:?} {second:?}");
-        }
-    }
-
-    #[test]
-    fn an_attempt_that_was_not_made_fails_the_batch() {
-        for kind in [
-            AttemptKind::Control,
-            AttemptKind::Refused,
-            AttemptKind::RefusedInContainer,
-        ] {
-            let attempts = [
-                Attempt::control("a", "a", &[]),
-                Attempt::new(kind, "b", "b", &[]),
-                Attempt::refused("c", "c", &[]),
-            ];
-            for failed in ["a", "b", "c"] {
-                let err = in_order(&attempts, |attempt| {
-                    ensure!(attempt.id != failed, "never entered {failed}");
-                    Ok(true)
-                })
-                .unwrap_err();
-                assert_eq!(err.to_string(), format!("never entered {failed}"));
-            }
-        }
-    }
-
-    #[test]
-    fn a_refusal_proves_its_session_got_in() {
-        for (stderr, got_in) in [
-            (b"".as_slice(), false),
-            (b"sudo: a password is required\n".as_slice(), false),
-            (b"agentic-job-sandbox-entered-not\n".as_slice(), false),
-            (b"agentic-job-sandbox-entered\n".as_slice(), true),
-            (
-                b"Running as unit run-u1.service\nagentic-job-sandbox-entered\ncurl: (7) refused\n"
-                    .as_slice(),
-                true,
-            ),
-        ] {
-            assert_eq!(entered(stderr), got_in, "{}", bounded_stderr(stderr));
-        }
-        // The script prints the line and then is the attempt, status and all.
-        for (argv, status) in [
-            (&["true"][..], Some(0)),
-            (&["false"][..], Some(1)),
-            (&["sh", "-c", "exit 7", "x y"][..], Some(7)),
-        ] {
-            let output = std::process::Command::new("sh")
-                .args(["-c", ENTER_SCRIPT, ENTERED])
-                .args(argv)
-                .output()
-                .unwrap();
-            assert!(entered(&output.stderr), "{argv:?}");
-            assert_eq!(output.status.code(), status, "{argv:?}");
-        }
-    }
-
-    #[test]
-    fn only_secure_hosts_check_spares_the_next_one_until_the_sandbox_is_entered() {
+    fn only_secure_hosts_check_spares_the_next_one_until_an_agent_runs() {
         use Mode::{Probe, Record, UnlessPassed};
         /// What the probes of a check come to: all pass, one fails, or
         /// they cannot be made.
@@ -1190,7 +566,7 @@ mod tests {
                 &[Check(Probe, Pass), Check(UnlessPassed, Fail)],
                 &[Probed, Probed],
             ),
-            // Entering the sandbox user, or another check, consumes it.
+            // Starting an agent, or another check, consumes it.
             (
                 true,
                 &[Check(Record, Pass), Enter, Check(UnlessPassed, Fail)],

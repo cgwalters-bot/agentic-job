@@ -20,9 +20,8 @@ the fail-closed readiness gate. Neither is supplied by these docs.
 
 The operator chose runner-only execution in
 [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989).
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) is still open;
-this checkout retains legacy two-user code. Do not use that code to work around
-runner-mode refusals. The [inventory](plan.md#runner-only-hardening-inventory-2026-11-05)
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed the
+second user. Do not reintroduce one to work around runner-mode refusals. The [inventory](plan.md#runner-only-hardening-inventory-2026-11-05)
 separates source behavior, caller migrations and missing deployment proof.
 
 ## What a broker provides

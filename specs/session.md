@@ -7,7 +7,7 @@
 below records the legacy bridge and future session work, not a supported
 runner-only deployment. [#536](https://github.com/cgwalters-forge/agentic-job/issues/536)
 and [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976) retain
-ownership; [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) is open.
+ownership; [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed the second user.
 
 **Legacy implementation status**: first slice built: the bridge, listening behind `tailscale serve`,
 and the conversation. The chat pane

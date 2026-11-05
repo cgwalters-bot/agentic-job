@@ -1,9 +1,11 @@
-//! `sandbox setup` refuses a machine that is not fresh, and has changed
-//! nothing when it does; and it takes an image's user it is told to.
+//! `sandbox setup` refuses what it cannot do as asked, and has changed
+//! nothing when it does: the removed sandbox user's keys
+//! (agentic-job#2989), a setup script, and a host whose world-write
+//! policy is not loaded.
 //!
-//! This adds and removes users as root through sudo: it is for a machine
-//! that is thrown away, BEFORE `sandbox setup` has run there. CI's
-//! `sandbox` job runs it:
+//! This runs setup as root through sudo: it is for a machine that is
+//! thrown away, BEFORE `sandbox setup` has run there. CI's `sandbox` job
+//! runs it:
 //!
 //! ```text
 //! cargo test --test sandbox_fresh -- --ignored --nocapture
@@ -20,26 +22,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 /// What setup makes first, and so must not exist after a refusal.
 const CONFIG_DIR: &str = "/etc/agentic-job";
 
-const EXISTING_USER: &str = "aj-test-existing";
-
-/// An image's user, as `sandbox.allow-existing-user` is for.
-const IMAGE_USER: &str = "aj-test-image";
-
-const LEFTOVER_HOME: &str = "/home/aj-test-leftover";
+/// The second user's name before agentic-job#2989.
+const REMOVED_USER: &str = "runner-sandbox";
 
 /// What `exit::ERROR` is.
 const ERROR: i32 = 2;
-
-fn root(argv: &[&str]) {
-    let status = Command::new("sudo")
-        .arg("-n")
-        .arg("--")
-        .args(argv)
-        .stdin(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "sudo {argv:?} failed");
-}
 
 /// Runs `sandbox setup` with `config` as root; its exit code and what it
 /// wrote to standard error.
@@ -59,49 +46,36 @@ fn setup(config: &str) -> (Option<i32>, String) {
 }
 
 #[test]
-#[ignore = "adds users as root; CI's sandbox job runs it before `sandbox setup`"]
-fn setup_refuses_a_machine_that_is_not_fresh() {
+#[ignore = "runs setup as root; CI's sandbox job runs it before `sandbox setup`"]
+fn setup_refuses_what_it_cannot_do_and_changes_nothing() {
     assert!(
         !Path::new(CONFIG_DIR).exists(),
         "`sandbox setup` already ran here"
     );
     // A fresh host that loaded the policy would be set up by the last case.
-    root(&["test", "!", "-e", "/sys/fs/bpf/agentic-job-world-write"]);
-    root(&["useradd", "--create-home", EXISTING_USER]);
-    root(&["usermod", "-aG", "adm", EXISTING_USER]);
-    root(&["useradd", "--create-home", IMAGE_USER]);
-    root(&["mkdir", LEFTOVER_HOME]);
+    let loaded = Command::new("sudo")
+        .args([
+            "-n",
+            "--",
+            "test",
+            "-e",
+            "/sys/fs/bpf/agentic-job-world-write",
+        ])
+        .status()
+        .unwrap();
+    assert!(!loaded.success(), "the world-write policy is loaded here");
 
     // The configuration, and what the refusal must say.
+    let removed = "was removed with the sandbox user (agentic-job#2989)";
     let cases = [
-        (
-            format!("[sandbox]\nuser = \"{EXISTING_USER}\"\n"),
-            "already exists",
-        ),
-        // The image's user, in a group the configuration could not give it.
-        (
-            format!("[sandbox]\nuser = \"{EXISTING_USER}\"\nallow-existing-user = true\n"),
-            "is in adm",
-        ),
-        (
-            "[sandbox]\nuser = \"aj-test-leftover\"\n".to_owned(),
-            "something left it there",
-        ),
-        (
-            "[sandbox]\nuser = \"aj-test-new\"\ngroups = [\"no-such-group\"]\n".to_owned(),
-            "no group no-such-group",
-        ),
-        // The image's user, taken: setup goes on to the next refusal.
-        (
-            format!("[sandbox]\nuser = \"{IMAGE_USER}\"\nallow-existing-user = true\n"),
-            "the world-write policy is not loaded",
-        ),
+        ("[sandbox]\ncreate-user = true\n", removed),
+        ("[sandbox]\ncreate-user = false\n", removed),
+        ("[sandbox]\nuser = \"aj-test-new\"\n", removed),
+        ("[sandbox]\ngroups = [\"kvm\"]\n", removed),
+        ("[setup]\nscript = \"/bin/true\"\n", "setup runs no script"),
         // Fresh, but the world-write policy is not loaded yet: CI runs
         // this before its loader.
-        (
-            "[sandbox]\nuser = \"aj-test-new\"\ngroups = []\n".to_owned(),
-            "the world-write policy is not loaded",
-        ),
+        ("", "the world-write policy is not loaded"),
     ];
     let wrong: Vec<String> = cases
         .iter()
@@ -113,9 +87,11 @@ fn setup_refuses_a_machine_that_is_not_fresh() {
                 .then(|| format!("{config:?}: exit {code:?}, untouched {untouched}: {stderr}"))
         })
         .collect();
-
-    root(&["userdel", "--remove", EXISTING_USER]);
-    root(&["userdel", "--remove", IMAGE_USER]);
-    root(&["rmdir", LEFTOVER_HOME]);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    let made = Command::new("id")
+        .args(["-u", "--", REMOVED_USER])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!made.success(), "a refused setup made {REMOVED_USER}");
 }

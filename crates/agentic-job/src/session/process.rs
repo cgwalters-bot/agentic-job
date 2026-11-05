@@ -1,11 +1,11 @@
 //! The agent's process: started with its standard streams on sockets, and
 //! ended with everything it left behind.
 //!
-//! The session is not a sandbox. The only boundary between it and the
-//! agent is the wrapper command of [`Launch`], which `run` sets to enter
-//! the sandbox user's login session with `run0`. Without a wrapper the
-//! agent runs as the caller's user and inherits its environment, which is
-//! only fit for tests.
+//! The session is not a sandbox. The agent is the caller's own user
+//! (agentic-job#2989); the wrapper command of [`Launch`], which `run`
+//! sets to `env -i`, keeps the caller's environment from it. Without a
+//! wrapper the agent inherits that environment, which is only fit for
+//! tests.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -13,19 +13,16 @@ use std::os::fd::OwnedFd;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
-use crate::sandbox::root::Root;
-
 /// How long a killed process gets to be gone.
 const KILL_GRACE: Duration = Duration::from_secs(10);
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(2);
 const DIAGNOSTIC_BYTES: u64 = 8192;
-const ROOT_UID: u32 = 0;
 /// The state of a zombie in `/proc/PID/stat`.
 const ZOMBIE: &str = "Z";
 /// Variables of this process that nothing it starts may inherit: what
@@ -52,21 +49,10 @@ pub enum Launch {
     /// As the caller's user, with its environment: for tests.
     #[default]
     Direct,
-    /// As another user, which a wrapper command switches to.
-    Sandbox {
-        /// The user the agent runs as. When the session ends, every
-        /// process of this user is killed: a wrapper such as `run0`
-        /// starts the agent in a session of its own, out of reach of a
-        /// signal to the process group started here.
-        user: String,
-        /// The command that runs the agent's argv as that user, such as
-        /// `sudo run0 --pipe --user=... --`.
-        wrapper: Vec<String>,
-    },
     /// As the caller's own user, through a wrapper that clears its
-    /// environment (`env -i`): for a job that is the unit of trust, with
-    /// no second user. Only the agent's process group is killed when the
-    /// session ends: every process of the user would be the caller too.
+    /// environment (`env -i`): the job is the unit of trust. Only the
+    /// agent's process group is killed when the session ends: every
+    /// process of the user would be the caller too.
     Own {
         /// The command that runs the agent's argv, such as `env -i HOME=... --`.
         wrapper: Vec<String>,
@@ -77,7 +63,7 @@ impl Launch {
     pub(super) fn wrapper(&self) -> &[String] {
         match self {
             Self::Direct => &[],
-            Self::Sandbox { wrapper, .. } | Self::Own { wrapper } => wrapper,
+            Self::Own { wrapper } => wrapper,
         }
     }
 }
@@ -97,7 +83,7 @@ pub fn is_inherited_setting(name: &OsStr) -> bool {
 }
 
 /// The variables of this process that a command it starts must not get.
-/// A wrapper such as `run0` passes none of them on anyway; this holds
+/// A wrapper such as `env -i` passes none of them on anyway; this holds
 /// for the wrapper itself, and for an agent started without one.
 pub fn inherited_settings() -> impl Iterator<Item = OsString> {
     std::env::vars_os()
@@ -129,11 +115,9 @@ fn socket_pair() -> std::io::Result<(UnixStream, OwnedFd)> {
 /// Starts ARGV with ENV added to its environment, in a process group of
 /// its own.
 ///
-/// Its standard streams are sockets, not pipes: `run0 --pipe` hands them
-/// to PID 1 over D-Bus, and under SELinux PID 1 may not read a pipe made
-/// by a service such as a CI runner, so with pipes run0 fails with
-/// "Connection reset by peer". The old tree put a Node script between
-/// the two for this.
+/// Its standard streams are sockets, not pipes, as they were for `run0
+/// --pipe`, which handed them to PID 1 over D-Bus when the agent was a
+/// second user; agents and their tests have relied on that since.
 pub(super) fn spawn(argv: &[String], env: &BTreeMap<String, String>) -> Result<(Agent, Streams)> {
     let (program, args) = argv.split_first().context("the agent's command is empty")?;
     let (stdin, child_stdin) = socket_pair().context("creating a socket pair")?;
@@ -173,11 +157,8 @@ pub(super) fn spawn(argv: &[String], env: &BTreeMap<String, String>) -> Result<(
 }
 
 impl Agent {
-    pub fn diagnostics(&self, sandbox: Option<&SandboxUser>) -> Diagnostics {
-        Diagnostics {
-            group: self.group,
-            uid: sandbox.map(|s| s.uid),
-        }
+    pub fn diagnostics(&self) -> Diagnostics {
+        Diagnostics { group: self.group }
     }
 
     /// Waits for the process to exit.
@@ -210,12 +191,11 @@ impl Agent {
 /// Process selectors copied before the agent is borrowed by the protocol driver.
 pub(super) struct Diagnostics {
     group: Option<Pid>,
-    uid: Option<u32>,
 }
 
 impl Diagnostics {
-    /// Capture the launcher, its children and, with run0, the sandbox user's processes.
-    /// Bound both the diagnostic output and time before killing the session.
+    /// Capture the launcher and its children. Bound both the diagnostic
+    /// output and time before killing the session.
     pub async fn state(&self) -> String {
         let Some(group) = self.group else {
             return "agent process state: no process group".to_owned();
@@ -230,9 +210,6 @@ impl Diagnostics {
             "--ppid",
             &pid,
         ]);
-        if let Some(uid) = self.uid {
-            command.args(["-u", &uid.to_string()]);
-        }
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -256,59 +233,6 @@ impl Diagnostics {
             Ok(Err(error)) => format!("agent process state unavailable: {error:#}"),
             Err(_) => "agent process state unavailable: ps timed out".to_owned(),
         }
-    }
-}
-
-/// The user the agent runs as, known to exist and to be safe to stop.
-///
-/// The session stops it when [`super::run`] returns. A caller that drops
-/// that future, or is told to stop while it runs, stops the user itself
-/// with [`SandboxUser::reap`].
-pub struct SandboxUser {
-    name: String,
-    uid: u32,
-    root: Root,
-}
-
-impl SandboxUser {
-    /// Looks NAME up, and refuses a user whose processes must not all be
-    /// killed: root, and the one this process runs as. ROOT is how the
-    /// stopping, which is root's to do, is had.
-    pub async fn find(name: &str, root: Root) -> Result<Self> {
-        let uid: u32 = Command::new("id")
-            .args(["-u", "--", name])
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .ok()
-            .filter(|out| out.status.success())
-            .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse().ok())
-            .with_context(|| format!("there is no sandbox user {name}"))?;
-        let own = rustix::process::geteuid();
-        ensure!(
-            uid != ROOT_UID && uid != own.as_raw(),
-            "{name} (uid {uid}) cannot be the sandbox user: the session ends by killing every \
-             process of that user"
-        );
-        Ok(Self {
-            name: name.to_owned(),
-            uid,
-            root,
-        })
-    }
-
-    /// Stops everything the user is running, and makes sure of it: its
-    /// sessions, its slice, a lingering manager, and stray processes of
-    /// its uid (`sandbox::helper::reap` says how). By uid throughout, the one
-    /// `find` checked: a name could come to mean another user between
-    /// the check and the kill. On a thread: the sequence blocks on each
-    /// command, and a signal here must not leave it half done.
-    pub async fn reap(&self) -> Result<()> {
-        let (uid, root, name) = (self.uid, self.root, self.name.clone());
-        tokio::task::spawn_blocking(move || root.reap(uid))
-            .await
-            .context("stopping the sandbox user")?
-            .with_context(|| format!("stopping {name}"))
     }
 }
 
@@ -341,8 +265,8 @@ mod tests {
         ["sh", "-c", script].map(str::to_owned).to_vec()
     }
 
-    /// What run0 needs of the streams it is handed, and that they carry
-    /// data both ways with the environment set.
+    /// The streams are sockets, and carry data both ways with the
+    /// environment set.
     #[tokio::test]
     async fn streams_are_sockets() {
         let script = "test -S /dev/stdin && test -S /dev/stdout && test -S /dev/stderr \
@@ -412,28 +336,5 @@ mod tests {
     #[test]
     fn an_empty_command_is_refused() {
         assert!(spawn(&[], &BTreeMap::new()).is_err());
-    }
-
-    /// Killing every process of the sandbox user must never mean this
-    /// one's, or root's.
-    #[tokio::test]
-    async fn sandbox_users_that_are_refused() {
-        let own = std::process::Command::new("id")
-            .arg("-un")
-            .output()
-            .unwrap();
-        let own = String::from_utf8(own.stdout).unwrap();
-        let cases = [
-            ("no-such-user-agentic-job", "no sandbox user"),
-            ("--help", "no sandbox user"),
-            ("root", "cannot be the sandbox user"),
-            (own.trim(), "cannot be the sandbox user"),
-        ];
-        for (name, want) in cases {
-            let Err(err) = SandboxUser::find(name, Root::Sudo).await else {
-                panic!("{name} was taken as a sandbox user");
-            };
-            assert!(format!("{err:#}").contains(want), "{name}: {err:#}");
-        }
     }
 }

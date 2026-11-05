@@ -2,7 +2,7 @@
 //! held to docs/private-repositories.md: what its bounds admit, that check
 //! keeps it to one comment on its item, that its egress policy is one a
 //! private run takes, and that its workflow composes the private path of
-//! policy.yml and a sandbox-user agent job, not agentic-job.yml.
+//! policy.yml and an agent job of its own, not agentic-job.yml.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -535,9 +535,9 @@ fn the_configuration_keeps_the_agent_behind_the_allowlist() {
 }
 
 /// The workflow is inert here, calls policy.yml, check.yml and apply.yml
-/// at a placeholder commit with the private path's settings, and runs the
-/// agent as the sandbox user, admitting only a private policy for the
-/// calling repository.
+/// at a placeholder commit with the private path's settings, and admits
+/// only a private policy for the calling repository; its agent, the
+/// runner's user, is refused the private target.
 #[test]
 fn the_workflow_composes_the_private_path() {
     let path = format!("{DIR}/workflow.yml");
@@ -603,8 +603,14 @@ fn the_workflow_composes_the_private_path() {
     let steps = jobs["agent"]["steps"].as_vec().unwrap();
     let run = steps.last().unwrap();
     assert_eq!(run["uses"].as_str(), Some("./.agentic-job-source/run"));
-    assert_eq!(run["with"]["agent-user"].as_str(), Some("sandbox"));
-    assert!(run["with"]["runner-home"].is_badvalue());
+    // The runner's user, which `run` refuses for a private target since
+    // the sandbox user was removed (agentic-job#2989).
+    assert!(run["with"]["agent-user"].is_badvalue());
+    assert_eq!(
+        run["with"]["runner-home"].as_str(),
+        Some("${{ runner.temp }}/agent-home")
+    );
+    assert!(text.contains("`run` refuses a private target"));
     assert_eq!(
         run["with"]["github-token"].as_str(),
         Some("${{ github.token }}")

@@ -3,14 +3,9 @@
 //! What a configuration is refused for needs nothing but the binary.
 //! The rest runs the fake agent against the mock inference proxy
 //! (`support`) and a repository on this machine, as this user with
-//! `--runner-home`, the run action's default, so they always run.
-//!
-//! What only a second user has (`register = "api-key"` and `[mcp]`,
-//! which `--runner-home` refuses) needs `AGENTIC_JOB_TEST_SANDBOX_USER`:
-//! a user this one can become with `sudo run0`, with `fake-agent` on its
-//! PATH. Without it those tests pass without having run, as in
-//! `session.rs`. CI sets it nowhere: its `e2e-sandbox` job runs the
-//! sandbox user with neither.
+//! `--runner-home`, which every run needs since the sandbox user was
+//! removed (agentic-job#2989), so they always run. What only a second
+//! user had (`register = "api-key"` and `[mcp]`) is refused.
 //!
 //! With `GH_AW_JS`, the directory of gh-aw's scripts, the test that
 //! chains `run` and `check` puts gh-aw's own collector between them, as
@@ -25,18 +20,14 @@ mod support;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use agentic_job::config::Provider;
 use agentic_job::policy::{Kind, Policy, SafeOutputs};
-use agentic_job::run::api_key::API_KEY_VAR;
 use agentic_job::run::mcp::TOKEN_VAR as MCP_TOKEN_VAR;
 use serde_json::{Value, json};
-use support::{Fault, MockProvider, Proxy, key};
+use support::{Fault, Proxy};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
-const SANDBOX_USER_VAR: &str = "AGENTIC_JOB_TEST_SANDBOX_USER";
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_ERROR: i32 = 2;
@@ -66,15 +57,6 @@ const HOME_DIR: &str = "home";
 /// of the agent's home it puts it in.
 const GITHUB_TOKEN_VAR: &str = "GH_TOKEN";
 const GITHUB_TOKEN_FILE: &str = ".config/agentic-job/github-token";
-
-/// The sandbox user is one, and ending a run kills every process of it:
-/// the tests that use it take turns.
-static SANDBOX: Mutex<()> = Mutex::new(());
-
-fn sandbox_user() -> Option<(String, MutexGuard<'static, ()>)> {
-    let user = std::env::var(SANDBOX_USER_VAR).ok()?;
-    Some((user, SANDBOX.lock().unwrap_or_else(|e| e.into_inner())))
-}
 
 fn sh(script: &str) -> String {
     let out = Command::new("sh").args(["-c", script]).output().unwrap();
@@ -149,14 +131,6 @@ impl Job {
 
     /// A repository to clone, which the sandbox user owns: git refuses
     /// to serve one of another user's.
-    fn repository(&self, user: &str) {
-        self.own_repository();
-        sh(&format!(
-            "sudo -n chown -R {user}: {repo}",
-            repo = self.path("repo").display()
-        ));
-    }
-
     /// A repository to clone, which this user owns: for a run whose
     /// agent is this user too.
     fn own_repository(&self) {
@@ -318,8 +292,8 @@ impl Finished {
     }
 }
 
-fn config(user: &str, inference: &str) -> String {
-    format!("[sandbox]\nuser = \"{user}\"\n[agent]\nname = \"fake\"\n{LIMITS}{inference}")
+fn config(inference: &str) -> String {
+    format!("[agent]\nname = \"fake\"\n{LIMITS}{inference}")
 }
 
 /// A configuration for a run whose agent is this user: the fake agent
@@ -372,15 +346,6 @@ fn canary() -> Value {
 /// The string that step prints.
 fn canary_text() -> String {
     format!("gh{}_FAKEREDACTIONCANARY0123456789abcdef", "p")
-}
-
-/// What the sandbox user is still running.
-fn processes_of(user: &str) -> String {
-    let out = Command::new("pgrep")
-        .args(["-l", "-u", user])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 /// What is still running in DIR or below it: for a run whose agent is
@@ -479,7 +444,7 @@ fn review_refuses_invalid_policy_and_heads_before_starting_or_spending() {
         policy["kind"] = json!(kind);
         job.write("policy.json", &policy.to_string());
         let got = Finished::of(
-            job.command(&config("no-such-user", &plain(&proxy)))
+            job.command(&config(&plain(&proxy)))
                 .args(["--review-head", &head])
                 .output()
                 .unwrap(),
@@ -501,7 +466,7 @@ fn review_refuses_invalid_policy_and_heads_before_starting_or_spending() {
         policy["kind"] = json!("analysis");
         job.write("policy.json", &policy.to_string());
         job.write("history.json", history);
-        let mut command = job.command(&config("no-such-user", &plain(&proxy)));
+        let mut command = job.command(&config(&plain(&proxy)));
         command
             .arg("--review-history")
             .arg(job.path("history.json"));
@@ -738,10 +703,10 @@ fn a_run_from_clone_to_the_end_of_its_run() {
     assert!(!job.path("out/safe-outputs").exists());
 }
 
-/// With `--runner-home` there is no sandbox user: the fake agent runs as
-/// this user, with that home and only the variables a run gives it, and
-/// the run ends as it does with one. It needs no other user, so it
-/// always runs. What would need one is refused before anything starts.
+/// The fake agent runs as this user, with the home `--runner-home`
+/// gives and only the variables a run gives it. What would need a second
+/// user is refused before anything starts, and so is a run without the
+/// home.
 #[test]
 fn a_run_as_its_own_user_in_the_home_given() {
     let proxy = Proxy::start();
@@ -791,11 +756,48 @@ fn a_run_as_its_own_user_in_the_home_given() {
     let got = Finished::of(command.output().unwrap());
     assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
     assert!(
-        got.stderr.contains("--runner-home") && got.stderr.contains("id-token"),
+        got.stderr.contains("needs a second user") && got.stderr.contains("id-token"),
         "{}",
         got.all()
     );
     assert!(!job.path("home").exists());
+
+    // Without the home: there is no other user to run the agent as.
+    let job = Job::new("own-no-home");
+    let got = job.run(&config);
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains("--runner-home is required") && got.stderr.contains("#2989"),
+        "{}",
+        got.all()
+    );
+
+    // What only a second user kept from the agent: a provider's key, an
+    // MCP server's credential.
+    for (name, refused, names) in [
+        (
+            "own-api-key-refused",
+            own_config(
+                "[inference]\nurl = \"https://api.example\"\nregister = \"api-key\"\n\
+                 provider = \"anthropic\"\n",
+            ),
+            "api-key",
+        ),
+        (
+            "own-mcp-refused",
+            format!(
+                "{config}[mcp.tracker]\nurl = \"https://mcp.example/mcp\"\nsecret = \"MCP_TOKEN\"\n\
+                 allowed = [\"search\"]\n"
+            ),
+            "[mcp]",
+        ),
+    ] {
+        let job = Job::new(name);
+        let got = job.own_run(&refused);
+        assert_ne!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+        assert!(got.stderr.contains(names), "{name}: {}", got.all());
+        assert!(!job.path("home").exists(), "{name}");
+    }
 
     // Asked for by the configuration: the child's daemon would outlive
     // the agent's session, with nothing to end it.
@@ -804,7 +806,7 @@ fn a_run_as_its_own_user_in_the_home_given() {
     let got = job.own_run(&config);
     assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
     assert!(
-        got.stderr.contains("--runner-home") && got.stderr.contains("[child-agent]"),
+        got.stderr.contains("needs a second user") && got.stderr.contains("[child-agent]"),
         "{}",
         got.all()
     );
@@ -833,7 +835,7 @@ fn documented_mcp_config_is_refused_before_runner_launch() {
     );
     assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
     assert!(
-        got.stderr.contains("--runner-home") && got.stderr.contains("an [mcp] server"),
+        got.stderr.contains("needs a second user") && got.stderr.contains("an [mcp] server"),
         "{}",
         got.all()
     );
@@ -886,135 +888,6 @@ fn the_reason_a_change_was_dropped_is_redacted_in_the_job_log() {
     let error = summary["patch"]["error"].as_str().unwrap();
     assert!(error.contains("[REDACTED]"), "{summary:#}");
     assert!(!error.contains(&canary_text()), "{summary:#}");
-}
-
-/// `register = "api-key"`: the key is checked with the provider, the
-/// probe that no process of the sandbox user's holds it passes, and it
-/// is in nothing the run wrote or said. Without a key the run does not
-/// start, and says which variable it wanted.
-#[test]
-fn a_run_with_an_api_key_hands_the_sandbox_no_key() {
-    let Some((user, _turn)) = sandbox_user() else {
-        return;
-    };
-    // GitHub billing takes the same way, with a GitHub token as the key.
-    let github = MockProvider::start(Provider::Github);
-    let job = Job::new("github");
-    job.repository(&user);
-    let got = Finished::of(
-        job.command(&config(&user, &api_key(&github, Provider::Github)))
-            .env(API_KEY_VAR, key())
-            .output()
-            .unwrap(),
-    );
-    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
-    assert_eq!(github.seen()[0].target, "/models");
-    assert!(!got.all().contains(&key()), "{}", got.all());
-    for (path, content) in job.written() {
-        assert!(!contains(&content, &key()), "{path}");
-    }
-    // Nor does the agent get it as its GitHub token.
-    let job = Job::new("shared");
-    job.repository(&user);
-    let got = Finished::of(
-        job.command(&config(&user, &api_key(&github, Provider::Github)))
-            .env(API_KEY_VAR, key())
-            .env("GH_TOKEN", key())
-            .output()
-            .unwrap(),
-    );
-    assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
-    assert!(got.stderr.contains("github-reads: false"), "{}", got.all());
-    assert_eq!(github.seen().len(), 1);
-
-    let provider = MockProvider::start(Provider::Anthropic);
-    let inference = api_key(&provider, Provider::Anthropic);
-    let job = Job::new("apikey");
-    job.repository(&user);
-    let got = Finished::of(
-        job.command(&config(&user, &inference))
-            .env(API_KEY_VAR, key())
-            .output()
-            .unwrap(),
-    );
-    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
-    assert!(
-        got.stderr.contains("ok: [api-key-processes] no process")
-            && got.stderr.contains("has the provider's API key"),
-        "{}",
-        got.all()
-    );
-    assert_eq!(provider.seen()[0].target, "/v1/models");
-    let inference = job.json("out/work/inference.json");
-    assert_eq!(inference["register"], "api-key");
-    assert_eq!(inference["ended"], true);
-    assert_eq!(inference["usage"]["state"], "ended");
-    assert!(!got.all().contains(&key()), "{}", got.all());
-    for (path, content) in job.written() {
-        assert!(!contains(&content, &key()), "{path}");
-    }
-    assert_eq!(processes_of(&user), "");
-
-    let job = Job::new("nokey");
-    job.repository(&user);
-    let got = Finished::of(
-        job.command(&config(&user, &api_key(&provider, Provider::Anthropic)))
-            .env_remove(API_KEY_VAR)
-            .output()
-            .unwrap(),
-    );
-    assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
-    assert!(got.stderr.contains(API_KEY_VAR), "{}", got.all());
-    assert_eq!(provider.seen().len(), 1);
-}
-
-/// `[mcp.NAME]`: without its credential, or with one no server takes,
-/// the run does not start, and says which variable it wanted.
-#[test]
-fn a_run_with_an_mcp_server_needs_its_credential() {
-    let Some((user, _turn)) = sandbox_user() else {
-        return;
-    };
-    // Nothing listens there: the check before the run cannot reach it.
-    let gone = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let mcp = format!(
-        "[mcp.tracker]\nurl = \"https://{gone}/mcp\"\nsecret = \"MCP_TOKEN\"\nallowed = [\"search\"]\n"
-    );
-    let credential = format!("{}-{}", "test-mcp-not-secret", "0123456789abcdef");
-    let proxy = Proxy::start();
-    for (name, given, want) in [
-        ("nomcp", None, MCP_TOKEN_VAR),
-        (
-            "mcpgone",
-            Some(credential.as_str()),
-            "cannot reach the MCP server tracker",
-        ),
-    ] {
-        let job = Job::new(name);
-        job.repository(&user);
-        let mut command = job.command(&format!("{}{mcp}", config(&user, &plain(&proxy))));
-        match given {
-            Some(credential) => command.env(MCP_TOKEN_VAR, credential),
-            None => command.env_remove(MCP_TOKEN_VAR),
-        };
-        let got = Finished::of(command.output().unwrap());
-        assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
-        assert!(got.stderr.contains(want), "{}", got.all());
-        assert!(!got.all().contains(&credential), "{}", got.all());
-    }
-    // Refused before the run was registered.
-    assert!(proxy.requests().is_empty());
-}
-
-fn api_key(mock: &MockProvider, provider: Provider) -> String {
-    format!(
-        "[inference]\nurl = \"{}\"\nregister = \"api-key\"\nprovider = \"{}\"\n",
-        mock.url,
-        provider.as_str()
-    )
 }
 
 /// What check.yml's collector makes of the requests of a hand-back.

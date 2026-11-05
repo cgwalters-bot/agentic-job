@@ -61,10 +61,10 @@ separate jobs on separate machines. The apply job's additional checks are
    read-only permissions, no `id-token`, no secret but the run token.
    `run` refuses what would need a second user there: `api-key`, an MCP
    server, a private target, a session, fronting and a child agent.
-   `agent-user: sandbox` remains in this checkout but is superseded by
-   [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
-   do not use it to bypass these refusals. [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
-   is still open as of 5 November 2026. See the
+   `agent-user: sandbox`, superseded by
+   [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989),
+   was removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
+   and is refused. See the
    [migration inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
 3. **check**, on a machine the agent never touched. `agentic-job collect`
    validates and sanitizes the producer's requests, as gh-aw's collector

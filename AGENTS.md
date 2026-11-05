@@ -58,10 +58,8 @@ are in [ci.yml](.github/workflows/ci.yml) and [build.yml](.github/workflows/buil
 Do not run destructive host setup, ignored `sandbox_fresh`/`sandbox_host` tests,
 or secure-host examples inside an existing sandbox: they change users, sudo,
 services and firewall rules. CI uses fresh Ubuntu 26.04 machines with root and
-systemd/run0; sandbox probes took 27 minutes unsharded and are now four shards
-with 30-minute job limits. `AGENTIC_JOB_TEST_SANDBOX_USER` needs a second user,
-sudo/run0 and an installed fake agent; do not enable it here. CI covers the
-sandbox user through the `e2e-sandbox` reusable-workflow job instead.
+systemd; its `sandbox` job has a 30-minute limit. There is no second user to
+test as: the runner's user is the only agent user (#2989).
 
 Corpus/parity tests need the pinned external old-tree and gh-aw checkouts;
 validation regeneration needs gh-aw's compiled workflows. Release-pin checks
@@ -114,8 +112,9 @@ Explain security consequences whenever touching workflows, action pins,
 permissions, token placement, caller bounds or check code. Preserve the
 [job/token separation](docs/workflow.md) and [safe-output contract](docs/safe-outputs.md):
 `policy` and `check` have read-only repository access; `agent` has read access
-and OIDC permission, but the sandbox user has at most a read-only forge token
-and never the OIDC request credential. Only `apply` consumes `SAFE_OUTPUTS_PAT`,
+and OIDC permission, but the agent, the runner's user, has at most a read-only
+forge token and never the OIDC request credential, beside which `run` refuses
+to start. Only `apply` consumes `SAFE_OUTPUTS_PAT`,
 explicitly passed even for an environment secret. If empty it falls back to
 the job token, whether or not an apply environment is configured.
 `activate`, `notify` and `conclude` inherit caller permissions and can write
@@ -132,7 +131,7 @@ all under the agentic-job crate unless a root path is given, all of
 limits, no-follow regular-file reads and fail-closed refusals intact.
 See the host's [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md)
 and [probe coverage](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md),
-and the agent's [sandbox user](docs/sandbox.md) and [token probes](docs/sandbox-check.md).
+and the agent's [host](docs/sandbox.md) and [check](docs/sandbox-check.md).
 
 Do not edit generated `safe-outputs/validation.json` by hand or vendor gh-aw;
 use its generator against the pinned source when updating it. Do not weaken

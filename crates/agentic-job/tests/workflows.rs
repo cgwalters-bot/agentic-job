@@ -956,18 +956,17 @@ fn run_requires_locked_host_and_consistent_user_before_probing() {
             .unwrap();
         assert_eq!(result.status.success(), ok, "{sandbox}: {result:?}");
     }
+    // The sandbox user went with agentic-job#2989, home or not.
+    let removed = "agent-user sandbox was removed with the sandbox user (agentic-job#2989): drop \
+                   the input, the runner is the only agent user";
     for (user, home, message) in [
         ("runner", "", "agent-user runner requires runner-home"),
-        (
-            "sandbox",
-            "/tmp/home",
-            "agent-user sandbox takes no runner-home",
-        ),
-        ("", "/tmp/home", "agent-user must be runner or sandbox"),
-        ("root", "", "agent-user must be runner or sandbox"),
-        ("runner/home", "", "agent-user must be runner or sandbox"),
+        ("sandbox", "/tmp/home", removed),
+        ("sandbox", "", removed),
+        ("", "/tmp/home", "agent-user must be runner"),
+        ("root", "", "agent-user must be runner"),
+        ("runner/home", "", "agent-user must be runner"),
         ("runner", "/tmp/home", ""),
-        ("sandbox", "", ""),
     ] {
         let dir = tempfile::tempdir().unwrap();
         executable(
@@ -1003,22 +1002,6 @@ fn run_requires_locked_host_and_consistent_user_before_probing() {
             message.is_empty()
         );
     }
-    let dir = tempfile::tempdir().unwrap();
-    let result = run_step(
-        "run/action.yml",
-        "Install the built-in scripted session",
-        dir.path(),
-        &[
-            ("AGENT_USER", "sandbox"),
-            ("PROFILE", "comment"),
-            ("RUNNER_HOME", ""),
-        ],
-    );
-    assert_eq!(result.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8_lossy(&result.stdout),
-        "::error::fake-profile requires agent-user runner\n"
-    );
     assert_eq!(
         doc["inputs"]["agent-user"]["default"].as_str(),
         Some("runner")
@@ -1424,71 +1407,35 @@ fn runner_admission_precedes_setup_and_setup_is_isolated() {
     std::fs::create_dir(dir.path().join(".agentic-job")).unwrap();
     let home = dir.path().join("agent-home");
     let config = dir.path().join(".agentic-job/config.toml");
-    for (caller, policy, text, runner, sandbox) in [
-        ("false", "{}", "", true, true),
-        ("false", r#"{"private":false}"#, "", true, true),
-        ("false", "{}", "[egress]\nwrite-policy = true\n", true, true),
-        ("true", "{}", "", false, false),
-        ("null", "{}", "", false, false),
-        ("false", r#"{"private":true}"#, "", false, false),
-        (
-            "true",
-            "{}",
-            "[egress]\nwrite-policy = true\n",
-            false,
-            false,
-        ),
-        (
-            "null",
-            "{}",
-            "[egress]\nwrite-policy = true\n",
-            false,
-            false,
-        ),
-        (
-            "true",
-            r#"{"private":true}"#,
-            "[egress]\nwrite-policy = true\n",
-            false,
-            false,
-        ),
-        (
-            "false",
-            r#"{"private":true}"#,
-            "[egress]\nwrite-policy = true\n",
-            false,
-            false,
-        ),
-        (
-            "false",
-            "{}",
-            "[inference]\nregister = 'api-key'",
-            false,
-            false,
-        ),
+    let write_policy = "[egress]\nwrite-policy = true\n";
+    let private = r#"{"private":true}"#;
+    for (caller, policy, text, runner) in [
+        ("false", "{}", "", true),
+        ("false", r#"{"private":false}"#, "", true),
+        ("false", "{}", write_policy, true),
+        ("true", "{}", "", false),
+        ("null", "{}", "", false),
+        ("false", private, "", false),
+        ("true", "{}", write_policy, false),
+        ("null", "{}", write_policy, false),
+        ("true", private, write_policy, false),
+        ("false", private, write_policy, false),
+        ("false", "{}", "[inference]\nregister = 'api-key'", false),
         (
             "false",
             "{}",
             "[mcp.server]\nurl = 'https://example.com'",
             false,
-            false,
         ),
-        ("false", "{}", "[session]\nlisten = true", false, true),
-        (
-            "false",
-            "{}",
-            "[sandbox.check]\nbefore-agent = true",
-            false,
-            true,
-        ),
-        ("false", "{}", "[setup.tools]\nrust = 'stable'", false, true),
-        ("false", "{}", "[setup]\npackages = []", true, true),
+        ("false", "{}", "[session]\nlisten = true", false),
+        ("false", "{}", "[setup]\npackages = []", true),
     ] {
         std::fs::write(&config, text).unwrap();
         std::fs::write(dir.path().join(".agentic-job/policy.json"), policy).unwrap();
+        // The sandbox user went with agentic-job#2989, whatever the file.
         for (user, ok) in [
             ("runner", runner),
-            ("sandbox", sandbox),
+            ("sandbox", false),
             ("", false),
             ("root", false),
         ] {
@@ -1610,72 +1557,66 @@ fn documented_runner_configs_parse_and_obey_admission() {
 
 #[test]
 fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
-    for user in ["runner", "sandbox"] {
-        for exit in [0, 1, 3, 4, 124] {
-            let dir = tempfile::tempdir().unwrap();
-            executable(
-                &dir.path().join("agentic-job"),
-                "#!/bin/bash\nprintf '%s\\n' \"$0\" \"$@\" > \"$RECORD\"\nexit \"$STATE\"\n",
-            );
-            // Artifact downloads do not preserve executable permissions.
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                dir.path().join("agentic-job"),
-                std::fs::Permissions::from_mode(0o644),
-            )
-            .unwrap();
-            let record = dir.path().join("record");
-            let output = dir.path().join("output");
-            let home = dir.path().join("agent-home");
-            let result = run_step(
+    for exit in [0, 1, 3, 4, 124] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(
+            &dir.path().join("agentic-job"),
+            "#!/bin/bash\nprintf '%s\\n' \"$0\" \"$@\" > \"$RECORD\"\nexit \"$STATE\"\n",
+        );
+        // Artifact downloads do not preserve executable permissions.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.path().join("agentic-job"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let record = dir.path().join("record");
+        let output = dir.path().join("output");
+        let home = dir.path().join("agent-home");
+        let result = run_step(
+            "run/action.yml",
+            "Run the agent",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("RUNNER_HOME", path(&home)),
+                ("REVIEW_HEAD", "review-head"),
+                ("STATE", &exit.to_string()),
+                ("RECORD", path(&record)),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("exit={exit}\n")
+        );
+        let args = std::fs::read_to_string(record).unwrap();
+        assert!(args.starts_with(&format!(
+            "{}/agentic-job\nrun\n--runner-home\n{}\n",
+            dir.path().display(),
+            home.display()
+        )));
+        assert!(args.contains("--review-head\nreview-head\n"));
+        for partial in ["false", "true"] {
+            let gate = run_step(
                 "run/action.yml",
-                "Run the agent",
+                "The run's result",
                 dir.path(),
                 &[
                     ("JOB_DIR", path(dir.path())),
-                    ("AGENT_USER", user),
-                    (
-                        "RUNNER_HOME",
-                        if user == "runner" { path(&home) } else { "" },
-                    ),
-                    ("REVIEW_HEAD", "review-head"),
-                    ("STATE", &exit.to_string()),
-                    ("RECORD", path(&record)),
-                    ("GITHUB_OUTPUT", path(&output)),
-                    ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
+                    ("EXIT", &exit.to_string()),
+                    ("PARTIAL", partial),
+                    ("HANDED_BACK", "false"),
+                    ("CLASS", ""),
                 ],
             );
-            assert!(result.status.success(), "{result:?}");
             assert_eq!(
-                std::fs::read_to_string(output).unwrap(),
-                format!("exit={exit}\n")
+                gate.status.success(),
+                exit == 0 || partial == "true" && [3, 124].contains(&exit),
+                "{exit} {partial}: {gate:?}"
             );
-            let args = std::fs::read_to_string(record).unwrap();
-            assert!(args.starts_with(&format!("{}/agentic-job\nrun\n", dir.path().display())));
-            assert!(args.contains("--review-head\nreview-head\n"));
-            assert_eq!(args.contains("--runner-home\n"), user == "runner");
-            if user == "runner" {
-                assert!(args.ends_with(&format!("--runner-home\n{}\n", home.display())));
-            }
-            for partial in ["false", "true"] {
-                let gate = run_step(
-                    "run/action.yml",
-                    "The run's result",
-                    dir.path(),
-                    &[
-                        ("JOB_DIR", path(dir.path())),
-                        ("EXIT", &exit.to_string()),
-                        ("PARTIAL", partial),
-                        ("HANDED_BACK", "false"),
-                        ("CLASS", ""),
-                    ],
-                );
-                assert_eq!(
-                    gate.status.success(),
-                    exit == 0 || partial == "true" && [3, 124].contains(&exit),
-                    "{exit} {partial}: {gate:?}"
-                );
-            }
         }
     }
 }
@@ -2370,25 +2311,23 @@ fn policy_config_uses_its_own_binary_and_host_config_keeps_user_mode() {
         &dir.path().join("bin/agentic-job"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RECORD\"\n",
     );
-    for (user, flags) in [("runner", "--host\n--no-script\n"), ("sandbox", "--host\n")] {
-        let record = dir.path().join("record");
-        let result = run_step(
-            "agent.yml",
-            "The host's configuration",
-            dir.path(),
-            &[
-                ("PATH", &search),
-                ("AGENT_USER", user),
-                ("RUNNER_TEMP", path(dir.path())),
-                ("RECORD", path(&record)),
-            ],
-        );
-        assert!(result.status.success(), "{result:?}");
-        assert_eq!(
-            std::fs::read_to_string(record).unwrap(),
-            format!("config\n{flags}--from\n.agentic-job/config.toml\n")
-        );
-    }
+    // A host's file has no script: the runner's user runs it after setup.
+    let record = dir.path().join("record");
+    let result = run_step(
+        "agent.yml",
+        "The host's configuration",
+        dir.path(),
+        &[
+            ("PATH", &search),
+            ("RUNNER_TEMP", path(dir.path())),
+            ("RECORD", path(&record)),
+        ],
+    );
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(record).unwrap(),
+        "config\n--host\n--from\n.agentic-job/config.toml\n"
+    );
 }
 
 #[test]
@@ -2769,7 +2708,7 @@ fn agent_configuration_provenance_and_step_gates_are_preserved() {
     for (file, expected) in [
         (
             "agent.yml",
-            "[ \"$AGENT_USER\" = sandbox ] || set -- --no-script\nagentic-job config --host \"$@\" --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
+            "agentic-job config --host --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
         ),
         (
             "example-compose.yml",
@@ -3495,15 +3434,14 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "agent.yml",
         "agent",
         &[
-            r"agent-user: \$\{\{ inputs.agent-user \}\}",
-            r"runner-home: \$\{\{ inputs.agent-user != 'sandbox' && format\('\{0\}/agent-home', runner.temp\) \|\| '' \}\}",
-            r"- name: The setup script\n        if: \$\{\{ inputs.agent-user != 'sandbox' \}\}",
+            r"runner-home: \$\{\{ format\('\{0\}/agent-home', runner.temp\) \}\}",
+            r"- name: The setup script\n        env:",
             r"session-endpoint: \$\{\{ steps.run.outputs.session-endpoint \}\}",
             r"config: \$\{\{ runner.temp \}\}/agentic-job-host.toml",
             r"artifact-ids: \$\{\{ inputs.secure-host-image-artifact-id \}\}",
             r"image-archive: \$\{\{ inputs.secure-host-image-artifact-id != '' && format\('\{0\}/secure-host-image/secure-host.tar', runner.temp\) \|\| '' \}\}",
         ],
-        &[],
+        &[r"agent-user: sandbox|inputs.agent-user != 'sandbox'"],
     ),
     (
         "agentic-job.yml",
@@ -4062,14 +4000,6 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
     (
         "ci.yml",
         "secure-host-options",
-        &[
-            r"uses: \./secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
-        ],
-        &["shell:"],
-    ),
-    (
-        "ci.yml",
-        "secure-host-no-user",
         &[
             r"uses: \./secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
         ],
@@ -5155,7 +5085,6 @@ const GATES: &[(&str, &[&str])] = &[
             "sandbox",
             "secure-host",
             "secure-host-options",
-            "secure-host-no-user",
             "world-write",
             "world-write-runtime",
             "secure-host-image",
@@ -5172,7 +5101,6 @@ const GATES: &[(&str, &[&str])] = &[
             "e2e-full",
             "e2e-limit",
             "e2e-write-policy",
-            "e2e-sandbox",
             "e2e-event",
             "e2e-analysis",
             "e2e-analysis-refused",
@@ -5916,11 +5844,11 @@ fn pr_ci_tests_the_ingress_checker_with_its_analyzers() {
     }
 }
 
-/// The runner's user is the agent by default, everywhere a caller can
-/// choose; one end-to-end run, and only that one, asks for the sandbox
-/// user, and its verifier insists on its comment.
+/// The runner's user is the only agent user (agentic-job#2989): every
+/// input that chose stays, so a caller that names `runner` still parses,
+/// and no run of this repository asks for the sandbox user.
 #[test]
-fn the_agent_is_the_runners_user_unless_a_caller_asks_for_the_sandbox_user() {
+fn the_agent_is_the_runners_user_and_no_run_asks_for_the_sandbox_user() {
     for (file, default) in [
         (
             "agentic-job.yml",
@@ -5939,35 +5867,23 @@ fn the_agent_is_the_runners_user_unless_a_caller_asks_for_the_sandbox_user() {
     ] {
         assert_eq!(default.as_str(), Some("runner"), "{file}");
     }
-    let text = workflow("ci.yml");
-    let users: Vec<&str> = Regex::new(r"(?m)^ {6}agent-user: (.*)$")
-        .unwrap()
-        .captures_iter(&text)
-        .map(|user| user.get(1).unwrap().as_str())
-        .collect();
-    assert_eq!(users, ["sandbox"]);
+    // A caller's `sandbox` reaches agent.yml's admission, which refuses it.
+    let passes = Regex::new(r"(?m)^ +agent-user: (.+)$").unwrap();
+    for (file, passed) in [
+        ("ci.yml", &[][..]),
+        ("agent.yml", &[]),
+        ("agentic-job.yml", &["${{ inputs.agent-user }}"]),
+    ] {
+        let text = workflow(file);
+        let values: Vec<&str> = passes
+            .captures_iter(&text)
+            .map(|value| value.get(1).unwrap().as_str())
+            .collect();
+        assert_eq!(values, passed, "{file}");
+    }
     assert!(
-        Regex::new(r"\n {6}agent-user: sandbox\n {6}setup: \.github/agentic-job/e2e/sandbox\.sh\n")
-            .unwrap()
-            .is_match(job(&text, "e2e-sandbox"))
-    );
-    let doc = definition("ci.yml");
-    let verify = named_step(&doc, "The sandbox-user run handed back its comment")["run"]
-        .as_str()
-        .unwrap();
-    assert!(
-        verify.contains("test \"$RESULT/$EXIT\" = success/0\n"),
-        "{verify}"
-    );
-    assert!(
-        verify.contains("grep -F 'A comment from the scripted agent of a sandbox-user run.'"),
-        "{verify}"
-    );
-    let setup = std::fs::read_to_string(root().join(".github/agentic-job/e2e/sandbox.sh")).unwrap();
-    assert!(
-        setup
-            .lines()
-            .any(|line| line == "test \"$HOME\" = /home/runner-sandbox")
+        !root().join(".github/agentic-job/e2e/sandbox.sh").exists(),
+        "the sandbox user's end-to-end setup is gone"
     );
 }
 

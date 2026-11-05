@@ -1,6 +1,5 @@
 //! How the runner's user gets the few privileged operations a run needs:
-//! entering the sandbox, stopping the sandbox user, reading the egress
-//! proxy's log, and the controls of some probes.
+//! reading the egress proxy's log, and the controls of some probes.
 //!
 //! On a machine `sandbox setup` has set up, the runner's user has no
 //! sudo but for one rule, the `helper` command of the root-owned copy of
@@ -16,7 +15,6 @@ use anyhow::{Context, Result, ensure};
 
 use crate::config::ROOT_COPY;
 use crate::egress::ACCESS_LOG;
-use crate::enter::Entry;
 use crate::helper::{self, Exec, SELF_COPY, ViaSudo};
 
 /// Becomes root for an operation without ever asking for a password.
@@ -63,53 +61,14 @@ impl Root {
         ViaSudo.command(argv)
     }
 
-    /// Whether root does anything at all for this user: the control of
-    /// the probe that the sandbox user has no sudo.
+    /// Whether root does anything at all for this user: the helper's
+    /// rule, which the lock leaves the runner's user.
     pub fn ping(self) -> bool {
         let command = match self {
             Self::Helper => Some(Self::helper_command::<&str>("ping", &[])),
             Self::Sudo => Self::sudo_command(&["true"]).ok(),
         };
         command.is_some_and(|mut command| crate::host::succeeds(&mut command))
-    }
-
-    /// The command that runs ARGV as the sandbox user of ENTRY in CWD.
-    /// Its standard streams are the caller's to connect, and must be
-    /// sockets (see [`Entry::command`]).
-    pub fn enter(self, entry: &Entry, argv: &[String], cwd: &Path) -> Result<Command> {
-        ensure!(!argv.is_empty(), "an empty command for the sandbox");
-        match self {
-            Self::Helper => {
-                let mut command = Self::helper_command::<&str>("enter", &[]);
-                command.arg("--chdir").arg(cwd).arg("--").args(argv);
-                Ok(command)
-            }
-            Self::Sudo => {
-                let run0 = entry.run0_argv(argv, cwd)?;
-                let run0: Vec<&str> = run0.iter().map(String::as_str).collect();
-                Self::sudo_command(&run0)
-            }
-        }
-    }
-
-    /// Stops every process of the user UID (the sandbox user's), and
-    /// makes sure of it.
-    pub fn reap(self, uid: u32) -> Result<()> {
-        match self {
-            Self::Helper => {
-                let out = Self::helper_command::<&str>("reap", &[])
-                    .stdin(Stdio::null())
-                    .output()
-                    .context("running the helper")?;
-                ensure!(
-                    out.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-                Ok(())
-            }
-            Self::Sudo => helper::reap(uid, &ViaSudo),
-        }
     }
 
     /// The size of the egress proxy's log, or `None` for none.
@@ -183,33 +142,6 @@ impl Root {
             .success()
             .then(|| serde_json::from_slice(&out.stdout).ok())
             .flatten()
-    }
-
-    /// Whether root runs a command through pkexec: a probe's control.
-    pub fn pkexec_control(self) -> bool {
-        let command = match self {
-            Self::Helper => Some(Self::helper_command::<&str>("pkexec-control", &[])),
-            Self::Sudo => Self::sudo_command(&["pkexec", "true"]).ok(),
-        };
-        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
-    }
-
-    /// Takes the sandbox user USER's lingering away again.
-    pub fn disable_linger(self, user: &str) -> bool {
-        let command = match self {
-            Self::Helper => Some(Self::helper_command::<&str>("disable-linger", &[])),
-            Self::Sudo => Self::sudo_command(&["loginctl", "disable-linger", "--", user]).ok(),
-        };
-        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
-    }
-
-    /// Removes the sandbox user USER's crontab again.
-    pub fn crontab_remove(self, user: &str) -> bool {
-        let command = match self {
-            Self::Helper => Some(Self::helper_command::<&str>("crontab-remove", &[])),
-            Self::Sudo => Self::sudo_command(&["crontab", "-r", "-u", user]).ok(),
-        };
-        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
     }
 }
 

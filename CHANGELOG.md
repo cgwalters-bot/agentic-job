@@ -9,6 +9,26 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- **Breaking:** the sandbox user is gone; the runner's user is the only agent
+  user (#2989). `sandbox setup` creates no `runner-sandbox` user, sudoers or
+  scheduler entries for it, runs no `setup.script` (the agent job runs it as
+  the runner's user) and no longer needs `run0`. `helper enter`, `reap`,
+  `disable-linger`, `crontab-remove` and `pkexec-control`, `sandbox
+  probe-local` and `sandbox probe sandbox-user` are removed; `sandbox check`
+  probes the runner's user (lock, metadata rule, world-write policy,
+  write policy) and `sandbox probe no-user` checks that no second user exists.
+  `run` requires `--runner-home`, and refuses what needed a second user
+  (`api-key`, `inference.front`, `[mcp]`, private targets, `session.listen`,
+  `[child-agent]`). `agent-user: sandbox` is refused. The keys
+  `sandbox.create-user`, `sandbox.user`, `sandbox.groups`,
+  `sandbox.allow-existing-user`, `sandbox.filesystem-view`,
+  `sandbox.check.before-agent` and `setup.tools` are refused by name;
+  `sandbox.check.control-url`, `fetch-repo`, `allow-sockets` and
+  `allow-tcp-ports` are accepted and reported as ignored while the pinned
+  image still reads them. A host's file (`config --host`) has no
+  `setup.script`, and `sandbox setup` refuses one. Hosts set up by the
+  pinned secure-host image (v0.6.4) still get the unused `runner-sandbox`
+  user until the pin moves to an image with this change.
 - The secure-host forwarder and site CI now select the reviewed actions#180
   pin and attested v0.6.9 image, bringing method/host-only write-refusal
   diagnostics to callers without printing signed URLs. No storage accounts

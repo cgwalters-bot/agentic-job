@@ -10,14 +10,14 @@ inputs:
     default: ${{ github.workspace }}/.agentic-job
   agent-user:
     description: >-
-      `runner` runs the agent as the runner's user, in `runner-home`; `sandbox` runs it as the
-      second user secure-host made (`agentic-job run` without `--runner-home`), in that user's home
+      Only `runner`: the agent is the runner's user, in `runner-home`. `sandbox` is refused: the
+      second user went with agentic-job#2989
     default: runner
   runner-home:
     description: >-
-      With `agent-user: runner`, the agent's home (`agentic-job run --runner-home`): after
+      The agent's home (`agentic-job run --runner-home`), required: after
       cgwalters-forge/actions/secure-host, in a job that holds no secret, no write token and no
-      `id-token`. Empty with `agent-user: sandbox`
+      `id-token`
     default: ""
   github-token:
     description: >-
@@ -27,9 +27,8 @@ inputs:
   inference-api-key:
     description: >-
       For `[inference] register = "api-key"`, the provider's API key, or with `provider = "github"`
-      a GitHub token with Copilot access, never the one passed as `github-token`. Only
-      `agentic-job run` gets it, which keeps it from the agent only with `agent-user: sandbox`:
-      with `runner`, `run` refuses `api-key` for now. Empty for a broker
+      a GitHub token with Copilot access, never the one passed as `github-token`. `run` refuses
+      `api-key`: with no second user, nothing keeps the key from the agent. Empty for a broker
     default: ""
   inference-run-token:
     description: >-
@@ -39,9 +38,9 @@ inputs:
     default: ""
   mcp-token:
     description: >-
-      For an `[mcp.NAME]` server of the configuration, its credential. Only `agentic-job run`
-      gets it, which keeps it from the agent only with `agent-user: sandbox`: with `runner`,
-      `run` refuses an MCP server for now. Empty for a run without one
+      For an `[mcp.NAME]` server of the configuration, its credential. `run` refuses an MCP
+      server: with no second user, nothing keeps the credential from the agent. Empty for a run
+      without one
     default: ""
 outputs:
   exit:
@@ -125,13 +124,12 @@ runs:
         AGENT_USER: ${{ inputs.agent-user }}
         RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
-        # A home with the sandbox user would be ignored, and one missing
-        # for the runner's user would leave `run` to want a second user.
+        # The runner's user is the only agent user (agentic-job#2989).
         case "$AGENT_USER/${RUNNER_HOME:+home}" in
-          runner/home | sandbox/) ;;
+          runner/home) ;;
           runner/) echo '::error::agent-user runner requires runner-home'; exit 1 ;;
-          sandbox/home) echo '::error::agent-user sandbox takes no runner-home'; exit 1 ;;
-          *) echo '::error::agent-user must be runner or sandbox'; exit 1 ;;
+          sandbox/*) echo '::error::agent-user sandbox was removed with the sandbox user (agentic-job#2989): drop the input, the runner is the only agent user'; exit 1 ;;
+          *) echo '::error::agent-user must be runner'; exit 1 ;;
         esac
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
         agentic-job sandbox check --unless-passed
@@ -161,19 +159,15 @@ runs:
           { echo '::error::run.json is not one line per setting'; exit 1; }
         jq -r 'to_entries[] | "\(.key)=\(.value)"' "$JOB_DIR/run.json" | tee -a "$GITHUB_OUTPUT"
     # The session comes from this action's pinned source, not target code.
-    # It is installed only as the agent's user, in the agent's home: this
-    # step is that user only with `agent-user: runner`; the sandbox user's
-    # script is the configuration's `setup.script`, which secure-host runs.
+    # It is installed as the agent's user, this step's, in the agent's home.
     - name: Install the built-in scripted session
       if: ${{ steps.settings.outputs.fake_profile != '' }}
       shell: bash
       env:
         ACTION: ${{ github.action_path }}
         PROFILE: ${{ steps.settings.outputs.fake_profile }}
-        AGENT_USER: ${{ inputs.agent-user }}
         RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
-        [ "$AGENT_USER" = runner ] || { echo '::error::fake-profile requires agent-user runner'; exit 1; }
         case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
         mkdir -p -m 0700 "$RUNNER_HOME"
         env -i -C "$RUNNER_HOME" HOME="$RUNNER_HOME" LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin sh -s < "$ACTION/../workflow/dispatch-$PROFILE.sh"
@@ -210,15 +204,15 @@ runs:
         # `agentic-job run` writes it to a file of the agent's and
         # redacts it wherever the run logs or publishes.
         GH_TOKEN: ${{ inputs.github-token }}
-        # Held by `run` alone, outside the sandbox: its proxy puts the key
-        # in place of the run's token on the agent's requests.
+        # Held by `run` alone: its proxy puts the key in place of the
+        # run's token on the agent's requests. `run` refuses it with no
+        # second user to keep it from.
         AGENTIC_JOB_INFERENCE_KEY: ${{ inputs.inference-api-key }}
         # Likewise the MCP server's credential: `run`'s proxy for the
         # server puts it in place of the run's token.
         AGENTIC_JOB_MCP_TOKEN: ${{ inputs.mcp-token }}
         # Taken over by `run` in place of a registration of its own.
         AGENTIC_JOB_INFERENCE_RUN_TOKEN: ${{ inputs.inference-run-token }}
-        AGENT_USER: ${{ inputs.agent-user }}
         RUNNER_HOME: ${{ inputs.runner-home }}
       run: |
         echo '::group::agent (condensed)'
@@ -232,9 +226,7 @@ runs:
         # there, and that is the pinned release's, not this commit's.
         binary=$JOB_DIR/agentic-job
         chmod 0755 "$binary"
-        # Without it, `run` enters the sandbox user secure-host made.
-        [ "$AGENT_USER" = sandbox ] || set -- "$@" --runner-home "$RUNNER_HOME"
-        "$binary" run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
+        "$binary" run --runner-home "$RUNNER_HOME" --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"
         [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"

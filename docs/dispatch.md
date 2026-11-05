@@ -264,7 +264,7 @@ the apply job uses its job token instead; no environment is needed.
 Use distribution `setup.packages`/`repo-packages`, or a caller-owned
 `setup.script` after lockdown as the runner. **Do not enable `[setup.tools]`**
 or use a second user: runner mode refuses it, and #2989 supersedes that path.
-The installer discussion below is legacy implementation reference pending
+The installer discussion below is legacy implementation reference, removed in
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991), not an adoption
 recipe. Preserve trusted setup pins and never run target-selected setup as root.
 
@@ -302,7 +302,7 @@ what is installed as root. For the same reason
 toolchain the distribution lacks needs a `setup` script of the caller's
 (the reusable workflow's input; the shipped dispatch caller passes none),
 which runs unprivileged, never as root: in the reusable workflow as the
-runner's user. The old sandbox-user path is pending removal, not an alternative.
+runner's user. The old sandbox-user path was removed in #2991.
 
 The reusable workflow and `run --runner-home` refuse `[setup.tools]`.
 The following is **historical implementation reference**, not an opt-in recipe.

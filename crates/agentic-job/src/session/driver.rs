@@ -64,9 +64,8 @@
 //! the run's summary and its caller.
 //!
 //! When the session ends, the process group started for the agent is
-//! killed, and then every process of the sandbox user (`process`): the
-//! agent runs in a login session of that user's, where a signal to the
-//! group does not reach.
+//! killed (`process`). The agent is the caller's own user
+//! (agentic-job#2989), whose other processes are the caller's too.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -107,7 +106,6 @@ use super::provider::{self, Class};
 use super::steer::{self, Seen, Watch};
 use super::transcript::{Log, Tap, set_stop};
 use crate::exit::Exit;
-use crate::sandbox::root::Root;
 
 pub const RESULT_FILE: &str = "harness.json";
 /// The old tree's schema name, which readers of `harness.json` check.
@@ -202,9 +200,9 @@ const RETRY_AFTER_CAP: Duration = provider::RETRY_AFTER_CAP;
 const RATE_LIMIT_QUIET: Duration = Duration::from_secs(60);
 
 /// Why the agent has not left the output its run requires; `None` when done. It runs
-/// commands (as the sandbox user), so it is called off the runtime, and
-/// starts none once its flag is set: the session sets it when it stops
-/// waiting for the check, before it stops what the sandbox user runs.
+/// commands (as the agent), so it is called off the runtime, and starts
+/// none once its flag is set: the session sets it when it stops waiting
+/// for the check, before it stops what the agent runs.
 pub type OutputCheck = Arc<dyn Fn(&AtomicBool) -> Option<String> + Send + Sync>;
 /// What the agent is told after a compaction of its context; `None` for
 /// nothing. It runs as an [`OutputCheck`] does, and reads the agent's
@@ -551,8 +549,8 @@ async fn drain_stderr(stderr: UnixStream, tap: Arc<Tap>) {
 /// Runs the session and writes `harness.json`.
 ///
 /// `Err` is for what keeps a session from being run or recorded at all,
-/// and for processes of the sandbox user that could not be stopped. An
-/// agent that fails, or cannot be started, is a result.
+/// and for a bridge whose serve could not be revoked. An agent that
+/// fails, or cannot be started, is a result.
 pub async fn run(opts: Options) -> Result<RunResult> {
     let Options {
         name,
@@ -583,14 +581,6 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         "the session has a cap on model requests and nothing that counts them"
     );
     std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
-    // Before anything is started: a user that cannot be stopped again is
-    // no sandbox user.
-    let sandbox = match &launch {
-        Launch::Sandbox { user, .. } => {
-            Some(process::SandboxUser::find(user, Root::detect()).await?)
-        }
-        Launch::Direct | Launch::Own { .. } => None,
-    };
     // Listening before the agent starts: a client may come during the
     // task's turn.
     let (session_id, attach_to) = watch::channel(None);
@@ -650,9 +640,9 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         stop_tx,
         nudge_tx,
     ));
-    // Whatever the agent left running goes before anything reads its
-    // files, and whether or not it ever started.
-    let (ended, reaped) = match process::spawn(&argv, &env) {
+    // Whatever the agent left in its group goes before anything reads its
+    // files.
+    let ended = match process::spawn(&argv, &env) {
         Ok((mut agent, streams)) => {
             let process::Streams {
                 stdin,
@@ -685,31 +675,22 @@ pub async fn run(opts: Options) -> Result<RunResult> {
             if *deadline.borrow() == Some(Stop::NoRequests) {
                 ended = Ended::stopped(&Stop::NoRequests, false);
                 exited = None;
-                tap.log(&[agent.diagnostics(sandbox.as_ref()).state().await]);
+                tap.log(&[agent.diagnostics().state().await]);
                 tap.log_last_output();
             }
-            // The group started here is the wrapper's, which may be
-            // root's and out of this user's reach: the sandbox user's
-            // processes are killed first, so the wrapper is not waited
-            // for while its agent lives.
             agent.kill_group();
-            let reaped = reap(sandbox.as_ref()).await;
             agent.gone().await;
             // With its writers gone the agent's standard error closes;
             // what was written until then belongs in the log.
             let _ = tokio::time::timeout(EXIT_GRACE, stderr).await;
-            let ended = match exited {
+            match exited {
                 Some(status) => {
                     ended.agent_exited(status, tap.last_stderr(), tap.provider_failure())
                 }
                 None => ended,
-            };
-            (ended, reaped)
+            }
         }
-        Err(e) => (
-            Ended::failure(format!("the agent could not be started: {e:#}")),
-            reap(sandbox.as_ref()).await,
-        ),
+        Err(e) => Ended::failure(format!("the agent could not be started: {e:#}")),
     };
     watcher.abort();
     if let Some(item_watcher) = item_watcher {
@@ -719,7 +700,6 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         Some(hang_up) => hang_up.close().await,
         None => Ok(()),
     };
-    let reaped = reaped.and(revoked);
     let finished = chrono::Utc::now();
 
     let Ended {
@@ -742,9 +722,9 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         message = Some(e);
         class = None;
     }
-    // What is left running may still be writing the files a caller is
-    // about to read: no result of such a session stands.
-    if let Err(e) = &reaped {
+    // A bridge whose serve could not be revoked is left open: no result
+    // of such a session stands.
+    if let Err(e) = &revoked {
         outcome = Outcome::Failure;
         message = Some(format!("{e:#}"));
     }
@@ -783,16 +763,8 @@ pub async fn run(opts: Options) -> Result<RunResult> {
     let path = out.join(RESULT_FILE);
     std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
         .with_context(|| format!("writing {}", path.display()))?;
-    reaped?;
+    revoked?;
     Ok(result)
-}
-
-/// Stops everything the sandbox user is running, where there is one.
-async fn reap(sandbox: Option<&process::SandboxUser>) -> Result<()> {
-    match sandbox {
-        Some(user) => user.reap().await,
-        None => Ok(()),
-    }
 }
 
 /// What the session asks of the agent.
@@ -1870,9 +1842,8 @@ async fn provider_wait(
 }
 
 /// Sets its flag when dropped: however the wait for a check of the
-/// sandbox user's ends, the session returning or its future dropped on a
-/// signal, the check goes no further than the command it is in, which
-/// the reaping then kills.
+/// agent's output ends, the session returning or its future dropped on a
+/// signal, the check goes no further than the command it is in.
 struct Abandon(Arc<AtomicBool>);
 
 impl Drop for Abandon {

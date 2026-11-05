@@ -13,9 +13,8 @@ builds that source. `build-binary: true` forces a build.
 Runner-only execution uses `run --runner-home DIR`. It does not isolate the
 supervisor from the same-UID agent. The operator superseded the second-user
 direction in [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) is still open
-as of 5 November 2026. The legacy commands/tables described below are a source
-inventory, not advice to use a second user. The migration's breaking-key errors
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed it.
+The migration's breaking-key errors
 are [listed in the plan](plan.md#breaking-keys-and-safe-refusals).
 
 | Command | Runs as | Does |

@@ -11,8 +11,7 @@ before untrusted steps, whether or not an agent runs afterwards:
 which runs the image this repository builds. Later workflow steps run as
 the runner's user, which is also the agent's user. The former second-user
 direction is superseded by [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
-its removal PR [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
-is still open at this snapshot. Do not adopt the legacy mode.
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed it.
 
 That action's README and documents are the documentation of record for
 the host: what setup changes, the lock, the world-write policy, the rule
@@ -175,8 +174,7 @@ call) runs the forwarder with the policy job's configuration except for
 (`run --runner-home`, the run action's default `agent-user: runner`).
 The image would run `setup.script` as its second user, from the host's
 root, so the job runs it itself, after secure-host, in the agent's home.
-The legacy second-user script path remains in this checkout pending #2991,
-but is not the runner-only contract. The image also
+`sandbox setup` refuses a host's `setup.script` since #2991. The image also
 installs its own binary in `/usr/local/bin` over the one `prepare` put
 there, so `run` starts the policy job's binary from the job directory.
 The composed example (`example-compose.yml`) has the same steps, and

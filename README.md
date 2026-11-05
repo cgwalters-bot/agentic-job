@@ -202,10 +202,14 @@ to the issue that tracks it, where one is filed, or to the page that explains it
   ([the run token](docs/workflow.md#the-run-token)).
 - The egress proxy lets any host be read unless its policy file sets
   `[egress] mode = "allowlist"`, which is off by default
-  ([the sandbox user's network](docs/sandbox.md#what-setup-does-for-an-agent)).
+  ([the agent's network](docs/sandbox.md#what-setup-does-for-an-agent)).
+- The agent is the runner's user, the only agent user since the sandbox
+  user was removed ([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)):
+  it can read whatever the job holds, and `run` refuses a private target.
 - `sandbox.close-resolved`, off by default and set by `hosted.toml`, closes
-  systemd-resolved to the sandbox user. Every later step runs as the
-  runner's user, which still resolves names, so data can leave through DNS
+  systemd-resolved's Varlink socket to every user but root. Every later
+  step and the agent run as the runner's user, which still resolves names,
+  so data can leave through DNS
   ([not claimed](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#not-claimed)).
 - The world-write policy is proven at run time on hosted Ubuntu 26.04
   ([CI's controls](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
@@ -229,7 +233,7 @@ to the issue that tracks it, where one is filed, or to the page that explains it
 ## Where to read more
 
 The [secure-host action](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
-[sandbox user](docs/sandbox.md), [run contract](specs/run-contract-spec.md),
+[the agent's host](docs/sandbox.md), [run contract](specs/run-contract-spec.md),
 [MCP servers](docs/mcp.md), [dispatch profiles](docs/dispatch.md),
 [skills](docs/skills.md), [stable interfaces](docs/stable-interfaces.md),
 [CHANGELOG.md](CHANGELOG.md) and [what is left](docs/plan.md).

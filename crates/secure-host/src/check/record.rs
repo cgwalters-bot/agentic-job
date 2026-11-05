@@ -8,11 +8,11 @@
 //! (a process, a container) is what the probes would find. No other check
 //! writes one.
 //!
-//! The record is the runner's user's, in the job's temporary directory:
-//! the sandbox user cannot write there, which the probes of the check
-//! that wrote it proved (the runner's home and `RUNNER_TEMP` are closed
-//! to it), and a record is taken only where those probes look: a file of
-//! this user's, in a directory of its own. It names the job and the
+//! The record is the runner's user's, in the job's temporary directory,
+//! and is taken only as a file of this user's, in a directory of its own.
+//! The agent is that same user (agentic-job#2989) and could write one,
+//! but `run` removes any before the agent starts: a forged record could
+//! only spare the check of a later `run` in the same job. It names the job and the
 //! binary that probed, and holds the configuration the probes passed
 //! against, so a record from another job, another build (with other
 //! probes) or another configuration is not taken; GitHub also empties
@@ -76,9 +76,8 @@ pub fn path(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
 }
 
 /// The version and a fingerprint of this executable's bytes: two builds
-/// of one version may probe differently. Not a cryptographic digest: the
-/// sandbox user cannot write the record at all, and this only keeps a
-/// job that mixes builds from taking another's.
+/// of one version may probe differently. Not a cryptographic digest: it
+/// only keeps a job that mixes builds from taking another's.
 pub fn binary() -> Result<String> {
     let mut file = fs::File::open(SELF_EXE).with_context(|| format!("opening {SELF_EXE}"))?;
     let mut hasher = std::hash::DefaultHasher::new();

@@ -6,8 +6,8 @@ Runner-mode runs are **public-only**, not privately opt-in. The policy parser
 retains private-run contracts, but `run --runner-home` refuses private targets
 and the reusable agent job refuses private/unknown callers and targets even
 with `private = true`. Do not compose a second-user job to bypass this refusal.
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) is still open
-as of 5 November 2026. The remainder is a **legacy policy/reference design**,
+The second user was removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991).
+The remainder is a **legacy policy/reference design**,
 not supported runner-only deployment instructions. The private-digest fixture
 tests policy and output bounds, not current runner-mode launch acceptance.
 
@@ -63,16 +63,17 @@ private bytes to an attacker. The shipped reads-anywhere policy permits that
 unless the destination is otherwise denied. Even an allowed shared service or
 attacker-controlled subdomain can receive those bytes. Runner-user processes,
 direct endpoints and local services must not provide a bypass around the
-sandbox user's proxy policy.
+agent's proxy policy.
 
 ## Opting in
 
-The reusable workflow refuses a private target, or a private caller, for
-now, whatever the bounds say: its agent job runs the agent as the
-runner's user, with no second user between it and `run`, until the host
-keeps the runner's processes from reading each other
-([workflow.md](workflow.md)). What follows is what the binary admits for
-a caller that composes its own agent job with a sandbox user.
+No run takes a private target now, whatever the bounds say: since the
+sandbox user was removed
+([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)) the
+agent is the runner's user, with no second user between it and `run`,
+and `run` refuses a private policy. What follows is what the binary
+admitted for a caller that composed its own agent job with a sandbox
+user, kept for a private run's next design.
 
 Add `private = true` at the top level of the caller's bounds file, and of the
 organization's if there is one; both must set it. Then a run is admitted with a
@@ -137,9 +138,10 @@ boundaries; they do not make a private run safe on their own.
 [`.github/agentic-job/private-digest/`](../.github/agentic-job/private-digest/workflow.yml)
 composes the conditions above for one job: a digest posted as one comment on
 one issue of the private repository it runs in. It calls `policy.yml`,
-`check.yml` and `apply.yml` and has an agent job of its own, which runs the
+`check.yml` and `apply.yml` and has an agent job of its own, which ran the
 agent as the sandbox user behind the domain allowlist with the job's read
-token. It is not a workflow of this repository and nothing runs it here. A
+token; with that user removed, its run step now fails on `run`'s refusal of
+a private target. It is not a workflow of this repository and nothing runs it here. A
 repository that adopts it fills in placeholders for the agentic-job commit,
 the issue and its own name. It also replaces a step that joins the inference
 proxy's network, which this repository cannot supply. Left as they are, the

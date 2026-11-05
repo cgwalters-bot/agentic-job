@@ -75,38 +75,39 @@ fn missing_fixture_never_records_success() {
     }
 }
 
+/// On a host setup never locked, the runner's sudo is no helper rule: the
+/// record says so, and that no second user was found where none was made.
 #[test]
-fn missing_sandbox_user_records_failure() {
+fn an_unlocked_host_records_failure() {
+    if User::lookup("runner-sandbox").unwrap().is_some() {
+        eprintln!("skipping: this host has the removed sandbox user");
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
-    let user = format!("confine-absent-{}", std::process::id());
-    assert!(User::lookup(&user).unwrap().is_none());
-    let config = temp.path().join("config.toml");
-    fs::write(&config, format!("[sandbox]\nuser = {user:?}\n")).unwrap();
     let output = Command::new(BIN)
-        .args([
-            "sandbox",
-            "probe",
-            "sandbox-user",
-            "missing-user",
-            "--config",
-        ])
-        .arg(config)
+        .args(["sandbox", "probe", "no-user", "unlocked"])
         .env("RUNNER_TEMP", temp.path())
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let record: serde_json::Value =
-        serde_json::from_slice(&fs::read(temp.path().join("confine/missing-user.json")).unwrap())
+        serde_json::from_slice(&fs::read(temp.path().join("confine/unlocked.json")).unwrap())
             .unwrap();
-    assert_eq!(record["mode"], "sandbox-user");
-    assert_eq!(record["label"], "missing-user");
+    assert_eq!(record["mode"], "no-user");
+    assert_eq!(record["label"], "unlocked");
     assert_eq!(record["results"]["user"], false);
     assert!(
         record["problems"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|problem| { problem.as_str() == Some("user: failed, must succeed") })
+            .any(|problem| problem.as_str() == Some("sudo-rules: failed, must succeed"))
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("user failed"));
+    // The removed mode is refused, not taken for another.
+    let removed = Command::new(BIN)
+        .args(["sandbox", "probe", "sandbox-user", "removed"])
+        .env("RUNNER_TEMP", temp.path())
+        .output()
+        .unwrap();
+    assert!(!removed.status.success(), "{removed:?}");
 }

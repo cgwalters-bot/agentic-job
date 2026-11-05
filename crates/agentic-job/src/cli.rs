@@ -365,10 +365,10 @@ mod tests {
         }
     }
 
-    /// Not in the plan's table: `sandbox check` runs it as the sandbox user.
+    /// `sandbox check` ran it as the removed sandbox user (agentic-job#2989).
     #[test]
-    fn the_hidden_prober_parses() {
-        Cli::try_parse_from(["agentic-job", "sandbox", "probe-local"]).unwrap();
+    fn the_sandbox_users_prober_is_gone() {
+        assert!(Cli::try_parse_from(["agentic-job", "sandbox", "probe-local"]).is_err());
     }
 
     /// Not in the plan's table: what the runner's user has root do after
@@ -377,34 +377,23 @@ mod tests {
     fn the_helper_parses() {
         let ops: &[&[&str]] = &[
             &["ping"],
-            &["enter", "--chdir", "/home/agent", "--", "git", "status"],
-            &[
-                "enter",
-                "--chdir",
-                "/home/agent",
-                "--",
-                "sh",
-                "-c",
-                "--help",
-            ],
-            &["reap"],
             &["egress-log-size"],
             &["egress-log", "--from", "0"],
             &["tailscale-status"],
-            &["pkexec-control"],
-            &["disable-linger"],
-            &["crontab-remove"],
         ];
         for op in ops {
             Cli::try_parse_from(["agentic-job", "helper"].iter().chain(*op))
                 .unwrap_or_else(|err| panic!("{op:?}: {err}"));
         }
+        // The second user's operations went with it (agentic-job#2989).
         for bad in [
             &["helper"][..],
-            &["helper", "enter", "--chdir", "/home/agent"],
-            &["helper", "enter", "--", "true"],
+            &["helper", "enter", "--chdir", "/home/agent", "--", "true"],
             &["helper", "egress-log"],
-            &["helper", "reap", "--uid", "1"],
+            &["helper", "reap"],
+            &["helper", "disable-linger"],
+            &["helper", "crontab-remove"],
+            &["helper", "pkexec-control"],
         ] {
             assert!(
                 Cli::try_parse_from(["agentic-job"].iter().chain(bad)).is_err(),

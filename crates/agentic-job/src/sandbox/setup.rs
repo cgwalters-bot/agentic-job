@@ -1,7 +1,7 @@
 //! `agentic-job sandbox setup`: secure-host's host setup
 //! ([`::secure_host::setup`]), with what agentic-job adds to it through
-//! [`Program`]: the agents and tools it installs, the agent's managed
-//! settings and a session's bridge. secure-host's module says what setup
+//! [`Program`]: the agents it installs, the agent's managed settings and
+//! a session's bridge. secure-host's module says what setup
 //! closes and in what order; it is re-exported here at the paths callers
 //! know.
 
@@ -13,16 +13,15 @@ use anyhow::{Context, Result, ensure};
 
 pub use ::secure_host::setup::{
     CONFIG_DIR, CRYPTO_POLICIES, DISK_GROUP, OTHER_WRITE, READ_ONLY_GROUPS, ROOT_GROUPS, RootGroup,
-    SELF_COPY, SHADOW_GROUP, VIEW_PROBE_DIR, WORLD_WRITE_LINKS, WORLD_WRITE_PIN,
-    WORLD_WRITE_PROBE_DIR, WORLD_WRITE_PROBE_FILE, private_dirs, resolved, runner_sudo_rules,
-    subuid_ranges, writable_crypto_policies,
+    SELF_COPY, SHADOW_GROUP, WORLD_WRITE_LINKS, WORLD_WRITE_PIN, WORLD_WRITE_PROBE_DIR,
+    WORLD_WRITE_PROBE_FILE, private_dirs, resolved, runner_sudo_rules, writable_crypto_policies,
 };
 use ::secure_host::setup::{
     MODE_FILE, Plan, Program, install_file, install_packages, make_roots_alone, timed,
 };
 
 use super::egress;
-use super::host::{self, User};
+use super::host;
 use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
@@ -30,7 +29,6 @@ use crate::run::inference::Endpoint;
 use crate::session::bridge::{self, Listen};
 
 pub mod agents;
-mod tools;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -69,6 +67,14 @@ fn read(args: &Args) -> Result<Plan<Job>> {
         Config::parse(&text)
     }
     .with_context(|| format!("in {}", args.config.display()))?;
+    // It ran as the second user, which setup no longer makes; it is the
+    // runner's user's to run after setup, as the agent job does.
+    ensure!(
+        config.setup.script.is_none(),
+        "setup.script: setup runs no script since the sandbox user was removed \
+         (agentic-job#2989); the runner's user runs it after setup, so leave it out of the \
+         host's file (`agentic-job config --host` does)"
+    );
     let config::checked::Host {
         direct,
         refused,
@@ -81,7 +87,6 @@ fn read(args: &Args) -> Result<Plan<Job>> {
         refused,
         served_port: session.is_some().then_some(bridge::PORT),
         packages: config.setup.packages.clone(),
-        script: config.setup.script.clone(),
         program: Job {
             config,
             install_vibe,
@@ -136,13 +141,6 @@ impl Program for Job {
         })?;
         if self.install_vibe {
             timed("vibe", install_vibe)?;
-        }
-        Ok(())
-    }
-
-    fn install_as(&self, sandbox: &User) -> Result<()> {
-        if let Some(tools) = &self.config.setup.tools {
-            timed("caller-tools", || tools::install(tools, sandbox))?;
         }
         Ok(())
     }

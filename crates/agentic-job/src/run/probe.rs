@@ -6,11 +6,12 @@
 //! These are the token's part of the old tree's
 //! `agent-isolation-check.mjs`. The probes that need no token are
 //! `sandbox check`'s (step 5), which the run action calls again unless
-//! it passed earlier in the same job. With `[sandbox.check]
-//! before-agent`, `run` makes those again too ([`recheck`]), after its
-//! own commands as the sandbox user, and adds the old probe that needs
-//! the container image `[sandbox.check]` names: that a container's
-//! subordinate uid cannot read the token's files.
+//! it passed earlier in the same job.
+//!
+//! Since the sandbox user was removed (agentic-job#2989) `run` makes the
+//! token's probes for no run: the agent is the runner's user, from whom
+//! no probe could show the token kept. What needs a second user is
+//! refused before any of it would run.
 //!
 //! These are the only probes of the run token: `sandbox check` has no
 //! token to probe, and the host test that removes protections runs these
@@ -30,7 +31,6 @@ use anyhow::{Context, Result, ensure};
 use super::clone::utf8;
 use super::enter::Sandbox;
 use super::inference::Token;
-use crate::config::Config;
 use crate::sandbox::egress;
 use crate::sandbox::network::Direct;
 
@@ -825,24 +825,6 @@ pub fn require(
     Ok(())
 }
 
-/// `sandbox check`'s probes of the sandbox CONFIG describes, again, and
-/// an error unless all passed: what `[sandbox.check] before-agent` asks
-/// of `run` once it has cloned the target. Between the run action's check
-/// and here `run` has run commands as the sandbox user, and a check
-/// probes what such a user left behind (a process, a unit, a listener).
-pub fn recheck(config: &Config) -> Result<()> {
-    eprintln!("Probing the sandbox again before the agent starts (sandbox.check.before-agent)");
-    let report = crate::sandbox::check::probes(config)?;
-    let failures: Vec<&str> = report.failures().into_iter().collect();
-    ensure!(
-        failures.is_empty(),
-        "{} sandbox check(s) failed before the agent started: {}",
-        failures.len(),
-        failures.join(", ")
-    );
-    Ok(())
-}
-
 /// Prints PROBES as `sandbox check` does, and says whether all passed.
 pub fn report(probes: &[Probe]) -> bool {
     for probe in probes {
@@ -861,6 +843,7 @@ fn line(probe: &Probe) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn a_token_is_found_in_bytes() {

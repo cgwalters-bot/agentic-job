@@ -9,9 +9,8 @@
 //! from a `run:` step and from .github/actions/confine-probe, a JavaScript
 //! action whose main and post steps run it as their child, where each must
 //! fail (cgwalters-forge/actions's secure-host/docs/evidence.md). Its
-//! `sandbox-user` and `no-user` modes probe, after the lock, the sandbox
-//! user setup makes by default, and a host that opted out of it
-//! (`sandbox.create-user = false`).
+//! `no-user` mode probes, after the lock, that setup made no second user
+//! (agentic-job#2989) and left the runner's sudo the helper's rule alone.
 //!
 //! It writes what it found to `$RUNNER_TEMP/confine/LABEL.json` for the
 //! job's artifact, and to its log: booleans and group names, never a
@@ -32,9 +31,7 @@ use rustix::process::{Pid, test_kill_process};
 use serde_json::json;
 
 use super::{metadata_request, runner_reaches, runner_stdout, sudo_rules};
-use crate::config::{HostFile, ROOT_COPY};
-use crate::enter::Entry;
-use crate::helper::SELF_COPY;
+use crate::config::Sandbox;
 use crate::host::{self, User};
 use crate::root::Root;
 use crate::setup::runner_sudo_rules;
@@ -71,9 +68,6 @@ pub struct Args {
     mode: Mode,
     /// The record's name: lowercase letters, digits and dashes
     label: String,
-    /// The host configuration for the user modes; normally setup's root-owned copy
-    #[arg(long, hide = true, default_value = ROOT_COPY)]
-    config: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
@@ -85,12 +79,8 @@ enum Mode {
     /// write, so the refusal of the root-owned one is the policy's, not
     /// every write's.
     Confined,
-    /// After it, the sandbox user setup made by default, entered the one
-    /// way there is (`helper enter`, whose success is the control): no
-    /// sudo, no metadata service.
-    SandboxUser,
-    /// After it with `sandbox.create-user = false`: no such user, and the
-    /// runner's sudo is the helper's rule and nothing else.
+    /// After it: no second user (the removed sandbox user's name), and
+    /// the runner's sudo is the helper's rule and nothing else.
     NoUser,
 }
 
@@ -115,7 +105,6 @@ impl Mode {
                 "worker-diagnostics",
                 "owner-write",
             ],
-            Self::SandboxUser => &["user", "user-enter", "user-sudo", "user-metadata"],
             Self::NoUser => &["user", "sudo", "sudo-true-listed", "sudo-rules", "helper"],
         }
     }
@@ -126,7 +115,6 @@ impl Mode {
         match self {
             Self::Control => true,
             Self::Confined => name == "owner-write",
-            Self::SandboxUser => ["user", "user-enter"].contains(&name),
             Self::NoUser => ["sudo-rules", "helper"].contains(&name),
         }
     }
@@ -307,40 +295,23 @@ fn reaches_worker(mode: Mode, temp: &Path) -> Result<bool> {
     Ok(sockets.iter().any(|s| UnixStream::connect(s).is_ok()))
 }
 
-/// What the sandbox user does, or that there is none, as the runner's user.
-fn user_results<F: HostFile>(mode: Mode, path: &Path) -> Result<Results> {
-    let config = F::load(path)?;
-    let user = User::lookup(&config.sandbox().user)?;
-    let mut results = Results::from([("user", user.is_some())]);
-    if mode == Mode::NoUser {
-        let truth = host::find_program("true").context("no true on this host")?;
-        let truth = truth.to_string_lossy();
-        let listing = runner_stdout(&["sudo", "-n", "-l"]);
-        results.extend([
-            ("sudo", runner_reaches(&["sudo", "-n", "true"])),
-            // sudo's own answer for an ordinary command, which the lock refuses.
-            (
-                "sudo-true-listed",
-                runner_reaches(&["sudo", "-n", "-l", &truth]),
-            ),
-            ("sudo-rules", locked(&sudo_rules(&listing))),
-            ("helper", Root::Helper.ping()),
-        ]);
-    } else if user.is_some() {
-        ensure!(
-            Path::new(SELF_COPY).is_file(),
-            "{SELF_COPY} is missing: the sandbox user is entered through the helper"
-        );
-        let entry = Entry::new(&config)?;
-        results.extend([
-            ("user-enter", entry.succeeds(&["true"])?),
-            ("user-sudo", entry.succeeds(&["sudo", "-n", "true"])?),
-            // Around the egress proxy its environment names, whose refusal
-            // would otherwise stand in for the rule on its uid.
-            ("user-metadata", entry.succeeds(&metadata_request())?),
-        ]);
-    }
-    Ok(results)
+/// That setup made no second user, and what the runner's user has of sudo.
+fn user_results() -> Result<Results> {
+    let user = User::lookup(Sandbox::REMOVED_USER)?;
+    let truth = host::find_program("true").context("no true on this host")?;
+    let truth = truth.to_string_lossy();
+    let listing = runner_stdout(&["sudo", "-n", "-l"]);
+    Ok(Results::from([
+        ("user", user.is_some()),
+        ("sudo", runner_reaches(&["sudo", "-n", "true"])),
+        // sudo's own answer for an ordinary command, which the lock refuses.
+        (
+            "sudo-true-listed",
+            runner_reaches(&["sudo", "-n", "-l", &truth]),
+        ),
+        ("sudo-rules", locked(&sudo_rules(&listing))),
+        ("helper", Root::Helper.ping()),
+    ]))
 }
 
 /// The routes of the runner's user, before or after the lock.
@@ -378,12 +349,8 @@ fn is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 
-pub fn run<F: HostFile>(args: &Args) -> Result<bool> {
-    let Args {
-        mode,
-        label,
-        config,
-    } = args;
+pub fn run(args: &Args) -> Result<bool> {
+    let Args { mode, label } = args;
     let mode = *mode;
     ensure!(
         valid_label(label),
@@ -397,7 +364,7 @@ pub fn run<F: HostFile>(args: &Args) -> Result<bool> {
     fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
     let results = match mode {
         Mode::Control | Mode::Confined => runner_results(mode, &temp, label)?,
-        Mode::SandboxUser | Mode::NoUser => user_results::<F>(mode, config)?,
+        Mode::NoUser => user_results()?,
     };
     let problems = failures(mode, &results);
     let tokens: Results = TOKENS.iter().map(|&var| (var, is_set(var))).collect();
@@ -457,12 +424,6 @@ mod tests {
             ("worker-diagnostics", false),
             ("owner-write", true),
         ]);
-        let sandbox_user = results(&[
-            ("user", true),
-            ("user-enter", true),
-            ("user-sudo", false),
-            ("user-metadata", false),
-        ]);
         let no_user = results(&[
             ("user", false),
             ("sudo", false),
@@ -473,15 +434,15 @@ mod tests {
         let passes = [
             (Mode::Control, &control),
             (Mode::Confined, &confined),
-            (Mode::SandboxUser, &sandbox_user),
             (Mode::NoUser, &no_user),
         ];
         let refused: Results = confined.keys().map(|&n| (n, false)).collect();
-        let missing = [
-            "user: failed, must succeed",
-            "user-enter: not probed, must succeed",
-            "user-sudo: not probed, must fail",
-            "user-metadata: not probed, must fail",
+        let leftover = [
+            "user: succeeded, must fail",
+            "sudo: not probed, must fail",
+            "sudo-true-listed: not probed, must fail",
+            "sudo-rules: not probed, must succeed",
+            "helper: not probed, must succeed",
         ];
 
         let listing = "User runner may run the following commands on host:\n    (ALL) NOPASSWD: ALL\n    (ALL : ALL) !ALL\n    (root) NOPASSWD: /usr/local/libexec/agentic-job   helper *\n";
@@ -511,7 +472,7 @@ mod tests {
 
         // [what, whether it holds]
         let cases = [
-            ("a label", valid_label("sandbox-user")),
+            ("a label", valid_label("no-user")),
             ("an empty label", !valid_label("")),
             ("a path for a label", !valid_label("../x")),
             ("an uppercase label", !valid_label("Main")),
@@ -525,11 +486,11 @@ mod tests {
                 "nothing probed",
                 failures(Mode::Confined, &Results::new()).len() == 7,
             ),
-            // No sandbox user where one must be: the rest is not probed,
-            // and fails too.
+            // A second user where there must be none: what was not
+            // probed fails too.
             (
-                "no sandbox user",
-                failures(Mode::SandboxUser, &results(&[("user", false)])) == missing,
+                "a leftover sandbox user",
+                failures(Mode::NoUser, &results(&[("user", true)])) == leftover,
             ),
             (
                 "sudo's listing",

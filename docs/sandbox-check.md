@@ -4,31 +4,23 @@
 
 **Runner-only status, 5 November 2026:** `run --runner-home` does not execute
 the token, container-token or bridge probes described below. `before-agent`
-is refused there. The second-user paths below are a legacy implementation
-reference pending [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991),
-not deployment instructions. The helper's `enter`/`reap` operations still exist
-in this checkout but are not runner-mode controls. No check record or token
+is refused. The second-user paths were removed in
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991), along with
+the helper's `enter`/`reap` operations. No check record or token
 shape scan proves same-UID process isolation. See the
 [acceptance inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
 
 `agentic-job sandbox check` runs as the runner's user after `sandbox
-setup`. What each of its probes tries, its control and what stops it are
-in the action's
+setup`, and probes that user's hardening: since
+[#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) it is
+the only agent user, and there is no second user to probe as. What each
+probe tries, its control and what stops it are in the action's
 [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md),
 and where each has been seen to fail in its
 [evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#where-each-probe-has-been-seen-to-fail).
-This page keeps how `run` uses the check, the probes that are `run`'s
-own, and the helper the agent is entered through.
-
-By default `run` does not repeat the check: once the run token is in
-place it probes only where that token is. With `[sandbox.check]
-before-agent = true` it makes all of the check's probes again after its own
-commands as the sandbox user (the clone), before it registers the run,
-and, where the sandbox user has podman, reads each file holding the run
-token from a rootless container, as its root and as a subordinate uid,
-which must fail; any failure stops the run before the agent starts.
-That costs a full check's time. A probe or a control that comes out
-wrong fails the check: exit state 1.
+This page keeps how `run` uses the check, the token probes `run` no
+longer makes, and the helper. A probe or a control that comes out wrong
+fails the check: exit state 1.
 
 The [run action](../run/action.yml) calls `sandbox check --unless-passed`
 before the agent starts. The shipped [secure-host forwarder](../secure-host/action.yml)
@@ -52,164 +44,81 @@ probing, whether it matches or not. Only `--record` writes one;
 `--unless-passed` skips probes only on a match and never writes another.
 Changed configuration, another build or job, a missing or consumed record
 therefore causes normal probing. [`run`](../crates/agentic-job/src/run/enter.rs)
-removes it before entering either agent user, so it spares at most one check.
-Do not reuse a record across sandbox-user work (`sandbox exec -- make check`,
-say): that work can leave a process or detached container for probes to find.
-The threat is the sandbox user writing a record of a
-check that never passed: `RUNNER_TEMP` is closed to it, which the
-check that wrote the record proved
-([the job's work directories](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#the-jobs-work-directories)).
-A record is taken only from a
-file of the runner's user in a directory of its own that no one else can
-write in, which is where those probes look, and a link in its place is
-not followed.
+removes it before the agent starts, so it spares at most one check.
 
-When reuse is enabled, what the record does not stop is the runner's user
-itself. Steps of that user between the recorded check and `run` run
-unprobed, and any of them
-can write a record `run` takes, since everything in it is
-known to that user, or loosen what the probes proved (the home or
-workspace modes, a loopback listener) without `run` noticing. Without
-reuse, the run action probes after such a step; with reuse it is the caller's to avoid, or
-to catch with `before-agent`. Such a
-step already holds the job's credentials, so this loses a second look,
-not a privilege. A
-caller job that runs repository code as the runner's user before `run`
-(`make check`, say) should
-give secure-host `check: false` and leave no record, so that `run` probes
-after that code. The shipped pin already leaves no record even with
-`check: true`.
+What the record does not stop is the runner's user itself, which the
+agent now is. Steps of that user between the recorded check and `run`
+run unprobed, and any of them can write a record `run` takes, since
+everything in it is known to that user, or loosen what the probes proved
+without `run` noticing. Such a step already holds the job's credentials,
+so this loses a second look, not a privilege. A caller job that runs
+repository code as the runner's user before `run` (`make check`, say)
+should give secure-host `check: false` and leave no record, so that
+`run` probes after that code. The shipped pin already leaves no record
+even with `check: true`.
 
 ## The egress policy and containers
 
-With `egress.proxy`, the check reads the policy the proxy enforces,
-`/opt/egress-proxy/policy/policy.toml` as `sandbox setup` installed it,
-with the Rust proxy's parser (mitmproxy's `egress/policy.py` decides
-alike), and fails before any probe if it cannot read or parse it. For
-`egress-git` (`git ls-remote` of `[sandbox.check] fetch-repo`, by
-default `https://github.com/bootc-dev/bootc`), `egress-cargo` and
-`egress-npm` it asks the policy whether it admits the requests each
-makes. Where it does, the fetch must succeed. Where it does not, the
-probe becomes `egress-git-refused`, `egress-cargo-refused` or
-`egress-npm-refused`: the first refused request, made with curl, must
-meet the proxy's own 403 (`X-Egress-Denied`). So an allowlist that
-admits no GitHub host is tested as it is, not loosened for the check.
-`[sandbox.check] control-url` is the control of the probes that expect
-a refusal, and the check fails, naming that key, if the policy refuses
-a read of it. The threat feed is not consulted: a host on it fails the
-probe that expected success, rather than passing.
-
-`[sandbox.check] containers = false` skips every probe that pulls or
-runs `container-image`: `container-pull`, `container-build`,
-`container-built-run`, `container-control`, `container-metadata`, the
-`egress-container-*`, `tailnet-container*` and `session-bridge-container`
-probes, and in `run` the
-`token-container-*` and `broker-egress-container` probes. Each skipped
-probe is named in a note and none counts as passed. The `podman
-unshare` probes of the filesystem view pull nothing and stay. The
-consequence: rootless Podman stays usable to the sandbox user, and
-whether its subordinate uids are held by the network rules (no
-metadata service, nothing around the proxy) and kept from the run
-token goes unprobed. A host that does not want that should remove
-podman rather than turn the probes off; turning them off is accepting
-it.
+Under `egress.write-policy` the check makes the runner's user, with no
+proxy in its environment, read a host and be refused a POST to it by the
+proxy itself (`write-policy-read`, `write-policy-post`). The probes of
+the egress policy, the tailnet and containers were the sandbox user's
+and went with it. `[sandbox.check] control-url`, `fetch-repo`,
+`allow-sockets` and `allow-tcp-ports` are read only by images from
+before #2989; this binary accepts them while the pinned image still
+needs them, and the check notes each as ignored. `before-agent` is
+refused. `container-image` and `containers` are left for `run`'s probes
+under `inference.front`, which `run` refuses with no second user.
 
 ## A session's bridge
 
-With `[session] listen`, the network rules reject the sandbox's uids on
-loopback at the [session bridge](../specs/session.md)'s port, 7790, and
-at the node's own tailnet addresses, where `tailscale serve` passes a
-client on. The bridge lets in whoever `Tailscale-User-Login` names, so
-an agent that reached it could name the operator, or come through serve
-as the node's owner, and prompt the session it runs in. The check proves
-those rules: as the runner's user it listens at `127.0.0.1:7790` and at
-port 7790 of each address `tailscale status` gives the node, and
-connecting there is the control. Every check runs before `run` binds
-the bridge, so a loopback port already taken is not the bridge but
-whatever serve would hand the operator's connections to: that, or any
-other failure to listen on loopback, stops the check, and the loopback
-control must succeed. A tailnet address it cannot listen at is noted
-and has no control. A session is served only on the tailnet, so
-`session-bridge-tailnet` fails where `tailscale status` gives no address
-of the node's. Then the sandbox user must fail to open a TCP connection
-to `session-bridge:127.0.0.1:7790`, to each tailnet address at 7790 and
-at serve's port, 443, and, where it runs containers, a subordinate uid
-must fail to reach the loopback port (`session-bridge-container`). As
-with every refusal, the check first confirms the sandbox user's session
-got as far as the attempt. Nothing listens at serve's port during the
-check, so that probe is noted as having no control; the address rule it
-tests covers every port and is shown with a control at 7790. Without
-`[session] listen` the probe is skipped with a note.
-
-No CI shard covers it. The sandbox probe shards use
-`crates/agentic-job/tests/data/sandbox/ci.toml`, which has no session:
-session setup needs tailscale with HTTPS certificates, which those
-runners do not join. The probe runs in the check of a session run, such
-as one the reusable workflow's `session` input starts, and the ruleset
-is unit-tested in `crates/secure-host/src/network.rs`.
+The network rules rejected the sandbox's uids at the
+[session bridge](../specs/session.md)'s port, and the check proved it;
+the runner's user was never kept off that port. With no second user
+`run` refuses `[session] listen`, and nothing is probed for it.
 
 ## `run`'s token probes
 
-`sandbox check` has no run token, so it makes none of these. They are
-`run`'s, once it has written the agent's configuration and before the
-agent starts, and only with a sandbox user: under `--runner-home`, the
-reusable workflow's default, none runs
-([sandbox.md](sandbox.md#what-is-tested)). The test that removes
-protections runs them for its token cases. `run`'s other probes, of
-the provider's key, the MCP credential and token and the broker under
-`inference.front`, print ids too (`api-key-processes`,
-`mcp-token-files`, `broker-egress` and the like) and have no rows here.
-Every line of output starts with `ok` or `FAIL` and the probe's name in
-brackets. The names are stable; the test that removes protections
-matches on them.
-
-| Probe | The sandbox user tries to | Control | What stops it |
-| --- | --- | --- | --- |
-| `token-runner-file` | read the runner's copy of the run token, under `register = "token-file"` | `run` read it | the runner's home is closed |
-| `token-config-mode`, `token-config-dir-mode` | (none: the agent's configuration, and a child agent's, must be its own, mode 600, in a directory of mode 700) | `token-config-control`: the configuration holds the token | `run` writes it so |
-| `token-files`, `token-processes` | find the token in any other file under its home, `/run/user/UID`, `/tmp`, `/var/tmp` or `/dev/shm`, or in any environment or command line it can read | as above | `run` hands the token over on standard input only |
-| `token-container-subuid` | read the configuration from a rootless container as a subordinate uid, with `[sandbox.check] before-agent`, which names the image, unless `containers = false` | `token-container-control`, `token-container-subuid-control`: the container's root reads it, the subordinate uid reads `/etc/os-release` | the modes above |
+`sandbox check` has no run token, so it makes none of these. They were
+`run`'s, once it had written the agent's configuration and before the
+agent started, and only with a sandbox user. The agent is now the
+runner's user, which can read the token in `run`'s own environment, so
+none runs ([sandbox.md](sandbox.md#what-is-tested)). The ids
+(`token-runner-file`, `token-config-mode`, `token-config-dir-mode`,
+`token-files`, `token-processes`, `token-container-*`) stay reserved.
 
 ## The helper
 
 The lock takes root from the runner's user
 ([the lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock)).
-What a run still needs root for is small: enter the
-sandbox (`run0` as the sandbox user), stop that user's every process,
-read the egress proxy's log, and the controls of a few probes
-(`pkexec` as root, tailscaled's status as root, undoing a probe's
-linger or crontab). Three ways were weighed. A sudoers rule for fixed
+What a run still needs root for is small: read the egress proxy's log,
+tailscaled's status as root, and the session bridge's serve. Entering
+and stopping the sandbox user, and undoing a probe's linger or crontab,
+went with it (#2989). Three ways were weighed. A sudoers rule for fixed
 subcommands of a root-owned binary: the simplest, with sudo's own
 checks that the file is root's, and the binary's own validation as the
 boundary. A root service behind a socket with a peer-credential check:
 sounder in theory (the kernel says who is calling, no sudo involved),
-but a daemon for the job's length, a protocol, and passing the agent's
-standard streams across a socket. polkit rules for `run0`: polkit sees
-the unit and the verb, not the command, so a rule could not say "as the
-sandbox user only". The first was chosen. `agentic-job helper` is a
-hidden command of the binary; the sudo rule names the copy setup
-installed at `/usr/local/libexec/agentic-job`, and setup makes that
-path, the configuration's and the fixed PATH's directories root's alone
-(no group write but root's, no other write) or refuses. The interface is
-closed:
+but a daemon for the job's length and a protocol. polkit rules for
+`run0`: polkit sees the unit and the verb, not the command. The first
+was chosen. `agentic-job helper` is a hidden command of the binary; the
+sudo rule names the copy setup installed at
+`/usr/local/libexec/agentic-job`, and setup makes that path, the
+configuration's and the fixed PATH's directories root's alone (no group
+write but root's, no other write) or refuses. The interface is closed:
 no operation takes a path, a user or a command that root then acts on.
-The sandbox user comes from the root-owned configuration; `enter` runs
-the caller's command as that user, in a directory that must be under
-its home; the log read is of one fixed file from a byte offset; every
-program root runs is looked up once, on a fixed PATH whose directories
-must be root's alone, and runs with none of the caller's environment;
-the configuration must be root's alone too, and the proxy's log is
-opened without following a link and must be the proxy user's plain
-file. The `enter` command line is built
-from the configuration as before (`sandbox::enter`), and the helper
-becomes `run0` with the caller's sockets as its standard streams, so
-the session's wrapper is `sudo helper enter ... --` where it was `sudo
-run0 ... --`. On a host where setup never ran (the tests), the same
-operations go through sudo directly (`sandbox::root`).
+The log read is of one fixed file from a byte offset; every program
+root runs is looked up once, on a fixed PATH whose directories must be
+root's alone, and runs with none of the caller's environment; the
+configuration must be root's alone too, and the proxy's log is opened
+without following a link and must be the proxy user's plain file. On a
+host where setup never ran (the tests), the same operations go through
+sudo directly (`sandbox::root`).
 
 **The steps after setup.** In the reusable workflow every step of the
 agent job after setup is this repository's (in an agent job of the
-caller's own, its later steps follow): `sandbox check`, `run`, the public-repository check, three uploads and the
+caller's own, its later steps follow): `sandbox check`, the setup
+script, `run`, the public-repository check, three uploads and the
 result. None needs root; the uploads read only what `run` moved out
 ([the upload gate](layout.md#run)). Of the actions' post steps, `actions/checkout`'s cleans
 its own credentials as the runner's user, the artifact actions have

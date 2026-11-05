@@ -8,7 +8,7 @@
 #   register  the run's registration at the inference proxy, with the
 #           identity-token permission the agent's job does not get
 #   agent   agent.yml: the agent, as the runner's user without root on the
-#           caller's machine (or the sandbox user, with `agent-user`):
+#           caller's machine, the only agent user (agentic-job#2989):
 #           prepare, secure-host and run, the actions of this repository
 #   check   check.yml: what the agent handed back, on a machine it never
 #           touched
@@ -227,7 +227,7 @@ on:
         type: string
         default: ""
       setup:
-        description: A script in the calling repository that runs as the sandbox user before the agent, for toolchains
+        description: A script in the calling repository that runs as the runner's user, in the agent's home, before the agent, for toolchains
         type: string
         default: ""
       egress-write-policy:
@@ -336,10 +336,9 @@ on:
         default: true
       agent-user:
         description: >-
-          `runner`, the runner's own user, which secure-host deprivileges; or `sandbox`, the second
-          user secure-host makes, which then also runs `setup`, for a uid between the agent and the
-          job's own steps and for what needs one (a session, `[setup] tools`, probes before the
-          agent). See docs/requirements.md#actors-and-trust
+          Only `runner`, the runner's own user, which secure-host deprivileges. `sandbox` is
+          refused: the second user went with agentic-job#2989. See
+          docs/requirements.md#actors-and-trust
         type: string
         default: runner
       secure-host-image-artifact-id:
@@ -369,11 +368,10 @@ on:
         description: Optional credential for applying safe outputs; defaults to the job token when empty
         required: false
       # For `inference-register: api-key` and an `[mcp.NAME]` server: not
-      # passed on. The agent is the runner's user now, with no second user
-      # between it and `run`, so it could read either from `run`'s
-      # environment; `run` refuses both until the host keeps the runner's
-      # processes from reading each other. Kept so that callers that pass
-      # them still parse.
+      # passed on. The agent is the runner's user, with no second user
+      # between it and `run` (agentic-job#2989), so it could read either
+      # from `run`'s environment; `run` refuses both. Kept so that callers
+      # that pass them still parse.
       INFERENCE_API_KEY:
         description: Not passed on; `inference-register` api-key is refused for now
         required: false

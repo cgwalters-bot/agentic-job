@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::network::Direct;
 
@@ -15,13 +16,8 @@ pub const ROOT_COPY: &str = "/etc/agentic-job/config.toml";
 /// A host's configuration file as the program built on this crate has
 /// it: these tables and any of its own, read and checked as that program
 /// does. The helper reads the root-owned copy ([`ROOT_COPY`]) through
-/// it, and the way into the sandbox ([`crate::enter::Entry::new`]) is
-/// made from it. agentic-job's `Config`, with its run tables, is one.
+/// it. agentic-job's `Config`, with its run tables, is one.
 pub trait HostFile: Sized {
-    /// Variables of the program's own that no command in the sandbox
-    /// gets, besides the job's: agentic-job's run credentials.
-    const UNSET: &'static [&'static str] = &[];
-
     /// Reads the file at PATH.
     fn load(path: &Path) -> Result<Self>;
 
@@ -29,20 +25,10 @@ pub trait HostFile: Sized {
 
     fn egress(&self) -> &Egress;
 
-    /// Whether setup installs tools in the sandbox user's home, whose
-    /// `.local/bin` then leads that user's PATH.
-    fn tools(&self) -> bool;
-
     /// Checks the tables that set up the host, as setup does, and
-    /// returns where the sandbox user connects without the egress proxy.
+    /// returns where the network rules let a connection go without the
+    /// egress proxy.
     fn direct(&self) -> Result<Vec<Direct>>;
-
-    /// The session bridge's loopback port when this host serves one.
-    /// The probes must prove the sandbox user cannot reach it, including
-    /// through the node's own tailnet addresses and serve's HTTPS port.
-    fn session_port(&self) -> Option<u16> {
-        None
-    }
 
     /// The helper's `session-serve`, as root: what the program has the
     /// host serve for a session, decided by this file alone. Refused
@@ -52,25 +38,24 @@ pub trait HostFile: Sized {
     }
 }
 
-/// The sandbox user, what is closed to it, and what `sandbox check`
-/// probes with. Step 5.
+/// What is closed to the runner's user, the only one an agent runs as,
+/// and what `sandbox check` probes with. Step 5.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Sandbox {
-    /// Whether `sandbox setup` creates the sandbox user, the separate uid
-    /// an agent runs as and `helper enter` is the one way into. On by
-    /// default. Off, the host hardens the runner's own user alone (the
-    /// lock, the metadata rule, the egress proxy and the rest): for plain
-    /// CI that runs nothing as another user, which then has no account
-    /// with a home, subordinate uids and a session to leave anything in.
-    pub create_user: bool,
-    pub user: String,
-    /// Supplementary groups of the sandbox user; unset,
-    /// [`Self::DEFAULT_GROUPS`] ([`Self::groups`]).
-    pub groups: Option<Vec<String>>,
-    /// An image may ship the sandbox user; otherwise one that exists
-    /// means an earlier job left it, and `sandbox setup` refuses.
-    pub allow_existing_user: bool,
+    /// Keys of the second user setup no longer makes, read only to be
+    /// refused by name ([`Sandbox::refuse_removed`]) rather than as
+    /// unknown.
+    #[serde(rename = "create-user")]
+    removed_create_user: Option<IgnoredAny>,
+    #[serde(rename = "user")]
+    removed_user: Option<IgnoredAny>,
+    #[serde(rename = "groups")]
+    removed_groups: Option<IgnoredAny>,
+    #[serde(rename = "allow-existing-user")]
+    removed_allow_existing_user: Option<IgnoredAny>,
+    #[serde(rename = "filesystem-view")]
+    removed_filesystem_view: Option<IgnoredAny>,
     /// Whose home is closed. `sandbox setup` takes it from `SUDO_USER`
     /// when this is not set.
     pub runner_user: Option<String>,
@@ -80,13 +65,9 @@ pub struct Sandbox {
     /// must keep root for the runner's user after the job, which the
     /// docs say is no machine an agent should run on.
     pub lock_runner: bool,
-    /// Confine the sandbox user's commands to a read-only view of the host,
-    /// writable only in its home and the temporary directories. Off by
-    /// default; the world-write policy applies either way.
-    pub filesystem_view: bool,
-    /// Whether the network rules also refuse the runner's user (and its
-    /// subordinate uids) the cloud metadata service, as they always
-    /// refuse the sandbox user: a step of the job, a third-party action
+    /// Whether the network rules refuse the runner's user (and its
+    /// subordinate uids) the cloud metadata service: a step of the job,
+    /// the agent or a third-party action
     /// among them, then cannot ask it for the instance's identity or a
     /// cloud role's credentials. Unset, [`Self::lock_runner`]'s value
     /// ([`Self::deny_runner_metadata`]); needs it, since with sudo the
@@ -112,8 +93,8 @@ pub struct Sandbox {
     /// Whether `sandbox setup` closes systemd-resolved to every user but
     /// root and, on the bus, the runner's. resolved answers any local user over its
     /// Varlink socket and the system bus, as itself, so the uid rules do
-    /// not stop the sandbox user sending names out through it, around
-    /// the egress proxy. Off by default; a host without resolved has
+    /// not stop a user sending names out through it, around the egress
+    /// proxy. Off by default; a host without resolved has
     /// nothing to close.
     pub close_resolved: bool,
     /// More directories closed to every user but their owner, besides
@@ -123,19 +104,22 @@ pub struct Sandbox {
     /// systemd units stopped and masked until reboot by `sandbox setup`,
     /// a container daemon for one, with the units that trigger them.
     pub stop_services: Vec<String>,
-    /// Variables every command of the sandbox user gets, over the fixed
-    /// ones (see [`crate::enter`]).
+    /// Variables every command of the agent gets, over the fixed ones
+    /// (agentic-job's `run::enter`).
     pub env: BTreeMap<String, String>,
     pub check: SandboxCheck,
 }
 
 impl Sandbox {
-    /// The old tree's name, which its readers and docs know.
-    pub const DEFAULT_USER: &'static str = "runner-sandbox";
+    /// The second user's name before agentic-job#2989, which `sandbox
+    /// probe` makes sure no setup created.
+    pub const REMOVED_USER: &'static str = "runner-sandbox";
 
-    /// `/dev/kvm` is what the work this was built for needs. Not
-    /// `libvirt`: its polkit rule grants all of `qemu:///system`.
-    pub const DEFAULT_GROUPS: &'static [&'static str] = &["kvm"];
+    /// What [`Self::refuse_removed`] says of a key of the removed second
+    /// user.
+    pub const REMOVED_KEY: &'static str = "was removed with the sandbox user \
+         (agentic-job#2989): the runner's user is the only agent user and setup creates no \
+         other, so delete the key";
 
     /// The hosted compute agent's token on some runner images, and
     /// tailscaled's socket, whose API dials the tailnet for any user.
@@ -163,15 +147,6 @@ impl Sandbox {
 
     /// Variables that let a process ask for the job's identity token.
     pub const FORBIDDEN_ENV_PREFIX: &'static str = "ACTIONS_";
-
-    pub fn groups(&self) -> Vec<String> {
-        self.groups.clone().unwrap_or_else(|| {
-            Self::DEFAULT_GROUPS
-                .iter()
-                .map(|&group| group.to_owned())
-                .collect()
-        })
-    }
 
     pub fn deny_runner_metadata(&self) -> bool {
         self.deny_runner_metadata.unwrap_or(self.lock_runner)
@@ -222,10 +197,28 @@ impl Sandbox {
             .collect()
     }
 
-    /// What the types cannot say. The user's name goes into a sudoers
-    /// file and a polkit rule, so it is held to the portable character
-    /// set and not to what `useradd` happens to accept.
+    /// Refuses a key of the removed second user, by name, rather than
+    /// ignore it: a file that still asks for that user is not run as if
+    /// it had one. Called on every parse and again by [`Self::validate`].
+    pub fn refuse_removed(&self) -> Result<()> {
+        let removed = [
+            ("create-user", &self.removed_create_user),
+            ("user", &self.removed_user),
+            ("groups", &self.removed_groups),
+            ("allow-existing-user", &self.removed_allow_existing_user),
+            ("filesystem-view", &self.removed_filesystem_view),
+        ];
+        if let Some((key, _)) = removed.iter().find(|(_, set)| set.is_some()) {
+            bail!("sandbox.{key} {}", Self::REMOVED_KEY);
+        }
+        self.check.refuse_removed()
+    }
+
+    /// What the types cannot say. The runner user's name goes into a
+    /// sudoers file and a polkit rule, so it is held to the portable
+    /// character set and not to what `useradd` happens to accept.
     pub fn validate(&self) -> Result<()> {
+        self.refuse_removed()?;
         let name_ok = |name: &str| {
             let mut chars = name.chars();
             chars
@@ -235,15 +228,10 @@ impl Sandbox {
                 && chars
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
         };
-        ensure!(
-            name_ok(&self.user) && self.user != "root",
-            "sandbox.user: {:?} is not a user name the sandbox can have",
-            self.user
-        );
         if let Some(runner) = &self.runner_user {
             ensure!(
-                name_ok(runner) && *runner != self.user,
-                "sandbox.runner-user: {runner:?} must be a user other than the sandbox user"
+                name_ok(runner) && runner != "root",
+                "sandbox.runner-user: {runner:?} is not a user name the runner can have"
             );
         }
         ensure!(
@@ -258,29 +246,6 @@ impl Sandbox {
             self.lock_runner || !self.deny_runner_reads(),
             "sandbox.deny-runner-reads needs sandbox.lock-runner: a runner's user with sudo could clear the rule"
         );
-        // What only the sandbox user has, which nothing would make.
-        ensure!(
-            self.create_user || !self.allow_existing_user,
-            "sandbox.allow-existing-user needs sandbox.create-user: without it there is no sandbox user to take from the image"
-        );
-        ensure!(
-            self.create_user || !self.filesystem_view,
-            "sandbox.filesystem-view needs sandbox.create-user: the view confines the sandbox user's commands"
-        );
-        ensure!(
-            self.create_user || self.groups.as_ref().is_none_or(Vec::is_empty),
-            "sandbox.groups needs sandbox.create-user: they are the sandbox user's groups"
-        );
-        for group in &self.groups() {
-            ensure!(
-                name_ok(group),
-                "sandbox.groups: {group:?} is not a group name"
-            );
-            ensure!(
-                !Self::FORBIDDEN_GROUPS.contains(&group.as_str()),
-                "sandbox.groups: membership of {group} would give the sandbox user root or the host's secrets"
-            );
-        }
         for dir in &self.private_dirs {
             ensure!(
                 dir.is_absolute(),
@@ -303,7 +268,7 @@ impl Sandbox {
             );
             ensure!(
                 !name.starts_with(Self::FORBIDDEN_ENV_PREFIX),
-                "sandbox.env: {name} is refused: {}* variables are the job's, never the sandbox user's",
+                "sandbox.env: {name} is refused: {}* variables are the job's, never the agent's",
                 Self::FORBIDDEN_ENV_PREFIX
             );
             ensure!(
@@ -318,13 +283,13 @@ impl Sandbox {
 impl Default for Sandbox {
     fn default() -> Self {
         Self {
-            create_user: true,
-            user: Self::DEFAULT_USER.to_owned(),
-            groups: None,
-            allow_existing_user: false,
+            removed_create_user: None,
+            removed_user: None,
+            removed_groups: None,
+            removed_allow_existing_user: None,
+            removed_filesystem_view: None,
             runner_user: None,
             lock_runner: true,
-            filesystem_view: false,
             deny_runner_metadata: None,
             unlink_worker_diagnostics: None,
             deny_runner_reads: None,
@@ -337,86 +302,66 @@ impl Default for Sandbox {
     }
 }
 
-/// What `sandbox check` probes with, `[sandbox.check]`. Step 5.
+/// What the probes run with, `[sandbox.check]`. Step 5.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct SandboxCheck {
-    /// A public page the sandbox user must reach: the positive control
-    /// of every probe that expects a connection to fail.
-    pub control_url: String,
-    /// A small image that has `curl`, for the probes from a container.
+    /// A small image that has `curl`, for agentic-job's probes from a
+    /// container.
     pub container_image: String,
-    /// Whether the probes pull and run `container-image`. Off, rootless
-    /// Podman stays usable to the sandbox user, but what its subordinate
-    /// uids reach on the network, and whether they read the run token,
-    /// goes unprobed: each skipped probe is named in the check's notes.
-    /// A host that does not accept that should remove podman instead.
+    /// Whether those probes pull and run `container-image`.
     pub containers: bool,
-    /// A repository the egress probes fetch from with `git ls-remote`,
-    /// or expect the proxy to refuse that fetch where its policy does.
-    pub fetch_repo: String,
-    /// Unix sockets the sandbox user may connect to, besides the host's
-    /// own (`sandbox::check` has that list): a path, a directory ending
-    /// in `/` for everything under it, a path ending in `*` for every
-    /// path that starts so, or `@name` for an abstract one.
-    pub allow_sockets: Vec<String>,
-    /// Local TCP ports the sandbox user may connect to.
-    pub allow_tcp_ports: Vec<u16>,
-    /// Whether `run` makes these probes again once it has cloned the
-    /// target, before it registers the run, and also tries to read the
-    /// run token from a rootless container as a subordinate uid. Off, the run action's `sandbox check
-    /// --unless-passed` before `run` is the last full check: what the
-    /// sandbox user did in `run`'s own preparation (the clone, the
-    /// agent's files), and a token that a container's other uids could
-    /// read, would go unprobed. It costs a full check's time.
-    pub before_agent: bool,
+    /// `run`'s repeat of the removed sandbox user's probes, read only to
+    /// be refused by name ([`Sandbox::refuse_removed`]).
+    #[serde(rename = "before-agent")]
+    removed_before_agent: Option<IgnoredAny>,
+    /// Settings of the removed sandbox user's probes, which this binary
+    /// no longer reads ([`Self::ignored`]). Accepted, not refused, while
+    /// the pinned secure-host image still makes those probes: its hosts'
+    /// files must keep them until that image is past agentic-job#2989.
+    #[serde(rename = "control-url")]
+    legacy_control_url: Option<IgnoredAny>,
+    #[serde(rename = "fetch-repo")]
+    legacy_fetch_repo: Option<IgnoredAny>,
+    #[serde(rename = "allow-sockets")]
+    legacy_allow_sockets: Option<IgnoredAny>,
+    #[serde(rename = "allow-tcp-ports")]
+    legacy_allow_tcp_ports: Option<IgnoredAny>,
 }
 
 impl SandboxCheck {
-    pub const DEFAULT_CONTROL_URL: &'static str = "https://github.com/";
-
     pub const DEFAULT_CONTAINER_IMAGE: &'static str =
         "registry.access.redhat.com/ubi10/ubi-minimal";
 
-    pub const DEFAULT_FETCH_REPO: &'static str = "https://github.com/bootc-dev/bootc";
+    fn refuse_removed(&self) -> Result<()> {
+        ensure!(
+            self.removed_before_agent.is_none(),
+            "sandbox.check.before-agent {}",
+            Sandbox::REMOVED_KEY
+        );
+        Ok(())
+    }
+
+    /// The keys a file sets that only the removed sandbox user's probes
+    /// read, for `sandbox check` to say it ignores them.
+    pub fn ignored(&self) -> Vec<&'static str> {
+        [
+            ("control-url", &self.legacy_control_url),
+            ("fetch-repo", &self.legacy_fetch_repo),
+            ("allow-sockets", &self.legacy_allow_sockets),
+            ("allow-tcp-ports", &self.legacy_allow_tcp_ports),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.is_some().then_some(key))
+        .collect()
+    }
 
     fn validate(&self) -> Result<()> {
-        for (key, url) in [
-            ("control-url", &self.control_url),
-            ("fetch-repo", &self.fetch_repo),
-        ] {
-            ensure!(
-                url.starts_with("https://") || url.starts_with("http://"),
-                "sandbox.check.{key}: {url:?} is not an http or https URL"
-            );
-        }
-        // git appends its own paths to it, which the check judges against
-        // the egress policy: a query or fragment would put them after it,
-        // and credentials would be printed with every probe.
-        let rest = self
-            .fetch_repo
-            .split_once("://")
-            .map_or("", |(_, rest)| rest);
-        ensure!(
-            !rest.is_empty()
-                && !rest.starts_with('/')
-                && !rest.contains(['?', '#', '@'])
-                && !rest.chars().any(char::is_whitespace),
-            "sandbox.check.fetch-repo: {:?} must be a repository URL with a host, and no \
-             credentials, query or fragment",
-            self.fetch_repo
-        );
         ensure!(
             !self.container_image.is_empty() && !self.container_image.starts_with('-'),
             "sandbox.check.container-image: {:?} is not an image name",
             self.container_image
         );
-        for socket in &self.allow_sockets {
-            ensure!(
-                socket.starts_with('/') || socket.starts_with('@'),
-                "sandbox.check.allow-sockets: {socket:?} is neither a path nor an @abstract name"
-            );
-        }
         Ok(())
     }
 }
@@ -424,30 +369,29 @@ impl SandboxCheck {
 impl Default for SandboxCheck {
     fn default() -> Self {
         Self {
-            control_url: Self::DEFAULT_CONTROL_URL.to_owned(),
             container_image: Self::DEFAULT_CONTAINER_IMAGE.to_owned(),
             containers: true,
-            fetch_repo: Self::DEFAULT_FETCH_REPO.to_owned(),
-            allow_sockets: Vec::new(),
-            allow_tcp_ports: Vec::new(),
-            before_agent: false,
+            removed_before_agent: None,
+            legacy_control_url: None,
+            legacy_fetch_repo: None,
+            legacy_allow_sockets: None,
+            legacy_allow_tcp_ports: None,
         }
     }
 }
 
-/// The sandbox user's way out to the network.
+/// The host's way out to the network.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Egress {
-    /// Whether the sandbox user reaches the network only through the
-    /// egress proxy. Off, its network is open but for the cloud metadata
-    /// service and the tailnet.
+    /// Whether setup starts the egress proxy, which
+    /// [`Self::write_policy`] holds the runner's user to.
     pub proxy: bool,
-    /// URLs the sandbox user reaches directly and not through the egress
-    /// proxy: the inference proxy, so that the run token never crosses
-    /// the egress proxy. Each is an IPv4 address on the tailnet, with a
-    /// port; with any, the rest of the tailnet is closed to the sandbox
-    /// user.
+    /// URLs reached directly and not through the egress proxy: the
+    /// inference proxy, so that the run token never crosses the egress
+    /// proxy. Each is an IPv4 address on the tailnet, with a port; under
+    /// [`Self::write_policy`] the runner's user reaches each and no other
+    /// tailnet address.
     pub direct: Vec<String>,
     /// The write rules, in place of the ones that come with the binary
     /// (`egress/policy.toml`).

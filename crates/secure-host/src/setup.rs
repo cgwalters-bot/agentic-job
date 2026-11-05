@@ -1,13 +1,10 @@
-//! `agentic-job sandbox setup`: create the sandbox user and close its
-//! routes to credentials and root. Run as root, once, on a machine that is
-//! thrown away after the job. With `sandbox.create-user = false` it makes
-//! no user and hardens the runner's alone, all the same but for the
-//! stages that are the sandbox user's.
+//! `agentic-job sandbox setup`: harden the runner's own user, the only
+//! one an agent runs as, and close its routes to credentials and root.
+//! Run as root, once, on a machine that is thrown away after the job. It
+//! creates no other user: the second, sandbox user went with
+//! agentic-job#2989, and the runner's user is the agent's.
 //!
-//! The boundary is the separate uid: it cannot read another uid's
-//! processes through `/proc` or memory, and has no sudo. The rest closes what
-//! runner images leave open to every local user, which starts to matter
-//! once something runs as a user other than the runner's.
+//! The rest closes what runner images leave open to every local user.
 //!
 //! Setup is the last thing that runs as root with the runner's user's own
 //! sudo. It ends by taking that away ([`lock_runner`]): every step after
@@ -25,14 +22,13 @@ use std::io::{ErrorKind, Write};
 use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::Mode;
 
 use crate::config::{self, HostFile, Sandbox};
-use crate::enter::{Entry, RUN0};
 use crate::host::{self, User};
 use crate::network::{self, Direct};
 use crate::{egress, helper, worker_diagnostics};
@@ -46,18 +42,15 @@ pub struct Plan<P> {
     /// The file as written, which setup installs ([`config::ROOT_COPY`]).
     pub text: String,
     pub program: P,
-    /// Where the sandbox user connects without the egress proxy.
+    /// Where the runner's user connects without the egress proxy under
+    /// `egress.write-policy`.
     pub direct: Vec<Direct>,
-    /// What the egress proxy refuses the sandbox user whatever its policy
-    /// says.
+    /// What the egress proxy refuses whatever its policy says.
     pub refused: Vec<(String, u16)>,
-    /// A port the program serves on the host ([`Program::serve`]), which
-    /// the network rules keep from the sandbox user.
+    /// A port the program serves on the host ([`Program::serve`]).
     pub served_port: Option<u16>,
     /// `[setup] packages`: names for the host's package manager.
     pub packages: Vec<String>,
-    /// `[setup] script`, run as the sandbox user in its home.
-    pub script: Option<PathBuf>,
 }
 
 /// The program's own stages, each at a fixed point of setup. Each that
@@ -82,14 +75,8 @@ pub trait Program {
         Ok(())
     }
 
-    /// Installs as SANDBOX, after its privileges are taken away and
-    /// before the network rules.
-    fn install_as(&self, _sandbox: &User) -> Result<()> {
-        Ok(())
-    }
-
-    /// After the network rules, which keep the sandbox user from
-    /// [`Plan::served_port`]; called only when there is one.
+    /// After the network rules; called only when there is a
+    /// [`Plan::served_port`].
     fn serve(&self) -> Result<()> {
         Ok(())
     }
@@ -105,14 +92,9 @@ pub trait Program {
 /// the supervisor. That it exists also says setup ran here before.
 pub const CONFIG_DIR: &str = "/etc/agentic-job";
 
-/// The copy of this program that the sandbox user can run, and the
-/// helper's sudo rule names: the helper's, at the path callers know.
+/// The copy of this program that the helper's sudo rule names, at the
+/// path callers know.
 pub use crate::helper::SELF_COPY;
-
-/// Root-owned and writable by the sandbox group alone, not world-writable,
-/// so the world-write policy leaves it be: what the view must deny is the
-/// sandbox's otherwise permitted writes.
-pub const VIEW_PROBE_DIR: &str = "/etc/agentic-job/write-probe";
 
 /// Root-owned, world-writable and not sticky, on the root filesystem, with
 /// [`WORLD_WRITE_PROBE_FILE`] in it: what the world-write policy must keep
@@ -126,9 +108,6 @@ pub const WORLD_WRITE_PROBE_FILE: &str = "/etc/agentic-job/world-write-probe/fil
 /// world-write policy, and its programs' links.
 pub use crate::world_write::{WORLD_WRITE_LINKS, WORLD_WRITE_PIN};
 
-/// `[setup] script`, where the sandbox user can read it.
-const SCRIPT_COPY: &str = "/etc/agentic-job/setup-script";
-
 /// The last matching sudoers rule wins, and this file is read last.
 /// No dot in the name: sudo skips such files.
 const SUDOERS_DENY: &str = "/etc/sudoers.d/zz-agentic-job-sandbox";
@@ -140,34 +119,6 @@ const VISUDO_CHECK: &[&str] = &["visudo", "-q", "-c", "-f"];
 const POLKIT_RULES_DIR: &str = "/etc/polkit-1/rules.d";
 
 const POLKIT_DENY: &str = "/etc/polkit-1/rules.d/00-agentic-job-sandbox.rules";
-
-/// Something that runs a user's commands later, and its lists of who may
-/// use it.
-struct Scheduler {
-    allow: &'static str,
-    deny: &'static str,
-    /// Whether every user may use it when neither list exists. Then a
-    /// deny list has to be made; where only root may, making one would
-    /// open it to everyone the list does not name.
-    open_without_lists: bool,
-}
-
-/// Nothing may start the sandbox user's processes outside a session,
-/// where the supervisor cannot stop them. With neither list, Debian's
-/// cron takes everyone (cronie only root, but it ships an empty deny
-/// list), and at takes only root.
-const SCHEDULERS: &[Scheduler] = &[
-    Scheduler {
-        allow: "/etc/cron.allow",
-        deny: "/etc/cron.deny",
-        open_without_lists: true,
-    },
-    Scheduler {
-        allow: "/etc/at.allow",
-        deny: "/etc/at.deny",
-        open_without_lists: false,
-    },
-];
 
 /// A group that is root by another name, through a daemon that does as
 /// its members ask or a device they may write. A process keeps the groups
@@ -292,8 +243,8 @@ const MODE_BITS: u32 = 0o7777;
 /// it to every session, which breaks other users' session bus and
 /// rootless podman (actions/runner-images#14649). The hosted images also
 /// set an `ACTIONS_*` variable here, a path and no secret; it goes too,
-/// so that "the sandbox user has no `ACTIONS_*` variable" has no
-/// exception to argue about. The runner itself has long read the file.
+/// so that "no session gets an `ACTIONS_*` variable" has no exception to
+/// argue about. The runner itself has long read the file.
 const ENVIRONMENT: &str = "/etc/environment";
 
 const IMAGE_ENV_VARS: &[&str] = &["XDG_RUNTIME_DIR"];
@@ -344,8 +295,6 @@ pub fn run<P: Program>(
 struct Preflight<P> {
     plan: Plan<P>,
     runner: User,
-    /// The sandbox user, where the image ships it and that is allowed.
-    existing: Option<User>,
     /// The resolvers the egress proxy may use: none without it.
     resolvers: Vec<IpAddr>,
 }
@@ -357,7 +306,6 @@ fn setup<P: Program>(
     let Preflight {
         plan,
         runner,
-        existing,
         resolvers,
     } = timed("preflight", || {
         let plan = read()?;
@@ -371,16 +319,6 @@ fn setup<P: Program>(
             );
         }
         ensure!(host::is_root(), "`sandbox setup` must run as root");
-        ensure!(
-            host::has_program(RUN0),
-            "{RUN0} not found: the sandbox is entered with it, and it needs systemd {RUN0_SYSTEMD} or later"
-        );
-        let version = host::run(Command::new(RUN0).arg("--version"))?;
-        ensure!(
-            systemd_version(&version).is_some_and(|v| v >= RUN0_SYSTEMD),
-            "{RUN0} is from {:?}: the sandbox is entered with `{RUN0} --pipe`, which needs systemd {RUN0_SYSTEMD} or later",
-            version.lines().next().unwrap_or_default()
-        );
         // Root's umask is the caller's, and some images build with 000.
         rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
         // Before anything else is decided: a machine that was set up before
@@ -389,20 +327,8 @@ fn setup<P: Program>(
             !Path::new(CONFIG_DIR).exists(),
             "{CONFIG_DIR} already exists: `sandbox setup` ran on this machine before, and the sandbox needs a fresh one for every job"
         );
-        let runner = runner_user(config)?;
         // Every refusal comes before the first change.
-        let existing = if config.create_user {
-            preflight(config, &runner)?
-        } else {
-            // Nothing would deny such a user sudo, polkit or the metadata
-            // service: one that is there is refused, as by preflight.
-            let name = &config.user;
-            ensure!(
-                User::lookup(name)?.is_none(),
-                "the user {name} already exists, and sandbox.create-user = false would leave it unconfined"
-            );
-            None
-        };
+        let runner = runner_user(config)?;
         plan.program.preflight()?;
         if config.close_resolved {
             resolved::bus_policy(&runner.name)?;
@@ -439,41 +365,19 @@ fn setup<P: Program>(
         Ok(Preflight {
             plan,
             runner,
-            existing,
             resolvers,
         })
     })?;
     let program = &plan.program;
     let (config, egress_config) = (program.file().sandbox(), program.file().egress());
-    // None with sandbox.create-user = false: the stages below that are the
-    // sandbox user's are skipped, and the program refused those that
-    // would run as it (agentic-job's setup.tools, setup.script, an agent).
-    let sandbox = timed("create-user", || {
+    timed("config-dir", || {
         fs::create_dir(CONFIG_DIR).with_context(|| format!("creating {CONFIG_DIR}"))?;
         fs::set_permissions(CONFIG_DIR, fs::Permissions::from_mode(MODE_PROGRAM))
-            .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
-        if !config.create_user {
-            println!(
-                "sandbox.create-user = false: no sandbox user; {} is hardened alone",
-                runner.name
-            );
-            return Ok(None);
-        }
-        create_user(config, &runner, existing).map(Some)
+            .with_context(|| format!("setting the mode of {CONFIG_DIR}"))
     })?;
-    // Before any sandbox mount view or user manager inherits /proc.
     timed("proc-hidepid", hide_other_processes)?;
-    if config.filesystem_view
-        && let Some(sandbox) = &sandbox
-    {
-        timed("filesystem-view", || install_filesystem_view(sandbox))?;
-    }
-    let (subuids, runner_uids, write_uids) = timed("environment-and-private-dirs", || {
+    let (runner_uids, write_uids) = timed("environment-and-private-dirs", || {
         let text = fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?;
-        let subuids = match &sandbox {
-            Some(sandbox) => subuid_ranges(sandbox, &text)?,
-            None => Vec::new(),
-        };
         let all_runner: Vec<String> = std::iter::once(runner.uid.to_string())
             .chain(subordinate_ranges(&runner, &text))
             .collect();
@@ -482,7 +386,7 @@ fn setup<P: Program>(
         let write_uids = of(egress_config.write_policy);
         drop_image_environment()?;
         close_private_dirs(config, &runner)?;
-        Ok((subuids, runner_uids, write_uids))
+        Ok((runner_uids, write_uids))
     })?;
     timed("stop-services", || stop_services(&config.stop_services))?;
     if config.close_resolved {
@@ -510,14 +414,8 @@ fn setup<P: Program>(
     // at), and a rule is written only for what is there. The runner's
     // rules take effect now too, which nothing running needs: the job's
     // step is waiting on this process, root already.
-    timed("deny-privileges", || {
-        deny_privileges(
-            sandbox.as_ref().map(|sandbox| sandbox.name.as_str()),
-            config.lock_runner.then_some(runner.name.as_str()),
-        )
-    })?;
-    if let Some(sandbox) = &sandbox {
-        program.install_as(sandbox)?;
+    if config.lock_runner {
+        timed("deny-privileges", || deny_privileges(&runner.name))?;
     }
     // The proxy first, since the rules name its uid; and both after the
     // installs, which root does on the open network.
@@ -530,13 +428,9 @@ fn setup<P: Program>(
         })
         .transpose()?;
     timed("network-rules", || {
-        let uids: Vec<String> = sandbox
-            .iter()
-            .map(|sandbox| sandbox.uid.to_string())
-            .chain(subuids.iter().cloned())
-            .collect();
+        // No second user's uids: the runner's rules alone.
         network::apply(&network::rules_with_resolvers(
-            &uids,
+            &[],
             &plan.direct,
             proxy_uid,
             &resolvers,
@@ -545,8 +439,7 @@ fn setup<P: Program>(
             &write_uids,
         ))
     })?;
-    // After the rules, which keep the sandbox user from what it serves;
-    // with no port for them to close, nothing is served.
+    // After the rules; with no port for them to name, nothing is served.
     if plan.served_port.is_some() {
         program.serve()?;
     }
@@ -564,28 +457,9 @@ fn setup<P: Program>(
             runner_uids.join(", ")
         );
     }
-    match (&sandbox, proxy_uid) {
-        (Some(sandbox), Some(_)) => println!(
-            "{} reaches the network only through the egress proxy, {}",
-            sandbox.name,
-            egress::proxy_url()
-        ),
-        (Some(sandbox), None) => println!(
-            "{} has no egress proxy: its network is open but for the metadata service and the tailnet",
-            sandbox.name
-        ),
-        (None, _) => {}
-    }
     timed("probe-dirs", || {
-        // Writable by DAC, so that the probes prove the view and the
-        // world-write policy, each on a directory the other leaves alone.
-        if let Some(sandbox) = &sandbox {
-            fs::create_dir(VIEW_PROBE_DIR).context("creating filesystem-view probe directory")?;
-            let owner = format!("root:{}", sandbox.gid);
-            host::run(Command::new("chown").args([owner.as_str(), VIEW_PROBE_DIR]))?;
-            fs::set_permissions(VIEW_PROBE_DIR, fs::Permissions::from_mode(0o770))?;
-        }
-        // Root owns both, and the policy has no exemption but the owner's.
+        // Writable by DAC, so that the probes prove the world-write
+        // policy. Root owns both, and the policy has no exemption but the owner's.
         fs::create_dir(WORLD_WRITE_PROBE_DIR).context("creating world-write probe directory")?;
         fs::set_permissions(WORLD_WRITE_PROBE_DIR, fs::Permissions::from_mode(0o777))?;
         install_file(Path::new(WORLD_WRITE_PROBE_FILE), b"", 0o666, None)
@@ -596,23 +470,6 @@ fn setup<P: Program>(
     })?;
     if config.unlink_worker_diagnostics() {
         timed("worker-diagnostics", worker_diagnostics::unlink)?;
-    }
-    if let Some(sandbox) = &sandbox {
-        println!(
-            "Sandbox user {} (uid {}, subordinate uids {}), in addition to {} whose home {} is closed to it",
-            sandbox.name,
-            sandbox.uid,
-            subuids.join(", "),
-            runner.name,
-            runner.home.display()
-        );
-    }
-    if let Some(script) = &plan.script
-        && sandbox.is_some()
-    {
-        timed("sandbox-script", || {
-            run_setup_script(program.file(), script)
-        })?;
     }
     timed("configuration", || {
         program.configure()?;
@@ -640,24 +497,6 @@ fn setup<P: Program>(
     Ok(())
 }
 
-/// The manager is a system service: its children, including socket-activated
-/// user units, inherit this view even when they reset their own properties.
-/// Preflight already refuses any process of this uid, so no old children can
-/// keep an unrestricted namespace alive.
-fn install_filesystem_view(user: &User) -> Result<()> {
-    let text = crate::view::manager_drop_in(user)?;
-    let dir = PathBuf::from(format!("/etc/systemd/system/user@{}.service.d", user.uid));
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    install_file(
-        &dir.join("agentic-job-view.conf"),
-        text.as_bytes(),
-        MODE_FILE,
-        None,
-    )?;
-    host::run(Command::new("systemctl").arg("daemon-reload"))?;
-    Ok(())
-}
-
 /// The user whose job this is: the one that called sudo, unless the
 /// configuration names it.
 fn runner_user(config: &Sandbox) -> Result<User> {
@@ -670,210 +509,14 @@ fn runner_user(config: &Sandbox) -> Result<User> {
     let runner = User::lookup(&name)?.with_context(|| format!("no user {name}"))?;
     ensure!(
         runner.uid != 0,
-        "the runner user {name} is root: there is nothing to keep from the sandbox user that root's own files do not already hold"
+        "the runner user {name} is root: there is nothing to take root away from"
     );
     Ok(runner)
 }
 
-/// Where `useradd` makes homes, from its own defaults.
-fn home_base() -> Result<PathBuf> {
-    let defaults = host::run(Command::new("useradd").arg("-D"))?;
-    Ok(defaults
-        .lines()
-        .find_map(|line| line.strip_prefix("HOME="))
-        .map_or_else(|| PathBuf::from("/home"), PathBuf::from))
-}
-
-/// The groups of `groups`, as `id -Gn` prints them, that the sandbox
-/// user must not be in.
-fn forbidden_groups(groups: &str) -> Vec<&str> {
-    groups
-        .split_whitespace()
-        .filter(|group| Sandbox::FORBIDDEN_GROUPS.contains(group))
-        .collect()
-}
-
-/// Whether any process runs as `uid`. pgrep exits 1 for none; anything
-/// else but 0 is pgrep not working, which must not read as none.
-fn has_processes(uid: u32) -> Result<bool> {
-    let status = Command::new("pgrep")
-        .arg("-u")
-        .arg(uid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
-        .context("running pgrep")?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => bail!("pgrep -u {uid} failed ({status})"),
-    }
-}
-
-/// Refuses a machine that is not fresh, before anything is changed. A
-/// machine that ran a job before would hand this one the previous job's
-/// sandbox user, with whatever that agent left to run at its next login.
-/// Returns the sandbox user if the image ships it and the configuration
-/// says so.
-fn preflight(config: &Sandbox, runner: &User) -> Result<Option<User>> {
-    let name = &config.user;
-    let Some(user) = User::lookup(name)? else {
-        let home = home_base()?.join(name);
-        ensure!(
-            !home.exists(),
-            "{} already exists, with no user {name}: something left it there",
-            home.display()
-        );
-        for group in &config.groups() {
-            ensure!(
-                host::succeeds(Command::new("getent").args(["group", "--", group.as_str()])),
-                "no group {group}: take it out of sandbox.groups if the sandbox user does not need it"
-            );
-        }
-        return Ok(None);
-    };
-    ensure!(
-        config.allow_existing_user,
-        "the user {name} already exists: on a fresh machine nothing has made it yet. If the image ships it, set sandbox.allow-existing-user"
-    );
-    // The configuration's groups were checked; the image's were not.
-    let groups = host::run(Command::new("id").args(["-Gn", "--", name.as_str()]))?;
-    let forbidden = forbidden_groups(&groups);
-    ensure!(
-        forbidden.is_empty() && user.gid != 0,
-        "the user {name} is in {}: that is root by another name, or reads what the sandbox keeps from the agent",
-        if forbidden.is_empty() {
-            "root's group".to_owned()
-        } else {
-            forbidden.join(", ")
-        }
-    );
-    ensure!(
-        !has_processes(user.uid)?,
-        "processes of {name} are already running"
-    );
-    ensure_distinct(&user, runner)?;
-    if config.filesystem_view {
-        crate::view::properties(&user)?;
-        ensure!(
-            fs::canonicalize(&user.home).is_ok_and(|path| path == user.home),
-            "sandbox home {} must be a real directory, with no symlink components",
-            user.home.display()
-        );
-    }
-    Ok(Some(user))
-}
-
-/// Also by uid: another name for root or the runner is still them.
-fn ensure_distinct(sandbox: &User, runner: &User) -> Result<()> {
-    ensure!(
-        sandbox.uid != 0 && sandbox.uid != runner.uid,
-        "the sandbox user {} has uid {}, root's or {}'s",
-        sandbox.name,
-        sandbox.uid,
-        runner.name
-    );
-    Ok(())
-}
-
-/// The sandbox user: the image's, or a new one with its home, a group of
-/// its own, and subordinate uids and gids, which useradd assigns.
-fn create_user(config: &Sandbox, runner: &User, existing: Option<User>) -> Result<User> {
-    if let Some(user) = existing {
-        return Ok(user);
-    }
-    let name = &config.user;
-    // Hosted images seed /etc/skel with hundreds of MB of toolchains. An
-    // empty private skeleton avoids copying them; useradd still sets the
-    // home's mode and owner according to the host's account policy.
-    // Prevent another local user from planting startup files in the skeleton.
-    let skeleton = tempfile::Builder::new()
-        .permissions(fs::Permissions::from_mode(0o700))
-        .tempdir()
-        .context("creating empty user skeleton")?;
-    label_like(
-        Path::new(SKEL),
-        skeleton.path(),
-        Path::new(SELINUX_ENFORCE).exists(),
-    )?;
-    let mut useradd = useradd_command(config, skeleton.path());
-    timed("create-user-useradd", || {
-        host::run(&mut useradd).map(|_| ())
-    })?;
-    let user = timed("create-user-lookup", || {
-        User::lookup(name)?.with_context(|| format!("useradd made no user {name}"))
-    })?;
-    ensure_distinct(&user, runner)?;
-    Ok(user)
-}
-
-/// The skeleton useradd would otherwise copy, whose label ours takes.
-const SKEL: &str = "/etc/skel";
-/// Present when selinuxfs is mounted, that is, SELinux is enabled.
-const SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
-const SELINUX_XATTR: &str = "security.selinux";
-/// Larger than any SELinux context a policy writes.
-const SELINUX_LABEL_MAX: usize = 4096;
-
-/// Give `target` the SELinux label of `source` when `selinux` is set. A directory
-/// made in /tmp takes the caller's tmp type (`initrc_tmp_t` when setup
-/// runs from a service), which `useradd_t` may not read, so useradd is
-/// denied its skeleton (cgwalters-forge/agentic-job#1813). Labelled like
-/// /etc/skel, the directory is one it may read; its owner and mode stay.
-/// An SELinux host without that label is refused rather than skipped.
-fn label_like(source: &Path, target: &Path, selinux: bool) -> Result<()> {
-    if !selinux {
-        return Ok(());
-    }
-    let mut label = [0u8; SELINUX_LABEL_MAX];
-    let len = rustix::fs::getxattr(source, SELINUX_XATTR, &mut label[..])
-        .with_context(|| format!("reading the SELinux label of {}", source.display()))?;
-    ensure!(len > 0, "{} has an empty SELinux label", source.display());
-    rustix::fs::lsetxattr(
-        target,
-        SELINUX_XATTR,
-        &label[..len],
-        rustix::fs::XattrFlags::empty(),
-    )
-    .with_context(|| format!("labelling {} like {}", target.display(), source.display()))
-}
-
-fn useradd_command(config: &Sandbox, skeleton: &Path) -> Command {
-    let mut useradd = Command::new("useradd");
-    // This is a fresh, password-locked job account, not a recycled login.
-    // Resetting lastlog/faillog can extend sparse per-UID databases; neither
-    // database participates in sandbox authorization. Keep home creation,
-    // the private group and ordinary (not system) subordinate-ID allocation.
-    useradd.args([
-        "--no-log-init",
-        "--create-home",
-        "--user-group",
-        "--shell",
-        "/bin/bash",
-    ]);
-    useradd.arg("--skel").arg(skeleton);
-    let groups = config.groups();
-    if !groups.is_empty() {
-        useradd.arg("--groups").arg(groups.join(","));
-    }
-    useradd.args(["--", config.user.as_str()]);
-    useradd
-}
-
-/// The subordinate uid ranges of `user`, each as `START-END`. Containers
-/// the sandbox user starts run as these, so the network rules name them.
-pub fn subuid_ranges(user: &User, subuid: &str) -> Result<Vec<String>> {
-    let ranges = subordinate_ranges(user, subuid);
-    ensure!(
-        !ranges.is_empty(),
-        "{} has no subordinate uids in {SUBUID}, which rootless podman needs",
-        user.name
-    );
-    Ok(ranges)
-}
-
-/// [`subuid_ranges`], none being an answer: the runner's user may have
-/// no rootless containers to cover.
+/// The subordinate uid ranges of `user`, each as `START-END`: containers
+/// it starts run as these, so the network rules name them. None is an
+/// answer: the runner's user may have no rootless containers to cover.
 fn subordinate_ranges(user: &User, subuid: &str) -> Vec<String> {
     // subuid(5) names the owner or gives its uid.
     let uid = user.uid.to_string();
@@ -892,21 +535,13 @@ fn subordinate_ranges(user: &User, subuid: &str) -> Vec<String> {
         .collect()
 }
 
-/// The sudoers rules: the sandbox user, where there is one, has nothing;
-/// the runner's user, when the machine is locked, nothing but the helper.
-/// The last matching rule wins, so the grant follows the denial.
-fn sudoers_rules(sandbox: Option<&str>, locked_runner: Option<&str>) -> String {
-    let mut rules = String::new();
-    if let Some(sandbox) = sandbox {
-        rules.push_str(&format!("{sandbox} ALL=(ALL:ALL) !ALL\n"));
-    }
-    if let Some(runner) = locked_runner {
-        rules.push_str(&format!(
-            "{runner} ALL=(ALL:ALL) !ALL\n{runner} ALL=(root) NOPASSWD: {}\n",
-            helper::sudoers_command()
-        ));
-    }
-    rules
+/// The sudoers rules: the locked runner's user has nothing but the
+/// helper. The last matching rule wins, so the grant follows the denial.
+fn sudoers_rules(runner: &str) -> String {
+    format!(
+        "{runner} ALL=(ALL:ALL) !ALL\n{runner} ALL=(root) NOPASSWD: {}\n",
+        helper::sudoers_command()
+    )
 }
 
 /// What `sudo -l` lists for the locked runner's user, and nothing else:
@@ -931,92 +566,28 @@ fn polkit_deny(users: &[&str]) -> String {
     )
 }
 
-/// What to add to a deny list `text` so that it names `user`, if it does
-/// not already.
-fn denial(text: &str, user: &str) -> Option<String> {
-    if text.lines().any(|line| line.trim() == user) {
-        return None;
-    }
-    let separator = if text.is_empty() || text.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    Some(format!("{separator}{user}\n"))
-}
-
-/// Takes away the sandbox user's sudo, its polkit actions, and every way
-/// to leave a process behind for later: cron, at, and a lingering user
-/// manager. With LOCKED_RUNNER, the runner's user's sudo (but for the
-/// helper) and polkit actions go too. With neither, there is no one to
-/// write a rule for.
-fn deny_privileges(user: Option<&str>, locked_runner: Option<&str>) -> Result<()> {
-    let users: Vec<&str> = user.into_iter().chain(locked_runner).collect();
-    if users.is_empty() {
-        return Ok(());
-    }
+/// Takes away the locked runner's user's sudo, but for the helper, and
+/// its polkit actions.
+fn deny_privileges(runner: &str) -> Result<()> {
     install_file(
         Path::new(SUDOERS_DENY),
-        sudoers_rules(user, locked_runner).as_bytes(),
+        sudoers_rules(runner).as_bytes(),
         MODE_SUDOERS,
         Some(VISUDO_CHECK),
     )?;
     if Path::new(POLKIT_RULES_DIR).is_dir() {
         install_file(
             Path::new(POLKIT_DENY),
-            polkit_deny(&users).as_bytes(),
+            polkit_deny(&[runner]).as_bytes(),
             MODE_FILE,
             None,
         )?;
     }
-    if let Some(user) = user {
-        for scheduler in SCHEDULERS {
-            scheduler.deny(user)?;
-        }
-        host::run(Command::new("loginctl").args(["disable-linger", "--", user]))?;
-    }
     Ok(())
 }
 
-impl Scheduler {
-    /// Keeps `user` from this scheduler. A deny list that is there is
-    /// added to in place, keeping its owner and mode, which its readers
-    /// depend on. One we make is world-readable: cron's own programs are
-    /// not root, and one that cannot read the list allows everyone.
-    fn deny(&self, user: &str) -> Result<()> {
-        let (allow, deny) = (Path::new(self.allow), Path::new(self.deny));
-        // An allow list is all that is read when there is one.
-        match fs::read_to_string(allow) {
-            Ok(allowed) => {
-                ensure!(
-                    !allowed.lines().any(|line| line.trim() == user),
-                    "{} lists {user}: the sandbox user must not be able to schedule commands",
-                    self.allow
-                );
-                return Ok(());
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("reading {}", self.allow)),
-        }
-        match fs::read_to_string(deny) {
-            Ok(text) => denial(&text, user).map_or(Ok(()), |line| {
-                fs::OpenOptions::new()
-                    .append(true)
-                    .open(deny)
-                    .and_then(|mut file| file.write_all(line.as_bytes()))
-                    .with_context(|| format!("adding {user} to {}", self.deny))
-            }),
-            Err(err) if err.kind() == ErrorKind::NotFound && self.open_without_lists => {
-                install_file(deny, format!("{user}\n").as_bytes(), MODE_FILE, None)
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err).with_context(|| format!("reading {}", self.deny)),
-        }
-    }
-}
-
-/// Whether a variable the image sets for every session is one the
-/// sandbox user's must not get.
+/// Whether a variable the image sets for every session is one no
+/// session must get.
 fn image_variable(name: &str) -> bool {
     IMAGE_ENV_VARS.contains(&name) || name.starts_with(Sandbox::FORBIDDEN_ENV_PREFIX)
 }
@@ -1056,7 +627,7 @@ fn drop_image_environment() -> Result<()> {
     Ok(())
 }
 
-/// The directories the sandbox user must not see into: the runner's home,
+/// The directories other local users must not see into: the runner's home,
 /// which holds the runner's credentials and the job's files; the ones
 /// every runner of the old tree had closed; and the configured ones. The
 /// configuration adds to the list and cannot shorten it.
@@ -1385,7 +956,7 @@ fn fix_crypto_policies(root: &Path) -> Result<()> {
 }
 
 /// Apply to the host, not just one entry path. Reset any image-provided
-/// exemption to root's group, which the sandbox user cannot belong to.
+/// exemption to root's group, which the runner's user cannot belong to.
 fn hide_other_processes() -> Result<()> {
     host::run(Command::new("mount").args(["-o", "remount,hidepid=invisible,gid=0", "/proc"]))
         .context("hiding other users' processes on the host /proc")?;
@@ -1454,9 +1025,6 @@ fn stop_services(units: &[String]) -> Result<()> {
     }
     Ok(())
 }
-
-/// What `run0 --pipe` needs.
-const RUN0_SYSTEMD: u32 = 257;
 
 /// The systemd version `--version` printed first: `systemd 259 (259.5-1)`.
 fn systemd_version(text: &str) -> Option<u32> {
@@ -1578,7 +1146,7 @@ impl PackageManager {
             return true;
         }
         // Query package state, not PATH: a runner's private toolchain is
-        // not necessarily usable by the sandbox. Version/release requests,
+        // not necessarily on root's. Version/release requests,
         // local .debs and apt patterns go to apt unchanged.
         !installed(package)
     }
@@ -1625,52 +1193,6 @@ pub fn install_packages(packages: &[String]) -> Result<()> {
     bail!(
         "installing {} failed {INSTALL_ATTEMPTS} times",
         packages.join(" ")
-    )
-}
-
-/// `[setup] script`, as the sandbox user in its home: for toolchains,
-/// which then belong to the user that runs them. Never as root.
-fn run_setup_script<F: HostFile>(file: &F, script: &Path) -> Result<()> {
-    let bytes = fs::read(script).with_context(|| format!("reading {}", script.display()))?;
-    install_file(Path::new(SCRIPT_COPY), &bytes, MODE_PROGRAM, None)?;
-    let user = &file.sandbox().user;
-    let entry = Entry::new(file)?;
-    let output = entry.run(&[SCRIPT_COPY], b"")?;
-    // Captured setup output is only a log, so complete escaping avoids a
-    // suspension window (and cross-stream ordering or signal cleanup).
-    std::io::stdout().write_all(
-        crate::workflow_commands::escaped(&String::from_utf8_lossy(&output.stdout)).as_bytes(),
-    )?;
-    std::io::stderr().write_all(
-        crate::workflow_commands::escaped(&String::from_utf8_lossy(&output.stderr)).as_bytes(),
-    )?;
-    if output.success() {
-        return Ok(());
-    }
-    let failed = anyhow::anyhow!("setup.script failed as {user} ({})", output.status);
-    if String::from_utf8_lossy(&output.stderr).contains(RUN0_NO_UNIT) {
-        return Err(failed.context(run0_no_unit_hint(user)));
-    }
-    Err(failed)
-}
-
-/// What run0 prints when the system manager will not start its unit.
-const RUN0_NO_UNIT: &str = "Failed to start transient service unit";
-
-/// Why run0 may have refused, and what to do instead. Seen when setup
-/// ran from cloud-init's `runcmd` on CentOS Stream 10; the cause is not
-/// yet known (cgwalters-forge/agentic-job#1810).
-fn run0_no_unit_hint(user: &str) -> String {
-    format!(
-        "{RUN0} could not start a transient unit to run as {user}. This was seen when setup ran from cloud-init (runcmd) on CentOS Stream 10; \
-         start setup from a root shell or a systemd unit after boot instead, for example:\n\
-         [Unit]\n\
-         After=multi-user.target\n\
-         [Service]\n\
-         Type=oneshot\n\
-         ExecStart=/usr/local/bin/agentic-job sandbox setup --config /etc/agentic-job-setup.toml\n\
-         [Install]\n\
-         WantedBy=multi-user.target"
     )
 }
 
@@ -1815,52 +1337,30 @@ mod tests {
     }
 
     #[test]
-    fn run0_no_unit_hints() {
-        let hint = run0_no_unit_hint("agent");
-        for want in [
-            "run0 could not start a transient unit to run as agent",
-            "cloud-init (runcmd) on CentOS Stream 10",
-            "a root shell or a systemd unit after boot",
-            "Type=oneshot",
-            "After=multi-user.target",
-            "ExecStart=/usr/local/bin/agentic-job sandbox setup --config ",
-        ] {
-            assert!(hint.contains(want), "{want:?} not in {hint}");
-        }
-    }
-
-    #[test]
     fn subordinate_uid_ranges() {
-        let agent = |name: &str| User {
+        let runner = |name: &str| User {
             name: name.to_owned(),
             uid: 1001,
             gid: 1001,
-            home: "/home/agent".into(),
+            home: "/home/runner".into(),
         };
-        let subuid = "runner:100000:65536\nagent:165536:65536\n1001:300000:1000\nother:1:1\n";
+        let subuid = "other:100000:65536\nrunner:165536:65536\n1001:300000:1000\nx:1:1\n";
         assert_eq!(
-            subuid_ranges(&agent("agent"), subuid).unwrap(),
+            subordinate_ranges(&runner("runner"), subuid),
             ["165536-231071", "300000-300999"]
         );
+        // The runner's user may have none; that is no refusal.
         for (user, text) in [
-            ("agent", ""),
-            ("agent", "agent:x:1\n"),
-            ("agen", "agent:165536:65536\n"),
-            ("agent", "agent:5:0\n"),
+            ("runner", ""),
+            ("runner", "runner:x:1\n"),
+            ("runne", "runner:165536:65536\n"),
+            ("runner", "runner:5:0\n"),
         ] {
             assert!(
-                subuid_ranges(&agent(user), text).is_err(),
+                subordinate_ranges(&runner(user), text).is_empty(),
                 "{user} in {text:?}"
             );
-            // The runner's user may have none; that is no refusal.
-            assert!(subordinate_ranges(&agent(user), text).is_empty());
         }
-    }
-
-    #[test]
-    fn groups_an_image_gave_the_user() {
-        assert_eq!(forbidden_groups("agent kvm render"), Vec::<&str>::new());
-        assert_eq!(forbidden_groups("agent docker kvm adm"), ["docker", "adm"]);
     }
 
     #[test]
@@ -1890,37 +1390,15 @@ mod tests {
 
     #[test]
     fn deny_files() {
-        let runner_lines = "runner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: /usr/local/libexec/agentic-job helper *\n";
+        // The lock alone: there is no second user to write a rule for.
         assert_eq!(
-            sudoers_rules(Some("agent"), None),
-            "agent ALL=(ALL:ALL) !ALL\n"
+            sudoers_rules("runner"),
+            "runner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: /usr/local/libexec/agentic-job helper *\n"
         );
         assert_eq!(
-            sudoers_rules(Some("agent"), Some("runner")),
-            format!("agent ALL=(ALL:ALL) !ALL\n{runner_lines}")
+            polkit_deny(&["runner"]),
+            "polkit.addRule(function(action, subject) {\n  if (subject.user == \"runner\") return polkit.Result.NO;\n});\n"
         );
-        // sandbox.create-user = false: the lock alone.
-        assert_eq!(sudoers_rules(None, Some("runner")), runner_lines);
-        assert_eq!(
-            polkit_deny(&["agent"]),
-            "polkit.addRule(function(action, subject) {\n  if (subject.user == \"agent\") return polkit.Result.NO;\n});\n"
-        );
-        assert_eq!(
-            polkit_deny(&["agent", "runner"]),
-            "polkit.addRule(function(action, subject) {\n  if (subject.user == \"agent\" || subject.user == \"runner\") return polkit.Result.NO;\n});\n"
-        );
-        let cases = [
-            ("", Some("agent\n")),
-            ("daemon\n", Some("agent\n")),
-            ("daemon", Some("\nagent\n")),
-            ("daemon\nagent\n", None),
-            ("agent", None),
-            // Another user's name that only contains ours.
-            ("agent2\n", Some("agent\n")),
-        ];
-        for (text, want) in cases {
-            assert_eq!(denial(text, "agent").as_deref(), want, "{text:?}");
-        }
     }
 
     #[test]
@@ -2065,63 +1543,5 @@ mod tests {
             assert!(!manager.refresh_before(1));
             assert!(manager.refresh_before(2));
         }
-    }
-
-    /// Without SELinux the skeleton is left alone; with it, a source with
-    /// no label is refused, not skipped. The tempdir source is unlabelled
-    /// only on a host without SELinux, as CI's; a missing one never is.
-    #[test]
-    fn skeleton_takes_the_label_of_etc_skel_only_under_selinux() {
-        let source = tempfile::tempdir().unwrap();
-        let missing = source.path().join("missing");
-        let target = tempfile::Builder::new()
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap();
-        for (source, selinux, wanted) in [
-            (source.path(), false, Ok(())),
-            (missing.as_path(), false, Ok(())),
-            (source.path(), true, Err("reading the SELinux label of")),
-            (missing.as_path(), true, Err("reading the SELinux label of")),
-        ] {
-            let labelled = label_like(source, target.path(), selinux);
-            match wanted {
-                Ok(()) => assert!(labelled.is_ok(), "{source:?}: {labelled:?}"),
-                Err(message) => {
-                    let error = format!("{:#}", labelled.unwrap_err());
-                    assert!(error.starts_with(message), "{source:?}: {error}");
-                }
-            }
-            let mode = std::fs::metadata(target.path()).unwrap().mode() & 0o7777;
-            assert_eq!(mode, 0o700);
-        }
-    }
-
-    #[test]
-    fn job_user_keeps_home_groups_and_subordinate_ids_without_login_logs() {
-        let config: Sandbox = toml::from_str("user = 'job-user'\ngroups = ['kvm']").unwrap();
-        let skeleton = tempfile::tempdir().unwrap();
-        assert_eq!(std::fs::read_dir(skeleton.path()).unwrap().count(), 0);
-        let command = useradd_command(&config, skeleton.path());
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_str().unwrap())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "--no-log-init",
-                "--create-home",
-                "--user-group",
-                "--shell",
-                "/bin/bash",
-                "--skel",
-                skeleton.path().to_str().unwrap(),
-                "--groups",
-                "kvm",
-                "--",
-                "job-user",
-            ]
-        );
     }
 }

@@ -1,7 +1,6 @@
 //! The `--config` file: one TOML file for a run, with a table per
 //! concern. `sandbox setup` reads the caller's file and copies it to
-//! [`ROOT_COPY`]; `run` reads only that copy, which the sandbox user
-//! cannot change.
+//! [`ROOT_COPY`]; `run` reads only that copy, which is root's.
 //!
 //! Each table's struct belongs to the step of docs/plan.md that uses it
 //! (see docs/layout.md). What the types cannot say (that `github-oidc`
@@ -18,7 +17,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 // secure-host's now, at the paths callers know.
-pub use ::secure_host::config::{HostFile, ROOT_COPY, Sandbox, SandboxCheck};
+pub use ::secure_host::config::{HostFile, ROOT_COPY, Sandbox};
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -41,7 +40,10 @@ pub struct Config {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parsing the configuration")
+        let config: Self = toml::from_str(text).context("parsing the configuration")?;
+        config.sandbox.refuse_removed()?;
+        config.setup.refuse_removed()?;
+        Ok(config)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -66,7 +68,10 @@ pub struct HostConfig {
 
 impl HostConfig {
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parsing the host configuration")
+        let config: Self = toml::from_str(text).context("parsing the host configuration")?;
+        config.sandbox.refuse_removed()?;
+        config.setup.refuse_removed()?;
+        Ok(config)
     }
 }
 
@@ -266,115 +271,32 @@ pub struct Setup {
     /// `NAME@VERSION` as pinned, installed without npm or their scripts
     /// (`sandbox::setup::agents`).
     pub agents: Vec<String>,
-    /// Run as the sandbox user, never as root: for toolchains.
+    /// For toolchains: run as the runner's user, the agent's, in the
+    /// agent's home after setup (the reusable workflow's setup-script
+    /// step), never by setup and never as root.
     pub script: Option<PathBuf>,
-    /// Trusted caller-selected tools, installed before network lockdown.
-    pub tools: Option<Tools>,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Tools {
-    pub repository: String,
-    pub revision: String,
-    pub recipe: String,
-}
-
-impl Tools {
-    fn validate(&self) -> Result<()> {
-        // A moving ref would let a later repository compromise replace host
-        // setup code without a caller configuration change.
-        ensure!(
-            self.revision.len() == 40 && self.revision.bytes().all(|b| b.is_ascii_hexdigit()),
-            "setup.tools.revision must be a full 40-digit commit pin"
-        );
-        ensure!(
-            self.repository.starts_with("https://")
-                && self.repository.len() > "https://".len()
-                && !self.repository.contains(char::is_whitespace)
-                && !self.repository.contains(['\0', '@', '?', '#']),
-            "setup.tools.repository must be a public HTTPS clone URL without credentials"
-        );
-        ensure!(
-            !self.recipe.is_empty()
-                && self.recipe.len() <= 64
-                && self
-                    .recipe
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-                && !self.recipe.starts_with('-'),
-            "setup.tools.recipe must be one just recipe name"
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tools_tests {
-    use super::*;
-
-    #[test]
-    fn tools_are_opt_in_and_reject_unpinned_or_option_like_settings() {
-        assert!(Config::parse("").unwrap().setup.tools.is_none());
-        for (repository, revision, recipe, accepted) in [
-            (
-                "https://example.org/tools.git",
-                "a".repeat(40),
-                "install-tools",
-                true,
-            ),
-            (
-                "https://example.org/tools.git",
-                "main".into(),
-                "install-tools",
-                false,
-            ),
-            (
-                "https://example.org/tools.git",
-                "g".repeat(40),
-                "install-tools",
-                false,
-            ),
-            (
-                "https://token@example.org/tools.git",
-                "a".repeat(40),
-                "install-tools",
-                false,
-            ),
-            ("file:///tmp/tools", "a".repeat(40), "install-tools", false),
-            (
-                "https://example.org/tools.git",
-                "a".repeat(40),
-                "--evaluate",
-                false,
-            ),
-            (
-                "https://example.org/tools.git",
-                "a".repeat(40),
-                "install tools",
-                false,
-            ),
-        ] {
-            let text = format!(
-                "[setup.tools]\nrepository = {repository:?}\nrevision = {revision:?}\nrecipe = {recipe:?}\n"
-            );
-            let config = Config::parse(&text).unwrap();
-            assert_eq!(config.setup.validate().is_ok(), accepted, "{text}");
-        }
-        assert!(
-            Config::parse("[setup.tools]\nrepository = 'https://example.org/tools.git'").is_err()
-        );
-    }
+    /// Tools installed in the removed sandbox user's home, read only to
+    /// be refused by name ([`Setup::refuse_removed`]).
+    #[serde(rename = "tools")]
+    removed_tools: Option<serde::de::IgnoredAny>,
 }
 
 impl Setup {
+    /// Refuses `setup.tools`, which went with the sandbox user's home.
+    pub fn refuse_removed(&self) -> Result<()> {
+        ensure!(
+            self.removed_tools.is_none(),
+            "setup.tools {}",
+            Sandbox::REMOVED_KEY
+        );
+        Ok(())
+    }
+
     /// A name is handed to a package manager run as root, so it must not
     /// read as an option; and an agent program without an exact version
     /// is whatever the registry serves that day.
     fn validate(&self) -> Result<()> {
-        if let Some(tools) = &self.tools {
-            tools.validate()?;
-        }
+        self.refuse_removed()?;
         let plain = |name: &str| {
             !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace)
         };
@@ -482,7 +404,7 @@ mod tests {
 
     const FULL: &str = r#"
         [sandbox]
-        user = "agent"
+        runner-user = "agent"
         stop-services = ["docker.service"]
 
         [inference]
@@ -526,7 +448,7 @@ mod tests {
     fn empty_is_the_defaults() {
         let config = Config::parse("").unwrap();
         assert_eq!(config, Config::default());
-        assert_eq!(config.sandbox.user, Sandbox::DEFAULT_USER);
+        assert!(config.sandbox.lock_runner);
         // No mode is chosen for a run that names none.
         assert_eq!(config.inference.register, None);
     }
@@ -568,7 +490,6 @@ mod tests {
     fn sandbox_and_setup_refuse_what_the_types_allow() {
         let good = r#"
             [sandbox]
-            groups = ["kvm", "render"]
             runner-user = "runner"
             deny-runner-metadata = true
             unlink-worker-diagnostics = true
@@ -580,7 +501,6 @@ mod tests {
             [sandbox.check]
             allow-sockets = ["/run/snapd.socket", "/run/pcscd/", "@ISCSIADM_ABSTRACT_NAMESPACE"]
             allow-tcp-ports = [3128]
-            before-agent = true
             containers = false
             fetch-repo = "https://git.example.org/a/b"
             [setup]
@@ -589,68 +509,32 @@ mod tests {
             agents = ["opencode-ai@1.18.35"]
         "#;
         let config = Config::parse(good).unwrap();
-        assert!(config.sandbox.check.before_agent);
-        assert!(!Config::default().sandbox.check.before_agent);
         assert!(!config.sandbox.check.containers);
         assert!(Config::default().sandbox.check.containers);
+        // Only the removed sandbox user's probes read these: accepted
+        // while the pinned image still makes them, and named as ignored.
         assert_eq!(
-            config.sandbox.check.fetch_repo,
-            "https://git.example.org/a/b"
+            config.sandbox.check.ignored(),
+            ["fetch-repo", "allow-sockets", "allow-tcp-ports"]
         );
-        assert_eq!(
-            Config::default().sandbox.check.fetch_repo,
-            SandboxCheck::DEFAULT_FETCH_REPO
-        );
+        assert!(Config::default().sandbox.check.ignored().is_empty());
         config.sandbox.validate().unwrap();
         config.setup.validate().unwrap();
-        assert_eq!(config.sandbox.groups(), ["kvm", "render"]);
         Config::default().sandbox.validate().unwrap();
-        // The sandbox user is made unless a host opts out; without it the
-        // default groups mean nothing, and none named is no group at all.
-        assert!(Config::default().sandbox.create_user);
-        assert_eq!(Config::default().sandbox.groups(), Sandbox::DEFAULT_GROUPS);
-        for text in [
-            "[sandbox]\ncreate-user = false",
-            "[sandbox]\ncreate-user = false\ngroups = []",
-            "[sandbox]\ncreate-user = true\ngroups = []",
-        ] {
-            let sandbox = Config::parse(text).unwrap().sandbox;
-            sandbox
-                .validate()
-                .unwrap_or_else(|err| panic!("{text:?}: {err:#}"));
-        }
-        assert!(Config::parse("[sandbox]\ncreate_user = false").is_err());
 
         let bad = [
-            "[sandbox]\nuser = \"root\"",
-            "[sandbox]\nuser = \"a b\"",
-            "[sandbox]\nuser = \"x) ALL=(ALL) NOPASSWD: ALL #\"",
-            "[sandbox]\nuser = \"agent\"\nrunner-user = \"agent\"",
+            "[sandbox]\nrunner-user = \"root\"",
+            "[sandbox]\nrunner-user = \"x) ALL=(ALL) NOPASSWD: ALL #\"",
             "[sandbox]\nlock-runner = false\ndeny-runner-metadata = true",
             "[sandbox]\nlock-runner = false\nunlink-worker-diagnostics = true",
             "[sandbox]\nlock-runner = false\ndeny-runner-reads = true",
-            "[sandbox]\ncreate-user = false\nallow-existing-user = true",
-            "[sandbox]\ncreate-user = false\nfilesystem-view = true",
-            "[sandbox]\ncreate-user = false\ngroups = [\"kvm\"]",
-            "[sandbox]\ngroups = [\"docker\"]",
-            "[sandbox]\ngroups = [\"wheel\"]",
             "[sandbox]\nprivate-dirs = [\"relative\"]",
             "[sandbox]\nstop-services = [\"--now\"]",
             "[sandbox]\nstop-services = [\"docker\"]",
             "[sandbox]\nenv = { ACTIONS_ID_TOKEN_REQUEST_URL = \"x\" }",
             "[sandbox]\nenv = { \"A=B\" = \"x\" }",
             "[sandbox]\nenv = { A = \"x\\ny\" }",
-            "[sandbox.check]\ncontrol-url = \"ftp://example.com\"",
-            "[sandbox.check]\nfetch-repo = \"git@github.com:a/b\"",
-            "[sandbox.check]\nfetch-repo = \"--upload-pack=x\"",
-            "[sandbox.check]\nfetch-repo = \"https://\"",
-            "[sandbox.check]\nfetch-repo = \"https:///a/b\"",
-            "[sandbox.check]\nfetch-repo = \"https://h/a/b?x\"",
-            "[sandbox.check]\nfetch-repo = \"https://h/a/b#x\"",
-            "[sandbox.check]\nfetch-repo = \"https://user:pass@h/a/b\"",
-            "[sandbox.check]\nfetch-repo = \"https://h/a b\"",
             "[sandbox.check]\ncontainer-image = \"--privileged\"",
-            "[sandbox.check]\nallow-sockets = [\"run/x\"]",
             "[setup]\npackages = [\"--installroot=/\"]",
             "[setup]\nnpm = [\"opencode-ai\"]",
             "[setup]\nnpm = [\"opencode-ai@latest\"]",
@@ -670,6 +554,54 @@ mod tests {
                 "{text:?} was accepted"
             );
         }
+    }
+
+    /// Every key of the removed sandbox user is refused when the file is
+    /// read, naming the decision, whatever its value: a file that still
+    /// asks for that user is not run as if it had one.
+    #[test]
+    fn the_sandbox_users_keys_are_refused_by_name() {
+        for (text, key) in [
+            ("[sandbox]\ncreate-user = false", "sandbox.create-user"),
+            ("[sandbox]\ncreate-user = true", "sandbox.create-user"),
+            ("[sandbox]\nuser = \"runner-sandbox\"", "sandbox.user"),
+            ("[sandbox]\ngroups = []", "sandbox.groups"),
+            ("[sandbox]\ngroups = [\"kvm\"]", "sandbox.groups"),
+            (
+                "[sandbox]\nallow-existing-user = true",
+                "sandbox.allow-existing-user",
+            ),
+            (
+                "[sandbox]\nfilesystem-view = false",
+                "sandbox.filesystem-view",
+            ),
+            (
+                "[sandbox.check]\nbefore-agent = true",
+                "sandbox.check.before-agent",
+            ),
+            (
+                "[setup.tools]\nrepository = \"https://example.org/t.git\"",
+                "setup.tools",
+            ),
+        ] {
+            for parsed in [
+                Config::parse(text).map(drop),
+                HostConfig::parse(text).map(drop),
+            ] {
+                let err = format!("{:#}", parsed.unwrap_err());
+                assert!(
+                    err.starts_with(&format!("{key} was removed with the sandbox user")),
+                    "{text:?}: {err}"
+                );
+                assert!(err.contains("agentic-job#2989"), "{err}");
+            }
+        }
+        // A misspelling is still unknown, not removed.
+        let err = format!(
+            "{:#}",
+            Config::parse("[sandbox]\ncreate_user = false").unwrap_err()
+        );
+        assert!(err.contains("unknown field"), "{err}");
     }
 
     /// The runner's rules follow the lock unless set, and a locked host's
@@ -750,7 +682,7 @@ mod tests {
             // What CI's confined job proves, with no override.
             assert!(host.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
             if name == "rhel-cloud.toml" {
-                assert!(host.sandbox.check.allow_sockets.is_empty());
+                assert!(host.sandbox.check.ignored().is_empty());
             }
             for unit in units {
                 assert!(
@@ -769,7 +701,7 @@ mod tests {
             "[commit]\nauthor = \"A Bot <bot@example.com>\"",
             "[session]\nlisten = true",
             "[mcp.docs]\nurl = \"https://mcp.example\"",
-            "[sandbx]\nuser = \"x\"",
+            "[sandbx]\nlock-runner = true",
             "[sandbox]\nusr = \"x\"",
         ] {
             assert!(HostConfig::parse(text).is_err(), "{text:?} parsed");
@@ -781,7 +713,7 @@ mod tests {
     fn unknown_keys_and_values_are_refused() {
         let cases = [
             "[sandbox]\nusr = \"x\"",
-            "[sandbx]\nuser = \"x\"",
+            "[sandbx]\nlock-runner = true",
             "[inference]\nregister = \"oidc\"",
             "[inference]\nprovider = \"mistral\"",
             "[limits]\ntimeout = 5",

@@ -58,9 +58,8 @@ pub struct Args {
     /// Check only what `sandbox setup` reads: for a job that runs no agent
     #[arg(long)]
     pub host: bool,
-    /// Leave `setup.script` out: for the secure-host image, which would
-    /// run it from the host's root as its second user, where an agent job
-    /// with no second user runs it itself
+    /// Leave `setup.script` out, as `--host` always does: the runner's
+    /// user runs it after setup, which runs none
     #[arg(long)]
     pub no_script: bool,
     /// The repository the run works on, OWNER/NAME: chooses its entry of
@@ -324,28 +323,12 @@ fn compose(args: &Args) -> Result<String> {
     if let Some(address) = &args.inference_address {
         inference_address(&mut table, address)?;
     }
-    if args.no_script
+    // Setup runs no script (agentic-job#2989): the runner's user runs it
+    // after setup, so a host's file never has one.
+    if (args.no_script || args.host)
         && let Some(setup) = table.get_mut("setup").and_then(Value::as_table_mut)
     {
         setup.remove("script");
-    }
-    // The secure-host image runs a host file's script from the host's
-    // root, not from this directory: a relative path, as the policy job
-    // composes it, would name another file there or none.
-    if args.host
-        && let Some(script) = table
-            .get_mut("setup")
-            .and_then(Value::as_table_mut)
-            .and_then(|setup| setup.get_mut("script"))
-        && let Some(path) = script.as_str().map(PathBuf::from)
-        && path.is_relative()
-    {
-        let dir = std::env::current_dir().context("setup.script: the current directory")?;
-        let path = dir.join(path);
-        let path = path
-            .to_str()
-            .context("setup.script: the current directory is not UTF-8")?;
-        *script = Value::String(path.to_owned());
     }
     // Default only an absent key: an explicit list (even an empty one)
     // is the caller's network policy, not ours to expand.
@@ -506,7 +489,7 @@ mod tests {
                 "inference.register=github-oidc",
                 "inference.audience=proxy",
                 "agent.name=fake",
-                "sandbox.check.control-url=https://example.com/",
+                "sandbox.check.container-image=quay.io/example/curl",
             ],
             &["limits.timeout-minutes= 75 ", "limits.budget=500"],
             &[
@@ -518,7 +501,7 @@ mod tests {
         assert_eq!(config.inference.url, "http://100.64.0.1:18080");
         assert_eq!(config.inference.register, Some(Register::GithubOidc));
         assert_eq!(config.agent.name, "fake");
-        assert_eq!(config.sandbox.check.control_url, "https://example.com/");
+        assert_eq!(config.sandbox.check.container_image, "quay.io/example/curl");
         assert_eq!(config.limits.timeout_minutes, 75);
         assert_eq!(config.limits.budget, 500);
         assert_eq!(config.setup.packages, ["just", "gcc-c++", "jq"]);
@@ -986,7 +969,6 @@ mod tests {
             &[
                 "sandbox.lock-runner= false ",
                 "egress.proxy=false",
-                "sandbox.allow-existing-user=",
                 "sandbox.deny-runner-metadata=",
             ],
             &["sandbox.stop-services=docker.socket docker.service"],
@@ -994,7 +976,6 @@ mod tests {
         assert!(!config.sandbox.lock_runner);
         assert!(!config.sandbox.deny_runner_metadata());
         assert!(!config.egress.proxy);
-        assert!(!config.sandbox.allow_existing_user);
         assert_eq!(
             config.sandbox.stop_services,
             ["docker.socket", "docker.service"]
@@ -1007,39 +988,24 @@ mod tests {
         assert!(locked.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
         let opted_out = composed(&host_args(&["sandbox.deny-runner-reads=false"], &[]));
         assert!(opted_out.sandbox.deny_runner_metadata() && !opted_out.sandbox.deny_runner_reads());
-        // For the secure-host image, a run's file without its script and
-        // with all else: the agent job runs the script itself.
+        // A run's file keeps its script, which the runner's user runs
+        // after setup; a host's file never has one, `--no-script` or not,
+        // and has all else.
         let run = args(None, &["setup.script=setup.sh", RUN[0]], LIMITS, &[]);
         assert_eq!(
             composed(&run).setup.script.as_deref(),
             Some(std::path::Path::new("setup.sh"))
         );
-        // With its script, for the image to run as the sandbox user
-        // (`agent-user: sandbox`): from here, not the host's root.
-        let sandbox = composed(&Args {
-            host: true,
-            ..args(None, &["setup.script=setup.sh", RUN[0]], LIMITS, &[])
-        });
-        assert_eq!(
-            sandbox.setup.script,
-            Some(std::env::current_dir().unwrap().join("setup.sh"))
-        );
-        let absolute = composed(&Args {
-            host: true,
-            ..args(None, &["setup.script=/etc/setup.sh", RUN[0]], LIMITS, &[])
-        });
-        assert_eq!(
-            absolute.setup.script.as_deref(),
-            Some(std::path::Path::new("/etc/setup.sh"))
-        );
-        let image = composed(&Args {
-            host: true,
-            no_script: true,
-            ..run
-        });
-        assert_eq!(image.setup.script, None);
-        assert_eq!(image.agent.name, "fake");
-        assert_eq!(image.limits.budget, 100);
+        for no_script in [false, true] {
+            let image = composed(&Args {
+                host: true,
+                no_script,
+                ..args(None, &["setup.script=/etc/setup.sh", RUN[0]], LIMITS, &[])
+            });
+            assert_eq!(image.setup.script, None);
+            assert_eq!(image.agent.name, "fake");
+            assert_eq!(image.limits.budget, 100);
+        }
         // The same file, as a run's: `run` could not use it.
         let run = Args {
             host: false,
@@ -1052,7 +1018,16 @@ mod tests {
                 vec![],
                 "sandbox.lock-runner: \"yes\" is neither true nor false",
             ),
-            (vec!["sandbox.user=true"], vec![], "invalid type: boolean"),
+            (
+                vec!["sandbox.runner-user=true"],
+                vec![],
+                "invalid type: boolean",
+            ),
+            (
+                vec!["sandbox.create-user=false"],
+                vec![],
+                "sandbox.create-user was removed with the sandbox user",
+            ),
             (
                 vec![
                     "sandbox.lock-runner=false",
@@ -1155,10 +1130,10 @@ mod tests {
                 "setting agent.name.first: name is not a table",
             ),
             (
-                vec!["sandbox.user=root"],
+                vec!["sandbox.runner-user=root"],
                 vec![],
                 vec![],
-                "sandbox.user: \"root\"",
+                "sandbox.runner-user: \"root\"",
             ),
             (
                 vec![],

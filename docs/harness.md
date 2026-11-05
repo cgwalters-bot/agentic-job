@@ -26,10 +26,9 @@ evidence of what the agent let through, not a guarantee
 ([requirements.md](requirements.md#actors-and-trust)). The agent's
 environment holds none of the job's `ACTIONS_*` variables and none of
 its inherited provider settings. Clearing those variables does not hide
-credentials in same-UID files, processes or memory. The old `run0` path remains
-in this checkout pending [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991),
-but is not a migration target. No second user should be introduced to bypass
-the runner-mode refusals below.
+credentials in same-UID files, processes or memory. The old `run0` path was
+removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991);
+no second user should be introduced to bypass the runner-mode refusals below.
 
 It sends the task as one prompt and advertises no filesystem or
 terminal capability, so the agent uses its own tools inside the

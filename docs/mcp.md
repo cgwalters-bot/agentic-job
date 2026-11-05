@@ -8,9 +8,9 @@
 `run`'s environment or memory is readable by the same-UID agent. The reusable
 workflow declares `MCP_TOKEN` for compatibility but passes it to no job.
 Do not send it to an agent job of your own or revive the second-user path.
-As of 5 November 2026, [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
-is open and legacy local-proxy code remains; its presence is not support for
-runner-only credential isolation.
+The second user was removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991);
+the local-proxy code that remains is not support for runner-only credential
+isolation.
 
 An agent can start a credential-free local MCP process with its own tools.
 That process has the agent's authority, not a new trusted boundary. MCP results

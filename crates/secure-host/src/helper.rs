@@ -6,18 +6,17 @@
 //! root-owned copy of this program ([`SELF_COPY`]). So this
 //! is the whole of what that user can have root do, and it is kept
 //! closed: no operation takes a path, a user or a command that root then
-//! acts on. The sandbox user comes from the root-owned configuration;
-//! `enter` runs the caller's command, but as that unprivileged user and
-//! only in a directory under its home; the log read is of one fixed
-//! file; every program root runs here is looked up on a fixed PATH and
-//! must be root's alone, as must the configuration. The caller is taken
-//! for hostile: a supervisor the agent got hold of must gain nothing
-//! more than it has.
+//! acts on. The log read is of one fixed file; every program root runs
+//! here is looked up on a fixed PATH and must be root's alone, as must
+//! the configuration. The caller is taken for hostile: the agent, the
+//! runner's own user, must gain nothing more than it has. Since
+//! agentic-job#2989 there is no second user, and no operation enters,
+//! stops or cleans up after one.
 //!
 //! The same operations are what the runner's user did with full sudo
 //! before the lock existed, and still does on a host where setup never
-//! ran (tests): [`crate::root::Root`] chooses, and [`Exec`] lets the
-//! sequence that stops the sandbox user run either way.
+//! ran (tests): [`crate::root::Root`] chooses, and [`Exec`] runs a
+//! command as root either way.
 //!
 //! What the program built on this crate adds, its own configuration
 //! tables and `session-serve`, comes in through [`HostFile`], which
@@ -25,10 +24,8 @@
 
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Subcommand;
@@ -37,14 +34,12 @@ use rustix::io::Errno;
 
 use crate::config::{HostFile, ROOT_COPY};
 use crate::egress::{self, ACCESS_LOG};
-use crate::enter::{Entry, RUN0};
 use crate::host::{self, User};
 
 pub use crate::host::{roots_alone, trusted_program};
 
-/// A copy of this program that the sandbox user can run: `sandbox check`
-/// starts it there to see the host as that user does. The build it was
-/// made from is in the runner's home, which is closed.
+/// Root's copy of this program, which the helper's sudo rule names. The
+/// build it was made from is in the runner's home, which is closed.
 pub const SELF_COPY: &str = "/usr/local/libexec/agentic-job";
 
 /// The command's name, as the sudo rule and the client spell it.
@@ -56,22 +51,10 @@ pub fn sudoers_command() -> String {
     format!("{SELF_COPY} {COMMAND} *")
 }
 
-/// How long one command that stops the sandbox user may take, how long a
-/// probe's control may, and what ends either then.
-const REAP_STEP_SECONDS: &str = "30";
-
+/// How long a probe's control may take, and what ends it then.
 const CONTROL_SECONDS: &str = "60";
 
 const TIMEOUT_KILL_AFTER: &str = "--kill-after=5";
-
-/// How often, and how many times, the sandbox user's processes are
-/// looked for after they were killed: they do not vanish at once.
-const SURVIVOR_POLL: Duration = Duration::from_millis(200);
-
-const SURVIVOR_POLLS: u32 = 50;
-
-/// What pgrep exits with when nothing matched.
-const PGREP_NONE: i32 = 1;
 
 /// What is printed for a log that is not there.
 const NO_LOG: &str = "none";
@@ -80,15 +63,6 @@ const NO_LOG: &str = "none";
 pub enum Op {
     /// Do nothing: proves the rule that lets the runner's user run this
     Ping,
-    /// Run ARGV as the sandbox user, in a directory under its home
-    Enter {
-        #[arg(long, value_name = "DIR")]
-        chdir: PathBuf,
-        #[arg(last = true, required = true)]
-        argv: Vec<String>,
-    },
-    /// Stop every process of the sandbox user, and make sure of it
-    Reap,
     /// Print the size of the egress proxy's log, or `none`
     EgressLogSize,
     /// Print the egress proxy's log from byte FROM on
@@ -100,12 +74,6 @@ pub enum Op {
     TailscaleStatus,
     /// Hold the bridge listener and revoke serve when its supervisor leaves
     SessionServe,
-    /// Run a command through pkexec, as root: a probe's control
-    PkexecControl,
-    /// Take away the sandbox user's lingering, after a probe enabled it
-    DisableLinger,
-    /// Remove the sandbox user's crontab, after a probe installed one
-    CrontabRemove,
 }
 
 /// Runs OP as root, with root's copy of the configuration read as F;
@@ -114,24 +82,11 @@ pub fn run<F: HostFile>(op: &Op) -> Result<bool> {
     ensure!(host::is_root(), "`{COMMAND}` runs as root, through sudo");
     program_dirs_are_roots()?;
     let config = root_config::<F>()?;
-    // With sandbox.create-user = false there is no one to enter, reap or
-    // clean up after; the rest, the lock's proof (ping) first, still works.
-    let entry = if config.sandbox().create_user {
-        Some(Entry::new(&config)?)
-    } else {
-        config.direct()?;
-        None
-    };
-    let sandbox = || {
-        entry
-            .as_ref()
-            .context("sandbox.create-user = false: there is no sandbox user")
-    };
+    // Checked as setup checked it.
+    config.direct()?;
     let exec = Direct;
     match op {
         Op::Ping => Ok(true),
-        Op::Enter { chdir, argv } => enter(sandbox()?, chdir, argv),
-        Op::Reap => reap(sandbox()?.user().uid, &exec).map(|()| true),
         Op::EgressLogSize => {
             match open_log()? {
                 Some(file) => println!("{}", file.metadata().context("reading the log")?.len()),
@@ -154,15 +109,6 @@ pub fn run<F: HostFile>(op: &Op) -> Result<bool> {
         // Root's own copy decides what serve accepts: the runner's user
         // passes no arguments here.
         Op::SessionServe => config.session_serve().map(|()| true),
-        Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
-        Op::DisableLinger => {
-            let user = &sandbox()?.user().name;
-            passthrough(&exec, &["loginctl", "disable-linger", "--", user])
-        }
-        Op::CrontabRemove => {
-            let user = &sandbox()?.user().name;
-            passthrough(&exec, &["crontab", "-r", "-u", user])
-        }
     }
 }
 
@@ -177,50 +123,6 @@ fn passthrough(exec: &Direct, argv: &[&str]) -> Result<bool> {
         .status()
         .with_context(|| format!("running {}", argv.join(" ")))?;
     Ok(status.success())
-}
-
-/// Becomes `run0` for ARGV as the sandbox user in CHDIR.
-fn enter(entry: &Entry, chdir: &Path, argv: &[String]) -> Result<bool> {
-    check_chdir(chdir, entry.home())?;
-    let run0 = entry.run0_argv(argv, chdir)?;
-    let (program, args) = run0.split_first().context("an empty run0 command line")?;
-    debug_assert_eq!(program, RUN0);
-    let program = trusted_program(program)?;
-    // Our standard streams are the caller's sockets, which run0 hands to
-    // PID 1 as they are: exec, so that nothing stands between. With none
-    // of the caller's environment: the bus address, for one, is where
-    // run0 would send its request.
-    let err = Command::new(&program)
-        .args(args)
-        .env_clear()
-        .env("PATH", host::root_path())
-        .exec();
-    Err(err).with_context(|| format!("running {}", program.display()))
-}
-
-/// A directory the sandbox user's command may start in: its home, or an
-/// absolute path under it spelled plainly, with no `.` or `..` and no
-/// empty name in it. The directory itself is that user's to make or
-/// not; the check is only that root changes into nothing else on the
-/// caller's say-so.
-fn check_chdir(dir: &Path, home: &Path) -> Result<()> {
-    let text = dir.to_str().unwrap_or_default();
-    let body = text
-        .strip_suffix('/')
-        .filter(|_| text.len() > 1)
-        .unwrap_or(text);
-    let plain = body.starts_with('/')
-        && body
-            .split('/')
-            .skip(1)
-            .all(|name| !name.is_empty() && name != "." && name != "..");
-    ensure!(
-        plain && Path::new(body).starts_with(home),
-        "{} is not a directory under the sandbox user's home {}",
-        dir.display(),
-        home.display()
-    );
-    Ok(())
 }
 
 /// The egress proxy's log, open for reading, or `None` for none. Its
@@ -348,140 +250,9 @@ impl Exec for ViaSudo {
     }
 }
 
-/// The login sessions of the user UID, the agent's among them.
-fn sessions(uid: u32) -> Vec<String> {
-    let Ok(loginctl) = trusted_program("loginctl") else {
-        return Vec::new();
-    };
-    let listing = host::bare(loginctl)
-        .args([
-            "show-user",
-            &uid.to_string(),
-            "--property=Sessions",
-            "--value",
-        ])
-        .stdin(Stdio::null())
-        .output();
-    match listing {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// The processes of the user UID that are still there, as pgrep lists
-/// them; `None` for none. Any user may ask.
-pub fn survivors(uid: u32) -> Result<Option<String>> {
-    let pgrep = trusted_program("pgrep")?;
-    let out = host::bare(pgrep)
-        .args(["-l", "-u", &uid.to_string()])
-        .stdin(Stdio::null())
-        .output()
-        .context("running pgrep")?;
-    match out.status.code() {
-        Some(0) => Ok(Some(
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
-        )),
-        Some(PGREP_NONE) => Ok(None),
-        _ => bail!(
-            "pgrep -u {uid} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-    }
-}
-
-/// Stops everything the user UID is running, as root through EXEC, and
-/// makes sure of it.
-///
-/// Its sessions go first: a session scope holds every process started
-/// in it, including ones that left their process group (setsid, double
-/// forks). Then, as backstops, the user's slice (its service manager
-/// and what that started), a manager it may have kept by enabling
-/// lingering, and stray processes of its uid. Each step has a time
-/// limit, and may fail (a session already gone, a user with no
-/// manager): the survivor check is what counts. Root and this process's
-/// own user are refused: the caller's checks come first, and this one
-/// is the last.
-pub fn reap(uid: u32, exec: &dyn Exec) -> Result<()> {
-    ensure!(
-        uid != 0 && uid != rustix::process::geteuid().as_raw() && uid != real_uid(),
-        "refusing to stop every process of uid {uid}: root's or this process's own"
-    );
-    let uid_text = uid.to_string();
-    let slice = format!("user-{uid}.slice");
-    let manager = format!("user@{uid}.service");
-    let step = |argv: &[&str]| {
-        let limited = limited(argv, REAP_STEP_SECONDS).ok()?;
-        let limited: Vec<&str> = limited.iter().map(String::as_str).collect();
-        exec.output(&limited)
-    };
-    let sessions = sessions(uid);
-    if !sessions.is_empty() {
-        let ids: Vec<&str> = sessions.iter().map(String::as_str).collect();
-        step(&[&["loginctl", "kill-session", "--signal=KILL"], &ids[..]].concat());
-        step(&[&["loginctl", "terminate-session"], &ids[..]].concat());
-    }
-    step(&["systemctl", "kill", "--signal=KILL", &slice]);
-    step(&["loginctl", "disable-linger", &uid_text]);
-    step(&["loginctl", "terminate-user", &uid_text]);
-    for _ in 0..SURVIVOR_POLLS {
-        step(&["pkill", "-KILL", "-u", &uid_text]);
-        if survivors(uid)?.is_none() {
-            // Killed like that, the user's manager is left failed.
-            step(&["systemctl", "reset-failed", &manager]);
-            return Ok(());
-        }
-        std::thread::sleep(SURVIVOR_POLL);
-    }
-    bail!(
-        "processes of uid {uid} survived the end of the session: {}",
-        survivors(uid)?.unwrap_or_default()
-    )
-}
-
-/// The uid of whoever asked for this, through sudo or not.
-fn real_uid() -> u32 {
-    std::env::var("SUDO_UID")
-        .ok()
-        .and_then(|uid| uid.parse().ok())
-        .unwrap_or_else(|| rustix::process::getuid().as_raw())
-}
-
-/// Whether DIR is one the sandbox user may be entered in.
-pub fn chdir_allowed(dir: &Path, home: &Path) -> bool {
-    check_chdir(dir, home).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn directories_the_sandbox_user_may_start_in() {
-        let home = Path::new("/home/agent");
-        let cases = [
-            ("/home/agent", true),
-            ("/home/agent/work/repo", true),
-            ("/home/agent/", true),
-            ("/home/agent2", false),
-            ("/home", false),
-            ("/", false),
-            ("/home/agent/../runner", false),
-            ("/home/agent/./x", false),
-            ("/home/agent//x", false),
-            ("home/agent", false),
-            ("/root", false),
-        ];
-        for (dir, want) in cases {
-            assert_eq!(chdir_allowed(Path::new(dir), home), want, "{dir}");
-        }
-    }
 
     #[test]
     fn limits_name_the_program_by_its_path() {
@@ -529,17 +300,5 @@ mod tests {
         // named, root would be running what is not root's.
         let err = roots_alone(&file).unwrap_err();
         assert!(format!("{err:#}").contains("not root"), "{err:#}");
-    }
-
-    #[test]
-    fn stopping_root_or_oneself_is_refused() {
-        struct Never;
-        impl Exec for Never {
-            fn command(&self, _: &[&str]) -> Result<Command> {
-                bail!("not to be run")
-            }
-        }
-        assert!(reap(0, &Never).is_err());
-        assert!(reap(rustix::process::geteuid().as_raw(), &Never).is_err());
     }
 }

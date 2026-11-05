@@ -474,36 +474,16 @@ jobs:
     if: ${{ needs.changes.outputs.full == 'true' }}
     uses: ./.github/workflows/build.yml # zizmor: ignore[self-repository] Test this revision's reusable workflow, not a remote revision.
 
-  # The sandbox for real, on a machine that is thrown away: `sandbox
-  # setup` with the egress proxy and the network rules, every probe of
-  # `sandbox check`, and then each probe again with its protection
+  # The hardened host for real, on a machine that is thrown away:
+  # `sandbox setup` with the egress proxy and the network rules, every
+  # probe of `sandbox check` as the runner's user, the only agent user
+  # (agentic-job#2989), and then each probe again with its protection
   # removed, which must make that probe and no other fail.
-  # ubuntu-26.04 has run0 (systemd 256 or later); ubuntu-24.04 does not.
-  #
-  # Every removal runs every probe, most of a minute each time, and one
-  # machine took 27 minutes over them all. So the removals are shared out
-  # over several machines, each of which sets the sandbox up for itself:
-  # what one removes must not be there for another's probes to find.
   sandbox:
     needs: changes
     if: ${{ needs.changes.outputs.host == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
-        filesystem-view: [true]
-        rust-proxy: [true]
-        include:
-          # One fresh host without the view, the default, proves the layers
-          # the view masks (the world-write policy among them) on their own.
-          # Its egress probes run against mitmproxy (egress.rust-proxy =
-          # false), the others' against the default Rust proxy, until
-          # mitmproxy is removed (#919).
-          - shard: baseline
-            filesystem-view: false
-            rust-proxy: false
     env:
       CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
     steps:
@@ -516,10 +496,10 @@ jobs:
       - run: sudo target/debug/agentic-job secure-host apt
       - run: sudo apt-get -o Acquire::Retries=3 update -q
         timeout-minutes: 5
-      - run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends at cron pkexec podman uidmap python3-venv nftables cargo socat clang
+      - run: sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends pkexec nftables socat clang
         timeout-minutes: 5
       # Before the world-write policy is loaded: setup refuses that too.
-      - name: Setup refuses a machine that is not fresh
+      - name: Setup refuses what it cannot do as asked
         run: cargo test --locked --test sandbox_fresh -- --ignored --nocapture
       # As secure-host does before setup, with the object the release build
       # compiles (binary.sh).
@@ -553,36 +533,24 @@ jobs:
       # Setup only warns when the threat feed cannot be fetched, and a pin
       # that names a commit no longer served would have every run warn:
       # here the feed has to load.
-      - name: Setup timing (filesystem view = ${{ matrix.filesystem-view }}, Rust proxy = ${{ matrix.rust-proxy }})
+      - name: Setup timing
         shell: bash
-        env:
-          FILESYSTEM_VIEW: ${{ matrix.filesystem-view }}
-          RUST_PROXY: ${{ matrix.rust-proxy }}
         run: |
-          target/debug/agentic-job config --host --from "$CONFIG" --boolean "sandbox.filesystem-view=$FILESYSTEM_VIEW" --boolean "egress.rust-proxy=$RUST_PROXY" > "$RUNNER_TEMP/sandbox-ci.toml"
+          target/debug/agentic-job config --host --from "$CONFIG" > "$RUNNER_TEMP/sandbox-ci.toml"
           sudo target/debug/agentic-job sandbox setup --config "$RUNNER_TEMP/sandbox-ci.toml" 2>&1 | tee "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Threat feed:' "$RUNNER_TEMP/sandbox-setup.log"
-          if [ "$RUST_PROXY" = true ]; then grep -F 'Egress proxy (Rust)' "$RUNNER_TEMP/sandbox-setup.log"; else grep -F 'Egress proxy (mitmproxy)' "$RUNNER_TEMP/sandbox-setup.log"; fi
+          grep -F 'Egress proxy (Rust)' "$RUNNER_TEMP/sandbox-setup.log"
           grep -qE '^Sandbox setup stage privileged-binary-allowlist: [0-9]+[.][0-9]{3}s [(]ok[)]$' "$RUNNER_TEMP/sandbox-setup.log"
-          view=0; if [ "$FILESYSTEM_VIEW" = true ]; then view=1; fi
-          test "$(grep -cE '^Sandbox setup stage filesystem-view: [0-9]+[.][0-9]{3}s [(]ok[)]$' "$RUNNER_TEMP/sandbox-setup.log")" = "$view"
       # From here on this job's user has no sudo: root is the test's
       # service, or the helper.
       - name: "The runner's user has no root after setup"
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
           sudo -n -l
-      - name: The setup script ran as the sandbox user
-        run: test "$(printf 'cat /home/runner-sandbox/toolchain-installed-by; exit\n' | socat -t 5 - UNIX-CONNECT:/run/agentic-job-test-root.sock)" = runner-sandbox
       - run: target/debug/agentic-job sandbox check
-      # Stand-ins for the variables of a job that may ask for an identity
-      # token: the probes look for their values where they must not be.
+      - name: No second user, and sudo is the helper rule alone
+        run: target/debug/agentic-job sandbox probe no-user no-user
       - name: Each probe fails when its protection is removed
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_URL: https://oidc.invalid/stand-in
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: stand-in-request-token-0123456789abcdef
-          # Four view shards; baseline runs the layered cases without the view.
-          AGENTIC_JOB_TEST_SHARD: ${{ matrix.shard == 'baseline' && '0/1' || format('{0}/4', matrix.shard) }}
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
   # The step that secures a host, in a job that runs no agent: the
@@ -632,42 +600,6 @@ jobs:
           sudo -n true
           if systemctl is-active --quiet egress-proxy.service; then echo "::error::the egress proxy runs"; exit 1; fi
           if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
-
-  # The same step with sandbox.create-user = false: plain CI that runs
-  # nothing as another user. Setup and the action's own sandbox check pass
-  # with no sandbox user, and the lock is as it is with one.
-  secure-host-no-user:
-    needs: [changes, static]
-    if: ${{ needs.changes.outputs.host == 'true' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: secure-host-image
-          path: ${{ runner.temp }}/image
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: agentic-job
-          path: ${{ runner.temp }}/dist
-      - name: The hosted configuration without the sandbox user
-        run: |
-          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
-          "$RUNNER_TEMP/agentic-job" config --host --from secure-host/hosted.toml \
-            --boolean sandbox.create-user=false > "$RUNNER_TEMP/no-user.toml"
-      - name: Secure the host from the image archive
-        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
-        with:
-          config: ${{ runner.temp }}/no-user.toml
-          image-archive: ${{ runner.temp }}/image/secure-host.tar
-      - run: agentic-job sandbox check
-      - name: No sandbox user, and sudo is the helper rule alone
-        run: agentic-job sandbox probe no-user no-user
 
   # The action as another repository names it, which a pull request
   # cannot do for its own commit: after a push to main, from main. The
@@ -851,39 +783,6 @@ jobs:
       budget-usd: "1"
       comment-target: "64"
       artifact-prefix: write-policy-
-
-  # The same with `agent-user: sandbox`: secure-host runs the setup script
-  # as its second user, and `run` enters that user, with run0 through the
-  # helper, for the scripted agent
-  # (.github/agentic-job/e2e/sandbox.sh), which asks for its comment only
-  # as that user, in its home, with the runner's home closed to it. The
-  # other end-to-end jobs are the default, the runner's user.
-  e2e-sandbox:
-    needs: [changes, static]
-    if: ${{ needs.changes.outputs.e2e == 'true' }}
-    permissions:
-      contents: read
-      issues: write # add_comment
-      pull-requests: write # the status comment and reaction on the pull request e2e-event is for
-      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
-      id-token: write # the register job asks for it, for a proxy this run has none of
-    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
-    with:
-      id: e2e-sandbox-${{ github.run_id }}
-      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
-      task: Comment on the issue as the sandbox user.
-      repo: ${{ github.repository }}
-      outputs: add_comment,noop
-      allow: .github/agentic-job/allow.toml
-      config: .github/agentic-job/hosted.toml
-      agent: fake
-      agent-user: sandbox
-      setup: .github/agentic-job/e2e/sandbox.sh
-      timeout: "5"
-      max-requests: "0"
-      budget-usd: "1"
-      comment-target: "64"
-      artifact-prefix: sandbox-
 
   # The event-triggered path, through the workflow itself and on the
   # event that started this run. On a pull request the policy job admits
@@ -1572,7 +1471,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1735,15 +1634,6 @@ jobs:
         run: |
           test "$RESULT/$EXIT" = success/0
           grep -F 'A comment from the scripted agent of a write-policy run.' "$RUNNER_TEMP/comments"
-      # Its agent asked for the comment only as the sandbox user, with
-      # HOME=/home/runner-sandbox, which its log shows.
-      - name: The sandbox-user run handed back its comment
-        env:
-          RESULT: ${{ needs.e2e-sandbox.result }}
-          EXIT: ${{ needs.e2e-sandbox.outputs.exit }}
-        run: |
-          test "$RESULT/$EXIT" = success/0
-          grep -F 'A comment from the scripted agent of a sandbox-user run.' "$RUNNER_TEMP/comments"
       - name: The run stopped at a limit was applied as partial
         run: jq -e '.partial and (.handlers | keys) == ["add_comment", "noop"]' "$RUNNER_TEMP/limit/applied.json"
       # Check runs cannot be deleted; one of this attempt's, by the pinned
@@ -2185,10 +2075,10 @@ jobs:
       - run: agentic-job sandbox check --record
       - name: A run step is confined
         run: agentic-job sandbox probe confined run-step
-      # The default still makes the sandbox user: entered the one way
-      # there is, it has no sudo and no metadata service.
-      - name: The sandbox user exists, without sudo or the metadata service
-        run: agentic-job sandbox probe sandbox-user sandbox-user
+      # Setup made no second user (agentic-job#2989): the runner's user,
+      # confined above, is the only agent user.
+      - name: No second user, and sudo is the helper rule alone
+        run: agentic-job sandbox probe no-user no-user
       # Its post step runs after the upload below, and fails the job if a
       # route is open; its record is in that step's log. The ingress check
       # (docs/workflow-ingress.md) accepts this ignore only while every line
@@ -2244,7 +2134,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, publication, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-deterministic, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, publication, static, sandbox, secure-host, secure-host-options, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-deterministic, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -2267,8 +2157,8 @@ jobs:
           FILTER: >-
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
-            ($host == "false" and (.key | IN("sandbox", "secure-host", "secure-host-options", "secure-host-no-user", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
-            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-deterministic", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-sandbox", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-secondary", "e2e-secondary-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            ($host == "false" and (.key | IN("sandbox", "secure-host", "secure-host-options", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
+            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-deterministic", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-secondary", "e2e-secondary-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))
         run: >-

@@ -26,13 +26,12 @@ def main():
             sys.exit('the agent job refuses inference-register api-key and [mcp.NAME]: their credentials are not passed on')
         agent_user = os.environ.get('AGENT_USER')
         if agent_user == 'sandbox':
-            return
+            sys.exit('agent-user sandbox was removed with the sandbox user (agentic-job#2989): '
+                     'drop the input, the runner is the only agent user')
         if agent_user != 'runner':
-            sys.exit('agent-user must be runner or sandbox')
-        if (config.get('session', {}).get('listen')
-                or config.get('sandbox', {}).get('check', {}).get('before-agent')
-                or config.get('setup', {}).get('tools') is not None):
-            sys.exit('runner-home refuses configuration requiring a second user')
+            sys.exit('agent-user must be runner')
+        if config.get('session', {}).get('listen'):
+            sys.exit('session.listen needs a second user, which there is none of since agentic-job#2989')
         return
     if mode != 'setup':
         sys.exit('expected admit or setup')
