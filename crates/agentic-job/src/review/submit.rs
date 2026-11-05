@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use super::carry::{Carried, latest_status};
 use super::verdict::{self, Verdict, escape, inline_section, one_line, positive};
-use super::{REVIEW_COMMENT, SHA};
+use super::{REVIEW_COMMENT, SHA, classifier};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE: u64 = 16 << 20;
@@ -497,8 +497,19 @@ pub fn submit(
         return Ok(String::new());
     }
     // Validated before any API call.
+    let classifier = classifier::enabled(env)?;
     let run = Run::read(env)?;
+    let base = env("BASE");
+    ensure!(
+        !classifier || !base.is_empty(),
+        "A draft classifier review's submission needs the configured BASE"
+    );
     let (verdict, output) = if let Some(carried) = Carried::read(env)? {
+        // An approval of another head reviewed no draft and has no result.
+        ensure!(
+            !classifier,
+            "A draft classifier review carries no earlier approval"
+        );
         (Some(Verdict::Approve), carried.output())
     } else {
         // apply-partial is false for a review (`review task`): a run
@@ -511,7 +522,7 @@ pub fn submit(
             return Ok(String::new());
         }
         let output = output.context("Review submission requires check's accepted output")?;
-        let verdict = verdict::check_outputs(output, &run.pull.to_string())?;
+        let verdict = verdict::check_outputs(output, &run.pull.to_string(), classifier)?;
         ensure!(
             Verdict::word(verdict) == checked,
             "Checked output does not match the checked verdict"
@@ -531,6 +542,22 @@ pub fn submit(
             "No review submitted: the reviewed head is no longer current",
         );
         return Ok(String::new());
+    }
+    // Read again before publishing: the result names the title and
+    // description check held it to, and the draft is to be on its base
+    // still. An edit after this read and before the submission is not
+    // seen here; the pass compares them again when it reads the review.
+    if classifier {
+        let fresh = classifier::Bound::of_pull(&current)
+            .ok()
+            .filter(|b| b.base == base && &b.repository == repo && b.pr == pull);
+        if fresh.is_none_or(|b| classifier::bound_result(&output, &b).is_err()) {
+            annotate(
+                "notice",
+                "No review submitted: the pull request is no longer the draft on its base with the title and description the classifier result names",
+            );
+            return Ok(String::new());
+        }
     }
     let server = match env("GITHUB_SERVER_URL") {
         server if server.is_empty() => DEFAULT_SERVER.to_owned(),
@@ -588,6 +615,13 @@ pub fn submit(
     let body = format!(
         "{text}{}\n\n{footer}\n\n{digest}{marker}",
         inline_section(unplaced)
+    );
+    // The pass reads a larger body as no result; check left room for the
+    // footer and marker, which only this job knows.
+    ensure!(
+        !classifier || body.len() <= classifier::MAX_BODY_BYTES,
+        "A draft classifier review's body, with its footer and run marker, must be at most {} bytes",
+        classifier::MAX_BODY_BYTES
     );
     let (event, state) = match verdict {
         Some(Verdict::Approve) => ("APPROVE", "APPROVED"),
@@ -750,6 +784,8 @@ mod tests {
     struct Fake {
         sha: Option<&'static str>,
         closed: bool,
+        /// Other changes to the pull request, a draft with a title and body.
+        edits: Vec<(&'static str, Value)>,
         comments: Vec<Value>,
         reviews: RefCell<Vec<Value>>,
         files: Vec<Value>,
@@ -765,9 +801,15 @@ mod tests {
         fn get(&self, path: &str) -> Result<Value> {
             let path = path.split('?').next().unwrap();
             Ok(match path {
-                "repos/owner/repo/pulls/12" => json!({
-                    "state": if self.closed { "closed" } else { "open" },
-                    "head": {"sha": self.sha.unwrap_or(HEAD)}}),
+                "repos/owner/repo/pulls/12" => {
+                    let mut pull = classifier::tests::draft("owner/repo", 12);
+                    pull["state"] = json!(if self.closed { "closed" } else { "open" });
+                    pull["head"]["sha"] = json!(self.sha.unwrap_or(HEAD));
+                    for (pointer, value) in &self.edits {
+                        *pull.pointer_mut(pointer).unwrap() = value.clone();
+                    }
+                    pull
+                }
                 "repos/owner/repo/issues/12/comments" => json!(self.comments),
                 "repos/owner/repo/pulls/12/reviews" => json!(*self.reviews.borrow()),
                 "repos/owner/repo/pulls/12/files" => json!(self.files),
@@ -1273,6 +1315,189 @@ mod tests {
             comment.contains("GitHub refused it with status 422 (Line could not be resolved).")
         );
         assert!(comment.ends_with(&format!("\n\n{}", trailer())));
+    }
+
+    /// A draft classifier review's result for the fake's pull request.
+    fn classified(verdict: &str) -> Value {
+        let fields = classifier::tests::fields("owner/repo", 12);
+        checked(&classifier::tests::body(verdict, &fields.to_string()))
+    }
+
+    const CLASSIFIER: [(&str, &str); 2] = [("REVIEW_DRAFT_CLASSIFIER", "true"), ("BASE", "main")];
+
+    // Only a checked verdict is published, as the review's own state, and
+    // only while the draft is still the one its result names.
+    #[test]
+    fn a_draft_classifier_result_is_published_only_as_checked_and_still_current() {
+        for (verdict, event) in [("APPROVE", "APPROVE"), ("CHANGES", "REQUEST_CHANGES")] {
+            let fake = Fake::default();
+            let output = classified(verdict);
+            let changes = [CLASSIFIER.as_slice(), &[("VERDICT", verdict)]].concat();
+            assert_eq!(run_submit(&fake, &changes, &output).unwrap(), REVIEW_URL);
+            let text = output["items"][0]["body"].as_str().unwrap();
+            let body = format!("{text}\n\n{}", trailer());
+            assert!(body.len() <= classifier::MAX_BODY_BYTES);
+            assert_eq!(body.matches("<!--").count(), 1);
+            assert_eq!(
+                reviews(&fake),
+                [json!({"commit_id": HEAD, "event": event, "body": body})]
+            );
+            // A re-run, or a lost response, posts it no second time.
+            let again = Fake {
+                reviews: RefCell::new(vec![json!({"user": {"login": BOT},
+                    "html_url": "https://github.com/owner/repo/pull/12#pullrequestreview-4",
+                    "commit_id": HEAD, "state": if verdict == "APPROVE" { "APPROVED" } else { "CHANGES_REQUESTED" },
+                    "body": body})]),
+                ..Default::default()
+            };
+            assert!(
+                run_submit(&again, &changes, &output)
+                    .unwrap()
+                    .ends_with("review-4")
+            );
+            assert!(reviews(&again).is_empty());
+        }
+        let output = classified("APPROVE");
+        let lost = Fake {
+            refuse: Some((502, "", true)),
+            ..Default::default()
+        };
+        assert!(
+            run_submit(&lost, &CLASSIFIER, &output)
+                .unwrap()
+                .ends_with("review-6")
+        );
+
+        // Edited, retargeted, marked ready, closed or moved since: nothing.
+        for (name, fake) in [
+            ("an edited title", ("/title", json!("docs: Fix spelling"))),
+            ("an edited body", ("/body", json!("Correct spelling."))),
+            ("a removed body", ("/body", Value::Null)),
+            ("another base", ("/base/ref", json!("release"))),
+            ("marked ready", ("/draft", json!(false))),
+            (
+                "another repository",
+                ("/base/repo/full_name", json!("owner/other")),
+            ),
+        ]
+        .map(|(name, edit)| {
+            let fake = Fake {
+                edits: vec![edit],
+                ..Default::default()
+            };
+            (name, fake)
+        })
+        .into_iter()
+        .chain([
+            (
+                "a moved head",
+                Fake {
+                    sha: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "a closed pull request",
+                Fake {
+                    closed: true,
+                    ..Default::default()
+                },
+            ),
+        ]) {
+            assert_eq!(
+                run_submit(&fake, &CLASSIFIER, &output).unwrap(),
+                "",
+                "{name}"
+            );
+            assert!(fake.posted.borrow().is_empty(), "{name}");
+        }
+
+        // A failed, cancelled or stopped run, or a noop, submits nothing.
+        for changes in [
+            ("CHECK_RESULT", "failure"),
+            ("CHECK_RESULT", "cancelled"),
+            ("AGENT_EXIT", ""),
+            ("AGENT_EXIT", "124"),
+            ("VERDICT", ""),
+        ] {
+            let fake = Fake::default();
+            let changes = [CLASSIFIER.as_slice(), &[changes]].concat();
+            assert_eq!(run_submit(&fake, &changes, &output).unwrap(), "");
+            assert!(fake.posted.borrow().is_empty());
+        }
+    }
+
+    // What check refuses, submit refuses too, before it reads the forge
+    // for the target's sake or posts anything.
+    #[test]
+    fn a_draft_classifier_submission_refuses_what_is_no_checked_result() {
+        let mut other = classifier::tests::fields("owner/repo", 13);
+        other["reviewed_head"] = json!(HEAD);
+        let mut long = classifier::tests::fields("owner/repo", 12);
+        long["evidence"] = json!("x".repeat(1000));
+        long["reason"] = json!("y".repeat(1000));
+        long["architecture_findings"] = json!(vec!["z".repeat(1000); 4]);
+        let long = checked(&classifier::tests::body("APPROVE", &long.to_string()));
+        let carried = "b".repeat(40);
+        for (name, changes, output, want) in [
+            (
+                "an ordinary verdict",
+                CLASSIFIER.to_vec(),
+                checked("VERDICT: APPROVE\nLooks right."),
+                "exactly one",
+            ),
+            (
+                "a result without the opt-in",
+                vec![],
+                classified("APPROVE"),
+                "Only a draft classifier review",
+            ),
+            (
+                "no base",
+                vec![CLASSIFIER[0]],
+                classified("APPROVE"),
+                "configured BASE",
+            ),
+            (
+                "a carried approval",
+                [
+                    CLASSIFIER.as_slice(),
+                    &[
+                        ("CARRIED_FROM", carried.as_str()),
+                        ("CARRIED_WHY", "rebase"),
+                    ],
+                ]
+                .concat(),
+                classified("APPROVE"),
+                "carries no earlier approval",
+            ),
+            (
+                "a verdict check did not set",
+                [CLASSIFIER.as_slice(), &[("VERDICT", "CHANGES")]].concat(),
+                classified("APPROVE"),
+                "does not match",
+            ),
+            (
+                "a footer past the bound",
+                [
+                    CLASSIFIER.as_slice(),
+                    &[("GITHUB_WORKFLOW", &"w".repeat(4000))],
+                ]
+                .concat(),
+                long,
+                "at most 8192 bytes",
+            ),
+        ] {
+            let fake = Fake::default();
+            let err = run_submit(&fake, &changes, &output).unwrap_err();
+            assert!(format!("{err:#}").contains(want), "{name}: {err:#}");
+            assert!(fake.posted.borrow().is_empty(), "{name}");
+        }
+        // Another pull request's result is checked, then found stale.
+        let fake = Fake::default();
+        let output = checked(&classifier::tests::body("APPROVE", &other.to_string()));
+        assert_eq!(run_submit(&fake, &CLASSIFIER, &output).unwrap(), "");
+        assert!(fake.posted.borrow().is_empty());
     }
 
     #[test]

@@ -178,6 +178,105 @@ fn a_dispatched_review_is_held_to_its_requested_head_and_known_pool() {
     assert!(refused.stdout.is_empty());
 }
 
+/// The caller's draft classifier opt-in, through policy and check alike:
+/// a draft at the requested head, its task naming the result to return,
+/// and a verdict whose result names that pull request exactly.
+#[test]
+fn an_opted_in_draft_review_binds_its_result_to_the_policy_snapshot() {
+    const OPT_IN: (&str, &str) = ("REVIEW_DRAFT_CLASSIFIER", "true");
+    // The verdict alone, as the classifier asks.
+    const POLICY: [(&str, &str); 3] = [
+        OPT_IN,
+        ("OUTPUTS", "add_comment,noop"),
+        ("MAX_OUTPUTS", "1"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pull.json");
+    let mut pull = open_pull();
+    pull["draft"] = json!(true);
+    pull["title"] = json!("docs: Correct spelling");
+    pull["body"] = Value::Null;
+    std::fs::write(&file, pull.to_string()).unwrap();
+    let resolve = ["resolve-dispatch", "--pull-request", file.to_str().unwrap()];
+    // Off by default, the draft is refused as before.
+    let refused = dispatched(&resolve, dir.path(), &[]);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not a draft"));
+    // Nor with inline comments asked for.
+    let refused = dispatched(&resolve, dir.path(), &[OPT_IN]);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("one verdict or noop"));
+    let resolved = dispatched(&resolve, dir.path(), &POLICY);
+    assert!(resolved.status.success(), "{resolved:?}");
+    assert_eq!(resolved.stdout, format!("{}\n", "a".repeat(40)).as_bytes());
+
+    std::fs::write(dir.path().join("task.md"), "Trusted base task\n").unwrap();
+    let task = dispatched(
+        &["task", "task.md", "--pull-request", file.to_str().unwrap()],
+        dir.path(),
+        &POLICY,
+    );
+    assert!(task.status.success(), "{task:?}");
+    let task = String::from_utf8(task.stdout).unwrap();
+    let result = task.find("## Draft classifier result").unwrap();
+    assert!(result < task.find("Everything below this line").unwrap());
+
+    let collected = dir.path().join("agent_output.json");
+    let report = dir.path().join("report.json");
+    let verdict = |pull: Option<&Path>, changes: &[(&str, &str)]| {
+        let mut cli = Command::new(env!("CARGO_BIN_EXE_agentic-job"));
+        cli.args(["review", "verdict", "--target", "147", "--collected"])
+            .arg(&collected)
+            .arg("--report")
+            .arg(&report)
+            .envs(changes.iter().copied());
+        if let Some(pull) = pull {
+            cli.arg("--pull-request").arg(pull);
+        }
+        cli.output().unwrap()
+    };
+    let fields = json!({"schema": "agent-board/draft-review/v1", "repository": "o/r", "pr": 147,
+        "reviewed_head": "a".repeat(40), "title": "docs: Correct spelling", "description": "",
+        "semantic_diff": "pass", "description_assessment": "matches", "change_category": "docs",
+        "risk": "none", "evidence": "Inspected the README diff", "reason": "Spelling only"});
+    let write = |fields: &Value| {
+        let body = format!("VERDICT: APPROVE\n\n```agent-board-draft-review\n{fields}\n```\n");
+        let output = json!({"items": [{"type": "add_comment", "body": body}], "errors": []});
+        std::fs::write(&collected, output.to_string()).unwrap();
+    };
+    write(&fields);
+    let got = verdict(Some(&file), &[OPT_IN]);
+    assert!(got.status.success(), "{got:?}");
+    assert_eq!(got.stdout, b"APPROVE\n");
+    assert!(String::from_utf8_lossy(&got.stderr).contains("may be quick"));
+    // The opt-in and the snapshot go together.
+    for (pull, changes) in [(Some(file.as_path()), &[][..]), (None, &[OPT_IN][..])] {
+        let refused = verdict(pull, changes);
+        assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+        assert!(refused.stdout.is_empty());
+    }
+    // Without the opt-in the result is refused like any malformed verdict.
+    let refused = verdict(None, &[]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    // A result for another head, or for an edited title, is refused.
+    for (key, value) in [
+        ("reviewed_head", json!("b".repeat(40))),
+        ("title", json!("docs: Fix spelling")),
+        ("pr", json!(148)),
+    ] {
+        let mut changed = fields.clone();
+        changed[key] = value;
+        write(&changed);
+        let refused = verdict(Some(&file), &[OPT_IN]);
+        assert_eq!(refused.status.code(), Some(1), "{key}: {refused:?}");
+        let report: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert!(
+            report["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("exact title")
+        );
+    }
+}
+
 #[test]
 fn the_task_command_appends_the_base_merge_policy() {
     let dir = tempfile::tempdir().unwrap();

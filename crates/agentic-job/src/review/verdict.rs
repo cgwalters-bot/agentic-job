@@ -10,7 +10,7 @@ use anyhow::{Result, bail, ensure};
 use regex::Regex;
 use serde_json::{Map, Value};
 
-use super::{MAX_SAFE_INTEGER, REVIEW_COMMENT, REVIEW_COMMENTS_MAX};
+use super::{MAX_SAFE_INTEGER, REVIEW_COMMENT, REVIEW_COMMENTS_MAX, classifier};
 
 // Folded into one body, as apply posts them when nothing was submitted, the
 // verdict and its findings stay under GitHub's 65536-character limit for a
@@ -187,8 +187,12 @@ pub(super) fn inline_section<'a>(items: impl IntoIterator<Item = &'a Value>) -> 
 /// The verdict, or `None` for a noop, which approves nothing. REJECT, which
 /// briefs written before CHANGES still ask for, is read as CHANGES. Inline
 /// comments may come with a verdict comment, never with a noop, which
-/// apply would not post.
-pub fn check_outputs(output: &Value, number: &str) -> Result<Option<Verdict>> {
+/// apply would not post. A draft classifier review's verdict, with
+/// CLASSIFIER, holds one well-formed result and comes alone, bounded so
+/// that the submitted body fits the pass's bound; any other's holds none
+/// (classifier.rs). Which pull request the result names is the caller's
+/// to check against the one it bound.
+pub fn check_outputs(output: &Value, number: &str, classifier: bool) -> Result<Option<Verdict>> {
     let Some(number) = positive(&Value::String(number.to_owned())) else {
         bail!("Review target must be a pull request number");
     };
@@ -237,10 +241,25 @@ pub fn check_outputs(output: &Value, number: &str) -> Result<Option<Verdict>> {
     let Some(verdict) = of_body(body) else {
         bail!("Review comment must start with VERDICT: APPROVE or VERDICT: CHANGES");
     };
+    let folded = format!("{body}{}", inline_section(inline.iter().copied()));
     ensure!(
-        utf16_len(body) + utf16_len(&inline_section(inline)) <= REVIEW_BODY_MAX,
+        utf16_len(&folded) <= REVIEW_BODY_MAX,
         "Review comment and inline comments together must be at most {REVIEW_BODY_MAX} characters"
     );
+    if classifier {
+        ensure!(
+            inline.is_empty(),
+            "A draft classifier review returns no inline comments"
+        );
+        classifier::result(body)?;
+        let max = classifier::MAX_BODY_BYTES - classifier::TRAILER_BYTES;
+        ensure!(
+            body.len() <= max,
+            "A draft classifier review's comment must be at most {max} bytes"
+        );
+    } else {
+        classifier::refuse(&folded)?;
+    }
     Ok(Some(verdict))
 }
 
@@ -283,7 +302,7 @@ mod tests {
     use super::*;
 
     fn check(item: Value) -> Result<&'static str> {
-        check_outputs(&json!({"items": [item]}), "147").map(Verdict::word)
+        check_outputs(&json!({"items": [item]}), "147", false).map(Verdict::word)
     }
 
     fn comment(body: &str) -> Value {
@@ -368,12 +387,17 @@ mod tests {
             json!([{"type": "noop"}, {"type": "noop"}]),
             json!(null),
         ] {
-            let err = check_outputs(&json!({"items": items}), "147").unwrap_err();
+            let err = check_outputs(&json!({"items": items}), "147", false).unwrap_err();
             assert!(err.to_string().contains("exactly one"), "{items}");
         }
         for target in ["", "0", "*", "01"] {
             assert!(
-                check_outputs(&json!({"items": [comment("VERDICT: APPROVE")]}), target).is_err()
+                check_outputs(
+                    &json!({"items": [comment("VERDICT: APPROVE")]}),
+                    target,
+                    false
+                )
+                .is_err()
             );
         }
     }
@@ -469,13 +493,13 @@ mod tests {
         ] {
             let mut items = vec![verdict.clone()];
             items.extend(comments);
-            let got = check_outputs(&json!({"items": items}), "147");
+            let got = check_outputs(&json!({"items": items}), "147", false);
             assert_eq!(got.is_ok(), ok, "{name}: {got:?}");
         }
         // A noop is posted nowhere: its findings would be lost.
         let noop = json!({"items": [{"type": "noop"}, inline(json!({}))]});
         assert!(
-            check_outputs(&noop, "147")
+            check_outputs(&noop, "147", false)
                 .unwrap_err()
                 .to_string()
                 .contains("not a noop")
@@ -497,11 +521,76 @@ mod tests {
                 \n**b.rs, lines 7-9 of the base**\n\nimportant: two\n")], "errors": []})
         );
         assert_eq!(
-            check_outputs(&folded, "147").unwrap(),
+            check_outputs(&folded, "147", false).unwrap(),
             Some(Verdict::Approve)
         );
         let noop = json!({"items": [{"type": "noop"}]});
         assert_eq!(fold(noop.clone()), noop);
+    }
+
+    // An ordinary review cannot carry a classifier result, in its body or
+    // an inline finding folded into it; a classifier review must, alone.
+    #[test]
+    fn only_an_opted_in_review_carries_one_classifier_result() {
+        use super::classifier::tests::{body, fields};
+
+        let result = body("APPROVE", &fields("o/r", 147).to_string());
+        let inline = json!({"type": REVIEW_COMMENT, "path": "a.rs", "line": 1, "body": result});
+        let output = |items: Value| json!({"items": items});
+        for (name, items, ordinary, classifier) in [
+            ("a result", json!([comment(&result)]), false, true),
+            (
+                "no result",
+                json!([comment("VERDICT: APPROVE")]),
+                true,
+                false,
+            ),
+            ("a noop", json!([{"type": "noop"}]), true, true),
+            (
+                "a result in an inline finding",
+                json!([comment("VERDICT: APPROVE"), inline]),
+                false,
+                false,
+            ),
+            (
+                "a result and an inline finding",
+                json!([comment(&result), {"type": REVIEW_COMMENT, "path": "a.rs", "line": 1, "body": "nit"}]),
+                false,
+                false,
+            ),
+            (
+                "a result past the bound",
+                json!([comment(&format!("{result}{}", "x".repeat(7168)))]),
+                false,
+                false,
+            ),
+            // A review of this code names the fence; only opening one counts.
+            (
+                "the fence named in prose",
+                json!([comment(
+                    "VERDICT: APPROVE\nnit: `agent-board-draft-review` is spelt out twice"
+                )]),
+                true,
+                false,
+            ),
+            (
+                "an indented fence",
+                json!([comment(&result.replace("\n```agent", "\n   ```agent"))]),
+                false,
+                false,
+            ),
+        ] {
+            for (mode, want) in [(false, ordinary), (true, classifier)] {
+                let got = check_outputs(&output(items.clone()), "147", mode);
+                assert_eq!(got.is_ok(), want, "{name}, classifier {mode}: {got:?}");
+            }
+        }
+        // A changes request carries one too, as the same review's result.
+        let changes = body("CHANGES", &fields("o/r", 147).to_string());
+        assert_eq!(
+            check_outputs(&output(json!([comment(&changes)])), "147", true).unwrap(),
+            Some(Verdict::Changes)
+        );
     }
 
     #[test]

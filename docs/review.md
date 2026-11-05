@@ -532,6 +532,92 @@ nothing here enables it:
 Reporting what reviews spend next to dispatches remains
 ([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
 
+## Draft classifier reviews
+
+agent-board's pass can sort its draft pull requests into quick and deep
+by a review's classification
+([its draft review result contract](https://github.com/cgwalters-forge/agent-board/blob/main/docs/poll.md#draft-review-result-contract)):
+an approval by `github-actions[bot]` at the head, holding one
+`agent-board-draft-review` JSON fence of schema
+`agent-board/draft-review/v1` and the one gh-aw run marker. The threat
+is laundering: agent prose, an ordinary review or a carried approval
+passed off as a checked classification of the pull request's current
+head, title and description. So the binary carries the result through
+the review's existing stages, off by default, and nothing here turns it
+on.
+
+The trusted caller opts in by setting `REVIEW_DRAFT_CLASSIFIER=true` in
+the environment of every stage below, from its own configuration, never
+an input a dispatcher sets; anything but `true`, `false` or unset fails.
+It applies only to review.yml's dispatch of a requested head (`pr`,
+`head`, `pool`) asking for the verdict alone (`outputs: add_comment,noop`,
+`max-outputs: 1`), as an inline comment would take findings out of the
+body the pass reads; an event review, a dispatch without a head or one
+asking for inline comments fails with it set, so a caller sets it only
+on a classifier run, never job-wide. With it:
+
+- `review resolve-dispatch` admits a draft, and only a draft, open on the
+  configured base at the requested head, with a title. Without it a draft
+  is refused as before.
+- `review task --pull-request FILE` adds, after the merge policy and
+  before the pull request's untrusted text, the fields to return, with
+  the bound repository, number and head. The reviewer copies the title
+  and body from that text; check refuses a result that does not match
+  them, so a title or body the task shows sanitized or cut cannot be
+  classified, nor can one the collector's sanitizing changes in the
+  verdict.
+- `review verdict --pull-request FILE`, where FILE is the policy job's
+  `resolve-dispatch` snapshot, takes one verdict comment, or a noop, and
+  no inline comment. The comment holds exactly one fence, opening at the
+  start of its line, as its only code block, and no HTML comment, so the
+  run marker submit adds is its only one. The JSON has exactly the
+  schema's fields: an unknown, missing or repeated field, another schema,
+  evidence, a reason or an architecture finding that is empty, more than
+  one line or over 1024 bytes, or a verdict word that is not one
+  lowercase word, is refused. Its `repository`, `pr`, `reviewed_head`,
+  `title` and `description` must equal the snapshot's, the body (`""` for
+  none). The comment is at most 7168 bytes. The step notes whether the
+  pass may count the result quick: only `pass`, `matches` and `none`, a
+  known category and no architecture finding; any finding is deep.
+- `review submit`, with `BASE` set, refuses a carried approval and checks
+  the output again, then reads the pull request and submits nothing,
+  with a notice, unless it is still open, a draft, on `BASE`, at the
+  reviewed head, with the title and description the result names. The
+  body, footer and run marker included, must be at most 8192 bytes, the
+  pass's bound, or the job fails without posting. An edit between that
+  read and the submission is not seen here; the pass compares them again.
+  As with a moved head, a submission skipped this way leaves the verdict
+  to apply's comment, result included, which sets the `review` status as
+  any posted verdict does; the pass reads reviews, not comments, so the
+  draft stays deep. The freshness check comes before the search for this
+  run's earlier review, so a re-run after such an edit posts that
+  comment even where an earlier attempt submitted the review.
+
+Without the opt-in, `review verdict` and `review submit` refuse any
+verdict, or inline finding, with a line that opens an
+`agent-board-draft-review` fence, so neither an ordinary review nor a
+renamed writer job can post a result; prose naming the fence is still
+accepted. The
+verdict decides the review as for any other: only APPROVE submits
+`APPROVED` at `commit_id`, CHANGES a change request with its result,
+and a failed, cancelled or stopped run or a noop submits nothing. The
+idempotency and lost-response guards, the 422 comment, the submit job's
+`GITHUB_TOKEN` and the sandbox's credential-free head fetch are
+unchanged; it grants no fix, ready, promotion or merge authority beyond
+the approval any review submits. The pass still applies its own file,
+size, CI and run provenance checks.
+
+For actions#200, a caller needs a release of this binary with this
+change; this change publishes none and names no revision. The wrapper
+then pins `policy.yml`, `check.yml` and the binary together at it, sets
+the variable on the policy job's dispatch step, check's verdict step and
+the submit step of a classifier dispatch only, asks that dispatch for
+the verdict alone, passes the policy job's `dispatch-review.json` to the
+check job (as an artifact of the policy job, by ID) for
+`--pull-request`, passes `BASE` to submit, and names the submit job
+`agent-board-review-result-v1` only where the variable is set. Those
+workflow changes are not made here.
+
 ## Configuration
 
 `review.yml` has no network or inference setup of its own; the deployment
@@ -680,7 +766,13 @@ failed runs and noops, outputs that do not match the verdict, re-runs and
 lost responses that must not post twice, a 422 posted as the comment, inline
 comments placed in the review or moved to its body, and the status for each
 combination of check, verdict, apply and open pull requests at the head,
-and a carried approval's review and status. `review::carry::tests` builds
+and a carried approval's review and status. `review::classifier::tests`
+and the classifier cases in the verdict, submit and dispatch tests cover
+the opt-in, drafts refused without it, malicious, repeated, unknown and
+oversized results, wrong targets, heads and bases, edited titles and
+bodies, closed, retargeted or readied pull requests, stopped runs and
+re-runs; `tests/review.rs` runs the policy and check stages with it.
+`review::carry::tests` builds
 local repositories and covers which heads carry (a rebase, a recommit,
 formatter output, rebased or not) and which do not (another change,
 added spaces, a non-Rust or new file, a conflicting rebase, a failing

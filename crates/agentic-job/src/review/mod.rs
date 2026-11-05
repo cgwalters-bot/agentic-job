@@ -18,8 +18,11 @@
 //! and `submit` and `status` post the checked verdict (submit.rs). In place
 //! of the agent, `carry` may carry the previous head's approval (carry.rs).
 //! Before it, `history` may write the earlier reviews it reads (history.rs).
+//! With REVIEW_DRAFT_CLASSIFIER, a dispatched review is of a draft, and
+//! its verdict carries a checked classifier result (classifier.rs).
 
 mod carry;
+mod classifier;
 pub mod history;
 mod submit;
 mod verdict;
@@ -122,6 +125,10 @@ pub enum Command {
         /// The triggering pull request's number
         #[arg(long)]
         target: String,
+        /// A draft classifier review's pull request, as `resolve-dispatch`
+        /// read it, which its result must name
+        #[arg(long, value_name = "FILE")]
+        pull_request: Option<PathBuf>,
         /// Where a refusal is written as check's report, `{ok, errors}`
         #[arg(long, value_name = "FILE")]
         report: PathBuf,
@@ -200,7 +207,11 @@ impl Command {
                         "A dispatched review's task is for a requested head only"
                     );
                     request.resolve(&pull)?;
-                    Some(request.context(&pull))
+                    let classifier = request
+                        .classifier
+                        .then(|| classifier::Bound::of_pull(&pull).map(|b| classifier::task(&b)))
+                        .transpose()?;
+                    Some((classifier, request.context(&pull)))
                 } else {
                     ensure!(
                         pull_request.is_none(),
@@ -212,7 +223,8 @@ impl Command {
                 let root = Path::new(".");
                 let mut task = task_file(root, file)?;
                 task.push_str(&merge_statement(merge_policy(root)?));
-                if let Some(context) = dispatched {
+                if let Some((classifier, context)) = dispatched {
+                    task.extend(classifier);
                     task.push('\n');
                     task.push_str(&context);
                 }
@@ -221,10 +233,34 @@ impl Command {
             Self::Verdict {
                 collected,
                 target,
+                pull_request,
                 report,
             } => {
-                let checked = read_output(collected)
-                    .and_then(|output| verdict::check_outputs(&output, target));
+                let bound = match (classifier::enabled(&env)?, pull_request) {
+                    (true, Some(pull)) => Some(classifier::Bound::of_pull(&read_pull(pull)?)?),
+                    (false, None) => None,
+                    _ => bail!(
+                        "A draft classifier review's verdict, and only its, needs --pull-request"
+                    ),
+                };
+                let checked = read_output(collected).and_then(|output| {
+                    let verdict = verdict::check_outputs(&output, target, bound.is_some())?;
+                    if let (Some(bound), Some(_)) = (&bound, verdict) {
+                        ensure!(
+                            target == &bound.pr.to_string(),
+                            "A draft classifier review's target must be its pull request"
+                        );
+                        let result = classifier::bound_result(&output, bound)?;
+                        // Counts and fixed words only, never agent text.
+                        let kind = if result.quick() {
+                            "may be quick"
+                        } else {
+                            "is deep"
+                        };
+                        eprintln!("::notice::The draft classifier result {kind} for the pass");
+                    }
+                    Ok(verdict)
+                });
                 match checked {
                     Ok(verdict) => println!("{}", verdict::Verdict::word(verdict)),
                     Err(err) => {
@@ -381,6 +417,10 @@ fn check_request(env: impl Fn(&str) -> String) -> Result<()> {
             && REVIEW_AGENTS.contains(&env("AGENT").as_str()),
         "Review requires an analysis event run, one comment or noop and its inline comments on the triggering repository, no notifications, alternate token or partial application, and a supported agent"
     );
+    ensure!(
+        !classifier::enabled(&env)?,
+        "A draft classifier review is a dispatch of a requested head, not an event review"
+    );
     Ok(())
 }
 
@@ -501,6 +541,9 @@ struct Dispatch {
     /// The head review.yml's dispatch names, which the PR must still be at;
     /// none for dispatch.yml's review, which reviews whatever head it reads.
     head: Option<String>,
+    /// A draft classifier review, which the caller opted into: of a draft
+    /// only, where any other review is of a pull request that is not.
+    classifier: bool,
 }
 
 impl Dispatch {
@@ -545,11 +588,19 @@ impl Dispatch {
                 "Dispatched review pool is unknown: the caller's pool configuration (review.yml's REVIEW_POOLS) must map it to a supported agent and a model"
             );
         }
+        let classifier = classifier::enabled(&env)?;
+        // Its verdict alone: an inline comment would take a finding out of
+        // the body the pass reads, so check refuses one.
+        ensure!(
+            !classifier || (head.is_some() && request == VERDICT_ONLY),
+            "A draft classifier review is review.yml's dispatch of a requested head, for one verdict or noop"
+        );
         Ok(Self {
             repo,
             base: env("BASE"),
             item: number.context("dispatch pull request number")?,
             head,
+            classifier,
         })
     }
 
@@ -564,11 +615,16 @@ impl Dispatch {
             "Dispatch review requires an open PR on the configured base with an exact head SHA"
         );
         if let Some(requested) = &self.head {
-            // As an event review, which waits for ready_for_review.
-            ensure!(
-                pull["draft"] == false,
-                "Dispatched review requires a pull request that is not a draft"
-            );
+            // As an event review, which waits for ready_for_review; a draft
+            // classifier review is of a draft, with its title and body.
+            if self.classifier {
+                classifier::Bound::of_pull(pull)?;
+            } else {
+                ensure!(
+                    pull["draft"] == false,
+                    "Dispatched review requires a pull request that is not a draft"
+                );
+            }
             // A push since the dispatch supersedes it: its verdict would be
             // for a head nobody asked about, and a later dispatch reviews
             // the new one.
@@ -1008,5 +1064,48 @@ mod tests {
             let err = request.resolve(&pull).unwrap_err().to_string();
             assert!(err.contains(want), "{pointer}: {err}");
         }
+    }
+
+    // Off by default, a draft is refused as above; the caller's opt-in
+    // admits a draft, and only a draft, at the requested head, and never
+    // an event review or one without a requested head.
+    #[test]
+    fn only_an_opted_in_dispatch_reviews_a_draft() {
+        let opted = merged(
+            &requested(),
+            &json!({"REVIEW_DRAFT_CLASSIFIER": "true", "OUTPUTS": "add_comment,noop", "MAX_OUTPUTS": "1"}),
+        );
+        let dispatch = request(&opted).unwrap();
+        let pull = classifier::tests::draft("o/r", 147);
+        assert_eq!(dispatch.resolve(&pull).unwrap(), classifier::tests::HEAD);
+        for (pointer, replacement, want) in [
+            ("/draft", json!(false), "open draft"),
+            ("/title", Value::Null, "open draft"),
+            ("/head/sha", json!("b".repeat(40)), "head is now"),
+            ("/state", json!("closed"), "open PR"),
+            ("/base/ref", json!("other"), "configured base"),
+        ] {
+            let mut changed = pull.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            let err = dispatch.resolve(&changed).unwrap_err().to_string();
+            assert!(err.contains(want), "{pointer}: {err}");
+        }
+        for (changes, want) in [
+            (json!({"REQUESTED_HEAD": ""}), "requested head"),
+            // Inline comments would take findings out of the result's body.
+            (
+                json!({"OUTPUTS": "add_comment,noop,create_pull_request_review_comment", "MAX_OUTPUTS": "11"}),
+                "one verdict or noop",
+            ),
+            (json!({"REVIEW_DRAFT_CLASSIFIER": "yes"}), "must be true"),
+        ] {
+            let err = request(&merged(&opted, &changes)).err().unwrap();
+            assert!(err.to_string().contains(want), "{changes}: {err}");
+        }
+        let event = json!({"EVENT":"true", "KIND":"analysis", "OUTPUTS":"add_comment,noop",
+            "MAX_OUTPUTS":"1", "NOTIFY":"none", "REPO":"o/r", "GITHUB_REPOSITORY":"o/r",
+            "APPLY_PARTIAL":"false", "AGENT":"fake", "REVIEW_DRAFT_CLASSIFIER":"true"});
+        let err = check_request(|key| event[key].as_str().unwrap_or_default().to_owned());
+        assert!(err.unwrap_err().to_string().contains("not an event review"));
     }
 }

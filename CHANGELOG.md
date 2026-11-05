@@ -42,6 +42,16 @@ says what a caller may rely on across versions.
   are added; identifying the failed artifact-upload destination still needs
   a fresh run using this deployment (#2811).
 
+- `review resolve-dispatch`, `task`, `verdict` and `submit` take an
+  opt-in, `REVIEW_DRAFT_CLASSIFIER=true`, for a dispatched review of a
+  draft whose verdict carries one checked `agent-board/draft-review/v1`
+  result, bound to the pull request's repository, number, head, base,
+  title and description and read again before it is submitted. Off by
+  default; without it a draft is refused as before, and a verdict that
+  opens such a result's fence is now refused. No workflow sets it yet
+  ([draft classifier reviews](docs/review.md#draft-classifier-reviews),
+  #3040).
+
 - A rebase fix round can hand back a replacement series for a pull request
   that grew past `max_patch_files`: bounds may set `replacement_max_files`
   on `push_to_pull_request_branch` (off by default, at most 500) for the
