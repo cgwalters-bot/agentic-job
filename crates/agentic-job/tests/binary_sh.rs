@@ -22,7 +22,7 @@ use tempfile::TempDir;
 
 const REPOSITORY: &str = "cgwalters-forge/agentic-job";
 const TARGET: &str = "x86_64-unknown-linux-musl";
-const NAMES: [&str; 2] = ["agentic-job", "fake-agent"];
+const NAMES: [&str; 3] = ["agentic-job", "fake-agent", "secure-host"];
 const OBJECT: &str = "world_write.bpf.o";
 const BYTES: &str = "binary";
 /// The environment `binary.sh` would take a tagged release's identity from,
@@ -75,7 +75,7 @@ const CLANG: &str =
 
 const CARGO: &str = r#"
 echo "cargo $*" >> "$STUB_LOG"; mkdir -p target/x86_64-unknown-linux-musl/release
-for name in agentic-job fake-agent; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
+for name in agentic-job fake-agent secure-host; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
 
 const STUBS: [(&str, &str); 7] = [
     ("gh", GH),
@@ -485,7 +485,7 @@ fn assets(from: &str, change: impl Fn(&str) -> String) -> Vec<(String, String)> 
 
 /// The build `get` runs where it takes no release.
 fn cargo_build() -> String {
-    format!("cargo build --release --locked --target {TARGET} -p agentic-job")
+    format!("cargo build --release --locked --target {TARGET} -p agentic-job -p secure-host")
 }
 
 /// What `get` left in OUT, and that every file there is the release's.

@@ -119,6 +119,8 @@ impl HostFile for Config {
 pub enum Command {
     /// Harden the runner's user, the agent's, closing its routes to credentials and root
     Setup(setup::Args),
+    /// As root, before the secure-host image: install the agents, their managed settings and this binary as the helper
+    Prepare(setup::PrepareArgs),
     /// Probe the runner's user's hardening, each probe with a positive control where one can be had
     Check(check::Args),
     /// Run secure-host's setup or probes, and add their time to the job summary
@@ -136,6 +138,7 @@ impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
             Self::Setup(args) => setup::run(args),
+            Self::Prepare(args) => setup::prepare(args),
             Self::Check(args) => check::run(args),
             Self::Timed(args) => timed::run(args),
             Self::Probe(args) => probe::run(args),

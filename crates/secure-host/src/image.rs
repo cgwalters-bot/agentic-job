@@ -1,5 +1,5 @@
-//! `agentic-job secure-host image CONFIG`: the entrypoint of the
-//! `FROM scratch` image (`secure-host/Containerfile`), run as
+//! `secure-host image CONFIG`: the entrypoint of the `FROM scratch`
+//! image (`secure-host/Containerfile`), run as
 //!
 //! ```text
 //! sudo podman run --rm --privileged --pid=host --network=none -v /:/host IMAGE@sha256:... CONFIG
@@ -8,34 +8,45 @@
 //! The image holds this binary and the BPF objects and nothing else, so
 //! the host is set up by the host's own tools: the process takes the
 //! host's root as its own, installs the binary and objects there (for
-//! `sandbox check` and the probes after it), and runs the
+//! `secure-host check` and the probes after it), and runs the
 //! secure-host steps through the host's `nsenter -t 1`, in the host's
 //! mount, network and other namespaces. The world-write links are pinned
 //! in the host's bpffs and the egress proxy is a systemd unit (running
 //! this same image in root podman: `egress::PODMAN`), so both
 //! outlive the container. CONFIG is a path on the host, a configuration
-//! `agentic-job config --host` wrote. Any failed step fails the whole.
+//! `secure-host config` wrote. Any failed step fails the whole.
+//!
+//! The image holds no agent code: in an agent job, agentic-job's own
+//! root step ran before it (`[sandbox.prepared]`, [`crate::config::Prepared`]).
+//! For one release, until cgwalters-forge/actions pins an image built
+//! so, the binary also answers to its old name, in the image
+//! ([`IMAGE_ALIAS`]) and on the host ([`HOST_ALIAS`]), for what that
+//! action calls by it: `config --host` and `sandbox check`.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, ensure};
 
-use super::platform;
-use crate::config::Config;
-use crate::sandbox::{egress, host};
+use crate::config::Host;
+use crate::{egress, host, platform};
 
 /// Where `-v /:/host` puts the host's root.
 pub const HOST_ROOT: &str = "/host";
 /// The image's own files, at its root (`secure-host/Containerfile`).
-const IMAGE_BINARY: &str = "/agentic-job";
+pub const IMAGE_BINARY: &str = "/secure-host";
+/// The same binary by the name the pinned action runs it as
+/// (`--entrypoint /agentic-job ... config --host`).
+pub const IMAGE_ALIAS: &str = "/agentic-job";
 const IMAGE_OBJECT: &str = "/world_write.bpf.o";
-/// Where they go on the host: the binary where the action installs it,
-/// which `sandbox timed` and the sudo rules name.
-const HOST_BINARY: &str = "/usr/local/bin/agentic-job";
+/// Where they go on the host: the binary where its later steps find it,
+/// and by the name the pinned action's check and agentic-job's probes
+/// call it (`agentic-job sandbox check`).
+pub const HOST_BINARY: &str = "/usr/local/bin/secure-host";
+pub const HOST_ALIAS: &str = "/usr/local/bin/agentic-job";
 const HOST_OBJECT_DIR: &str = "/usr/local/lib/agentic-job";
 const HOST_OBJECT: &str = "/usr/local/lib/agentic-job/world_write.bpf.o";
 /// util-linux's, on Ubuntu and RHEL alike.
@@ -72,12 +83,10 @@ fn image_id(text: &str) -> Result<String> {
 fn deny_runner_reads(config: &Path) -> Result<bool> {
     let text =
         fs::read_to_string(config).with_context(|| format!("reading {}", config.display()))?;
-    // `config --host --from` preserves run tables in an existing job
-    // configuration. Setup reads that full configuration too; HostConfig
-    // is only for admitting standalone host-only input, not this output.
-    let config = Config::parse(&text).with_context(|| format!("in {}", config.display()))?;
-    config.check_host()?;
-    Ok(config.sandbox.deny_runner_reads())
+    // A job's whole file too: its program's tables pass, unread.
+    let host = Host::parse(&text).with_context(|| format!("in {}", config.display()))?;
+    host.check()?;
+    Ok(host.sandbox.deny_runner_reads())
 }
 
 /// The commands run on the host, in order, as the action runs them:
@@ -98,26 +107,18 @@ pub fn host_steps(config: &Path, image: &str, deny_runner_reads: bool) -> Result
     // finds the Worker on the host instead of among its ancestors.
     let world_write: &[&str] = if deny_runner_reads {
         &[
-            "secure-host",
             "world-write",
             HOST_OBJECT,
             "--deny-runner-reads",
             "--sole-worker",
         ]
     } else {
-        &["secure-host", "world-write", HOST_OBJECT]
+        &["world-write", HOST_OBJECT]
     };
     let steps: [&[&str]; 3] = [
-        &["secure-host", "apt"],
+        &["apt"],
         world_write,
-        &[
-            "sandbox",
-            "setup",
-            "--config",
-            config,
-            "--egress-image",
-            image,
-        ],
+        &["setup", "--config", config, "--egress-image", image],
     ];
     Ok(steps
         .iter()
@@ -140,6 +141,9 @@ fn install(source: &mut File, path: &str, mode: u32) -> Result<()> {
     let dir = path.parent().context("an install path has a directory")?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("creating a file in {}", dir.display()))?;
+    source
+        .rewind()
+        .with_context(|| format!("reading what goes to {}", path.display()))?;
     io::copy(source, &mut temp).with_context(|| format!("writing {}", path.display()))?;
     temp.flush()?;
     temp.as_file()
@@ -171,6 +175,7 @@ pub fn run(config: &Path) -> Result<()> {
     );
     let steps = host_steps(config, &image, deny_runner_reads(config)?)?;
     install(&mut binary, HOST_BINARY, 0o755)?;
+    install(&mut binary, HOST_ALIAS, 0o755)?;
     fs::create_dir_all(HOST_OBJECT_DIR).with_context(|| format!("creating {HOST_OBJECT_DIR}"))?;
     install(&mut object, HOST_OBJECT, 0o644)?;
     for args in steps {
@@ -186,7 +191,7 @@ pub fn run(config: &Path) -> Result<()> {
             .with_context(|| format!("starting {NSENTER}"))?;
         ensure!(status.success(), "{NSENTER} {}: {status}", args.join(" "));
     }
-    println!("secure-host: the host is set up; {HOST_BINARY} is installed");
+    println!("secure-host: the host is set up; {HOST_BINARY} and {HOST_ALIAS} are installed");
     Ok(())
 }
 
@@ -210,10 +215,9 @@ mod tests {
             HOST_BINARY,
         ];
         let tails: [&[&str]; 3] = [
-            &["secure-host", "apt"],
-            &["secure-host", "world-write", HOST_OBJECT],
+            &["apt"],
+            &["world-write", HOST_OBJECT],
             &[
-                "sandbox",
                 "setup",
                 "--config",
                 "/tmp/secure-host/config.toml",
@@ -225,6 +229,9 @@ mod tests {
         for (step, tail) in steps.iter().zip(tails) {
             assert_eq!(step[..prefix.len()], prefix);
             assert_eq!(step[prefix.len()..], *tail);
+            // As the binary's own command line takes it.
+            let argv = std::iter::once("secure-host").chain(tail.iter().copied());
+            <crate::cli::Cli as clap::Parser>::try_parse_from(argv).unwrap();
         }
         assert_eq!(
             Path::new(HOST_OBJECT).parent(),
@@ -248,7 +255,11 @@ mod tests {
                 "[sandbox]\nlock-runner = false\ndeny-runner-reads = true\n",
                 Err("needs sandbox.lock-runner"),
             ),
-            ("[agent]\nname = \"claude\"\n", Ok(true)),
+            ("[agent]\nname = \"claude\"\n[sandbox.prepared]\n", Ok(true)),
+            (
+                "[agent]\nname = \"claude\"\n",
+                Err("agent set nothing here"),
+            ),
             ("[sandbox]\ndeny-runner-read = true\n", Err("unknown field")),
         ] {
             fs::write(&path, text).unwrap();
@@ -292,8 +303,10 @@ timeout-minutes = 5
 runner-user = "runner"
 deny-runner-reads = {enabled}
 close-resolved = true
+[sandbox.prepared]
 [setup]
 packages = ["nftables", "podman", "uidmap", "cargo"]
+agents = ["opencode-ai@1.18.35"]
 "#
             );
             fs::write(&path, text).unwrap();
@@ -307,17 +320,20 @@ packages = ["nftables", "podman", "uidmap", "cargo"]
     #[test]
     fn an_install_replaces_the_file_whole_with_its_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agentic-job");
+        let path = dir.path().join("secure-host");
+        let alias = dir.path().join("agentic-job");
         fs::write(&path, "old binary, longer than the new one").unwrap();
         let mut source = tempfile::tempfile().unwrap();
         source.write_all(b"new").unwrap();
-        std::io::Seek::rewind(&mut source).unwrap();
-        install(&mut source, path.to_str().unwrap(), 0o755).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"new");
-        let meta = fs::metadata(&path).unwrap();
-        assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
-        // Nothing left beside it.
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        // Twice from one file, as the binary and its old name are.
+        for path in [&path, &alias] {
+            install(&mut source, path.to_str().unwrap(), 0o755).unwrap();
+            assert_eq!(fs::read(path).unwrap(), b"new");
+            let meta = fs::metadata(path).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+        }
+        // Nothing left beside them.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]

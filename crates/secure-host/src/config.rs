@@ -1,10 +1,11 @@
 //! The tables of a host's configuration that the host setup reads, as
-//! agentic-job's `--config` file and a host's own file both have them.
+//! agentic-job's `--config` file and a host's own file both have them,
+//! and the secure-host binary's own reading of such a file ([`Host`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
@@ -85,7 +86,7 @@ pub struct Sandbox {
     /// its runner-read rule on (`secure-host world-write
     /// --deny-runner-reads`), so that a step cannot read the environment,
     /// and the tokens in it, of a process an earlier step left running.
-    /// Only the image reads it (agentic-job's `secure_host::image`), and
+    /// Only the image reads it ([`crate::image`]), and
     /// it refuses a host with no single `Runner.Worker` to exempt. Unset,
     /// [`Self::lock_runner`]'s value ([`Self::deny_runner_reads`]); needs
     /// it, since with sudo the runner's user could clear the rule's map.
@@ -108,6 +109,69 @@ pub struct Sandbox {
     /// (agentic-job's `run::enter`).
     pub env: BTreeMap<String, String>,
     pub check: SandboxCheck,
+    /// What a program's own root step did before setup, and needs of it;
+    /// unset for none.
+    pub prepared: Option<Prepared>,
+}
+
+/// `[sandbox.prepared]`: a program built on this crate ran its own root
+/// step before setup (agentic-job's `sandbox prepare`, before the
+/// secure-host image of an agent job) and installed its binary as the
+/// helper ([`crate::helper::SELF_COPY`]), with the operations its run
+/// needs of root later. Setup then keeps that helper, which must be
+/// there, instead of installing itself; and since it reads none of the
+/// program's tables, this table says what of them the host's rules must
+/// still hold to, as [`crate::setup::Plan`] takes it. agentic-job writes
+/// it from its run's tables (`config --host --prepared`) and refuses one
+/// that does not match them.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Prepared {
+    /// What the egress proxy refuses whatever its policy says, and that
+    /// the policy may not name: the inference broker under agentic-job's
+    /// `inference.front`, which the agent would otherwise reach with a
+    /// run token it found.
+    pub refuse: Vec<Refusal>,
+    /// A loopback port a later step listens on and has root serve on the
+    /// tailnet (agentic-job's session bridge): setup writes where it is
+    /// served ([`crate::setup::SERVE_ENDPOINT`]) and gives the port to
+    /// the network rules.
+    pub serve_port: Option<u16>,
+}
+
+/// One destination of [`Prepared::refuse`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Refusal {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Prepared {
+    fn validate(&self) -> Result<()> {
+        for Refusal { host, port } in &self.refuse {
+            ensure!(
+                !host.is_empty()
+                    && *port != 0
+                    && !host.starts_with('-')
+                    && !host.contains(|c: char| c.is_whitespace() || c == '/'),
+                "sandbox.prepared.refuse: {host:?} port {port} is not a host and a port"
+            );
+        }
+        ensure!(
+            self.serve_port != Some(0),
+            "sandbox.prepared.serve-port: 0 is not a port"
+        );
+        Ok(())
+    }
+
+    /// [`Self::refuse`] as setup and the egress proxy take it.
+    pub fn refused(&self) -> Vec<(String, u16)> {
+        self.refuse
+            .iter()
+            .map(|Refusal { host, port }| (host.clone(), *port))
+            .collect()
+    }
 }
 
 impl Sandbox {
@@ -276,6 +340,9 @@ impl Sandbox {
                 "sandbox.env: the value of {name} has a newline or NUL in it"
             );
         }
+        if let Some(prepared) = &self.prepared {
+            prepared.validate()?;
+        }
         self.check.validate()
     }
 }
@@ -298,6 +365,7 @@ impl Default for Sandbox {
             stop_services: Vec::new(),
             env: BTreeMap::new(),
             check: SandboxCheck::default(),
+            prepared: None,
         }
     }
 }
@@ -423,5 +491,196 @@ impl Default for Egress {
             rust_proxy: true,
             write_policy: false,
         }
+    }
+}
+
+impl Egress {
+    /// What the types cannot say, given the sandbox's LOCK_RUNNER.
+    pub fn validate(&self, lock_runner: bool) -> Result<()> {
+        ensure!(
+            !self.write_policy || (self.proxy && self.rust_proxy && lock_runner),
+            "egress.write-policy needs egress.proxy, egress.rust-proxy and sandbox.lock-runner: \
+             the runner's traffic goes through the Rust proxy's own listener, under rules a \
+             runner's user with sudo could remove"
+        );
+        Ok(())
+    }
+}
+
+/// `[setup] packages`: names handed to a package manager run as root,
+/// so none may read as an option.
+pub fn check_packages(packages: &[String]) -> Result<()> {
+    for package in packages {
+        ensure!(
+            !package.is_empty()
+                && !package.starts_with('-')
+                && !package.contains(char::is_whitespace),
+            "setup.packages: {package:?} is not a package name"
+        );
+    }
+    Ok(())
+}
+
+/// A host's file as the secure-host binary reads it: `[sandbox]`,
+/// `[egress]` and `[setup] packages`. A job's whole file may come here
+/// too, once a program built on this crate did its own part first
+/// ([`Prepared`]): its tables and `[setup]` keys (agentic-job's run
+/// tables, its agents) are kept in the root-owned copy, where that
+/// program's helper reads them, and set nothing here.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Host {
+    pub sandbox: Sandbox,
+    pub egress: Egress,
+    pub setup: HostSetup,
+    #[serde(flatten)]
+    pub program: toml::Table,
+}
+
+/// `[setup]`, as [`Host`] reads it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HostSetup {
+    /// Names for the host's package manager.
+    pub packages: Vec<String>,
+    #[serde(flatten)]
+    pub program: toml::Table,
+}
+
+impl Host {
+    pub fn parse(text: &str) -> Result<Self> {
+        let host: Self = toml::from_str(text).context("parsing the host configuration")?;
+        host.sandbox.refuse_removed()?;
+        Ok(host)
+    }
+
+    /// Checks the tables setup acts on, and returns where the runner's
+    /// user connects without the egress proxy. A program's tables are
+    /// refused unless its step ran ([`Prepared`]): setup would leave out
+    /// what they ask of the host (an agent installed, a broker refused),
+    /// and a misspelt key of its own would pass.
+    pub fn check(&self) -> Result<Vec<Direct>> {
+        let keys = self.program_keys();
+        ensure!(
+            keys.is_empty() || self.sandbox.prepared.is_some(),
+            "{} set nothing here: a program's step sets them up before this one and says so in \
+             [sandbox.prepared] (agentic-job: `sandbox prepare` on what `config --host \
+             --prepared` writes); a host's own file has only [sandbox], [egress] and [setup] \
+             packages",
+            keys.join(", ")
+        );
+        // Prepared or not, setup runs no script: the runner's user does,
+        // after it (agentic-job#2989).
+        ensure!(
+            !self.setup.program.contains_key("script"),
+            "setup.script: setup runs no script since the sandbox user was removed \
+             (agentic-job#2989); the runner's user runs it after setup, so leave it out of the \
+             host's file"
+        );
+        self.sandbox.validate()?;
+        self.egress.validate(self.sandbox.lock_runner)?;
+        check_packages(&self.setup.packages)?;
+        crate::network::direct(&self.egress)
+    }
+
+    /// The program's tables and `[setup]` keys, which set nothing here.
+    pub fn program_keys(&self) -> Vec<String> {
+        self.program
+            .keys()
+            .cloned()
+            .chain(self.setup.program.keys().map(|key| format!("setup.{key}")))
+            .collect()
+    }
+}
+
+impl HostFile for Host {
+    fn load(path: &Path) -> Result<Self> {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Self::parse(&text).with_context(|| format!("in {}", path.display()))
+    }
+
+    fn sandbox(&self) -> &Sandbox {
+        &self.sandbox
+    }
+
+    fn egress(&self) -> &Egress {
+        &self.egress
+    }
+
+    fn direct(&self) -> Result<Vec<Direct>> {
+        self.check()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program's tables and `[setup]` keys pass, unread, once its step
+    /// ran; secure-host's own tables are held to their keys and checks.
+    #[test]
+    fn the_host_file_keeps_a_programs_tables_and_checks_its_own() {
+        let job = "[agent]\nname = \"claude\"\n[limits]\nbudget = 1\n\
+                   [setup]\npackages = [\"git\"]\nagents = [\"x@1\"]\n";
+        let host = Host::parse(&format!("{job}[sandbox.prepared]\n")).unwrap();
+        host.check().unwrap();
+        assert_eq!(host.setup.packages, ["git"]);
+        assert_eq!(host.program_keys(), ["agent", "limits", "setup.agents"]);
+        // Without it, the program's tables would set nothing.
+        let unprepared = "agent, limits, setup.agents set nothing here";
+        for (text, want) in [
+            (job, unprepared),
+            (
+                "[setup]\npackges = [\"git\"]\n",
+                "setup.packges set nothing here",
+            ),
+            (
+                "[sandbox.prepared]\n[setup]\nscript = \"/s\"\n",
+                "setup runs no script",
+            ),
+            ("[sandbox]\nusr = \"x\"\n", "unknown field"),
+            ("[sandbox]\ncreate-user = false\n", "was removed"),
+            ("[egress]\nproxyy = true\n", "unknown field"),
+            ("[sandbox.prepared]\nhelper = true\n", "unknown field"),
+            ("[setup]\npackages = [\"-y\"]\n", "not a package name"),
+            (
+                "[sandbox]\nlock-runner = false\ndeny-runner-metadata = false\n\
+                 unlink-worker-diagnostics = false\ndeny-runner-reads = false\n\
+                 [egress]\nwrite-policy = true\n",
+                "needs egress.proxy, egress.rust-proxy and sandbox.lock-runner",
+            ),
+            (
+                "[[sandbox.prepared.refuse]]\nhost = \"\"\nport = 443\n",
+                "not a host and a port",
+            ),
+            (
+                "[[sandbox.prepared.refuse]]\nhost = \"broker\"\nport = 0\n",
+                "not a host and a port",
+            ),
+            (
+                "[[sandbox.prepared.refuse]]\nhost = \"-x\"\nport = 443\n",
+                "not a host and a port",
+            ),
+            ("[sandbox.prepared]\nserve-port = 0\n", "not a port"),
+        ] {
+            let err = Host::parse(text).and_then(|host| host.check()).unwrap_err();
+            assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn the_prepared_table_says_what_the_rules_hold_to() {
+        let host = Host::parse("").unwrap();
+        assert_eq!(host.sandbox.prepared, None);
+        let text = "[sandbox.prepared]\nserve-port = 7790\n\
+                    [[sandbox.prepared.refuse]]\nhost = \"fd7a:115c:a1e0::1\"\nport = 443\n";
+        let host = Host::parse(text).unwrap();
+        host.check().unwrap();
+        let prepared = host.sandbox.prepared.as_ref().unwrap();
+        assert_eq!(prepared.serve_port, Some(7790));
+        assert_eq!(prepared.refused(), [("fd7a:115c:a1e0::1".to_owned(), 443)]);
+        let empty = Host::parse("[sandbox.prepared]\n").unwrap();
+        assert_eq!(empty.sandbox.prepared, Some(Prepared::default()));
     }
 }

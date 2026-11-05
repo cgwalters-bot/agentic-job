@@ -128,10 +128,14 @@ A self-hosted CI job, or a VM of its own, needs the binary **and its matching
 object as root before setup, then check as the user the later steps run as:
 
 ```sh
-sudo agentic-job secure-host world-write /path/to/world_write.bpf.o
-sudo agentic-job sandbox setup --config FILE
-agentic-job sandbox check
+sudo secure-host world-write /path/to/world_write.bpf.o
+sudo secure-host setup --config FILE
+secure-host check
 ```
+
+`agentic-job secure-host world-write`, `agentic-job sandbox setup` and
+`agentic-job sandbox check` do the same, and that setup does the agent's
+part too.
 
 These are host-changing commands, not commands to run inside an existing
 sandbox. The loader needs kernel BTF, BPF privileges, `runuser` and bpftool
@@ -180,6 +184,26 @@ there, so `run` starts the policy job's binary from the job directory.
 The composed example (`example-compose.yml`) has the same steps, and
 CI's jobs that secure a host run the forwarder with this revision's
 image (`image-archive`).
+
+An image of this source holds the secure-host binary and no agent code
+([below](#the-secure-host-binary)), so with one the agent job does
+agentic-job's part of setup first, as root: `sudo agentic-job sandbox
+prepare` installs the packages, the agents and Vibe, writes the agent's
+managed settings, and installs the policy job's binary as the helper,
+with the operations `run` needs of root later. The host's file says so,
+`[sandbox.prepared]`, which `agentic-job config --host --prepared`
+writes from the run's tables: the image's setup then keeps that helper
+rather than installing itself (it must be a regular file there, and is
+made root's alone with its directories, or setup refuses), and holds
+the egress proxy and the network rules to what the run's tables ask
+(the broker under `inference.front`, the session bridge's port), which
+it does not read itself. agentic-job's readers refuse a table that no
+longer says what the run's tables ask. The pinned image, a release
+whose binary is agentic-job's and does all of setup, refuses that
+table, so until a release is pinned the agent job runs this step only
+with `image-archive`, as CI's end-to-end jobs do; running it before
+every image is
+[#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656).
 
 The agent is then a later step like any other: no root, the metadata
 service only where the configuration leaves it open
@@ -245,16 +269,59 @@ It has no outputs. The action knows nothing of inference or sessions: an
 agent job checks its inference proxy before this step, and the run action
 reads a session's endpoint after it ([workflow](workflow.md)).
 
+## The secure-host binary
+
+`crates/secure-host` builds `secure-host`, the host's side with nothing
+that runs an agent: `supported`, `apt`, `world-write`, `setup`, `check`,
+`config` and `image`, the image's entrypoint, which installs the binary
+on the host and runs the first three steps and setup there through
+`nsenter`. Its hidden commands are what the host runs it for after
+setup: `helper`, the egress proxy's unit and the probes.
+
+`secure-host setup` and `check` read a host's file, or a job's whole
+file as an agent job passes it: `[sandbox]` and `[egress]` are held to
+their keys, `[setup]` to `packages`, and `setup.script` is refused as
+`sandbox setup` refuses it. Any other table or `[setup]` key is a
+program's, and is refused unless `[sandbox.prepared]` says the
+program's step ran: it sets nothing here, so setup would leave out what
+it asks of the host. With the table setup names those keys, keeps the
+copy the program's step installed as the helper, and holds the egress
+proxy and the network rules to the table; without it, its own copy is
+the helper.
+
+The pinned cgwalters-forge/actions/secure-host calls the image's binary
+by agentic-job's name: `--entrypoint /agentic-job ... config --host`,
+and `agentic-job sandbox check` on the host. For one release the image
+answers to both: it has the binary at `/secure-host` and
+`/agentic-job`, installs it as `/usr/local/bin/secure-host` and
+`/usr/local/bin/agentic-job`, and takes `config --host` and `sandbox
+check`, `probe` and `egress-proxy`. `agentic-job secure-host image` is
+gone; agentic-job's other `secure-host` subcommands and `sandbox setup`
+stay.
+
+CI proves the image of each revision from its archive: the
+`secure-host-image` job checks that both names on the host are the
+staged secure-host binary and not agentic-job's, and `confined` probes
+a step under it. The published image and the action's pin can follow
+only a release built so; until then the `secure-host-published` job,
+and every caller, go on running the v0.6 image, whose binary is
+agentic-job's. That job proves the published path only after a release
+and the pin move
+([#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)).
+
 ## Where the binary and image come from
 
 The host's binary is the image's. A release pushes
 `ghcr.io/cgwalters-forge/secure-host:vVERSION`, an image `FROM scratch`
-with the static binary and the compiled world-write object
+with the static secure-host binary and the compiled world-write object
 `world_write.bpf.o` ([`Containerfile`](../secure-host/Containerfile)),
 and attests it by its digest from `release.yml` on main; what the image
 does on the host is in the action's
 [setup](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-image).
 A new package on ghcr.io is private until an owner makes it public.
+The release, and `build-…` releases with it, also publish
+`secure-host-x86_64-unknown-linux-musl`, its checksum in the attested
+manifest beside agentic-job's.
 
 The policy job gets the binary an agent job runs with
 [`binary.sh`](../secure-host/binary.sh), a shell script since no

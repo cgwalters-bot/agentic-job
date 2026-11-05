@@ -50,8 +50,9 @@ REPOSITORY=cgwalters-forge/agentic-job
 # `skills` and `workflow/review.md` are the agents' skills, built in.
 BUILT_FROM=(Cargo.lock Cargo.toml crates egress skills workflow/review.md secure-host/binary.sh)
 
-# The scripted agent too: a run with `agent: fake` needs it.
-NAMES=(agentic-job fake-agent)
+# The scripted agent too: a run with `agent: fake` needs it. secure-host
+# is what the image holds: the host's side, with no agent code.
+NAMES=(agentic-job fake-agent secure-host)
 
 # One static binary, so that it runs on whatever the job's runner is.
 TARGET=x86_64-unknown-linux-musl
@@ -301,7 +302,7 @@ build() {
   fi
   object "$out"
   rustup target add "$TARGET"
-  (cd "$ROOT" && cargo build --release --locked --target "$TARGET" -p agentic-job)
+  (cd "$ROOT" && cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host)
   for name in "${NAMES[@]}"; do install -m 0755 -- "$ROOT/target/$TARGET/release/$name" "$out/$name"; done
 }
 

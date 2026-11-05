@@ -15,6 +15,22 @@ says what a caller may rely on across versions.
   are unchanged. Callers need a new compatible policy/check/apply pin; no
   caller migration or classifier is included (#3085).
 
+- The secure-host image is built from a new `secure-host` binary, the
+  host's side with no agent code (`supported`, `apt`, `world-write`,
+  `setup`, `check`, `config`, `image`), which releases also publish with
+  its checksum (#2070). For one release the image and the host also give
+  it agentic-job's name (`/agentic-job`, `/usr/local/bin/agentic-job`),
+  for what the pinned cgwalters-forge/actions/secure-host calls by it
+  (`config --host`, `sandbox check`). An agent job with such an image
+  first runs `agentic-job sandbox prepare` as root, which installs the
+  agents, their managed settings and agentic-job as the helper, on a file
+  `config --host --prepared` wrote: its `[sandbox.prepared]` table tells
+  the image's setup to keep that helper and what the run's tables ask of
+  the host's rules, and the image refuses a job's tables without it.
+  `agentic-job secure-host image` is gone: the image's entrypoint is
+  `secure-host image`. The published image and the action's pin move only
+  after a release (#2656).
+
 - **Breaking:** the sandbox user is gone; the runner's user is the only agent
   user (#2989). `sandbox setup` creates no `runner-sandbox` user, sudoers or
   scheduler entries for it, runs no `setup.script` (the agent job runs it as

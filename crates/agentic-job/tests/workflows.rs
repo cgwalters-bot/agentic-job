@@ -2708,7 +2708,7 @@ fn agent_configuration_provenance_and_step_gates_are_preserved() {
     for (file, expected) in [
         (
             "agent.yml",
-            "agentic-job config --host --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
+            "[ -z \"$IMAGE_ARTIFACT\" ] || set -- --prepared\nagentic-job config --host \"$@\" --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
         ),
         (
             "example-compose.yml",
@@ -2737,6 +2737,34 @@ fn agent_configuration_provenance_and_step_gates_are_preserved() {
             Some("${{ runner.temp }}/agentic-job-host.toml")
         );
     }
+    // With an image of this source, which holds no agent code,
+    // agentic-job's part of setup comes first, as root, on the file the
+    // image then reads.
+    let doc = definition("agent.yml");
+    let steps = steps(&doc);
+    let at = |name: &str| {
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let prepare = steps[at("agentic-job's part of the host's setup")];
+    assert_eq!(
+        prepare["if"].as_str(),
+        Some("${{ inputs.secure-host-image-artifact-id != '' }}")
+    );
+    assert_eq!(
+        prepare["run"].as_str(),
+        Some(
+            "sudo /usr/local/bin/agentic-job sandbox prepare --config \"$RUNNER_TEMP/agentic-job-host.toml\""
+        )
+    );
+    let secured = steps
+        .iter()
+        .position(|s| s["uses"].as_str() == Some("./.agentic-job-source/secure-host"))
+        .unwrap();
+    assert!(at("The host's configuration") < at("agentic-job's part of the host's setup"));
+    assert!(at("agentic-job's part of the host's setup") < secured);
     for (file, name) in [
         ("policy.yml", "Check that the repositories are public"),
         (
@@ -3913,8 +3941,8 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"- name: The JavaScript action main and post steps are confined\n        uses: \./\.github/actions/confine-probe # zizmor: ignore\[self-repository\] ",
             r"\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n",
             r#"echo "\$!" > "\$RUNNER_TEMP/confine-orphan\.pid""#,
-            "agentic-job sandbox check --record",
-            r"\n        run: agentic-job sandbox probe confined run-step\n",
+            "secure-host check --record",
+            r"\n        run: secure-host probe confined run-step\n",
             r"- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions/upload-artifact@",
         ],
         &[
@@ -4241,9 +4269,9 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
         "confined",
         &[
             "      - name: Leave a process running\n        id: orphan\n",
-            "\"$RUNNER_TEMP/agentic-job\" sandbox probe control before",
+            "\"$RUNNER_TEMP/secure-host-bin\" probe control before",
             "        uses: ./secure-host # zizmor: ignore[self-repository] ",
-            "sandbox probe confined run-step",
+            "secure-host probe confined run-step",
             "        uses: ./.github/actions/confine-probe # zizmor: ignore[self-repository] ",
             "uses: actions/upload-artifact@",
         ],
@@ -5979,6 +6007,92 @@ fn confined_uses_only_its_local_actions_and_cleanup_finds_it() {
     let name = doc["jobs"]["confined-cleanup"]["steps"][0]["env"]["NAME"].as_str();
     assert!(name.is_some());
     assert_eq!(name, doc["jobs"]["confined"]["name"].as_str());
+}
+
+/// The pinned action creates $RUNNER_TEMP/secure-host/in for its config,
+/// and #2642's confined job failed with ENOTDIR when a binary staged at
+/// $RUNNER_TEMP/secure-host took that path first. No workflow or action
+/// of this repository may use the path, as a file or a directory; names
+/// that only start with it (`secure-host-bin`, `secure-host-image`) are
+/// other paths.
+#[test]
+fn nothing_occupies_the_actions_config_directory() {
+    let taken =
+        Regex::new(r"(\$RUNNER_TEMP|\$\{RUNNER_TEMP\}|runner\.temp \}\})/secure-host([^-\w.]|$)")
+            .unwrap();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(root().join(".github/workflows"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    files.extend(
+        [
+            "secure-host",
+            "prepare",
+            "run",
+            ".github/actions/confine-probe",
+        ]
+        .iter()
+        .map(|dir| root().join(dir).join("action.yml")),
+    );
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (number, line) in text.lines().enumerate() {
+            assert!(
+                !taken.is_match(line),
+                "{}:{}: $RUNNER_TEMP/secure-host is the pinned action's directory: {line}",
+                path.display(),
+                number + 1
+            );
+        }
+    }
+    for bad in [
+        "install -m 0755 \"$RUNNER_TEMP/dist/x\" \"$RUNNER_TEMP/secure-host\"",
+        "path: ${{ runner.temp }}/secure-host",
+        "mkdir \"${RUNNER_TEMP}/secure-host/in\"",
+    ] {
+        assert!(taken.is_match(bad), "{bad}");
+    }
+    let text = workflow("ci.yml");
+    for name in ["secure-host-options", "confined"] {
+        let job = job(&text, name);
+        assert!(job.contains(
+            "install -m 0755 \"$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl\" \"$RUNNER_TEMP/secure-host-bin\""
+        ));
+        assert!(job.contains("\"$RUNNER_TEMP/secure-host-bin\" "));
+    }
+}
+
+/// The image's binary is secure-host's, which build.yml stages, checksums
+/// and pins with the others, and which the image installs on the host
+/// under both its names: CI compares both with the staged file and
+/// refuses agentic-job's in its place.
+#[test]
+fn the_image_holds_and_installs_the_secure_host_binary() {
+    let containerfile = workflow("secure-host/Containerfile");
+    for line in [
+        "COPY --chmod=0755 secure-host-x86_64-unknown-linux-musl /secure-host\n",
+        "COPY --chmod=0755 secure-host-x86_64-unknown-linux-musl /agentic-job\n",
+        "ENTRYPOINT [\"/secure-host\", \"image\"]\n",
+    ] {
+        assert!(containerfile.contains(line), "{line}");
+    }
+    assert!(!containerfile.contains("COPY --chmod=0755 agentic-job-"));
+    let build = workflow("build.yml");
+    assert!(build.contains("for name in agentic-job fake-agent secure-host; do\n"));
+    assert!(build.contains("-p agentic-job -p secure-host\n"));
+    let binary = workflow("secure-host/binary.sh");
+    assert!(binary.contains("NAMES=(agentic-job fake-agent secure-host)\n"));
+    let release = workflow("release.yml");
+    assert!(release.contains("\"secure-host-$TARGET\" \"secure-host-$TARGET.sha256\""));
+    assert!(release.contains("\"secure-host-$TARGET.sha256\"\n"));
+    let ci = workflow("ci.yml");
+    let image = job(&ci, "secure-host-image");
+    for want in [
+        "for name in secure-host agentic-job; do\n            cmp \"/usr/local/bin/$name\" \"$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl\"\n",
+        "if cmp -s \"$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl\" /usr/local/bin/secure-host; then",
+    ] {
+        assert!(image.contains(want), "{want}");
+    }
 }
 
 /// Every caller, agentic-job's own jobs included, gets the new action's

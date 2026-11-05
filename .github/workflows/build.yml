@@ -45,19 +45,20 @@ jobs:
         if: ${{ inputs.cache }}
         with:
           key: ${{ env.TARGET }}
-      - run: cargo build --release --locked --target "$TARGET" -p agentic-job
+      - run: cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host
       - name: Check the world-write policy's predicate
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror crates/agentic-job/bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
           "$RUNNER_TEMP/world-write-test"
-      # The scripted agent too: a run with `agent: fake` needs it. The
-      # world-write policy object goes with them, its checksum in the manifest.
+      # The scripted agent too: a run with `agent: fake` needs it; and
+      # secure-host, the image's. The world-write policy object goes with
+      # them, its checksum in the manifest.
       - name: Stage the binaries and their checksums
         run: |
           mkdir dist
           bash secure-host/binary.sh object --out dist
           cd dist
-          for name in agentic-job fake-agent; do
+          for name in agentic-job fake-agent secure-host; do
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
             sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
           done
@@ -69,17 +70,19 @@ jobs:
         run: |
           bash secure-host/binary.sh pin --dist dist --release "$RELEASE" --repository "$GITHUB_REPOSITORY" > dist/release.json
       # A runner the binary is fetched onto may have another libc, or none.
-      - name: The binary is static and runs
+      - name: The binaries are static and run
         run: |
-          file "dist/agentic-job-$TARGET" | tee /dev/stderr | grep -q 'static'
-          "dist/agentic-job-$TARGET" --version
+          for name in agentic-job secure-host; do
+            file "dist/$name-$TARGET" | tee /dev/stderr | grep -q 'static'
+            "dist/$name-$TARGET" --version
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentic-job
           path: dist/
           if-no-files-found: error
-      # The same binary and object as an image, saved as an archive: ci
-      # runs it from that archive, and release pushes it as it is.
+      # The secure-host binary and the object as an image, saved as an
+      # archive: ci runs it from that archive, and release pushes it as it is.
       - name: The secure-host image
         run: |
           podman build --file secure-host/Containerfile --tag localhost/secure-host:build dist

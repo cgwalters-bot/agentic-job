@@ -250,6 +250,20 @@ These questions are new and are the operator's:
 
 ## Open work
 
+The secure-host image holds the secure-host binary and no agent code
+([#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070)),
+but only CI runs such an image yet, from its archive; the published
+image and `secure-host-published` are unproven until a release. After
+the next release publishes one: move cgwalters-forge/actions/secure-host's
+pin to it and the forwarder's with it; then have `agent.yml` and
+`example-compose.yml` run `sandbox prepare` and write
+`[sandbox.prepared]` whatever the image (such an image refuses a job's
+file without it,
+[#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)),
+call the binary `secure-host` in the examples and the run action, and,
+a release later, drop its `agentic-job` names in the image and on the
+host.
+
 Queued execution has run ([41239144677](https://github.com/cgwalters-forge/agentic-job/actions/runs/41239144677));
 the gap is hosted admission coverage for the event caller, the review verdict
 and dispatch's review profile. [CI](../.github/workflows/ci.yml) now wires queued scripted dispatch review to

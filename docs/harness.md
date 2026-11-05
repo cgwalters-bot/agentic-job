@@ -240,7 +240,9 @@ The implementation recipe is:
    for `sandbox setup`; `run` cannot write them after hardening. Keep
    them to what holds inference and permissions: in an agent job setup is
    the pinned secure-host image's release, older than `run` between
-   releases, and `run` refuses any difference.
+   releases, and `run` refuses any difference. With an image of this
+   source, `sandbox prepare` writes them, from the policy job's binary,
+   before it.
 3. In `run/launch.rs`, add the agent's launch behavior: read the run's
    configuration, set only the required environment, and execute the
    registry command. Extend `KEPT` only for non-secret model settings that

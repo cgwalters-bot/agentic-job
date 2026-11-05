@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 
+use ::secure_host::setup::HTTPS_DISABLED;
+
 use super::helper::{Direct, Exec};
 use super::root::Root;
 use crate::session::bridge::PORT;
@@ -25,8 +27,6 @@ const REVOKE_ATTEMPTS: u32 = 10;
 /// of `--kill-after`.
 const TIMED_OUT: [i32; 2] = [124, 137];
 const READY: u8 = 1;
-pub(super) const HTTPS_DISABLED: &str =
-    "the tailnet has HTTPS certificates disabled; enable them in the admin console";
 
 pub(crate) struct Guard {
     // Dropping this socket asks root to revoke serve, including on early errors.

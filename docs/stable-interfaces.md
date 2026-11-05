@@ -141,9 +141,12 @@ the next in the same major version.
   since #2989; `sandbox.check.control-url`, `fetch-repo`, `allow-sockets`
   and `allow-tcp-ports` are accepted and ignored.
 - **The secure-host configuration**, the action's `config` input
-  (`agentic-job config --host`): `[sandbox]`, `[egress]` and `[setup]`
-  of the runner configuration, and nothing else
-  ([secure-host](secure-host.md)). With no `config`, the forwarder selects
+  (`agentic-job config --host`, `secure-host config`): `[sandbox]`,
+  `[egress]` and `[setup]` of the runner configuration, and nothing else
+  ([secure-host](secure-host.md)). The secure-host binary also reads a
+  job's whole file, which an agent job passes it with
+  `[sandbox.prepared]`: it holds its own tables to their keys and leaves
+  the rest to the program that wrote the file. With no `config`, the forwarder selects
   its Ubuntu 26.04 or RHEL 10 / CentOS Stream 10 cloud file by exact
   `ID` and supported `VERSION_ID` (never `ID_LIKE`); an unsupported host
   has no default. An explicit file replaces the selected default whole.

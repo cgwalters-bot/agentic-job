@@ -147,9 +147,10 @@ jobs:
           name: provenance
       - name: The checksums match and the version is the tag's
         run: |
-          sha256sum --check "agentic-job-$TARGET.sha256" "fake-agent-$TARGET.sha256"
-          chmod +x "agentic-job-$TARGET"
+          sha256sum --check "agentic-job-$TARGET.sha256" "fake-agent-$TARGET.sha256" "secure-host-$TARGET.sha256"
+          chmod +x "agentic-job-$TARGET" "secure-host-$TARGET"
           test "$("./agentic-job-$TARGET" --version)" = "agentic-job ${TAG#v}"
+          test "$("./secure-host-$TARGET" --version)" = "secure-host ${TAG#v}"
       # A tag pushed during the build may be newer than this version.
       # Only the gh steps get the token: the step above runs the binary.
       - name: The tags are those the version was checked against
@@ -179,7 +180,8 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "$TAG" --generate-notes "${start[@]}" \
             "agentic-job-$TARGET" "agentic-job-$TARGET.sha256" \
-            "fake-agent-$TARGET" "fake-agent-$TARGET.sha256" release.json provenance.jsonl world_write.bpf.o
+            "fake-agent-$TARGET" "fake-agent-$TARGET.sha256" \
+            "secure-host-$TARGET" "secure-host-$TARGET.sha256" release.json provenance.jsonl world_write.bpf.o
           # Immutability locks assets at publication, not while still a draft.
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
