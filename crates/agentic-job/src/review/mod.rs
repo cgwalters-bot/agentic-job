@@ -222,7 +222,9 @@ impl Command {
                 };
                 let root = Path::new(".");
                 let mut task = task_file(root, file)?;
-                task.push_str(&merge_statement(merge_policy(root)?));
+                if env("ADVISORY") != "true" {
+                    task.push_str(&merge_statement(merge_policy(root)?));
+                }
                 if let Some((classifier, context)) = dispatched {
                     task.extend(classifier);
                     task.push('\n');
@@ -408,6 +410,7 @@ fn check_request(env: impl Fn(&str) -> String) -> Result<()> {
         env("EVENT") == "true"
             && env("KIND") == "analysis"
             && (request == inline_request() || request == VERDICT_ONLY)
+            && (env("ADVISORY") != "true" || request == VERDICT_ONLY)
             && env("NOTIFY") == "none"
             && env("TARGET").is_empty()
             && env("REPO") == env("GITHUB_REPOSITORY")

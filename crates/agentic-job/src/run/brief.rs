@@ -234,7 +234,9 @@ pub fn hand_back(
         })
         .collect();
     let requests = home.join(AGENT_OUTPUTS);
-    if types.is_empty() {
+    if policy.advisory.is_some() {
+        advisory_requests(&mut text, policy, &requests);
+    } else if types.is_empty() {
         let _ = writeln!(
             text,
             "- Requests: none; leave `{}` unwritten.",
@@ -290,6 +292,27 @@ pub fn hand_back(
          protected paths, checkpoints, replacing a branch's commits, containers.\n\n",
     );
     text
+}
+
+fn advisory_requests(text: &mut String, policy: &Policy, requests: &Path) {
+    if let Some(advisory) = &policy.advisory {
+        let comment = serde_json::json!({"type":"add_comment", "repo":advisory.repo,
+            "item_number":advisory.pull, "body":"Your advisory prose."});
+        let _ = writeln!(
+            text,
+            "- `{}`: required, exactly one JSON object on one line: `{comment}` or \
+             `{{\"type\":\"noop\",\"message\":\"Nothing useful to add.\"}}`. No other fields \
+             are accepted; unknown fields are rejected, not dropped. Text must be nonempty \
+             and at most {} UTF-8 bytes. This is advisory prose for head `{}`, not a review \
+             verdict: no APPROVE or CHANGES statement is required. Trusted apply adds the \
+             head framing and checks the final body is at most {} bytes. Do not select a \
+             different destination or head.",
+            requests.display(),
+            safe_outputs::advisory::MAX_PROSE_BYTES,
+            advisory.head,
+            safe_outputs::advisory::MAX_FINAL_BYTES,
+        );
+    }
 }
 
 /// The whole of what a run of POLICY whose agent has the home HOME and
@@ -379,7 +402,9 @@ pub fn guide(
         })
         .collect();
     let requests = home.join(AGENT_OUTPUTS);
-    if types.is_empty() {
+    if policy.advisory.is_some() {
+        advisory_requests(&mut text, policy, &requests);
+    } else if types.is_empty() {
         let _ = writeln!(
             text,
             "- `{}`: this run may make no requests; leave it unwritten.",
@@ -540,6 +565,7 @@ mod tests {
 
     fn policy(kind: Kind, outputs: serde_json::Value) -> Policy {
         Policy {
+            advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
             clone_url: "https://example.invalid/o/r".into(),
@@ -569,6 +595,51 @@ mod tests {
             None,
             "0123abcd",
         )
+    }
+
+    #[test]
+    fn advisory_instructions_name_the_strict_contract() {
+        let mut policy = policy(
+            Kind::Analysis,
+            json!({"add_comment":{"max":1},"noop":{"max":1}}),
+        );
+        policy.max_outputs = 1;
+        policy.native_handlers = vec!["add_comment".into()];
+        policy.advisory = Some(safe_outputs::advisory::Advisory {
+            repo: policy.repo.clone(),
+            pull: 7,
+            base: policy.base.clone(),
+            head: "a".repeat(40),
+        });
+        for instructions in [
+            text(&policy),
+            hand_back(
+                &policy,
+                Path::new("/home/agent"),
+                Path::new("/home/agent/work/r"),
+                None,
+            ),
+        ] {
+            for required in [
+                "required, exactly one",
+                "\"repo\":\"o/r\"",
+                "\"item_number\":7",
+                "unknown fields are rejected",
+                "46000 UTF-8 bytes",
+                "48000 bytes",
+                "not a review verdict",
+            ] {
+                assert!(
+                    instructions.contains(required),
+                    "{required}: {instructions}"
+                );
+            }
+            assert!(!instructions.contains("(optional)"), "{instructions}");
+            assert!(
+                !instructions.contains("a field not listed is dropped"),
+                "{instructions}"
+            );
+        }
     }
 
     #[test]
@@ -847,6 +918,7 @@ mod brief_tests {
             "noop": {"max": 1}, "missing_tool": {"max": 1}, "missing_data": {"max": 1},
         });
         Policy {
+            advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
             clone_url: "https://example.invalid/o/r".into(),

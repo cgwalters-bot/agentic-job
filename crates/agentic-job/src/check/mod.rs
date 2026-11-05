@@ -392,7 +392,13 @@ pub(crate) fn check_run_outputs_with_public(
     run_id: &str,
     public: &PublicAddresses,
 ) -> Result<Verdict> {
-    check_outputs_with_public(dir, collected, policy, None, Some(run_id), public)
+    // Producer-side feedback uses the policy's destination. The trusted check
+    // still supplies its independently admitted event destination.
+    let comment = policy
+        .advisory
+        .as_ref()
+        .map(|advisory| (advisory.repo.as_str(), advisory.pull));
+    check_outputs_with_public(dir, collected, policy, comment, Some(run_id), public)
 }
 
 fn check_outputs_with_public(

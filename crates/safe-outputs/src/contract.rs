@@ -14,6 +14,7 @@ use anyhow::{Context, Result, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+pub use crate::advisory::Advisory;
 use crate::check::{is_patch_file_name, patch_file_name_in};
 use crate::{
     CONTRACT, CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, Forge, HIDE_COMMENT, HIDE_REASONS,
@@ -729,6 +730,9 @@ impl OutputLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
+    /// Trusted, head-bound prose publication; absent for ordinary reviews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory: Option<Advisory>,
     /// Bounds-approved HTTP authorities; empty keeps publishing on HTTPS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_http: Vec<String>,
@@ -1044,6 +1048,9 @@ impl Policy {
     /// the dot-folders protected.
     pub fn validate(&self) -> Result<()> {
         check_context(&self.context)?;
+        if let Some(advisory) = &self.advisory {
+            advisory.validate(self)?;
+        }
         check_native_handlers(&self.native_handlers, self.forge, |output| {
             self.safe_outputs.max_of(output).is_some()
         })?;

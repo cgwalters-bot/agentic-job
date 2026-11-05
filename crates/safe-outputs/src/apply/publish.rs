@@ -1043,6 +1043,7 @@ fn holds_temporary_reference(value: &Value) -> bool {
 #[derive(Debug, Clone)]
 enum Op {
     Comment {
+        advisory: Option<crate::advisory::Advisory>,
         index: usize,
         item: Map<String, Value>,
         /// The handler's `target-repo` and `target`.
@@ -1406,6 +1407,7 @@ fn plan(
                     "an add_comment without one item to comment on (the handler's target is {target:?})"
                 );
                 return Ok(Op::Comment {
+                    advisory: policy.advisory.clone(),
                     index,
                     repo: setting(config, "target-repo")?.to_owned(),
                     issue: target.parse().context("the comment target")?,
@@ -3275,7 +3277,35 @@ fn comment(
     if let Some(error) = comment_limits(&body) {
         return Outcome::failed(op, error);
     }
-    match publisher.comment(issue, &hide_applied(&body)) {
+    let body = hide_applied(&body);
+    let body = if let Op::Comment {
+        advisory: Some(advisory),
+        ..
+    } = op
+    {
+        let prepare = (|| -> Result<String> {
+            ensure!(
+                repo == advisory.repo
+                    && issue == advisory.pull
+                    && publisher.item_repo == advisory.repo,
+                "advisory writer target differs from policy"
+            );
+            let body = advisory.body(&body)?;
+            let pull =
+                publisher
+                    .github
+                    .request("GET", &format!("/repos/{repo}/pulls/{issue}"), None)?;
+            advisory.check_pull(&pull)?;
+            Ok(body)
+        })();
+        match prepare {
+            Ok(body) => body,
+            Err(err) => return Outcome::failed(op, format!("{err:#}")),
+        }
+    } else {
+        body
+    };
+    match publisher.comment(issue, &body) {
         Ok(Made { url, id, .. }) => Outcome {
             output: ADD_COMMENT,
             index: op.index(),
@@ -4313,6 +4343,32 @@ pub fn apply(
             errors.join("; ")
         )
     };
+    if let Some(advisory) = &policy.advisory {
+        policy.validate()?;
+        let report = read_report(&upload)?;
+        ensure!(
+            report.ok && report.errors.is_empty(),
+            "advisory requires a successful check report"
+        );
+        let accepted = report
+            .items
+            .into_iter()
+            .map(Value::Object)
+            .collect::<Vec<_>>();
+        advisory.check_items(&accepted, crate::advisory::MAX_PROSE_BYTES, false)?;
+        // The applied guard can remove an already-posted request. It cannot
+        // expand this batch, reroute it, or add a review/status operation.
+        advisory.check_items(items, crate::advisory::MAX_FINAL_BYTES, true)?;
+        let config = &handlers[ADD_COMMENT];
+        ensure!(
+            config["target-repo"] == advisory.repo
+                && config["target"]
+                    .as_str()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    == Some(advisory.pull),
+            "advisory handler destination differs from policy"
+        );
+    }
     let Split { ours, rest } = match split(items, &policy.native_handlers) {
         Ok(split) => split,
         Err(errors) => return refuse(errors),
@@ -5133,6 +5189,134 @@ mod tests {
 
     fn comment_item() -> Value {
         json!({"type": ADD_COMMENT, "body": "Done."})
+    }
+
+    #[test]
+    fn advisory_writer_rechecks_immediately_before_posting() {
+        let advisory = crate::advisory::Advisory {
+            repo: REPO.into(),
+            pull: 7,
+            base: "main".into(),
+            head: "a".repeat(40),
+        };
+        let pull = json!({"number":7,"state":"open","base":{"ref":"main",
+            "repo":{"full_name":REPO}},"head":{"sha":advisory.head}});
+        for (pointer, value, success) in [
+            ("/state", json!("open"), true),
+            ("/state", json!("closed"), false),
+            ("/head/sha", json!("b".repeat(40)), false),
+            ("/base/ref", json!("release"), false),
+            ("/base/repo/full_name", json!("other/repo"), false),
+            ("/number", json!(8), false),
+        ] {
+            let mut changed = pull.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let (github, sent) = forge(&json!({format!("/repos/{REPO}/pulls/7"):changed}), &[]);
+            let run = run(1, "https://api.github.com");
+            let publisher = GithubPublisher {
+                github,
+                git: SERVER.into(),
+                repo: REPO.into(),
+                item_repo: REPO.into(),
+            };
+            let mut item = comment_item().as_object().unwrap().clone();
+            item.insert(
+                "body".into(),
+                json!("Prose.\nagentic-job-applied: 4242/0/0123456789abcdef"),
+            );
+            let op = Op::Comment {
+                advisory: Some(advisory.clone()),
+                index: 0,
+                item: item.clone(),
+                repo: REPO.into(),
+                issue: 7,
+                max: 1,
+            };
+            let outcome = comment(&op, &item, REPO, 7, &[], &publisher, &run);
+            assert_eq!(
+                outcome.kind == Kind::Success,
+                success,
+                "{pointer}: {outcome:?}"
+            );
+            let sent = sent.lock().unwrap();
+            let posts = sent
+                .iter()
+                .filter(|request| request.line.starts_with("POST "))
+                .collect::<Vec<_>>();
+            assert_eq!(posts.len(), usize::from(success));
+            if success {
+                let last = &sent[sent.len() - 2];
+                assert!(
+                    last.line
+                        .starts_with(&format!("GET /repos/{REPO}/pulls/7 "))
+                );
+                let body = posts[0].body["body"].as_str().unwrap();
+                assert!(body.contains(&advisory.head));
+                assert!(body.contains("<!-- agentic-job-applied:"));
+                assert!(body.len() <= crate::advisory::MAX_FINAL_BYTES);
+            }
+        }
+    }
+
+    #[test]
+    fn advisory_apply_refuses_missing_failed_reports_and_rerouting() {
+        let mut policy = crate::advisory::tests::policy();
+        policy.repo = REPO.into();
+        policy.advisory.as_mut().unwrap().repo = REPO.into();
+        let root = tempfile::tempdir().unwrap();
+        let (github, sent) = forge(&json!({}), &[]);
+        let run = run(1, "https://api.github.com");
+        let publisher = GithubPublisher {
+            github,
+            git: SERVER.into(),
+            repo: REPO.into(),
+            item_repo: REPO.into(),
+        };
+        let comment = json!({"type":"add_comment","repo":REPO,"item_number":7,"body":"Prose."});
+        let noop = json!({"type":"noop","message":"No findings."});
+        let handlers = json!({"add_comment":{"max":1,"target-repo":REPO,"target":"7"}});
+        for (report, items, reroute, expected) in [
+            (None, vec![comment.clone()], false, false),
+            (Some(false), vec![comment.clone()], false, false),
+            (
+                Some(true),
+                vec![comment.clone(), comment.clone()],
+                false,
+                false,
+            ),
+            (Some(true), vec![comment.clone()], true, false),
+            (Some(true), vec![noop.clone()], false, true),
+            (Some(true), vec![], false, true), // applied guard removed replay
+        ] {
+            if let Some(ok) = report {
+                std::fs::write(
+                    root.path().join(REPORT_FILE),
+                    json!({"ok":ok,"errors":[],"items":[noop],"patch":null}).to_string(),
+                )
+                .unwrap();
+            }
+            let mut handlers = handlers.clone();
+            if reroute {
+                handlers[ADD_COMMENT]["target"] = json!("8");
+            }
+            let checked = Checked {
+                items: &items,
+                handlers: handlers.as_object().unwrap(),
+                upload: upload(root.path()),
+                policy: &policy,
+            };
+            let records = Records {
+                remainder: &root.path().join("rest.json"),
+                made: &root.path().join("made.jsonl"),
+                errors: &root.path().join("errors.json"),
+                output: None,
+                summary: None,
+                workflow: "advisory",
+            };
+            let result = apply(&checked, &run, &publisher, &records, &mut |_| {});
+            assert_eq!(result.is_ok(), expected, "{result:?}");
+        }
+        assert!(sent.lock().unwrap().is_empty());
     }
 
     fn pull_request_item() -> Value {

@@ -1906,6 +1906,7 @@ mod tests {
 
     fn policy(kind: Kind, outputs: Value) -> Policy {
         Policy {
+            advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
             clone_url: "https://example.invalid/o/r".into(),

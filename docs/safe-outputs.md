@@ -712,6 +712,76 @@ a maintainer unhid in between.
 
 ### Review comments on the pull request
 
+#### Head-bound advisory publication
+
+The concrete threat is stale or redirected agent prose borrowing the writer's
+credential after the reviewed PR changes. Trusted-base callers may opt in with
+`advisory: true` on `policy.yml` or `agentic-job.yml`; it defaults to false.
+This is an **event review** mode, not a generic stale-comment bypass. Set
+`event: true`, `review: true`, `kind: analysis`, `outputs: add_comment,noop`,
+`max-outputs: '1'`, `notify: none`, `apply-partial: false`, and `review-task`
+to a trusted-base task that asks for prose, never APPROVE/CHANGES. Leave
+`review-item`, `review-head`, `comment-target`, `output-repo`, `item-repo`,
+`apply-environment` and proposals inputs empty. The existing review admission
+still checks authorized events/actors, the configured base, public visibility
+and an exact head. Dispatch and inline findings are not part of this API.
+No caller is enabled here; the ordinary review workflow is unchanged.
+
+Bounds must admit one `add_comment` and one `noop`. Policy routes the comment
+through the existing native publisher, independent of ordinary handler routing.
+Its optional `advisory` object contains `repo`, numeric `pull`, base branch `base`
+and full lowercase `head`. The policy CLI accepts trusted `--advisory-item N`
+and `--advisory-head SHA`; the workflow supplies them only from the narrowed
+admitted event, not a request or sandbox artifact. The base binds the branch,
+not the base branch's advancing tip. Check copies this policy into its existing
+digest-bound checked artifact; no new service, token or artifact channel exists.
+The workflow's returned `review` flag is false in this mode: verdict validation,
+folding, review submission and review statuses are not advisory operations.
+Do not wire an advisory call to `review submit`, `review status` or approval carry.
+No classifier result or bucket escalation is produced; #3040 remains separate.
+
+The entire handback is exactly one of:
+
+```json
+{"type":"add_comment","repo":"OWNER/REPO","item_number":7,"body":"Advisory prose."}
+```
+
+```json
+{"type":"noop","message":"No useful advisory to publish."}
+```
+
+Unknown fields (including SHA, mode, aliases, reply IDs and verdict metadata),
+other destinations, duplicate requests, mixed comment/noop and empty outputs
+refuse. Check validates raw JSONL before collector field dropping as well as the
+collected output, independently of the normal count checks. Text is limited to
+46,000 UTF-8 bytes, leaving space for trusted framing and deduplication markers;
+the writer independently refuses a final body over 48,000 bytes including all
+footers and trusted markers. Neither check nor writer truncates to meet this cap.
+Ordinary review verdict validation and generic output limits remain unchanged.
+
+Apply retains cancellation, successful-check/agent-exit gates, same-run artifact
+name/ID/digest verification, and the existing author-checked run/index/content
+deduplication marker. A noop posts nothing. Immediately before comment POST,
+the writer reads the PR again and refuses a closed PR, different number,
+base repository/branch or head. GitHub offers no conditional issue-comment POST:
+the PR can still move in the residual read-to-POST API race. The comment names
+the exact reviewed head even then. Serialize apply attempts as usual: marker
+lookup is not an atomic lock. A lost POST response is ambiguous; no automatic
+POST retry is added. Inspect the destination before retrying; if the comment
+landed, a rerun's existing guard recognizes its marker and skips it, otherwise
+it may post after the same fresh PR validation. A failed/overflowed lookup must
+not be treated as absence. A later run is a different advisory, not deduplicated
+against an earlier run merely because its prose is identical.
+
+For actions#195/#202, pin all policy/check/apply workflows and binaries to the
+same **new release containing this API**, or one source commit using the existing
+source-build path. Existing releases do not accept `advisory`; no version is
+released by this change. The external actions wrapper must forward the boolean
+from trusted-base configuration, never expose it as untrusted output selection,
+and consume the returned policy/check artifacts unchanged. It must not call the
+verdict/status/submit helpers for this mode. Model selection, caller migration
+and #3040's classifier are intentionally not implemented.
+
 `create_pull_request_review_comment` comments on a line of the run's
 triggering pull request's diff, `reply_to_pull_request_review_comment`
 replies to a review comment there, and `resolve_pull_request_review_thread`

@@ -1186,6 +1186,7 @@ mod tests {
         );
         let base = sh(&checkout, "git rev-parse HEAD").trim().to_owned();
         let policy = Policy {
+            advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
             clone_url: "https://example.invalid/o/r".into(),
@@ -1215,6 +1216,34 @@ mod tests {
             secondary: None,
         };
         (dir, run)
+    }
+
+    #[test]
+    fn advisory_handback_accepts_comment_and_noop() {
+        let (dir, mut run) = home(json!({"add_comment":{"max":1}, "noop":{"max":1}}));
+        run.policy.kind = Kind::Analysis;
+        run.policy.max_outputs = 1;
+        run.policy.native_handlers = vec!["add_comment".into()];
+        run.policy.advisory = Some(safe_outputs::advisory::Advisory {
+            repo: run.policy.repo.clone(),
+            pull: 7,
+            base: run.policy.base.clone(),
+            head: run.base.clone(),
+        });
+        run.policy.validate().unwrap();
+        std::fs::write(
+            dir.path().join(AGENT_OUTCOME),
+            r#"{"summary":"Done.","tests":[],"stopped_early":null}"#,
+        )
+        .unwrap();
+        for request in [
+            json!({"type":"add_comment","repo":"o/r","item_number":7,"body":"Useful prose."}),
+            json!({"type":"noop","message":"Nothing useful."}),
+        ] {
+            std::fs::write(dir.path().join(AGENT_OUTPUTS), request.to_string()).unwrap();
+            let report = validate(dir.path(), &run).unwrap();
+            assert!(report.problems.is_empty(), "{:?}", report.problems);
+        }
     }
 
     fn pull_requests() -> Value {

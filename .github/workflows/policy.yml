@@ -52,6 +52,10 @@ on:
         description: Enforce an analysis-only pull request review with a pinned head and verdict comment
         type: boolean
         default: false
+      advisory:
+        description: Trusted-base opt-in verdict-free comment at an admitted event review head; requires review and one add_comment or noop
+        type: boolean
+        default: false
       review-task:
         description: Review task file in the trusted base checkout, never the review head
         type: string
@@ -483,7 +487,7 @@ jobs:
       repo: ${{ inputs.repo }}
       output-repo: ${{ inputs.output-repo }}
       item-repo: ${{ inputs.item-repo }}
-      review: ${{ inputs.review }}
+      review: ${{ inputs.review && !inputs.advisory }}
       expect-check-refusal: ${{ inputs.expect-check-refusal }}
       proposals-artifact: ${{ inputs.proposals-artifact }}
       apply-environment: ${{ inputs.apply-environment }}
@@ -510,7 +514,13 @@ jobs:
           PARTIAL: ${{ inputs.apply-partial }}
           TASK: ${{ inputs.task }}
           TASK_ARTIFACT: ${{ inputs.task-artifact }}
+          ADVISORY: ${{ inputs.advisory }}
+          REVIEW_ITEM: ${{ inputs.review-item }}
         run: |
+          if [ "$ADVISORY" = true ]; then
+            [ "$EVENT/$REVIEW/$PARTIAL" = true/true/false ] && [ -z "$REVIEW_ITEM$PROPOSALS" ] ||
+              { echo '::error::advisory requires an admitted event review, not dispatch, proposals or partial application'; exit 1; }
+          fi
           if [ -n "$TASK_ARTIFACT" ]; then
             [ -z "$TASK" ] || { echo '::error::choose task or task-artifact, not both'; exit 1; }
             file=$RUNNER_TEMP/task-artifact/task.md
@@ -635,6 +645,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           REVIEW: ${{ inputs.review }}
           REVIEW_TASK: ${{ inputs.review-task }}
+          ADVISORY: ${{ inputs.advisory }}
           EVENT: ${{ inputs.event }}
           KIND: ${{ inputs.kind }}
           OUTPUTS: ${{ inputs.outputs }}
@@ -750,6 +761,7 @@ jobs:
           REVIEW_ITEM: ${{ inputs.review-item }}
           REVIEW: ${{ inputs.review }}
           CONTEXT_REPOS: ${{ inputs.context }}
+          ADVISORY: ${{ inputs.advisory }}
           GH_TOKEN: ${{ github.token }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
@@ -783,6 +795,9 @@ jobs:
           fi
           # The binary resolves `context` through the API with the read-only
           # job token, and prints its reasons as plain log lines, escaped.
+          if [ "$ADVISORY" = true ]; then
+            set -- "$@" --advisory-item "$target" --advisory-head "$(jq -er '.head.sha' "$JOB_DIR/event.json")"
+          fi
           "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" --context-request "$CONTEXT_REPOS" \
             --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
             { echo "::error::The request was refused; this step's log says why"; exit 1; }

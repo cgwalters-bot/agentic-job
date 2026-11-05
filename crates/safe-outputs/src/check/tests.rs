@@ -21,6 +21,48 @@ const PATCH: &str = "aw-agent-run-7.patch";
 const PUSH_BRANCH: &str = "agent-run-12";
 const PUSH_PATCH: &str = "aw-agent-run-12.patch";
 
+#[test]
+fn advisory_check_refuses_raw_fields_even_when_collection_drops_them() {
+    let policy = crate::advisory::tests::policy();
+    let advisory = policy.advisory.as_ref().unwrap();
+    let comment = json!({"type":"add_comment","repo":advisory.repo,"item_number":7,"body":"Prose, no verdict."});
+    for (key, value, pass) in [
+        ("body", json!("Prose, no verdict."), true),
+        ("head", json!(HEAD), false),
+        ("mode", json!("advisory"), false),
+        ("repo", json!("other/repo"), false),
+        ("item_number", json!(8), false),
+        (
+            "body",
+            json!("x".repeat(crate::advisory::MAX_PROSE_BYTES + 1)),
+            false,
+        ),
+    ] {
+        let mut raw = comment.clone();
+        raw[key] = value;
+        let raw = raw.to_string();
+        let collected = Collected {
+            items: vec![comment.as_object().unwrap().clone()],
+            errors: vec![],
+        };
+        let result = check(
+            &Handback {
+                outputs: Some(raw.as_bytes()),
+                ..Default::default()
+            },
+            collected,
+            &policy,
+            Trusted {
+                comment: Some((&advisory.repo, 7)),
+                ..Default::default()
+            },
+            &Fake::default(),
+            |_| vec![],
+        );
+        assert_eq!(result.errors.is_empty(), pass, "{key}: {:?}", result.errors);
+    }
+}
+
 /// Publishers that refuse only what a test tells them to.
 #[derive(Default)]
 struct Fake {

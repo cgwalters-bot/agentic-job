@@ -7,6 +7,83 @@ use std::process::{Command, Output};
 
 use serde_json::{Value, json};
 
+#[test]
+fn advisory_policy_carries_only_trusted_target_base_and_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let bounds = dir.path().join("allow.toml");
+    std::fs::write(&bounds, "hosts = [\"github.com\"]\nrepos = [\"o/r\"]\nbases = [\"main\"]\nmax_outputs = 2\nmax_patch_bytes = 1048576\nmax_patch_files = 50\n[github.outputs]\nadd_comment = { max = 2 }\nnoop = { max = 1 }\n").unwrap();
+    let head = "a".repeat(40);
+    for (extra, pass) in [
+        (vec![], true),
+        (
+            vec!["--advisory-item", "147", "--advisory-head", &head],
+            true,
+        ),
+        (
+            vec!["--advisory-item", "147", "--advisory-head", "main"],
+            false,
+        ),
+        (
+            vec![
+                "--advisory-item",
+                "147",
+                "--advisory-head",
+                &head,
+                "--output-repo",
+                "o/other",
+            ],
+            false,
+        ),
+        (
+            vec![
+                "--advisory-item",
+                "147",
+                "--advisory-head",
+                &head,
+                "--private",
+                "--output-repo",
+                "o/r",
+            ],
+            false,
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args([
+                "policy",
+                "--allow",
+                bounds.to_str().unwrap(),
+                "--repo",
+                "o/r",
+                "--clone-url",
+                "https://github.com/o/r",
+                "--base",
+                "main",
+                "--kind",
+                "analysis",
+                "--outputs",
+                "add_comment,noop",
+                "--max-outputs",
+                "1",
+            ])
+            .args(&extra)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), pass, "{extra:?}: {output:?}");
+        if pass {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if extra.is_empty() {
+                assert!(value.get("advisory").is_none());
+            } else {
+                assert_eq!(
+                    value["advisory"],
+                    json!({"repo":"o/r","pull":147,"base":"main","head":head})
+                );
+                assert_eq!(value["native_handlers"], json!(["add_comment"]));
+            }
+        }
+    }
+}
+
 fn review(command: &str, pull: Option<&Path>) -> Output {
     let mut cli = Command::new(env!("CARGO_BIN_EXE_agentic-job"));
     cli.args(["review", command]);

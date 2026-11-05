@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Add off-by-default `advisory` event-review publication: one checked comment
+  or noop bound to the admitted repository, PR, base branch and exact head.
+  The writer re-reads the open PR before posting; ordinary review verdicts
+  are unchanged. Callers need a new compatible policy/check/apply pin; no
+  caller migration or classifier is included (#3085).
+
 - **Breaking:** the sandbox user is gone; the runner's user is the only agent
   user (#2989). `sandbox setup` creates no `runner-sandbox` user, sudoers or
   scheduler entries for it, runs no `setup.script` (the agent job runs it as

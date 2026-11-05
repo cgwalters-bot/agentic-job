@@ -33,8 +33,9 @@ Inputs:
 - the run: `id`, `task`, `task-artifact`, `repo`, `base`, `kind`,
   `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`,
   `proposals-artifact`;
-- reviews and events: `review`, `review-task`, `review-item`,
+- reviews and events: `review`, `advisory`, `review-task`, `review-item`,
   `review-head`, `event`;
+
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
   `agent-config-path`, `agent-skills`, `agent-user` (only `runner` since
   #2989), `github-reads`,
@@ -48,6 +49,11 @@ Inputs:
   `apply-partial`, `apply-staged`, `require-safe-outputs-pat`,
   `comment-target`, `issue`, `notify`, `status-comment`,
   `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings`.
+
+`advisory` is off by default and requires the restricted event-review contract
+in [head-bound advisory publication](safe-outputs.md#head-bound-advisory-publication).
+It publishes prose or nothing, never a review verdict/status or classifier result.
+All workflow pieces must use a release containing the input at the same pin.
 
 Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`

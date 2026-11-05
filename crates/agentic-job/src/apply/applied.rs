@@ -1416,6 +1416,38 @@ mod tests {
         json!({"on": on, "user": {"login": user}, "body": sent(body), "html_url": url})
     }
 
+    #[test]
+    fn advisory_replay_after_a_lost_response_uses_the_existing_owned_marker() {
+        let advisory = safe_outputs::advisory::Advisory {
+            repo: "owner/repo".into(),
+            pull: 64,
+            base: "main".into(),
+            head: "a".repeat(40),
+        };
+        let request = json!({"type":"add_comment","repo":advisory.repo,"item_number":64,"body":"Suggested rewrite."});
+        let options = Options::default();
+        let first = ok(std::slice::from_ref(&request), &[], &options);
+        assert_eq!(first.kept.len(), 1);
+        // The server accepted POST, but the writer lost its response and
+        // made no local success record. Only the owned remote marker counts.
+        let body = advisory
+            .body(&sent(first.kept[0]["body"].as_str().unwrap()))
+            .unwrap();
+        for (author, expected) in [(ACTIONS, 0), (MALLORY, 1)] {
+            let posted = posted_comment(
+                64,
+                author,
+                &body,
+                "https://github.com/owner/repo/issues/64#issuecomment-1",
+            );
+            let replay = ok(std::slice::from_ref(&request), &[posted], &options);
+            assert_eq!(replay.kept.len(), expected);
+        }
+        // If POST did not land, a rerun may post; it must perform the fresh
+        // head/base check again in the native writer, not trust local state.
+        assert_eq!(ok(&[request], &[], &options).kept.len(), 1);
+    }
+
     /// Recorded from apply.yml's script with node: the artifact prefix,
     /// the request as written, the patch, `JSON.stringify` of the parsed
     /// request, and the digest in its name.

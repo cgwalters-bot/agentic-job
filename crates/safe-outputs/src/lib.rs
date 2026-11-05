@@ -17,6 +17,7 @@
 //! docs/safe-outputs.md#library-boundary lists what moved here and what
 //! stays.
 
+pub mod advisory;
 pub mod apply;
 pub mod bounds;
 pub mod check;

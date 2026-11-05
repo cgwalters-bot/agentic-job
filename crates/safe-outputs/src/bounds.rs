@@ -502,6 +502,11 @@ fn union(mut own: Vec<String>, other: Vec<String>) -> Result<Vec<String>, Vec<St
 /// Intersect compiled policies rather than trying to intersect glob patterns.
 /// Each file independently checks the target and any explicitly requested type.
 pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
+    if policy.advisory != other.advisory {
+        return Err(vec![
+            "bounds policies disagree on advisory publication".into(),
+        ]);
+    }
     policy
         .allow_http
         .retain(|host| allows_http(&other.allow_http, host));

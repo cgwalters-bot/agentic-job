@@ -60,6 +60,10 @@ on:
         description: Enforce an analysis-only pull request review with a pinned head and verdict comment
         type: boolean
         default: false
+      advisory:
+        description: Trusted-base opt-in head-bound advisory comment instead of a verdict; requires an event review
+        type: boolean
+        default: false
       review-task:
         description: Review task file in the trusted base checkout, never the review head
         type: string
@@ -446,6 +450,7 @@ jobs:
       task-artifact: ${{ inputs.task-artifact }}
       proposals-artifact: ${{ inputs.proposals-artifact }}
       review: ${{ inputs.review }}
+      advisory: ${{ inputs.advisory }}
       review-task: ${{ inputs.review-task }}
       review-item: ${{ inputs.review-item }}
       review-head: ${{ inputs.review-head }}

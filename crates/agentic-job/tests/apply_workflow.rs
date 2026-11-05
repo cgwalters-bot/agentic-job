@@ -16,6 +16,71 @@ const TRIAL: &str =
     "Apply the patch on its own base, and compare what changed with what was checked";
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
+#[test]
+fn advisory_uses_the_same_check_artifact_and_cancellation_gates() {
+    let policy = definition("policy.yml");
+    assert_eq!(
+        policy["on"]["workflow_call"]["inputs"]["advisory"]["default"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        policy["jobs"]["policy"]["outputs"]["review"].as_str(),
+        Some("${{ inputs.review && !inputs.advisory }}")
+    );
+    let apply = definition("apply.yml");
+    let gate = apply["jobs"]["apply"]["if"].as_str().unwrap();
+    assert!(gate.contains("!cancelled() && fromJSON(inputs.check).result == 'success'"));
+    assert!(!gate.contains("advisory")); // no alternate failed/cancelled-check route
+    assert!(
+        step(&apply, "apply", "Require the checked outputs' artifact ID")["run"]
+            .as_str()
+            .unwrap()
+            .contains("DIGEST")
+    );
+    assert!(
+        step(
+            &apply,
+            "apply",
+            "The checked outputs are this run's check's"
+        )["run"]
+            .as_str()
+            .unwrap()
+            .contains(".workflow_run.id")
+    );
+    let check = definition("check.yml");
+    assert_eq!(
+        step(&check, "check", "Validate the review verdict")["if"].as_str(),
+        Some("${{ fromJSON(inputs.policy).review == 'true' }}")
+    );
+    let admission = step(&policy, "policy", "Check the proposals mode");
+    let dir = TempDir::new().unwrap();
+    for (event, review, partial, proposals, expected) in [
+        ("true", "true", "false", "", 0),
+        ("false", "true", "false", "", 1),
+        ("true", "false", "false", "", 1),
+        ("true", "true", "true", "", 1),
+        ("true", "true", "false", "producer", 1),
+    ] {
+        status(
+            &bash(
+                dir.path(),
+                admission["run"].as_str().unwrap(),
+                &[
+                    ("ADVISORY", "true"),
+                    ("EVENT", event),
+                    ("REVIEW", review),
+                    ("PARTIAL", partial),
+                    ("PROPOSALS", proposals),
+                    ("REVIEW_ITEM", ""),
+                    ("TASK", ""),
+                    ("TASK_ARTIFACT", ""),
+                ],
+            ),
+            expected,
+        );
+    }
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }

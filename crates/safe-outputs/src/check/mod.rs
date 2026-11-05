@@ -818,6 +818,35 @@ pub fn check(
         .map(|name| format!("unexpected file {name:?}"))
         .collect();
     drop_collectors_incomplete(&mut collected.items);
+    if let Some(advisory) = &policy.advisory {
+        let checked = (|| -> Result<()> {
+            let lines = handback
+                .outputs
+                .ok_or_else(|| anyhow::anyhow!("advisory requires outputs"))?;
+            let text = std::str::from_utf8(lines)?;
+            let raw = text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str)
+                .collect::<Result<Vec<Value>, _>>()?;
+            advisory.check_items(&raw, crate::advisory::MAX_PROSE_BYTES, false)?;
+            let items = collected
+                .items
+                .iter()
+                .cloned()
+                .map(Value::Object)
+                .collect::<Vec<_>>();
+            advisory.check_items(&items, crate::advisory::MAX_PROSE_BYTES, false)?;
+            anyhow::ensure!(
+                comment == Some((advisory.repo.as_str(), advisory.pull)),
+                "advisory check destination differs from policy"
+            );
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            errors.push(error.to_string());
+        }
+    }
     // Mending joins nothing to a link's text (`links::repair`), so it
     // makes no secret-shaped string, URL or mention the collector missed.
     for item in &mut collected.items {

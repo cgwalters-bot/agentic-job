@@ -73,6 +73,12 @@ const MAX_OUTPUTS: &str = "max";
 /// and one that does is refused with a reason like any other.
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Trusted admission's advisory target (never producer supplied)
+    #[arg(long, requires = "advisory_head")]
+    pub advisory_item: Option<u64>,
+    /// Exact head resolved by trusted review admission
+    #[arg(long, requires = "advisory_item")]
+    pub advisory_head: Option<String>,
     /// Resolved context repositories as a JSON array (empty by default)
     #[arg(long, default_value = "[]", allow_hyphen_values = true)]
     pub context: String,
@@ -569,6 +575,7 @@ impl Compile for Bounds {
                 .collect(),
         };
         Ok(Policy {
+            advisory: None,
             allow_http: self.allow_http.clone(),
             context: Vec::new(),
             repo: repo.to_owned(),
@@ -693,6 +700,23 @@ pub fn run(args: &Args) -> Result<Exit> {
                 );
             }
             policy.context = context;
+            if let Some(pull) = args.advisory_item {
+                ensure!(
+                    args.output_repo
+                        .as_deref()
+                        .is_none_or(|repo| repo == policy.repo)
+                        && args.item_repo.is_none(),
+                    "advisory cannot reroute its repository"
+                );
+                policy.native_handlers = vec!["add_comment".into()];
+                policy.advisory = Some(Advisory {
+                    repo: policy.repo.clone(),
+                    pull,
+                    base: policy.base.clone(),
+                    head: args.advisory_head.clone().context("advisory head")?,
+                });
+                policy.validate()?;
+            }
             let json = serde_json::to_string_pretty(&policy).context("writing the policy")?;
             println!("{json}");
             Ok(Exit::Success)
