@@ -61,7 +61,15 @@ even with `check: true`.
 
 Under `egress.write-policy` the check makes the runner's user, with no
 proxy in its environment, read a host and be refused a POST to it by the
-proxy itself (`write-policy-read`, `write-policy-post`). The probes of
+proxy itself (`write-policy-read`, `write-policy-post`). The host is
+the first of example.com and github.com that the installed policy
+admits a read of and refuses a POST to. Where there is none the read is
+skipped with a note, and a plain-HTTP POST to one of them outside the
+domain allowlist, which the proxy refuses, shows only that the proxy
+holds the runner's user; with no such host the POST is skipped too. The
+check adds no destination of its own. Images up to secure-host v0.6.9
+still read example.com, so until the pin moves past them secure-host's
+own check fails under an allowlist without it. The probes of
 the egress policy, the tailnet and containers were the sandbox user's
 and went with it. `[sandbox.check] control-url`, `fetch-repo`,
 `allow-sockets` and `allow-tcp-ports` are read only by images from

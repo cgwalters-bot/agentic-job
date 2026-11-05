@@ -350,10 +350,7 @@ impl Checker<'_> {
             self.timed("runner-metadata", |this| this.runner_metadata())?;
         }
         if self.config.egress.write_policy {
-            self.timed("write-policy", |this| {
-                this.runner_write_policy();
-                Ok(())
-            })?;
+            self.timed("write-policy", |this| this.runner_write_policy())?;
         }
         Ok(self.report)
     }
