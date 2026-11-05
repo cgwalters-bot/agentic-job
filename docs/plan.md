@@ -83,7 +83,7 @@ unrelated work; do not mass-close issues based on this table.
 | [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | tracker#1311 downstream evidence umbrella; preserve needs-human. Reported v0.6.5 GitLab/TF successes are historical two-user/API-key evidence, not runner-only acceptance. Retain #2996/#2997 and closed #2994/#2995 deliverables. |
 | [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) | tracker#1311 removal owner, implementation in open #2991. Require Ubuntu and RHEL rhel10-kvm-smoke setup/run proof before completion; do not duplicate removal here. |
 | [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | Keep needs-human acceptance umbrella. Operator must approve non-replayable identity/listener and trusted off-agent lifecycle owner in [broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60); [broker#61](https://github.com/cgwalters-bot/praxis-credential-broker/issues/61) owns external MCP. Old title's local proxy is superseded. |
-| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215), keep needs-human: which disposable VM/KVM deployment and caller-owned profile may run midstream jobs? Contract-only until answered; no arbitrary runner selectors. |
+| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215). The operator's answer was relayed on 5 November: separate VM-capable infrastructure, handing back to a midstream draft. The deployment, its disposability and its limits still need the operator's confirmation. The contract is [proposed in dispatch.md](dispatch.md#per-job-vm-runners-proposed), with [follow-ups](#per-job-vm-runner-follow-ups) below. Runtime acceptance is outstanding. |
 | [#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) | [tracker#596](https://github.com/cgwalters-forge/tracker/issues/596); concrete corrections already present in sandbox-check's pin-linked record discussion and this plan's #2740/#2741 history. Propose operator verification then closure, retaining needs-human until verified; not new host acceptance. |
 | [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | [tracker#674](https://github.com/cgwalters-forge/tracker/issues/674) egress diagnostics/host evidence owner. Preserve exact-account allowlisting; verify refusal names host/method without signed query and release/image pin reaches callers. DNS existence alone is not evidence. |
 | [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | tracker#674 publication follow-up to #2070/#2642; enable prepare on published and archive paths only once the released image accepts it, then hosted proof for both. |
@@ -192,6 +192,61 @@ the chat session on RHEL; or a 64-core run.
 The parity tests still use cgwalters-devspace-sandbox at
 [df1e867](https://github.com/cgwalters-forge/cgwalters-devspace-sandbox/tree/df1e867bb551ed8e36bd535f6d304a0861f54913).
 That is a test fixture pin, not a claim that the old deployment is unchanged.
+
+### Per-job VM runner follow-ups
+
+The [per-job VM runner contract](dispatch.md#per-job-vm-runners-proposed)
+of [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) is
+documentation only. These implement-sized slices are for the next replan of
+[tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215), by
+repository. Each new mechanism is off until a caller configures it. None
+of them is filed yet, and none has run.
+
+- **agentic-job**
+  1. A KVM preflight that a runner configuration opts into. Setup refuses
+     before registration unless `/dev/kvm` is readable and writable by
+     the user the agent runs as, and `qemu:///session` answers for that
+     user. It also needs a test that refuses a missing device. The
+     refusal of the `libvirt` group already ships.
+  2. Trusted apply of another repository's run. `apply.yml` takes the
+     run's repository, workflow path, ref, run ID, attempt, artifact ID and
+     digest. It verifies them against the Actions API, builds its own
+     policy and base-secret evidence from the caller's bounds, and runs
+     `check` again before it writes. How tracker learns the external run's
+     ID is part of this slice's design. Its negative tests
+     cover a wrong repository, workflow, run, digest and target.
+  3. `test-evidence.json`. Check validates its shape, its bounds and its
+     `tree` against the patch, and apply states the attempt and outcome
+     counts in the draft, with a link to the run.
+- **cgwalters-forge/actions**: a wrapper mode for an external caller that
+  runs policy, agent and check, uploads the checked artifact, and has no
+  apply job and no `SAFE_OUTPUTS_PAT`. Its run identity and artifact
+  digest are job outputs.
+- **cgwalters-forge/tracker**: the closed `runner-profiles.json`, with
+  `hosted` unchanged. Dispatch resolves the profile and refuses an unknown
+  name before it starts a workflow, and a trusted apply workflow in the
+  apply environment calls agentic-job's apply with the external run's
+  identity, using the midstream bounds.
+- **cgwalters-forge/agent-board**: the job plan's `runner` accepts a
+  profile name (the same character set as `pool`), which it passes to the
+  caller as an input without resolving it. `hosted` stays the default
+  that planners write.
+- **bootc-dev/cgwalters-devspace-sandbox** remains
+  [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)'s.
+  That covers the caller's mode switch, broker admission for its
+  workflow, and the RHEL KVM smoke run, and none of it is repeated here.
+  #589 does not cover one new devspace slice: its `dispatch.toml` names
+  only bootc-dev repositories, so its policy stage would refuse a
+  `cgwalters-forge` midstream target until those forks are added there.
+
+These questions are new and are the operator's:
+
+- whether devspace is the deployment, with the profile's limits;
+- whether bootc-dev's RHEL runners run one job each and are then
+  destroyed, which the disposable-runner rule requires;
+- which credential lets tracker start a workflow in bootc-dev, and who
+  holds it;
+- whether ostree or any other fork joins the midstream bounds.
 
 ## Open work
 

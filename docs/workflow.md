@@ -673,7 +673,9 @@ Read this before relying on it.
   (4 cores) succeeded but handed back only a `missing_tool`: its task
   asked for a pull request against `bootc-dev/bootc`, and with no fork
   configured the run could open no pull request, nor comment. Neither run
-  used the chat session, whose job was skipped.
+  used the chat session, whose job was skipped. Handing such a run back
+  to a midstream fork through a trusted apply job is
+  [proposed, not built](dispatch.md#per-job-vm-runners-proposed).
   Claude Code and opencode have also run through the reusable workflow on
   GitHub-hosted runners using its old built-in `tailscale-*` inputs, including
   agent configuration and analysis runs (the [retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).
