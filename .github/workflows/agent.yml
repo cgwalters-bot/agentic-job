@@ -23,6 +23,10 @@ on:
         description: Give the agent job's own read-only GitHub token as GH_TOKEN
         type: boolean
         required: true
+      runner-preflight:
+        description: Fail closed on unproven runner credential isolation and egress (currently always refuses)
+        type: boolean
+        default: false
       secure-host-image-artifact-id:
         description: >-
           For testing an unreleased secure-host image: the ID of an artifact of this workflow run
@@ -232,4 +236,5 @@ jobs:
           agent-user: ${{ inputs.agent-user }}
           runner-home: ${{ inputs.agent-user != 'sandbox' && format('{0}/agent-home', runner.temp) || '' }}
           github-token: ${{ inputs.github-reads && github.token || '' }}
+          runner-preflight: ${{ inputs.runner-preflight }}
           inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}

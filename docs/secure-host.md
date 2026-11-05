@@ -176,6 +176,48 @@ only the scripted agent, which registers nothing, and holds no
 machine before a job with a write token acts on it
 ([workflow](workflow.md)).
 
+### Opt-in runner readiness refusal
+
+This is preparatory launch-refusal plumbing for #3000, not its completed
+runtime readiness check. It does not inspect installed firewall rules or
+detect reachable credentials; the missing independent proof blocks admission
+before those checks could permit a launch.
+
+The concrete threat is an agent taking CI, OIDC or supervisor credentials
+from same-UID memory, procfs, settings, files or local services, then sending
+them through an unenforced network. `run --runner-preflight --runner-home DIR`
+adds one fail-closed launch gate. The run action and reusable workflow expose
+it as `runner-preflight: true`; it is **off by default** and does not change
+the guarantees of runs that leave it off.
+
+**No current host can pass this gate.** The implementation refuses rather
+than treating requested settings, a cached host check, a clean token-shape
+scan or `hidepid=2` as independent evidence of same-UID memory isolation.
+It also refuses unproven active egress and metadata enforcement for the
+runner and its subordinate UIDs: an empty legacy sandbox UID set is not
+enforcement. Unknown and unreadable evidence cannot silently pass because
+there is no supported evidence source or bypass. Local credential proxies
+are unsupported. This is admission, not a new scanner or firewall design:
+it makes no network requests or filesystem walks and prints only fixed
+control names, never credential values.
+
+Existing callers opting in must use `agent-user: runner`, set `github-reads:
+false` (the run action's `github-token` must be empty), retain no CI/OIDC or
+supervisor credentials reachable by the agent, and request `egress.proxy =
+true`, `egress.write-policy = true`, `sandbox.lock-runner = true` and
+`sandbox.deny-runner-metadata = true`. These settings are necessary, **not
+sufficient**: active runner/subuid enforcement and independent credential
+isolation still need runtime proof before a successful hardened launch can
+be implemented. Merely switching settings cannot make a host pass. Do not
+switch to the legacy sandbox mode to evade this refusal.
+
+The non-destructive regression tests use runtime-generated known-value
+exposures and readable-file/procfs controls to verify refusal before clone,
+registration or launch, including an apparently clean configuration. They
+do not prove that a host isolates credentials or enforces egress. Fresh-host
+positive/negative enforcement probes remain required before admission can
+be enabled for any host.
+
 ### The egress write policy for an agent job
 
 Without the

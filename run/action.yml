@@ -24,6 +24,12 @@ inputs:
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
       The agent can leak it: give a job token with read permissions only, or a read-only token
     default: ""
+  runner-preflight:
+    description: >-
+      Opt-in fail-closed runner readiness gate. Currently refuses all hosts: independent
+      same-uid credential isolation and runner/subuid egress evidence are not available.
+      Requires agent-user runner and no github-token
+    default: "false"
   inference-api-key:
     description: >-
       For `[inference] register = "api-key"`, the provider's API key, or with `provider = "github"`
@@ -124,6 +130,8 @@ runs:
       env:
         AGENT_USER: ${{ inputs.agent-user }}
         RUNNER_HOME: ${{ inputs.runner-home }}
+        RUNNER_PREFLIGHT: ${{ inputs.runner-preflight }}
+        GH_TOKEN: ${{ inputs.github-token }}
       run: |
         # A home with the sandbox user would be ignored, and one missing
         # for the runner's user would leave `run` to want a second user.
@@ -133,6 +141,13 @@ runs:
           sandbox/home) echo '::error::agent-user sandbox takes no runner-home'; exit 1 ;;
           *) echo '::error::agent-user must be runner or sandbox'; exit 1 ;;
         esac
+        case "${RUNNER_PREFLIGHT:-false}/$AGENT_USER" in
+          false/* | true/runner) ;;
+          *) echo '::error::runner-preflight must be false or true with agent-user runner'; exit 1 ;;
+        esac
+        if [ "${RUNNER_PREFLIGHT:-false}" = true ] && [ -n "${GH_TOKEN:-}" ]; then
+          echo '::error::runner-preflight refuses agent GitHub read credentials; give no github-token'; exit 1
+        fi
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
         agentic-job sandbox check --unless-passed
     # The policy job's commit must be this action's: a caller that names
@@ -220,6 +235,7 @@ runs:
         AGENTIC_JOB_INFERENCE_RUN_TOKEN: ${{ inputs.inference-run-token }}
         AGENT_USER: ${{ inputs.agent-user }}
         RUNNER_HOME: ${{ inputs.runner-home }}
+        RUNNER_PREFLIGHT: ${{ inputs.runner-preflight }}
       run: |
         echo '::group::agent (condensed)'
         state=0
@@ -234,6 +250,7 @@ runs:
         chmod 0755 "$binary"
         # Without it, `run` enters the sandbox user secure-host made.
         [ "$AGENT_USER" = sandbox ] || set -- "$@" --runner-home "$RUNNER_HOME"
+        [ "${RUNNER_PREFLIGHT:-false}" != true ] || set -- "$@" --runner-preflight
         "$binary" run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"

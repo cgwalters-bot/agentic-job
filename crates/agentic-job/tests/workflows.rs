@@ -925,6 +925,64 @@ fn actions_refuse_source_skew_before_using_policy() {
 }
 
 #[test]
+fn runner_preflight_is_opt_in_and_reaches_the_launch_gate() {
+    let workflow = definition(".github/workflows/agentic-job.yml");
+    assert_eq!(
+        workflow["on"]["workflow_call"]["inputs"]["runner-preflight"]["default"].as_bool(),
+        Some(false)
+    );
+    let action = definition("run/action.yml");
+    assert_eq!(
+        action["inputs"]["runner-preflight"]["default"].as_str(),
+        Some("false")
+    );
+    let step = named_step(&action, "Run the agent");
+    assert_eq!(
+        step["env"]["RUNNER_PREFLIGHT"].as_str(),
+        Some("${{ inputs.runner-preflight }}")
+    );
+    assert!(
+        step["run"]
+            .as_str()
+            .unwrap()
+            .contains("set -- \"$@\" --runner-preflight")
+    );
+    for (user, token, expected) in [
+        (
+            "sandbox",
+            "",
+            "runner-preflight must be false or true with agent-user runner",
+        ),
+        (
+            "runner",
+            "runtime-fixture",
+            "runner-preflight refuses agent GitHub read credentials",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let result = run_step(
+            "run/action.yml",
+            "Prove the host is secured",
+            dir.path(),
+            &[
+                ("AGENT_USER", user),
+                (
+                    "RUNNER_HOME",
+                    if user == "runner" { "/tmp/home" } else { "" },
+                ),
+                ("RUNNER_PREFLIGHT", "true"),
+                ("GH_TOKEN", token),
+            ],
+        );
+        assert_eq!(result.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains(expected),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
 fn run_requires_locked_host_and_consistent_user_before_probing() {
     let doc = definition("run/action.yml");
     let guard = named_step(&doc, "Prove the host is secured")["run"]
@@ -2288,6 +2346,7 @@ fn wrapper_forwards_policy_settings_without_reinterpretation() {
     let own = [
         "agent-runner",
         "github-reads",
+        "runner-preflight",
         "secure-host-image-artifact-id",
         "agent-user",
     ];

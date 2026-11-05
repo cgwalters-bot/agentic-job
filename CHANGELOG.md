@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Add opt-in `run --runner-preflight` and the run action/reusable workflow's
+  `runner-preflight` input, off by default. It refuses launch on every current
+  host: requested egress settings and environment filtering do not prove
+  runner/subuid enforcement or same-UID credential isolation. Hardened runs
+  cannot receive a GitHub read token; no caller assertion bypasses the gate.
+
 - A rebase fix round can hand back a replacement series for a pull request
   that grew past `max_patch_files`: bounds may set `replacement_max_files`
   on `push_to_pull_request_branch` (off by default, at most 500) for the

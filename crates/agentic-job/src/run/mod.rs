@@ -51,6 +51,7 @@ pub mod mcp;
 mod prices;
 pub mod probe;
 pub(crate) mod public_addresses;
+mod readiness;
 pub mod register;
 mod session_markdown;
 pub mod summary;
@@ -163,6 +164,10 @@ pub struct Args {
     /// read, on a host cgwalters-forge/actions/secure-host secured
     #[arg(long, value_name = "DIR")]
     pub runner_home: Option<PathBuf>,
+    /// Refuse runner launch unless credential isolation and runner/subuid
+    /// network enforcement are proven. Currently no host supplies that proof
+    #[arg(long, requires = "runner_home")]
+    pub runner_preflight: bool,
 }
 
 /// Everything a run is, checked before anything is started or spent.
@@ -679,7 +684,8 @@ fn inference_addresses(endpoint: Option<&Endpoint>) -> Vec<String> {
 
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
-        let mut config = load_config(&args.config)?;
+        let mut config =
+            readiness::configuration(load_config(&args.config), args.runner_preflight)?;
         // What `agentic-job config` held the file to, again: it is only
         // a file by the time `run` reads it.
         let Checked {
@@ -690,7 +696,10 @@ impl Plan {
             child,
             mcp,
             watch,
-        } = config.check()?;
+        } = readiness::configuration(config.check(), args.runner_preflight)?;
+        if args.runner_preflight {
+            readiness::require(&config)?;
+        }
         let watch = watch_item(
             watch,
             args.watch_item.as_deref(),

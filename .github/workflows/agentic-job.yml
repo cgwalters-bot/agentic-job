@@ -334,6 +334,13 @@ on:
           False gives it none
         type: boolean
         default: true
+      runner-preflight:
+        description: >-
+          Opt-in fail-closed runner readiness. Currently refuses all hosts because independent
+          same-uid credential isolation and runner/subuid egress evidence are unavailable.
+          Set github-reads false; agent-user must be runner
+        type: boolean
+        default: false
       agent-user:
         description: >-
           `runner`, the runner's own user, which secure-host deprivileges; or `sandbox`, the second
@@ -575,6 +582,7 @@ jobs:
       policy: ${{ toJSON(needs.policy.outputs) }}
       runner: ${{ inputs.agent-runner }}
       github-reads: ${{ inputs.github-reads }}
+      runner-preflight: ${{ inputs.runner-preflight }}
       secure-host-image-artifact-id: ${{ inputs.secure-host-image-artifact-id }}
       agent-user: ${{ inputs.agent-user }}
 

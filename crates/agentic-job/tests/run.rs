@@ -812,6 +812,120 @@ fn a_run_as_its_own_user_in_the_home_given() {
 }
 
 #[test]
+fn runner_preflight_configuration_errors_do_not_quote_credentials() {
+    let marker = format!("malformed-readiness-fixture-{}", std::process::id());
+    for (case, config) in [
+        (
+            "parse",
+            format!("[sandbox.env]\nSUPERVISOR_BEARER = [\"{marker}\"]\n"),
+        ),
+        (
+            "validate",
+            format!("[agent]\nname = \"fake\"\n[sandbox.env]\nACTIONS_SECRET = \"{marker}\"\n"),
+        ),
+    ] {
+        let job = Job::new(&format!("preflight-errors-{case}"));
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-preflight")
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR));
+        assert!(got.stderr.contains("details withheld"), "{}", got.all());
+        assert!(!got.all().contains(&marker));
+        assert!(!job.path("out").exists());
+    }
+}
+
+#[test]
+fn runner_preflight_refuses_even_clean_or_deliberately_exposed_hosts() {
+    let proxy = Proxy::start();
+    // These controls establish that the fixtures really are readable. They do
+    // not establish isolation: preflight must refuse even the clean case, not
+    // silently pass because a scanner did not recognize a credential's shape.
+    let marker = format!("readiness-fixture-{}-{}", std::process::id(), RUN_ID);
+    for exposure in ["clean", "environment", "settings", "file", "procfs"] {
+        let job = Job::new(&format!("preflight-{exposure}"));
+        let mut config = format!("[agent]\nname = \"fake\"\n{LIMITS}{}", plain(&proxy));
+        if exposure == "settings" {
+            config.push_str(&format!(
+                "[sandbox.env]\nSUPERVISOR_BEARER = \"{marker}\"\n"
+            ));
+            assert!(config.contains(&marker));
+        }
+        if exposure == "file" {
+            std::fs::create_dir_all(job.path(HOME_DIR)).unwrap();
+            job.write("home/credentials", &marker);
+            assert_eq!(job.text("home/credentials"), marker);
+        }
+        let mut child = (exposure == "procfs").then(|| {
+            Command::new("sleep")
+                .arg("60")
+                .env("SUPERVISOR_BEARER", &marker)
+                .spawn()
+                .unwrap()
+        });
+        let mut command = job.own_command(&config);
+        command.arg("--runner-preflight");
+        if exposure == "environment" {
+            command.env(GITHUB_TOKEN_VAR, &marker);
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == GITHUB_TOKEN_VAR)
+                    .unwrap()
+                    .1,
+                Some(std::ffi::OsStr::new(&marker))
+            );
+        }
+        let output = command.output();
+        let proc_control = child.as_ref().map(|child| {
+            // spawn can return before the child's new environment is visible
+            // in procfs. Bound this positive control, never assume an empty
+            // read establishes isolation.
+            for _ in 0..100 {
+                let bytes = std::fs::read(format!("/proc/{}/environ", child.id()))?;
+                if contains(&bytes, &marker) {
+                    return Ok::<_, std::io::Error>(true);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(false)
+        });
+        if let Some(child) = &mut child {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        if let Some(control) = proc_control {
+            assert!(control.unwrap(), "procfs positive control must be readable");
+        }
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains("runner preflight refused"),
+            "{}",
+            got.all()
+        );
+        assert!(
+            got.stderr.contains("process-memory isolation"),
+            "{}",
+            got.all()
+        );
+        if exposure == "environment" {
+            assert!(got.stderr.contains("github-reads: false"), "{}", got.all());
+        }
+        assert!(
+            !got.all().contains(&marker),
+            "diagnostics must not quote credentials"
+        );
+        // No clone, registration or launch; even invalid/missing input files
+        // beyond configuration must not defer the readiness decision.
+        assert!(!job.path("out").exists());
+    }
+}
+
+#[test]
 fn documented_mcp_config_is_refused_before_runner_launch() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let doc = std::fs::read_to_string(root.join("docs/mcp.md")).unwrap();

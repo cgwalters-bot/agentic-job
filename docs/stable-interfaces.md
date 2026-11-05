@@ -38,7 +38,7 @@ Inputs:
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
   `agent-config-path`, `agent-skills`, `agent-user`, `github-reads`,
   `packages`, `npm`, `setup`, `egress-write-policy`, `session`,
-  `idle-minutes`;
+  `idle-minutes`, `runner-preflight`;
 - runners and the binary: `runner`, `agent-runner`, `build-binary`;
 - inference: `inference-url`, `inference-register` (`github-oidc`,
   `plain`, `token-file`), `inference-audience`, `inference-token-file`;
@@ -62,6 +62,12 @@ optional positive `app_id`, not token names or agent-selected identities
 Both `runner` and `agent-runner` default to the JSON string
 `"ubuntu-26.04"`. Explicit labels and runner groups still resolve in the
 calling repository; architecture-specific and special runners are not remapped.
+
+`runner-preflight` defaults to false. True requests fail-closed runner-only
+readiness admission, currently refused on every host because independent
+credential isolation and active runner/subuid egress evidence are unavailable.
+It requires `agent-user: runner` and `github-reads: false`; those settings do
+not by themselves permit launch ([readiness](secure-host.md#opt-in-runner-readiness-refusal)).
 
 `status-comment` preserves opening whole-line hidden caller comments, except
 tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
