@@ -94,7 +94,7 @@ impl Inner {
     fn log(&mut self, lines: &[String]) {
         // The job log is best effort; the transcript has everything.
         for line in lines {
-            let _ = writeln!(self.log, "{}", secure_host::workflow_commands::escaped(line));
+            let _ = writeln!(self.log, "{}", crate::workflow_commands::escaped(line));
         }
         let _ = self.log.flush();
     }

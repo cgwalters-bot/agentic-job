@@ -431,7 +431,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
         }))
         .unwrap();
     assert_eq!(
-        session::exit(result.result).code(),
+        result.result.exit().code(),
         if handback { 3 } else { 0 },
         "{result:?}: {}",
         std::fs::read_to_string(out.join("agent-stderr.log")).unwrap()

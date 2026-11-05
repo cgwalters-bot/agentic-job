@@ -25,12 +25,6 @@ const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(2);
 const DIAGNOSTIC_BYTES: u64 = 8192;
 /// The state of a zombie in `/proc/PID/stat`.
 const ZOMBIE: &str = "Z";
-/// The variable of `run`'s own environment that holds the provider's key
-/// (`run::api_key`, which re-exports it). Here so that the agent's
-/// environment leaves it out without this crate knowing `run`.
-pub const API_KEY_VAR: &str = "AGENTIC_JOB_INFERENCE_KEY";
-/// The same for an MCP server's credential (`run::mcp::TOKEN_VAR`).
-pub const MCP_TOKEN_VAR: &str = "AGENTIC_JOB_MCP_TOKEN";
 /// Variables of this process that nothing it starts may inherit: what
 /// lets a process ask for the job's identity token and use the CI
 /// system's own services (`ACTIONS_*`), and what selects an agent's
@@ -40,8 +34,8 @@ pub const MCP_TOKEN_VAR: &str = "AGENTIC_JOB_MCP_TOKEN";
 /// MCP server's credential, which only `run` holds.
 const NOT_INHERITED: &[&str] = &[
     "ACTIONS_",
-    API_KEY_VAR,
-    MCP_TOKEN_VAR,
+    crate::run::api_key::API_KEY_VAR,
+    crate::run::mcp::TOKEN_VAR,
     "ANTHROPIC_",
     "CLAUDE_",
     "OPENCODE_",
@@ -304,11 +298,11 @@ mod tests {
         ];
         // As `main` gives them to secure-host, whose commands then leave
         // out the same.
-        secure_host::host::also_not_inherited(is_inherited_setting);
+        crate::sandbox::host::also_not_inherited(is_inherited_setting);
         for (name, want) in cases {
             assert_eq!(is_inherited_setting(OsStr::new(name)), want, "{name}");
             assert_eq!(
-                secure_host::host::is_not_inherited(OsStr::new(name)),
+                crate::sandbox::host::is_not_inherited(OsStr::new(name)),
                 want,
                 "{name}"
             );

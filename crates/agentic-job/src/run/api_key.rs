@@ -41,9 +41,8 @@ use super::mcp;
 use crate::config::Provider;
 
 /// The variable of `run`'s own environment that holds the key. The
-/// workflow sets it on the one step that runs `run`, from a secret. The
-/// session's, which leaves it out of the agent's environment.
-pub use crate::session::process::API_KEY_VAR;
+/// workflow sets it on the one step that runs `run`, from a secret.
+pub const API_KEY_VAR: &str = "AGENTIC_JOB_INFERENCE_KEY";
 /// What a key may consist of: it goes into a header as it is.
 const KEY_LEN: std::ops::RangeInclusive<usize> = 16..=4096;
 /// Where the proxy listens: a port of loopback the kernel picks, which

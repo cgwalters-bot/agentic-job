@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::table as config;
+use crate::config;
 
 /// One AIC is a hundredth of a dollar.
 pub const AIC_PER_USD: f64 = 100.0;
@@ -428,13 +428,7 @@ mod tests {
     }
 
     fn configured(text: &str) -> Result<Limits> {
-        #[derive(Deserialize)]
-        struct File {
-            #[serde(default)]
-            limits: config::Limits,
-        }
-        let file: File = toml::from_str(text)?;
-        Limits::from_config(&file.limits)
+        Limits::from_config(&config::Config::parse(text)?.limits)
     }
 
     #[test]

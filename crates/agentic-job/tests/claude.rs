@@ -145,11 +145,7 @@ fn pinned_claude_acp_offers_file_tools() {
     stop.store(true, Ordering::SeqCst);
     server.join().unwrap();
     let stderr = std::fs::read_to_string(out.join(session::STDERR_LOG)).unwrap_or_default();
-    assert_eq!(
-        session::exit(result.result).code(),
-        0,
-        "{result:?}: {stderr}"
-    );
+    assert_eq!(result.result.exit().code(), 0, "{result:?}: {stderr}");
 
     let first = stub.first.lock().unwrap().take();
     let first = first.unwrap_or_else(|| panic!("no request offered tools: {stderr}"));

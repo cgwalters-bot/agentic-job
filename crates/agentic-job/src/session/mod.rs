@@ -1,13 +1,61 @@
-//! The ACP session, which the `acp-session` crate holds: re-exported
-//! here, at the paths `run` and callers have used, beside what is the
-//! command line's own: `session connect` ([`connect`]), a client of the
-//! bridge, not a session, and the exit state a session's outcome maps to.
+//! The ACP session: one agent process, driven over the Agent Client
+//! Protocol (<https://agentclientprotocol.com>), recorded, and held to its
+//! limits. It came from the old tree's `harness/` (`bot-harness`) in
+//! step 3 of docs/plan.md.
+//!
+//! It is a library whose one command, `session connect` ([`connect`]),
+//! is a client of the bridge, not a session: `run` drives it with
+//! [`run()`], which
+//!
+//! - starts the agent ([`agents`]) behind the caller's wrapper, with its
+//!   standard streams on sockets, so that `run0` can take it into the
+//!   sandbox user's login session ([`process`]);
+//! - opens a session in the work directory and sends the task as a
+//!   prompt, advertising no filesystem or terminal capability, so the
+//!   agent uses its own tools inside the sandbox;
+//! - answers the agent's permission requests from a policy
+//!   ([`permission`]);
+//! - warns the agent as the run nears a limit, has it hand back near
+//!   one, and stops it at one ([`budget`]);
+//! - where the run asks for it, passes on what changes on the run's item
+//!   while the agent works ([`steer`]);
+//! - records every message in both directions to `acp.jsonl`
+//!   ([`transcript`]) and prints a condensed line for each event
+//!   ([`digest`]);
+//! - kills what the agent left running, and writes `harness.json`.
+//!
+//! A session is the agent-facing half of an ACP proxy: the agent's
+//! client, with a list of attached clients ([`clients`]) that the agent's
+//! notifications are passed on to. The list is empty for a task run. With
+//! `[session] listen`, [`bridge`] is the client-facing half, and the
+//! session goes on after the task's turn to its client's prompts
+//! (specs/session.md).
 
-pub use acp_session::*;
-
+pub mod agents;
+pub mod bridge;
+pub mod budget;
+pub mod clients;
+pub mod compaction;
 pub mod connect;
+pub mod digest;
+mod driver;
+pub mod permission;
+pub mod process;
+pub mod provider;
+pub mod steer;
+pub mod transcript;
+pub mod vibe;
 
-use crate::exit::Exit;
+pub use agents::AgentSpec;
+pub use budget::Limits;
+pub use clients::Clients;
+pub use driver::{
+    HttpMcp, Options, Outcome, OutputCheck, RESULT_FILE, RESULT_SCHEMA, Restate, RunResult,
+    STALLED, run,
+};
+pub use permission::Policy;
+pub use process::Launch;
+pub use transcript::{ACP_LOG, Log, Record, STDERR_LOG};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -16,20 +64,9 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn run(&self) -> anyhow::Result<Exit> {
+    pub fn run(&self) -> anyhow::Result<crate::exit::Exit> {
         match self {
             Self::Connect(args) => connect::run(args),
         }
-    }
-}
-
-/// The exit state of a run whose session ended like OUTCOME.
-pub fn exit(outcome: Outcome) -> Exit {
-    match outcome {
-        Outcome::Success => Exit::Success,
-        Outcome::NoRequests => Exit::NotStarted,
-        Outcome::Timeout => Exit::Timeout,
-        Outcome::Budget => Exit::Limit,
-        Outcome::Failure | Outcome::Cancelled => Exit::Failure,
     }
 }

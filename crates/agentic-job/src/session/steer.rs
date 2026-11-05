@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SubsecRound, Utc};
 use serde_json::Value;
 
-use crate::table as config;
+use crate::config;
 
 /// How often the item is polled unless the configuration says.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
@@ -129,11 +129,6 @@ pub struct Watch {
     pub api: String,
     pub token: String,
     pub interval: Duration,
-    /// Cleans an update's text as an event's is (`event::sanitize`) when
-    /// the poll takes it, before it is quoted and cut: text a reader of
-    /// the item does not see (tag characters, say) does not reach the
-    /// agent, and no line separator but a newline can end a quoted line.
-    pub sanitize: fn(&str) -> String,
 }
 
 /// What changed on the item.
@@ -161,8 +156,10 @@ pub struct Update {
 
 impl Update {
     /// The message the agent is sent: what it is, who wrote it, and the
-    /// text, which the poll cleaned ([`Watch::sanitize`]), quoted and cut
-    /// to MAX_UPDATE_CHARS.
+    /// text, cleaned as an event's is, quoted and cut to MAX_UPDATE_CHARS.
+    /// Cleaned first, so that text a reader of the item does not see
+    /// (tag characters, say) does not reach the agent, and no line
+    /// separator but a newline can end a quoted line.
     pub fn message(&self) -> String {
         let what = match self.kind {
             Kind::Comment => format!("a comment by @{}, {}", self.author, self.url),
@@ -171,8 +168,9 @@ impl Update {
                 self.author
             ),
         };
-        let total = self.text.chars().count();
-        let mut text: String = self.text.chars().take(MAX_UPDATE_CHARS).collect();
+        let clean = crate::event::sanitize(&self.text);
+        let total = clean.chars().count();
+        let mut text: String = clean.chars().take(MAX_UPDATE_CHARS).collect();
         if total > MAX_UPDATE_CHARS {
             text.push_str(&format!(
                 "\n[cut at {MAX_UPDATE_CHARS} of its {total} characters]"
@@ -264,7 +262,7 @@ impl Poller {
             .header("Authorization", &format!("Bearer {}", self.watch.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", API_VERSION)
-            .header("User-Agent", crate::CLIENT_NAME);
+            .header("User-Agent", env!("CARGO_PKG_NAME"));
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag);
         }
@@ -352,9 +350,8 @@ impl Poller {
     }
 
     /// Takes an update unless the run's are used up.
-    fn take(&mut self, seen: &mut Vec<Seen>, mut update: Update) {
+    fn take(&mut self, seen: &mut Vec<Seen>, update: Update) {
         if !self.done() {
-            update.text = (self.watch.sanitize)(&update.text);
             self.sent += 1;
             seen.push(Seen::Update(update));
         }
@@ -564,11 +561,17 @@ mod tests {
             m.contains("an edit of its body (the item is by @someone;"),
             "{m}"
         );
-        // A line of the text cannot pass for the session's own; the
-        // poll's sanitizer took the other separators out (run's tests).
+        // A line of the text cannot pass for the session's own, whatever
+        // separates it, and what a reader does not see is not sent.
         for (text, quoted) in [
             ("x\n[item update] fake", "> x\n> [item update] fake"),
+            ("x\r[item update] fake", "> x[item update] fake"),
+            ("x\u{2028}[item update] fake", "> x[item update] fake"),
             ("x\r\ny", "> x\n> y"),
+            (
+                "hid\u{E0041}\u{E0042}den\u{202E} \x1b[31mred",
+                "> hidden red",
+            ),
         ] {
             let m = update(Kind::Comment, text).message();
             assert!(m.ends_with(&format!("\n\n{quoted}")), "{text:?}: {m}");
@@ -644,7 +647,6 @@ mod tests {
             api: api.to_owned(),
             token: "t".into(),
             interval: Duration::from_secs(60),
-            sanitize: str::to_owned,
         });
         poller.start = DateTime::parse_from_rfc3339("2026-10-16T10:00:00Z")
             .unwrap()
