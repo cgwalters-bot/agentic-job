@@ -84,11 +84,10 @@ says what a caller may rely on across versions.
   status line saying it stopped before the task was done instead of ✅.
   The run action and `agent.yml` gain a `stopped-early` output for this
   (#3017).
-- docs/gitlab.md shows a GitLab project how to run policy, the agent,
-  check and apply from its own `.gitlab-ci.yml` with a pinned, checksummed
-  release, keeping publishing secrets in the apply job's environment. It
-  says what is refused pending #2903 and #2989, and that no live GitLab
-  pipeline has run it yet (#2996).
+- Document GitLab's supported policy/check/apply path with a pinned,
+  checksummed release and a deterministic CI example. Agent inference
+  remains unsupported pending #2903 and #2989; no live GitLab run is
+  claimed (#2996).
 
 - Clarify the runner-only credential boundary and current launch refusals.
   Record the still-open #2991 migration, caller key/pin gaps and a dated
