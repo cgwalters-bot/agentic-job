@@ -423,6 +423,47 @@ fn replacement_series_are_checked_commit_by_commit() {
             "{name}: {errors:?}"
         );
     }
+
+    // A pull request that grew past `max_patch_files` over several
+    // pushes, rebased: refused in all unless `replacement_max_files`
+    // allows it, while each commit still keeps to `max_patch_files`.
+    let total = |max_patch_files, replacement_max_files| {
+        let mut policy = policy.clone();
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        push.max_patch_files = max_patch_files;
+        push.replacement_max_files = replacement_max_files;
+        series(&["src/a.rs", "src/b.rs"]).check(&policy).errors
+    };
+    for (max_patch_files, replacement_max_files, want) in [
+        (
+            1,
+            0,
+            Some("replacement: replacement exceeds the total file limit"),
+        ),
+        (
+            1,
+            1,
+            Some("replacement: replacement exceeds the total file limit"),
+        ),
+        (1, 2, None),
+        (2, 0, None),
+        (
+            2,
+            1,
+            Some("replacement: replacement exceeds the total file limit"),
+        ),
+    ] {
+        let errors = total(max_patch_files, replacement_max_files);
+        assert_eq!(
+            errors.first().map(String::as_str),
+            want,
+            "{max_patch_files} {replacement_max_files}: {errors:?}"
+        );
+    }
 }
 
 #[test]

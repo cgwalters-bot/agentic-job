@@ -178,6 +178,7 @@ pub const HANDLERS: &[Handler] = &[
             "target",
             "head",
             "replacement_max_commits",
+            "replacement_max_files",
             "replacement_base",
             "protected_files",
             "protect_top_level_dot_folders",

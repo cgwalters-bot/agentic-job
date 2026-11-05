@@ -1,5 +1,6 @@
 //! Producer-side convenience only: trusted capture and check still enforce policy.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 
@@ -500,7 +501,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     if base_shapes_checked {
         found.retain(|finding| finding.pattern != redact::PRIVATE_KEY);
     }
-    scan_out(home, &mut found)?;
+    scan_out(home, &run.checkout, &run.base, &mut found)?;
     if let Some(tree) = &checkout.secondary {
         // Located by the clone as well: a path alone could be either's.
         found.extend(
@@ -777,7 +778,7 @@ impl std::fmt::Display for Finding {
 /// also matches its first line alone.
 fn scan(repo: &Path, base: &str, home: &Path) -> Result<Vec<Finding>> {
     let mut found = scan_change(repo, base)?;
-    scan_out(home, &mut found)?;
+    scan_out(home, repo, base, &mut found)?;
     Ok(found)
 }
 
@@ -813,8 +814,9 @@ fn scan_change(repo: &Path, base: &str) -> Result<Vec<Finding>> {
     Ok(diff_findings(&diff))
 }
 
-/// The findings in HOME's `out/`, added to FOUND.
-fn scan_out(home: &Path, found: &mut Vec<Finding>) -> Result<()> {
+/// The findings in HOME's `out/`, added to FOUND; a replacement's against
+/// the checkout REPO, which BASE the run started from is in.
+fn scan_out(home: &Path, repo: &Path, base: &str, found: &mut Vec<Finding>) -> Result<()> {
     // Whatever `run` reads from there: the requests, the report (a
     // summary can become the commit message) and a replacement series.
     let names = [AGENT_OUTPUTS, AGENT_OUTCOME, REPLACEMENT_PATH];
@@ -825,6 +827,13 @@ fn scan_out(home: &Path, found: &mut Vec<Finding>) -> Result<()> {
             Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => bail!("{} {err}", path.display()),
         };
+        if name == REPLACEMENT_PATH
+            && let Ok(series) = serde_json::from_slice::<Replacement>(&content)
+        {
+            let tokens = base_run_tokens(repo, &[base, &series.base_commit]);
+            found.extend(series_findings(&path, &series, &tokens)?);
+            continue;
+        }
         for (number, line) in content.split(|&b| b == b'\n').enumerate() {
             let mut patterns = redact::secret_shapes(line);
             // `run` decodes and writes again what it takes from JSON, so
@@ -848,6 +857,109 @@ fn scan_out(home: &Path, found: &mut Vec<Finding>) -> Result<()> {
     Ok(())
 }
 
+/// The run tokens' shapes the commits REVS of the checkout REPO hold. The
+/// run's base predates its token; a series' `base_commit` is the agent's
+/// to name, so this is advice to the agent, and `run`'s gate still refuses
+/// this run's token by value. A revision that does not resolve holds none.
+fn base_run_tokens(repo: &Path, revs: &[&str]) -> BTreeSet<Vec<u8>> {
+    let mut tokens = BTreeSet::new();
+    for rev in revs {
+        let Ok(commit) = git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &format!("{rev}^{{commit}}"),
+            ],
+        ) else {
+            continue;
+        };
+        let commit = String::from_utf8_lossy(&commit).trim().to_owned();
+        // Exit 1, no match, holds none as well.
+        let Ok(output) = git_command(repo)
+            .args([
+                "grep",
+                "-h",
+                "-o",
+                "-I",
+                "-E",
+                redact::RUN_TOKEN,
+                &commit,
+                "--",
+            ])
+            .output()
+        else {
+            continue;
+        };
+        if output.status.success() {
+            tokens.extend(
+                output
+                    .stdout
+                    .split(|&b| b == b'\n')
+                    .filter(|token| !token.is_empty())
+                    .map(<[u8]>::to_vec),
+            );
+        }
+    }
+    tokens
+}
+
+/// The findings in SERIES, the replacement at PATH, mail by mail as the
+/// change's. The mails are the agent's text, not a diff git made: a line
+/// one removes or quotes as context counts as the base's only where each
+/// run token's shape on it is one of TOKENS, what the base holds
+/// ([`base_run_tokens`]). So a rebase that deletes a fixture of the base
+/// is not refused for it (#3017), and a line an earlier mail added, or
+/// one no commit has, still is. Its message, up to the diff where
+/// `git am` starts reading one, is the agent's.
+fn series_findings(
+    path: &Path,
+    series: &Replacement,
+    tokens: &BTreeSet<Vec<u8>>,
+) -> Result<Vec<Finding>> {
+    let run_token = regex::bytes::Regex::new(redact::RUN_TOKEN)?;
+    let base_holds = |line: &[u8]| {
+        run_token
+            .find_iter(line)
+            .all(|token| tokens.contains(token.as_bytes()))
+    };
+    let mut found: Vec<Finding> = redact::secret_shapes(series.base_commit.as_bytes())
+        .into_iter()
+        .map(|pattern| Finding {
+            location: format!("{}: its base_commit", path.display()),
+            pattern,
+            from_base: false,
+        })
+        .collect();
+    for (index, mail) in series.commits.iter().enumerate() {
+        let at = |location: &str| format!("{} commit {}: {location}", path.display(), index + 1);
+        let (message, diff) = match mail.find("\ndiff --git ") {
+            Some(start) => mail.split_at(start + 1),
+            None => (mail.as_str(), ""),
+        };
+        for (number, line) in message.split('\n').enumerate() {
+            for pattern in redact::secret_shapes(line.as_bytes()) {
+                found.push(Finding {
+                    location: at(&format!("line {} of its message", number + 1)),
+                    pattern,
+                    from_base: false,
+                });
+            }
+        }
+        found.extend(
+            diff_findings_with(diff.as_bytes(), &base_holds)
+                .into_iter()
+                .map(|finding| Finding {
+                    location: at(&finding.location),
+                    ..finding
+                }),
+        );
+    }
+    Ok(found)
+}
+
 /// PATH as a location, unless it is itself what may not be shown.
 fn shown(path: &[u8]) -> String {
     if redact::secret_shapes(path).is_empty() {
@@ -862,6 +974,13 @@ fn shown(path: &[u8]) -> String {
 /// unchanged one the patch quotes as context, the old file's for one it
 /// removes, since the patch holds all three.
 fn diff_findings(diff: &[u8]) -> Vec<Finding> {
+    // Git made it from the base: what it removes or quotes is the base's.
+    diff_findings_with(diff, &|_| true)
+}
+
+/// As [`diff_findings`], with a line DIFF removes or quotes as context
+/// counted as the base's only where BASE_HOLDS it.
+fn diff_findings_with(diff: &[u8], base_holds: &dyn Fn(&[u8]) -> bool) -> Vec<Finding> {
     let mut found = Vec::new();
     let (mut old_path, mut new_path) = (String::new(), String::new());
     let (mut old, mut new) = (0_usize, 0_usize);
@@ -911,7 +1030,8 @@ fn diff_findings(diff: &[u8]) -> Vec<Finding> {
             }
             format!("{new_path} (a diff header)")
         };
-        let from_base = in_hunk && matches!(line.first(), Some(b'-' | b' '));
+        let from_base =
+            in_hunk && matches!(line.first(), Some(b'-' | b' ')) && base_holds(&line[1..]);
         for pattern in redact::secret_shapes(line) {
             found.push(Finding {
                 location: location.clone(),
@@ -1683,6 +1803,125 @@ mod tests {
         assert!(replace(p, "HEAD", Some("HEAD~1..HEAD"), &output).is_err());
         assert_eq!(std::fs::read(&output).unwrap(), bytes);
         assert!(replace(p, "HEAD", None, &output).is_err());
+    }
+
+    /// A replacement series is scanned mail by mail as a change is, its
+    /// mails held to the base: a rebase that deletes a run-token fixture
+    /// the base commit holds is not refused for it (#3017), while one a
+    /// mail adds, in its diff or its message, still is, and so is a
+    /// removed line no commit before the run holds, such as one an
+    /// earlier mail added.
+    #[test]
+    fn a_replacement_is_refused_only_for_what_its_mails_add() {
+        let token = format!("praxis-run-{}", "0f".repeat(32));
+        let other = format!("praxis-run-{}", "1e".repeat(32));
+        let repo = tempfile::tempdir().unwrap();
+        let p = repo.path();
+        git(p, &["init", "--quiet"]).unwrap();
+        git(p, &["config", "user.name", "Test"]).unwrap();
+        git(p, &["config", "user.email", "test@example.org"]).unwrap();
+        std::fs::write(p.join("t.rs"), format!("{token}\n{token}\n")).unwrap();
+        git(p, &["add", "."]).unwrap();
+        git(p, &["commit", "-qm", "Base"]).unwrap();
+        let base = String::from_utf8(git(p, &["rev-parse", "HEAD"]).unwrap()).unwrap();
+        let base = base.trim();
+        let mail = |message: &str, lines: &[String]| {
+            format!(
+                "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n\
+                 From: agent <agent@localhost>\n\
+                 Date: Tue, 6 Oct 2026 21:02:35 -0400\n\
+                 Subject: [PATCH] Rebase\n\
+                 \n\
+                 {message}\n\
+                 ---\n \
+                 t.rs | 1 -\n\
+                 \n\
+                 diff --git a/t.rs b/t.rs\n\
+                 --- a/t.rs\n\
+                 +++ b/t.rs\n\
+                 @@ -1,2 +1,2 @@\n\
+                 \x20{token}\n\
+                 {}\n",
+                lines.join("\n")
+            )
+        };
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(OUT_DIR)).unwrap();
+        let unknown = "1".repeat(40);
+        let why = "Why.".to_owned();
+        // (case, the run's base, the series' base_commit, each mail's
+        // message and changed lines, which findings are refused)
+        for (name, run_base, series_base, mails, want) in [
+            (
+                "removed",
+                base,
+                &*unknown,
+                vec![(why.clone(), vec![format!("-{token}")])],
+                vec![false, false],
+            ),
+            (
+                "removed from the series' base",
+                &*unknown,
+                base,
+                vec![(why.clone(), vec![format!("-{token}")])],
+                vec![false, false],
+            ),
+            (
+                "added",
+                base,
+                base,
+                vec![(why.clone(), vec![format!("+{token}")])],
+                vec![false, true],
+            ),
+            (
+                "removed, but in no commit",
+                base,
+                base,
+                vec![(why.clone(), vec![format!("-{other}")])],
+                vec![false, true],
+            ),
+            (
+                "added, then removed",
+                base,
+                base,
+                vec![
+                    (why.clone(), vec![format!("+{other}")]),
+                    (why.clone(), vec![format!("-{other}")]),
+                ],
+                vec![false, true, false, true],
+            ),
+            (
+                "in the message",
+                base,
+                base,
+                vec![(format!("Why: {token}."), vec![format!("-{token}")])],
+                vec![true, false, false],
+            ),
+        ] {
+            let commits: Vec<String> = mails
+                .iter()
+                .map(|(message, lines)| mail(message, lines))
+                .collect();
+            let series = json!({"base_commit": series_base, "commits": commits});
+            let path = home.path().join(REPLACEMENT_PATH);
+            std::fs::write(&path, series.to_string()).unwrap();
+            let mut found = Vec::new();
+            scan_out(home.path(), p, run_base, &mut found).unwrap();
+            let refused: Vec<bool> = found.iter().map(Finding::is_refused).collect();
+            assert_eq!(refused, want, "{name}: {found:?}");
+            assert!(
+                found.iter().all(|f| f.location.contains(" commit ")
+                    && !f.location.contains(&token)
+                    && !f.location.contains(&other)),
+                "{name}: {found:?}"
+            );
+        }
+        // One that does not parse is scanned a line at a time, as before.
+        let path = home.path().join(REPLACEMENT_PATH);
+        std::fs::write(&path, format!("{{\"commits\": \"-{token}\"}}")).unwrap();
+        let mut found = Vec::new();
+        scan_out(home.path(), p, base, &mut found).unwrap();
+        assert!(found.iter().any(Finding::is_refused), "{found:?}");
     }
 
     #[test]

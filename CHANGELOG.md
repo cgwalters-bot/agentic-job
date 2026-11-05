@@ -9,6 +9,17 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- A rebase fix round can hand back a replacement series for a pull request
+  that grew past `max_patch_files`: bounds may set `replacement_max_files`
+  on `push_to_pull_request_branch` (off by default, at most 500) for the
+  series' total. `handback scan` reads a `replacement.json` mail by mail, so
+  a run-token fixture that the base commit holds, on a line the series
+  deletes, is no longer refused. A run that handed back no result after
+  its agent set `stopped_early`, or after a limit stopped it, now gets a
+  status line saying it stopped before the task was done instead of ✅.
+  The run action and `agent.yml` gain a `stopped-early` output for this
+  (#3017).
+
 - Clarify the runner-only credential boundary and current launch refusals.
   Record the still-open #2991 migration, caller key/pin gaps and a dated
   hardening acceptance inventory; credentialless inference/MCP remain future

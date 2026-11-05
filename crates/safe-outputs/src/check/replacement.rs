@@ -88,7 +88,7 @@ pub fn check(content: &[u8], push: &Push, max_bytes: u64) -> Result<PatchInfo> {
         commit_files.push(reading.files);
     }
     ensure!(
-        all_files.len() <= push.max_patch_files as usize,
+        all_files.len() <= push.replacement_files() as usize,
         "replacement exceeds the total file limit"
     );
     Ok(PatchInfo {

@@ -84,6 +84,9 @@ impl ForgeAdmission for Forge {
 /// A run hands back one patch, so at most one pull request, or one push.
 pub(crate) const MAX_PULL_REQUESTS: u32 = 1;
 const MAX_REPLACEMENT_COMMITS: u32 = 50;
+/// The most `replacement_max_files` may be; the patch byte limit still
+/// bounds the series.
+const MAX_REPLACEMENT_FILES: u32 = 500;
 
 /// How many globs the bounds' `protected` may list, and how long each
 /// may be: room for a repository's own source trees, none for a list
@@ -527,6 +530,13 @@ pub struct OutputLimit {
     /// admits that many individually checked, nonempty commit patches.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub replacement_max_commits: u32,
+    /// The most files a replacement series may touch in all, in place of
+    /// `max_patch_files`, which still bounds each of its commits. Zero
+    /// (the default) keeps `max_patch_files`. A pull request that grew
+    /// over several pushes, each within that limit, can outgrow it, and
+    /// a rebase must carry all of it at once (#3017).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub replacement_max_files: u32,
     /// The one name a check run gets, from the bounds and never the agent:
     /// gh-aw's handler takes it from its configuration. Required for
     /// `create_check_run`, and only for it.
@@ -566,6 +576,12 @@ impl OutputLimit {
             self.replacement_max_commits <= MAX_REPLACEMENT_COMMITS
                 && (output == PUSH_TO_PULL_REQUEST_BRANCH || self.replacement_max_commits == 0),
             "outputs.{output}: replacement_max_commits is supported only for a push, at most 50"
+        );
+        ensure!(
+            self.replacement_max_files <= MAX_REPLACEMENT_FILES
+                && (self.replacement_max_files == 0
+                    || (output == PUSH_TO_PULL_REQUEST_BRANCH && self.replacement_max_commits > 0)),
+            "outputs.{output}: replacement_max_files is supported only for a push that allows replacement_max_commits, at most {MAX_REPLACEMENT_FILES}"
         );
         ensure!(
             !self.ready_when_complete
@@ -885,6 +901,9 @@ pub struct Push {
     pub head: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub replacement_max_commits: u32,
+    /// [`OutputLimit::replacement_max_files`]; see [`Self::replacement_files`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub replacement_max_files: u32,
     /// The target base head resolved by the read-only policy job, not the producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_base: Option<String>,
@@ -943,6 +962,14 @@ impl Push {
             protected_paths: &self.protected_paths,
             max_patch_files: self.max_patch_files,
             commit_author: None,
+        }
+    }
+
+    /// The most files a replacement series may touch in all.
+    pub fn replacement_files(&self) -> u32 {
+        match self.replacement_max_files {
+            0 => self.max_patch_files,
+            max => max,
         }
     }
 }
@@ -1099,6 +1126,10 @@ impl Policy {
             ensure!(
                 push.replacement_max_commits <= MAX_REPLACEMENT_COMMITS,
                 "over 50 replacement commits"
+            );
+            ensure!(
+                push.replacement_max_files <= MAX_REPLACEMENT_FILES,
+                "over {MAX_REPLACEMENT_FILES} replacement files"
             );
             ensure!(
                 push.replacement_base

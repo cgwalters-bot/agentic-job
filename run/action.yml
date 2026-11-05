@@ -61,6 +61,12 @@ outputs:
       For a run that ended well although the cost its agent reported went over the budget, how far
       ("565.9 of 500 AIC"); empty otherwise
     value: ${{ steps.run.outputs.over-budget }}
+  stopped-early:
+    description: >-
+      `true` when the agent's outcome set `stopped_early`, saying it stopped before the task was
+      done; empty otherwise. The agent controls it: it decides only how the status comment
+      describes a run that handed back no result
+    value: ${{ steps.run.outputs.stopped-early }}
   cost:
     description: Summary cost as usd=NUMBER partial=BOOLEAN; empty when unknown
     value: ${{ steps.run.outputs.cost }}
@@ -246,6 +252,12 @@ runs:
           echo "::warning::the agent ended its turn over budget: spent $over"
           echo "over-budget=$over" >> "$GITHUB_OUTPUT"
         fi
+        # Whether the agent's outcome says it stopped before the task was
+        # done (JavaScript's truthiness, as `run` reads it): a fixed word,
+        # never the agent's reason, for conclude's status line (#3017).
+        [ ! -e "$JOB_DIR/out/run/outcome.json" ] ||
+          ! jq -e '.stopped_early | . != null and . != false and . != 0 and . != ""' "$JOB_DIR/out/run/outcome.json" > /dev/null 2>&1 ||
+          echo "stopped-early=true" >> "$GITHUB_OUTPUT"
         # What a run that did not end well ended on: the kind of the one
         # failure in summary.json that is the run's (a tool_error is a
         # tool's), one of the binary's fixed words and nothing else, so

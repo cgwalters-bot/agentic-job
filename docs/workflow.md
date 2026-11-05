@@ -369,6 +369,7 @@ jobs:
       exit: ${{ steps.run.outputs.exit }}
       failure-class: ${{ steps.run.outputs.failure-class }}
       over-budget: ${{ steps.run.outputs.over-budget }}
+      stopped-early: ${{ steps.run.outputs.stopped-early }}
       cost: ${{ steps.run.outputs.cost }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
@@ -1993,9 +1994,14 @@ bounded status comment with the reason and run link even with `notify: none`
 or `notify: reaction`. Without a fixed numeric item, only the summary is available;
 cross-repository status still requires the caller's `SAFE_OUTPUTS_PAT`.
 Ordinary noops and missing-tool declines stay green and respect notification settings.
-An agent's `stopped_early` is
-not seen here: a run that hands back nothing at all has no checked outputs,
-and check and apply are skipped.
+A run that handed back no result, or nothing at all (check and apply are
+then skipped), is not green when it was stopped at a limit or when its
+agent's outcome set `stopped_early`, which the run action passes on as
+its `stopped-early` output: the status line says it stopped before the
+task was done (#3017). That output is the agent's word, not quoted, and
+decides only this line and its reaction; it adds no marker for a
+scheduler, check, apply and the job results are as before, and a blocked
+run stays blocked.
 
 ### Running apply again
 

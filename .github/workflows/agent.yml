@@ -75,6 +75,8 @@ on:
         value: ${{ jobs.agent.outputs.failure-class }}
       over-budget:
         value: ${{ jobs.agent.outputs.over-budget }}
+      stopped-early:
+        value: ${{ jobs.agent.outputs.stopped-early }}
       cost:
         value: ${{ jobs.agent.outputs.cost }}
       secret-at:
@@ -110,6 +112,7 @@ jobs:
       # dispatcher decides on it (docs/workflow.md).
       failure-class: ${{ steps.run.outputs.failure-class }}
       over-budget: ${{ steps.run.outputs.over-budget }}
+      stopped-early: ${{ steps.run.outputs.stopped-early }}
       cost: ${{ steps.run.outputs.cost }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}

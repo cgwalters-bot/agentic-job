@@ -514,6 +514,7 @@ impl Compile for Bounds {
                 .map_or_else(Vec::new, |bound| bound.fields.clone()),
             branches: Vec::new(),
             replacement_max_commits: 0,
+            replacement_max_files: 0,
             name: limits.get(output).and_then(|bound| bound.name.clone()),
             category: limits.get(output).and_then(|bound| bound.category.clone()),
             allowed_reasons: limits
@@ -546,6 +547,9 @@ impl Compile for Bounds {
                 replacement_max_commits: limits
                     .get(PUSH_TO_PULL_REQUEST_BRANCH)
                     .map_or(0, |bound| bound.replacement_max_commits),
+                replacement_max_files: limits
+                    .get(PUSH_TO_PULL_REQUEST_BRANCH)
+                    .map_or(0, |bound| bound.replacement_max_files),
                 replacement_base: None,
                 ready_when_complete: ready(PUSH_TO_PULL_REQUEST_BRANCH),
                 protected_files: protected_files(&self.unprotected_files, repo),
@@ -3432,6 +3436,66 @@ max_patch_files = 10
                 ..OutputLimit::default()
             };
             assert_eq!(limit.validate(output).is_ok(), accepted);
+        }
+    }
+
+    /// A replacement's file total is each file's own, its
+    /// `max_patch_files` where it sets none, and the tighter one wins.
+    #[test]
+    fn replacement_files_only_tighten() {
+        // (caller's max_patch_files, replacement_max_files), the
+        // organization's, and the series total both allow.
+        for (caller, organization, want) in [
+            ((50, 0), (50, 0), (0, 50)),
+            ((50, 200), (50, 0), (0, 50)),
+            ((50, 200), (50, 100), (100, 100)),
+            ((50, 10), (50, 0), (10, 10)),
+            ((50, 200), (20, 300), (200, 200)),
+            // The caller's total, above the organization's per patch.
+            ((50, 0), (20, 300), (50, 50)),
+        ] {
+            let compile = |(files, total)| {
+                let mut bounds = push_bounds();
+                bounds.max_patch_files = files;
+                let push = bounds
+                    .outputs_mut()
+                    .unwrap()
+                    .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+                    .unwrap();
+                push.replacement_max_commits = 5;
+                push.replacement_max_files = total;
+                bounds.validate().unwrap();
+                bounds.compile(&push_request()).unwrap()
+            };
+            let both = intersect(compile(caller), compile(organization)).unwrap();
+            let push = both.safe_outputs.push_to_pull_request_branch.unwrap();
+            assert_eq!(
+                (push.replacement_max_files, push.replacement_files()),
+                want,
+                "{caller:?} {organization:?}"
+            );
+        }
+        // (output, replacement_max_commits, replacement_max_files, valid)
+        for (output, commits, total, accepted) in [
+            (PUSH_TO_PULL_REQUEST_BRANCH, 5, 500, true),
+            (PUSH_TO_PULL_REQUEST_BRANCH, 5, 501, false),
+            // Without replacement it would do nothing.
+            (PUSH_TO_PULL_REQUEST_BRANCH, 0, 100, false),
+            (PUSH_TO_PULL_REQUEST_BRANCH, 0, 0, true),
+            (CREATE_PULL_REQUEST, 0, 1, false),
+        ] {
+            let limit = OutputLimit {
+                max: 1,
+                replacement_max_commits: commits,
+                replacement_max_files: total,
+                branches: if output == PUSH_TO_PULL_REQUEST_BRANCH {
+                    vec!["agent-run-*".into()]
+                } else {
+                    Vec::new()
+                },
+                ..OutputLimit::default()
+            };
+            assert_eq!(limit.validate(output).is_ok(), accepted, "{output} {total}");
         }
     }
 

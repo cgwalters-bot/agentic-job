@@ -1731,6 +1731,45 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
             !over.is_empty()
         );
     }
+    // The agent's `stopped_early`, as a fixed word only (#3017).
+    for (outcome, wanted) in [
+        (
+            Some(r#"{"stopped_early": "the hand-back cannot carry it"}"#),
+            true,
+        ),
+        (Some(r#"{"stopped_early": true}"#), true),
+        (Some(r#"{"stopped_early": null}"#), false),
+        (Some(r#"{"stopped_early": ""}"#), false),
+        (Some(r#"{"stopped_early": false}"#), false),
+        (Some(r#"{"summary": "Done."}"#), false),
+        (Some("not json"), false),
+        (None, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("out/run")).unwrap();
+        if let Some(outcome) = outcome {
+            std::fs::write(dir.path().join("out/run/outcome.json"), outcome).unwrap();
+        }
+        executable(&dir.path().join("agentic-job"), "#!/bin/sh\nexit 0\n");
+        let output = dir.path().join("output");
+        let result = run_step(
+            "run/action.yml",
+            "Run the agent",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
+            ],
+        );
+        assert!(result.status.success(), "{outcome:?}: {result:?}");
+        let extra = if wanted { "stopped-early=true\n" } else { "" };
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("exit=0\n{extra}"),
+            "{outcome:?}"
+        );
+    }
     for (at, wanted) in [
         (
             "safe-outputs/aw-agent-run-1.patch, line 3 (known run secret: GH_TOKEN)\n",

@@ -683,9 +683,17 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             push.replacement_max_commits = push
                 .replacement_max_commits
                 .min(bound.replacement_max_commits);
+            // Each file's own total, its `max_patch_files` where it sets
+            // none; zero again where that is all the tighter one is.
+            let replacement_files = push.replacement_files().min(bound.replacement_files());
             push.ready_when_complete &= bound.ready_when_complete;
             push.max_patch_size = push.max_patch_size.min(bound.max_patch_size);
             push.max_patch_files = push.max_patch_files.min(bound.max_patch_files);
+            push.replacement_max_files = if replacement_files == push.max_patch_files {
+                0
+            } else {
+                replacement_files
+            };
             for name in bound.protected_files {
                 if !push.protected_files.contains(&name) {
                     push.protected_files.push(name);

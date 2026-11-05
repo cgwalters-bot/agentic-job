@@ -764,6 +764,15 @@ file forbids replacement. The ordinary one-commit push remains unchanged.
 The same head repository and branch checks apply; no write token
 is given to the producer or checker, and a partial run cannot replace history.
 
+Each commit of a series keeps to `max_patch_files`, and by default so does
+the series in all. A pull request that grew over several pushes, each
+within that limit, can outgrow it, and a rebase onto a moved base must
+carry all of it at once (#3017). For that, the caller may add
+`replacement_max_files = 200` beside `replacement_max_commits` (maximum
+500): the most files a replacement series may touch in all. Organization
+bounds intersect it, taking a file's `max_patch_files` where it sets none,
+and the patch byte limit still bounds the series.
+
 The producer runs `agentic-job handback replace --base BASE_SHA [RANGE]`
 in its checkout, alongside its `push_to_pull_request_branch` request.
 The range defaults to `BASE_SHA..HEAD`. The command generates the mails

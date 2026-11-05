@@ -412,9 +412,10 @@ pub fn guide(
         if let Some(push) = push.filter(|push| push.replacement_max_commits > 0) {
             let _ = writeln!(
                 text,
-                "  Alternatively, run `agentic-job handback replace --base {}` in your checkout (optional final argument: a revision range, default BASE..HEAD). Do not construct replacement mails or JSON by hand. The command builds `out/replacement.json` under your home, preserves format-patch bytes and validates the series with git am in a scratch repository before writing it. This replaces the entire branch with at most {} nonempty commits, including all original commits you want to keep. You may fetch and use the current head of the PR's base branch instead; trusted apply refuses any other base. Every commit passes the same path rules, and the whole JSON fits the patch byte limit. Include a `push_to_pull_request_branch` request; do not also propose a working-tree patch. A moved branch is refused with an exact lease. Commit messages and existing trailers are preserved; no trailers are added.",
+                "  Alternatively, run `agentic-job handback replace --base {}` in your checkout (optional final argument: a revision range, default BASE..HEAD). Do not construct replacement mails or JSON by hand. The command builds `out/replacement.json` under your home, preserves format-patch bytes and validates the series with git am in a scratch repository before writing it. This replaces the entire branch with at most {} nonempty commits, including all original commits you want to keep. You may fetch and use the current head of the PR's base branch instead; trusted apply refuses any other base. Every commit passes the same path rules and file limit, the series touches at most {} files in all, and the whole JSON fits the patch byte limit. Include a `push_to_pull_request_branch` request; do not also propose a working-tree patch. A moved branch is refused with an exact lease. Commit messages and existing trailers are preserved; no trailers are added.",
                 push.replacement_base.as_deref().unwrap_or("unresolved"),
-                push.replacement_max_commits
+                push.replacement_max_commits,
+                push.replacement_files()
             );
         }
         text.push_str(

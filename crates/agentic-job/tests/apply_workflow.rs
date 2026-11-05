@@ -1339,6 +1339,132 @@ fn conclude_says_how_run_ended() {
             format!("text={expected}")
         );
     }
+    // A run stopped at a limit, or whose agent said it stopped early,
+    // that handed back no result did not do what it was asked (#3017).
+    // (exit state, the agent's stopped-early, no result, failure class,
+    // blocked, the status line)
+    for (exit, stopped, none, class, blocked, expected) in [
+        (
+            "0",
+            "true",
+            "true",
+            "",
+            "",
+            "⚠️ [w](u) stopped before the task was done and handed back no result.",
+        ),
+        // Only the run action's fixed word counts.
+        (
+            "0",
+            "yes",
+            "true",
+            "",
+            "",
+            "✅ [w](u) ended well and handed back no result.",
+        ),
+        (
+            "0",
+            "",
+            "true",
+            "",
+            "",
+            "✅ [w](u) ended well and handed back no result.",
+        ),
+        // A run that handed back a result, or is blocked, says so as before.
+        (
+            "0",
+            "true",
+            "",
+            "",
+            "",
+            "✅ [w](u) ended well and opened pull request #39.",
+        ),
+        (
+            "0",
+            "true",
+            "true",
+            "",
+            "true",
+            "<!-- agentic-job-outcome: blocked -->⏸️ [w](u) is blocked: it handed back missing_data and no change.",
+        ),
+        (
+            "3",
+            "",
+            "true",
+            "",
+            "",
+            "⚠️ [w](u) stopped before the task was done and handed back no result (exit state 3).",
+        ),
+        (
+            "124",
+            "true",
+            "true",
+            "timeout",
+            "",
+            "⚠️ [w](u) stopped before the task was done and handed back no result (exit state 124, timeout).",
+        ),
+        (
+            "3",
+            "",
+            "",
+            "",
+            "",
+            "✅ [w](u) ended well and opened pull request #39. The run was stopped at a limit (exit state 3); what it handed back is marked partial.",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("output");
+        let out = run_step(
+            dir.path(),
+            "How the run ended",
+            &[
+                ("RESULTS", "success/success/success"),
+                ("EXIT", exit),
+                ("STOPPED_EARLY", stopped),
+                ("FAILURE_CLASS", class),
+                ("BLOCKED", blocked),
+                ("PR", if none.is_empty() { "39" } else { "" }),
+                ("NO_RESULT", none),
+                ("NO_RESULT_REASON", "\"Could not hand it back.\""),
+                ("WORKFLOW", "w"),
+                ("RUN_URL", "u"),
+                ("GITHUB_OUTPUT", output.to_str().unwrap()),
+            ],
+        );
+        status(&out, 0);
+        let written = fs::read_to_string(output).unwrap();
+        assert!(written.contains(&format!("text={expected}\n")), "{written}");
+        // Nor is one that handed back nothing at all, which check and
+        // apply skip.
+        let skipped = dir.path().join("skipped");
+        let out = run_step(
+            dir.path(),
+            "How the run ended",
+            &[
+                ("RESULTS", "success/skipped/skipped"),
+                ("EXIT", exit),
+                ("STOPPED_EARLY", stopped),
+                ("FAILURE_CLASS", class),
+                ("WORKFLOW", "w"),
+                ("RUN_URL", "u"),
+                ("GITHUB_OUTPUT", skipped.to_str().unwrap()),
+            ],
+        );
+        status(&out, 0);
+        let stopped_line = exit != "0" || stopped == "true";
+        assert_eq!(
+            fs::read_to_string(skipped)
+                .unwrap()
+                .contains("stopped before the task was done and handed back no result"),
+            stopped_line,
+            "{exit} {stopped}"
+        );
+        // The agent's reason still reaches the status comment.
+        assert_eq!(
+            written.contains("no-result-reason=\"Could not hand it back.\""),
+            !none.is_empty(),
+            "{written}"
+        );
+    }
 }
 
 #[test]

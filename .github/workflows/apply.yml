@@ -1098,6 +1098,7 @@ jobs:
           # again below against the same list before it goes into the text.
           FAILURE_CLASS: ${{ fromJSON(inputs.agent).outputs.failure-class }}
           OVER_BUDGET: ${{ fromJSON(inputs.agent).outputs.over-budget }}
+          STOPPED_EARLY: ${{ fromJSON(inputs.agent).outputs.stopped-early }}
           SECRET_AT: ${{ fromJSON(inputs.agent).outputs.secret-at }}
           PR: ${{ needs.apply.outputs.pull-request }}
           # The status comment is on the item: a pull request of another
@@ -1127,6 +1128,17 @@ jobs:
             success/skipped/skipped) text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back nothing to apply." reaction=rocket ;;
             *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
             *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none}${FAILURE_CLASS:+; failure class: $FAILURE_CLASS})." reaction=confused ;;
+          esac
+          # Nothing handed back, or no result, after a limit stopped the run
+          # or the agent said it stopped early: not success (#3017). The
+          # agent's word picks this line only; it is not quoted.
+          case "$RESULTS/$NO_RESULT" in
+            success/skipped/skipped/* | success/success/success/true)
+              if [ "${EXIT:-0}" != 0 ] || [ "${STOPPED_EARLY:-}" = true ]; then
+                why=
+                [ "${EXIT:-0}" = 0 ] || why=" (exit state $EXIT${FAILURE_CLASS:+, $FAILURE_CLASS})"
+                text="⚠️ [$WORKFLOW]($RUN_URL) stopped before the task was done and handed back no result$why." reaction=confused
+              fi ;;
           esac
           # The hidden marker, at the start of a line, is for whoever reads
           # the comment to schedule work: blocked is neither done nor failed.
