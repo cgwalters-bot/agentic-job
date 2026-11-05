@@ -99,7 +99,7 @@ pub fn run(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::net::TcpListener;
+    use std::net::{SocketAddr, TcpListener};
 
     use super::*;
 
@@ -215,9 +215,20 @@ mod tests {
         )
         .unwrap();
         drop(listener);
+        // A socket that is bound but never listens refuses connections and
+        // keeps its port, so a parallel test can't take it over between the
+        // two checks the way it could a dropped listener's port.
+        let closed = rustix::net::socket(
+            rustix::net::AddressFamily::INET,
+            rustix::net::SocketType::STREAM,
+            None,
+        )
+        .unwrap();
+        rustix::net::bind(&closed, &SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let bound = SocketAddr::try_from(rustix::net::getsockname(&closed).unwrap()).unwrap();
         assert!(
             check(
-                &config("claude", &format!("http://127.0.0.1:{port}")),
+                &config("claude", &format!("http://127.0.0.1:{}", bound.port())),
                 connect
             )
             .is_err()
