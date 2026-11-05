@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Document the agreed external VM-runner to midstream draft contract, with
+  a devspace profile example and separate runtime implementation slices.
+  External dispatch and cross-run apply are not deployed by this change;
+  hosted behavior and bounds are unchanged (#2891).
+
 - Add off-by-default `advisory` event-review publication: one checked comment
   or noop bound to the admitted repository, PR, base branch and exact head.
   The writer re-reads the open PR before posting; ordinary review verdicts

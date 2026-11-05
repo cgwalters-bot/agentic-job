@@ -83,7 +83,7 @@ unrelated work; do not mass-close issues based on this table.
 | [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | tracker#1311 downstream evidence umbrella; preserve needs-human. Reported v0.6.5 GitLab/TF successes are historical two-user/API-key evidence, not runner-only acceptance. Retain #2996/#2997 and closed #2994/#2995 deliverables. |
 | [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) | tracker#1311 removal owner, implementation in open #2991. Require Ubuntu and RHEL rhel10-kvm-smoke setup/run proof before completion; do not duplicate removal here. |
 | [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | Keep needs-human acceptance umbrella. Operator must approve non-replayable identity/listener and trusted off-agent lifecycle owner in [broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60); [broker#61](https://github.com/cgwalters-bot/praxis-credential-broker/issues/61) owns external MCP. Old title's local proxy is superseded. |
-| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215). The operator's answer was relayed on 5 November: separate VM-capable infrastructure, handing back to a midstream draft. The deployment, its disposability and its limits still need the operator's confirmation. The contract is [proposed in dispatch.md](dispatch.md#per-job-vm-runners-proposed), with [follow-ups](#per-job-vm-runner-follow-ups) below. Runtime acceptance is outstanding. |
+| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215): separate VM-capable infrastructure hands back to a midstream draft; the [external-runner contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract) separates external agent/check from trusted midstream apply. The deployment, its disposability and its limits still need the operator's confirmation. Runtime slices below remain unimplemented; no arbitrary runner selectors or bounds changes. |
 | [#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) | [tracker#596](https://github.com/cgwalters-forge/tracker/issues/596); concrete corrections already present in sandbox-check's pin-linked record discussion and this plan's #2740/#2741 history. Propose operator verification then closure, retaining needs-human until verified; not new host acceptance. |
 | [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | [tracker#674](https://github.com/cgwalters-forge/tracker/issues/674) egress diagnostics/host evidence owner. Preserve exact-account allowlisting; verify refusal names host/method without signed query and release/image pin reaches callers. DNS existence alone is not evidence. |
 | [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | tracker#674 publication follow-up to #2070/#2642; enable prepare on published and archive paths only once the released image accepts it, then hosted proof for both. |
@@ -106,6 +106,57 @@ diagnostics and [#2995](https://github.com/cgwalters-forge/agentic-job/issues/29
 GitLab summary publication are in this checkout's Unreleased changelog. Keep
 their existing owners/evidence, not duplicate implementation. Neither establishes
 credentialless TF/GitLab launch or live publication of this revision.
+
+### External-runner implementation slices
+
+The [contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract)
+is agreed, not deployed. These are issue-ready follow-ups for tracker#1215,
+**not filed issues**: this documentation run's safe outputs cannot create
+issues, locally or in the other repositories. A subsequent authorized issue
+filing pass must create/link these four slices before runtime planning.
+All repositories below are under `cgwalters-forge`.
+
+1. **agentic-job — Bind external checked artifacts to trusted apply.**
+   Extend the current checked-output transport without a new output type.
+   Bind digest, external repository/workflow revision/run/attempt and check
+   result to trusted policy/source/target/base/head; verify them before
+   publication without executing artifact code. Keep current byte/file/path
+   limits and draft/head constraints. Acceptance: fixture-based cross-run
+   success plus refusal of substitution, wrong provenance, oversized
+   metadata, wrong target and stale head. Depends on the actions transport
+   contract below; no deployed token or bounds change in this slice.
+2. **agent-board — Carry a caller-owned runner profile in job plans.**
+   Extend `docs/job-plans.md` and plan/manual/scheduled dispatch together;
+   keep `hosted` unchanged and external profiles off until caller-enabled.
+   Forward only the validated name, not workflow/ref/labels or config paths.
+   Acceptance: hosted request unchanged; unknown/disabled profiles refused;
+   the accepted name survives dispatch, dedupe and run tracking without
+   changing target authority. Depends on tracker's closed profile interface.
+3. **actions — Split external agent/check from trusted apply.**
+   Extend `.github/workflows/cgwalters-agentic-job.yml` with the reviewed
+   cross-run transport, no publication job/credential on the external side.
+   Enforce disposable agent/check separation, KVM/libvirt preflight and fixed
+   resource/lifetime/cleanup settings; pass the existing checked-output
+   format to agentic-job's verifier. Acceptance: mocked transfer/refusal
+   tests, capability failure before inference and cleanup on cancellation
+   and runner loss. Broker identity admission and credentialless lifecycle
+   remain explicit deployment prerequisites, not granted by this change.
+4. **tracker — Resolve profiles and prove midstream hand-back.**
+   Add a reviewed closed map in `.github/agentic-job/runner-profiles.json`
+   and resolution in `.github/workflows/dispatch.yml`; proposed key
+   `devspace-rhel10-64` maps to the external repository/workflow/config and
+   `cores: "64"` described in the contract, with operator-approved numeric
+   limits and immutable revision filled in before enabling. Retain existing
+   hosted defaults and `midstream.toml`/`midstream-fix.toml` target lists.
+   Acceptance, after the other slices and operator prerequisites: exact-head
+   repeated-test evidence, external run link, one draft creation and update,
+   and the contract's negative proofs. Do not enable profiles, change broker
+   admission, or add ostree/other targets in the implementation PR.
+
+Reuse [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) for
+external sandbox caller changes and its ruleset/operator prerequisites;
+do not duplicate that work or edit the sandbox from these slices. Runtime
+proof requires a later authorized deployment, not documentation checks.
 
 ### Breaking keys and safe refusals
 
@@ -195,7 +246,7 @@ That is a test fixture pin, not a claim that the old deployment is unchanged.
 
 ### Per-job VM runner follow-ups
 
-The [per-job VM runner contract](dispatch.md#per-job-vm-runners-proposed)
+The [external-runner contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract)
 of [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) is
 documentation only. These implement-sized slices are for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215), by

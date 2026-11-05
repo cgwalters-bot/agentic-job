@@ -455,200 +455,149 @@ its closing comment, within the bounds' 32 outputs; check refuses one naming
 another repository. A misled run's closes are undone by reopening, and each
 says why on the issue.
 
-## Per-job VM runners (proposed)
+## External VM runner to midstream draft: agreed contract
 
-**Nothing in this section is shipped.** It is the contract for
-[#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891), so that
-a job which needs VMs (bootc, bcvk, tmt or install tests, repeated until
-green) can run on separate VM-capable infrastructure and still hand back to
-a midstream fork. No runner is provisioned, no broker admission changes and
-no job is dispatched by it. Runtime acceptance is outstanding: none of the
-negative proofs below has run.
+This is a **contract, not a deployed dispatch interface** (#2891,
+[operator clarification](https://github.com/cgwalters-forge/agentic-job/issues/2891#issuecomment-6657969105)).
+Separate infrastructure, including `bootc-dev/cgwalters-devspace-sandbox`
+on bootc-dev/CNCF runners, may run the agent and check stages. A trusted
+apply job in `cgwalters-forge` publishes the checked result to a midstream
+fork. This does not launch a devspace, change bounds or admit a broker client.
+The current [agent-board plan schema](https://github.com/cgwalters-forge/agent-board/blob/main/docs/job-plans.md)
+still accepts only `runner: "hosted"`; do not submit the example below as a plan.
 
-What ships today:
+Today the agent job uses `AGENT_RUNNER` or the reusable workflow's `runner`
+input, defaulting to hosted Ubuntu 26.04. The external sandbox's
+[agent.yml](https://github.com/bootc-dev/cgwalters-devspace-sandbox/blob/54d58072c793b1599114b6dbfa3b9e9e5fd6f71b/.github/workflows/agent.yml)
+maps `cores` through `runner-sizes.json` and `config` to a runner
+configuration; it checks and applies within its own repository and bounds,
+not to midstream forks ([#589](https://github.com/cgwalters-forge/agentic-job/issues/589)).
+Apply currently accepts only the artifact checked in its own run.
+The operator has not confirmed devspace as the deployment, its runners'
+disposability or its resource limits. The profile names and limits below
+remain proposals, not approved deployment settings.
 
-- The agent job runs on `AGENT_RUNNER`, or the reusable workflow's `runner`
-  input, with hosted Ubuntu 26.04 as the default. That stays the default,
-  and a caller that sets nothing keeps it.
-- agent-board's job plans accept only `"runner": "hosted"`
-  ([job-plans.md](https://github.com/cgwalters-forge/agent-board/blob/6c7ecdabdad572d4f69713c55e6ab9f2c2b10e02/docs/job-plans.md#format)).
-- `bootc-dev/cgwalters-devspace-sandbox` is its own caller of the
-  `cgwalters-forge/actions` wrapper. Its
-  [agent.yml](https://github.com/bootc-dev/cgwalters-devspace-sandbox/blob/54d58072c793b1599114b6dbfa3b9e9e5fd6f71b/.github/workflows/agent.yml)
-  maps a `cores` choice through `runner-sizes.json` and a `config` choice
-  (`rhel10`, `rhel10-kvm-smoke`) to a runner label and a configuration.
-  Its runs check and apply within that repository and its own bounds,
-  which name no midstream fork
-  ([#589](https://github.com/cgwalters-forge/agentic-job/issues/589)).
-- Apply takes only the artifact that its own run's check accepted. No
-  workflow applies an artifact from another repository's run.
+### Selection and lifetime
 
-The operator's decision, relayed on #2891 on 5 November 2026: "we need to
-ensure our infrastructure can reuse separate infra like the cncf runners
-while still targeting a PR on our midstream in general". Adding a fork to the
-midstream bounds, ostree for example, remains a separate decision for the
-operator. The profile name, the file names, the limits and the steps below
-are proposals. The operator has not yet confirmed devspace as the deployment,
-and has not confirmed that its RHEL runners are destroyed after each job.
+Issue text could redirect execution to a credential-bearing runner or an
+attacker's workflow. To stop that, the only proposed selection mechanism is
+a closed caller-owned profile map on the caller's protected default branch.
+`hosted` keeps its existing path unchanged. External execution is off unless
+the caller explicitly installs a mapping; unknown or disabled names fail
+before scheduling, with no fallback. A plan may name a profile, never runner
+labels, a repository/workflow/ref, a configuration path or resource overrides.
+The caller resolves all of those, including an immutable reviewed workflow
+revision, and records the resolved profile in the admitted job.
 
-### Example
+For example, a future tracker dispatch could select
+`runner: "devspace-rhel10-64"` for a bootc VM-test job. Its caller-owned
+mapping would select `bootc-dev/cgwalters-devspace-sandbox`, its reviewed
+`.github/workflows/agent.yml` revision and `cores: "64"`, with
+`.github/agentic-job/rhel10-kvm-smoke.toml` as the runner configuration.
+Those are proposed mapping values, not new inputs available today. Before
+enabling it, the operator must also fix numeric memory, disk, guest-count,
+job-timeout, total lifetime and artifact-retention limits in that mapping;
+the name `64` alone is not a resource contract. No size or limit is approved
+by this example. A smaller profile would need its own reviewed map entry.
 
-A plan names a profile instead of `hosted`:
+A profile must provide a fresh disposable job host, not a shared persistent
+runner. Before any target code or inference starts, trusted preflight checks
+the effective CPU/memory/disk allocation, usable `/dev/kvm`, hardware
+virtualization and a successful minimal guest start/stop. For tests requiring
+libvirt, it also checks the intended libvirt connection and permission to
+create and destroy a disposable guest. A label or device's existence is not
+proof. Missing capability refuses the job; software emulation must not turn
+an unavailable KVM profile green. Guest privilege and libvirt sockets stay
+inside the disposable host, never on a shared control host.
+The host must also meet the [runner requirements](workflow.md#what-a-caller-provides)
+and pass `sandbox check`. Preflight runs as the effective agent user and
+requires usable `qemu:///session` for libvirt tests, not membership in
+`libvirt` granting access to `qemu:///system` on a shared host.
 
-```json
-{
-  "schema": "agent-board/job-plan/v1",
-  "repo": "cgwalters-forge/bootc",
-  "item": 123,
-  "kind": "implement",
-  "runner": "devspace-rhel10-64",
-  "pool": "claude",
-  "brief": "Fix the install test; run it 5 times on the final head."
-}
-```
+The lifecycle owner enforces the fixed deadline and guest limit, tears down
+guests, volumes, networks, runner registration and job host on success,
+failure and cancellation, and reaps abandoned hosts after the same lifetime
+when the runner dies. Cleanup failure is reported, not silently green;
+neither disks nor workspaces are reused for the next job.
+The run's inference budget and request cap still apply.
 
-The caller, cgwalters-forge/tracker, looks the name up in a closed map on
-its default branch, for example `.github/agentic-job/runner-profiles.json`:
+### Checked hand-back and trusted apply
 
-```json
-{
-  "hosted": { "dispatch": "local" },
-  "devspace-rhel10-64": {
-    "dispatch": "bootc-dev/cgwalters-devspace-sandbox/.github/workflows/agent.yml",
-    "cores": "64",
-    "config": "rhel10-kvm-smoke",
-    "kvm": true,
-    "timeout-minutes": 240,
-    "max-attempts": 10
-  }
-}
-```
+An external runner could substitute an artifact or choose a more permissive
+target. Therefore the trusted caller fixes the target, base/head, task,
+bounds and source pin before dispatch. The external side runs only agent
+and check, on separate fresh machines; check runs pinned trusted code, not
+the agent's checkout. Neither stage nor VM tests gets a forge-write token,
+provider key or broker lifecycle credential. Inference endpoints come from
+deployment environment configuration, not task text. Broker admission for
+the exact external repository/workflow identity is a separate prerequisite;
+existing RHEL runs do not prove admission for a new identity or runner-only
+credential safety (see [current refusals](plan.md#breaking-keys-and-safe-refusals)).
+Registration/lifecycle authority must remain off the agent/test host.
 
-1. Tracker's dispatch resolves the profile. `hosted` runs exactly as today.
-   Any other entry starts the external caller's workflow with that entry's
-   fixed inputs, together with the plan's repo, item, kind, pool and task.
-2. The external run does the policy, agent and check stages on its runner,
-   with no forge write credential. It uploads the checked artifact in
-   the format apply already takes, together with the evidence below.
-3. A trusted apply workflow in cgwalters-forge fetches that artifact, checks
-   it again and opens a draft pull request on the midstream fork, or
-   pushes to an existing draft. The draft links the external run.
+Check produces the existing checked-output format consumed by apply, not
+a new safe-output type. The cross-run transport must bind its artifact ID
+and digest to the admitted target/base/head and policy/source revision,
+external repository, workflow revision, run ID and attempt, plus the
+successful trusted check job. A digest supplied in an agent-authored report
+does not establish provenance. The trusted apply job fetches by that exact
+identity, verifies digest and provenance using forge metadata and the
+caller's expected dispatch record, and refuses missing, mismatched, stale
+or untrusted results. It must not search for the latest artifact by name.
+Evidence and transport metadata are bounded data, never executable code.
 
-### Rules
+Only apply in `cgwalters-forge` holds the publication credential. It does
+not execute target code or tests, and reuses normal policy/check/apply
+limits, protected-path refusals and head checks. The external side cannot
+broaden those limits or provide replacement bounds. Apply opens one draft
+PR, or updates the specifically admitted existing draft at its expected
+head, on the midstream fork, never upstream and never by merging it or
+advancing its default branch. Existing fork/branch opt-ins remain required;
+this contract does not authorize a new same-repository push path.
+Before publication, trusted `check` must accept the artifact again, using
+policy and base-secret evidence rebuilt from the midstream bounds and
+claimed base commit, never the external run's `policy.json`. External
+policy/check are early filters, not authority to loosen trusted policy.
 
-Each rule names the threat it stops.
+For the bootc example, the trusted target is `cgwalters-forge/bootc` on
+`main`, with its exact base commit recorded, not the devspace repository
+or `bootc-dev/bootc`. As read on 5 November 2026, tracker's
+[midstream bounds](https://github.com/cgwalters-forge/tracker/blob/main/.github/agentic-job/midstream.toml)
+list bootc, composefs-rs, bcvk, rpm-ostree and gh-agentic-workflows under
+`cgwalters-forge`; the effective implement/fix bounds at admission remain
+authoritative. Ostree is **not** in that list: adding it or any other fork
+requires a separate operator bounds decision. A runner profile grants no
+target authority. A draft links the external run; VM logs and RESULTS-style
+evidence stay in that run's bounded artifacts, not pasted into the PR.
 
-- **Closed, caller-owned profiles.** The map lives in the dispatching
-  caller's repository and changes only by a reviewed merge. A plan, issue
-  text or dispatch input names a profile, never a workflow, a ref or a
-  runner label, and an unknown name fails before anything starts. Threat:
-  someone who can write a plan or an issue would otherwise send the job,
-  and the task's data, to a runner of their choosing, including one that
-  publishes its logs ([private repositories](private-repositories.md)).
-- **Disposable runner.** Each job gets a fresh VM-capable machine that runs
-  one job and is then destroyed. Nothing on it persists between jobs:
-  caches, the sandbox home, libvirt state or images. Threat: a job leaves
-  a planted binary, image or git hook for the next job, or reads what the
-  previous job left. The machine must also meet the
-  [runner requirements](workflow.md#what-a-caller-provides) and pass
-  `sandbox check` like any other.
-- **KVM preflight.** Before inference is registered, setup refuses
-  unless `/dev/kvm` exists, the user the agent runs as can read and write
-  it, and `virsh --connect qemu:///session version` succeeds as that
-  user. A profile with `"kvm": true` requires this. That user is the
-  sandbox user today, and the runner's user once #2989 removes the
-  sandbox user. Threat: a runner without KVM spends a run's budget on
-  tests that cannot boot, or falls back to slow emulation that looks like
-  a flake. Today [nothing checks /dev/kvm](sandbox.md). The devspace's
-  `kvm-smoke.sh` boots one VM in a setup script and is the model for
-  this check. The libvirt side already ships. The sandbox user may not
-  be in `libvirt`, whose polkit rule grants all of `qemu:///system`, and
-  host setup stops libvirt's system daemons when the runner's user is
-  in that group.
-- **Resources, lifetime and cleanup.** The profile fixes the runner size
-  (`cores`, through the external caller's own `runner-sizes.json`) and
-  `timeout-minutes`, the job's wall-clock limit. A VM runs under the
-  user's `qemu:///session` daemon, not under the run's processes. It is
-  destroyed and undefined on exit, as in `kvm-smoke.sh`'s trap, and the
-  machine itself is discarded whatever the outcome. The run's inference budget and request cap still apply.
-  Threats: a runaway test loop holds a 64-core machine for hours, or a
-  leaked VM keeps running after the job's credentials are gone.
-- **Inference admission.** The broker admits the external caller's
-  workflow by its `job_workflow_ref`
-  ([inference admission](inference.md#which-workflows-a-broker-admits)),
-  as a separate decision for the operator. This contract changes no broker
-  configuration. Threat: admitting a whole organization would let any of
-  its workflows spend the pool.
-- **No forge write credential in agent or test processes.** The external
-  run holds at most the read-only token that the agent already gets. It
-  holds no `SAFE_OUTPUTS_PAT`, no apply environment and no OIDC request
-  credential in the sandbox ([tokens](workflow.md#which-tokens-reach-what)).
-  VMs that the tests boot inherit nothing from the runner's environment.
-  Threat: test code, or the agent through it, pushes or comments directly
-  and bypasses check.
-- **Protected check and apply.** The trusted apply job runs in a
-  cgwalters-forge repository with that repository's bounds. Before it
-  writes, it requires all of these:
-  - the artifact's digest matches the one the external run recorded;
-  - the run's repository, workflow path, ref and run ID are the ones the
-    profile names;
-  - the run was started by this dispatch, at the expected run attempt
-    (how tracker learns the run ID of a dispatch in another repository is
-    an open design point);
-  - `check` accepts the artifact again. The trusted side builds the
-    policy, and the base-secret evidence for the claimed base commit,
-    from the midstream bounds itself, and never reads the external run's
-    `policy.json`.
+### Repeated-test evidence and acceptance
 
-  The external policy and check only filter early. Threat: whoever
-  administers the external repository could loosen its policy (limits,
-  base, clone URL) or its check, or substitute an artifact from another
-  run.
-- **Midstream-only drafts.** The target must be in the caller's midstream
-  bounds (tracker's `midstream.toml` or `midstream-fix.toml`). The output is
-  a draft pull request or a push to an existing draft, never ready, merged
-  or upstream. Threat: an external run lands work outside the forks, or as
-  ready for merge, where the operator expects to promote it by hand.
+For example, a bootc install test requested three times records the exact
+tested commit (including the proposed patch), image digest, test identifier
+and command, profile and effective resources, planned attempt count `3`,
+and each attempt's exit status, duration and artifact-relative log/RESULTS
+paths. Record `pass`, `fail`, `skipped` or `not-run` for every attempt;
+one pass after two failures is not three passes. A changed patch/head needs
+a new evidence set. Check validates the bounded evidence manifest and its
+association with the checked patch; it cannot prove test truth from prose.
+Cancellation or missing logs cannot count as a successful repeated run.
+The manifest must bind the checked-out base/head and the patched tree,
+which check recomputes. Attempt counts must fit the profile's fixed
+maximum, with one outcome and one regular-file log per attempt under
+existing artifact size limits. Failed attempts are not dropped; the draft
+summarizes the count of each outcome and links the external run.
 
-### Repeated-test evidence
-
-A job that is asked to show a test stays green hands back, inside its
-artifact and not in the pull request, a `test-evidence.json` alongside the
-outcome file:
-
-```json
-{
-  "repo": "cgwalters-forge/bootc",
-  "head": "BASE_COMMIT_40_HEX",
-  "tree": "TREE_WITH_PATCH_40_HEX",
-  "test": "tmt run plans --name /tmt/plans/install",
-  "attempts": 5,
-  "outcomes": ["pass", "pass", "pass", "pass", "pass"],
-  "logs": ["evidence/attempt-1.log", "evidence/attempt-2.log", "evidence/attempt-3.log", "evidence/attempt-4.log", "evidence/attempt-5.log"]
-}
-```
-
-`head` is the commit that the run checked out. `tree` is the tree of that
-commit with the patch applied, which check recomputes and must match, so
-the evidence names exactly the code that apply proposes. `attempts` is
-at least 1 and at most the profile's `max-attempts`. `outcomes` and
-`logs` have one entry per attempt. Each outcome is `pass`, `fail` or
-`error`, and each log is a regular file inside the artifact under the
-existing size limits. Failures are reported, not dropped. The draft
-links the external run and states `attempts` and the count of each
-outcome. The file is the agent's own report, held to its shape and
-`tree`; it is not proof that the tests ran as described.
-
-### Negative proofs
-
-Runtime acceptance needs all three refusals, each with its positive control,
-from a real dispatch:
-
-| Case | Expected refusal | Positive control |
-| --- | --- | --- |
-| Unknown profile, such as `devspace-rhel10-65` or a raw label | Tracker's dispatch fails before starting any workflow, naming the profile | `hosted` and `devspace-rhel10-64` start |
-| KVM unavailable: no `/dev/kvm`, or not writable by the runner's user | Setup fails before inference registration, naming `/dev/kvm` | The same profile on a KVM runner boots `kvm-smoke.sh`'s VM |
-| Unauthorized target or artifact: a repository outside the midstream bounds, an upstream repository, or an artifact from another repository, workflow or run | Trusted apply refuses before any write | A target in `midstream.toml` gets one draft |
+Runtime acceptance remains outstanding: demonstrate an admitted external
+run and checked-artifact apply to an allowed midstream draft, then an
+update at its exact head. Negative tests must refuse unknown profiles,
+unavailable KVM/libvirt, unauthorized targets (including ostree today),
+substituted digests, wrong repository/workflow/run/attempt and moved heads.
+Also prove cleanup after cancellation/runner loss and absence of write or
+lifecycle credentials in agent/test processes. See the
+[implementation slices](plan.md#external-runner-implementation-slices).
+Each negative proof needs its positive control: an admitted profile
+starts, a KVM-capable host boots and destroys a minimal guest, and an
+allowed midstream target receives one draft. No runtime proof has run here.
 
 ## Forgejo Actions caller
 

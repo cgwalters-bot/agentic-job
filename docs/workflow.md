@@ -287,6 +287,22 @@ calls.
 The tracker dispatcher, external workflow wrapper and agent-board plan schema
 must forward this input separately; they are not changed here.
 
+## External execution and trusted midstream publication
+
+The agreed [external VM-runner contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract)
+separates execution location from publication target: an external deployment
+such as the bootc-dev devspace runs agent and isolated check stages without
+forge-write credentials; a trusted apply job in `cgwalters-forge` verifies
+the checked artifact's digest and repository/workflow/run provenance before
+opening or updating an allowed midstream draft. It never executes the
+artifact as code. VM evidence remains in the external run's artifacts.
+
+This is future cross-run wiring, not something the composed workflow below
+already supplies. Its same-run source/policy/artifact checks must not be
+bypassed to implement transport. Hosted behavior, effective bounds and
+apply-only publication credentials stay unchanged; runtime acceptance and
+broker admission remain prerequisites, not claims of this documentation.
+
 ## The pieces, and an agent job of your own
 
 `agentic-job.yml` is four pieces, and a caller can put them together
@@ -675,7 +691,7 @@ Read this before relying on it.
   configured the run could open no pull request, nor comment. Neither run
   used the chat session, whose job was skipped. Handing such a run back
   to a midstream fork through a trusted apply job is
-  [proposed, not built](dispatch.md#per-job-vm-runners-proposed).
+  [specified, not built](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract).
   Claude Code and opencode have also run through the reusable workflow on
   GitHub-hosted runners using its old built-in `tailscale-*` inputs, including
   agent configuration and analysis runs (the [retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).
