@@ -815,6 +815,326 @@ fn a_run_as_its_own_user_in_the_home_given() {
         got.all()
     );
     assert!(!job.path("home").exists());
+
+    // `--runner-gate`: a GitHub token the agent could read, made now, is
+    // named and never shown; nor does this host, without the installed
+    // write policy, hold the agent's network. Nothing is started.
+    let job = Job::new("own-gate-refused");
+    let token = format!("gate-fixture-{}", std::process::id());
+    let config = own_config(&plain(&proxy));
+    let mut command = job.own_command(&config);
+    command.arg("--runner-gate").env("GH_TOKEN", &token);
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    for want in [
+        "run --runner-gate refuses",
+        "GH_TOKEN",
+        "egress.write-policy",
+    ] {
+        assert!(got.stderr.contains(want), "{want:?}: {}", got.all());
+    }
+    assert!(!got.all().contains(&token), "{}", got.all());
+    assert!(!job.path("home").exists());
+    // And only with --runner-home.
+    let mut command = job.command(&config);
+    command.arg("--runner-gate");
+    let got = Finished::of(command.output().unwrap());
+    assert_ne!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert!(got.stderr.contains("--runner-home"), "{}", got.all());
+}
+
+/// The public gate must refuse a store even when this uid has to chmod
+/// the file or an ancestor before reading it. No privileged setup needed.
+#[test]
+fn runner_gate_refuses_recoverable_stores_and_other_process_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    for (case, blocked, candidate) in [
+        ("gate-file-mode", ".netrc", ".netrc"),
+        ("gate-directory-mode", ".aws", ".aws/credentials"),
+    ] {
+        let job = Job::new(case);
+        let home = job.path(HOME_DIR);
+        std::fs::create_dir(&home).unwrap();
+        // Block just this store's ancestor, not the whole home: otherwise
+        // every missing candidate becomes a finding and the bounded
+        // diagnostic can omit the store this test is checking.
+        let store = home.join(candidate);
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let value = format!("opaque-store-{}", std::process::id());
+        std::fs::write(&store, &value).unwrap();
+        let blocked = home.join(blocked);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let output = job.own_command(&config).arg("--runner-gate").output();
+        // Restore access even if an assertion fails, including for cleanup.
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains(&format!("{} ", store.display())),
+            "{}",
+            got.all()
+        );
+        assert!(!got.all().contains(&value), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+        assert_eq!(std::fs::read_to_string(store).unwrap(), value);
+    }
+
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .env_clear()
+        .env("DEPLOY_PASSWORD", "opaque-child-credential")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    for _ in 0..250 {
+        if std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .unwrap_or_default()
+            .trim()
+            == "sleep"
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let job = Job::new("gate-other-environment");
+    let output = job.own_command(&config).arg("--runner-gate").output();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let got = Finished::of(output.unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains(&format!(
+            "process {pid} (\"sleep\") holds a credential-named variable"
+        )),
+        "{}",
+        got.all()
+    );
+    assert!(
+        !got.all().contains("opaque-child-credential"),
+        "{}",
+        got.all()
+    );
+    assert!(!job.path("out/work/harness/harness.json").exists());
+}
+
+/// Discovery must not drop a stopped runner just because its marker's
+/// directory is inaccessible. Its registration is still directly readable.
+#[test]
+fn runner_gate_discovers_stopped_runner_with_inaccessible_marker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let job = Job::new("gate-stopped-runner");
+    let install = job.path("runner");
+    let bin = install.join("bin");
+    let workspace = install.join("_work/repo");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(bin.join("Runner.Worker"), "marker").unwrap();
+    let store = install.join(".credentials");
+    let value = format!("opaque-registration-{}", std::process::id());
+    std::fs::write(&store, &value).unwrap();
+    for mode in [0o700, 0o000] {
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).unwrap();
+        let output = job
+            .own_command(&config)
+            .arg("--runner-gate")
+            .env("RUNNER_WORKSPACE", &workspace)
+            .output();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains(&format!("{} holds", store.display())),
+            "mode {mode:o}: {}",
+            got.all()
+        );
+        assert!(!got.all().contains(&value), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+/// A gitfile must not make the checkout's authorization disappear from
+/// the gate: unsupported layouts must be explicitly refused.
+#[test]
+fn runner_gate_discovers_workspace_git_layouts() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    for layout in ["directory", "separate", "linked"] {
+        let job = Job::new(&format!("gate-git-{layout}"));
+        job.own_repository();
+        let repo = job.path("repo");
+        let workspace = if layout == "linked" {
+            job.path("linked")
+        } else {
+            repo.clone()
+        };
+        let mut git = Command::new("git");
+        git.arg("-C").arg(&repo);
+        match layout {
+            "separate" => {
+                git.args(["init", "--separate-git-dir"])
+                    .arg(job.path("gitdir"));
+            }
+            "linked" => {
+                git.args(["worktree", "add", "--detach"])
+                    .arg(&workspace)
+                    .arg("HEAD");
+            }
+            _ => {
+                git.arg("status");
+            }
+        }
+        let setup = Finished::of(git.output().unwrap());
+        assert_eq!(setup.code, Some(EXIT_SUCCESS), "{}", setup.all());
+        let value = "AUTHORIZATION: basic opaque-fixture";
+        let setup = Finished::of(
+            Command::new("git")
+                .arg("-C")
+                .arg(&workspace)
+                .args([
+                    "config",
+                    "--local",
+                    "http.https://github.com/.extraheader",
+                    value,
+                ])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(setup.code, Some(EXIT_SUCCESS), "{}", setup.all());
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .env("GITHUB_WORKSPACE", &workspace)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        let want = if layout == "directory" {
+            "git's http.extraheader"
+        } else {
+            "unsupported Git layout"
+        };
+        assert!(got.stderr.contains(want), "{layout}: {}", got.all());
+        assert!(!got.all().contains(value), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+/// Git's includes can hold credentials outside the fixed scan list.
+#[test]
+fn runner_gate_refuses_git_configuration_includes() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    for (case, file, key) in [
+        ("local", "repo/.git/config", "include.path"),
+        ("conditional", "repo/.git/config", "includeIf.gitdir:/.path"),
+        ("worktree", "repo/.git/config.worktree", "include.path"),
+        ("home", "home/.gitconfig", "include.path"),
+    ] {
+        let job = Job::new(&format!("gate-git-include-{case}"));
+        job.own_repository();
+        std::fs::create_dir_all(job.path("home")).unwrap();
+        job.write("included-config", "[http \"https://github.com/\"]\nextraheader = AUTHORIZATION: basic b3BhcXVlLWZpeHR1cmU=\n");
+        let setup = Finished::of(
+            Command::new("git")
+                .args(["config", "--file"])
+                .arg(job.path(file))
+                .arg(key)
+                .arg(job.path("included-config"))
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(setup.code, Some(EXIT_SUCCESS), "{}", setup.all());
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .env("GITHUB_WORKSPACE", job.path("repo"))
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains(&format!(
+                "{} has unsupported Git includes",
+                job.path(file).display()
+            )),
+            "{case}: {}",
+            got.all()
+        );
+        assert!(!got.all().contains("b3BhcXVlLWZpeHR1cmU="), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+/// Run only on a disposable, already secured host, as the locked runner
+/// uid, with no credentials in any same-uid process or candidate file.
+/// The installed rules must cover that uid and its subordinate ranges.
+#[test]
+#[ignore = "needs a fresh secured host; never run in an existing sandbox"]
+fn runner_gate_starts_an_agent_only_without_credential_exposures() {
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let config = own_config(&plain(&proxy)).replace(NO_PROXY, "[egress]\nwrite-policy = true\n");
+    // A passing baseline is required, not skipped when the host refuses.
+    let job = Job::new("gate-success");
+    job.own_repository();
+    job.script(&json!([canary()]));
+    let got = Finished::of(
+        job.own_command(&config)
+            .arg("--runner-gate")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert_eq!(
+        job.json("out/work/harness/harness.json")["result"],
+        "success"
+    );
+
+    for case in ["environment", "store", "process"] {
+        let job = Job::new(&format!("gate-fresh-{case}"));
+        job.own_repository();
+        job.script(&json!([canary()]));
+        let mut command = job.own_command(&config);
+        command.arg("--runner-gate");
+        let mut child = None;
+        match case {
+            "environment" => {
+                command.env("DEPLOY_PASSWORD", "opaque-fixture");
+            }
+            "store" => {
+                std::fs::write(job.path("home/.netrc"), "opaque-fixture").unwrap();
+            }
+            "process" => {
+                child = Some(
+                    Command::new("sleep")
+                        .arg("60")
+                        .env("DEPLOY_PASSWORD", "opaque-fixture")
+                        .spawn()
+                        .unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let output = command.output();
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            child.wait().unwrap();
+        }
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{case}: {}", got.all());
+        assert!(
+            got.stderr.contains("run --runner-gate refuses"),
+            "{}",
+            got.all()
+        );
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
 }
 
 #[test]

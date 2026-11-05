@@ -43,6 +43,7 @@ pub mod brief;
 pub mod clone;
 pub mod egress;
 pub mod enter;
+pub mod gate;
 pub mod handback;
 pub mod inference;
 pub mod key_check;
@@ -164,6 +165,11 @@ pub struct Args {
     /// sandbox user to run it as without one (agentic-job#2989)
     #[arg(long, value_name = "DIR")]
     pub runner_home: Option<PathBuf>,
+    /// With --runner-home, refuse to start the agent unless the host shows
+    /// that no credential but the agent's own is within its uid's reach and
+    /// that its uid is held to the egress write policy ([`gate`])
+    #[arg(long, requires = "runner_home")]
+    pub runner_gate: bool,
 }
 
 /// Everything a run is, checked before anything is started or spent.
@@ -676,6 +682,7 @@ impl Plan {
             watch,
         } = config.check()?;
         config.check_held()?;
+        let asks_watch = watch.is_some();
         let watch = watch_item(
             watch,
             args.watch_item.as_deref(),
@@ -754,6 +761,15 @@ impl Plan {
         .flatten();
         // And the MCP server's credential.
         let mcp_credential = mcp.is_some().then(mcp::Credential::from_env).flatten();
+        // Before anything is written: a refused run leaves nothing.
+        if let (true, Some(home)) = (args.runner_gate, &args.runner_home) {
+            ensure!(
+                !asks_watch,
+                "run --runner-gate: session.watch-item reads the run's item with the agent's \
+                 GitHub token, which a hardened run does not give it"
+            );
+            gate::check(&config, home)?;
+        }
         let exe = std::env::current_exe().context("finding this program's own path")?;
         let work = args.out.join(WORK_DIR);
         // Private to the runner's user: the transcript is not redacted

@@ -14,6 +14,11 @@ says what a caller may rely on across versions.
   External dispatch and cross-run apply are not deployed by this change;
   hosted behavior and bounds are unchanged (#2891).
 
+- The opt-in runner gate keeps discovered runner registrations in its scan
+  when the installation marker is inaccessible, refuses unsupported Git
+  layouts rather than overlooking checkout credentials, and uses the host's
+  shared root-daemon group and socket inventory.
+
 - Add off-by-default `advisory` event-review publication: one checked comment
   or noop bound to the admitted repository, PR, base branch and exact head.
   The writer re-reads the open PR before posting; ordinary review verdicts
@@ -103,6 +108,19 @@ says what a caller may rely on across versions.
   report as a comment body is sanitized, links included. `agentic-job apply
   --forge gitlab --run-summary` then posts it with mentions and quick
   actions broken (#2995).
+
+- The run action's new `runner-gate` input (`run --runner-gate`, off by
+  default) refuses to start an agent as the runner's user unless the host
+  shows that no credential other than the agent's run token is in reach:
+  not in `run`'s environment (so no `github-token`), not in another process
+  of the uid or of its subordinate uids, not in a credential file or the
+  runner's registration, not behind memory that a child can open, not
+  behind a Worker diagnostic socket, and not through `sudo`. The uid must
+  also be refused, on the spot, connections to the metadata service and
+  around the proxy, and the installed ruleset must hold its subordinate
+  uids to `egress.write-policy`.
+  Each missing control is named without its value
+  ([the gate](docs/secure-host.md#the-runner-only-launch-gate)).
 
 - `run`'s refusal of a provider key or broker token in a readable process
   now says whether `/proc`'s `hidepid` hides other users' processes and, if
