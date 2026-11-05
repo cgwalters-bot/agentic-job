@@ -178,8 +178,12 @@ For an agent in particular:
 
 - The agent can read whatever the runner's user can: the job's files,
   its environment and `run`'s.
-- Without `egress.write-policy` the agent's network is the runner's,
-  open but for the metadata service under `sandbox.deny-runner-metadata`.
+- The egress proxy holds the agent, the runner's user, only under
+  `egress.write-policy`. `config` turns it on for a run's file that keeps
+  the proxy and leaves it unset, and `run` refuses an agent with the
+  proxy on and the write policy off. With `egress.proxy = false` the
+  agent's network is the runner's, open but for the metadata service
+  under `sandbox.deny-runner-metadata`.
 - What the agent leaves running outside its process group runs until
   the job ends: nothing kills every process of the runner's user.
 - A container the agent starts has no network of its own. It reaches the

@@ -392,11 +392,16 @@ fn cases(config: &Config, runner: &User) -> Vec<Case> {
     }));
     // sandbox.deny-runner-metadata's rule is in the table setup loaded:
     // without it the runner reaches the metadata service again (IPv4
-    // only on CI's hosted runner).
+    // only on CI's hosted runner), and under egress.write-policy POSTs
+    // past the proxy.
     if config.sandbox.deny_runner_metadata() {
+        let expect: &[&str] = match config.egress.write_policy {
+            true => &["runner-metadata", "write-policy-post"],
+            false => &["runner-metadata"],
+        };
         cases.push(Case::new(
             "the network rules",
-            network_case("NO_RULES", &["runner-metadata"]),
+            network_case("NO_RULES", expect),
             || {
                 Removed::by(
                     &[&["nft", "delete", "table", "inet", network::TABLE]],
@@ -406,6 +411,99 @@ fn cases(config: &Config, runner: &User) -> Vec<Case> {
         ));
     }
     cases
+}
+
+/// A public address and port the write policy does not redirect to the
+/// proxy: Cloudflare's DNS over TLS, which answers anyone.
+const UNREDIRECTED: &str = "telnet://1.1.1.1:853";
+
+/// A host the proxy reads from but refuses a POST to.
+const WRITE_URL: &str = "https://example.com/";
+
+/// curl's status when it could not connect at all.
+const CURL_COULD_NOT_CONNECT: i32 = 7;
+
+/// curl as UID, around any proxy the environment names: this process's
+/// own, or another through root and setpriv.
+fn curl_as(uid: Option<u32>, args: &[&str]) -> RootOutput {
+    let curl = ["curl", "-sS", "--noproxy", "*", "--connect-timeout", "10"];
+    let curl = curl.iter().chain(args).copied();
+    match uid {
+        None => {
+            let out = Command::new("curl")
+                .args(curl.skip(1))
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            RootOutput {
+                success: out.status.success(),
+                status: out.status.code().unwrap_or(-1),
+                output: format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            }
+        }
+        Some(uid) => {
+            let (reuid, regid) = (format!("--reuid={uid}"), format!("--regid={uid}"));
+            let setpriv = ["setpriv", &reuid, &regid, "--clear-groups", "--"];
+            root_run(
+                &strings(&setpriv.into_iter().chain(curl).collect::<Vec<_>>()),
+                "",
+            )
+        }
+    }
+}
+
+/// The first of the runner's subordinate uids, which setup holds to the
+/// proxy with the runner's own: a container's processes run as them.
+fn subordinate_uid(runner: &User) -> u32 {
+    let text = std::fs::read_to_string("/etc/subuid").unwrap();
+    text.lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(owner, _)| *owner == runner.name || *owner == runner.uid.to_string())
+        .find_map(|(_, range)| range.split(':').next()?.parse().ok())
+        .expect("the runner's user has no subordinate uids in /etc/subuid")
+}
+
+/// Whether UID connects straight out, and whether the proxy refused it
+/// a POST, with no proxy set: the write policy's rules, which hold the
+/// agent of a run whose file leaves `egress.write-policy` unset.
+fn direct_egress(uid: Option<u32>) -> (bool, bool) {
+    let connect = curl_as(uid, &["-m", "15", "-o", "/dev/null", UNREDIRECTED]);
+    let post = ["-m", "30", "-o", "/dev/null", "-D", "-", "-X", "POST"];
+    let post = curl_as(
+        uid,
+        &[&post[..], &["-d", "egress-test", WRITE_URL]].concat(),
+    );
+    let refused = post
+        .output
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("x-egress-denied:"));
+    (connect.status != CURL_COULD_NOT_CONNECT, refused)
+}
+
+/// The runner's user, the agent's, and its subordinate uids are refused
+/// a direct connection and held to the proxy's write rules; without the
+/// network rules, the same requests go out.
+fn direct_egress_is_held(runner: &User) {
+    let uids = [None, Some(subordinate_uid(runner))];
+    for uid in uids {
+        assert_eq!(direct_egress(uid), (false, true), "uid {uid:?}, as set up");
+    }
+    let removed = Removed::by(
+        &[&["nft", "delete", "table", "inet", network::TABLE]],
+        &[&["nft", "-f", network::RULES_FILE]],
+    );
+    for uid in uids {
+        assert_eq!(
+            direct_egress(uid),
+            (true, false),
+            "uid {uid:?}, with no rules"
+        );
+    }
+    drop(removed);
 }
 
 /// The ids of `sandbox check`'s probes that failed.
@@ -435,6 +533,17 @@ fn each_probe_fails_when_its_protection_is_removed() {
             .unwrap()
             .is_none(),
         "setup made a second user"
+    );
+    // The sandbox job sets the host up as `config` writes a run's file.
+    assert!(
+        config.egress.write_policy,
+        "the host is not set up as for an agent: egress.write-policy is off"
+    );
+    direct_egress_is_held(&runner);
+    assert_eq!(
+        failed(&config),
+        none,
+        "after the network rules were put back"
     );
 
     // A machine is set up once.

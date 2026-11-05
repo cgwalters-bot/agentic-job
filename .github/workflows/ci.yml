@@ -532,11 +532,13 @@ jobs:
           test "$(printf 'id -u; exit\n' | socat -t 5 - UNIX-CONNECT:/run/agentic-job-test-root.sock)" = 0
       # Setup only warns when the threat feed cannot be fetched, and a pin
       # that names a commit no longer served would have every run warn:
-      # here the feed has to load.
+      # here the feed has to load. The write policy is on, as `config`
+      # writes it for an agent's host: tests/sandbox_host.rs proves it
+      # holds the runner's user and its subordinate uids.
       - name: Setup timing
         shell: bash
         run: |
-          target/debug/agentic-job config --host --from "$CONFIG" > "$RUNNER_TEMP/sandbox-ci.toml"
+          target/debug/agentic-job config --host --from "$CONFIG" --boolean egress.write-policy=true > "$RUNNER_TEMP/sandbox-ci.toml"
           sudo target/debug/agentic-job sandbox setup --config "$RUNNER_TEMP/sandbox-ci.toml" 2>&1 | tee "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Threat feed:' "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Egress proxy (Rust)' "$RUNNER_TEMP/sandbox-setup.log"
@@ -756,7 +758,7 @@ jobs:
   # runner's user, reads through the egress proxy and is refused a POST
   # (.github/agentic-job/e2e/write-policy.sh), and the job hands back and
   # applies its comment through the proxy's runner rules. e2e-full is the
-  # default, where the agent's writes are open.
+  # default, which `config` holds to the proxy the same way.
   e2e-write-policy:
     needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}

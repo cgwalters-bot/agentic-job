@@ -19,7 +19,10 @@ says what a caller may rely on across versions.
   write policy) and `sandbox probe no-user` checks that no second user exists.
   `run` requires `--runner-home`, and refuses what needed a second user
   (`api-key`, `inference.front`, `[mcp]`, private targets, `session.listen`,
-  `[child-agent]`). `agent-user: sandbox` is refused. The keys
+  `[child-agent]`). With no second user for the egress proxy to hold,
+  `config` turns `egress.write-policy` on for a run's file that keeps the
+  proxy and leaves it unset, and `run` and `config` refuse an agent with
+  the proxy on and the write policy off. `agent-user: sandbox` is refused. The keys
   `sandbox.create-user`, `sandbox.user`, `sandbox.groups`,
   `sandbox.allow-existing-user`, `sandbox.filesystem-view`,
   `sandbox.check.before-agent` and `setup.tools` are refused by name;

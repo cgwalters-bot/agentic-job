@@ -1,6 +1,6 @@
 #!/bin/sh
-# What the scripted agent does in CI's end-to-end run: `sandbox setup`
-# runs this as the sandbox user, and `fake-agent demo` then plays the
+# What the scripted agent does in CI's end-to-end run: the agent job runs
+# this as the runner's user, and `fake-agent demo` then plays the
 # session it leaves. It prints a string shaped like a credential (which
 # the run insists was redacted) and asks for a comment, but only when
 # its GitHub token reads this repository and GitHub refuses it a write,
@@ -22,10 +22,10 @@ if out=$(gh api graphql -f id="$issue" -f query='mutation($id: ID!) {
 fi
 printf '%s\n' "$out"
 case "$out" in *"egress proxy"*) exit 1 ;; *"not accessible"*) ;; *) exit 1 ;; esac
-# Without the egress-write-policy input the agent's writes are open: no
-# proxy refuses its POST (e2e-write-policy is the run where one does).
+# `config` holds the agent to the egress proxy by default: the proxy
+# refuses its POST to a host no rule allows.
 headers=$(curl -sS -o /dev/null -D - -X POST --data probe https://example.com/)
-case "$headers" in *[Xx]-[Ee]gress-[Dd]enied:*) exit 1 ;; esac
+case "$headers" in *[Xx]-[Ee]gress-[Dd]enied:*) ;; *) exit 1 ;; esac
 printf '%s\n' '{"type": "add_comment", "body": "A comment from the scripted agent of an end-to-end run."}' >> "$HOME/out/safe-outputs.jsonl"
 SH
 cat > "$HOME/.config/fake-agent/demo.json" <<'JSON'

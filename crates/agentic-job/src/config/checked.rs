@@ -250,6 +250,21 @@ impl Config {
         })
     }
 
+    /// That the egress proxy holds the agent, the runner's user since
+    /// #2989: only the write policy puts that user's connections through
+    /// it, and without it the proxy's rules would bound nothing the agent
+    /// does. `config` turns it on for a run's file that leaves it unset;
+    /// `run` and `config` refuse it off.
+    pub fn check_held(&self) -> Result<()> {
+        ensure!(
+            self.agent.name.is_empty() || !self.egress.proxy || self.egress.write_policy,
+            "egress.proxy needs egress.write-policy for an agent: it runs as the runner's \
+             user, which the proxy holds only under it; set egress.proxy = false for an agent \
+             with the runner's open network"
+        );
+        Ok(())
+    }
+
     /// The whole configuration, checked: [`Config::check_host`], and
     /// that it names an agent `run` can configure, an inference proxy if
     /// that agent has a model behind it, limits that bind, a commit git
@@ -1034,6 +1049,37 @@ model = \"m\"
             [("100.64.0.1".to_owned(), 18080)]
         );
         assert!(hosts(&format!("{CLAUDE}{PROXY}{OIDC}{CAPPED}{DIRECT}")).is_empty());
+    }
+
+    /// An agent is held to the egress proxy or has none; a host's file
+    /// names no agent, and its proxy is the host's business.
+    #[test]
+    fn an_agent_is_held_to_the_proxy_or_has_none() {
+        for (text, held) in [
+            (format!("{FAKE}{CAPPED}"), false),
+            (
+                format!("{FAKE}{CAPPED}[egress]\nwrite-policy = false\n"),
+                false,
+            ),
+            (
+                format!("{FAKE}{CAPPED}[egress]\nwrite-policy = true\n"),
+                true,
+            ),
+            (format!("{FAKE}{CAPPED}[egress]\nproxy = false\n"), true),
+            ("[egress]\nwrite-policy = false\n".to_owned(), true),
+        ] {
+            let config = Config::parse(&text).unwrap();
+            match config.check_held() {
+                Ok(()) => assert!(held, "{text}"),
+                Err(err) => {
+                    assert!(!held, "{text}");
+                    assert!(
+                        err.to_string()
+                            .contains("needs egress.write-policy for an agent")
+                    );
+                }
+            }
+        }
     }
 
     /// `sandbox setup` holds a file to the machine's tables alone: it is

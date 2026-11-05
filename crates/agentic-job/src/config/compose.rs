@@ -287,6 +287,30 @@ fn inference_address(table: &mut Table, address: &str) -> Result<()> {
     Ok(())
 }
 
+/// Turns `egress.write-policy` on for a run whose file leaves it unset
+/// and keeps the proxy: the agent is the runner's user (#2989), whom
+/// only the write policy holds to the proxy. Written out, so that the
+/// secure-host forwarder, which reads the file for it, passes it on.
+fn hold_the_agent(table: &mut Table) -> Result<()> {
+    let named = table
+        .get("agent")
+        .and_then(Value::as_table)
+        .and_then(|agent| agent.get("name"))
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.is_empty());
+    let egress = table.get("egress").and_then(Value::as_table);
+    let proxy = egress.and_then(|egress| egress.get("proxy"));
+    let unset = egress.is_none_or(|egress| !egress.contains_key("write-policy"));
+    if named && unset && proxy.and_then(Value::as_bool) != Some(false) {
+        set(
+            table,
+            &["egress".into(), "write-policy".into()],
+            Value::Boolean(true),
+        )?;
+    }
+    Ok(())
+}
+
 /// The configuration of ARGS as TOML, checked.
 fn compose(args: &Args) -> Result<String> {
     let mut table = match &args.from {
@@ -359,9 +383,11 @@ fn compose(args: &Args) -> Result<String> {
             )?;
         }
     }
+    hold_the_agent(&mut table)?;
     let text = toml::to_string(&table).context("writing the configuration")?;
     // As its readers will see it: parsed from the text that is printed.
     let config = Config::parse(&text)?;
+    config.check_held()?;
     if args.host {
         config.check_host()?;
         // Formatting and the upload exception belong to `run`, not host
@@ -644,11 +670,14 @@ mod tests {
         .unwrap();
         let config = composed(&args(file.path().to_str(), RUN, LIMITS, &[]));
         assert_eq!(config.egress.direct, ["http://100.64.0.1:18080"]);
-        // Under `front` only `run` reaches the broker.
+        // Under `front` only `run` would reach the broker, which the
+        // proxy holding the runner's user refuses.
         writeln!(file, "front = true").unwrap();
-        let config = composed(&args(file.path().to_str(), RUN, LIMITS, &[]));
-        assert!(config.inference.front);
-        assert!(config.egress.direct.is_empty());
+        let err = compose(&args(file.path().to_str(), RUN, LIMITS, &[])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not go with egress.write-policy"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -1062,6 +1091,52 @@ mod tests {
             let args = host_args(&boolean, &list);
             let err = compose(&args).expect_err("a bad setting was taken");
             assert!(format!("{err:#}").contains(names), "{args:?}: {err:#}");
+        }
+    }
+
+    /// A run's file holds its agent, the runner's user, to the egress
+    /// proxy unless it has none, in the text the secure-host forwarder
+    /// reads for `egress: write-policy`; a host's file is left alone.
+    #[test]
+    fn a_run_holds_its_agent_to_the_proxy() {
+        const HELD: &str = "write-policy = true";
+        for (host, run, boolean, want) in [
+            (false, true, &[][..], Ok(true)),
+            (true, true, &[], Ok(true)),
+            (false, true, &["egress.proxy=false"], Ok(false)),
+            (true, false, &[], Ok(false)),
+            (
+                false,
+                true,
+                &["egress.write-policy=false"],
+                Err("needs egress.write-policy for an agent"),
+            ),
+            (
+                true,
+                true,
+                &["sandbox.lock-runner=false"],
+                Err("needs egress.proxy, egress.rust-proxy and sandbox.lock-runner"),
+            ),
+            (
+                false,
+                true,
+                &["egress.rust-proxy=false"],
+                Err("needs egress.proxy, egress.rust-proxy and sandbox.lock-runner"),
+            ),
+        ] {
+            let args = Args {
+                host,
+                boolean: settings(boolean),
+                ..args(None, if run { RUN } else { &[] }, LIMITS, &[])
+            };
+            match (compose(&args), want) {
+                (Ok(text), Ok(held)) => {
+                    assert_eq!(text.contains(HELD), held, "{args:?}: {text}");
+                    assert_eq!(Config::parse(&text).unwrap().egress.write_policy, held);
+                }
+                (Err(err), Err(want)) => assert!(format!("{err:#}").contains(want), "{err:#}"),
+                (got, want) => panic!("{args:?}: got {got:?}, wanted {want:?}"),
+            }
         }
     }
 

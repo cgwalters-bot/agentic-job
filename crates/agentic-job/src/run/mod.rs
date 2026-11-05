@@ -675,6 +675,7 @@ impl Plan {
             mcp,
             watch,
         } = config.check()?;
+        config.check_held()?;
         let watch = watch_item(
             watch,
             args.watch_item.as_deref(),

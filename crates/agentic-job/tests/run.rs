@@ -292,8 +292,11 @@ impl Finished {
     }
 }
 
+/// No host setup runs here, and so no egress proxy holds the agent.
+const NO_PROXY: &str = "[egress]\nproxy = false\n";
+
 fn config(inference: &str) -> String {
-    format!("[agent]\nname = \"fake\"\n{LIMITS}{inference}")
+    format!("[agent]\nname = \"fake\"\n{LIMITS}{NO_PROXY}{inference}")
 }
 
 /// A configuration for a run whose agent is this user: the fake agent
@@ -303,7 +306,7 @@ fn own_config(inference: &str) -> String {
         .parent()
         .unwrap();
     format!(
-        "[agent]\nname = \"fake\"\n[sandbox]\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n{LIMITS}{inference}",
+        "[agent]\nname = \"fake\"\n[sandbox]\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n{LIMITS}{NO_PROXY}{inference}",
         bin.display()
     )
 }
@@ -824,9 +827,10 @@ fn documented_mcp_config_is_refused_before_runner_launch() {
         .split_once("```")
         .unwrap()
         .0;
+    let config = format!("{config}{NO_PROXY}");
     let job = Job::new("documented-mcp-refused");
     let got = Finished::of(
-        job.own_command(config)
+        job.own_command(&config)
             .env_remove(MCP_TOKEN_VAR)
             .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
             .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
