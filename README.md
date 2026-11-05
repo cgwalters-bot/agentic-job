@@ -54,9 +54,9 @@ workflow keeps write credentials in separate jobs
 
 **Agent security is just CI security.** An agent is code you did not
 write, steered by text you did not write, like a build script from a pull
-request: take root away from it, give its job no token it could misuse,
-and check its output on another machine before a write token acts on it
-([trust](docs/requirements.md#actors-and-trust),
+request: take root away from it, don't give its job a token it could
+misuse, and check its output on another machine before a write token acts
+on it ([trust](docs/requirements.md#actors-and-trust),
 [tokens](docs/workflow.md#which-tokens-reach-what)). For most people
 [gh-aw](https://github.com/github/gh-aw) is the right choice today; this
 runs the agent as a host user, not in a container
@@ -157,19 +157,19 @@ later changes on main; binaries are prebuilt and attested, or built in the
 run ([versions and binaries](docs/workflow.md#things-a-caller-should-know)).
 
 **A real agent** needs a credential broker
-([what a broker provides](docs/inference.md#what-a-broker-provides)) and
-no secret beyond `SAFE_OUTPUTS_PAT`. Replace `agent: fake` with `claude`,
-drop `max-requests: "0"` (the default caps at 150 requests, which the
+([what a broker provides](docs/inference.md#what-a-broker-provides)), but
+it doesn't need any secret beyond `SAFE_OUTPUTS_PAT`. Replace
+`agent: fake` with `claude`, drop `max-requests: "0"` (the default caps at 150 requests, which the
 broker counts), and pass `inference-url` and `inference-audience` from the
 broker's operator and an `agent-runner` that reaches the broker;
-agentic-job provisions no runners. The
+agentic-job doesn't provision runners. The
 [real agent checklist](docs/workflow.md#real-agent-checklist) has the rest.
 
 ## What is real today
 
-The binary is Rust; the workflow, the sandbox and the checks run on
-same-repository pull requests here, end to end, with the scripted agent, on
-GitHub's hosted Ubuntu 26.04 runners. Claude Code and opencode have each
+The binary is written in Rust. The workflow, the sandbox and the checks run
+end to end on same-repository pull requests here, with the scripted agent,
+on GitHub's hosted Ubuntu 26.04 runners. Claude Code and opencode have each
 run real tasks on it on RHEL 10 runners. Cross-repository trials opened
 pull requests before apply switched to forks
 ([#59](https://github.com/cgwalters-forge/agentic-job/issues/59)). The fork
@@ -189,12 +189,12 @@ opts its own repository in under the conditions of
 [private repositories](docs/private-repositories.md).
 Pull requests from forks
 do not get the end-to-end jobs that write. The sandbox setup takes two
-to five minutes on a hosted runner. Nobody but its authors has used it.
+to five minutes on a hosted runner. Only its authors have used it.
 
 ## Known gaps
 
-Behaviour that does not match what a new user would expect, each with
-the issue that tracks it, where one is filed, or the page that explains it.
+This behaviour does not match what a new user would expect. Each item links
+to the issue that tracks it, where one is filed, or to the page that explains it.
 
 - Steps after `secure-host` lose root but keep the job's tokens and an open
   network ([one trust level for the rest of the job](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)).
@@ -204,16 +204,16 @@ the issue that tracks it, where one is filed, or the page that explains it.
   `[egress] mode = "allowlist"`, which is off by default
   ([the sandbox user's network](docs/sandbox.md#what-setup-does-for-an-agent)).
 - `sandbox.close-resolved`, off by default and set by `hosted.toml`, closes
-  systemd-resolved to the sandbox user. The runner's user, which every
-  later step runs as, still resolves names, so data can leave through DNS
+  systemd-resolved to the sandbox user. Every later step runs as the
+  runner's user, which still resolves names, so data can leave through DNS
   ([not claimed](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#not-claimed)).
 - The world-write policy is proven at run time on hosted Ubuntu 26.04
   ([CI's controls](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
   not on RHEL 10. The image admits RHEL 10, but no run has tested the policy there yet
   ([RHEL 10](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#rhel-10)).
-- The reusable workflow takes no model key or MCP credential, so a real
-  agent needs a broker, until the runner's processes are kept from
-  reading `run`'s environment and memory ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618);
+- The reusable workflow doesn't accept a model key or an MCP credential, so
+  a real agent needs a broker. This stays so until the runner's processes
+  are kept from reading `run`'s environment and memory ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618);
   [refused for now](docs/inference.md#a-provider-api-key)).
   Where an agent job of your own uses a key, nothing outside the provider
   caps what it spends.
@@ -222,8 +222,8 @@ the issue that tracks it, where one is filed, or the page that explains it.
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
   after the agent has run, unless the call sets `require-safe-outputs-pat`
   ([checking the token first](docs/workflow.md#checking-the-token-before-the-agent)).
-- A push to a stale fork with a PAT lacking the `workflow` scope is
-  untried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
+- Pushing to a stale fork with a PAT that lacks the `workflow` scope has
+  not been tried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
 - Setup takes minutes ([#188](https://github.com/cgwalters-forge/agentic-job/issues/188)).
 
 ## Where to read more
