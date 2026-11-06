@@ -4,7 +4,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 
 use super::{Checker, Want};
 use crate::proxy::policy::{Policy, Request};
@@ -28,6 +28,121 @@ const CONTROL_HOSTS: &[&str] = &["example.com", "github.com"];
 
 /// The header the proxy puts on every refusal of its own, lowercase.
 const DENIED_HEADER: &str = "x-egress-denied:";
+
+/// Fail-closed launch variant of the existing write-policy probe. A blocked
+/// unrelated TCP port does not stop direct HTTP(S) writes: require a live
+/// read control and the proxy's own refusal on both transparent listeners.
+/// No policy host means no evidence, not a skipped successful check.
+pub fn runner_write_readiness() -> Result<()> {
+    let policy = egress::installed_policy()?.with_runner_writes()?;
+    write_readiness(&policy, kernel_ipv6_disabled(), readiness_request)
+}
+
+/// The only missing-family exception: IPv6 disabled at boot, not just a
+/// missing route, interface sysctl, failed DNS lookup or refused remote port.
+/// The read-only module parameter and a failed AF_INET6 socket creation are
+/// independent evidence. Unknown evidence keeps the dual-stack requirement.
+pub fn kernel_ipv6_disabled() -> bool {
+    let Ok(bytes) = ipv6_boot_parameter() else {
+        return false;
+    };
+    ipv6_disabled_evidence(&bytes, || {
+        std::net::TcpListener::bind("[::1]:0").map(|_| ())
+    })
+}
+
+fn ipv6_boot_parameter() -> Result<Vec<u8>> {
+    let parameter = std::path::Path::new("/sys/module/ipv6/parameters/disable");
+    crate::host::roots_alone(parameter)?;
+    // Sysfs reports a page-sized attribute, not its short textual value.
+    // Accommodate up to a 64-KiB page while keeping both stat and read caps.
+    crate::files::read_regular(parameter, 64 * 1024).map_err(Into::into)
+}
+
+fn ipv6_disabled_evidence(parameter: &[u8], socket: impl FnOnce() -> std::io::Result<()>) -> bool {
+    matches!(parameter.trim_ascii(), b"Y" | b"1")
+        && socket().is_err_and(|err| {
+            err.raw_os_error() == Some(rustix::io::Errno::AFNOSUPPORT.raw_os_error())
+        })
+}
+
+fn write_readiness(
+    policy: &Policy,
+    ipv6_disabled: bool,
+    mut request: impl FnMut(&[&str]) -> Result<String>,
+) -> Result<()> {
+    let host = control_host(policy)
+        .context("runner write-policy readiness has no admitted read/refused POST control host")?;
+    let https = format!("https://{host}/");
+    // A failed read, missing curl, timeout, or origin refusal cannot count
+    // as enforcement. Do not print curl's output or response headers.
+    for family in ["--ipv4", "--ipv6"] {
+        if family == "--ipv6" && ipv6_disabled {
+            continue;
+        }
+        request(&direct(&[family, "--fail", &https]))
+            .context("runner write-policy address-family read positive control failed")?;
+        for url in [format!("http://{host}/"), https.clone()] {
+            let headers = request(&direct(&[
+                family,
+                "-D",
+                "-",
+                "-X",
+                "POST",
+                "-d",
+                "egress-check",
+                &url,
+            ]))
+            .context("runner write-policy POST probe failed")?;
+            ensure!(
+                refused_by_proxy(&headers),
+                "runner write-policy POST lacks the proxy's refusal"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Bounded time and bounded captured response, with neither inherited
+/// credentials/proxy variables nor the user's curl settings.
+fn readiness_request(argv: &[&str]) -> Result<String> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(argv[0])
+        .arg("--disable")
+        .args(&argv[1..])
+        .env_clear()
+        .env("PATH", crate::host::root_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("running write-policy readiness curl")?;
+    capture_response(&mut child)
+}
+
+fn capture_response(child: &mut std::process::Child) -> Result<String> {
+    use std::io::Read;
+
+    const MAX_RESPONSE: u64 = 64 * 1024;
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .context("opening readiness response pipe")?
+        .take(MAX_RESPONSE + 1)
+        .read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > MAX_RESPONSE {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("write-policy readiness response unreadable or oversized");
+    }
+    let status = child
+        .wait()
+        .context("waiting for write-policy readiness curl")?;
+    ensure!(status.success(), "write-policy readiness curl failed");
+    String::from_utf8(bytes).context("write-policy readiness response is not UTF-8")
+}
 
 impl Checker<'_> {
     /// `sandbox.deny-runner-metadata`: the runner's user, the agent's,
@@ -265,6 +380,112 @@ fn refused_by_proxy(headers: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_requires_live_read_and_both_proxy_refusals() {
+        let policy = Policy::parse(
+            include_str!("../../../../egress/policy.toml"),
+            crate::proxy::policy::ECOSYSTEMS,
+        )
+        .unwrap()
+        .with_runner_writes()
+        .unwrap();
+        let denied = "HTTP/1.1 403 Forbidden\r\nx-egress-denied: policy\r\n\r\n";
+        for broken in [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)] {
+            let mut requests = Vec::new();
+            let result = write_readiness(&policy, false, |argv| {
+                let index = requests.len();
+                requests.push(argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+                ensure!(broken != Some(index), "fixture connection failed");
+                Ok(if index % 3 == 0 { "" } else { denied }.to_owned())
+            });
+            assert_eq!(result.is_ok(), broken.is_none(), "{result:?}");
+            if broken.is_none() {
+                assert_eq!(requests.len(), 6);
+                assert!(requests[0].contains(&"--fail".to_owned()));
+                assert!(requests[1].last().unwrap().starts_with("http://"));
+                assert!(requests[2].last().unwrap().starts_with("https://"));
+                assert!(
+                    requests[..3]
+                        .iter()
+                        .all(|args| args.contains(&"--ipv4".to_owned()))
+                );
+                assert!(
+                    requests[3..]
+                        .iter()
+                        .all(|args| args.contains(&"--ipv6".to_owned()))
+                );
+            }
+            for argv in requests {
+                assert!(argv.windows(2).any(|pair| pair == ["--noproxy", "*"]));
+            }
+        }
+        let closed = Policy::parse(
+            "[egress]\nmode = 'allowlist'\nallow = []\n",
+            crate::proxy::policy::ECOSYSTEMS,
+        )
+        .unwrap();
+        assert!(write_readiness(&closed, false, |_| panic!("no control host")).is_err());
+        for origin in ["HTTP/2 200\r\n", "HTTP/1.1 403 Forbidden\r\n"] {
+            assert!(write_readiness(&policy, false, |_| Ok(origin.to_owned())).is_err());
+        }
+        let mut count = 0;
+        write_readiness(&policy, true, |argv| {
+            assert!(argv.contains(&"--ipv4"));
+            let response = if count == 0 { "" } else { denied };
+            count += 1;
+            Ok(response.to_owned())
+        })
+        .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn missing_ipv6_requires_boot_disable_and_socket_family_refusal() {
+        for parameter in ["Y\n", "1\n", "N\n", "0\n", "", "unknown"] {
+            for errno in [
+                None,
+                Some(rustix::io::Errno::AFNOSUPPORT),
+                Some(rustix::io::Errno::NETUNREACH),
+                Some(rustix::io::Errno::CONNREFUSED),
+                Some(rustix::io::Errno::ACCESS),
+            ] {
+                assert_eq!(
+                    ipv6_disabled_evidence(parameter.as_bytes(), || match errno {
+                        None => Ok(()),
+                        Some(errno) => Err(std::io::Error::from_raw_os_error(errno.raw_os_error())),
+                    }),
+                    matches!(parameter, "Y\n" | "1\n")
+                        && errno == Some(rustix::io::Errno::AFNOSUPPORT),
+                    "{parameter:?}: {errno:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn boot_parameter_reader_accepts_sysfs_attribute_size() {
+        let path = std::path::Path::new("/sys/module/ipv6/parameters/disable");
+        match std::fs::read(path) {
+            Ok(expected) => assert_eq!(ipv6_boot_parameter().unwrap(), expected),
+            Err(_) => assert!(!kernel_ipv6_disabled()),
+        }
+    }
+
+    #[test]
+    fn oversized_stream_is_stopped_before_capture_can_grow() {
+        let mut child = std::process::Command::new("yes")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert!(
+            capture_response(&mut child)
+                .unwrap_err()
+                .to_string()
+                .contains("oversized")
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn the_proxys_refusal_and_an_origins() {

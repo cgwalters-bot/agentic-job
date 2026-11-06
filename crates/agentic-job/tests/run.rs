@@ -936,6 +936,776 @@ fn a_run_as_its_own_user_in_the_home_given() {
         got.all()
     );
     assert!(!job.path("home").exists());
+
+    // `--runner-gate`: a GitHub token the agent could read, made now, is
+    // named and never shown; nor does this host, without the installed
+    // write policy, hold the agent's network. Nothing is started.
+    let job = Job::new("own-gate-refused");
+    let token = format!("gate-fixture-{}", std::process::id());
+    let config = own_config(&plain(&proxy));
+    let mut command = job.own_command(&config);
+    command.arg("--runner-gate").env("GH_TOKEN", &token);
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    for want in [
+        "run --runner-gate refuses",
+        "GH_TOKEN",
+        "egress.write-policy",
+    ] {
+        assert!(got.stderr.contains(want), "{want:?}: {}", got.all());
+    }
+    assert!(!got.all().contains(&token), "{}", got.all());
+    assert!(!job.path("home").exists());
+    // And only with --runner-home.
+    let mut command = job.command(&config);
+    command.arg("--runner-gate");
+    let got = Finished::of(command.output().unwrap());
+    assert_ne!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert!(got.stderr.contains("--runner-home"), "{}", got.all());
+}
+
+/// The public gate must refuse a store even when this uid has to chmod
+/// the file or an ancestor before reading it. No privileged setup needed.
+#[test]
+fn runner_gate_refuses_recoverable_stores_and_other_process_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    for (case, blocked, candidate) in [
+        ("gate-file-mode", ".netrc", ".netrc"),
+        ("gate-directory-mode", ".aws", ".aws/credentials"),
+    ] {
+        let job = Job::new(case);
+        let home = job.path(HOME_DIR);
+        std::fs::create_dir(&home).unwrap();
+        // Block just this store's ancestor, not the whole home: otherwise
+        // every missing candidate becomes a finding and the bounded
+        // diagnostic can omit the store this test is checking.
+        let store = home.join(candidate);
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let value = format!("opaque-store-{}", std::process::id());
+        std::fs::write(&store, &value).unwrap();
+        let blocked = home.join(blocked);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let output = job.own_command(&config).arg("--runner-gate").output();
+        // Restore access even if an assertion fails, including for cleanup.
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(got.stderr.contains(candidate), "{}", got.all());
+        assert!(!got.all().contains(&value), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+        assert_eq!(std::fs::read_to_string(store).unwrap(), value);
+    }
+
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .env_clear()
+        .env("DEPLOY_PASSWORD", "opaque-child-credential")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    for _ in 0..250 {
+        if std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .unwrap_or_default()
+            .trim()
+            == "sleep"
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let readable = sibling_environment_readable(pid);
+    let job = Job::new("gate-other-environment");
+    let output = job.own_command(&config).arg("--runner-gate").output();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let got = Finished::of(output.unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        !readable
+            || got
+                .stderr
+                .contains(&format!("process {pid} holds a credential-named variable")),
+        "{}",
+        got.all()
+    );
+    assert!(
+        !got.all().contains("opaque-child-credential"),
+        "{}",
+        got.all()
+    );
+    assert!(!job.path("out/work/harness/harness.json").exists());
+}
+
+/// Discovery must not drop a stopped runner just because its marker's
+/// directory is inaccessible. Its registration is still directly readable.
+#[test]
+fn runner_gate_discovers_stopped_runner_with_inaccessible_marker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let job = Job::new("gate-stopped-runner");
+    let install = job.path("runner");
+    let bin = install.join("bin");
+    let workspace = install.join("_work/repo");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(bin.join("Runner.Worker"), "marker").unwrap();
+    let store = install.join(".credentials");
+    let value = format!("opaque-registration-{}", std::process::id());
+    std::fs::write(&store, &value).unwrap();
+    for mode in [0o700, 0o000] {
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).unwrap();
+        let output = job
+            .own_command(&config)
+            .arg("--runner-gate")
+            .env("RUNNER_WORKSPACE", &workspace)
+            .output();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains(".credentials holds"),
+            "mode {mode:o}: {}",
+            got.all()
+        );
+        assert!(!got.all().contains(&value), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+/// A gitfile must not make the checkout's authorization disappear from
+/// the gate: unsupported layouts must be explicitly refused. A checkout
+/// with `path:` is a directory of the workspace.
+#[test]
+fn runner_gate_discovers_workspace_git_layouts() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    for layout in ["directory", "path", "separate", "linked", "submodule"] {
+        let job = Job::new(&format!("gate-git-{layout}"));
+        job.own_repository();
+        let repo = job.path("repo");
+        let workspace = match layout {
+            "linked" => job.path("linked"),
+            "path" => job.path(""),
+            _ => repo.clone(),
+        };
+        let mut git = Command::new("git");
+        git.arg("-C").arg(&repo);
+        match layout {
+            "separate" => {
+                git.args(["init", "--separate-git-dir"])
+                    .arg(job.path("gitdir"));
+            }
+            "linked" => {
+                git.args(["worktree", "add", "--detach"])
+                    .arg(&workspace)
+                    .arg("HEAD");
+            }
+            _ => {
+                git.arg("status");
+            }
+        }
+        let setup = Finished::of(git.output().unwrap());
+        assert_eq!(setup.code, Some(EXIT_SUCCESS), "{}", setup.all());
+        if layout == "submodule" {
+            std::fs::create_dir(repo.join(".git/modules")).unwrap();
+        }
+        let value = "AUTHORIZATION: basic opaque-fixture";
+        let setup = Finished::of(
+            Command::new("git")
+                .arg("-C")
+                .arg(if layout == "path" { &repo } else { &workspace })
+                .args([
+                    "config",
+                    "--local",
+                    "http.https://github.com/.extraheader",
+                    value,
+                ])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(setup.code, Some(EXIT_SUCCESS), "{}", setup.all());
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .env("GITHUB_WORKSPACE", &workspace)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        let want = if ["directory", "path"].contains(&layout) {
+            "git's http.extraheader"
+        } else {
+            "unsupported Git layout"
+        };
+        assert!(got.stderr.contains(want), "{layout}: {}", got.all());
+        assert!(!got.all().contains(value), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+/// Git's includes can hold credentials outside the fixed scan list.
+#[test]
+fn runner_gate_refuses_git_configuration_includes() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    for (case, file, key) in [
+        ("local", "repo/.git/config", "include.path"),
+        ("conditional", "repo/.git/config", "includeIf.gitdir:/.path"),
+        ("worktree", "repo/.git/config.worktree", "include.path"),
+        ("home", "home/.gitconfig", "include.path"),
+    ] {
+        let job = Job::new(&format!("gate-git-include-{case}"));
+        job.own_repository();
+        std::fs::create_dir_all(job.path("home")).unwrap();
+        job.write("included-config", "[http \"https://github.com/\"]\nextraheader = AUTHORIZATION: basic b3BhcXVlLWZpeHR1cmU=\n");
+        let setup = Finished::of(
+            Command::new("git")
+                .args(["config", "--file"])
+                .arg(job.path(file))
+                .arg(key)
+                .arg(job.path("included-config"))
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(setup.code, Some(EXIT_SUCCESS), "{}", setup.all());
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .env("GITHUB_WORKSPACE", job.path("repo"))
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains("has unsupported Git includes"),
+            "{case}: {}",
+            got.all()
+        );
+        assert!(!got.all().contains("b3BhcXVlLWZpeHR1cmU="), "{}", got.all());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+#[test]
+fn runner_gate_refuses_git_proxies_and_opaque_url_credentials() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let credential = format!("opaque-git-{}", std::process::id());
+    let url = format!("https://fixture:{credential}@example.invalid/repo");
+    for (case, content) in [
+        ("proxy", format!("[http]\nproxy = {url}\n")),
+        ("remote", format!("[remote \"origin\"]\nurl = {url}\n")),
+        ("push", format!("[remote \"origin\"]\npushurl = {url}\n")),
+        (
+            "rewrite",
+            format!("[url \"{url}\"]\ninsteadOf = https://example.invalid/\n"),
+        ),
+    ] {
+        let job = Job::new(&format!("gate-git-url-{case}"));
+        std::fs::create_dir_all(job.path("home")).unwrap();
+        job.write("home/.gitconfig", &content);
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr
+                .contains("unsupported Git proxy settings or authenticated URLs"),
+            "{case}: {}",
+            got.all()
+        );
+        assert!(!got.all().contains(&credential));
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+#[test]
+fn runner_gate_refuses_ssh_identities_and_live_git_credential_helpers() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let job = Job::new("gate-ssh-key");
+    std::fs::create_dir_all(job.path("home/.ssh")).unwrap();
+    let key = [
+        "-----BEGIN ",
+        "OPENSSH PRIVATE ",
+        "KEY-----\n",
+        "fixture\n",
+        "-----END ",
+        "OPENSSH PRIVATE ",
+        "KEY-----\n",
+    ]
+    .concat();
+    std::fs::write(job.path("home/.ssh/id_ed25519"), &key).unwrap();
+    let got = Finished::of(
+        job.own_command(&config)
+            .arg("--runner-gate")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains(".ssh is not a regular file"),
+        "{}",
+        got.all()
+    );
+    assert!(!got.all().contains(&key));
+
+    let job = Job::new("gate-git-cache");
+    job.own_repository();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(cache.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = cache.path().join("socket");
+    let helper = format!("cache --timeout=60 --socket={}", socket.display());
+    let credential = "opaque-cache-password";
+    let mut approve = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("-c")
+        .arg(format!("credential.helper={helper}"))
+        .args(["credential", "approve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    write!(
+        approve.stdin.take().unwrap(),
+        "protocol=https\nhost=github.com\nusername=fixture\npassword={credential}\n\n"
+    )
+    .unwrap();
+    assert!(approve.wait().unwrap().success());
+    assert!(socket.exists());
+    let setup = Command::new("git")
+        .arg("-C")
+        .arg(job.path("repo"))
+        .args(["config", "credential.helper", &helper])
+        .status()
+        .unwrap();
+    assert!(setup.success());
+    let output = job
+        .own_command(&config)
+        .arg("--runner-gate")
+        .env("GITHUB_WORKSPACE", job.path("repo"))
+        .output();
+    let cleanup = Command::new("git")
+        .args(["credential-cache", "--socket"])
+        .arg(socket)
+        .arg("exit")
+        .status()
+        .unwrap();
+    assert!(cleanup.success());
+    let got = Finished::of(output.unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains("unsupported Git credential helpers"),
+        "{}",
+        got.all()
+    );
+    assert!(!got.all().contains(credential));
+}
+
+/// Opaque provider passwords and helper/proxy indirection have no token
+/// shape. The public gate must refuse the settings without executing them
+/// or contacting a configured proxy.
+#[test]
+fn runner_gate_refuses_opaque_agent_settings_and_local_proxy_configuration() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let credential = format!("opaque-settings-{}", std::process::id());
+    let local = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    local.set_nonblocking(true).unwrap();
+    let address = local.local_addr().unwrap();
+    for (case, path, content) in [
+        (
+            "claude-password",
+            ".claude/settings.json",
+            json!({"env": {"ANTHROPIC_AUTH_TOKEN": credential}}).to_string(),
+        ),
+        (
+            "claude-helper",
+            ".claude.json",
+            json!({"apiKeyHelper": "touch helper-was-executed"}).to_string(),
+        ),
+        (
+            "claude-local",
+            ".claude/settings.local.json",
+            json!({"env": {"ANTHROPIC_BASE_URL": format!("http://{address}")}}).to_string(),
+        ),
+        (
+            "opencode-password",
+            ".config/opencode/opencode.json",
+            json!({"provider": {"custom": {"options": {"apiKey": credential}}}}).to_string(),
+        ),
+        (
+            "opencode-proxy",
+            ".config/opencode/opencode.jsonc",
+            format!("// local credential proxy\n{{\"baseURL\": \"http://{address}\"}}"),
+        ),
+        (
+            "vibe-password",
+            ".config/agentic-job/vibe/config.toml",
+            format!("api_key = {credential:?}\n"),
+        ),
+        (
+            "vibe-proxy",
+            ".vibe/config.toml",
+            format!("api_base = \"http://{address}\"\n"),
+        ),
+        (
+            "claude-env",
+            ".config/agentic-job/claude-env.json",
+            format!("ANTHROPIC_AUTH_TOKEN={credential}\n"),
+        ),
+    ] {
+        let job = Job::new(&format!("gate-opaque-{case}"));
+        let file = job.path("home").join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, &content).unwrap();
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{case}: {}", got.all());
+        assert!(
+            got.stderr
+                .contains("unsupported pre-existing agent settings"),
+            "{case}: {}",
+            got.all()
+        );
+        assert!(got.stderr.contains(path), "{case}: {}", got.all());
+        assert!(!got.all().contains(&credential), "{}", got.all());
+        assert!(!got.all().contains(&address.to_string()), "{}", got.all());
+        assert!(!job.path("helper-was-executed").exists());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+        assert_eq!(
+            local.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
+fn runner_gate_checks_configured_launch_environment() {
+    let proxy = Proxy::start();
+    let value = format!("opaque-launch-{}", std::process::id());
+    for name in [
+        "GH_TOKEN",
+        "DEPLOY_PASSWORD",
+        "SSH_AUTH_SOCK",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "GIT_CONFIG_GLOBAL",
+        "CLAUDE_CONFIG_DIR",
+        "OPENCODE_CONFIG",
+        "VIBE_HOME",
+    ] {
+        let job = Job::new(&format!("gate-config-env-{name}"));
+        let config = format!("{}[host.env]\n{name} = {value:?}\n", config(&plain(&proxy)));
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr.contains(
+                "host.env contains unsupported credential or agent-configuration overrides"
+            ),
+            "{name}: {}",
+            got.all()
+        );
+        assert!(!got.all().contains(&value));
+        assert!(!job.path("home").exists());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
+#[test]
+fn runner_gate_refuses_standard_cloud_stores_and_unconfigured_git_cache() {
+    use std::io::Write;
+
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let credential = format!("opaque-cloud-{}", std::process::id());
+    for (case, path, content, want) in [
+        (
+            "aws-config",
+            ".aws/config",
+            format!("[default]\naws_secret_access_key = {credential}\n"),
+            ".aws/config holds credentials",
+        ),
+        (
+            "gcloud-adc",
+            ".config/gcloud/application_default_credentials.json",
+            json!({"type": "authorized_user", "refresh_token": credential}).to_string(),
+            ".config/gcloud/application_default_credentials.json holds credentials",
+        ),
+        (
+            "gcloud-database",
+            ".config/gcloud/credentials.db",
+            credential.clone(),
+            ".config/gcloud/credentials.db holds credentials",
+        ),
+        (
+            "gcloud-access-cache",
+            ".config/gcloud/access_tokens.db",
+            credential.clone(),
+            ".config/gcloud/access_tokens.db holds credentials",
+        ),
+        (
+            "aws-sso",
+            ".aws/sso/cache/fixture.json",
+            json!({"accessToken": credential}).to_string(),
+            ".aws/sso/cache is not a regular file",
+        ),
+        (
+            "aws-cli-cache",
+            ".aws/cli/cache/fixture.json",
+            json!({"Credentials": {"SessionToken": credential}}).to_string(),
+            ".aws/cli/cache is not a regular file",
+        ),
+    ] {
+        let job = Job::new(&format!("gate-{case}"));
+        let file = job.path("home").join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, content).unwrap();
+        let got = Finished::of(
+            job.own_command(&config)
+                .arg("--runner-gate")
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(got.stderr.contains(want), "{}", got.all());
+        assert!(!got.all().contains(&credential));
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+
+    let job = Job::new("gate-default-git-cache");
+    let home = job.path("home");
+    // Use a short private HOME for Unix's socket path limit; the agent's
+    // --runner-home remains separate. No persisted credential.helper exists.
+    let cache_home = tempfile::tempdir().unwrap();
+    let socket = cache_home.path().join(".cache/git/credential/socket");
+    let helper = format!("cache --timeout=60 --socket={}", socket.display());
+    let mut approve = Command::new("git")
+        .env_clear()
+        .env("PATH", secure_host::host::root_path())
+        .env("HOME", cache_home.path())
+        .arg("-c")
+        .arg(format!("credential.helper={helper}"))
+        .args(["credential", "approve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    write!(
+        approve.stdin.take().unwrap(),
+        "protocol=https\nhost=example.invalid\nusername=fixture\npassword={credential}\n\n"
+    )
+    .unwrap();
+    assert!(approve.wait().unwrap().success());
+    assert!(socket.exists());
+    let mut fill = Command::new("git")
+        .env_clear()
+        .env("PATH", secure_host::host::root_path())
+        .env("HOME", cache_home.path())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["-c", "credential.helper=cache", "credential", "fill"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    write!(
+        fill.stdin.take().unwrap(),
+        "protocol=https\nhost=example.invalid\n\n"
+    )
+    .unwrap();
+    let filled = fill.wait_with_output().unwrap();
+    let output = job
+        .own_command(&config)
+        .arg("--runner-gate")
+        .env("HOME", cache_home.path())
+        .output();
+    let cleanup = Command::new("git")
+        .args(["credential-cache", "--socket"])
+        .arg(socket)
+        .arg("exit")
+        .status()
+        .unwrap();
+    assert!(cleanup.success());
+    assert!(filled.status.success());
+    assert!(String::from_utf8_lossy(&filled.stdout).contains(&credential));
+    let got = Finished::of(output.unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr
+            .contains(".cache/git/credential is not a regular file"),
+        "{}",
+        got.all()
+    );
+    assert!(!got.all().contains(&credential));
+    assert!(!home.exists());
+    assert!(!job.path("out/work/harness/harness.json").exists());
+}
+
+// The runner-read policy may deny sibling environ reads even though the
+// test parent can read its child. Probe from another child, like the gate,
+// and accept only a successful read, a kernel permission denial, or a hidden
+// proc entry that the parent can still read (not an exited fixture).
+fn sibling_environment_readable(pid: u32) -> bool {
+    let output = Command::new("cat")
+        .arg(format!("/proc/{pid}/environ"))
+        .env("LC_ALL", "C")
+        .output()
+        .unwrap();
+    if output.status.success() {
+        return true;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Permission denied")
+            || stderr.contains("Operation not permitted")
+            || (stderr.contains("No such file or directory")
+                && std::fs::read(format!("/proc/{pid}/environ")).is_ok()),
+        "unexpected environ read failure: {stderr}"
+    );
+    false
+}
+
+#[test]
+fn runner_gate_does_not_echo_process_names_or_discovered_filenames() {
+    let proxy = Proxy::start();
+    let config = own_config(&plain(&proxy));
+    let value = "opaque-pass";
+    let mut child = Command::new("sh")
+        .args([
+            "-c",
+            "printf '%s' \"$DEPLOY_PASSWORD\" > /proc/self/comm; read -r line",
+        ])
+        .env_clear()
+        .env("DEPLOY_PASSWORD", value)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    for _ in 0..250 {
+        if std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .unwrap_or_default()
+            .trim()
+            == value
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let readable = sibling_environment_readable(pid);
+    let job = Job::new("gate-secret-filename");
+    let temp = job.path("temp");
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::write(temp.join(value), value).unwrap();
+    let output = job
+        .own_command(&config)
+        .arg("--runner-gate")
+        .env("GH_TOKEN", value)
+        .env("RUNNER_TEMP", temp)
+        .output();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let got = Finished::of(output.unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        !readable || got.stderr.contains(&format!("process {pid} holds")),
+        "{}",
+        got.all()
+    );
+    assert!(got.stderr.contains("candidate file holds"), "{}", got.all());
+    assert!(!got.all().contains(value), "{}", got.all());
+}
+
+/// Run only on a disposable, already secured host, as the locked runner
+/// uid, with no credentials in any same-uid process or candidate file.
+/// No subordinate uid allocation is supported yet. The host must use Yama
+/// scope 3, discard core dumps and pass the live HTTP(S) write-policy controls.
+#[test]
+#[ignore = "needs a fresh secured host; never run in an existing sandbox"]
+fn runner_gate_starts_an_agent_only_without_credential_exposures() {
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let config = own_config(&plain(&proxy)).replace(NO_PROXY, "[egress]\nwrite-policy = true\n");
+    // A passing baseline is required, not skipped when the host refuses.
+    let job = Job::new("gate-success");
+    job.own_repository();
+    job.script(&json!([canary()]));
+    let got = Finished::of(
+        job.own_command(&config)
+            .arg("--runner-gate")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert_eq!(
+        job.json("out/work/harness/harness.json")["result"],
+        "success"
+    );
+
+    for case in ["environment", "store", "process"] {
+        let job = Job::new(&format!("gate-fresh-{case}"));
+        job.own_repository();
+        job.script(&json!([canary()]));
+        let mut command = job.own_command(&config);
+        command.arg("--runner-gate");
+        let mut child = None;
+        match case {
+            "environment" => {
+                command.env("DEPLOY_PASSWORD", "opaque-fixture");
+            }
+            "store" => {
+                std::fs::write(job.path("home/.netrc"), "opaque-fixture").unwrap();
+            }
+            "process" => {
+                child = Some(
+                    Command::new("sleep")
+                        .arg("60")
+                        .env("DEPLOY_PASSWORD", "opaque-fixture")
+                        .spawn()
+                        .unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let output = command.output();
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            child.wait().unwrap();
+        }
+        let got = Finished::of(output.unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{case}: {}", got.all());
+        assert!(
+            got.stderr.contains("run --runner-gate refuses"),
+            "{}",
+            got.all()
+        );
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
 }
 
 /// The one login, and the one page, a session run of these tests lets in.
