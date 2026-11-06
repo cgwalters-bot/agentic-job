@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Remove the secure-host forwarder's redundant runner-storage policy
+  override: the pinned v0.6.9 image already admits those exact PUT
+  destinations on the transparent listener. Caller policies are left
+  untouched, and the explicit proxy no longer gains those extra writes
+  from the forwarder (#2811).
+
 - **Deprecated:** the host's configuration table `[sandbox]`, with
   `[sandbox.check]` and `[sandbox.prepared]`, is now `[host]`, and
   messages name its keys `host.KEY` (#2071). `[sandbox]` and `config`'s
@@ -61,10 +67,8 @@ says what a caller may rely on across versions.
   `[child-agent]`). With no second user for the egress proxy to hold,
   `config` turns `egress.write-policy` on for a run's file that keeps the
   proxy and leaves it unset, and `run` and `config` refuse an agent with
-  the proxy on and the write policy off. Under it, the `secure-host`
-  forwarder gives the pinned image the shipped policy plus the artifact
-  storage accounts its runner writes lack, unless the file names
-  `egress.policy`, so that later uploads are not refused.
+  the proxy on and the write policy off. The pinned image's built-in
+  runner writes admit the artifact storage accounts for later uploads.
   `agent-user: sandbox` is refused. The keys
   `sandbox.create-user`, `sandbox.user`, `sandbox.groups`,
   `sandbox.allow-existing-user`, `sandbox.filesystem-view`,
@@ -73,7 +77,7 @@ says what a caller may rely on across versions.
   `allow-tcp-ports` are accepted and reported as ignored while the pinned
   image still reads them. A host's file (`config --host`) has no
   `setup.script`, and `sandbox setup` refuses one. Hosts set up by the
-  pinned secure-host image (v0.6.4) still get the unused `runner-sandbox`
+  pinned secure-host image (v0.6.9) still get the unused `runner-sandbox`
   user until the pin moves to an image with this change.
 - The secure-host forwarder and site CI now select the reviewed actions#180
   pin and attested v0.6.9 image, bringing method/host-only write-refusal

@@ -6161,11 +6161,11 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
     assert_eq!(used, [line.trim()]);
     let version =
         |found: &regex::Captures| -> [u64; 3] { [1, 2, 3].map(|i| found[i].parse().unwrap()) };
-    // #2816's method/host-only refusal diagnostics first shipped in v0.6.8.
-    // A matching pair of pins must not silently regress to a hostless image.
+    // v0.6.9 supplies accounts 30–32 in its built-in runner writes, without
+    // the forwarder's former policy override, and query-free diagnostics.
     assert!(
-        version(&found) >= [0, 6, 8],
-        "{line} predates query-free write-refusal diagnostics"
+        version(&found) >= [0, 6, 9],
+        "{line} predates the required built-in runner storage rules"
     );
     let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
     let workspace = Regex::new(r#"(?m)^version = "(\d+)\.(\d+)\.(\d+)"$"#)
@@ -6186,26 +6186,22 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
         "        config: ${{ steps.config.outputs.path }}\n",
         "        check: ${{ inputs.check }}\n",
         "        egress: ${{ steps.egress.outputs.mode }}\n",
-        "        egress-policy: ${{ steps.egress.outputs.policy }}\n",
         "        image-archive: ${{ inputs.image-archive }}\n",
     ]
     .concat();
     assert!(text.ends_with(&last), "{text}");
     // The new action overrides the file's egress.write-policy with its
     // input: a configuration that asks for it, in any key form, gets it,
-    // and the policy with runner-storage.toml unless it names its own
-    // egress.policy, in any key form, which the action's would replace.
-    const POLICY: &str = "secure-host-policy.toml";
-    const OWN: &str = "write-policy with its own egress.policy";
+    // without replacing its egress.policy or creating a policy override.
+    assert!(
+        steps(&doc)
+            .iter()
+            .all(|step| step["with"]["egress-policy"].is_badvalue())
+    );
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     let output = dir.path().join("output");
     let hosted = workflow("secure-host/hosted.toml");
-    let shipped = [
-        workflow("egress/policy.toml"),
-        workflow("secure-host/runner-storage.toml"),
-    ]
-    .concat();
     let escaped =
         Regex::new(r"^::error::.* has a backslash outside a comment or a multi-line string")
             .unwrap();
@@ -6229,24 +6225,27 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
         ),
         (
             "egress = { policy = \"/etc/p#1.toml\", write-policy = true }\n",
-            Some(OWN),
+            Some("write-policy"),
         ),
         (
             "egress = { write-policy = true, \"policy\" = '/p' }\n",
-            Some(OWN),
+            Some("write-policy"),
         ),
-        ("[egress]\nwrite-policy = true\npolicy=\"/p\"\n", Some(OWN)),
+        (
+            "[egress]\nwrite-policy = true\npolicy=\"/p\"\n",
+            Some("write-policy"),
+        ),
         (
             "[egress]\nwrite-policy = true\n'policy' = \"/p\"\n",
-            Some(OWN),
+            Some("write-policy"),
         ),
         (
             "egress.write-policy = true\negress . policy = \"/p\"\n",
-            Some(OWN),
+            Some("write-policy"),
         ),
         (
             "[egress]\nwrite-policy = true # policy = \"/p\"\n",
-            Some(OWN),
+            Some("write-policy"),
         ),
         ("[egress]\n# \"write\\u002dpolicy\" = true\n", Some("off")),
         // Escapes could spell the key without its characters: refused.
@@ -6266,8 +6265,6 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
     ] {
         std::fs::write(&config, toml).unwrap();
         std::fs::write(&output, "").unwrap();
-        let policy = dir.path().join(POLICY);
-        let _ = std::fs::remove_file(&policy);
         let result = run_step(
             ACTION,
             "Read whether the configuration asks for the write policy",
@@ -6281,21 +6278,9 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
         );
         let written = std::fs::read_to_string(&output).unwrap();
         match wanted {
-            Some(OWN) => {
-                assert!(result.status.success(), "{toml:?}: {result:?}");
-                assert_eq!(written, "mode=write-policy\n", "{toml:?}");
-                assert!(!policy.exists(), "{toml:?}");
-            }
-            Some("write-policy") => {
-                assert!(result.status.success(), "{toml:?}: {result:?}");
-                let want = format!("mode=write-policy\npolicy={}\n", path(&policy));
-                assert_eq!(written, want, "{toml:?}");
-                assert_eq!(std::fs::read_to_string(&policy).unwrap(), shipped);
-            }
             Some(mode) => {
                 assert!(result.status.success(), "{toml:?}: {result:?}");
                 assert_eq!(written, format!("mode={mode}\n"), "{toml:?}");
-                assert!(!policy.exists(), "{toml:?}");
             }
             None => {
                 assert_eq!(result.status.code(), Some(1), "{toml:?}: {result:?}");
@@ -6304,6 +6289,8 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
                 assert_eq!(written, "", "{toml:?}");
             }
         }
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), toml);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
     // The refusal, run with each old input set alone, with all of them
     // and with none.
@@ -6353,25 +6340,12 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
     );
 }
 
-/// The policy the forwarder hands the pinned image admits the artifact
-/// storage this repository's runner writes admit beyond gh-aw's
-/// productionresultssa0 to productionresultssa19, which that image has:
-/// without them the runner's upload after an agent held to the proxy is
-/// refused. PUT alone, and nothing past the shipped policy otherwise.
+/// Storage uploads belong only to the transparent listener's runner
+/// policy, even when the caller supplies its own policy file.
 #[test]
-fn the_forwarded_policy_admits_the_runners_newer_storage() {
+fn the_forwarded_policy_leaves_storage_to_the_runner_writes() {
     use secure_host::proxy::policy::{ECOSYSTEMS, Policy, Request};
     let shipped = Policy::parse(&workflow("egress/policy.toml"), ECOSYSTEMS).unwrap();
-    let runner = shipped.with_runner_writes().unwrap();
-    let forwarded = Policy::parse(
-        &[
-            workflow("egress/policy.toml"),
-            workflow("secure-host/runner-storage.toml"),
-        ]
-        .concat(),
-        ECOSYSTEMS,
-    )
-    .unwrap();
     fn request<'a>(method: &'a str, host: &'a str) -> Request<'a> {
         Request {
             method,
@@ -6381,20 +6355,21 @@ fn the_forwarded_policy_admits_the_runners_newer_storage() {
             ..Request::default()
         }
     }
-    for n in 0..200 {
-        let host = format!("productionresultssa{n}.blob.core.windows.net");
-        let put = request("PUT", &host);
-        let newer = n >= 20 && runner.request(&put).allowed;
-        assert_eq!(forwarded.request(&put).allowed, newer, "{host}");
-        assert!(
-            !forwarded.request(&request("POST", &host)).allowed,
-            "{host}"
-        );
-        assert!(!shipped.request(&put).allowed, "{host}");
+    for policy in [shipped, Policy::parse("", ECOSYSTEMS).unwrap()] {
+        let runner = policy.with_runner_writes().unwrap();
+        for n in 0..200 {
+            let host = format!("productionresultssa{n}.blob.core.windows.net");
+            let put = request("PUT", &host);
+            assert_eq!(
+                runner.request(&put).allowed,
+                n < 20 || (30..=32).contains(&n),
+                "{host}"
+            );
+            assert!(!runner.request(&request("POST", &host)).allowed, "{host}");
+            assert!(!policy.request(&put).allowed, "{host}");
+        }
+        assert!(!runner.request(&request("PUT", "example.com")).allowed);
     }
-    let refused = "productionresultssa32.blob.core.windows.net";
-    assert!(forwarded.request(&request("PUT", refused)).allowed);
-    assert!(!forwarded.request(&request("PUT", "example.com")).allowed);
 }
 
 /// `run` refuses to upload a fake agent's run whose redaction replaced

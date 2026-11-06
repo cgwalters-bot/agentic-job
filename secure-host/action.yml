@@ -111,20 +111,11 @@ runs:
     # sets a key only after a multi-line string that closes on it. So a
     # backslash outside a comment line, or any multi-line string, is
     # refused rather than read as off.
-    #
-    # Under the write policy, a file that names no egress.policy gets the
-    # shipped policy with runner-storage.toml's rules, which the pinned
-    # image lacks. Any `policy =` but write-policy's on a line that is not
-    # a comment (a trailing comment, a string or a one-letter prefix such
-    # as `xpolicy` included) counts as one named: then the new action is
-    # given none, since its file would replace the caller's, and uploads
-    # to those accounts stay refused until the pin moves.
     - name: Read whether the configuration asks for the write policy
       id: egress
       shell: bash
       env:
         CONFIG: ${{ steps.config.outputs.path }}
-        ACTION_PATH: ${{ github.action_path }}
       run: |
         if grep -Eq "^[[:space:]]*([^#[:space:]].*)?\\\\|'''|\"\"\"" -- "$CONFIG"; then
           echo "::error::$CONFIG has a backslash outside a comment or a multi-line string, so the forwarder cannot tell whether it sets egress.write-policy: write the file without them"
@@ -133,10 +124,6 @@ runs:
         mode=off
         if grep -Eq "^[[:space:]]*([^#[:space:]].*)?write-policy[\"']?[[:space:]]*=[[:space:]]*true" -- "$CONFIG"; then mode=write-policy; fi
         echo "mode=$mode" >> "$GITHUB_OUTPUT"
-        if [ "$mode" = write-policy ] && ! grep -Eq "^[[:space:]]*([^#[:space:]](.*[^-[:alnum:]_])?)?policy[\"']?[[:space:]]*=" -- "$CONFIG"; then
-          cat -- "$ACTION_PATH/../egress/policy.toml" "$ACTION_PATH/runner-storage.toml" > "$RUNNER_TEMP/secure-host-policy.toml"
-          echo "policy=$RUNNER_TEMP/secure-host-policy.toml" >> "$GITHUB_OUTPUT"
-        fi
     # Without a config, this repository's host-specific default, as the old action
     # had: the new action's own default turns the egress proxy off, and
     # the v0.6 image's binary still creates its second user, so a step
@@ -151,5 +138,4 @@ runs:
         config: ${{ steps.config.outputs.path }}
         check: ${{ inputs.check }}
         egress: ${{ steps.egress.outputs.mode }}
-        egress-policy: ${{ steps.egress.outputs.policy }}
         image-archive: ${{ inputs.image-archive }}

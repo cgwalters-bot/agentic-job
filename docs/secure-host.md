@@ -52,8 +52,8 @@ forward keeps the old action. At `@main` or a later commit:
   its comment names the image tag that commit runs, and
   [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)'
   `the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs`
-  refuses a pin whose two copies differ or whose tag is newer than the
-  workspace's version.
+  refuses a pin whose two copies differ, whose tag is older than v0.6.9
+  (the required runner storage rules), or newer than the workspace's version.
 - The floor is ubuntu-26.04, the runner the new action is written for;
   the pinned image admits exactly Ubuntu 26.04 and RHEL 10
   ([supported hosts](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#supported-hosts)).
@@ -118,6 +118,16 @@ and [41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41
 [#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
 [tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),
 not to every Azure storage account.
+
+These are the pinned image's built-in runner writes, not rules injected
+by the forwarder into the explicit proxy's policy. The forwarder leaves
+`egress.policy` alone and no longer constructs a combined policy file.
+Artifact uploads run as the runner's uid: public HTTP/HTTPS connections
+are redirected to the transparent listener, whose `runner_policy` adds
+these PUT-only rules. The action exports CA trust variables, not explicit
+proxy variables, for later steps. Removing the override therefore keeps
+runner uploads working while removing those extra PUT permissions from
+the explicit proxy (unless a caller's own policy grants them).
 
 ## On a host that is not a GitHub Actions runner
 
@@ -227,18 +237,19 @@ machine before a job with a write token acts on it
 
 Without the
 [egress write policy](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#egress-write-policy-opt-in),
-the agent's writes go anywhere but the metadata service. It is off by
-default here too. Turn it on with the workflow's `egress-write-policy`
-input, or `egress.write-policy` in its `config` file, when the agent must
-not send what it reads where it likes. It holds the agent, the setup
-script and every later step of the job.
+the runner's writes go anywhere but the metadata service. Host setup keeps
+it opt-in, through `egress.write-policy` in its configuration. An agent
+run with the proxy enabled now requires the write policy: `config` turns
+it on when unset and refuses an explicit false value. The workflow's
+`egress-write-policy` input can also request it. It holds the agent, the
+setup script and every later step of the job.
 
 It restricts the agent less than it restricts the sandbox user. The agent is the
 runner's uid, so it gets the runner's own write rules: it can write to
 the Actions service with a token of its own, such as another
 repository's runtime token, and upload what it read there, and the
-pinned image's storage rule admits every Azure storage account
-([above](#what-main-has-that-the-pinned-image-does-not-yet)). There is no
+pinned image's storage rules admit only the exact results accounts
+[listed above](#deployed-write-policy-diagnostics). There is no
 supported second-user escape from that channel. The agent job refuses
 a private caller or target with the write policy on
 ([private-repositories.md](private-repositories.md#opting-in)).
