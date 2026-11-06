@@ -5266,9 +5266,34 @@ fn privileged_ci_jobs_run_only_under_the_e2e_gate_or_on_push() {
     assert!(privileged >= 10, "{privileged}");
 }
 
+#[test]
+fn gitlab_ci_uses_only_a_disposable_local_forge() {
+    let doc = definition("ci.yml");
+    let job = &doc["jobs"]["gitlab"];
+    assert_eq!(doc["permissions"]["contents"].as_str(), Some("read"));
+    assert!(job["permissions"].is_badvalue());
+    assert!(job["environment"].is_badvalue());
+    assert_eq!(
+        job["env"]["AGENTIC_JOB_TEST_GITLAB"].as_str(),
+        Some("http://127.0.0.1:8080")
+    );
+    let steps = job["steps"].as_vec().unwrap();
+    let scripts: String = steps
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scripts.contains("cargo test --locked --test gitlab -- --ignored --nocapture"));
+    assert!(scripts.contains("--publish 127.0.0.1:8080:8080"));
+    assert!(scripts.contains("gitlab/gitlab-ce@sha256:"));
+    assert!(scripts.contains("docker rm --force --volumes"));
+    assert!(!scripts.contains("secrets."));
+    assert!(!scripts.contains("gitlab.com"));
+}
+
 /// A job may be skipped only under its own gate, and only when that gate
 /// said "false"; anything else but success fails the aggregate. Every
-/// job but the sentinels, the push-only one and forgejo is aggregated,
+/// job but the sentinels, the push-only one and the disposable forges is aggregated,
 /// under exactly one gate.
 #[test]
 fn the_aggregate_accepts_a_skip_only_under_a_gate_that_said_false() {
@@ -5283,7 +5308,15 @@ fn the_aggregate_accepts_a_skip_only_under_a_gate_that_said_false() {
         .keys()
         .map(|name| name.as_str().unwrap())
         .filter(|name| {
-            !["required-checks", "ci", "secure-host-published", "forgejo"].contains(name)
+            // Disposable forge jobs are not required until proven stable.
+            ![
+                "required-checks",
+                "ci",
+                "secure-host-published",
+                "forgejo",
+                "gitlab",
+            ]
+            .contains(name)
         })
         .collect();
     all.sort_unstable();

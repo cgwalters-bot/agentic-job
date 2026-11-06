@@ -379,6 +379,51 @@ jobs:
           AGENTIC_JOB_TEST_FORGEJO: http://127.0.0.1:3000
           AGENTIC_JOB_TEST_FORGEJO_CONTAINER: ${{ job.services.forgejo.id }}
 
+  # Like forgejo, runs on pull_request with a read-only job token and no
+  # repository secret, environment or gitlab.com access. The test bootstraps
+  # disposable credentials through docker exec. Not required until stable.
+  gitlab:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
+    runs-on: ubuntu-26.04
+    # Provisional: Docker is unavailable in the development sandbox. CI logs
+    # readiness time and memory below; tune after the first measured run.
+    timeout-minutes: 25
+    env:
+      AGENTIC_JOB_TEST_GITLAB: http://127.0.0.1:8080
+      AGENTIC_JOB_TEST_GITLAB_CONTAINER: agentic-job-gitlab
+      # Fixed throwaway root password fixture, not a repository secret.
+      GITLAB_ROOT_PASSWORD: fixture-root-password-not-secret
+      GITLAB_OMNIBUS_CONFIG: >-
+        external_url 'http://127.0.0.1:8080';
+        prometheus_monitoring['enable'] = false;
+        gitlab_rails['usage_ping_enabled'] = false;
+        puma['worker_processes'] = 0;
+        sidekiq['concurrency'] = 2;
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Start explicitly: Actions' service health wait is too short for the
+      # initial Omnibus migrations. gitlab.rs polls with its STARTUP bound.
+      - name: Start throwaway GitLab CE
+        # Official GitLab CE 18.5.1-ce.0, pinned by hand like Forgejo.
+        run: >-
+          docker run --detach --name "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
+          --publish 127.0.0.1:8080:8080 --shm-size 256m
+          --env GITLAB_ROOT_PASSWORD --env GITLAB_OMNIBUS_CONFIG
+          gitlab/gitlab-ce@sha256:6db4caefb0597c966065f4c3307b60aa00d13559bbe9b0c3b17bc32f0d239ab1
+      - run: cargo test --locked --test gitlab -- --ignored --nocapture
+      - name: GitLab timing and memory
+        if: ${{ always() }}
+        run: |
+          docker inspect --format 'Started at {{.State.StartedAt}}' "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
+          docker stats --no-stream --format '{{.Name}}: {{.MemUsage}}' "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
+      - name: Remove throwaway GitLab
+        if: ${{ always() }}
+        run: docker rm --force --volumes "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
+
   # crates/agentic-job/tests/corpus: `collect` and `check` against gh-aw's
   # pinned handlers, with a mocked forge, and the old tree's check and the
   # new one on the same requests and hand-backs. The old tree is fetched

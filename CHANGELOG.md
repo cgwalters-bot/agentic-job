@@ -14,6 +14,11 @@ says what a caller may rely on across versions.
   routing and cross-repository token requirements are unchanged; research
   remains analysis-only, not review or fix (#3159).
 
+- Add a secret-free `gitlab` CI job exercising apply comments, fork merge
+  requests and inline discussions against a pinned disposable GitLab CE
+  container, including quick-action and `@all` neutralization (#2110).
+  Like Forgejo, it is ignored in ordinary tests and non-required until stable.
+
 - Under `host.deny-runner-reads`, setup discards every core dump on the
   host (`kernel.core_pattern = |/bin/false`), and `sandbox check` fails
   closed without it (`core-pattern`). This closes a forced dump

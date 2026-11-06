@@ -1859,8 +1859,9 @@ from the checked target and submitted review's current-head binding.
 Stale heads after a push, out-of-diff lines
 and the apply identity's pending review are refused before writes. This
 exercises the real diff endpoint, position semantics and review listing's
-`X-Total-Count` contract, but not multi-page review scans. GitLab inline
-coverage remains loopback-only; there is no live GitLab job. A failed later
+`X-Total-Count` contract, but not multi-page review scans. CI's `gitlab` job
+also exercises live inline discussions against a pinned local GitLab CE
+container, reading back path, line and side on both sides. A failed later
 write names already published URLs; retrying may duplicate comments because
 these publishers do not add deduplication markers.
 
@@ -2106,6 +2107,16 @@ comments or a new issue posts them again), review replies, thread resolution
 and approval verdicts. Single-line inline comments are supported as described above.
 
 ### Publishing to GitLab
+
+CI's `gitlab` job runs apply against a pinned, throwaway GitLab CE container
+on loopback, in [crates/agentic-job/tests/gitlab.rs](../crates/agentic-job/tests/gitlab.rs).
+The test bootstraps its own bot, target project, fork and runtime-generated PAT
+with only `api`: this scope covers both API writes and git-over-HTTP pushes;
+`write_repository` alone cannot publish notes or merge requests. It checks a
+comment, a fork merge request and inline discussions, including neutralized
+quick actions and `@all`. Like `forgejo`, the job runs on pull requests with a
+read-only job token, no repository secret and no external GitLab account or
+environment. Ordinary `cargo test` skips it; it is not required until stable.
 
 Also publishes `create_pull_request_review_comment` as head-bound discussions
 ([neutral inline comments](#neutral-inline-comments)), independently of the

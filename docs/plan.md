@@ -89,8 +89,8 @@ unrelated work; do not mass-close issues based on this table.
 | [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | tracker#674 publication follow-up to #2070/#2642; enable prepare on published and archive paths only once the released image accepts it, then hosted proof for both. |
 | [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398) | [tracker#1047](https://github.com/cgwalters-forge/tracker/issues/1047), operator-gated P2 adoption: authorize destination/infrastructure and provide tested immutable standalone revision; preserve local library until then. |
 | [#2397](https://github.com/cgwalters-forge/agentic-job/issues/2397) | tracker#1047 deterministic live proof, not another CLI. Operator dispatches safe-outputs-cli.yml with publish=true and links run/comment on #64; offline tests do not settle it. |
-| [#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) | [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786), retain GitLab apply E2E owner after #2110; require real publication, bound status and cleanup, not mock success. |
-| [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110) | tracker#786 operator prerequisite: create test group/bot fork and main/queue-only gitlab-e2e environment with GITLAB_TEST_TOKEN and GITLAB_TEST_GROUP; keep needs-human/P0. |
+| [#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) | [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786): local CI `gitlab` job covers apply comments, fork MRs and inline discussions; retain bound-status/summary acceptance and stability follow-up, not mock success. |
+| [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110) | Redirected to a disposable local GitLab CE CI container like Forgejo: no gitlab.com group, environment or repository token needed. Live verification awaits CI. |
 | [#2071](https://github.com/cgwalters-forge/agentic-job/issues/2071) | tracker#674 table rename: [host] is read, with [sandbox] as a warned alias refused beside it ([stable interfaces](stable-interfaces.md#configuration-files)). Left: once #2656 moves the forwarder's pin to an image that reads [host], have `config --host` write [host] for it and move secure-host/*.toml to [host]; remove the alias only in a later release that the changelog lists as breaking first. Its old request to keep runner-sandbox is superseded by #2989; do not restore a user to satisfy that stale sentence. |
 | [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) | tracker#674 standalone binary/image owner; reuse reference draft #2642, not a duplicate split. Require no agent dependency and static/image/archive/published/hosted E2E evidence. |
 | [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | tracker#596, preserve needs-human: human removes key-bearing legacy corpus fixture; operator decides whether pinned gh-aw JS drivers are exempt. Do not weaken hand-back scans or delete valid parity coverage here. |
@@ -491,9 +491,11 @@ Per-run App tokens are deferred
 Forgejo and GitLab publishers exist
 ([apply](../crates/safe-outputs/src/apply/), under
 [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786)); a
-GitLab end-to-end job ([#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111))
-waits for the operator's gitlab.com test group and token
-([#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110)).
+GitLab end-to-end job now uses a disposable local CE container, following the
+operator's redirect of [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110),
+not a gitlab.com group or token. CI must establish live proof and stability;
+broader status/summary acceptance remains with
+[#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111).
 A caller's own agent job ([the pieces](workflow.md#the-pieces-and-an-agent-job-of-your-own))
 can be admitted by the broker only by repository, not by its workflow
 file, which widens admission ([inference admission](inference.md#which-workflows-a-broker-admits));
