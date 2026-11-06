@@ -352,7 +352,7 @@ const ENVIRONMENT: &str = "/etc/environment";
 
 const IMAGE_ENV_VARS: &[&str] = &["XDG_RUNTIME_DIR"];
 
-const SUBUID: &str = "/etc/subuid";
+pub const SUBUID: &str = "/etc/subuid";
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
@@ -646,7 +646,7 @@ fn runner_user(config: &Sandbox) -> Result<User> {
 /// The subordinate uid ranges of `user`, each as `START-END`: containers
 /// it starts run as these, so the network rules name them. None is an
 /// answer: the runner's user may have no rootless containers to cover.
-fn subordinate_ranges(user: &User, subuid: &str) -> Vec<String> {
+pub fn subordinate_ranges(user: &User, subuid: &str) -> Vec<String> {
     // subuid(5) names the owner or gives its uid.
     let uid = user.uid.to_string();
     subuid

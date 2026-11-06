@@ -372,6 +372,158 @@ otherwise cleared environment. CI's `e2e-write-policy` job runs the
 scripted agent this way: it reads through the proxy with curl and Node,
 is refused a POST, and its hand-back is uploaded and applied.
 
+### The runner-only launch gate
+
+An agent that is the runner's user can do whatever any process of that uid
+can. Clearing its environment does not stop it reading `run`'s
+`/proc/PID/environ`, and `hidepid` separates uids only. The run action's
+`runner-gate: true` input (`run --runner-gate`, off by default) therefore
+checks the host as that uid before the agent starts. `run` refuses to start
+the agent unless every check passes, and lists each missing control without
+printing a value:
+
+- No variable of `run`'s environment is set whose name, in any case, looks
+  like a credential (`*_TOKEN`, `*_KEY`, `*_APIKEY`, `*_SECRET`,
+  `*_PASSWORD`, `*_PAT`, `*_CREDENTIALS`, `*_AUTH_CONFIG`, or plain
+  `TOKEN`, `PASSWORD` or `SECRET`). The agent's own run token is the one
+  exception. This covers `GH_TOKEN`: a gated run gives the agent no GitHub
+  token until one can be supplied from outside its uid, and it refuses
+  `session.watch-item`, which needs that token. `SSH_AUTH_SOCK` is refused
+   too, since an SSH agent signs for any process that connects.
+   Credentials in `[host.env]` (the deprecated `[sandbox.env]` alias too)
+   are refused before that map is merged into the launch environment. Home
+   and agent-configuration relocation through that map is unsupported and
+   refused, including XDG, Git, Claude, opencode and Vibe overrides.
+- If sudo is installed, `sudo -n -l` must succeed and its complete command
+  listing must end with setup's deny-all and exact helper-only grant.
+  The helper executable and all its ancestors must also be root's alone:
+  otherwise that grant lets the uid replace it and become root.
+  Unknown or wrapped output is refused; failure of `sudo -n true` alone
+  does not exclude command-specific root grants. The uid is in no group
+  that is root by another name and gets no answer from a container daemon's socket.
+- No process of the uid that it can read holds a non-empty credential-named
+  variable or SSH agent socket, one of those values, or a
+  string shaped like a credential, in its environment or command line. A
+  process that is not dumpable, such as `sudo`, counts as its real uid's:
+  its environment is refused, but its command line is not. A
+  child holding a canary is the positive control. No process runs as one
+  of the uid's subordinate uids: as root of their user namespace (`podman
+  unshare`), the uid could read their environment and memory.
+- No file in a fixed list holds one either. The list covers credential
+  stores (a non-empty one is enough, including `.docker/config.json`,
+   `.npmrc`, `.pypirc`, `.kube/config`, `.aws/config` and Google's application
+   default credentials, even if used without authentication).
+   Standard gcloud credential/token databases and AWS SSO/CLI cache
+   directories are also refused, not just exported credentials.
+   Default Git credential-cache directories (`.cache/git/credential` and the older
+   `.git-credential-cache`) are refused even without a configured helper:
+   an agent can query the daemon directly with its own Git command line.
+  Any `.ssh` directory is refused, even empty: identity keys and configured
+  `IdentityFile` indirection are not supported by this inventory. It also covers
+  settings in the runner's home (from
+   passwd and `HOME`) and the agent's home; the workspace's `.git/config`
+   and `.git/config.worktree`, where `actions/checkout` can persist the job
+   token as an `extraheader`, and the same in each directory directly in the
+   workspace (checkout's `path:`; a deeper checkout is not found); the
+  files and links at the top of `RUNNER_TEMP`; and the runner's registration
+  (`.credentials`, `.credentials_rsaparams`). If a `Runner.Worker` or
+  `Runner.Listener` runs and its executable's directory can't be found in
+  `/proc`, that is a finding even if a usual install path exists: a stale
+  installation does not locate the running runner. A file holding a canary is
+  the positive control. Permission-denied candidates are refused too: this
+   uid may own the file or an ancestor and make it readable with chmod.
+   Discovered runner directories are scanned even when their marker cannot
+   be inspected, which also counts as a missing control for a stopped runner.
+   Gitfiles (separate Git directories and linked worktrees), symlinked `.git`
+   paths, `commondir` indirection and submodules (`.git/modules`) are explicitly refused: the gate does
+   not yet resolve those layouts' effective credential configuration. Git
+   `include` and `includeIf` directives, credential-helper settings (including
+    credential caches and custom store paths), and SSH-command settings in the
+    scanned home and workspace configurations are also refused, as are proxy
+    settings and URL userinfo (including remote URLs and URL rewrites).
+    Git parses only the bounded input with
+    includes disabled; it never runs repository-configured helpers.
+    Pre-existing Claude, opencode and Vibe settings are refused when nonempty,
+    including Claude's local settings, opencode's JSONC settings and Vibe's
+    default home. Their provider passwords need not resemble tokens, and their
+    helper commands or local proxy endpoints may grant access without exposing
+    a credential value. The gate does not execute those helpers or connect to
+    those endpoints to decide whether they are safe. Even credentialless
+    settings must be removed before gated launch; `run` writes its managed
+    agent settings only after the gate. This fixed-path inventory does not yet
+    cover arbitrary custom configuration paths or discover all credential proxies.
+- A child of `run`, where the agent will be, cannot open the memory of any
+  process of the uid (`/proc/PID/mem`, decided as ptrace and
+  `process_vm_readv` are). As controls, the child opens its own memory and,
+  below Yama scope 2, its own child's. Independently of that probe, the gate
+  requires `kernel.yama.ptrace_scope = 3` (no attach, immutable until reboot)
+  and `kernel.core_pattern = |/bin/false`. A failed sibling-memory open or
+  clean credential scan alone cannot establish isolation, and ptrace denial
+  alone cannot prevent forced core dumps.
+- No `Runner.Worker` .NET diagnostic socket is still linked.
+- `egress.write-policy` is on. As the uid, `run` connects to the metadata
+  service (IPv4 and IPv6) and to a documentation address around the proxy.
+  Each connection must be refused at once; a timeout counts as no rule. The
+  root-owned `/etc/agentic-job/rules.nft` must name the uid and each of its
+  subordinate ranges in the write policy's set and the metadata refusal's
+  set, together with their reject rules. A set that names no uid holds no one.
+  Saved rules are only a configuration cross-check, never live enforcement
+  evidence: the gate additionally requires a successful HTTPS read and the
+  proxy's own POST refusal over both HTTP and HTTPS, separately forcing IPv4
+  and IPv6, using the existing host
+  write-policy probe's control-host selection. No admitted control host,
+  failed read, timeout, origin-only refusal or unreadable/oversized response
+  can pass. Curl gets no inherited environment or user settings; each request
+  has a 30-second timeout (six requests maximum) and response capture stops at
+  64 KiB. A host without working controls for **both** address families is
+   refused, even if IPv6 is believed unavailable. The sole exception requires
+   the root-owned, read-only IPv6 module parameter to show boot-time disable
+   (`ipv6.disable=1`) **and** an AF_INET6 socket creation to fail with
+   `EAFNOSUPPORT`. A missing route, DNS failure or per-interface disable does
+   not qualify. The current firewall redirects only IPv4 HTTP(S), so boot-time
+   IPv6 disable is necessary for a passing host with these installed rules;
+   permitting public IPv6 just to make the read pass would bypass enforcement.
+  Allocated subordinate uid ranges are currently **refused**, even if the
+  saved rules name them, because no live subordinate probe exists.
+
+A process read the kernel refuses, or a file that is not there, holds
+nothing for the agent. Any other failed read, including a permission-denied
+file, counts as a missing control, and so does a failed positive control.
+For other processes, only the exact run token known to `run`, under its own
+variable name, is exempt from the credential-name check. The shapes are only a
+backstop for credentials whose values `run` does not know. The gate also
+refuses whatever `--runner-home` already refuses (`id-token`, `api-key`,
+MCP, a private target).
+
+Findings use PIDs and fixed inventory labels, not process-chosen names or
+discovered filenames: either of those can itself contain a credential.
+
+To pass the gate, a configuration needs `egress.write-policy` (the
+workflow's `egress-write-policy`). It must pass no `github-token`, and it
+must keep the lock's defaults: `deny-runner-metadata`,
+`unlink-worker-diagnostics`, and discarded core dumps. A gated host additionally
+needs Yama scope **3**, not setup's scope 1 default; this cannot be undone
+until reboot, and currently needs IPv6 disabled at boot. It must have no subordinate uid allocations (so rootless
+container configurations with those allocations cannot pass yet), must
+check out with `persist-credentials: false`, and must keep the
+runner's registration out of the uid's reach. The reusable workflow has no
+input for the gate yet, and no CI job runs a hosted runner through it.
+The default runner-read protection hides a running Worker's executable
+from `run`, so the gate currently refuses that hosted configuration even
+if its registration is isolated. A fallback installation path is not proof
+of which runner is running; this needs a trustworthy discovery mechanism
+before such a host can pass. Do not disable the read protection to make it pass.
+The ignored `runner_gate_starts_an_agent_only_without_credential_exposures`
+CLI test requires a fresh secured host as the locked runner uid. It requires
+a successful agent launch, then separately refuses environment, file and
+process credentials; it does not provision the host or prove individual
+firewall, sudo or memory-control failures. Do not run it in an existing sandbox.
+This remains draft readiness work for #3000: successful fresh-host launch,
+individual missing-control tests and a complete inventory of local credential
+proxies and opaque settings credentials remain acceptance work. The gate is
+off by default; no existing caller is silently enrolled and no supported
+hosted passing configuration is claimed.
+
 ## Inputs and outputs
 
 The forwarder exposes these three inputs of the new action; every one is optional.

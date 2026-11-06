@@ -19,6 +19,14 @@ inputs:
       cgwalters-forge/actions/secure-host, in a job that holds no secret, no write token and no
       `id-token`
     default: ""
+  runner-gate:
+    description: >-
+      With `agent-user: runner`, refuse to start the agent unless a fixed (not yet complete)
+      inventory finds no credential but its own run token within its uid's reach, and the uid
+      is held to the egress write policy (`agentic-job run --runner-gate`,
+      docs/secure-host.md). Currently refuses allocated subordinate uids. Needs Yama scope 3,
+      discarded core dumps, live HTTP(S) policy controls and no `github-token`
+    default: "false"
   github-token:
     description: >-
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
@@ -245,6 +253,7 @@ runs:
         # Taken over by `run` in place of a registration of its own.
         AGENTIC_JOB_INFERENCE_RUN_TOKEN: ${{ inputs.inference-run-token }}
         RUNNER_HOME: ${{ inputs.runner-home }}
+        RUNNER_GATE: ${{ inputs.runner-gate }}
       run: |
         echo '::group::agent (condensed)'
         state=0
@@ -257,6 +266,7 @@ runs:
         # there, and that is the pinned release's, not this commit's.
         binary=$JOB_DIR/agentic-job
         chmod 0755 "$binary"
+        [ "$RUNNER_GATE" != true ] || set -- "$@" --runner-gate
         "$binary" run --runner-home "$RUNNER_HOME" --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"

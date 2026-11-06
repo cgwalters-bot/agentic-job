@@ -371,6 +371,18 @@ says what a caller may rely on across versions.
   --forge gitlab --run-summary` then posts it with mentions and quick
   actions broken (#2995).
 
+- The run action's new `runner-gate` input (`run --runner-gate`, off by
+  default) refuses to start an agent as the runner's user unless a fixed
+  inventory finds no credential other than the agent's run token in reach:
+  `run`'s environment (so no `github-token`), the uid's processes, listed
+  credential files and settings, the runner's registration, a Worker
+  diagnostic socket and `sudo`. It also requires Yama scope 3, discarded
+  core dumps, live metadata and write-policy refusals with a read control,
+  and no subordinate uids. The inventory is not complete, so passing it is
+  not proof that nothing is in reach, and no supported host passes it yet.
+  Each missing control is named without its value
+  ([the gate](docs/secure-host.md#the-runner-only-launch-gate), #3000).
+
 - `run`'s refusal of a provider key or broker token in a readable process
   now says whether `/proc`'s `hidepid` hides other users' processes and, if
   not, how to mount a procfs that does; `run` logs a note when a caller's
