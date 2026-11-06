@@ -139,6 +139,59 @@ and output paths. It records `acp.jsonl`, `agent-stderr.log` and
 also used to summarize recorded transcripts. `session/clients.rs` has a
 notification tap, but no client can attach to a running task yet.
 
+### Why the session stays in agentic-job
+
+The experiment for #2997, in
+[#3129](https://github.com/cgwalters-forge/agentic-job/pull/3129), extracted the
+session core to `acp-session`, depending on secure-host but not agentic-job.
+Reverse edges were configuration tables, credential-variable names, the
+task-size limit, outcome-to-exit mapping, item-text sanitization and the
+host's serve guard. The prototype moved or injected these while leaving the
+CLI and `session connect` in agentic-job. This introduced seams without a
+convincing release-build benefit, so the extraction was not kept;
+configuration, environment filtering, bounds, sanitization and cleanup retain
+their original implementation. No run/acp-drive/config split was attempted.
+
+The benchmark recorded these wall times at baseline `9da5b90` and its
+prototype. These are local measurements, not a reproduction of the reported
+three-hour Kubernetes stall:
+
+| Build or edit | Baseline (s) | Prototype (s) |
+| --- | ---: | ---: |
+| Fresh debug | 134.4 | 130.4 |
+| Debug incremental CLI | 9.7 | 8.9 |
+| Debug incremental run | 10.0 | 8.8 |
+| Debug incremental session | 9.9 | 9.6 |
+| Fresh release | 397.0 | 404.7 |
+| Release incremental CLI | 158.4 | 157.5 |
+| Release incremental run | 159.2 | Not collected |
+| Release incremental session | 160.0 | Not collected |
+
+The runner had 4 vCPUs (AMD EPYC 7763), 15 GiB RAM, no cgroup CPU or memory
+limit, Rust/Cargo 1.93.1, and the x86_64 GNU target. Builds used default jobs,
+default dev/release profiles and default `CARGO_INCREMENTAL`. Fresh builds
+used `cargo build --locked --timings -p agentic-job` (plus `--release` for
+release); incremental builds added `--bin agentic-job` after appending a dead
+function to `cli.rs`, `run/summary.rs` or session `budget.rs`. Incremental
+numbers are means of three samples; fresh builds had one sample each.
+Baseline incremental standard deviations were 0.10/0.24/0.11 seconds in debug
+and 0.4/3.3/1.3 seconds in release (CLI/run/session).
+
+Baseline fresh release spent 220.7 seconds in the final binary; release
+incremental work spent about 45 seconds in the library and 113 in the final
+binary. Per-process peak RSS was about 1.27–1.30 GiB; aggregate peaks were
+2.5 GiB for fresh debug, 2.0 GiB for fresh release and about 1.37 GiB for
+incremental release. The debug gains were modest, release CLI improved by
+less than a second, and fresh release regressed by 7.7 seconds
+(about 2%, one sample each). The incomplete release samples do not establish
+a general incremental win, so this evidence does not justify retaining the
+split.
+
+The original stall remains unconfirmed until the reporter supplies the
+revision, pod CPU/memory limits and pressure, throttling or OOM evidence.
+Published release binaries remain the recommended CI path. Revisit a split
+only with a measured bottleneck and a repeatable improvement.
+
 ## `run`
 
 `run/clone.rs` clones the public target as the runner's user in runner mode before
