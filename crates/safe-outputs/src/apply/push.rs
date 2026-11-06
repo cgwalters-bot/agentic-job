@@ -43,6 +43,7 @@ use serde_json::Value;
 
 use super::github::{Github, is_repo, same, segment};
 use super::{COMMIT_RE, owner};
+use crate::contract::is_login;
 use crate::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH};
 
 /// A repository whose default branch holds this file, naming that
@@ -95,6 +96,9 @@ pub struct Resolved {
     pub head: String,
     /// Its base branch's head now: a pull request's `base.sha` can lag.
     pub base: String,
+    /// The login that opened it, which bounds' `own_author` may admit in
+    /// any repository.
+    pub author: String,
 }
 
 pub fn resolve(github: &Github, args: &ResolveArgs) -> Result<Resolved> {
@@ -132,10 +136,17 @@ pub fn resolve(github: &Github, args: &ResolveArgs) -> Result<Resolved> {
              repository that still exists"
         );
     };
+    // Empty where it is not a login, such as an app's `name[bot]`, which
+    // no bounds' `own_author` names.
+    let author = pull["user"]["login"]
+        .as_str()
+        .filter(|login| is_login(login))
+        .unwrap_or_default();
     Ok(Resolved {
         branch: branch.to_owned(),
         head: pull["head"]["sha"].as_str().unwrap_or_default().to_owned(),
         base: current_base(github, &args.repo, &pull)?,
+        author: author.to_owned(),
     })
 }
 
@@ -376,6 +387,20 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
         );
     };
     ensure!(is_repo(name), "{what} names its head repository {name:?}");
+    // A repository the bounds admitted only for its author's own pull
+    // request: that author is apply's identity, or the bounds did not
+    // admit a push here at all.
+    if let Some(author) = push.get("author").filter(|author| !author.is_null()) {
+        let author = author
+            .as_str()
+            .context("the policy names a push's author that is not a login")?;
+        ensure!(
+            same(&pull["user"]["login"], author) && author.eq_ignore_ascii_case(me),
+            "{what} is by {}, and apply pushes as {me}: the policy admitted a push to it only as \
+             {author}'s own pull request",
+            pull["user"]["login"].as_str().unwrap_or("nobody")
+        );
+    }
     let own =
         pull["head"]["repo"]["fork"] == true && same(&pull["head"]["repo"]["owner"]["login"], me);
     let itself = name.eq_ignore_ascii_case(output);
@@ -500,6 +525,7 @@ mod tests {
         route(
             PULL,
             json!({"number": 42, "state": "open", "head": head("carol/r", true),
+                "user": {"login": "carol"},
                 "base": {"ref": "main", "sha": sha('b'), "repo": {"full_name": "o/r"}}}),
         );
         for name in ["carol/r", "bot/r", "bot/other", "o/r"] {
@@ -562,6 +588,13 @@ mod tests {
 
         fn from(&mut self, name: &str, fork: bool) {
             self.edit(PULL, "head", head(name, fork));
+        }
+
+        /// A pull request by AUTHOR, whose repository the policy admitted
+        /// as ADMITTED's own.
+        fn by(&mut self, author: &str, admitted: &str) {
+            self.edit(PULL, "user", json!({"login": author}));
+            self.config[PUSH_TO_PULL_REQUEST_BRANCH]["author"] = json!(admitted);
         }
 
         fn me(&mut self, login: &str) {
@@ -675,6 +708,14 @@ mod tests {
                     c.replacement = true;
                 },
                 pushed_to("bot/r", Some(sha('c'))),
+            ),
+            (
+                "the identity's own pull request, admitted by its author",
+                |c| {
+                    c.from("bot/r", true);
+                    c.by("Bot", "bot");
+                },
+                pushed_to("bot/r", None),
             ),
             (
                 "a branch of the repository itself, which accepts it",
@@ -801,6 +842,27 @@ mod tests {
                 "a head repository that is not a name",
                 |c| c.from("../r", true),
                 "names its head repository",
+            ),
+            // Admitted only as the identity's own pull request, it is still
+            // that identity's, and the identity is the one apply holds.
+            (
+                "another's pull request, admitted by the identity's authorship",
+                |c| {
+                    c.from("bot/r", true);
+                    c.by("carol", "bot");
+                },
+                "is by carol, and apply pushes as bot: the policy admitted a push to it only as \
+                 bot's own pull request",
+            ),
+            (
+                "a pull request by the author admitted, applied as another identity",
+                |c| c.by("carol", "carol"),
+                "is by carol, and apply pushes as bot",
+            ),
+            (
+                "an author that is not a string",
+                |c| c.config[PUSH_TO_PULL_REQUEST_BRANCH]["author"] = json!(["bot"]),
+                "names a push's author that is not a login",
             ),
             (
                 "no pull request in the policy",
@@ -1181,7 +1243,13 @@ mod tests {
             branch: "fix/x".into(),
             head: sha('a'),
             base: sha('c'),
+            author: "carol".into(),
         };
+        // An app's pull request resolves, by no author a bound can name.
+        let mut app = Case::new();
+        app.edit(PULL, "user", json!({"login": "renovate[bot]"}));
+        let (github, _requests) = forge(app.routes);
+        assert_eq!(resolve(&github, &args()).unwrap().author, "");
         type Edit = fn(&mut ResolveArgs, &mut Case);
         // (what, the request and forge, the error's words or none)
         let cases: Vec<(&str, Edit, Option<&str>)> = vec![

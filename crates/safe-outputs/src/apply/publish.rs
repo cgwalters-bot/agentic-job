@@ -168,8 +168,8 @@ pub const HANDLERS: &[Handler] = &[
     },
     // The pull request is the handler's fixed `target`, which the number a
     // request names does not change; the commit's message is the patch's.
-    // `head` and the replacement settings are apply.yml's, which the
-    // handler does not read.
+    // `head`, `author` and the replacement settings are apply.yml's, which
+    // the handler does not read.
     Handler {
         output: PUSH_TO_PULL_REQUEST_BRANCH,
         fields: &["type", "repo", "pull_request_number", "branch", "message"],
@@ -177,6 +177,7 @@ pub const HANDLERS: &[Handler] = &[
             "max",
             "target",
             "head",
+            "author",
             "replacement_max_commits",
             "replacement_max_files",
             "replacement_base",
@@ -6250,6 +6251,9 @@ mod tests {
 
         let (root, checked, case, mut handlers) = corpus_case("push-to-pull-request-branch");
         handlers[PUSH_TO_PULL_REQUEST_BRANCH]["protected_files"] = json!(["sub.rs"]);
+        // A push admitted by its pull request's author, which `push
+        // target` checked, publishes as any other.
+        handlers[PUSH_TO_PULL_REQUEST_BRANCH]["author"] = json!("cgwalters-bot");
         let items = [case["items"][0].clone()];
         let policy = case_policy(&case);
         let (ok, sent, records) = publish_case(

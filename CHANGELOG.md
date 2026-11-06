@@ -19,6 +19,14 @@ says what a caller may rely on across versions.
   container, including quick-action and `@all` neutralization (#2110).
   Like Forgejo, it is ignored in ordinary tests and non-required until stable.
 
+- A push's bound may set `own_author = "LOGIN"`, the account apply pushes
+  as. A fix run on that account's own pull request is then admitted in a
+  repository `repos` does not list, with only the push and `noop`/`missing_*`
+  outputs (and the run's status comment on that pull request). Policy and
+  apply each read the author from the forge, and apply refuses unless the
+  pull request is still by that login and it is the identity apply holds. `push resolve` prints `author=` too. Off by
+  default (#3162).
+
 - Under `host.deny-runner-reads`, setup discards every core dump on the
   host (`kernel.core_pattern = |/bin/false`), and `sandbox check` fails
   closed without it (`core-pattern`). This closes a forced dump

@@ -13,7 +13,7 @@ use crate::exit::Exit;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-    /// For policy: print the branch, head and current base of the pull request a run pushes to
+    /// For policy: print the branch, head, current base and author of the pull request a run pushes to
     Resolve(ResolveArgs),
     /// For apply: print the repository a run's commit is pushed to, forking for a new pull request
     Target(TargetArgs),
@@ -30,6 +30,7 @@ impl Command {
                 println!("branch={}", pull.branch);
                 println!("head={}", pull.head);
                 println!("replacement-base={}", pull.base);
+                println!("author={}", pull.author);
             }
             Self::Target(args) => {
                 let github =

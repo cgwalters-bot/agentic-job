@@ -8,6 +8,110 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
+/// Native publishers cannot enforce the applying identity against a PR's
+/// author yet: refuse both new bounds and an already compiled policy.
+#[test]
+fn own_author_is_github_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let allow = dir.path().join("allow.toml");
+    let pinned = dir.path().join("policy.json");
+    let head = "a".repeat(40);
+    let mut github = Value::Null;
+    for forge in ["github", "forgejo", "gitlab"] {
+        let push_repo = if forge == "github" {
+            ""
+        } else {
+            "push_repo = 'applying-bot/unlisted'"
+        };
+        std::fs::write(
+            &allow,
+            format!(
+                "hosts = ['github.com']\nrepos = ['example/listed']\nbases = ['main']\n\
+                 max_outputs = 1\nmax_patch_bytes = 65536\nmax_patch_files = 10\n\
+                 [{forge}]\n{push_repo}\n\
+                 [{forge}.outputs.push_to_pull_request_branch]\n\
+                 max = 1\nbranches = ['dispatch/**']\nown_author = 'different-user'\n"
+            ),
+        )
+        .unwrap();
+        let output = Command::new(BIN)
+            .args(["policy", "--allow"])
+            .arg(&allow)
+            .args([
+                "--repo",
+                "example/unlisted",
+                "--output-repo",
+                "example/unlisted",
+            ])
+            .args(["--clone-url", "https://github.com/example/unlisted"])
+            .args(["--base", "dispatch/fix", "--kind", "branch"])
+            .args([
+                "--outputs",
+                "push_to_pull_request_branch",
+                "--max-outputs",
+                "1",
+            ])
+            .args(["--pull-request", "12", "--head", &head])
+            .args(["--pull-author", "different-user"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if forge == "github" {
+            assert!(output.status.success(), "{stderr}");
+            github = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                github["safe_outputs"]["push_to_pull_request_branch"]["author"],
+                "different-user"
+            );
+        } else {
+            assert!(!output.status.success(), "{forge} accepted own_author");
+            assert!(
+                stderr.contains("own_author is supported only on GitHub"),
+                "{stderr}"
+            );
+            assert!(output.stdout.is_empty());
+        }
+    }
+    for (forge, token_env) in [("forgejo", "FORGEJO_TOKEN"), ("gitlab", "GITLAB_TOKEN")] {
+        let mut policy = github.clone();
+        policy["forge"] = forge.into();
+        policy["push_repo"] = "applying-bot/unlisted".into();
+        std::fs::write(&pinned, policy.to_string()).unwrap();
+        // A previously admitted different-user PR must not reach the
+        // applying-bot publisher, even with a token available. No server
+        // or checked upload is needed: policy validation must fail first.
+        let output = Command::new(BIN)
+            .args([
+                "apply",
+                "--forge",
+                forge,
+                "--server",
+                "https://forge.example",
+            ])
+            .args([
+                "--repo",
+                "example/unlisted",
+                "--push-repo",
+                "applying-bot/unlisted",
+            ])
+            .arg("--policy")
+            .arg(&pinned)
+            .arg("--checked")
+            .arg(dir.path().join("absent"))
+            .args(["--run-url", "https://ci.example/runs/1"])
+            .env(token_env, "native-apply-test-token")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{forge} accepted author");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("a push's author is supported only on GitHub"),
+            "{stderr}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
 #[test]
 fn context_admission() {
     let context = serde_json::json!({

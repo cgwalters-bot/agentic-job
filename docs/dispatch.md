@@ -99,7 +99,9 @@ push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"] }
 
 with globs of the branches a fix may push to; see
 [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch).
-The scripted session is implement's.
+With `own_author` set to the applying account's login there, a fix of a
+pull request that account opened is admitted in a repository `repos` does
+not list. The scripted session is implement's.
 
 A target with issues turned off can take its item from another repository:
 `-f item-repo=OWNER/TRACKER` with an issue number there, for `implement`,

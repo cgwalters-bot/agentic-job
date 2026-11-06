@@ -334,6 +334,10 @@ impl<Trigger> Bounds<Trigger> {
         for (output, limit) in outputs {
             limit.validate(output)?;
             ensure!(
+                limit.own_author.is_none() || forge == Forge::Github,
+                "outputs.{output}: own_author is supported only on GitHub"
+            );
+            ensure!(
                 OUTPUT_TYPES.contains(&output.as_str()),
                 "the output type {output:?} is not one of {}",
                 OUTPUT_TYPES.join(", ")
@@ -682,7 +686,22 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
                 push.target, push.head, bound.target, bound.head
             )]);
         }
+        (Some(push), Some(bound))
+            if push
+                .author
+                .as_ref()
+                .zip(bound.author.as_ref())
+                .is_some_and(|(own, other)| !own.eq_ignore_ascii_case(other)) =>
+        {
+            return Err(vec![format!(
+                "the bounds files admit the push by different authors: {:?} and {:?}",
+                push.author, bound.author
+            )]);
+        }
         (Some(mut push), Some(bound)) => {
+            // Where either file admitted the repository only by the pull
+            // request's author, apply checks that author again.
+            push.author = push.author.or_else(|| bound.author.clone());
             push.unprotected_dot_folders
                 .retain(|name| bound.unprotected_dot_folders.contains(name));
             push.replacement_max_commits = push
@@ -1058,6 +1077,27 @@ events = ["issues"]
                 .unwrap()
                 .head = "3333333333333333333333333333333333333333".into();
         });
+        let pushed_by = |author: &str| {
+            with(push_policy(), &|policy| {
+                policy
+                    .safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .author = Some(author.into())
+            })
+        };
+        // A file that admitted the push only by its author keeps apply's
+        // check of that author, whichever file it is.
+        for (own, other) in [
+            (pushed_by("bot"), push_policy()),
+            (push_policy(), pushed_by("bot")),
+            (pushed_by("bot"), pushed_by("Bot")),
+        ] {
+            let both = intersect(own, other).unwrap();
+            let push = both.safe_outputs.push_to_pull_request_branch.unwrap();
+            assert!(push.author.unwrap().eq_ignore_ascii_case("bot"));
+        }
         // The name, the two policies, and the refusal.
         for (name, own, other, want) in [
             (
@@ -1077,6 +1117,12 @@ events = ["issues"]
                 push_policy(),
                 moved,
                 "the bounds files pin different pushes",
+            ),
+            (
+                "another push author",
+                pushed_by("bot"),
+                pushed_by("other"),
+                "the bounds files admit the push by different authors",
             ),
             (
                 "no common output type",

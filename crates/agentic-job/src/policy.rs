@@ -59,6 +59,16 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
     ),
 ];
 
+/// What a run may ask for in a repository the bounds admit only for a
+/// push to their `own_author`'s pull request: that push, and the outputs
+/// that write nothing to the forge.
+const OWN_PULL_REQUEST_OUTPUTS: &[&str] = &[
+    PUSH_TO_PULL_REQUEST_BRANCH,
+    NOOP,
+    "missing_tool",
+    MISSING_DATA,
+];
+
 /// The forge whose private-repository rules a bounds file's `push_repo`
 /// leaves as they are (docs/private-repositories.md).
 const GITHUB_HOST: &str = "github.com";
@@ -131,6 +141,15 @@ pub struct Args {
         requires = "pull_request"
     )]
     pub head: Option<String>,
+    /// The login that opened that pull request, as the forge says: the
+    /// bounds' `own_author` admits it in a repository `repos` does not
+    #[arg(
+        long,
+        value_name = "LOGIN",
+        allow_hyphen_values = true,
+        requires = "pull_request"
+    )]
+    pub pull_author: Option<String>,
     /// Where apply applies the outputs (OWNER/NAME); a push is refused
     /// unless it is `--repo`, where the pull request is
     #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
@@ -166,6 +185,8 @@ pub struct Request<'a> {
     /// For a push: the pull request's number, and the commit its branch
     /// (`base`) was at when the run was asked for.
     pub pull_request: Option<(&'a str, &'a str)>,
+    /// For a push: who opened the pull request, as the forge says.
+    pub pull_author: Option<&'a str>,
     /// Where apply applies the outputs; a push must name the run's own
     /// repository here.
     pub output_repo: Option<&'a str>,
@@ -225,6 +246,7 @@ impl Compile for Bounds {
             max_outputs,
             job_token,
             pull_request,
+            pull_author,
             output_repo,
             item_repo,
             private,
@@ -234,12 +256,9 @@ impl Compile for Bounds {
         let push_repo = self.push_repo();
 
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
-        if !repo_ok || !glob_matches(&self.repos, repo) {
-            errors.push(format!(
-                "repo {repo:?} is not within the bounds ({})",
-                self.repos.join(", ")
-            ));
-        }
+        // Whether `repos` admits it is checked below, where the outputs
+        // asked for say whether `own_author` may.
+        let listed = repo_ok && glob_matches(&self.repos, repo);
         // Checked against the repository only if that is a name at all.
         if repo_ok && let Some(problem) = self.clone_url_problem(clone_url, repo) {
             errors.push(problem);
@@ -322,6 +341,38 @@ impl Compile for Bounds {
         }
         if types.is_empty() {
             errors.push("outputs lists no output type".to_owned());
+        }
+        // The operator's rule that the bot may always work on a pull
+        // request it opened (#3162): a push to one by the login the bounds
+        // name is admitted outside `repos`. That admits the push and the
+        // outputs that write nothing, and no comment, label or close in a
+        // repository the bounds never listed.
+        let own_author = limits
+            .get(PUSH_TO_PULL_REQUEST_BRANCH)
+            .and_then(|limit| limit.own_author.as_deref())
+            .filter(|own| {
+                types.contains(&PUSH_TO_PULL_REQUEST_BRANCH)
+                    && pull_author.is_some_and(|author| author.eq_ignore_ascii_case(own))
+            });
+        let by_author = repo_ok && !listed && own_author.is_some();
+        if !listed && !by_author {
+            errors.push(format!(
+                "repo {repo:?} is not within the bounds ({})",
+                self.repos.join(", ")
+            ));
+        }
+        if by_author {
+            errors.extend(
+                types
+                    .iter()
+                    .filter(|output| !OWN_PULL_REQUEST_OUTPUTS.contains(output))
+                    .map(|output| {
+                        format!(
+                            "output type {output:?} is not for {repo:?}, which the bounds admit \
+                             only for a push to their own_author's pull request"
+                        )
+                    }),
+            );
         }
         let known = || {
             limits
@@ -521,6 +572,7 @@ impl Compile for Bounds {
             branches: Vec::new(),
             replacement_max_commits: 0,
             replacement_max_files: 0,
+            own_author: None,
             name: limits.get(output).and_then(|bound| bound.name.clone()),
             category: limits.get(output).and_then(|bound| bound.category.clone()),
             allowed_reasons: limits
@@ -557,6 +609,7 @@ impl Compile for Bounds {
                     .get(PUSH_TO_PULL_REQUEST_BRANCH)
                     .map_or(0, |bound| bound.replacement_max_files),
                 replacement_base: None,
+                author: own_author.filter(|_| by_author).map(str::to_owned),
                 ready_when_complete: ready(PUSH_TO_PULL_REQUEST_BRANCH),
                 protected_files: protected_files(&self.unprotected_files, repo),
                 protect_top_level_dot_folders: true,
@@ -679,6 +732,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         max_outputs: &args.max_outputs,
         job_token: args.job_token,
         pull_request: args.pull_request.as_deref().zip(args.head.as_deref()),
+        pull_author: args.pull_author.as_deref(),
         output_repo: args.output_repo.as_deref(),
         item_repo: args.item_repo.as_deref(),
         private: args.private,
@@ -776,6 +830,7 @@ missing_data = { max = 3 }
             max_outputs: "3",
             job_token: false,
             pull_request: None,
+            pull_author: None,
             output_repo: None,
             item_repo: None,
             private: false,
@@ -1369,6 +1424,7 @@ max_patch_files = 10
                 max_outputs: "1",
                 job_token: false,
                 pull_request: None,
+                pull_author: None,
                 output_repo: None,
                 item_repo: None,
                 private: false,
@@ -2981,6 +3037,7 @@ max_patch_files = 10
             max_outputs: "many",
             job_token: false,
             pull_request: None,
+            pull_author: None,
             output_repo: None,
             item_repo: None,
             private: false,
@@ -3251,6 +3308,171 @@ max_patch_files = 10
         );
     }
 
+    /// A push to the bounds' `own_author`'s pull request, in a repository
+    /// `repos` does not list, and what else that admits: nothing.
+    #[test]
+    fn own_author_admits_only_a_push_to_its_own_pull_request() {
+        const BOT: &str = "cgwalters-bot";
+        let mut bounds = push_bounds();
+        bounds
+            .outputs_mut()
+            .unwrap()
+            .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+            .unwrap()
+            .own_author = Some(BOT.into());
+        bounds.validate().unwrap();
+        let ok = Request {
+            repo: "ostreedev/ostree",
+            clone_url: "https://github.com/ostreedev/ostree",
+            output_repo: Some("ostreedev/ostree"),
+            pull_author: Some(BOT),
+            outputs: "push_to_pull_request_branch,noop,missing_tool,missing_data",
+            ..push_request()
+        };
+        // The author apply checks again, or a part of the refusal.
+        type Want = Result<Option<&'static str>, &'static str>;
+        // The name, the request, and what it gets.
+        let cases: &[(&str, Request<'_>, Want)] = &[
+            ("the bot's pull request", ok, Ok(Some(BOT))),
+            (
+                "its login in another case",
+                Request {
+                    pull_author: Some("CGWalters-Bot"),
+                    ..ok
+                },
+                Ok(Some(BOT)),
+            ),
+            // `repos` admits as before, and apply checks no author.
+            (
+                "a listed repository",
+                Request {
+                    pull_author: Some("carol"),
+                    ..push_request()
+                },
+                Ok(None),
+            ),
+            (
+                "the bot's pull request in a listed repository",
+                Request {
+                    pull_author: Some(BOT),
+                    ..push_request()
+                },
+                Ok(None),
+            ),
+            (
+                "another's pull request",
+                Request {
+                    pull_author: Some("carol"),
+                    ..ok
+                },
+                Err("repo \"ostreedev/ostree\" is not within the bounds"),
+            ),
+            (
+                "an app's pull request",
+                Request {
+                    pull_author: Some(""),
+                    ..ok
+                },
+                Err("is not within the bounds"),
+            ),
+            (
+                "no author",
+                Request {
+                    pull_author: None,
+                    ..ok
+                },
+                Err("is not within the bounds"),
+            ),
+            (
+                "a comment beside the push",
+                Request {
+                    outputs: "push_to_pull_request_branch,add_comment",
+                    ..ok
+                },
+                Err(
+                    "output type \"add_comment\" is not for \"ostreedev/ostree\", which the bounds admit only for a push",
+                ),
+            ),
+            (
+                "every output",
+                Request {
+                    outputs: "all",
+                    max_outputs: "max",
+                    ..ok
+                },
+                Err("is not for \"ostreedev/ostree\""),
+            ),
+            (
+                "no push",
+                Request {
+                    outputs: "noop",
+                    ..ok
+                },
+                Err("is not within the bounds"),
+            ),
+            // The branch globs hold as for any push.
+            (
+                "a branch the push globs do not name",
+                Request { base: "main", ..ok },
+                Err("pull request branch \"main\" is not within the bounds"),
+            ),
+            (
+                "an item in another unlisted repository",
+                Request {
+                    item_repo: Some("ostreedev/other"),
+                    ..ok
+                },
+                Err("item repo \"ostreedev/other\" is not within the bounds"),
+            ),
+            (
+                "a repository that is not a name",
+                Request {
+                    repo: "ostreedev/../x",
+                    clone_url: "https://github.com/ostreedev/../x",
+                    output_repo: Some("ostreedev/../x"),
+                    ..ok
+                },
+                Err("is not within the bounds"),
+            ),
+        ];
+        for (name, request, want) in cases {
+            let author = |policy: &Policy| {
+                policy
+                    .safe_outputs
+                    .push_to_pull_request_branch
+                    .as_ref()
+                    .unwrap()
+                    .author
+                    .clone()
+            };
+            match (bounds.compile(request), want) {
+                (Ok(policy), Ok(want)) => {
+                    assert_eq!(author(&policy).as_deref(), *want, "{name}");
+                    policy.validate().unwrap();
+                }
+                (Err(errors), Err(want)) => assert!(
+                    errors.iter().any(|e| e.contains(want)),
+                    "{name}: {errors:?}"
+                ),
+                (result, _) => panic!("{name}: {result:?}"),
+            }
+        }
+        // Off by default: the same request without the key is refused.
+        let errors = push_bounds().compile(&ok).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("is not within the bounds")),
+            "{errors:?}"
+        );
+        // An organization file that lists the repository keeps the check.
+        let mut org = push_bounds();
+        org.repos.push("ostreedev/*".into());
+        let both = intersect(bounds.compile(&ok).unwrap(), org.compile(&ok).unwrap()).unwrap();
+        let push = both.safe_outputs.push_to_pull_request_branch.unwrap();
+        assert_eq!(push.author.as_deref(), Some(BOT));
+    }
+
     #[test]
     fn a_push_policy_names_its_pull_request_and_always_a_max() {
         let bounds = push_bounds();
@@ -3372,6 +3594,26 @@ max_patch_files = 10
                 false,
             ),
             ("add_comment", "max = 1\nbranches = ['x']", false),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']\nown_author = 'cgwalters-bot'",
+                true,
+            ),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']\nown_author = 'renovate[bot]'",
+                false,
+            ),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']\nown_author = ''",
+                false,
+            ),
+            (
+                "add_comment",
+                "max = 1\nown_author = 'cgwalters-bot'",
+                false,
+            ),
         ] {
             assert_eq!(valid(output, text), ok, "{output} {text}");
         }

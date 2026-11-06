@@ -718,6 +718,7 @@ jobs:
       # head read here with the read-only token, never from agent text or
       # the caller's task; the binary checks the branch against the bounds
       # and pins the head, which the agent's run, check and apply hold to.
+      # Its author is read here too, for the bounds' `own_author`.
       - name: Resolve the pull request a run pushes to
         id: push
         if: ${{ inputs.push-item != '' }}
@@ -753,6 +754,7 @@ jobs:
           PUSH_ITEM: ${{ inputs.push-item }}
           PUSH_BRANCH: ${{ steps.push.outputs.branch }}
           PUSH_HEAD: ${{ steps.push.outputs.head }}
+          PUSH_AUTHOR: ${{ steps.push.outputs.author }}
           REPLACEMENT_BASE: ${{ steps.push.outputs.replacement-base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
           ITEM_REPO: ${{ inputs.item-repo }}
@@ -778,7 +780,7 @@ jobs:
           base=$BASE target=${TARGET:-*}
           if [ -n "$PUSH_ITEM" ]; then
             base=$PUSH_BRANCH
-            set -- "$@" --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
+            set -- "$@" --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --pull-author "$PUSH_AUTHOR" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
           fi
           # A private run names where its outputs go, for the binary to
           # hold them to its own repository.

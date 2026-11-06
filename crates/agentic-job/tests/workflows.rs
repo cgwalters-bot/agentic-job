@@ -4729,6 +4729,7 @@ fn the_request_step_tells_the_policy_command_its_token_and_targets() {
         ("PUSH_ITEM", "42"),
         ("PUSH_BRANCH", "agent-run-1"),
         ("PUSH_HEAD", head.as_str()),
+        ("PUSH_AUTHOR", "cgwalters-bot"),
         ("REPLACEMENT_BASE", replacement.as_str()),
         ("OUTPUT_REPO", ""),
     ];
@@ -4738,6 +4739,8 @@ fn the_request_step_tells_the_policy_command_its_token_and_targets() {
             "42",
             "--head",
             head.as_str(),
+            "--pull-author",
+            "cgwalters-bot",
             "--output-repo",
         ];
         args.push(repo);

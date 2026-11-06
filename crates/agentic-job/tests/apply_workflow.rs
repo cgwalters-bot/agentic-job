@@ -458,7 +458,8 @@ fn carriers_exempt_at_most_github_of_policy_dot_folders() {
 fn push_uses_policy_pull_request_and_apply_fork_without_workflows() {
     let dir = TempDir::new().unwrap();
     let (pr, push_settings) = handler_settings();
-    let push = json!({"max":1,"target":"42","head":"2".repeat(40),"protected_files":[],"protect_top_level_dot_folders":true,"protected_files_policy":"blocked","max_patch_size":1024,"max_patch_files":100});
+    // `author` is an own-pull-request push's; the handler must keep it.
+    let push = json!({"max":1,"target":"42","head":"2".repeat(40),"author":"cgwalters-bot","protected_files":[],"protect_top_level_dot_folders":true,"protected_files_policy":"blocked","max_patch_size":1024,"max_patch_files":100});
     for fork in ["bot/repo", "carol/repo", "Owner/Repo", ""] {
         let (out, config) = handlers(
             dir.path(),

@@ -954,6 +954,37 @@ Policy refuses anything else before the agent runs. Its branch must match
 the push's `target` and the head commit the branch was at as its `head`. A
 run with a push has no `create_pull_request`: it hands back one patch.
 
+The repository must be within `repos`, unless the pull request is the
+applying account's own (#3162). Its authorship is then the permission,
+with no per-repository entry, where the push's bound names that account:
+
+```toml
+[github.outputs.push_to_pull_request_branch]
+max = 1
+branches = ["agent-run-*", "dispatch/**"]
+own_author = "cgwalters-bot"
+```
+
+Off by default and supported only on GitHub; Forgejo and GitLab bounds
+and compiled policies refuse this exception until their native publishers
+enforce the author and applying-identity check. `own_author` is the login of the user apply pushes as
+(`SAFE_OUTPUTS_PAT`, or `PUSH_TOKEN` under role bindings); an app's
+`name[bot]` identity cannot use it. The policy job reads the pull
+request's author with the branch and head. If `repos` does not list the
+repository, policy admits it only when that author is `own_author`, and
+records the login as the push's `author`. Such a run may ask for the
+push, `noop`, `missing_tool` and `missing_data`. Besides the push, the
+only write to a repository the bounds never listed is the run's status
+comment on that pull request, where the caller posts one (`notify`): no
+requested comment, label or close. Apply reads the pull request again and refuses
+unless it is still by `author`, and `author` is the identity apply holds.
+The branch globs, replacement limits and every apply check below are those
+of any push. This stops a fix run admitted this way from pushing to a
+stranger's pull request in an unlisted repository, even one whose branch
+the applying account may push to. An organization bounds file that
+lists the repository does not lift the check, and two files naming
+different authors are refused.
+
 The run clones the target's default branch, fetches `head` by its commit (the
 forge serves a fork pull request's head from the target too) and starts there:
 

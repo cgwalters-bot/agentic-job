@@ -185,6 +185,11 @@ pub const PERSON_OUTPUTS: &[&str] = &["add_reviewer", "assign_to_user"];
 static LOGIN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9](?:-?[A-Za-z0-9])*$").expect("a valid pattern"));
 
+/// Whether LOGIN is a GitHub login ([`LOGIN_RE`]).
+pub fn is_login(login: &str) -> bool {
+    login.len() <= 39 && LOGIN_RE.is_match(login)
+}
+
 pub static REPO_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").expect("a valid pattern"));
 
@@ -538,6 +543,15 @@ pub struct OutputLimit {
     /// a rebase must carry all of it at once (#3017).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub replacement_max_files: u32,
+    /// For a GitHub push: the login apply pushes as. A push to a pull request
+    /// this account opened is admitted in any repository, not only in
+    /// `repos`, as the operator lets the bot always work on its own pull
+    /// requests (#3162). Policy and apply each read the author from the
+    /// forge, and apply refuses unless it is still this login and the
+    /// identity apply holds; `branches` and the replacement limits hold
+    /// as for any push. Absent (the default), only `repos` admits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_author: Option<String>,
     /// The one name a check run gets, from the bounds and never the agent:
     /// gh-aw's handler takes it from its configuration. Required for
     /// `create_check_run`, and only for it.
@@ -647,6 +661,13 @@ impl OutputLimit {
         for pattern in &self.branches {
             glob(pattern).with_context(|| format!("outputs.{output}: the glob {pattern:?}"))?;
         }
+        if let Some(login) = &self.own_author {
+            ensure!(
+                output == PUSH_TO_PULL_REQUEST_BRANCH && is_login(login),
+                "outputs.{output}: own_author is supported only for {PUSH_TO_PULL_REQUEST_BRANCH}, \
+                 as one login, not {login:?}"
+            );
+        }
         // `allowed` and `blocked` are logins for a person output and labels
         // for the rest; the pins below are for one output each, whatever
         // the type, so neither branch returns before them.
@@ -661,10 +682,7 @@ impl OutputLimit {
                 "outputs.{output} requires a nonempty allowed list of logins, and no blocked list"
             );
             for login in self.allowed.iter().flatten() {
-                ensure!(
-                    login.len() <= 39 && LOGIN_RE.is_match(login),
-                    "outputs.{output}: invalid login {login:?}"
-                );
+                ensure!(is_login(login), "outputs.{output}: invalid login {login:?}");
             }
         } else {
             ensure!(
@@ -911,6 +929,11 @@ pub struct Push {
     /// The target base head resolved by the read-only policy job, not the producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_base: Option<String>,
+    /// The bounds' [`OutputLimit::own_author`], where only that admitted
+    /// the repository: apply's `push target` refuses the push unless the
+    /// pull request is by this login and it is the identity apply holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// As [`PullRequest::ready_when_complete`]: apply marks the pull
     /// request ready after a complete push, a draft after a checkpoint.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1143,6 +1166,16 @@ impl Policy {
                     .as_ref()
                     .is_none_or(|base| COMMIT_RE.is_match(base)),
                 "invalid replacement base commit"
+            );
+            ensure!(
+                push.author.as_deref().is_none_or(is_login),
+                "a push's author is not a login"
+            );
+            // Native publishers do not bind the live PR/MR author to the
+            // applying identity. Never let planning drop this constraint.
+            ensure!(
+                push.author.is_none() || self.forge == Forge::Github,
+                "a push's author is supported only on GitHub"
             );
             ensure!(
                 PULL_NUMBER_RE.is_match(&push.target) && COMMIT_RE.is_match(&push.head),
