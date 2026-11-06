@@ -579,6 +579,9 @@ fn setup<P: Program>(
         fix_crypto_policies(Path::new(CRYPTO_POLICIES))?;
         crate::world_write::restrict_ptrace()
     })?;
+    if config.deny_runner_reads() {
+        timed("core-dumps", discard_core_dumps)?;
+    }
     if config.unlink_worker_diagnostics() {
         timed("worker-diagnostics", worker_diagnostics::unlink)?;
     }
@@ -1074,6 +1077,41 @@ fn hide_other_processes() -> Result<()> {
     Ok(())
 }
 
+/// The kernel's pattern for every core dump on the host. Under the
+/// runner-read rule and Yama, a step still raises another of its user's
+/// processes' core limit (`prlimit`) and kills it with SIGSEGV, which
+/// need only the same uid, and reads the dump systemd-coredump keeps
+/// for that uid: the environment and memory of its own step's shell, of
+/// `run` or of the Worker (agentic-job#1618). Only root in the initial
+/// user namespace writes it, and it holds in every namespace.
+pub const CORE_PATTERN: &str = "/proc/sys/kernel/core_pattern";
+
+/// A pipe to a program that reads nothing: no file is written, and no
+/// handler keeps the dump. The kernel starts it as root in the host's
+/// own namespaces, so a step's mount namespace cannot change what runs.
+pub const DISCARD_CORES: &str = "|/bin/false";
+
+/// Whether `pattern`, as [`CORE_PATTERN`] reads, discards every dump.
+pub fn discards_cores(pattern: &str) -> bool {
+    pattern.strip_suffix('\n').unwrap_or(pattern) == DISCARD_CORES
+}
+
+/// Every job on the host loses its core dumps, deterministic ones too.
+fn discard_core_dumps() -> Result<()> {
+    fs::write(CORE_PATTERN, format!("{DISCARD_CORES}\n"))
+        .with_context(|| format!("writing {CORE_PATTERN}"))?;
+    let pattern =
+        fs::read_to_string(CORE_PATTERN).with_context(|| format!("reading {CORE_PATTERN}"))?;
+    ensure!(
+        discards_cores(&pattern),
+        "{CORE_PATTERN} is {pattern:?} after writing {DISCARD_CORES:?}"
+    );
+    println!(
+        "Core dumps are discarded host-wide ({CORE_PATTERN} is {DISCARD_CORES}): host.deny-runner-reads"
+    );
+    Ok(())
+}
+
 /// Stops `units` and masks them until reboot, with the units that
 /// trigger them: stopped alone, a unit is started again by its socket, a
 /// path or timer, or a dependency, after `sandbox check` found it
@@ -1553,6 +1591,26 @@ mod tests {
         ];
         for (text, want) in cases {
             assert_eq!(systemd_version(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_discarding_core_pattern_discards() {
+        let cases = [
+            ("|/bin/false\n", true),
+            ("|/bin/false", true),
+            // Ubuntu's and RHEL's default, which keeps the dump for its uid.
+            (
+                "|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h %d %F\n",
+                false,
+            ),
+            ("core\n", false),
+            ("|/bin/false %p\n", false),
+            ("|/bin/false\n\n", false),
+            ("", false),
+        ];
+        for (pattern, discards) in cases {
+            assert_eq!(discards_cores(pattern), discards, "{pattern:?}");
         }
     }
 

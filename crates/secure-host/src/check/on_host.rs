@@ -61,6 +61,22 @@ impl Checker<'_> {
             ),
             scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
         );
+        if self.config.sandbox.deny_runner_reads() {
+            // The runner-read rule and Yama leave a forced core dump of an
+            // ancestor, which only the pattern closes; unreadable is open.
+            let pattern = std::fs::read_to_string(setup::CORE_PATTERN).unwrap_or_default();
+            self.report.expect(
+                Want::Succeed,
+                "core-pattern",
+                format!(
+                    "core dumps are discarded host-wide ({} is {:?}, must be {:?})",
+                    setup::CORE_PATTERN,
+                    pattern.trim_end(),
+                    setup::DISCARD_CORES
+                ),
+                setup::discards_cores(&pattern),
+            );
+        }
         if self.config.sandbox.unlink_worker_diagnostics() {
             // As the Worker's user, which every later step is: setup's
             // unlinking proved by no path left to connect to. A host with

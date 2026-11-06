@@ -2022,7 +2022,9 @@ jobs:
 
   # After secure-host, a `run:` step and a JavaScript action's main and
   # post steps try sudo, docker, a root-owned world-writable file, the
-  # cloud metadata service, an earlier step's process's environment and
+  # cloud metadata service, an earlier step's process's environment, the
+  # environment, memory and ptrace of the step's parent, a forced core
+  # dump of a child of its own, the Worker's environment and dump, and
   # the Worker's .NET diagnostic sockets, and each must fail. Read-only
   # token, no id-token, no secrets; probes run as the runner's user, root
   # only before setup. The action is the checkout's own, so the runner gives
@@ -2068,6 +2070,11 @@ jobs:
       # refuses a write to it after the action.
       - name: Leave a world-writable root file
         run: sudo install -m 0666 -o root -g root /dev/null /var/tmp/agentic-job-confine-root-file
+      # The hosted image's Yama scope 1 already refuses an attach to an
+      # ancestor. At 0 the control's mem and ptrace probes of its parent
+      # succeed, so their refusal later is secure-host's, which sets 1.
+      - name: Let a process attach to any of its user's
+        run: sudo sysctl -q -w kernel.yama.ptrace_scope=0
       - name: Before the lock each route works (control)
         run: |
           install -m 0755 "$RUNNER_TEMP/dist/secure-host-x86_64-unknown-linux-musl" "$RUNNER_TEMP/secure-host-bin"

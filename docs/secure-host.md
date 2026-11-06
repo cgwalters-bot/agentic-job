@@ -82,6 +82,30 @@ next image release:
   exceptions. An explicit `config` still replaces the default whole.
   The pinned image does not yet admit CentOS Stream 10, even with this
   default; use an image built from this source until the pin moves.
+- Under `host.deny-runner-reads`, setup discards every core dump on the
+  host: it sets `kernel.core_pattern` to `|/bin/false`, and `secure-host
+  check` fails its `core-pattern` probe on a host without it. The
+  runner-read rule and Yama scope 1 refuse a step the environment, `mem`
+  and ptrace of its parent, `run` or the Worker. Without this, the step
+  could still raise that process's core limit with `prlimit`, kill it with
+  `SIGSEGV` and read its environment and memory from `coredumpctl dump`
+  ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618)).
+  `prlimit` and `kill` need only the same uid, and the default pattern
+  hands the dump to systemd-coredump, which keeps it readable by that uid.
+  The pattern is the kernel's and applies in every namespace. Only root
+  in the host's user namespace can change it, and the lock that the rule
+  requires keeps the runner's user from becoming root. So every job on
+  such a host loses its core dumps, deterministic CI included; a job that
+  needs them sets `host.deny-runner-reads = false`. CI's `confined` job
+  probes each route in its control before secure-host and requires it to
+  fail after. It forces a dump only of a child of its own that carries a
+  marker, never of the Worker. Until the pin moves, a host the pinned
+  image sets up keeps its dumps, and the check the run action runs is
+  that image's binary, which does not look. `run` still refuses an inference
+  provider's key, an MCP credential, the OIDC request and the rest under
+  `--runner-home` ([sandbox](sandbox.md)). These probes are the evidence
+  a later decision to lift any of them would rest on, and they do not
+  lift them.
 
 ### Deployed write-policy diagnostics
 

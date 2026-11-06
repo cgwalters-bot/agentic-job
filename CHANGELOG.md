@@ -9,6 +9,15 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Under `host.deny-runner-reads`, setup discards every core dump on the
+  host (`kernel.core_pattern = |/bin/false`), and `sandbox check` fails
+  closed without it (`core-pattern`). This closes a forced dump
+  (`prlimit`, `SIGSEGV`, `coredumpctl dump`) of a step's parent, `run` or
+  the Worker. Jobs on such a host, deterministic ones too, get no core
+  dumps. CI's `confined` job now probes the parent's environment, `mem`,
+  ptrace and forced dump, and the Worker's environment and dump. `run`'s
+  `--runner-home` refusals are unchanged (#1618).
+
 - Remove the secure-host forwarder's redundant runner-storage policy
   override: the pinned v0.6.9 image already admits those exact PUT
   destinations on the transparent listener. Caller policies are left

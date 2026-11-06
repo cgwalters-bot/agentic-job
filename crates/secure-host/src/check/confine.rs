@@ -4,7 +4,12 @@
 //! metadata service, to the environment of a process an earlier step left
 //! running, and to Runner.Worker's .NET diagnostic sockets
 //! (`sandbox.unlink-worker-diagnostics`), through which a step could have
-//! the Worker dump its memory. CI's `confined` job runs it once before
+//! the Worker dump its memory. With them, what the runner-read rule, Yama
+//! and the discarded core dumps hold (agentic-job#1618): the environment
+//! and memory of its parent, which holds the step's `env:`, by `/proc`,
+//! by ptrace and by a forced core dump, and the Worker's environment and
+//! forced dump. A dump is forced only of a child of its own, never of the
+//! parent or the Worker, which later steps need. CI's `confined` job runs it once before
 //! secure-host as the positive control, where each must work, and after it
 //! from a `run:` step and from .github/actions/confine-probe, a JavaScript
 //! action whose main and post steps run it as their child, where each must
@@ -23,18 +28,24 @@ use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use rustix::io::Errno;
-use rustix::process::{Pid, test_kill_process};
+use rustix::process::{
+    Pid, Resource, Rlimit, Signal, getrlimit, kill_process, prlimit, test_kill_process,
+};
 use serde_json::json;
 
-use super::{metadata_request, runner_reaches, runner_stdout, sudo_rules};
+use super::{canary, metadata_request, runner_reaches, runner_stdout, sudo_rules};
 use crate::config::Sandbox;
+use crate::files;
 use crate::host::{self, User};
 use crate::root::Root;
-use crate::setup::runner_sudo_rules;
+use crate::setup::{CORE_PATTERN, discards_cores, runner_sudo_rules};
 use crate::worker_diagnostics::{WORKER_COMM, listed_sockets};
 
 /// Root's, mode 0666, made before the control in a shared temporary
@@ -62,6 +73,37 @@ const MAX_ANCESTORS: usize = 32;
 /// What the runner hands a step, which no lock takes away: recorded as
 /// whether each is set.
 const TOKENS: &[&str] = &["ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
+
+/// The variable that carries a random marker into the process whose
+/// dump is forced, looked for in the dump.
+const CORE_MARKER: &str = "CONFINE_CORE_MARKER";
+
+/// The process whose dump is forced lives no longer than this, in
+/// seconds, should the signal not end it.
+const SACRIFICE_SECONDS: &str = "120";
+
+/// How long systemd-coredump may take to store a dump, and how often
+/// `coredumpctl` is asked for it in the meantime.
+const CORE_WAIT: Duration = Duration::from_secs(20);
+const CORE_POLL: Duration = Duration::from_millis(500);
+
+/// Most of a dump that is read: `sleep`'s is far less.
+const MAX_CORE: u64 = 64 * 1024 * 1024;
+
+/// PTRACE_SEIZE of the pid in its argument, which unlike an attach does
+/// not stop the tracee: the kernel detaches it when the script exits.
+/// Exits [`SEIZED`] or [`SEIZE_REFUSED`]; anything else is a broken
+/// probe. No unsafe code here, so Python's ctypes calls it.
+const SEIZE: &str = "import ctypes, sys
+lib = ctypes.CDLL(None, use_errno=True)
+lib.ptrace.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+lib.ptrace.restype = ctypes.c_long
+if lib.ptrace(0x4206, int(sys.argv[1]), None, None) == 0:
+    sys.exit(10)
+sys.exit(11 if ctypes.get_errno() in (1, 13) else 12)
+";
+const SEIZED: i32 = 10;
+const SEIZE_REFUSED: i32 = 11;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -94,6 +136,12 @@ impl Mode {
                 "world-write",
                 "metadata",
                 "environ",
+                "ancestor-environ",
+                "ancestor-mem",
+                "ancestor-ptrace",
+                "core-dump",
+                "worker-environ",
+                "worker-core",
                 "worker-diagnostics",
             ],
             Self::Confined => &[
@@ -102,6 +150,12 @@ impl Mode {
                 "world-write",
                 "metadata",
                 "environ",
+                "ancestor-environ",
+                "ancestor-mem",
+                "ancestor-ptrace",
+                "core-dump",
+                "worker-environ",
+                "worker-core",
                 "worker-diagnostics",
                 "owner-write",
             ],
@@ -234,14 +288,121 @@ fn recorded_pid(temp: &Path, name: &str) -> Result<u32> {
 /// signal says it is running.
 fn reads_orphan(temp: &Path) -> Result<bool> {
     let pid = recorded_pid(temp, ORPHAN)?;
-    let refused = [ErrorKind::PermissionDenied, ErrorKind::NotFound];
-    let read = match fs::read(format!("/proc/{pid}/environ")) {
-        Ok(_) => true,
-        Err(err) if refused.contains(&err.kind()) => false,
-        Err(err) => return Err(err).context("reading the orphan's environment"),
-    };
+    let read = opens_proc(pid, "environ")?;
     recorded_pid(temp, ORPHAN)?;
     Ok(read)
+}
+
+/// Whether this user opens `/proc/PID/FILE` for reading, where the
+/// kernel decides access to `environ` and `mem`: refused, or not found
+/// where hidepid takes out of /proc a process the rule refuses.
+fn opens_proc(pid: u32, file: &str) -> Result<bool> {
+    let path = format!("/proc/{pid}/{file}");
+    let refused = [ErrorKind::PermissionDenied, ErrorKind::NotFound];
+    match fs::File::open(&path) {
+        Ok(_) => Ok(true),
+        Err(err) if refused.contains(&err.kind()) => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("opening {path}")),
+    }
+}
+
+/// Whether the [`SEIZE`] script's exit `code` says it attached; any
+/// other end than these two is a broken probe, not a verdict.
+fn seize_verdict(code: Option<i32>) -> Result<bool> {
+    match code {
+        Some(SEIZED) => Ok(true),
+        Some(SEIZE_REFUSED) => Ok(false),
+        other => bail!("the ptrace probe failed for another reason: exit {other:?}"),
+    }
+}
+
+/// Whether this user attaches to process PID with ptrace.
+fn seizes(pid: u32) -> Result<bool> {
+    let status = Command::new("python3")
+        .args(["-I", "-c", SEIZE, &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .context("running the ptrace probe with python3")?;
+    seize_verdict(status.code())
+}
+
+/// Whether `marker` is anywhere in `bytes`.
+fn contains(bytes: &[u8], marker: &[u8]) -> bool {
+    !marker.is_empty() && bytes.windows(marker.len()).any(|window| window == marker)
+}
+
+/// The process whose dump is forced, until it is dropped.
+struct Sacrifice(Child);
+
+impl Drop for Sacrifice {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Whether this user reads, from a forced dump, the environment of a
+/// child that carries a fresh marker in it: the route to an ancestor's
+/// or the Worker's environment and memory that the runner-read rule and
+/// Yama leave open, since prlimit and kill need only the same uid. Its
+/// core limit raised as far as this process's hard limit lets it, then
+/// SIGSEGV, then `coredumpctl dump`, which systemd-coredump answers for
+/// that uid's dumps. Nothing a later step needs is killed.
+fn reads_forced_core() -> Result<bool> {
+    let marker = canary()?;
+    let hard = getrlimit(Resource::Core).maximum;
+    ensure!(
+        hard != Some(0),
+        "this step's hard core limit is 0, so a forced dump proves nothing"
+    );
+    let mut child = Sacrifice(
+        Command::new("sleep")
+            .arg(SACRIFICE_SECONDS)
+            .env(CORE_MARKER, &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("starting the process whose dump is forced")?,
+    );
+    let pid = Pid::from_child(&child.0);
+    let limit = Rlimit {
+        current: hard,
+        maximum: hard,
+    };
+    prlimit(Some(pid), Resource::Core, limit).context("raising the core limit with prlimit")?;
+    kill_process(pid, Signal::SEGV).context("sending SIGSEGV")?;
+    let status = child.0.wait().context("waiting for the dumped process")?;
+    ensure!(
+        status.signal() == Some(Signal::SEGV.as_raw()),
+        "the process whose dump is forced ended with {status}, not SIGSEGV"
+    );
+    let dir = tempfile::tempdir().context("creating a directory for the dump")?;
+    let core = dir.path().join("core");
+    let deadline = Instant::now() + CORE_WAIT;
+    loop {
+        let dumped = Command::new("coredumpctl")
+            .args(["--no-pager", "--quiet", "dump"])
+            .arg(format!("--output={}", core.display()))
+            .arg(pid.as_raw_pid().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if dumped {
+            let bytes = files::read_regular(&core, MAX_CORE)
+                .with_context(|| format!("reading {}", core.display()))?;
+            return Ok(contains(&bytes, marker.as_bytes()));
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(CORE_POLL);
+        // coredumpctl may have left a partial file behind.
+        let _ = fs::remove_file(&core);
+    }
 }
 
 /// Whether this process opens `path` for writing.
@@ -277,20 +438,22 @@ fn owner_file(temp: &Path, label: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Whether this step connects to any diagnostic socket of its Worker,
-/// found and recorded by the control, read back once confined. The
-/// listing keeps a path after it is unlinked, so the control proves the
-/// Worker had one to find.
-fn reaches_worker(mode: Mode, temp: &Path) -> Result<bool> {
-    let pid = if mode == Mode::Control {
+/// This step's Worker, found and recorded by the control, read back
+/// once confined, and refused unless it is running and this user's.
+fn worker(mode: Mode, temp: &Path) -> Result<u32> {
+    if mode == Mode::Control {
         let pid = ancestor_worker()?;
         let path = temp.join(WORKER);
         fs::write(&path, format!("{pid}\n"))
             .with_context(|| format!("writing {}", path.display()))?;
-        pid
-    } else {
-        recorded_pid(temp, WORKER)?
-    };
+    }
+    recorded_pid(temp, WORKER)
+}
+
+/// Whether this step connects to any diagnostic socket of the Worker.
+/// The listing keeps a path after it is unlinked, so the control proves
+/// the Worker had one to find.
+fn reaches_worker(pid: u32) -> Result<bool> {
     let sockets = listed_sockets(&[pid])?;
     Ok(sockets.iter().any(|s| UnixStream::connect(s).is_ok()))
 }
@@ -314,19 +477,36 @@ fn user_results() -> Result<Results> {
     ]))
 }
 
-/// The routes of the runner's user, before or after the lock.
-fn runner_results(mode: Mode, temp: &Path, label: &str) -> Result<Results> {
+/// The routes of the runner's user, before or after the lock. `pattern`
+/// is the host's core pattern: the Worker's dump is not forced, as it
+/// would end the job, but any process's dump goes where the pattern
+/// says, and the Worker, this user's, takes prlimit and kill as the
+/// child does.
+fn runner_results(mode: Mode, temp: &Path, label: &str, pattern: &str) -> Result<Results> {
     // Refuse invalid controls before starting commands or contacting services.
     let environ = reads_orphan(temp)?;
     let fixture = fixture()?;
+    let worker = worker(mode, temp)?;
+    // The step's shell or the action's node, which holds the step's
+    // `env:`, and whose job a forced dump would end.
+    let parent = std::os::unix::process::parent_id();
+    let core = reads_forced_core()?;
     let mut results = Results::from([
         ("sudo", runner_reaches(&["sudo", "-n", "true"])),
         ("docker", runner_reaches(&["docker", "info"])),
         ("world-write", opens_for_write(fixture)?),
         ("metadata", runner_reaches(&metadata_request())),
         ("environ", environ),
-        ("worker-diagnostics", reaches_worker(mode, temp)?),
+        ("ancestor-environ", opens_proc(parent, "environ")?),
+        ("ancestor-mem", opens_proc(parent, "mem")?),
+        ("ancestor-ptrace", seizes(parent)?),
+        ("core-dump", core),
+        ("worker-environ", opens_proc(worker, "environ")?),
+        ("worker-core", core && !discards_cores(pattern)),
+        ("worker-diagnostics", reaches_worker(worker)?),
     ]);
+    // Probing it ended nothing a later step needs.
+    recorded_pid(temp, WORKER)?;
     if mode == Mode::Confined {
         let own = owner_file(temp, label)?;
         results.insert("owner-write", opens_for_write(&own)?);
@@ -362,8 +542,10 @@ pub fn run(args: &Args) -> Result<bool> {
     let temp = PathBuf::from(temp);
     let out = temp.join(RECORDS);
     fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    // Not secret: where every dump on the host goes.
+    let pattern = fs::read_to_string(CORE_PATTERN).unwrap_or_default();
     let results = match mode {
-        Mode::Control | Mode::Confined => runner_results(mode, &temp, label)?,
+        Mode::Control | Mode::Confined => runner_results(mode, &temp, label, &pattern)?,
         Mode::NoUser => user_results()?,
     };
     let problems = failures(mode, &results);
@@ -374,6 +556,7 @@ pub fn run(args: &Args) -> Result<bool> {
         "results": results,
         "groups": groups(),
         "tokens": tokens,
+        "core_pattern": pattern.trim_end(),
         "problems": problems,
     });
     let path = out.join(format!("{label}.json"));
@@ -413,6 +596,12 @@ mod tests {
             ("world-write", true),
             ("metadata", true),
             ("environ", true),
+            ("ancestor-environ", true),
+            ("ancestor-mem", true),
+            ("ancestor-ptrace", true),
+            ("core-dump", true),
+            ("worker-environ", true),
+            ("worker-core", true),
             ("worker-diagnostics", true),
         ]);
         let confined = results(&[
@@ -421,6 +610,12 @@ mod tests {
             ("world-write", false),
             ("metadata", false),
             ("environ", false),
+            ("ancestor-environ", false),
+            ("ancestor-mem", false),
+            ("ancestor-ptrace", false),
+            ("core-dump", false),
+            ("worker-environ", false),
+            ("worker-core", false),
             ("worker-diagnostics", false),
             ("owner-write", true),
         ]);
@@ -484,8 +679,27 @@ mod tests {
             ),
             (
                 "nothing probed",
-                failures(Mode::Confined, &Results::new()).len() == 7,
+                failures(Mode::Confined, &Results::new()).len() == confined.len(),
             ),
+            // ptrace's verdict, and only its two exits are one.
+            (
+                "an attach",
+                seize_verdict(Some(SEIZED)).is_ok_and(|seized| seized),
+            ),
+            (
+                "a refused attach",
+                seize_verdict(Some(SEIZE_REFUSED)).is_ok_and(|seized| !seized),
+            ),
+            ("a Python exception", seize_verdict(Some(1)).is_err()),
+            ("another errno", seize_verdict(Some(12)).is_err()),
+            ("a killed probe", seize_verdict(None).is_err()),
+            // The marker found in a dump.
+            (
+                "a marker in a dump",
+                contains(b"\0A=1\0M=x-marker\0", b"x-marker"),
+            ),
+            ("no marker", !contains(b"\0A=1\0M=x-marke\0", b"x-marker")),
+            ("an empty marker", !contains(b"anything", b"")),
             // A second user where there must be none: what was not
             // probed fails too.
             (

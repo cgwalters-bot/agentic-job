@@ -330,6 +330,19 @@ fn cases(config: &Config, runner: &User) -> Vec<Case> {
             )
         },
     ));
+    if config.sandbox.deny_runner_reads() {
+        cases.push(Case::new(
+            "core dumps written where their uid reads them",
+            strings(&["core-pattern"]),
+            || {
+                let discard = format!("kernel.core_pattern={}", secure_host::setup::DISCARD_CORES);
+                Removed::by(
+                    &[&["sysctl", "-q", "-w", "kernel.core_pattern=core"]],
+                    &[&["sysctl", "-q", "-w", &discard]],
+                )
+            },
+        ));
+    }
     // The first stopped unit the host has, as before the lock. A unit
     // of a daemon that a group of the runner's user leads to (docker's
     // socket on the hosted image) is not alone: the runner's probe
