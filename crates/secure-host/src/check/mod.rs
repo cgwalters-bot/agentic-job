@@ -37,6 +37,7 @@ mod record;
 mod runner;
 
 pub(crate) use net::metadata_request;
+pub use net::{kernel_ipv6_disabled, runner_write_readiness};
 pub(crate) use runner::sudo_rules;
 
 #[derive(Debug, clap::Args)]
@@ -289,13 +290,21 @@ pub fn probes<F: HostFile>(config: &F) -> Result<Report> {
 }
 
 /// A value nothing else on the host has.
-fn canary() -> Result<String> {
+pub fn canary() -> Result<String> {
     let mut bytes = [0u8; CANARY_BYTES];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .context("reading /dev/urandom")?;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(format!("isolation-canary-{hex}"))
+}
+
+/// Whether `needle`, not empty, is in `haystack`.
+pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 /// The tables of the configuration the probes read.
