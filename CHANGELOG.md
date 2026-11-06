@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Dispatch `research` now accepts a pull request as well as an issue and
+  posts its one bounded comment on that item. Repository bounds, fixed comment
+  routing and cross-repository token requirements are unchanged; research
+  remains analysis-only, not review or fix (#3159).
+
 - Under `host.deny-runner-reads`, setup discards every core dump on the
   host (`kernel.core_pattern = |/bin/false`), and `sandbox check` fails
   closed without it (`core-pattern`). This closes a forced dump

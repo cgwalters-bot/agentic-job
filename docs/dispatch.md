@@ -40,7 +40,12 @@ gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 \
 ```
 
 `triage` and `research` post a canned comment on that issue and leave the tree
-clean. `implement` writes `DISPATCH-TRIAL.md` and proposes one draft PR from
+clean. `research` also accepts a pull request number and posts its single
+`add_comment` there, using the same caller bounds and fixed item routing.
+Select it explicitly with `-f kind=research`; it does not enable review mode,
+pin or check out the PR head, post a verdict, or push a change. It remains
+analysis-only, with no new permissions or token access. `implement` writes
+`DISPATCH-TRIAL.md` and proposes one draft PR from
 the applying account's fork. `review` takes an **open pull request number
 targeting the configured base (main by default)**, not an issue number. Both
 same-repository and fork pull requests are accepted. It
@@ -102,6 +107,9 @@ A target with issues turned off can take its item from another repository:
 triage, research or implement comment are that repository's; a pull request is the
 target's. Policy refuses an item repository the bounds' `repos` do not
 list, and it needs `APPLY_ENVIRONMENT` like any other repository.
+For `research`, `item-repo` may also name a repository containing the selected
+PR: its text and the comment belong there, with the same allowlist and token
+requirements. This grants no posting permission in unlisted repositories.
 
 Apply refuses a target the applying account owns, as it has no fork of it,
 unless the target's default branch has the file

@@ -59,17 +59,17 @@ on:
         type: string
         required: true
       item:
-        description: Positive issue number in the target repository (a pull request's for review and fix)
+        description: Positive item number (issue for implement/triage, issue or PR for research, PR for review/fix)
         type: string
         required: true
       item-repo:
         description: >-
-          The repository the item is an issue of, OWNER/NAME, when not the target (one with issues
-          turned off); the bounds must allow it. Empty for the target. Not for review and fix
+          The item's repository, OWNER/NAME, when not the target; the bounds must allow it.
+          Empty for the target. Research accepts an issue or PR; implement/triage an issue. Not for review/fix
         type: string
         default: ""
       kind:
-        description: Fixed profile (review and fix take a pull request number; fix is off unless the bounds allow it)
+        description: Fixed profile (research accepts issues or PRs; review/fix require PRs; fix needs bounds enabling it)
         type: choice
         options: [implement, triage, research, review, fix]
         required: true
