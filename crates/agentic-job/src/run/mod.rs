@@ -179,7 +179,7 @@ struct Plan {
     /// proxy, which under `inference.front` may be no address of the
     /// broker's.
     direct: Vec<crate::sandbox::network::Direct>,
-    /// The image `[sandbox.check]` names, which under `inference.front`
+    /// The image `[host.check]` names, which under `inference.front`
     /// the probes of the broker run a container of: none with
     /// `containers = false`, which `run` notes, and those probes are not
     /// made.
@@ -1068,7 +1068,7 @@ impl Plan {
                 .context("a fronted run has no proxy of its own")?;
             if self.container_image.is_none() {
                 eprintln!(
-                    "note: [sandbox.check] containers = false: not run, not passed: \
+                    "note: [host.check] containers = false: not run, not passed: \
                      broker-egress-container"
                 );
             }

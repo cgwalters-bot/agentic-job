@@ -17,7 +17,7 @@
 //! `secure-host config` wrote. Any failed step fails the whole.
 //!
 //! The image holds no agent code: in an agent job, agentic-job's own
-//! root step ran before it (`[sandbox.prepared]`, [`crate::config::Prepared`]).
+//! root step ran before it (`[host.prepared]`, [`crate::config::Prepared`]).
 //! For one release, until cgwalters-forge/actions pins an image built
 //! so, the binary also answers to its old name, in the image
 //! ([`IMAGE_ALIAS`]) and on the host ([`HOST_ALIAS`]), for what that
@@ -78,7 +78,7 @@ fn image_id(text: &str) -> Result<String> {
 }
 
 /// Whether the host's configuration CONFIG, checked as setup checks it,
-/// asks for the runner-read rule (`sandbox.deny-runner-reads`). Read
+/// asks for the runner-read rule (`host.deny-runner-reads`). Read
 /// here as well as by setup: the rule is the world-write step's.
 fn deny_runner_reads(config: &Path) -> Result<bool> {
     let text =
@@ -239,28 +239,34 @@ mod tests {
         );
     }
 
-    /// `sandbox.deny-runner-reads` follows the lock unless set and changes
+    /// `host.deny-runner-reads` follows the lock unless set and changes
     /// only the world-write step; a file setup would refuse is refused
-    /// here first.
+    /// here first. `[sandbox]`, the old name, reads the same.
     #[test]
     fn the_host_file_turns_on_the_runner_read_rule() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         for (text, want) in [
             ("", Ok(true)),
+            ("[host]\n", Ok(true)),
+            ("[host]\ndeny-runner-reads = false\n", Ok(false)),
             ("[sandbox]\ndeny-runner-reads = false\n", Ok(false)),
-            ("[sandbox]\ndeny-runner-reads = true\n", Ok(true)),
+            ("[host]\ndeny-runner-reads = true\n", Ok(true)),
+            ("[host]\nlock-runner = false\n", Ok(false)),
             ("[sandbox]\nlock-runner = false\n", Ok(false)),
             (
-                "[sandbox]\nlock-runner = false\ndeny-runner-reads = true\n",
-                Err("needs sandbox.lock-runner"),
+                "[host]\nlock-runner = false\ndeny-runner-reads = true\n",
+                Err("needs host.lock-runner"),
             ),
+            ("[agent]\nname = \"claude\"\n[host.prepared]\n", Ok(true)),
             ("[agent]\nname = \"claude\"\n[sandbox.prepared]\n", Ok(true)),
             (
                 "[agent]\nname = \"claude\"\n",
                 Err("agent set nothing here"),
             ),
+            ("[host]\ndeny-runner-read = true\n", Err("unknown field")),
             ("[sandbox]\ndeny-runner-read = true\n", Err("unknown field")),
+            ("[sandbox]\n[host]\n", Err("both set")),
         ] {
             fs::write(&path, text).unwrap();
             match (deny_runner_reads(&path), want) {
@@ -299,11 +305,11 @@ budget = 100
 max-requests = 0
 max-tasks = 4
 timeout-minutes = 5
-[sandbox]
+[host]
 runner-user = "runner"
 deny-runner-reads = {enabled}
 close-resolved = true
-[sandbox.prepared]
+[host.prepared]
 [setup]
 packages = ["nftables", "podman", "uidmap", "cargo"]
 agents = ["opencode-ai@1.18.35"]

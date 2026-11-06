@@ -1,6 +1,6 @@
 # What CI's `sandbox` job sets up on a hosted runner (ubuntu-26.04).
 
-[sandbox]
+[host]
 # Daemons of the runner image that listen for every local user, and that
 # nothing in this job uses: `sandbox check` fails on each one left.
 stop-services = [
@@ -27,7 +27,7 @@ stop-services = [
 # the runner's user (cgwalters-forge/actions's secure-host/docs/egress.md).
 close-resolved = true
 
-[sandbox.check]
+[host.check]
 allow-sockets = [
     # systemd-networkd, which the runner's network depends on: it
     # describes the links to any user and changes them only for root.

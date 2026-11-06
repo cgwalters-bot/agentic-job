@@ -521,7 +521,7 @@ pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result
         // On with the lock by default, so a host that is no single
         // GitHub runner's meets this first: say how it opts out.
         .context(
-            "the runner-read rule exempts one Runner.Worker; a host without one sets sandbox.deny-runner-reads = false",
+            "the runner-read rule exempts one Runner.Worker; a host without one sets host.deny-runner-reads = false",
         )?;
         // The rule decides reads only: an attach (`/proc/PID/mem`,
         // process_vm_readv) is Yama's, which must not be scope 0.

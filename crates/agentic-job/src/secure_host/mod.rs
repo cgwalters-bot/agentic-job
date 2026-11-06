@@ -44,7 +44,7 @@ pub enum Host {
     Apt,
     /// As root: load the world-write policy OBJECT through bpftool, and prove it took effect
     WorldWrite(::secure_host::cli::WorldWrite),
-    /// As root: `sandbox setup` from a file with only `[sandbox]`, `[egress]` and `[setup]`
+    /// As root: `sandbox setup` from a file with only `[host]`, `[egress]` and `[setup]`
     Setup {
         /// The host's configuration (TOML); copied to /etc/agentic-job/
         #[arg(long, value_name = "FILE")]

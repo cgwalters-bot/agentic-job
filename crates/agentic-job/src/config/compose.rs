@@ -31,7 +31,7 @@ use ::secure_host::compose::{Kind, set};
 use anyhow::{Context, Result, ensure};
 use toml::{Table, Value};
 
-use super::{Config, Register};
+use super::{Config, HOST_TABLE, LEGACY_HOST_TABLE, Register};
 use crate::exit::Exit;
 use crate::run::inference::with_address;
 use crate::sandbox::network::Direct;
@@ -64,7 +64,7 @@ pub struct Args {
     /// user runs it after setup, which runs none
     #[arg(long)]
     pub no_script: bool,
-    /// Write `[sandbox.prepared]` from the run's tables: for an agent job
+    /// Write `[host.prepared]` from the run's tables: for an agent job
     /// whose `sandbox prepare` runs before the secure-host image, whose
     /// setup reads none of them
     #[arg(long, requires = "host")]
@@ -222,11 +222,11 @@ fn hold_the_agent(table: &mut Table) -> Result<()> {
     Ok(())
 }
 
-/// `--prepared`: `[sandbox.prepared]` in TABLE, in place of any there,
+/// `--prepared`: `[host.prepared]` in TABLE, in place of any there,
 /// from its run tables ([`Config::prepared`]).
 fn prepared(table: &mut Table) -> Result<()> {
-    if let Some(sandbox) = table.get_mut("sandbox").and_then(Value::as_table_mut) {
-        sandbox.remove("prepared");
+    if let Some(host) = table.get_mut(HOST_TABLE).and_then(Value::as_table_mut) {
+        host.remove("prepared");
     }
     let text = toml::to_string(&table).context("writing the configuration")?;
     let prepared = Config::parse(&text)?.prepared()?;
@@ -245,7 +245,7 @@ fn prepared(table: &mut Table) -> Result<()> {
     }
     set(
         table,
-        &["sandbox".into(), "prepared".into()],
+        &[HOST_TABLE.into(), "prepared".into()],
         Value::Table(out),
     )
 }
@@ -329,6 +329,15 @@ fn compose(args: &Args) -> Result<String> {
         }
         if let Some(inference) = table.get_mut("inference").and_then(Value::as_table_mut) {
             inference.remove("allow-base-address-lines");
+        }
+        // The released image the forwarder pins (v0.6.9) reads the host's
+        // table only by its old name and refuses [host]; it also refuses
+        // [host.prepared], which only an image of this source, reading
+        // [host], is given. Until the pin moves (#2656).
+        if config.sandbox.prepared.is_none()
+            && let Some(host) = table.remove(HOST_TABLE)
+        {
+            table.insert(LEGACY_HOST_TABLE.to_owned(), host);
         }
         return toml::to_string(&table).context("writing the host configuration");
     } else {
@@ -445,7 +454,7 @@ mod tests {
                 "inference.register=github-oidc",
                 "inference.audience=proxy",
                 "agent.name=fake",
-                "sandbox.check.container-image=quay.io/example/curl",
+                "host.check.container-image=quay.io/example/curl",
             ],
             &["limits.timeout-minutes= 75 ", "limits.budget=500"],
             &[
@@ -636,7 +645,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(
             file,
-            "[sandbox]\nstop-services = [\"docker.service\"]\n[agent]\nname = \"claude\"\n\
+            "[host]\nstop-services = [\"docker.service\"]\n[agent]\nname = \"claude\"\n\
              model = \"opus\"\n[limits]\ntimeout-minutes = 30\nbudget = 100\n\
              [setup]\npackages = [\"jq\"]\n"
         )
@@ -926,11 +935,11 @@ mod tests {
     fn a_host_is_configured_without_an_agent() {
         let config = composed(&host_args(
             &[
-                "sandbox.lock-runner= false ",
+                "host.lock-runner= false ",
                 "egress.proxy=false",
-                "sandbox.deny-runner-metadata=",
+                "host.deny-runner-metadata=",
             ],
-            &["sandbox.stop-services=docker.socket docker.service"],
+            &["host.stop-services=docker.socket docker.service"],
         ));
         assert!(!config.sandbox.lock_runner);
         assert!(!config.sandbox.deny_runner_metadata());
@@ -945,8 +954,15 @@ mod tests {
         let locked = composed(&host_args(&[], &[]));
         assert!(locked.sandbox.lock_runner);
         assert!(locked.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
-        let opted_out = composed(&host_args(&["sandbox.deny-runner-reads=false"], &[]));
-        assert!(opted_out.sandbox.deny_runner_metadata() && !opted_out.sandbox.deny_runner_reads());
+        for name in [HOST_TABLE, LEGACY_HOST_TABLE] {
+            let opted_out = composed(&host_args(
+                &[&format!("{name}.deny-runner-reads=false")],
+                &[],
+            ));
+            assert!(
+                opted_out.sandbox.deny_runner_metadata() && !opted_out.sandbox.deny_runner_reads()
+            );
+        }
         // A run's file keeps its script, which the runner's user runs
         // after setup; a host's file never has one, `--no-script` or not,
         // and has all else.
@@ -973,40 +989,39 @@ mod tests {
         assert!(compose(&run).is_err());
         let cases = [
             (
-                vec!["sandbox.lock-runner=yes"],
+                vec!["host.lock-runner=yes"],
                 vec![],
-                "sandbox.lock-runner: \"yes\" is neither true nor false",
+                "host.lock-runner: \"yes\" is neither true nor false",
             ),
             (
-                vec!["sandbox.runner-user=true"],
+                vec!["sandbox.lock-runner=yes"],
+                vec![],
+                "host.lock-runner: \"yes\" is neither true nor false",
+            ),
+            (
+                vec!["host.runner-user=true"],
                 vec![],
                 "invalid type: boolean",
             ),
             (
                 vec!["sandbox.create-user=false"],
                 vec![],
-                "sandbox.create-user was removed with the sandbox user",
+                "host.create-user was removed with the sandbox user",
             ),
             (
-                vec![
-                    "sandbox.lock-runner=false",
-                    "sandbox.deny-runner-metadata=true",
-                ],
+                vec!["host.lock-runner=false", "host.deny-runner-metadata=true"],
                 vec![],
-                "sandbox.deny-runner-metadata needs sandbox.lock-runner",
+                "host.deny-runner-metadata needs host.lock-runner",
             ),
             (
-                vec![
-                    "sandbox.lock-runner=false",
-                    "sandbox.deny-runner-reads=true",
-                ],
+                vec!["sandbox.lock-runner=false", "host.deny-runner-reads=true"],
                 vec![],
-                "sandbox.deny-runner-reads needs sandbox.lock-runner",
+                "host.deny-runner-reads needs host.lock-runner",
             ),
             (
                 vec![],
-                vec!["sandbox.stop-services=docker"],
-                "sandbox.stop-services: \"docker\" is not a unit name",
+                vec!["host.stop-services=docker"],
+                "host.stop-services: \"docker\" is not a unit name",
             ),
             (
                 vec!["session.listen=true"],
@@ -1044,14 +1059,14 @@ mod tests {
             (
                 true,
                 true,
-                &["sandbox.lock-runner=false"],
-                Err("needs egress.proxy, egress.rust-proxy and sandbox.lock-runner"),
+                &["host.lock-runner=false"],
+                Err("needs egress.proxy, egress.rust-proxy and host.lock-runner"),
             ),
             (
                 false,
                 true,
                 &["egress.rust-proxy=false"],
-                Err("needs egress.proxy, egress.rust-proxy and sandbox.lock-runner"),
+                Err("needs egress.proxy, egress.rust-proxy and host.lock-runner"),
             ),
         ] {
             let args = Args {
@@ -1122,7 +1137,7 @@ mod tests {
         let mut from = tempfile::NamedTempFile::new().unwrap();
         write!(from, "{stale}").unwrap();
         let err = compose(&host(from.path(), false)).unwrap_err();
-        assert!(format!("{err:#}").contains("sandbox.prepared"), "{err:#}");
+        assert!(format!("{err:#}").contains("host.prepared"), "{err:#}");
         // `--prepared` writes the table for a host's file alone.
         assert!(
             <crate::cli::Cli as clap::Parser>::try_parse_from([
@@ -1132,6 +1147,65 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// The host's table, by either name in the file or a setting, is
+    /// written as `[host]`, but in a host's file for the pinned image,
+    /// which reads only `[sandbox]`: one with no `[host.prepared]`. Both
+    /// names in one file are refused.
+    #[test]
+    fn the_host_table_is_written_by_its_new_name() {
+        let from_text = |name: &str| {
+            format!(
+                "[{name}]\nlock-runner = true\ndeny-runner-reads = false\n\
+                 [{name}.check]\ncontainers = false\n"
+            )
+        };
+        let mut outputs = Vec::new();
+        for file in [HOST_TABLE, LEGACY_HOST_TABLE] {
+            for setting in [HOST_TABLE, LEGACY_HOST_TABLE] {
+                let mut from = tempfile::NamedTempFile::new().unwrap();
+                write!(from, "{}", from_text(file)).unwrap();
+                let close = format!("{setting}.close-resolved=true");
+                let path = from.path().to_str().unwrap();
+                for (host, prepared, name) in [
+                    (false, false, HOST_TABLE),
+                    (true, false, LEGACY_HOST_TABLE),
+                    (true, true, HOST_TABLE),
+                ] {
+                    let args = Args {
+                        host,
+                        prepared,
+                        boolean: settings(&[&close]),
+                        ..args(Some(path), RUN, LIMITS, &[])
+                    };
+                    let text = compose(&args).unwrap();
+                    let table: Table = toml::from_str(&text).unwrap();
+                    let other = if name == HOST_TABLE {
+                        LEGACY_HOST_TABLE
+                    } else {
+                        HOST_TABLE
+                    };
+                    assert!(!table.contains_key(other), "{file} {setting}: {text}");
+                    let config = Config::parse(&text).unwrap();
+                    assert!(config.sandbox.close_resolved && !config.sandbox.deny_runner_reads());
+                    assert!(!config.sandbox.check.containers);
+                    outputs.push(config);
+                }
+            }
+        }
+        // Whatever the names given, each mode writes the same configuration.
+        for (i, config) in outputs.iter().enumerate() {
+            assert_eq!(config, &outputs[i % 3], "{i}");
+        }
+        let mut both = tempfile::NamedTempFile::new().unwrap();
+        write!(both, "[host]\n[sandbox]\n").unwrap();
+        let err = compose(&Args {
+            from: Some(both.path().to_owned()),
+            ..host_args(&[], &[])
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("both set"), "{err:#}");
     }
 
     /// Text that would add keys if it were pasted into a file is the
@@ -1202,7 +1276,7 @@ mod tests {
                 vec!["sandbox.runner-user=root"],
                 vec![],
                 vec![],
-                "sandbox.runner-user: \"root\"",
+                "host.runner-user: \"root\"",
             ),
             (
                 vec![],

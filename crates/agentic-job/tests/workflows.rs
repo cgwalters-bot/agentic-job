@@ -935,16 +935,19 @@ fn run_requires_locked_host_and_consistent_user_before_probing() {
         .captures(guard)
         .unwrap()[1]
         .to_owned();
-    for (sandbox, ok) in [
+    // The configuration, by [host] and by its deprecated name [sandbox].
+    for (config, ok) in [
         ("{}", true),
-        (r#"{"lock-runner":true}"#, true),
-        (r#"{"lock-runner":false}"#, false),
-        (r#"{"lock-runner":"true"}"#, false),
+        (r#"{"host":{}}"#, true),
+        (r#"{"host":{"lock-runner":true}}"#, true),
+        (r#"{"host":{"lock-runner":false}}"#, false),
+        (r#"{"host":{"lock-runner":"true"}}"#, false),
+        (r#"{"sandbox":{}}"#, true),
+        (r#"{"sandbox":{"lock-runner":true}}"#, true),
+        (r#"{"sandbox":{"lock-runner":false}}"#, false),
+        (r#"{"sandbox":{"lock-runner":"true"}}"#, false),
     ] {
-        let replacement = format!(
-            "__import__('json').loads('{}')",
-            serde_json::json!({"sandbox":serde_json::from_str::<serde_json::Value>(sandbox).unwrap()})
-        );
+        let replacement = format!("__import__('json').loads('{config}')");
         let code = python.replace(
             "tomllib.load(open(\"/etc/agentic-job/config.toml\", \"rb\"))",
             &replacement,
@@ -954,7 +957,7 @@ fn run_requires_locked_host_and_consistent_user_before_probing() {
             .env_clear()
             .output()
             .unwrap();
-        assert_eq!(result.status.success(), ok, "{sandbox}: {result:?}");
+        assert_eq!(result.status.success(), ok, "{config}: {result:?}");
     }
     // The sandbox user went with agentic-job#2989, home or not.
     let removed = "agent-user sandbox was removed with the sandbox user (agentic-job#2989): drop \
@@ -1459,6 +1462,12 @@ fn runner_admission_precedes_setup_and_setup_is_isolated() {
     }
     for (text, script, code) in [
         ("[setup]\npackages = []", "", 0),
+        (
+            "[setup]\nscript = 'setup.sh'\n[host.env]\nTOOLCHAIN_OPTION = 'configured'",
+            "#!/bin/sh\npwd > \"$HOME/pwd\"\nenv > \"$HOME/env\"\n",
+            0,
+        ),
+        // The table's deprecated name, which `config` no longer writes.
         (
             "[setup]\nscript = 'setup.sh'\n[sandbox.env]\nTOOLCHAIN_OPTION = 'configured'",
             "#!/bin/sh\npwd > \"$HOME/pwd\"\nenv > \"$HOME/env\"\n",

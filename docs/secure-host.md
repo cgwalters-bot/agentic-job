@@ -149,19 +149,19 @@ RHEL 10 or CentOS Stream 10 runtime proof.
 None of these commands needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
 `Runner.Worker` process. What changes without them:
 
-- With no `Runner.Worker`, `sandbox.unlink-worker-diagnostics` has no
+- With no `Runner.Worker`, `host.unlink-worker-diagnostics` has no
   socket to unlink: setup prints that it skipped the step and why, and
   `sandbox check` notes the same rather than passing a probe. With one or
   more Workers, both behave as on a GitHub runner.
 - The runner-read rule exempts exactly one `Runner.Worker`, so where the
   secure-host image's loader runs, a host without one sets
-  `sandbox.deny-runner-reads = false`; the loader refuses it otherwise
+  `host.deny-runner-reads = false`; the loader refuses it otherwise
   and names this key. The standalone loader above leaves the runner-read
   rule off; `sandbox setup` alone never loads it, even when the key is true.
   With a Worker and that rule required, pass `--deny-runner-reads` to the
   loader (`--sole-worker` too if the loader is not its descendant).
 - Started from a root shell or a systemd unit rather than sudo as the
-  runner's user, setup needs `sandbox.runner-user` naming an existing
+  runner's user, setup needs `host.runner-user` naming an existing
   non-root user; otherwise it cannot identify whose job to harden.
 - The check record that lets a later check in the same job skip its
   probes ([sandbox-check.md](sandbox-check.md)) needs `RUNNER_TEMP` and
@@ -191,7 +191,7 @@ agentic-job's part of setup first, as root: `sudo agentic-job sandbox
 prepare` installs the packages, the agents and Vibe, writes the agent's
 managed settings, and installs the policy job's binary as the helper,
 with the operations `run` needs of root later. The host's file says so,
-`[sandbox.prepared]`, which `agentic-job config --host --prepared`
+`[host.prepared]`, which `agentic-job config --host --prepared`
 writes from the run's tables: the image's setup then keeps that helper
 rather than installing itself (it must be a regular file there, and is
 made root's alone with its directories, or setup refuses), and holds
@@ -261,7 +261,7 @@ The forwarder exposes these three inputs of the new action; every one is optiona
 
 | Input | What it sets |
 | --- | --- |
-| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
+| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. The pinned image reads the host's table only by this name, which an image of this source takes as `[host]`'s deprecated alias (#2071); a file for an image of this source, `image-archive`, may use `[host]`. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
 | `check` | `false` skips `sandbox check`. Default `true`. The pinned action does not pass `--record`, so it leaves no passing record for the run action's `--unless-passed` check; that check probes again ([record mechanism](sandbox-check.md)) |
 | `image-archive` | An image archive, as `podman load` takes it, run in place of the pinned image, unverified: for a job that built it, as CI's do |
 
@@ -279,10 +279,15 @@ on the host and runs the first three steps and setup there through
 setup: `helper`, the egress proxy's unit and the probes.
 
 `secure-host setup` and `check` read a host's file, or a job's whole
-file as an agent job passes it: `[sandbox]` and `[egress]` are held to
+file as an agent job passes it: `[host]` and `[egress]` are held to
 their keys, `[setup]` to `packages`, and `setup.script` is refused as
-`sandbox setup` refuses it. Any other table or `[setup]` key is a
-program's, and is refused unless `[sandbox.prepared]` says the
+`sandbox setup` refuses it. `[sandbox]` is read as `[host]` with a
+warning, and refused beside it
+([stable interfaces](stable-interfaces.md#configuration-files)); `config`
+writes `[host]`, from either name in the file or in a setting such as
+the pinned action's `--string sandbox.runner-user=`. Any other table or
+`[setup]` key is a program's, and is refused unless `[host.prepared]`
+says the
 program's step ran: it sets nothing here, so setup would leave out what
 it asks of the host. With the table setup names those keys, keeps the
 copy the program's step installed as the helper, and holds the egress

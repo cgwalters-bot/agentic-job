@@ -206,7 +206,7 @@ to the issue that tracks it, where one is filed, or to the page that explains it
 - The agent is the runner's user, the only agent user since the sandbox
   user was removed ([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)):
   it can read whatever the job holds, and `run` refuses a private target.
-- `sandbox.close-resolved`, off by default and set by `hosted.toml`, closes
+- `host.close-resolved`, off by default and set by `hosted.toml`, closes
   systemd-resolved's Varlink socket to every user but root. Every later
   step and the agent run as the runner's user, which still resolves names,
   so data can leave through DNS

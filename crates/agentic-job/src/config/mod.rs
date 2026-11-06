@@ -17,11 +17,16 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 // secure-host's now, at the paths callers know.
-pub use ::secure_host::config::{HostFile, Prepared, ROOT_COPY, Refusal, Sandbox};
+pub use ::secure_host::config::{
+    HOST_TABLE, HostFile, LEGACY_HOST_TABLE, Prepared, ROOT_COPY, Refusal, Sandbox,
+    host_table_names,
+};
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// `[host]`, or `[sandbox]` by its deprecated name ([`host_table_names`]).
+    #[serde(rename = "host", alias = "sandbox")]
     pub sandbox: Sandbox,
     pub egress: Egress,
     pub inference: Inference,
@@ -40,6 +45,7 @@ pub struct Config {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
+        host_table_names(text)?;
         let config: Self = toml::from_str(text).context("parsing the configuration")?;
         config.sandbox.refuse_removed()?;
         config.setup.refuse_removed()?;
@@ -61,6 +67,7 @@ impl Config {
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostConfig {
+    #[serde(rename = "host", alias = "sandbox")]
     pub sandbox: Sandbox,
     pub egress: Egress,
     pub setup: Setup,
@@ -68,6 +75,7 @@ pub struct HostConfig {
 
 impl HostConfig {
     pub fn parse(text: &str) -> Result<Self> {
+        host_table_names(text)?;
         let config: Self = toml::from_str(text).context("parsing the host configuration")?;
         config.sandbox.refuse_removed()?;
         config.setup.refuse_removed()?;
@@ -398,7 +406,7 @@ mod tests {
     use super::*;
 
     const FULL: &str = r#"
-        [sandbox]
+        [host]
         runner-user = "agent"
         stop-services = ["docker.service"]
 
@@ -484,7 +492,7 @@ mod tests {
     #[test]
     fn sandbox_and_setup_refuse_what_the_types_allow() {
         let good = r#"
-            [sandbox]
+            [host]
             runner-user = "runner"
             deny-runner-metadata = true
             unlink-worker-diagnostics = true
@@ -493,7 +501,7 @@ mod tests {
             private-dirs = ["/opt/hca"]
             stop-services = ["docker.socket", "docker.service"]
             env = { PATH = "/home/agent/.cargo/bin:/usr/bin" }
-            [sandbox.check]
+            [host.check]
             allow-sockets = ["/run/snapd.socket", "/run/pcscd/", "@ISCSIADM_ABSTRACT_NAMESPACE"]
             allow-tcp-ports = [3128]
             containers = false
@@ -518,18 +526,18 @@ mod tests {
         Config::default().sandbox.validate().unwrap();
 
         let bad = [
-            "[sandbox]\nrunner-user = \"root\"",
-            "[sandbox]\nrunner-user = \"x) ALL=(ALL) NOPASSWD: ALL #\"",
-            "[sandbox]\nlock-runner = false\ndeny-runner-metadata = true",
-            "[sandbox]\nlock-runner = false\nunlink-worker-diagnostics = true",
-            "[sandbox]\nlock-runner = false\ndeny-runner-reads = true",
-            "[sandbox]\nprivate-dirs = [\"relative\"]",
-            "[sandbox]\nstop-services = [\"--now\"]",
-            "[sandbox]\nstop-services = [\"docker\"]",
-            "[sandbox]\nenv = { ACTIONS_ID_TOKEN_REQUEST_URL = \"x\" }",
-            "[sandbox]\nenv = { \"A=B\" = \"x\" }",
-            "[sandbox]\nenv = { A = \"x\\ny\" }",
-            "[sandbox.check]\ncontainer-image = \"--privileged\"",
+            "[host]\nrunner-user = \"root\"",
+            "[host]\nrunner-user = \"x) ALL=(ALL) NOPASSWD: ALL #\"",
+            "[host]\nlock-runner = false\ndeny-runner-metadata = true",
+            "[host]\nlock-runner = false\nunlink-worker-diagnostics = true",
+            "[host]\nlock-runner = false\ndeny-runner-reads = true",
+            "[host]\nprivate-dirs = [\"relative\"]",
+            "[host]\nstop-services = [\"--now\"]",
+            "[host]\nstop-services = [\"docker\"]",
+            "[host]\nenv = { ACTIONS_ID_TOKEN_REQUEST_URL = \"x\" }",
+            "[host]\nenv = { \"A=B\" = \"x\" }",
+            "[host]\nenv = { A = \"x\\ny\" }",
+            "[host.check]\ncontainer-image = \"--privileged\"",
             "[setup]\npackages = [\"--installroot=/\"]",
             "[setup]\nnpm = [\"opencode-ai\"]",
             "[setup]\nnpm = [\"opencode-ai@latest\"]",
@@ -557,31 +565,32 @@ mod tests {
     #[test]
     fn the_sandbox_users_keys_are_refused_by_name() {
         for (text, key) in [
-            ("[sandbox]\ncreate-user = false", "sandbox.create-user"),
-            ("[sandbox]\ncreate-user = true", "sandbox.create-user"),
-            ("[sandbox]\nuser = \"runner-sandbox\"", "sandbox.user"),
-            ("[sandbox]\ngroups = []", "sandbox.groups"),
-            ("[sandbox]\ngroups = [\"kvm\"]", "sandbox.groups"),
+            ("[host]\ncreate-user = false", "host.create-user"),
+            ("[host]\ncreate-user = true", "host.create-user"),
+            ("[host]\nuser = \"runner-sandbox\"", "host.user"),
+            ("[host]\ngroups = []", "host.groups"),
+            ("[host]\ngroups = [\"kvm\"]", "host.groups"),
             (
-                "[sandbox]\nallow-existing-user = true",
-                "sandbox.allow-existing-user",
+                "[host]\nallow-existing-user = true",
+                "host.allow-existing-user",
             ),
+            ("[host]\nfilesystem-view = false", "host.filesystem-view"),
             (
-                "[sandbox]\nfilesystem-view = false",
-                "sandbox.filesystem-view",
-            ),
-            (
-                "[sandbox.check]\nbefore-agent = true",
-                "sandbox.check.before-agent",
+                "[host.check]\nbefore-agent = true",
+                "host.check.before-agent",
             ),
             (
                 "[setup.tools]\nrepository = \"https://example.org/t.git\"",
                 "setup.tools",
             ),
         ] {
+            // By the table's old name too, with the new name in the error.
+            let legacy = text.replacen("[host", "[sandbox", 1);
             for parsed in [
                 Config::parse(text).map(drop),
                 HostConfig::parse(text).map(drop),
+                Config::parse(&legacy).map(drop),
+                HostConfig::parse(&legacy).map(drop),
             ] {
                 let err = format!("{:#}", parsed.unwrap_err());
                 assert!(
@@ -594,7 +603,7 @@ mod tests {
         // A misspelling is still unknown, not removed.
         let err = format!(
             "{:#}",
-            Config::parse("[sandbox]\ncreate_user = false").unwrap_err()
+            Config::parse("[host]\ncreate_user = false").unwrap_err()
         );
         assert!(err.contains("unknown field"), "{err}");
     }
@@ -607,25 +616,25 @@ mod tests {
         // reads), then the keys of the opt-outs named.
         let cases: [(&str, [bool; 3], &[&str]); 7] = [
             ("", [true; 3], &[]),
-            ("[sandbox]\nlock-runner = true", [true; 3], &[]),
-            ("[sandbox]\nlock-runner = false", [false; 3], &[]),
+            ("[host]\nlock-runner = true", [true; 3], &[]),
+            ("[host]\nlock-runner = false", [false; 3], &[]),
             (
-                "[sandbox]\ndeny-runner-metadata = false",
+                "[host]\ndeny-runner-metadata = false",
                 [false, true, true],
                 &["deny-runner-metadata"],
             ),
             (
-                "[sandbox]\nunlink-worker-diagnostics = false",
+                "[host]\nunlink-worker-diagnostics = false",
                 [true, false, true],
                 &["unlink-worker-diagnostics"],
             ),
             (
-                "[sandbox]\ndeny-runner-reads = false\ndeny-runner-metadata = true",
+                "[host]\ndeny-runner-reads = false\ndeny-runner-metadata = true",
                 [true, true, false],
                 &["deny-runner-reads"],
             ),
             (
-                "[sandbox]\nlock-runner = false\ndeny-runner-reads = false",
+                "[host]\nlock-runner = false\ndeny-runner-reads = false",
                 [false; 3],
                 &[],
             ),
@@ -638,7 +647,7 @@ mod tests {
             let opt_outs = sandbox.runner_rule_opt_outs("runner");
             let prefixes: Vec<String> = named
                 .iter()
-                .map(|key| format!("sandbox.{key} = false: runner "))
+                .map(|key| format!("host.{key} = false: runner "))
                 .collect();
             assert_eq!(opt_outs.len(), named.len(), "{text:?}: {opt_outs:?}");
             for (line, prefix) in opt_outs.iter().zip(&prefixes) {
@@ -697,9 +706,73 @@ mod tests {
             "[session]\nlisten = true",
             "[mcp.docs]\nurl = \"https://mcp.example\"",
             "[sandbx]\nlock-runner = true",
+            "[host]\nusr = \"x\"",
             "[sandbox]\nusr = \"x\"",
+            "[host.check]\nusr = \"x\"",
+            "[host]\n[sandbox]",
         ] {
             assert!(HostConfig::parse(text).is_err(), "{text:?} parsed");
+        }
+    }
+
+    /// `[sandbox]`, `[host]`'s deprecated name, reads as `[host]` in a
+    /// run's file and a host's alike: defaults, explicit opt-outs, the
+    /// nested check table and validation. Both names together are
+    /// refused, empty or not, by either reader.
+    #[test]
+    fn the_host_tables_old_name_reads_as_the_new_one() {
+        let run = "[agent]\nname = \"claude\"\n[limits]\ntimeout-minutes = 10\n";
+        for body in [
+            "",
+            "lock-runner = true\n",
+            "lock-runner = false\ndeny-runner-metadata = false\n",
+            "deny-runner-metadata = false\nunlink-worker-diagnostics = false\n\
+             deny-runner-reads = false\nclose-resolved = false\n",
+            "runner-user = \"runner\"\nprivate-dirs = [\"/srv\"]\n\
+             stop-services = [\"docker.service\"]\nenv = { LANG = \"C.UTF-8\" }\n\
+             [NAME.check]\ncontainers = false\ncontainer-image = \"quay.io/x/curl\"\n",
+            "[NAME.check]\n",
+        ] {
+            let text = |name: &str| format!("[{name}]\n{}", body.replace("NAME", name));
+            let (new, old) = (text(HOST_TABLE), text(LEGACY_HOST_TABLE));
+            let host = HostConfig::parse(&new).unwrap();
+            assert_eq!(host, HostConfig::parse(&old).unwrap(), "{body:?}");
+            host.sandbox.validate().unwrap();
+            let full = |text: &str| Config::parse(&format!("{run}{text}")).unwrap();
+            assert_eq!(full(&new), full(&old), "{body:?}");
+            assert_eq!(full(&new).sandbox, host.sandbox);
+        }
+        assert_eq!(
+            HostConfig::parse("[host]\n").unwrap(),
+            HostConfig::default()
+        );
+        assert_eq!(
+            HostConfig::parse("[sandbox]\n").unwrap(),
+            HostConfig::default()
+        );
+        let both = "[host] and [sandbox], its deprecated name, are both set";
+        for (text, want) in [
+            ("[host]\n[sandbox]\n", both),
+            ("[sandbox]\n[host]\nlock-runner = false\n", both),
+            ("[sandbox.check]\n[host]\n", both),
+            ("[host]\nrunner-user = \"root\"\n", "host.runner-user"),
+            ("[sandbox]\nrunner-user = \"root\"\n", "host.runner-user"),
+            (
+                "[sandbox]\nlock-runner = false\ndeny-runner-reads = true\n",
+                "host.deny-runner-reads needs host.lock-runner",
+            ),
+            (
+                "[sandbox.check]\ncontainer-image = \"-x\"\n",
+                "host.check.container-image",
+            ),
+        ] {
+            for err in [
+                Config::parse(text).and_then(|config| config.sandbox.validate()),
+                HostConfig::parse(text).and_then(|config| config.sandbox.validate()),
+            ] {
+                let err = format!("{:#}", err.unwrap_err());
+                assert!(err.contains(want), "{text:?}: {err}");
+            }
         }
     }
 
@@ -707,7 +780,9 @@ mod tests {
     #[test]
     fn unknown_keys_and_values_are_refused() {
         let cases = [
+            "[host]\nusr = \"x\"",
             "[sandbox]\nusr = \"x\"",
+            "[host]\n[sandbox]",
             "[sandbx]\nlock-runner = true",
             "[inference]\nregister = \"oidc\"",
             "[inference]\nprovider = \"mistral\"",

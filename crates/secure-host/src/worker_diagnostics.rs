@@ -84,7 +84,7 @@ fn socket_paths(net_unix: &str, pids: &[u32]) -> Vec<PathBuf> {
 pub fn skipped(pids: &[u32]) -> Option<String> {
     pids.is_empty().then(|| {
         format!(
-            "skipped sandbox.unlink-worker-diagnostics: no {WORKER_COMM} runs on this host, so it has no .NET diagnostic socket"
+            "skipped host.unlink-worker-diagnostics: no {WORKER_COMM} runs on this host, so it has no .NET diagnostic socket"
         )
     })
 }
@@ -136,7 +136,7 @@ pub fn unlink() -> Result<()> {
         fs::remove_file(path).with_context(|| format!("unlinking {}", path.display()))?;
     }
     println!(
-        "Unlinked {} .NET diagnostic socket(s) of {WORKER_COMM}: sandbox.unlink-worker-diagnostics",
+        "Unlinked {} .NET diagnostic socket(s) of {WORKER_COMM}: host.unlink-worker-diagnostics",
         linked.len()
     );
     Ok(())

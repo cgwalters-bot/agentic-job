@@ -44,7 +44,9 @@ def main():
     shutil.copyfile(script, installed)
     installed.chmod(0o700)
     env = {'HOME': str(home), 'LANG': 'C.UTF-8', 'PATH': '/usr/local/bin:/usr/bin:/bin'}
-    env.update(config.get('sandbox', {}).get('env', {}))
+    # `agentic-job config` writes [host]; [sandbox] is its deprecated name
+    # (agentic-job#2071), which the binary refuses beside it.
+    env.update(config.get('host', config.get('sandbox', {})).get('env', {}))
     sys.exit(subprocess.run([str(installed)], cwd=home, env=env, check=False).returncode)
 
 

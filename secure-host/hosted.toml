@@ -4,6 +4,8 @@
 # `agentic-job sandbox check` fails on each one that is left and names
 # it, and a job on such an image passes a file of its own.
 
+# [host], by its deprecated name: the image the forwarder pins reads
+# only this one until agentic-job#2656 moves the pin.
 [sandbox]
 # Daemons of the image that listen for every local user. A job that
 # needs one of them after this step cannot have it: the runner's user is

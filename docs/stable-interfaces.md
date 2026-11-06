@@ -120,9 +120,19 @@ the next in the same major version.
   [events](events.md)). `allowed_domains` is accepted and ignored.
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`): the tables
-  `[sandbox]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
+  `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
   `[limits]`, `[session]` and `[commit]`
   ([files read](interface.md#files-read)).
+  `[host]` (with `[host.check]` and `[host.prepared]`) was `[sandbox]`
+  before #2071. `[sandbox]`, and a `sandbox.KEY` setting of `config`,
+  are still read as a deprecated alias, with the same keys, defaults and
+  checks and a warning on standard error. A file that has both tables is
+  refused, even when either is empty. The alias stays at least until the
+  release after the one whose image the secure-host forwarder pins and
+  which reads `[host]` (#2656). Its removal will be listed as breaking
+  in the changelog first. `config` writes `[host]`, except in a host's
+  file for that pinned image (`config --host` with no
+  `[host.prepared]`), which reads only `[sandbox]`.
   `[commit] allow-base-secret-lines` is an optional boolean, default false;
   it permits exact public-base secret-shaped patch lines within the same file,
   never known run secrets ([safe outputs](safe-outputs.md#public-base-secret-evidence)).
@@ -135,17 +145,19 @@ the next in the same major version.
   `[inference] stop-long-retry-after` is an optional boolean, default false;
   it requires `front` or `api-key` and stops a long upstream 429 followed
   by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).
-  The keys of the removed sandbox user (`sandbox.create-user`, `user`,
+  The keys of the removed sandbox user (`host.create-user`, `user`,
   `groups`, `allow-existing-user`, `filesystem-view`,
-  `sandbox.check.before-agent` and `setup.tools`) are refused by name
-  since #2989; `sandbox.check.control-url`, `fetch-repo`, `allow-sockets`
+  `host.check.before-agent` and `setup.tools`) are refused by name
+  since #2989; `host.check.control-url`, `fetch-repo`, `allow-sockets`
   and `allow-tcp-ports` are accepted and ignored.
 - **The secure-host configuration**, the action's `config` input
-  (`agentic-job config --host`, `secure-host config`): `[sandbox]`,
-  `[egress]` and `[setup]` of the runner configuration, and nothing else
-  ([secure-host](secure-host.md)). The secure-host binary also reads a
-  job's whole file, which an agent job passes it with
-  `[sandbox.prepared]`: it holds its own tables to their keys and leaves
+  (`agentic-job config --host`, `secure-host config`): `[host]`
+  (or `[sandbox]`, as above), `[egress]` and `[setup]` of the runner
+  configuration, and nothing else ([secure-host](secure-host.md)). Until
+  #2656 moves its pin, the forwarder runs an image that reads only
+  `[sandbox]`, so a file given to it keeps that name. The secure-host
+  binary also reads a job's whole file, which an agent job passes it with
+  `[host.prepared]`: it holds its own tables to their keys and leaves
   the rest to the program that wrote the file. With no `config`, the forwarder selects
   its Ubuntu 26.04 or RHEL 10 / CentOS Stream 10 cloud file by exact
   `ID` and supported `VERSION_ID` (never `ID_LIKE`); an unsupported host

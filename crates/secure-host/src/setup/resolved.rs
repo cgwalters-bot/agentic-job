@@ -82,7 +82,7 @@ fn needs_closure(state: &str) -> Result<bool> {
 fn require_socket_activation(version: &str) -> Result<()> {
     ensure!(
         super::systemd_version(version).is_some_and(|v| v >= 258),
-        "sandbox.close-resolved requires systemd 258 or newer: older resolved publishes its own Varlink socket before permissions can be restricted"
+        "host.close-resolved requires systemd 258 or newer: older resolved publishes its own Varlink socket before permissions can be restricted"
     );
     Ok(())
 }
@@ -141,7 +141,7 @@ fn install_drop_in(unit: &str, content: &str) -> Result<()> {
 pub fn close(runner: &str) -> Result<()> {
     if !startable()? {
         println!(
-            "sandbox.close-resolved: {UNIT} is absent or masked and stopped, so there is nothing to close"
+            "host.close-resolved: {UNIT} is absent or masked and stopped, so there is nothing to close"
         );
         return Ok(());
     }

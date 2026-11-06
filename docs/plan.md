@@ -91,7 +91,7 @@ unrelated work; do not mass-close issues based on this table.
 | [#2397](https://github.com/cgwalters-forge/agentic-job/issues/2397) | tracker#1047 deterministic live proof, not another CLI. Operator dispatches safe-outputs-cli.yml with publish=true and links run/comment on #64; offline tests do not settle it. |
 | [#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) | [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786), retain GitLab apply E2E owner after #2110; require real publication, bound status and cleanup, not mock success. |
 | [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110) | tracker#786 operator prerequisite: create test group/bot fork and main/queue-only gitlab-e2e environment with GITLAB_TEST_TOKEN and GITLAB_TEST_GROUP; keep needs-human/P0. |
-| [#2071](https://github.com/cgwalters-forge/agentic-job/issues/2071) | tracker#674 table rename owner after extraction: warned [sandbox] alias, reject both tables, preserve defaults. Its old request to keep runner-sandbox is superseded by #2989; do not restore a user to satisfy that stale sentence. |
+| [#2071](https://github.com/cgwalters-forge/agentic-job/issues/2071) | tracker#674 table rename: [host] is read, with [sandbox] as a warned alias refused beside it ([stable interfaces](stable-interfaces.md#configuration-files)). Left: once #2656 moves the forwarder's pin to an image that reads [host], have `config --host` write [host] for it and move secure-host/*.toml to [host]; remove the alias only in a later release that the changelog lists as breaking first. Its old request to keep runner-sandbox is superseded by #2989; do not restore a user to satisfy that stale sentence. |
 | [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) | tracker#674 standalone binary/image owner; reuse reference draft #2642, not a duplicate split. Require no agent dependency and static/image/archive/published/hosted E2E evidence. |
 | [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | tracker#596, preserve needs-human: human removes key-bearing legacy corpus fixture; operator decides whether pinned gh-aw JS drivers are exempt. Do not weaken hand-back scans or delete valid parity coverage here. |
 | [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) | tracker#674 standalone-project epic; retain needs-design. Operator owns destination/name, governance and disclosure commitments; #2070/#2656 remain implementation/publication owners. |
@@ -169,7 +169,8 @@ values; callers must delete them, not set false. It also rejects
 `agent-user: sandbox` and requires `--runner-home`. The probe-only
 `sandbox.check.control-url`, `fetch-repo`, `allow-sockets` and `allow-tcp-ports`
 remain accepted/ignored in that proposal for the old image. Refusing those keys
-too waits for image migration; [host] is #2071, not a currently accepted rename.
+too waits for image migration. Since #2071 these keys are under [host], and
+[sandbox] is its warned alias.
 
 Current safe refusal examples: runner admission rejects `register = "api-key"`
 and `[mcp.NAME]` before setup without needing a secret; the
@@ -309,7 +310,7 @@ image and `secure-host-published` are unproven until a release. After
 the next release publishes one: move cgwalters-forge/actions/secure-host's
 pin to it and the forwarder's with it; then have `agent.yml` and
 `example-compose.yml` run `sandbox prepare` and write
-`[sandbox.prepared]` whatever the image (such an image refuses a job's
+`[host.prepared]` whatever the image (such an image refuses a job's
 file without it,
 [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)),
 call the binary `secure-host` in the examples and the run action, and,
@@ -459,7 +460,7 @@ of #1735 creates. Sizes are the comment's.
 9. Fuzzing of the config and os-release parsers (M, low priority, this
    repository now). Add a cargo-fuzz target, in its own workspace since
    the workspace lints forbid unsafe code, for the `[egress]` and
-   `[sandbox]` tables in `crates/secure-host/src/config.rs` and the
+   `[host]` tables in `crates/secure-host/src/config.rs` and the
    `/etc/os-release` check in `crates/secure-host/src/platform.rs`, for
    Scorecard's Fuzzing check; running it in CI is the operator's.
 10. Naming (S, decision only, operator). Nothing called `secure-host`

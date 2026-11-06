@@ -131,7 +131,9 @@ runs:
           sandbox/*) echo '::error::agent-user sandbox was removed with the sandbox user (agentic-job#2989): drop the input, the runner is the only agent user'; exit 1 ;;
           *) echo '::error::agent-user must be runner'; exit 1 ;;
         esac
-        python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
+        # [sandbox] is [host]'s deprecated name (agentic-job#2071); setup
+        # refused a file with both.
+        python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("host", c.get("sandbox", {})).get("lock-runner", True) is True else "run requires a locked host")'
         agentic-job sandbox check --unless-passed
     # The policy job's commit must be this action's: a caller that names
     # another commit for an action would run one version's binary and

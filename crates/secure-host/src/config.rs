@@ -14,6 +14,65 @@ use crate::network::Direct;
 /// Where `sandbox setup` puts the root-owned copy.
 pub const ROOT_COPY: &str = "/etc/agentic-job/config.toml";
 
+/// The table of [`Sandbox`].
+pub const HOST_TABLE: &str = "host";
+
+/// [`HOST_TABLE`]'s name before agentic-job#2071, which every reader
+/// still takes, with a warning, for the compatibility window that
+/// docs/stable-interfaces.md promises.
+pub const LEGACY_HOST_TABLE: &str = "sandbox";
+
+/// What a reader prints, on standard error, for a file that names the
+/// table [`LEGACY_HOST_TABLE`]. agentic-job's `config --host` still
+/// writes that name for the image the forwarder pins, so the warning
+/// says so rather than blame a caller who wrote `[host]`.
+pub const LEGACY_HOST_WARNING: &str = "warning: [sandbox] is the deprecated name of [host] \
+     (agentic-job#2071): rename it, with [sandbox.check] and [sandbox.prepared]; this release \
+     still reads it, and `agentic-job config --host` writes it for the pinned secure-host image \
+     until agentic-job#2656";
+
+/// The tables a file names, by either name, read only for
+/// [`host_table_names`].
+#[derive(Deserialize)]
+struct HostTableNames {
+    host: Option<IgnoredAny>,
+    sandbox: Option<IgnoredAny>,
+}
+
+/// Refuses a file that names both [`HOST_TABLE`] and
+/// [`LEGACY_HOST_TABLE`], even empty, since one would be read and the
+/// other silently not; warns of the old name. A text that is not TOML
+/// passes, for the reader's own parse to say why.
+pub fn host_table_names(text: &str) -> Result<()> {
+    let Ok(HostTableNames { host, sandbox }) = toml::from_str(text) else {
+        return Ok(());
+    };
+    legacy_host_table(host.is_some(), sandbox.is_some())
+}
+
+/// [`host_table_names`] for a table built by a program: the old name's
+/// table, if any, moved to the new name.
+pub fn canonical_host_table(table: &mut toml::Table) -> Result<()> {
+    let legacy = table.contains_key(LEGACY_HOST_TABLE);
+    legacy_host_table(table.contains_key(HOST_TABLE), legacy)?;
+    if let Some(value) = table.remove(LEGACY_HOST_TABLE) {
+        table.insert(HOST_TABLE.to_owned(), value);
+    }
+    Ok(())
+}
+
+fn legacy_host_table(host: bool, legacy: bool) -> Result<()> {
+    ensure!(
+        !(host && legacy),
+        "[{HOST_TABLE}] and [{LEGACY_HOST_TABLE}], its deprecated name, are both set: \
+         keep only [{HOST_TABLE}]"
+    );
+    if legacy {
+        eprintln!("{LEGACY_HOST_WARNING}");
+    }
+    Ok(())
+}
+
 /// A host's configuration file as the program built on this crate has
 /// it: these tables and any of its own, read and checked as that program
 /// does. The helper reads the root-owned copy ([`ROOT_COPY`]) through
@@ -39,8 +98,8 @@ pub trait HostFile: Sized {
     }
 }
 
-/// What is closed to the runner's user, the only one an agent runs as,
-/// and what `sandbox check` probes with. Step 5.
+/// `[host]`: what is closed to the runner's user, the only one an agent
+/// runs as, and what `sandbox check` probes with. Step 5.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Sandbox {
@@ -114,7 +173,7 @@ pub struct Sandbox {
     pub prepared: Option<Prepared>,
 }
 
-/// `[sandbox.prepared]`: a program built on this crate ran its own root
+/// `[host.prepared]`: a program built on this crate ran its own root
 /// step before setup (agentic-job's `sandbox prepare`, before the
 /// secure-host image of an agent job) and installed its binary as the
 /// helper ([`crate::helper::SELF_COPY`]), with the operations its run
@@ -155,12 +214,12 @@ impl Prepared {
                     && *port != 0
                     && !host.starts_with('-')
                     && !host.contains(|c: char| c.is_whitespace() || c == '/'),
-                "sandbox.prepared.refuse: {host:?} port {port} is not a host and a port"
+                "host.prepared.refuse: {host:?} port {port} is not a host and a port"
             );
         }
         ensure!(
             self.serve_port != Some(0),
-            "sandbox.prepared.serve-port: 0 is not a port"
+            "host.prepared.serve-port: 0 is not a port"
         );
         Ok(())
     }
@@ -257,7 +316,7 @@ impl Sandbox {
         self.runner_rules()
             .into_iter()
             .filter(|(_, on, _)| !on)
-            .map(|(key, _, off)| format!("sandbox.{key} = false: {runner} {off}"))
+            .map(|(key, _, off)| format!("host.{key} = false: {runner} {off}"))
             .collect()
     }
 
@@ -273,7 +332,7 @@ impl Sandbox {
             ("filesystem-view", &self.removed_filesystem_view),
         ];
         if let Some((key, _)) = removed.iter().find(|(_, set)| set.is_some()) {
-            bail!("sandbox.{key} {}", Self::REMOVED_KEY);
+            bail!("host.{key} {}", Self::REMOVED_KEY);
         }
         self.check.refuse_removed()
     }
@@ -295,32 +354,32 @@ impl Sandbox {
         if let Some(runner) = &self.runner_user {
             ensure!(
                 name_ok(runner) && runner != "root",
-                "sandbox.runner-user: {runner:?} is not a user name the runner can have"
+                "host.runner-user: {runner:?} is not a user name the runner can have"
             );
         }
         ensure!(
             self.lock_runner || !self.deny_runner_metadata(),
-            "sandbox.deny-runner-metadata needs sandbox.lock-runner: a runner's user with sudo could remove the rule"
+            "host.deny-runner-metadata needs host.lock-runner: a runner's user with sudo could remove the rule"
         );
         ensure!(
             self.lock_runner || !self.unlink_worker_diagnostics(),
-            "sandbox.unlink-worker-diagnostics needs sandbox.lock-runner: a runner's user with sudo reads the Worker's memory anyway"
+            "host.unlink-worker-diagnostics needs host.lock-runner: a runner's user with sudo reads the Worker's memory anyway"
         );
         ensure!(
             self.lock_runner || !self.deny_runner_reads(),
-            "sandbox.deny-runner-reads needs sandbox.lock-runner: a runner's user with sudo could clear the rule"
+            "host.deny-runner-reads needs host.lock-runner: a runner's user with sudo could clear the rule"
         );
         for dir in &self.private_dirs {
             ensure!(
                 dir.is_absolute(),
-                "sandbox.private-dirs: {} is not an absolute path",
+                "host.private-dirs: {} is not an absolute path",
                 dir.display()
             );
         }
         for unit in &self.stop_services {
             ensure!(
                 unit.contains('.') && !unit.starts_with('-') && !unit.contains(char::is_whitespace),
-                "sandbox.stop-services: {unit:?} is not a unit name such as docker.service"
+                "host.stop-services: {unit:?} is not a unit name such as docker.service"
             );
         }
         for (name, value) in &self.env {
@@ -328,16 +387,16 @@ impl Sandbox {
                 !name.is_empty()
                     && !name.starts_with(|c: char| c.is_ascii_digit())
                     && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-                "sandbox.env: {name:?} is not a variable name"
+                "host.env: {name:?} is not a variable name"
             );
             ensure!(
                 !name.starts_with(Self::FORBIDDEN_ENV_PREFIX),
-                "sandbox.env: {name} is refused: {}* variables are the job's, never the agent's",
+                "host.env: {name} is refused: {}* variables are the job's, never the agent's",
                 Self::FORBIDDEN_ENV_PREFIX
             );
             ensure!(
                 !value.contains(['\0', '\n']),
-                "sandbox.env: the value of {name} has a newline or NUL in it"
+                "host.env: the value of {name} has a newline or NUL in it"
             );
         }
         if let Some(prepared) = &self.prepared {
@@ -370,7 +429,7 @@ impl Default for Sandbox {
     }
 }
 
-/// What the probes run with, `[sandbox.check]`. Step 5.
+/// What the probes run with, `[host.check]`. Step 5.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct SandboxCheck {
@@ -404,7 +463,7 @@ impl SandboxCheck {
     fn refuse_removed(&self) -> Result<()> {
         ensure!(
             self.removed_before_agent.is_none(),
-            "sandbox.check.before-agent {}",
+            "host.check.before-agent {}",
             Sandbox::REMOVED_KEY
         );
         Ok(())
@@ -427,7 +486,7 @@ impl SandboxCheck {
     fn validate(&self) -> Result<()> {
         ensure!(
             !self.container_image.is_empty() && !self.container_image.starts_with('-'),
-            "sandbox.check.container-image: {:?} is not an image name",
+            "host.check.container-image: {:?} is not an image name",
             self.container_image
         );
         Ok(())
@@ -477,7 +536,7 @@ pub struct Egress {
     /// secure-host/docs/egress.md): a step can then read from
     /// anywhere but send a job's secrets or sources only where a rule
     /// allows. Off by default; needs the Rust proxy and
-    /// `sandbox.lock-runner`, without which the runner's user could
+    /// `host.lock-runner`, without which the runner's user could
     /// remove the rules.
     pub write_policy: bool,
 }
@@ -499,7 +558,7 @@ impl Egress {
     pub fn validate(&self, lock_runner: bool) -> Result<()> {
         ensure!(
             !self.write_policy || (self.proxy && self.rust_proxy && lock_runner),
-            "egress.write-policy needs egress.proxy, egress.rust-proxy and sandbox.lock-runner: \
+            "egress.write-policy needs egress.proxy, egress.rust-proxy and host.lock-runner: \
              the runner's traffic goes through the Rust proxy's own listener, under rules a \
              runner's user with sudo could remove"
         );
@@ -521,8 +580,9 @@ pub fn check_packages(packages: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// A host's file as the secure-host binary reads it: `[sandbox]`,
-/// `[egress]` and `[setup] packages`. A job's whole file may come here
+/// A host's file as the secure-host binary reads it: `[host]` (or
+/// `[sandbox]`, [`LEGACY_HOST_TABLE`]), `[egress]` and `[setup] packages`.
+/// A job's whole file may come here
 /// too, once a program built on this crate did its own part first
 /// ([`Prepared`]): its tables and `[setup]` keys (agentic-job's run
 /// tables, its agents) are kept in the root-owned copy, where that
@@ -530,6 +590,7 @@ pub fn check_packages(packages: &[String]) -> Result<()> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Host {
+    #[serde(rename = "host", alias = "sandbox")]
     pub sandbox: Sandbox,
     pub egress: Egress,
     pub setup: HostSetup,
@@ -549,6 +610,7 @@ pub struct HostSetup {
 
 impl Host {
     pub fn parse(text: &str) -> Result<Self> {
+        host_table_names(text)?;
         let host: Self = toml::from_str(text).context("parsing the host configuration")?;
         host.sandbox.refuse_removed()?;
         Ok(host)
@@ -564,8 +626,8 @@ impl Host {
         ensure!(
             keys.is_empty() || self.sandbox.prepared.is_some(),
             "{} set nothing here: a program's step sets them up before this one and says so in \
-             [sandbox.prepared] (agentic-job: `sandbox prepare` on what `config --host \
-             --prepared` writes); a host's own file has only [sandbox], [egress] and [setup] \
+             [host.prepared] (agentic-job: `sandbox prepare` on what `config --host \
+             --prepared` writes); a host's own file has only [host], [egress] and [setup] \
              packages",
             keys.join(", ")
         );
@@ -623,12 +685,15 @@ mod tests {
     fn the_host_file_keeps_a_programs_tables_and_checks_its_own() {
         let job = "[agent]\nname = \"claude\"\n[limits]\nbudget = 1\n\
                    [setup]\npackages = [\"git\"]\nagents = [\"x@1\"]\n";
-        let host = Host::parse(&format!("{job}[sandbox.prepared]\n")).unwrap();
-        host.check().unwrap();
-        assert_eq!(host.setup.packages, ["git"]);
-        assert_eq!(host.program_keys(), ["agent", "limits", "setup.agents"]);
+        for name in [HOST_TABLE, LEGACY_HOST_TABLE] {
+            let host = Host::parse(&format!("{job}[{name}.prepared]\n")).unwrap();
+            host.check().unwrap();
+            assert_eq!(host.setup.packages, ["git"]);
+            assert_eq!(host.program_keys(), ["agent", "limits", "setup.agents"]);
+        }
         // Without it, the program's tables would set nothing.
         let unprepared = "agent, limits, setup.agents set nothing here";
+        let both = "[host] and [sandbox], its deprecated name, are both set";
         for (text, want) in [
             (job, unprepared),
             (
@@ -636,36 +701,129 @@ mod tests {
                 "setup.packges set nothing here",
             ),
             (
-                "[sandbox.prepared]\n[setup]\nscript = \"/s\"\n",
+                "[host.prepared]\n[setup]\nscript = \"/s\"\n",
                 "setup runs no script",
             ),
+            ("[host]\nusr = \"x\"\n", "unknown field"),
             ("[sandbox]\nusr = \"x\"\n", "unknown field"),
-            ("[sandbox]\ncreate-user = false\n", "was removed"),
-            ("[egress]\nproxyy = true\n", "unknown field"),
-            ("[sandbox.prepared]\nhelper = true\n", "unknown field"),
-            ("[setup]\npackages = [\"-y\"]\n", "not a package name"),
+            ("[host.check]\nusr = \"x\"\n", "unknown field"),
             (
-                "[sandbox]\nlock-runner = false\ndeny-runner-metadata = false\n\
-                 unlink-worker-diagnostics = false\ndeny-runner-reads = false\n\
-                 [egress]\nwrite-policy = true\n",
-                "needs egress.proxy, egress.rust-proxy and sandbox.lock-runner",
+                "[host]\ncreate-user = false\n",
+                "host.create-user was removed",
             ),
             (
-                "[[sandbox.prepared.refuse]]\nhost = \"\"\nport = 443\n",
+                "[sandbox]\ncreate-user = false\n",
+                "host.create-user was removed",
+            ),
+            ("[egress]\nproxyy = true\n", "unknown field"),
+            ("[host.prepared]\nhelper = true\n", "unknown field"),
+            ("[setup]\npackages = [\"-y\"]\n", "not a package name"),
+            (
+                "[host]\nlock-runner = false\ndeny-runner-metadata = false\n\
+                 unlink-worker-diagnostics = false\ndeny-runner-reads = false\n\
+                 [egress]\nwrite-policy = true\n",
+                "needs egress.proxy, egress.rust-proxy and host.lock-runner",
+            ),
+            (
+                "[[host.prepared.refuse]]\nhost = \"\"\nport = 443\n",
                 "not a host and a port",
             ),
             (
-                "[[sandbox.prepared.refuse]]\nhost = \"broker\"\nport = 0\n",
+                "[[host.prepared.refuse]]\nhost = \"broker\"\nport = 0\n",
                 "not a host and a port",
             ),
             (
                 "[[sandbox.prepared.refuse]]\nhost = \"-x\"\nport = 443\n",
                 "not a host and a port",
             ),
-            ("[sandbox.prepared]\nserve-port = 0\n", "not a port"),
+            ("[host.prepared]\nserve-port = 0\n", "not a port"),
+            // Both names, even empty or only by a table under one.
+            ("[host]\n[sandbox]\n", both),
+            ("[sandbox]\nlock-runner = false\n[host.check]\n", both),
+            ("[host.prepared]\n[sandbox.prepared]\n", both),
+            ("host = {}\nsandbox = {}\n", both),
+            ("host = 1\n", "invalid type"),
         ] {
             let err = Host::parse(text).and_then(|host| host.check()).unwrap_err();
             assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}");
+        }
+    }
+
+    /// `[sandbox]` is `[host]` by its old name: the same table, defaults,
+    /// opt-outs and nested tables, read alike.
+    #[test]
+    fn the_old_name_reads_as_the_new_one() {
+        for body in [
+            "",
+            "lock-runner = false\ndeny-runner-metadata = false\n\
+             unlink-worker-diagnostics = false\ndeny-runner-reads = false\n",
+            "deny-runner-reads = false\nclose-resolved = true\nrunner-user = \"runner\"\n\
+             private-dirs = [\"/srv\"]\nstop-services = [\"docker.service\"]\n\
+             env = { LANG = \"C.UTF-8\" }\n",
+        ] {
+            for tables in [
+                "",
+                "[NAME.check]\n",
+                "[NAME.check]\ncontainers = false\ncontainer-image = \"quay.io/x/curl\"\n\
+                 control-url = \"https://example.com\"\n",
+                "[NAME.prepared]\nserve-port = 7790\n",
+            ] {
+                let parse = |name: &str| {
+                    let text = format!("[{name}]\n{body}{}", tables.replace("NAME", name));
+                    let host = Host::parse(&text).unwrap();
+                    host.check().unwrap();
+                    (host.sandbox, host.program)
+                };
+                let new = parse(HOST_TABLE);
+                assert_eq!(new, parse(LEGACY_HOST_TABLE), "{body:?} {tables:?}");
+                assert!(new.1.is_empty());
+            }
+        }
+        let host = Host::parse("").unwrap().sandbox;
+        assert_eq!(host, Sandbox::default());
+        assert!(host.lock_runner && host.runner_rules().iter().all(|(_, on, _)| *on));
+        assert!(host.check.containers && !host.close_resolved);
+        let off = Host::parse("[sandbox]\nlock-runner = false\n")
+            .unwrap()
+            .sandbox;
+        assert!(!off.lock_runner && off.runner_rules().iter().all(|(_, on, _)| !on));
+        assert_eq!(
+            Host::parse("[host]\ndeny-runner-reads = false\n")
+                .unwrap()
+                .sandbox
+                .runner_rule_opt_outs("runner"),
+            [
+                "host.deny-runner-reads = false: runner reads the environment, and the tokens in \
+              it, of a process an earlier step left running"
+            ]
+        );
+    }
+
+    /// What a program writes from a caller's table is under the new name.
+    #[test]
+    fn a_built_table_moves_to_the_new_name() {
+        for (text, want) in [
+            ("", Ok("")),
+            ("[egress]\nproxy = true\n", Ok("[egress]\nproxy = true\n")),
+            (
+                "[host]\nlock-runner = true\n",
+                Ok("[host]\nlock-runner = true\n"),
+            ),
+            (
+                "[sandbox]\nlock-runner = true\n[sandbox.check]\ncontainers = false\n",
+                Ok("[host]\nlock-runner = true\n\n[host.check]\ncontainers = false\n"),
+            ),
+            ("[host]\n[sandbox]\n", Err("both set")),
+        ] {
+            let mut table: toml::Table = toml::from_str(text).unwrap();
+            let got = canonical_host_table(&mut table)
+                .map(|()| toml::to_string(&table).unwrap())
+                .map_err(|err| format!("{err:#}"));
+            match (got, want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{text:?}"),
+                (Err(got), Err(want)) => assert!(got.contains(want), "{text:?}: {got}"),
+                (got, _) => panic!("{text:?}: {got:?}"),
+            }
         }
     }
 
@@ -673,14 +831,14 @@ mod tests {
     fn the_prepared_table_says_what_the_rules_hold_to() {
         let host = Host::parse("").unwrap();
         assert_eq!(host.sandbox.prepared, None);
-        let text = "[sandbox.prepared]\nserve-port = 7790\n\
-                    [[sandbox.prepared.refuse]]\nhost = \"fd7a:115c:a1e0::1\"\nport = 443\n";
+        let text = "[host.prepared]\nserve-port = 7790\n\
+                    [[host.prepared.refuse]]\nhost = \"fd7a:115c:a1e0::1\"\nport = 443\n";
         let host = Host::parse(text).unwrap();
         host.check().unwrap();
         let prepared = host.sandbox.prepared.as_ref().unwrap();
         assert_eq!(prepared.serve_port, Some(7790));
         assert_eq!(prepared.refused(), [("fd7a:115c:a1e0::1".to_owned(), 443)]);
-        let empty = Host::parse("[sandbox.prepared]\n").unwrap();
+        let empty = Host::parse("[host.prepared]\n").unwrap();
         assert_eq!(empty.sandbox.prepared, Some(Prepared::default()));
     }
 }

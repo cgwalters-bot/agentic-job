@@ -79,7 +79,7 @@ impl Checker<'_> {
                     Want::Fail,
                     "worker-diagnostics",
                     format!(
-                        "no .NET diagnostic socket of {} is linked (sandbox.unlink-worker-diagnostics){}",
+                        "no .NET diagnostic socket of {} is linked (host.unlink-worker-diagnostics){}",
                         worker_diagnostics::WORKER_COMM,
                         if linked.is_empty() {
                             String::new()

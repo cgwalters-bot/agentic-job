@@ -7,7 +7,9 @@
 //! here: it is never read as TOML, so whatever it holds (a quote, a
 //! newline, a table header) it sets the one key it was given for and no
 //! other. A program's tables in the file ([`Host`]) are written back as
-//! they came. agentic-job's `config` takes the same settings
+//! they came. `[sandbox]` in the file and a `sandbox.` setting, as the
+//! pinned action passes them, are `[host]` by its deprecated name: read
+//! with a warning on standard error, and written as `[host]`. agentic-job's `config` takes the same settings
 //! ([`Setting`], [`Kind`], [`set`]).
 
 use std::io::Write;
@@ -16,7 +18,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use toml::{Table, Value};
 
-use crate::config::Host;
+use crate::config::{
+    HOST_TABLE, Host, LEGACY_HOST_TABLE, LEGACY_HOST_WARNING, canonical_host_table,
+};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -46,6 +50,9 @@ pub struct Args {
 pub struct Setting {
     path: Vec<String>,
     value: String,
+    /// Whether the key named the table by [`LEGACY_HOST_TABLE`], as the
+    /// pinned action's inputs do; `path` has [`HOST_TABLE`].
+    legacy: bool,
 }
 
 impl Setting {
@@ -56,7 +63,7 @@ impl Setting {
         let (key, value) = text
             .split_once('=')
             .with_context(|| format!("{text:?} is not KEY=VALUE"))?;
-        let path: Vec<String> = key.split('.').map(str::to_owned).collect();
+        let mut path: Vec<String> = key.split('.').map(str::to_owned).collect();
         let plain = |part: &String| {
             !part.is_empty()
                 && part
@@ -67,9 +74,14 @@ impl Setting {
             path.len() >= 2 && path.iter().all(plain),
             "{key:?} is not TABLE.KEY"
         );
+        let legacy = path[0] == LEGACY_HOST_TABLE;
+        if legacy {
+            HOST_TABLE.clone_into(&mut path[0]);
+        }
         Ok(Self {
             path,
             value: value.to_owned(),
+            legacy,
         })
     }
 
@@ -80,6 +92,9 @@ impl Setting {
     /// Sets this, as KIND, in TABLE; a text that sets nothing leaves it.
     pub fn apply(&self, kind: Kind, table: &mut Table) -> Result<()> {
         if let Some(value) = kind.value(self)? {
+            if self.legacy {
+                eprintln!("{LEGACY_HOST_WARNING} (setting {})", self.key());
+            }
             set(table, &self.path, value).with_context(|| format!("setting {}", self.key()))?;
         }
         Ok(())
@@ -151,7 +166,10 @@ pub fn table(from: Option<&std::path::Path>, settings: [(Kind, &[Setting]); 4]) 
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+            let mut table =
+                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+            canonical_host_table(&mut table).with_context(|| format!("in {}", path.display()))?;
+            table
         }
         None => Table::new(),
     };
@@ -210,23 +228,16 @@ mod tests {
 
     /// As the pinned action's `config.mjs` calls it, on a job's whole
     /// file: the settings land, and the program's tables come back as
-    /// they were.
+    /// they were. The host's table, by either name in the file or the
+    /// setting, is written as `[host]`.
     #[test]
     fn a_jobs_file_passes_with_the_actions_settings() {
         let dir = tempfile::tempdir().unwrap();
         let from = dir.path().join("config.toml");
         let job = "[agent]\nname = \"fake\"\n[limits]\nbudget = 100\n\
-                   [setup]\nagents = [\"x@1\"]\n[sandbox.prepared]\nserve-port = 7790\n";
-        std::fs::write(&from, job).unwrap();
-        let text = compose(&args(
-            Some(from),
-            &["sandbox.runner-user=runner"],
-            &["egress.write-policy=false"],
-        ))
-        .unwrap();
-        let got: Table = toml::from_str(&text).unwrap();
-        let mut want: Table = toml::from_str(job).unwrap();
-        want["sandbox"]
+                   [setup]\nagents = [\"x@1\"]\n[NAME.prepared]\nserve-port = 7790\n";
+        let mut want: Table = toml::from_str(&job.replace("NAME", HOST_TABLE)).unwrap();
+        want[HOST_TABLE]
             .as_table_mut()
             .unwrap()
             .insert("runner-user".into(), "runner".into());
@@ -234,7 +245,19 @@ mod tests {
             "egress".into(),
             Value::Table(Table::from_iter([("write-policy".into(), false.into())])),
         );
-        assert_eq!(got, want);
+        for file in [HOST_TABLE, LEGACY_HOST_TABLE] {
+            for setting in [HOST_TABLE, LEGACY_HOST_TABLE] {
+                std::fs::write(&from, job.replace("NAME", file)).unwrap();
+                let text = compose(&args(
+                    Some(from.clone()),
+                    &[&format!("{setting}.runner-user=runner")],
+                    &["egress.write-policy=false"],
+                ))
+                .unwrap();
+                let got: Table = toml::from_str(&text).unwrap();
+                assert_eq!(got, want, "{file} {setting}");
+            }
+        }
         // `--host`, as the action spells it, and the empty text of an
         // input left out.
         let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from([
@@ -257,23 +280,27 @@ mod tests {
             assert!(Setting::parse(text).is_err(), "{text:?}");
         }
         for (string, boolean, want) in [
-            (&["sandbox.usr=x"][..], &[][..], "unknown field `usr`"),
+            (&["host.usr=x"][..], &[][..], "unknown field `usr`"),
+            (&["sandbox.usr=x"], &[], "unknown field `usr`"),
+            (&["host.runner-user=root"], &[], "not a user name"),
             (&["sandbox.runner-user=root"], &[], "not a user name"),
-            (&["sandbox.user=agent"], &[], "was removed"),
+            (&["host.user=agent"], &[], "host.user was removed"),
             (&["setup.script=/s.sh"], &[], "set nothing here"),
             (&["agent.name=fake"], &[], "agent set nothing here"),
             (&[], &["egress.proxy=yes"], "neither true nor false"),
             (
                 &[],
-                &[
-                    "sandbox.lock-runner=false",
-                    "sandbox.deny-runner-reads=true",
-                ],
-                "needs sandbox.lock-runner",
+                &["sandbox.lock-runner=false", "host.deny-runner-reads=true"],
+                "needs host.lock-runner",
             ),
         ] {
             let err = compose(&args(None, string, boolean)).unwrap_err();
             assert!(format!("{err:#}").contains(want), "{err:#}");
         }
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("config.toml");
+        std::fs::write(&from, "[host]\n[sandbox]\n").unwrap();
+        let err = compose(&args(Some(from), &[], &[])).unwrap_err();
+        assert!(format!("{err:#}").contains("both set"), "{err:#}");
     }
 }

@@ -9,6 +9,18 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- **Deprecated:** the host's configuration table `[sandbox]`, with
+  `[sandbox.check]` and `[sandbox.prepared]`, is now `[host]`, and
+  messages name its keys `host.KEY` (#2071). `[sandbox]` and `config`'s
+  `sandbox.KEY` settings still work as an alias: same keys, defaults and
+  checks, plus a warning on standard error. A file with both tables is
+  refused. The alias stays at least until the release after the one whose
+  image the secure-host forwarder pins (#2656), and its removal will be
+  listed here as breaking first. `config` writes `[host]`. The exception
+  is `config --host` without `[host.prepared]`, which still writes
+  `[sandbox]` because the pinned v0.6.9 image reads only that name.
+  `runner-sandbox` and every default are unchanged.
+
 - Document the agreed external VM-runner to midstream draft contract, with
   a devspace profile example and separate runtime implementation slices.
   External dispatch and cross-run apply are not deployed by this change;

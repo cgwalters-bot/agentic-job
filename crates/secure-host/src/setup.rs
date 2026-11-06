@@ -128,7 +128,7 @@ fn read_host(config: &Path) -> Result<Plan<Host>> {
     let keys = host.program_keys();
     if !keys.is_empty() {
         println!(
-            "sandbox.prepared: left to the program whose file this is: {}",
+            "host.prepared: left to the program whose file this is: {}",
             keys.join(", ")
         );
     }
@@ -563,7 +563,7 @@ fn setup<P: Program>(
     }
     if !runner_uids.is_empty() {
         println!(
-            "{} (uids {}) can't reach the metadata service either: sandbox.deny-runner-metadata",
+            "{} (uids {}) can't reach the metadata service either: host.deny-runner-metadata",
             runner.name,
             runner_uids.join(", ")
         );
@@ -598,7 +598,7 @@ fn setup<P: Program>(
         timed("lock-runner", || lock_runner(&runner))?;
     } else {
         println!(
-            "sandbox.lock-runner = false: {} keeps its sudo, and every step after this one has root",
+            "host.lock-runner = false: {} keeps its sudo, and every step after this one has root",
             runner.name
         );
     }
@@ -614,7 +614,7 @@ fn runner_user(config: &Sandbox) -> Result<User> {
     let name = match &config.runner_user {
         Some(name) => name.clone(),
         None => std::env::var("SUDO_USER").ok().filter(|name| name != "root").context(
-            "whose job is this? Start `sandbox setup` with sudo as the runner's user, or set sandbox.runner-user",
+            "whose job is this? Start `sandbox setup` with sudo as the runner's user, or set host.runner-user",
         )?,
     };
     let runner = User::lookup(&name)?.with_context(|| format!("no user {name}"))?;
@@ -854,7 +854,7 @@ fn lock_runner(runner: &User) -> Result<()> {
     let after: Vec<String> = sudoers_after_ours()?;
     ensure!(
         after.is_empty(),
-        "{} sorts after {SUDOERS_DENY} in {}, and sudo would read it later: a rule there for {} would win. Remove it, or set sandbox.lock-runner = false",
+        "{} sorts after {SUDOERS_DENY} in {}, and sudo would read it later: a rule there for {} would win. Remove it, or set host.lock-runner = false",
         after.join(", "),
         Path::new(SUDOERS_DENY)
             .parent()
@@ -1129,7 +1129,7 @@ fn stop_services(units: &[String]) -> Result<()> {
         }
         ensure!(
             unmasked.is_empty(),
-            "sandbox.stop-services: masking left {} startable; a unit file in /etc/systemd/system overrides a runtime mask: remove it, or mask the unit there",
+            "host.stop-services: masking left {} startable; a unit file in /etc/systemd/system overrides a runtime mask: remove it, or mask the unit there",
             unmasked.join(", ")
         );
         println!("Stopped and masked until reboot: {}", stopped.join(", "));
@@ -1187,17 +1187,17 @@ pub fn make_roots_alone(path: &Path) -> Result<()> {
 fn keep_program_helper(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path).with_context(|| {
         format!(
-            "{}: sandbox.prepared says a program's step installed the helper there, and none did",
+            "{}: host.prepared says a program's step installed the helper there, and none did",
             path.display()
         )
     })?;
     ensure!(
         meta.is_file(),
-        "{} is not a regular file: sandbox.prepared keeps it as the helper",
+        "{} is not a regular file: host.prepared keeps it as the helper",
         path.display()
     );
     println!(
-        "sandbox.prepared: the helper is the program's, which its step installed at {}",
+        "host.prepared: the helper is the program's, which its step installed at {}",
         path.display()
     );
     Ok(())
@@ -1378,7 +1378,7 @@ pub fn install_file(
 mod tests {
     use super::*;
 
-    /// With `[sandbox.prepared]` the helper is the program's file, and
+    /// With `[host.prepared]` the helper is the program's file, and
     /// setup refuses rather than go on without one, or through a link.
     #[test]
     fn a_prepared_host_keeps_only_a_helper_that_is_there() {
@@ -1406,8 +1406,8 @@ mod tests {
         for (text, refused, port) in [
             ("[setup]\npackages = [\"git\"]\n", &[][..], None),
             (
-                "[agent]\nname = \"fake\"\n[sandbox.prepared]\nserve-port = 7790\n\
-                 [[sandbox.prepared.refuse]]\nhost = \"100.64.0.1\"\nport = 18080\n\
+                "[agent]\nname = \"fake\"\n[host.prepared]\nserve-port = 7790\n\
+                 [[host.prepared.refuse]]\nhost = \"100.64.0.1\"\nport = 18080\n\
                  [setup]\npackages = [\"git\"]\nagents = [\"x@1\"]\n",
                 &[("100.64.0.1", 18080)][..],
                 Some(7790),

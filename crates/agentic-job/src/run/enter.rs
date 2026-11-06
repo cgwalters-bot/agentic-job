@@ -1,7 +1,7 @@
 //! What `run` does as the agent: one command at a time as the runner's
 //! own user, the only agent user since agentic-job#2989, through
 //! `env -i` in the home `run --runner-home` gives, with the variables
-//! `[sandbox] env` adds. The job is the unit of trust
+//! `[host] env` adds. The job is the unit of trust
 //! (cgwalters-forge/actions/secure-host): the agent can read whatever the
 //! runner's user can anyway.
 //!
@@ -114,7 +114,7 @@ impl Runner for Unconfined {
 
 impl Sandbox {
     /// This process's own user, with HOME, which is made private to it,
-    /// as the agent's home. Commands get the variables `[sandbox] env` of
+    /// as the agent's home. Commands get the variables `[host] env` of
     /// CONFIG sets over a fixed language, PATH and the user's names.
     pub fn own(config: &Config, home: &Path) -> Result<Self> {
         let user = crate::sandbox::host::User::current()?;
@@ -338,7 +338,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agentic-job-own-{}", std::process::id()));
         let home = dir.join("home");
         let config =
-            Config::parse("[sandbox]\nenv = { LANG = \"en_US.UTF-8\", X = \"1\" }\n").unwrap();
+            Config::parse("[host]\nenv = { LANG = \"en_US.UTF-8\", X = \"1\" }\n").unwrap();
         let sandbox = Sandbox::own(&config, &home).unwrap();
         assert!(matches!(sandbox.launch().unwrap(), Launch::Own { .. }));
         let home = home.canonicalize().unwrap();

@@ -193,8 +193,9 @@ jobs:
       # host's file has no `setup.script`, which the runner's user runs
       # below (agentic-job#2989). An image of this source holds no agent
       # code, so the next step does agentic-job's part first, and the file
-      # says so (`[sandbox.prepared]`), which the pinned image, a release
-      # that does all of it, would refuse.
+      # says so (`[host.prepared]`), which the pinned image, a release
+      # that does all of it, would refuse. For that image the file names
+      # the host's table `[sandbox]`, the only name it reads.
       - name: The host's configuration
         env:
           IMAGE_ARTIFACT: ${{ inputs.secure-host-image-artifact-id }}

@@ -240,7 +240,7 @@ mod tests {
     fn from_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[sandbox]\nlock-runner = true\n").unwrap();
+        std::fs::write(&path, "[host]\nlock-runner = true\n").unwrap();
         run(&path).unwrap();
         std::fs::write(
             &path,

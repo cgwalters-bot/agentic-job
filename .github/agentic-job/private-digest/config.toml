@@ -1,8 +1,8 @@
 # The agent job's configuration for the private digest caller
 # (workflow.yml beside this file), on GitHub's hosted `ubuntu-26.04`. The
-# [sandbox] tables are hosted.toml's except for the pinned probe image.
+# [host] tables are hosted.toml's except for the pinned probe image.
 
-[sandbox]
+[host]
 stop-services = [
     "docker.socket",
     "docker.service",
@@ -23,7 +23,7 @@ stop-services = [
 ]
 close-resolved = true
 
-[sandbox.check]
+[host.check]
 # Keep container/subordinate-UID probes on. The allowlist admits this
 # official UBI image's registry; see docs/private-repositories.md.
 container-image = "registry.access.redhat.com/ubi10/ubi-minimal@sha256:ab67cd02caf8706e34a695a1432ebe965934f6128ec352a6c3f4048b43a4fb5e"

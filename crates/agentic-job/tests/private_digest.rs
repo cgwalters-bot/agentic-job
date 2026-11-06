@@ -492,11 +492,12 @@ fn the_configuration_keeps_the_agent_behind_the_allowlist() {
     assert!(image_path.starts_with("ubi10/ubi-minimal@sha256:"));
     assert_eq!(image_path.rsplit_once(':').unwrap().1.len(), 64);
     assert!(config["sandbox"]["check"].get("containers").is_none());
-    hosted["sandbox"]["check"]
+    hosted["host"]["check"]
         .as_table_mut()
         .unwrap()
         .insert("container-image".into(), image.into());
-    assert_eq!(config["sandbox"], hosted["sandbox"]);
+    // `config --host` writes [host] as [sandbox] for the pinned image.
+    assert_eq!(config["sandbox"], hosted["host"]);
     assert_eq!(config["egress"]["proxy"].as_bool(), Some(true));
     let policy = config["egress"]["policy"].as_str().unwrap();
     assert!(Path::new(policy).is_absolute(), "{policy}");

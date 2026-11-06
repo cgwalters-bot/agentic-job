@@ -68,17 +68,20 @@ setup keeps ([the agent job](secure-host.md#the-agent-job)):
 
 It runs no `setup.script`: the reusable workflow's agent job runs it
 after setup, as the runner's user, in the agent's home and with
-`sandbox.env`. A host's file (`agentic-job config --host`) leaves the
+`host.env`. A host's file (`agentic-job config --host`) leaves the
 script out, and setup refuses one that has it. The keys of the removed
-second user (`sandbox.create-user`, `sandbox.user`, `sandbox.groups`,
-`sandbox.allow-existing-user`, `sandbox.filesystem-view`,
-`sandbox.check.before-agent`, `setup.tools`) are refused by name.
+second user (`host.create-user`, `host.user`, `host.groups`,
+`host.allow-existing-user`, `host.filesystem-view`,
+`host.check.before-agent`, `setup.tools`) are refused by name.
+`[host]` was `[sandbox]` before #2071; that name is still read, with a
+warning, but not beside `[host]`
+([stable interfaces](stable-interfaces.md#configuration-files)).
 
 On a fresh disposable supported host, first load the matching world-write
 object as described in [standalone host setup](secure-host.md#on-a-host-that-is-not-a-github-actions-runner);
 `sandbox setup` does not load it and refuses to proceed without its pins.
 Start setup with sudo as the runner's user, or from a root shell or a
-systemd unit after boot. For the latter two, set `sandbox.runner-user` in
+systemd unit after boot. For the latter two, set `host.runner-user` in
 the configuration to the existing non-root user whose job this is. A unit:
 
 ```ini
@@ -100,7 +103,7 @@ address and port on the tailnet; it is for the
 egress proxy. Under `egress.write-policy` the runner's user, and so the
 agent, reaches each of them and no other tailnet address.
 
-`sandbox.close-resolved`, off by default, closes systemd-resolved's
+`host.close-resolved`, off by default, closes systemd-resolved's
 Varlink socket and system-bus interface to every user but root and, on
 the bus, the runner's. resolved answers any local user there and asks
 upstream as itself, so a name lookup (`DATA.attacker.example`) can carry
@@ -136,7 +139,7 @@ lockdown. Whether to allow a named private destination is open
 
 `run` starts every command of the agent's through `env -i` in the
 agent's home, with a fixed `PATH` and `LANG`, the user's names and
-`sandbox.env`; a variable named `ACTIONS_*` (the job's identity-token
+`host.env`; a variable named `ACTIONS_*` (the job's identity-token
 request is two of them) is refused by name in the configuration. That
 keeps `run`'s own variables out of what the agent's commands get, not
 what the agent could read from `run`'s process: there is no uid between
@@ -186,7 +189,7 @@ For an agent in particular:
   the proxy and leaves it unset, and `run` refuses an agent with the
   proxy on and the write policy off. With `egress.proxy = false` the
   agent's network is the runner's, open but for the metadata service
-  under `sandbox.deny-runner-metadata`.
+  under `host.deny-runner-metadata`.
 - What the agent leaves running outside its process group runs until
   the job ends: nothing kills every process of the runner's user.
 - A container the agent starts has no network of its own. It reaches the

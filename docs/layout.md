@@ -35,7 +35,10 @@ world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`), the
 Worker-diagnostics rule (`worker_diagnostics.rs`), and the privileged
 seam: the helper's fixed operations (`helper.rs`), how the runner's
 user has root run them (`root.rs`) and the way in as the sandbox user
-(`enter.rs`), with the `[sandbox]` table (`config.rs`), and the host
+(`enter.rs`), with the `[host]` table (`config.rs`, Rust's `Sandbox`;
+`[sandbox]` is its deprecated name, which the binaries read with a
+warning and `host_table_names` refuses beside `[host]`; the workflow's
+Python readers take either), and the host
 setup itself (`setup.rs`): the runner lock, the sandbox user, sudo and
 polkit denials, the privileged-binary allowlist (`setup/`), the
 systemd-resolved closure, the egress proxy and rules in their order,
@@ -69,7 +72,7 @@ and refuses them otherwise; and the image's
 entrypoint (`image.rs`), which installs it on the host and runs setup
 through `nsenter`. The image holds no agent code, so an agent job runs
 agentic-job's part first (`sandbox prepare`), which installs agentic-job
-as the helper and says so in `[sandbox.prepared]`
+as the helper and says so in `[host.prepared]`
 (`config::Prepared`): setup then keeps that helper, and holds the
 egress proxy and the network rules to what the table says the run's
 tables ask. For one release the binary also answers to agentic-job's

@@ -8,7 +8,7 @@
 //! before the secure-host image, which holds no agent code: the agents,
 //! the managed settings, and this binary as the helper, which reads the
 //! run's tables. The image's setup then keeps that helper
-//! (`[sandbox.prepared]`, which `config --host --prepared` writes).
+//! (`[host.prepared]`, which `config --host --prepared` writes).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ pub struct Args {
 
 #[derive(Debug, clap::Args)]
 pub struct PrepareArgs {
-    /// The run's configuration (TOML), with `[sandbox.prepared]`, as
+    /// The run's configuration (TOML), with `[host.prepared]`, as
     /// `agentic-job config --host --prepared` writes it
     #[arg(long, value_name = "FILE")]
     pub config: PathBuf,
@@ -100,7 +100,7 @@ fn read(args: &Args) -> Result<Plan<Job>> {
     // Setup would keep a helper no step of this one installed.
     ensure!(
         config.sandbox.prepared.is_none(),
-        "sandbox.prepared is for secure-host's setup after `agentic-job sandbox prepare`; \
+        "host.prepared is for secure-host's setup after `agentic-job sandbox prepare`; \
          `sandbox setup` does both itself: leave it out"
     );
     let config::checked::Host {
@@ -127,7 +127,7 @@ fn read(args: &Args) -> Result<Plan<Job>> {
 /// as root on the open network: apt's bounded waits and the packages,
 /// which the agents' installs may need, the agents, the managed settings,
 /// and this binary as the helper. The file must say so
-/// (`[sandbox.prepared]`), or secure-host's setup would install itself
+/// (`[host.prepared]`), or secure-host's setup would install itself
 /// over that helper.
 pub fn prepare(args: &PrepareArgs) -> Result<Exit> {
     ensure!(
@@ -161,7 +161,7 @@ fn prepared_job(path: &Path) -> Result<Job> {
     let (_, config, host) = load(path, false)?;
     ensure!(
         config.sandbox.prepared.is_some(),
-        "sandbox.prepared is not set, so secure-host's setup would install itself as the helper \
+        "host.prepared is not set, so secure-host's setup would install itself as the helper \
          over this one: write the file with `agentic-job config --host --prepared`"
     );
     Ok(Job {
@@ -320,8 +320,13 @@ mod tests {
         for (text, prepare, setup) in [
             (
                 "[agent]\nname = \"fake\"\n",
-                Err("sandbox.prepared is not set"),
+                Err("host.prepared is not set"),
                 Ok(()),
+            ),
+            (
+                "[agent]\nname = \"fake\"\n[host.prepared]\n",
+                Ok(()),
+                Err("`sandbox setup` does both itself"),
             ),
             (
                 "[agent]\nname = \"fake\"\n[sandbox.prepared]\n",
@@ -329,12 +334,12 @@ mod tests {
                 Err("`sandbox setup` does both itself"),
             ),
             (
-                &format!("{session}[sandbox.prepared]\nserve-port = 7790\n"),
+                &format!("{session}[host.prepared]\nserve-port = 7790\n"),
                 Ok(()),
                 Err("`sandbox setup` does both itself"),
             ),
             (
-                &format!("{session}[sandbox.prepared]\n"),
+                &format!("{session}[host.prepared]\n"),
                 Err("config --host --prepared"),
                 Err("config --host --prepared"),
             ),

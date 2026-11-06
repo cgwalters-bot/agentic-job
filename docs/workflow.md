@@ -631,11 +631,11 @@ action's own refusals are its documentation's.
 | apply-token / Check SAFE_OUTPUTS_PAT | `require-safe-outputs-pat`, the secret, `output-repo` | `workflow/apply-token.cjs` | a missing or unusable PAT, before the agent runs | yes |
 | register / The policy call is this workflow's commit, Register the run | the policy outputs, step debug logging | `agentic-job.yml`; `src/run/register.rs` | a call whose pieces are not one commit; a run with step debug logging on, which would print the token | the commit yes; the logging no |
 | agent / prepare | the policy outputs, `run.json`, `task.md` | `prepare/action.yml` (Require trusted upload IDs, The policy call is this action's commit, Write what the run is called) | non-numeric upload IDs; a version skew; an empty task | yes, except the skew |
-| agent / Admit the runner-user configuration | the calling repository's visibility, `policy.json`'s `private`, `config.toml`, `agent-user` | `workflow/runner-setup.py` `admit` | a private or unknown caller or target; `inference.register = "api-key"` or `[mcp.NAME]`, whose credentials the workflow does not pass; with `agent-user: runner`, `session.listen`, `sandbox.check.before-agent` or `setup.tools`, which need a second user | the configuration yes; `agent-user` is not a policy input |
+| agent / Admit the runner-user configuration | the calling repository's visibility, `policy.json`'s `private`, `config.toml`, `agent-user` | `workflow/runner-setup.py` `admit` | a private or unknown caller or target; `inference.register = "api-key"` or `[mcp.NAME]`, whose credentials the workflow does not pass; with `agent-user: runner`, `session.listen`, `host.check.before-agent` or `setup.tools`, which need a second user | the configuration yes; `agent-user` is not a policy input |
 | agent / Check inference proxy reachability | `config.toml`'s proxy URL, the runner's network | `src/secure_host/inference.rs` `check` | a malformed URL; a proxy the runner cannot reach by TCP | the URL yes; the reach no |
 | agent / The host's configuration | `config.toml` | `src/config/checked.rs` `check_host` | the host checks the policy job already made (a repeat) | yes |
 | agent / secure-host | the host configuration | `secure-host/action.yml` | the removed inputs; a backslash or multi-line string in the host configuration | yes |
-| run / The session's endpoint, Prove the host is secured | `/etc/agentic-job`, `agent-user`, `runner-home`, the host's state | `run/action.yml` | a malformed session endpoint; an inconsistent user and home; `sandbox.lock-runner` off; a failed probe | `lock-runner` yes; the rest no |
+| run / The session's endpoint, Prove the host is secured | `/etc/agentic-job`, `agent-user`, `runner-home`, the host's state | `run/action.yml` | a malformed session endpoint; an inconsistent user and home; `host.lock-runner` off; a failed probe | `lock-runner` yes; the rest no |
 | run / The policy call is this action's commit, Read the run's settings | `run.json` | `run/action.yml` | a version skew; a setting with a line break in it | the line break yes |
 | run / Install the built-in scripted session | `fake-profile`, `agent-user` | `run/action.yml` | an unknown profile (a repeat); a profile with the sandbox user | the profile yes |
 | run / Refuse a GitHub token that can write | the token given to the agent | `run/action.yml` | a token GitHub rejects or a classic token with a write scope | no |
@@ -1169,7 +1169,7 @@ sockets `sandbox check` accepts, the egress rules, who the hand-back's
 commit is by.
 [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml)
 is the one for GitHub's `ubuntu-26.04`. For another image, start from an
-empty `[sandbox]` and read what `sandbox check` fails on: it names each
+empty `[host]` and read what `sandbox check` fails on: it names each
 listener that is left. The inputs for the agent, the proxy, the limits
 and the packages are written over this file by `agentic-job config`,
 which takes each as the value of one key and never reads it as TOML.

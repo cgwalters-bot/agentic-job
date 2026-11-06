@@ -326,7 +326,7 @@ impl Checker<'_> {
         // earlier step left, and `sandbox setup` alone never loads it.
         if self.config.sandbox.deny_runner_reads() {
             self.report.note(
-                "sandbox.deny-runner-reads is on: only the secure-host image's world-write loader enables and proves the runner-read rule; this check does not probe it",
+                "host.deny-runner-reads is on: only the secure-host image's world-write loader enables and proves the runner-read rule; this check does not probe it",
             );
         }
         for line in self.config.sandbox.runner_rule_opt_outs(&self.runner.name) {
@@ -334,7 +334,7 @@ impl Checker<'_> {
         }
         for key in self.config.sandbox.check.ignored() {
             self.report.note(&format!(
-                "sandbox.check.{key} is ignored: only the removed sandbox user's probes read it (agentic-job#2989)"
+                "host.check.{key} is ignored: only the removed sandbox user's probes read it (agentic-job#2989)"
             ));
         }
         self.timed("runner-files", |this| {

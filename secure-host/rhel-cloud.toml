@@ -2,6 +2,8 @@
 # not reach these local listeners; stop and mask their activation units too.
 # Other images may need their own config: sandbox check still refuses every
 # unexpected listener. There are deliberately no allow-sockets exceptions.
+# [host], by its deprecated name: the image the forwarder pins reads
+# only this one until agentic-job#2656 moves the pin.
 [sandbox]
 stop-services = [
     "docker.socket",

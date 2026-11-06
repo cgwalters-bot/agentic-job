@@ -71,7 +71,7 @@ check adds no destination of its own. Images up to secure-host v0.6.9
 still read example.com, so until the pin moves past them secure-host's
 own check fails under an allowlist without it. The probes of
 the egress policy, the tailnet and containers were the sandbox user's
-and went with it. `[sandbox.check] control-url`, `fetch-repo`,
+and went with it. `[host.check] control-url`, `fetch-repo`,
 `allow-sockets` and `allow-tcp-ports` are read only by images from
 before #2989; this binary accepts them while the pinned image still
 needs them, and the check notes each as ignored. `before-agent` is
@@ -136,6 +136,6 @@ be one that expires by itself. The hosted runner's own
 completion needs no root. A self-hosted runner that is not ephemeral
 would keep a locked machine: `agent-runner` must be thrown away after
 the job, as [workflow.md](workflow.md) requires. A caller who does not want this
-sets `sandbox.lock-runner = false`, and gives up what the action's
+sets `host.lock-runner = false`, and gives up what the action's
 [R4](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r4-the-runners-user-loses-root-before-untrusted-steps-run)
 promises.

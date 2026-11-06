@@ -209,7 +209,7 @@ impl Config {
     }
 
     /// The tables that say how the machine is set up, checked, and
-    /// `[sandbox.prepared]` with them: it is what secure-host's setup
+    /// `[host.prepared]` with them: it is what secure-host's setup
     /// holds the host's rules to in place of the run's tables, which it
     /// does not read, so it must say what they do ([`Self::prepared`]),
     /// or the agent would reach a broker this file means to close.
@@ -223,14 +223,14 @@ impl Config {
             };
             ensure!(
                 sorted(said) == sorted(&Self::prepared_for(&host)),
-                "sandbox.prepared does not say what inference.front and session.listen ask of \
+                "host.prepared does not say what inference.front and session.listen ask of \
                  the host: write it with `agentic-job config --host --prepared`"
             );
         }
         Ok(host)
     }
 
-    /// `[sandbox.prepared]` for this file's run tables, as `config
+    /// `[host.prepared]` for this file's run tables, as `config
     /// --prepared` writes it: the broker under `inference.front`, and the
     /// bridge's port with `session.listen`.
     pub fn prepared(&self) -> Result<Prepared> {
@@ -954,8 +954,12 @@ model = \"m\"
                 "commit.trailers: \"no colon\" is not one line",
             ),
             (
+                format!("{FAKE}{CAPPED}[host]\nrunner-user = \"root\"\n"),
+                "host.runner-user: \"root\" is not a user name",
+            ),
+            (
                 format!("{FAKE}{CAPPED}[sandbox]\nrunner-user = \"root\"\n"),
-                "sandbox.runner-user: \"root\" is not a user name",
+                "host.runner-user: \"root\" is not a user name",
             ),
             (
                 format!("{FAKE}{CAPPED}[setup]\nnpm = [\"opencode-ai\"]\n"),
@@ -1047,7 +1051,7 @@ model = \"m\"
             (
                 format!(
                     "{CLAUDE}{PROXY}{OIDC}{FRONT}{CAPPED}[egress]\nwrite-policy = true\n\
-                     [sandbox]\nlock-runner = true\n"
+                     [host]\nlock-runner = true\n"
                 ),
                 Some("does not go with egress.write-policy"),
             ),
@@ -1122,7 +1126,7 @@ model = \"m\"
     /// also run by itself, on a file that describes no run.
     #[test]
     fn the_host_check_is_the_machines_part() {
-        let host_only = "[sandbox]\nstop-services = [\"docker.service\"]\n";
+        let host_only = "[host]\nstop-services = [\"docker.service\"]\n";
         let config = Config::parse(host_only).unwrap();
         assert_eq!(
             config.check_host().unwrap(),
@@ -1140,18 +1144,19 @@ model = \"m\"
         // The runner's user is the agent's: a script and an agent need no
         // second user.
         let hardened =
-            "[sandbox]\nclose-resolved = true\n[egress]\nproxy = true\nwrite-policy = true\n";
+            "[host]\nclose-resolved = true\n[egress]\nproxy = true\nwrite-policy = true\n";
         let script = "[setup]\nscript = \"/tmp/setup.sh\"\n";
         for more in [script, FAKE] {
             let config = Config::parse(&format!("{hardened}{more}")).unwrap();
             assert!(config.check_host().is_ok(), "{more}");
         }
         for bad in [
-            "[sandbox]\nrunner-user = \"root\"\n",
+            "[host]\nrunner-user = \"root\"\n",
             "[setup]\npackages = [\"--installroot=/\"]\n",
             "[egress]\ndirect = [\"http://proxy.example:18080\"]\n",
             "[egress]\nwrite-policy = true\nproxy = false\n",
             "[egress]\nwrite-policy = true\nrust-proxy = false\n",
+            "[host]\nlock-runner = false\n[egress]\nwrite-policy = true\n",
             "[sandbox]\nlock-runner = false\n[egress]\nwrite-policy = true\n",
         ] {
             let config = Config::parse(bad).unwrap();

@@ -5,7 +5,7 @@
 # sockets: `agentic-job sandbox check` fails on each one that is left and
 # names it.
 
-[sandbox]
+[host]
 # Daemons of the image that listen for every local user and that an agent
 # run does not use.
 stop-services = [
@@ -32,7 +32,7 @@ stop-services = [
 # the runner's user (cgwalters-forge/actions's secure-host/docs/egress.md).
 close-resolved = true
 
-[sandbox.check]
+[host.check]
 allow-sockets = [
     # systemd-networkd, which the runner's network depends on: it
     # describes the links to any user and changes them only for root.

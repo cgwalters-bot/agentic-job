@@ -48,14 +48,14 @@ impl Checker<'_> {
             Want::Fail,
             "runner-metadata",
             format!(
-                "{runner} can't reach the instance metadata service (sandbox.deny-runner-metadata)"
+                "{runner} can't reach the instance metadata service (host.deny-runner-metadata)"
             ),
             v4,
         );
         self.report.expect(
             Want::Fail,
             "runner-metadata-v6",
-            format!("{runner} can't reach the instance metadata service over IPv6 (sandbox.deny-runner-metadata)"),
+            format!("{runner} can't reach the instance metadata service over IPv6 (host.deny-runner-metadata)"),
             v6,
         );
         self.report.note(&format!(
