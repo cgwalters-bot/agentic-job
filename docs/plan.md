@@ -83,7 +83,7 @@ unrelated work; do not mass-close issues based on this table.
 | [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | tracker#1311 downstream evidence umbrella; preserve needs-human. Reported v0.6.5 GitLab/TF successes are historical two-user/API-key evidence, not runner-only acceptance. Retain #2996/#2997 and closed #2994/#2995 deliverables. |
 | [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) | tracker#1311 removal owner, implementation in open #2991. Require Ubuntu and RHEL rhel10-kvm-smoke setup/run proof before completion; do not duplicate removal here. |
 | [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | Keep needs-human acceptance umbrella. Operator must approve non-replayable identity/listener and trusted off-agent lifecycle owner in [broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60); [broker#61](https://github.com/cgwalters-bot/praxis-credential-broker/issues/61) owns external MCP. Old title's local proxy is superseded. |
-| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215): separate VM-capable infrastructure hands back to a midstream draft; the [external-runner contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract) separates external agent/check from trusted midstream apply. The deployment, its disposability and its limits still need the operator's confirmation. Runtime slices below remain unimplemented; no arbitrary runner selectors or bounds changes. |
+| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215): separate VM-capable infrastructure hands back to a midstream draft; the [external-runner contract](dispatch.md#external-vm-runner-to-midstream-draft) separates external agent/check from trusted midstream apply, with a closed runner profile map and exact run correlation. Only the requirement is the operator's; the deployment, its disposability, limits, dispatch credential and broker admission are [unverified prerequisites](dispatch.md#status). Runtime slices below remain unimplemented; no arbitrary runner selectors or bounds changes. |
 | [#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) | [tracker#596](https://github.com/cgwalters-forge/tracker/issues/596); concrete corrections already present in sandbox-check's pin-linked record discussion and this plan's #2740/#2741 history. Propose operator verification then closure, retaining needs-human until verified; not new host acceptance. |
 | [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | [tracker#674](https://github.com/cgwalters-forge/tracker/issues/674) egress diagnostics/host evidence owner. Preserve exact-account allowlisting; verify refusal names host/method without signed query and release/image pin reaches callers. DNS existence alone is not evidence. |
 | [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | tracker#674 publication follow-up to #2070/#2642; enable prepare on published and archive paths only once the released image accepts it, then hosted proof for both. |
@@ -109,55 +109,111 @@ credentialless TF/GitLab launch or live publication of this revision.
 
 ### External-runner implementation slices
 
-The [contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract)
-is agreed, not deployed. These are issue-ready follow-ups for tracker#1215's
-next epic replan, **not filed issues**. Enumerating their scope and acceptance
-criteria completes the documentation slice; filing and runtime implementation
-are separate follow-up work. All repositories below are under `cgwalters-forge`.
+The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
+[#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) is
+designed, not built or deployed. This is its one list of follow-ups, in
+dependency order, for the next replan of
+[tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
+None is filed yet and none has run. Each slice is one implement-sized pull
+request. None of them enables a profile, changes credentials, broker
+admission or bounds, or adds ostree or any other target. Repositories
+without an owner are under `cgwalters-forge`.
 
-1. **agentic-job — Bind external checked artifacts to trusted apply.**
-   Extend the current checked-output transport without a new output type.
-   Bind digest, external repository/workflow revision/run/attempt and check
-   result to trusted policy/source/target/base/head and artifact release
-   after caller-required threat detection; verify them before
-   publication without executing artifact code. Keep current byte/file/path
-   limits and draft/head constraints. Acceptance: fixture-based cross-run
-   success plus refusal of substitution, wrong provenance, oversized
-   metadata, wrong target, stale head and missing or failed required detection.
-   Depends on the actions transport
-   contract below; no deployed token or bounds change in this slice.
-2. **agent-board — Carry a caller-owned runner profile in job plans.**
-   Extend `docs/job-plans.md` and plan/manual/scheduled dispatch together;
-   keep `hosted` unchanged and external profiles off until caller-enabled.
-   Forward only the validated name, not workflow/ref/labels or config paths.
-   Acceptance: hosted request unchanged; unknown/disabled profiles refused;
-   the accepted name survives dispatch, dedupe and run tracking without
-   changing target authority. Depends on tracker's closed profile interface.
-3. **actions — Split external agent/check from trusted apply.**
-   Extend `.github/workflows/cgwalters-agentic-job.yml` with the reviewed
-   cross-run transport, no publication job/credential on the external side.
-   Enforce disposable agent/check separation, KVM/libvirt preflight and fixed
-   resource/lifetime/cleanup settings; pass the existing checked-output
-   format to agentic-job's verifier. Acceptance: mocked transfer/refusal
-   tests, capability failure before inference and cleanup on cancellation
-   and runner loss. Broker identity admission and credentialless lifecycle
-   remain explicit deployment prerequisites, not granted by this change.
-4. **tracker — Resolve profiles and prove midstream hand-back.**
-   Add a reviewed closed map in `.github/agentic-job/runner-profiles.json`
-   and resolution in `.github/workflows/dispatch.yml`; proposed key
-   `devspace-rhel10-64` maps to the external repository/workflow/config and
-   `cores: "64"` described in the contract, with operator-approved numeric
-   limits and immutable revision filled in before enabling. Retain existing
-   hosted defaults and `midstream.toml`/`midstream-fix.toml` target lists.
-   Acceptance, after the other slices and operator prerequisites: exact-head
-   repeated-test evidence, external run link, one draft creation and update,
-   and the contract's negative proofs. Do not enable profiles, change broker
-   admission, or add ostree/other targets in the implementation PR.
-
-Reuse [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) for
-external sandbox caller changes and its ruleset/operator prerequisites;
-do not duplicate that work or edit the sandbox from these slices. Runtime
-proof requires a later authorized deployment, not documentation checks.
+1. **tracker — Closed runner profile map, all disabled.** Add
+   `.github/agentic-job/runner-profiles.json` with the format and
+   resolution order of [runner profiles](dispatch.md#runner-profiles), and
+   a `runner` input to `dispatch.yml` defaulting to `hosted`. That input
+   picks where the job runs; the existing `config` choice keeps picking a
+   hosted run's configuration and must be `hosted` with an external
+   profile. Make the map a protected path in the caller's bounds. The map
+   may hold the disabled `devspace-rhel10-64` example. Acceptance: a hosted
+   dispatch is unchanged and does not read the map; an unknown or disabled
+   name, a malformed map, and an external request that is not `implement`,
+   targets a non-midstream repository, or sets `pool`, `effort` or another
+   `config` are each refused before any workflow starts, with a test for
+   each.
+2. **agent-board — Carry the profile name in job plans.** In
+   `docs/job-plans.md` and plan, manual and scheduled dispatch, `runner`
+   accepts `hosted` or a name of `pool`'s character set and is forwarded
+   as the caller's `runner` input without resolving it. `hosted` stays the
+   default planners write. Acceptance: hosted plans dispatch exactly as
+   today; an ill-formed name is refused; an accepted name survives dispatch,
+   dedupe and in-flight tracking, and the caller's refusal of an unknown or
+   disabled name is reported, not retried as hosted. Depends on 1.
+3. **agentic-job — KVM and session-libvirt preflight.** A runner
+   configuration opts into the [capability preflight](dispatch.md#capability-preflight).
+   Setup refuses before registration unless `/dev/kvm` is readable and
+   writable by the user the agent runs as, a minimal guest starts and stops,
+   and, when asked, `qemu:///session` answers and creates and destroys a
+   guest. Acceptance: case-table refusals for a missing or unwritable
+   device and an unanswering session; the existing `libvirt` group refusal
+   kept; the positive path covered by a privileged CI test where a
+   KVM-capable runner exists, and otherwise listed as unverified.
+4. **agentic-job — `test-evidence.json`.** `collect` accepts the file in
+   the hand-back and check.yml's checked upload carries it. Check validates
+   its shape and bounds, its attempt count against `max-attempts`, one
+   outcome and one regular-file log per attempt, and its base, head and
+   tree against the checked patch. Apply states each outcome's count in the
+   draft with a link to the run. Acceptance: refusals for a tree that is
+   not the patch's, too many attempts, a dropped attempt and a symlinked or
+   oversized log.
+5. **agentic-job — Correlate, fetch and re-check an external run.** A
+   binary subcommand does steps 3 to 5 of
+   [correlation](dispatch.md#correlating-a-dispatch-with-its-external-run)
+   from a dispatch record, and downloads the raw hand-back for step 6.
+   Policy, check and apply take the base and the hand-back's branch run ID
+   from the record. check.yml's detect job gains an output saying whether
+   detection ran, and apply refuses an external hand-back without it.
+   Acceptance: a mock Actions API fixture succeeds, and the fetched
+   hand-back passes check.yml's real `collect` and check and a staged
+   apply. It
+   refuses no match, two matches, a second attempt, a wrong path, ref,
+   commit, triggering actor, wrapper or agentic-job revision, a failed
+   detect job, a second artifact of either name, a download that does not
+   match its digest, a late run, a replayed run, a hand-back on another
+   base, and a skipped trusted detection. The external `policy.json` is
+   never read. It needs no deployment.
+6. **actions — External mode of the wrapper.** In
+   `.github/workflows/cgwalters-agentic-job.yml`, a mode that runs policy,
+   agent and check only: no apply job, no `SAFE_OUTPUTS_PAT`, the kind,
+   target, base commit and `dispatch-id` as inputs, and the id as the run
+   name's bracketed suffix. It runs the profile's preflight (3), fixed
+   limits and cleanup. Acceptance: workflow lint and a mocked run show no
+   write credential or apply job in the mode, refusal before inference
+   when a capability is missing, and cleanup on cancellation. Depends on 3.
+7. **tracker — Dispatch record, waiting job and trusted apply.** Write the
+   record, start the external workflow from the one step that holds the
+   dispatch credential, and call 5 from a waiting job with read access only.
+   Then upload the hand-back again and compose agentic-job's `policy.yml`,
+   `check.yml` and `apply.yml` directly, not through the wrapper, passing
+   that upload's ID and digest, with the midstream bounds and the
+   `agent-apply` environment. Acceptance: a staged apply against a fixture run; a hosted
+   dispatch unchanged; the dispatch credential absent from every other job.
+   Depends on 1, 4, 5 and 6. The credential itself is the operator's to
+   provision.
+8. **bootc-dev/cgwalters-devspace-sandbox** stays
+   [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)'s:
+   the caller's move to the external mode (6) at a new commit, calling the
+   wrapper by commit rather than `@main`, broker admission for its workflow
+   and the RHEL KVM smoke run. One gap is not in #589 yet: its
+   `dispatch.toml` names only bootc-dev repositories, so its policy stage
+   refuses a `cgwalters-forge` midstream target until those forks are added
+   there. Record that on #589; do not duplicate its work or edit the
+   sandbox from these slices.
+9. **Operator enablement and runtime acceptance.** After the
+   [prerequisites](dispatch.md#status) are settled, a reviewed tracker
+   change enables the entry with approved limits and new pins. Runtime
+   acceptance is the contract's
+   [list](dispatch.md#repeated-test-evidence-and-acceptance): one draft
+   created on an allowed midstream fork from an external run, its
+   repeated-test evidence bound to the checked patch, and each negative
+   proof with its positive control. Documentation checks do not stand in
+   for it.
+10. **Later: `fix` on an external profile.** Pin the pull request's head
+    from dispatch to apply for a pushed fix, as review pins its head today,
+    and add `fix` to the devspace workflow (#589). Acceptance: a moved head
+    is refused as stale, not rebased onto. Until then rule 5 of
+    [runner profiles](dispatch.md#runner-profiles) refuses it.
 
 ### Breaking keys and safe refusals
 
@@ -245,61 +301,8 @@ the chat session on RHEL; or a 64-core run.
 The parity tests still use cgwalters-devspace-sandbox at
 [df1e867](https://github.com/cgwalters-forge/cgwalters-devspace-sandbox/tree/df1e867bb551ed8e36bd535f6d304a0861f54913).
 That is a test fixture pin, not a claim that the old deployment is unchanged.
-
-### Per-job VM runner follow-ups
-
-The [external-runner contract](dispatch.md#external-vm-runner-to-midstream-draft-agreed-contract)
-of [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) is
-documentation only. These implement-sized slices are for the next replan of
-[tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215), by
-repository. Each new mechanism is off until a caller configures it. None
-of them is filed yet, and none has run.
-
-- **agentic-job**
-  1. A KVM preflight that a runner configuration opts into. Setup refuses
-     before registration unless `/dev/kvm` is readable and writable by
-     the user the agent runs as, and `qemu:///session` answers for that
-     user. It also needs a test that refuses a missing device. The
-     refusal of the `libvirt` group already ships.
-  2. Trusted apply of another repository's run. `apply.yml` takes the
-     run's repository, workflow path, ref, run ID, attempt, artifact ID and
-     digest. It verifies them against the Actions API, builds its own
-     policy and base-secret evidence from the caller's bounds, and runs
-     `check` again before it writes. How tracker learns the external run's
-     ID is part of this slice's design. Its negative tests
-     cover a wrong repository, workflow, run, digest and target.
-  3. `test-evidence.json`. Check validates its shape, its bounds and its
-     `tree` against the patch, and apply states the attempt and outcome
-     counts in the draft, with a link to the run.
-- **cgwalters-forge/actions**: a wrapper mode for an external caller that
-  runs policy, agent and check, uploads the checked artifact, and has no
-  apply job and no `SAFE_OUTPUTS_PAT`. Its run identity and artifact
-  digest are job outputs.
-- **cgwalters-forge/tracker**: the closed `runner-profiles.json`, with
-  `hosted` unchanged. Dispatch resolves the profile and refuses an unknown
-  name before it starts a workflow, and a trusted apply workflow in the
-  apply environment calls agentic-job's apply with the external run's
-  identity, using the midstream bounds.
-- **cgwalters-forge/agent-board**: the job plan's `runner` accepts a
-  profile name (the same character set as `pool`), which it passes to the
-  caller as an input without resolving it. `hosted` stays the default
-  that planners write.
-- **bootc-dev/cgwalters-devspace-sandbox** remains
-  [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)'s.
-  That covers the caller's mode switch, broker admission for its
-  workflow, and the RHEL KVM smoke run, and none of it is repeated here.
-  #589 does not cover one new devspace slice: its `dispatch.toml` names
-  only bootc-dev repositories, so its policy stage would refuse a
-  `cgwalters-forge` midstream target until those forks are added there.
-
-These questions are new and are the operator's:
-
-- whether devspace is the deployment, with the profile's limits;
-- whether bootc-dev's RHEL runners run one job each and are then
-  destroyed, which the disposable-runner rule requires;
-- which credential lets tracker start a workflow in bootc-dev, and who
-  holds it;
-- whether ostree or any other fork joins the midstream bounds.
+The follow-ups for running per-job VM jobs there are the
+[external-runner slices](#external-runner-implementation-slices).
 
 ## Open work
 
