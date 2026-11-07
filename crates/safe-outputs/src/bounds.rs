@@ -15,8 +15,8 @@ use serde::Deserialize;
 use crate::contract::{
     DEFAULT_PROTECTED_FILES, ForgeAdmission, KB, MAX_PROTECTED_GLOBS, MAX_PULL_REQUESTS, Memory,
     OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, REPO_RE, Secondary, UPDATE_FIELDS,
-    allows_http, check_commit_author, check_native_handlers, check_secondary, dotted, glob,
-    validate_dot_folders, validate_protected,
+    allows_http, check_comment_on_duplicate, check_commit_author, check_native_handlers,
+    check_secondary, dotted, glob, validate_dot_folders, validate_protected,
 };
 use crate::{CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, OUTPUT_TYPES, PUSH_TO_PULL_REQUEST_BRANCH};
 
@@ -384,6 +384,7 @@ impl<Trigger> Bounds<Trigger> {
         check_native_handlers(&self.native_handlers, forge, |output| {
             outputs.contains_key(output)
         })?;
+        check_comment_on_duplicate(outputs.get("create_issue"), &self.native_handlers)?;
         for repo in &self.unprotected_files.repos {
             ensure!(
                 REPO_RE.is_match(repo) && !dotted(repo),
@@ -586,6 +587,9 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             limit
                 .allowed_reasons
                 .retain(|reason| bound.allowed_reasons.contains(reason));
+            // Both files must set it, and so both route create_issue to
+            // agentic-job's handler, which `validate` requires of each.
+            limit.comment_on_duplicate &= bound.comment_on_duplicate;
             true
         } else {
             false

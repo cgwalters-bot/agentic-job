@@ -378,6 +378,47 @@ The types a run can be allowed are `create_pull_request`, `create_issue`, `creat
 `resolve_pull_request_review_thread`,
 `noop`, `missing_tool` and `missing_data`.
 
+### Proposing follow-up issues
+
+A run can propose follow-ups with its hand-back as `create_issue` requests
+([#3191](https://github.com/cgwalters-forge/agentic-job/issues/3191)). Each
+is opened in the caller's output repository, under the per-type `max` and
+total `max_outputs`, with the footer linking the run; in a run for an issue
+of the run's repository it is made that issue's sub-issue. A run that
+cannot know what earlier runs filed would open the same follow-up again
+each time, so the bound can ask apply to search first:
+
+```toml
+native_handlers = ["create_issue"]
+
+[github.outputs]
+create_issue = { max = 3, comment_on_duplicate = true }
+```
+
+With it, apply searches the repository's open issues, oldest first, for
+one whose title is exactly the one the issue would be opened with, title
+prefix included (so a run stopped at a limit, whose prefix says so, matches
+only its own kind), and posts the body, footer included, as a comment on
+the oldest of the first 100 answers instead of opening an issue. Labels are
+not applied and no sub-issue is linked. So a refinement of an existing issue
+(a split, a narrower scope, acceptance criteria) is a `create_issue` naming
+that issue's title. A pull request, a closed issue or another repository's
+issue is not a match, and a search that fails (one over the forge's 256
+characters among them) fails the request rather than open a possible
+duplicate. The search sees what the forge has indexed, so an issue opened
+moments earlier may be missed. Only
+[agentic-job's own handler](#agentic-jobs-own-handlers) searches, so the
+setting requires `create_issue` in `native_handlers`, and with organization
+bounds both files must set it.
+
+This reaches further than `create_issue` alone: a run can comment on any
+open issue of the output repository, one a person filed too, by naming its
+title, past `add_comment`'s fixed item, with the mentions an issue's body
+may have. Each request is still one write, counted by `create_issue`'s
+`max`. A re-run of apply does not find a comment it made earlier, as it
+finds an issue, and comments again. Off (the default), every request opens
+an issue.
+
 ### Updating project fields
 
 `update_project` admits exact Projects v2 URLs, exact field names, and a count:
@@ -1694,7 +1735,9 @@ link and the guard against re-runs, `agentic-job applied`, which also
 finishes a half-closed item and leaves out a push an earlier attempt
 made, even one whose comment failed).
 
-What it sends is what gh-aw's handlers send: the second sanitizing with
+Except for an issue under
+[`comment_on_duplicate`](#proposing-follow-up-issues), what it sends is
+what gh-aw's handlers send: the second sanitizing with
 the same mentions allowed (the item's author and the event's people;
 none in a closing comment), the footer, the workflow and execution
 markers, the applied name hidden as apply.yml's hook hides it, the

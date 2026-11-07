@@ -294,6 +294,23 @@ pub(crate) fn check_native_handlers(
     Ok(())
 }
 
+/// Refuses a `create_issue` LIMIT with `comment_on_duplicate` that NATIVE,
+/// the types `native_handlers` routes, leaves to gh-aw's handler: it
+/// searches for nothing, and would open every duplicate the setting is
+/// there to stop.
+pub(crate) fn check_comment_on_duplicate(
+    limit: Option<&OutputLimit>,
+    native: &[String],
+) -> Result<()> {
+    ensure!(
+        limit.is_none_or(|limit| !limit.comment_on_duplicate)
+            || native.iter().any(|output| output == "create_issue"),
+        "outputs.create_issue: comment_on_duplicate needs create_issue in native_handlers, as \
+         only agentic-job's own handler searches for a duplicate"
+    );
+    Ok(())
+}
+
 /// The smallest `secondary_pull_request` patch budget, as for the primary.
 const MIN_SECONDARY_PATCH_BYTES: u64 = KB;
 const MIN_SECONDARY_PATCH_FILES: u32 = 1;
@@ -575,6 +592,13 @@ pub struct OutputLimit {
     /// stopped at a limit as a draft. Off, every pull request is a draft.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ready_when_complete: bool,
+    /// For `create_issue`, published by agentic-job's own handler: an
+    /// open issue with exactly the title asked for gets the body as a
+    /// comment, and no new issue is opened. Without it a run proposing
+    /// the follow-up an earlier run filed opens it again; with it a run
+    /// refines an existing issue by naming its title. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub comment_on_duplicate: bool,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -602,6 +626,10 @@ impl OutputLimit {
             !self.ready_when_complete
                 || matches!(output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH),
             "outputs.{output}: ready_when_complete is supported only for {CREATE_PULL_REQUEST} and {PUSH_TO_PULL_REQUEST_BRANCH}"
+        );
+        ensure!(
+            !self.comment_on_duplicate || output == "create_issue",
+            "outputs.{output}: comment_on_duplicate is supported only for create_issue"
         );
         ensure!(
             output == "update_project" || self.projects.is_empty(),
@@ -1077,6 +1105,10 @@ impl Policy {
         check_native_handlers(&self.native_handlers, self.forge, |output| {
             self.safe_outputs.max_of(output).is_some()
         })?;
+        check_comment_on_duplicate(
+            self.safe_outputs.others.get("create_issue"),
+            &self.native_handlers,
+        )?;
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
         }

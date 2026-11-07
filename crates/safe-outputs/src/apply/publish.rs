@@ -205,11 +205,19 @@ pub const HANDLERS: &[Handler] = &[
     },
     // No `temporary_id`, `parent` or other link to another issue, which
     // check refuses too. The bounds' `allowed` and `blocked` are check's,
-    // which the handler does not read.
+    // which the handler does not read. `comment_on_duplicate` is this
+    // port's alone: gh-aw's handler has no such setting.
     Handler {
         output: CREATE_ISSUE,
         fields: &["type", "repo", "title", "body", "labels"],
-        settings: &["max", "target-repo", "title_prefix", "allowed", "blocked"],
+        settings: &[
+            "max",
+            "target-repo",
+            "title_prefix",
+            "allowed",
+            "blocked",
+            "comment_on_duplicate",
+        ],
         fixed: &[],
     },
     // On the handler's fixed `target`, whatever number a request names;
@@ -1127,6 +1135,9 @@ struct IssueRequest {
     parent: Option<u64>,
     /// The `#N` the footer names.
     triggering: Option<String>,
+    /// The bounds' `comment_on_duplicate`: an open issue titled exactly
+    /// [`Self::title`] gets the body as a comment in place of a new issue.
+    comment_on_duplicate: bool,
 }
 
 /// A routed push_to_pull_request_branch, decided.
@@ -1839,6 +1850,11 @@ fn issue_request(
         Some(Value::String(prefix)) => prefix,
         Some(_) => bail!("the create_issue handler's title_prefix is not text"),
     };
+    let comment_on_duplicate = match config.get("comment_on_duplicate") {
+        None => false,
+        Some(Value::Bool(on)) => *on,
+        Some(_) => bail!("the create_issue handler's comment_on_duplicate is not a boolean"),
+    };
     let title = js_trim(text("title"));
     let body = without_title_heading(title, text("body"))?;
     // Without a title, the body's first line that holds anything.
@@ -1875,6 +1891,7 @@ fn issue_request(
             .filter(|_| repo == run.repository),
         triggering: run.item_triggering()?,
         repo: repo.to_owned(),
+        comment_on_duplicate,
     })
 }
 
@@ -2943,6 +2960,23 @@ fn issue_outcome(
             ),
         );
     }
+    if issue.comment_on_duplicate {
+        match open_duplicate(github, repo, &issue.title) {
+            Ok(Some(number)) => return duplicate_comment(op, github, repo, number, &body),
+            Ok(None) => {}
+            // Opening it anyway could make the duplicate the bounds ask
+            // to be spared.
+            Err(err) => {
+                return Outcome::failed(
+                    op,
+                    format!(
+                        "could not search {repo} for an open issue titled {:?}: {err:#}",
+                        issue.title
+                    ),
+                );
+            }
+        }
+    }
     let made = github.request_retrying(
         "POST",
         &format!("/repos/{repo}/issues"),
@@ -2986,6 +3020,48 @@ fn issue_outcome(
             "body": body, "id": made["id"], "metadata": {"node_id": made["node_id"]},
             "temporaryId": temporary_id(), "_repo": repo}),
     )
+}
+
+/// The oldest open issue of REPO titled exactly TITLE, among the first
+/// page of what the forge's search finds, oldest first; a pull request is
+/// not one.
+fn open_duplicate(github: &Github, repo: &str, title: &str) -> Result<Option<u64>> {
+    // A phrase cannot hold a quote; each answer is held to the repository,
+    // the state and the exact title below, whatever the search made of it.
+    let phrase = title.replace(['"', '\\'], " ");
+    let found = github.search_issues(&format!(
+        "repo:{repo} is:issue is:open in:title \"{phrase}\" sort:created-asc"
+    ))?;
+    let in_repo = format!("/repos/{repo}").to_ascii_lowercase();
+    Ok(found
+        .iter()
+        .filter(|item| {
+            item.get("pull_request").is_none()
+                && item["state"] == "open"
+                && item["title"] == title
+                && item["repository_url"]
+                    .as_str()
+                    .is_some_and(|url| url.to_ascii_lowercase().ends_with(&in_repo))
+        })
+        .filter_map(|item| item["number"].as_u64())
+        .min())
+}
+
+/// Posts BODY, the issue's as it would have been opened, on issue NUMBER
+/// of REPO, its duplicate.
+fn duplicate_comment(op: &Op, github: &Github, repo: &str, number: u64, body: &str) -> Outcome {
+    let path = format!("/repos/{repo}/issues/{number}/comments");
+    match github.request("POST", &path, Some(&json!({"body": hide_applied(body)}))) {
+        Ok(made) => Outcome::succeeded(
+            op,
+            json!({"success": true, "repo": repo, "duplicate_of": number,
+                "url": made["html_url"], "body": body, "id": made["id"], "_repo": repo}),
+        ),
+        Err(err) => Outcome::failed(
+            op,
+            format!("could not comment on #{number}, the open issue of the same title: {err:#}"),
+        ),
+    }
 }
 
 /// Makes issue CHILD of REPO a sub-issue of PARENT there, as
@@ -6276,6 +6352,104 @@ mod tests {
         );
     }
 
+    /// Under `comment_on_duplicate`, the oldest open issue titled exactly
+    /// as asked gets the body as a comment and no issue is opened; with
+    /// none, the issue is opened; a search that fails opens nothing.
+    #[test]
+    fn a_duplicate_issue_is_commented_on() {
+        let issue = json!({"type": CREATE_ISSUE, "title": "Flaky", "body": "Why."});
+        let handlers = json!({CREATE_ISSUE: {"max": 1, "target-repo": REPO, "title_prefix": "",
+            "comment_on_duplicate": true}});
+        let found = |number: u64, title: &str| {
+            json!({"number": number, "title": title, "state": "open",
+                "repository_url": format!("https://api.github.com/repos/{REPO}")})
+        };
+        let mut pull = found(2, "Flaky");
+        pull["pull_request"] = json!({});
+        let mut closed = found(1, "Flaky");
+        closed["state"] = json!("closed");
+        let mut elsewhere = found(3, "Flaky");
+        elsewhere["repository_url"] = json!("https://api.github.com/repos/other/repo");
+        let search = "GET /search/issues?q=repo%3Aowner%2Frepo%20is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Flaky%22%20sort%3Acreated-asc&per_page=100 HTTP/1.1";
+        // What the search answers, the request that publishes, and
+        // whether the run succeeds.
+        for (answer, posted, ok) in [
+            (
+                Some(json!([
+                    pull,
+                    closed,
+                    elsewhere,
+                    found(9, "Flaky"),
+                    found(4, "flaky"),
+                    found(5, "Flaky")
+                ])),
+                Some("POST /repos/owner/repo/issues/5/comments HTTP/1.1"),
+                true,
+            ),
+            (
+                Some(json!([found(4, "Flaky tests")])),
+                Some("POST /repos/owner/repo/issues HTTP/1.1"),
+                true,
+            ),
+            (None, None, false),
+        ] {
+            let seed = answer.map_or(
+                json!({}),
+                |items| json!({"/search/issues": {"items": items}}),
+            );
+            let (github, sent) = forge(&seed, &[]);
+            let git = tempfile::tempdir().unwrap();
+            let publisher = GithubPublisher {
+                github,
+                git: git.path().display().to_string(),
+                item_repo: REPO.into(),
+                repo: REPO.into(),
+            };
+            let records = tempfile::tempdir().unwrap();
+            let path = |file: &str| records.path().join(file);
+            let policy = policy();
+            let published = apply(
+                &Checked {
+                    items: std::slice::from_ref(&issue),
+                    handlers: handlers.as_object().unwrap(),
+                    upload: upload(Path::new("/nonexistent")),
+                    policy: &policy,
+                },
+                &run(1, "http://127.0.0.1:1"),
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: None,
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(published, ok, "{posted:?}");
+            let lines: Vec<String> = sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.line.clone())
+                .collect();
+            assert_eq!(lines[0], search);
+            assert_eq!(lines.get(1).map(String::as_str), posted);
+            if posted.is_some_and(|line| line.contains("/comments")) {
+                assert_eq!(lines.len(), 2, "{lines:?}");
+                let body = sent.lock().unwrap()[1].body["body"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                assert!(body.starts_with("Why.\n"), "{body}");
+                let made = std::fs::read_to_string(path("made.jsonl")).unwrap();
+                assert!(made.contains("/issues/5#issuecomment-"), "{made}");
+            }
+        }
+    }
+
     /// Issues and review comments this cannot publish as gh-aw does are
     /// refused from what they hold, or from the handlers' settings and the
     /// event, before anything is published.
@@ -6361,6 +6535,11 @@ mod tests {
                 &issue,
                 |handlers, _| handlers[CREATE_ISSUE]["title_prefix"] = json!(5),
                 "title_prefix is not text",
+            ),
+            (
+                &issue,
+                |handlers, _| handlers[CREATE_ISSUE]["comment_on_duplicate"] = json!("yes"),
+                "comment_on_duplicate is not a boolean",
             ),
             (
                 &issue,

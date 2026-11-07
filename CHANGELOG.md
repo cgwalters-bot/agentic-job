@@ -19,6 +19,12 @@ says what a caller may rely on across versions.
   to 60 minutes, not 75. A caller that leaves it out gets runs 15
   minutes shorter; set `timeout: "75"` to keep the old limit (#3190).
 
+- `create_issue`'s bound may set `comment_on_duplicate = true`, with
+  `create_issue` in `native_handlers`: apply then posts the body on the
+  oldest open issue titled exactly as asked instead of opening another, so
+  a run can propose follow-ups without refiling earlier runs' and can refine
+  an existing issue by naming its title. Off by default (part of #3191).
+
 - Dispatch `research` now accepts a pull request as well as an issue and
   posts its one bounded comment on that item. Repository bounds, fixed comment
   routing and cross-repository token requirements are unchanged; research

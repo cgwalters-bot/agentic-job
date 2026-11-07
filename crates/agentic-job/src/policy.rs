@@ -579,6 +579,9 @@ impl Compile for Bounds {
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.allowed_reasons.clone()),
             ready_when_complete: false,
+            comment_on_duplicate: limits
+                .get(output)
+                .is_some_and(|bound| bound.comment_on_duplicate),
         };
         let ready = |output: &str| {
             limits
@@ -3910,6 +3913,72 @@ max_patch_files = 10
         }
         let mut policy = compile(&both, all);
         policy.native_handlers.push("close_issue".into());
+        assert!(policy.validate().is_err());
+    }
+
+    /// `comment_on_duplicate` is for create_issue alone, and only where
+    /// agentic-job's handler publishes it, as gh-aw's searches for nothing;
+    /// it reaches policy.json only where both files set it.
+    #[test]
+    fn comment_on_duplicate_needs_the_native_handler() {
+        let with = |native: &str, limit: &str| {
+            format!("native_handlers = {native}\n{BOUNDS}create_issue = {limit}\n")
+        };
+        let on = "{ max = 3, comment_on_duplicate = true }";
+        for (text, want) in [
+            (with(r#"["create_issue"]"#, on), None),
+            (with("[]", "{ max = 3 }"), None),
+            (
+                with("[]", on),
+                Some("needs create_issue in native_handlers"),
+            ),
+            (
+                with(r#"["add_comment"]"#, on),
+                Some("needs create_issue in native_handlers"),
+            ),
+            (
+                with("[]", "{ max = 3 }").replace(
+                    "add_comment = { max = 3 }",
+                    "add_comment = { max = 3, comment_on_duplicate = true }",
+                ),
+                Some("supported only for create_issue"),
+            ),
+        ] {
+            let bounds: Bounds = toml::from_str(&text).unwrap();
+            match (bounds.validate(), want) {
+                (Ok(()), None) => {}
+                (Err(err), Some(want)) => {
+                    let err = format!("{err:#}");
+                    assert!(err.contains(want), "{err}");
+                }
+                (got, want) => panic!("{text}: {got:?}, want {want:?}"),
+            }
+        }
+
+        let compile = |limit: &str| {
+            let bounds: Bounds = toml::from_str(&with(r#"["create_issue"]"#, limit)).unwrap();
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs: "create_issue,noop",
+                    ..request()
+                })
+                .unwrap()
+        };
+        for (caller, organization, want) in [
+            (on, on, true),
+            (on, "{ max = 3 }", false),
+            ("{ max = 3 }", on, false),
+        ] {
+            let policy = intersect(compile(caller), compile(organization)).unwrap();
+            assert_eq!(
+                policy.safe_outputs.others["create_issue"].comment_on_duplicate, want,
+                "{caller} {organization}"
+            );
+            policy.validate().unwrap();
+        }
+        let mut policy = compile(on);
+        policy.native_handlers.clear();
         assert!(policy.validate().is_err());
     }
 

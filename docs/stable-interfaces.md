@@ -200,7 +200,10 @@ The bounds' `native_handlers` may have `add_comment`,
 `close_pull_request`, `push_to_pull_request_branch`, `create_issue` and
 `create_pull_request_review_comment` published by agentic-job's own handlers instead of
 gh-aw's, which send the same requests
-([agentic-job's own handlers](safe-outputs.md#agentic-jobs-own-handlers)).
+([agentic-job's own handlers](safe-outputs.md#agentic-jobs-own-handlers)),
+except that a `create_issue` bound with `comment_on_duplicate = true`
+comments on an open issue of the same title instead
+([proposing follow-up issues](safe-outputs.md#proposing-follow-up-issues)).
 
 Off GitHub, `agentic-job apply --forge forgejo` publishes
 `add_comment`, `create_pull_request`, `push_to_pull_request_branch`,
