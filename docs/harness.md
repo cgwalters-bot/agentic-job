@@ -500,6 +500,31 @@ is sent none, and the condensed log says so. Each update sent is a line
 of the condensed log, and its link is in `updates` of `summary.json`
 and in `summary.md`.
 
+### Nudges on the clock
+
+Runs that reached their timeout, or lost their runner, lost work that a
+checkpoint would have kept (tracker#1413, tracker#1425). Claude Code gets
+none of the budget's notices, so nothing told it the time. With
+
+```toml
+[session]
+nudges = true
+```
+
+the session sends the agent two messages of its own, whatever else it
+has used. Halfway through `limits.timeout-minutes` it is told to
+summarize its progress, checkpoint what works and plan what is left. At
+five sixths of the timeout it is told to finish the change it is on,
+checkpoint and hand back. For an hour's run that is at 30 and 50
+minutes, before the hand-back at 57. They go as an update of the item
+does, with no item watched: steered into the running turn, or queued as
+a notice. An agent that takes neither, or a nudge that comes when no
+turn is running, goes without. Each one is a line of the condensed log
+(`notice to the agent: Halfway: …`), or a line saying why it was not
+sent. Its label (`halfway`, `wrap up`) is in `notices` of
+`summary.json`. Off by default. The times follow from the timeout, and
+the words are fixed.
+
 ## A second agent
 
 A run can let its agent start a second agent, the child, and drive it

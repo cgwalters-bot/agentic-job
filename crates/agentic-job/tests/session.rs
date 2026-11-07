@@ -62,6 +62,8 @@ struct Setup<'a> {
     steering: bool,
     /// The run's item, watched for the agent.
     watch: Option<Watch>,
+    /// Whether the agent is nudged on the clock.
+    nudges: bool,
     files: &'a [(&'a str, &'a str)],
     timeout_s: u64,
     budget_aic: Option<f64>,
@@ -472,6 +474,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
         }),
         mcp_servers: Vec::new(),
         watch: setup.watch,
+        nudges: setup.nudges,
     };
     let mut builder = if setup.advance_startup_clock || rate_responses.is_some() {
         tokio::runtime::Builder::new_current_thread()
@@ -1140,6 +1143,7 @@ fn a_cap_nothing_counts_is_refused() {
         restate: None,
         mcp_servers: Vec::new(),
         watch: None,
+        nudges: false,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1530,6 +1534,97 @@ fn updates_of_the_item_reach_the_turn() {
             "{name}: {}/{}",
             s.not_modified,
             s.requests
+        );
+    }
+}
+
+/// The nudges on the clock reach the turn as an item's updates do, each
+/// once, in order and before the hand-back; an agent that takes no
+/// message during its turn goes without, and the log says so.
+#[test]
+fn nudges_reach_the_turn() {
+    let cases = [
+        // No notices, as claude-agent-acp: the budget's go unsent.
+        ("steered", true, true, Some("_session/steering")),
+        ("as a notice", false, false, Some("session/prompt")),
+        ("not at all", true, false, None),
+    ];
+    for (name, no_notices, steering, method) in cases {
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                no_notices,
+                steering,
+                nudges: true,
+                files: &[
+                    ("script.json", r#"[{"sleep": 60}, {"say": "Not reached."}]"#),
+                    ("later.json", r#"[{"say": "Handed back."}]"#),
+                ],
+                // Halfway at 4s, wrap up at 6.7s, the hand-back at 7.6s.
+                timeout_s: 8,
+                ..Setup::default()
+            },
+        );
+        let labels = ["halfway", "wrap up"];
+        let sent: Vec<&Value> = r
+            .records
+            .iter()
+            .filter(|x| x["dir"] == "send")
+            .map(|x| &x["msg"])
+            .filter(|m| {
+                labels
+                    .iter()
+                    .any(|l| m["params"]["_meta"]["botHarness"]["notice"] == *l)
+            })
+            .collect();
+        let hand_back = r.position(|x| {
+            x["dir"] == "send" && x["msg"]["params"]["_meta"]["botHarness"]["notice"] == "hand back"
+        });
+        let Some(method) = method else {
+            assert!(sent.is_empty(), "{name}: {sent:?}");
+            for label in labels {
+                let not = format!(
+                    "the {label} nudge not sent (the agent takes no message during its turn)"
+                );
+                assert!(r.log.contains(&not), "{name}: {}", r.log);
+            }
+            continue;
+        };
+        let got: Vec<&str> = sent
+            .iter()
+            .map(|m| {
+                m["params"]["_meta"]["botHarness"]["notice"]
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(got, labels, "{name}");
+        for m in &sent {
+            assert_eq!(m["method"], method, "{name}");
+            let at = r.position(|x| x["dir"] == "send" && x["msg"]["id"] == m["id"]);
+            assert!(at < hand_back, "{name}: sent after the hand-back");
+        }
+        let text = |i: usize| sent[i]["params"]["prompt"][0]["text"].as_str().unwrap();
+        assert!(
+            text(0).contains("Halfway: this run has used 4s of its 8s."),
+            "{name}: {}",
+            text(0)
+        );
+        assert!(
+            text(1).contains("Wrap up: this run has 1s left of its 8s."),
+            "{name}: {}",
+            text(1)
+        );
+        // The run's log records each as it is sent.
+        assert!(
+            r.log.contains("⚠ notice to the agent: Halfway:"),
+            "{name}: {}",
+            r.log
+        );
+        assert!(
+            r.log.contains("⚠ notice to the agent: Wrap up:"),
+            "{name}: {}",
+            r.log
         );
     }
 }

@@ -399,6 +399,10 @@ pub struct Session {
     pub watch_item: bool,
     /// How often it polls the item, in seconds. Zero means the default.
     pub watch_seconds: u64,
+    /// Whether the agent is nudged on the clock, halfway through the
+    /// run's timeout and before its end, as an update of the item is
+    /// sent (`session::budget::timed`). Off by default.
+    pub nudges: bool,
 }
 
 #[cfg(test)]

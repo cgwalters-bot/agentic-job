@@ -145,6 +145,9 @@ the next in the same major version.
   `[inference] stop-long-retry-after` is an optional boolean, default false;
   it requires `front` or `api-key` and stops a long upstream 429 followed
   by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).
+  `[session] nudges` is an optional boolean, default false; it sends the
+  agent two messages at times derived from `limits.timeout-minutes`
+  ([nudges on the clock](harness.md#nudges-on-the-clock)).
   The keys of the removed sandbox user (`host.create-user`, `user`,
   `groups`, `allow-existing-user`, `filesystem-view`,
   `host.check.before-agent` and `setup.tools`) are refused by name

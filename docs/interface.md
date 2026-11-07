@@ -115,7 +115,7 @@ contains no secret.
 | `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` and a sandbox user (`run --runner-home` refuses it) |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped`; `max-repeats` ([repeated tool calls](harness.md#limits), off by default) |
 | `[mcp.NAME]` | `url`, `secret` (only `MCP_TOKEN`) and `allowed` of one remote [MCP server](mcp.md) `run` serves the agent with a credential it never holds |
-| `[session]` | `listen`, `operators`, `origins`, `capability` (a Tailscale app capability that lets tagged nodes in) and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default) |
+| `[session]` | `listen`, `operators`, `origins`, `capability` (a Tailscale app capability that lets tagged nodes in) and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default); `nudges` for [nudges on the clock](harness.md#nudges-on-the-clock) (off by default) |
 | `[commit]` | `author` and `trailers` of the hand-back's commit; a bounds file's `commit_author` ([safe outputs](safe-outputs.md#the-bounds-and-the-policy)) takes the place of `author`; `format` to format the agent's Rust first ([off by default](safe-outputs.md#what-the-agent-does)) |
 
 `[limits]` without a timeout is refused, and so is one that caps neither

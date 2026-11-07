@@ -9,6 +9,16 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `[session] nudges = true` (off by default) sends the agent two messages
+  on the clock: halfway through its timeout, to checkpoint and plan, and
+  at five sixths of it, to finish and hand back. They go the way updates
+  of the run's item go, so Claude Code, which gets no budget notices,
+  gets them too (#3190).
+
+- Behavior change: the reusable workflow's `timeout` input now defaults
+  to 60 minutes, not 75. A caller that leaves it out gets runs 15
+  minutes shorter; set `timeout: "75"` to keep the old limit (#3190).
+
 - Dispatch `research` now accepts a pull request as well as an issue and
   posts its one bounded comment on that item. Repository bounds, fixed comment
   routing and cross-repository token requirements are unchanged; research

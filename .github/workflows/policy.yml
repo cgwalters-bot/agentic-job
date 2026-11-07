@@ -182,7 +182,7 @@ on:
       timeout:
         description: Minutes the agent may run
         type: string
-        default: "75"
+        default: "60"
       max-requests:
         description: The most model requests, as the proxy counts them (0 for no such cap)
         type: string

@@ -188,6 +188,8 @@ struct Plan {
     session: Option<Listen>,
     /// The run's item, as the session watches it for the agent.
     watch: Option<Watch>,
+    /// Whether the session nudges the agent on the clock.
+    nudges: bool,
     identity: Identity,
     /// What `policy` allowed this run: the target, and where it is cloned
     /// from.
@@ -674,6 +676,7 @@ impl Plan {
             child,
             mcp,
             watch,
+            nudges,
         } = config.check()?;
         config.check_held()?;
         let watch = watch_item(
@@ -801,6 +804,7 @@ impl Plan {
                 .then(|| config.sandbox.check.container_image.clone()),
             session: host.session,
             watch,
+            nudges,
             identity: Identity {
                 oidc,
                 run_token,
@@ -1224,6 +1228,7 @@ impl Plan {
             restate,
             mcp_servers: prepared.mcp.into_iter().collect(),
             watch: self.watch.clone(),
+            nudges: self.nudges,
         };
         Ok((options, counter, redactor))
     }

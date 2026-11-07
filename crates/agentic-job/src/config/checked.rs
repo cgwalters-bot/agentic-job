@@ -60,6 +60,8 @@ pub struct Checked {
     /// How often the run's item is polled for the agent; `None` when it
     /// is not watched.
     pub watch: Option<Duration>,
+    /// Whether the agent is nudged on the clock (`[session] nudges`).
+    pub nudges: bool,
 }
 
 /// The limits, with the proxy's part in them checked: a cap on model
@@ -339,6 +341,7 @@ impl Config {
             child,
             mcp,
             watch: steer::interval(&self.session)?,
+            nudges: self.session.nudges,
         })
     }
 }
@@ -421,6 +424,9 @@ mod tests {
         );
         assert_eq!(fake.host.session, None);
         assert_eq!(fake.watch, None);
+        assert!(!fake.nudges);
+        let nudged = checked(&format!("{FAKE}{CAPPED}[session]\nnudges = true\n")).unwrap();
+        assert!(nudged.nudges);
         // The bounds themselves are steer's to test.
         let watched = checked(&format!(
             "{FAKE}{CAPPED}[session]\nwatch-item = true\nwatch-seconds = 30\n"

@@ -9,6 +9,13 @@
 //! session at once, unless the turn had already ended: then it is only a
 //! warning.
 //!
+//! Where the configuration asks for them (`[session] nudges`), the agent
+//! is also nudged on the clock, whatever else it has used: halfway
+//! through the timeout to take stock and checkpoint, and at `WRAP_UP` of
+//! it to finish and hand back (`timed`). They are sent as an update of
+//! the run's item is (`steer`), so that an agent that takes no notices,
+//! but is steered, has them too.
+//!
 //! This is the arithmetic and the words; the driver delivers them over ACP.
 
 use std::time::Duration;
@@ -402,6 +409,55 @@ fn repeated_text(count: usize) -> String {
     )
 }
 
+/// The label of the nudge at half the timeout.
+pub const LABEL_HALFWAY: &str = "halfway";
+/// The label of the nudge at `WRAP_UP` of the timeout.
+pub const LABEL_WRAP_UP: &str = "wrap up";
+/// The share of the timeout at which the agent is told to wrap up: 50
+/// minutes of an hour, which leaves it time to finish what it is on
+/// before `HAND_BACK` interrupts it.
+const WRAP_UP: (u32, u32) = (5, 6);
+
+/// A nudge on the clock (`[session] nudges`): runs that ran into their
+/// timeout, or lost their runner, lost work that a checkpoint would have
+/// kept (tracker#1413, tracker#1425).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timed {
+    /// How long into the run it is sent.
+    pub at: Duration,
+    pub label: &'static str,
+    pub text: String,
+}
+
+/// The nudges of a run with TIMEOUT, in the order they are sent.
+pub fn timed(timeout: Duration) -> [Timed; 2] {
+    let wrap_up = timeout * WRAP_UP.0 / WRAP_UP.1;
+    [
+        Timed {
+            at: timeout / 2,
+            label: LABEL_HALFWAY,
+            text: format!(
+                "{NOTICE_PREFIX} Halfway: this run has used {} of its {}. Summarize your \
+                 progress, checkpoint what works as your task brief says, and plan what is \
+                 left. {KEEP_WORKING}",
+                human(timeout / 2),
+                human(timeout)
+            ),
+        },
+        Timed {
+            at: wrap_up,
+            label: LABEL_WRAP_UP,
+            text: format!(
+                "{NOTICE_PREFIX} Wrap up: this run has {} left of its {}. Start nothing new: \
+                 finish the change you are on, checkpoint it and hand back as your task brief \
+                 says. {KEEP_WORKING}",
+                human(timeout - wrap_up),
+                human(timeout)
+            ),
+        },
+    ]
+}
+
 pub fn hand_back_text(used: &str, window: Duration) -> String {
     format!(
         "{NOTICE_PREFIX} This run has {used}, so your work was interrupted. Hand back now: \
@@ -725,5 +781,43 @@ mod tests {
         };
         assert!(text.starts_with(NOTICE_PREFIX), "{text}");
         assert!(text.contains("5 times in a row"), "{text}");
+    }
+
+    /// The nudges' times follow the timeout, and say so.
+    #[test]
+    fn nudges() {
+        for (minutes, halfway, wrap_up, words) in [
+            (
+                60,
+                1800,
+                3000,
+                ["used 30m of its 1h00m", "has 10m left of its 1h00m"],
+            ),
+            (
+                75,
+                2250,
+                3750,
+                ["used 37m of its 1h15m", "has 12m left of its 1h15m"],
+            ),
+            (1, 30, 50, ["used 30s of its 1m", "has 10s left of its 1m"]),
+        ] {
+            let [first, second] = timed(Duration::from_secs(minutes * 60));
+            assert_eq!(
+                (first.label, first.at.as_secs()),
+                (LABEL_HALFWAY, halfway),
+                "{minutes}"
+            );
+            assert_eq!(
+                (second.label, second.at.as_secs()),
+                (LABEL_WRAP_UP, wrap_up),
+                "{minutes}"
+            );
+            for (nudge, words) in [(first, words[0]), (second, words[1])] {
+                assert!(nudge.text.starts_with(NOTICE_PREFIX), "{}", nudge.text);
+                assert!(nudge.text.contains(words), "{}", nudge.text);
+                // Each comes before the hand-back's interruption.
+                assert!(nudge.at.as_secs() * 100 < minutes * 60 * HAND_BACK);
+            }
+        }
     }
 }
