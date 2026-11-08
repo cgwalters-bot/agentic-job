@@ -546,11 +546,9 @@ fn setup<P: Program>(
             proxy_uid,
             &resolvers,
             &runner_uids,
-            plan.served_port,
             &write_uids,
         ))
     })?;
-    // After the rules; with no port for them to name, nothing is served.
     if plan.served_port.is_some() {
         timed("session-serve", serve_endpoint)?;
     }
@@ -1434,8 +1432,8 @@ mod tests {
         assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
     }
 
-    /// The secure-host binary's plan: a prepared file's refusals and
-    /// served port reach the rules and the proxy, its program's tables
+    /// The secure-host binary's plan: a prepared file's refusals reach
+    /// the proxy and its served port the endpoint, its program's tables
     /// are kept in the copy and read by nothing here.
     #[test]
     fn a_hosts_plan_takes_what_the_prepared_table_says() {

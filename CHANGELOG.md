@@ -9,6 +9,16 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Behavior change: `run` and the reusable workflow's runner admission take
+  `[session] listen` (`session: true`) again, with the runner's user as the
+  agent, for chat only. The agent can attach to its own session's bridge
+  ahead of the operator and so deny them the chat; no message over the
+  bridge authorizes a write, which still waits for the end-of-run check and
+  apply. The helper's `session-serve` now runs once per job, so a process
+  the agent leaves behind cannot have the runner's name served to it after
+  the run. The network rules for the bridge's port, which held only the
+  removed sandbox user, are gone (part of #536).
+
 - `sandbox check` retries its read of an outside host under
   `egress.write-policy` (`write-policy-read`) up to three times with a
   short backoff, logs why each try failed (DNS, connect, timeout, TLS or

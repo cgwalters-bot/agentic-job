@@ -18,14 +18,17 @@
 mod support;
 
 use std::io::Read;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use agentic_job::policy::{Kind, Policy, SafeOutputs};
 use agentic_job::run::mcp::TOKEN_VAR as MCP_TOKEN_VAR;
+use agentic_job::session::bridge;
 use serde_json::{Value, json};
 use support::{Fault, Proxy};
+use tokio_tungstenite::tungstenite::{self, Message, WebSocket};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 const EXIT_SUCCESS: i32 = 0;
@@ -815,6 +818,168 @@ fn a_run_as_its_own_user_in_the_home_given() {
         got.all()
     );
     assert!(!job.path("home").exists());
+}
+
+/// The one login, and the one page, a session run of these tests lets in.
+const OPERATOR: &str = "operator@github";
+const ORIGIN: &str = "https://review.example.ts.net";
+
+/// Sends a JSON-RPC request over SOCKET and returns its response,
+/// keeping in GOT everything that came before it.
+fn bridge_request(
+    socket: &mut WebSocket<TcpStream>,
+    got: &mut Vec<Value>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Value {
+    let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    socket.send(Message::text(msg.to_string())).unwrap();
+    loop {
+        match socket.read().unwrap() {
+            Message::Text(text) => {
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if msg["id"] == id && msg["method"].is_null() {
+                    return msg;
+                }
+                got.push(msg);
+            }
+            Message::Close(_) => panic!("the session hung up before answering {method}"),
+            _ => {}
+        }
+    }
+}
+
+/// The operator's client, as `tailscale serve` would pass it on to the
+/// port `run` listens on: it attaches once the port is bound, sends
+/// PROMPT once the task's turn has ended, and leaves after the answer.
+/// The thread returns the answer and everything else the client was sent.
+fn operator_client(prompt: &'static str) -> std::thread::JoinHandle<(Value, Vec<Value>)> {
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let stream = loop {
+            match TcpStream::connect(("127.0.0.1", bridge::PORT)) {
+                Ok(stream) => break stream,
+                Err(e) => {
+                    assert!(Instant::now() < deadline, "the bridge never listened: {e}");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
+            "ws://127.0.0.1:{}/",
+            bridge::PORT
+        ))
+        .unwrap();
+        for (name, value) in [(bridge::LOGIN_HEADER, OPERATOR), ("Origin", ORIGIN)] {
+            request
+                .headers_mut()
+                .append(name, tungstenite::http::HeaderValue::from_static(value));
+        }
+        let (mut socket, _) = tungstenite::client(request, stream).unwrap();
+        let mut got = Vec::new();
+        let init = bridge_request(&mut socket, &mut got, 1, "initialize", json!({}));
+        assert!(init["result"].is_object(), "{init}");
+        let new = bridge_request(
+            &mut socket,
+            &mut got,
+            2,
+            "session/new",
+            json!({"cwd": "/", "mcpServers": []}),
+        );
+        let sid = new["result"]["sessionId"].clone();
+        assert!(sid.is_string(), "{new}");
+        let params = json!({"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]});
+        // Refused, and not passed on, while the task's turn runs.
+        let answer = loop {
+            let answer = bridge_request(&mut socket, &mut got, 3, "session/prompt", params.clone());
+            let why = answer["error"]["message"].as_str().unwrap_or_default();
+            if !why.contains("a turn is running") {
+                break answer;
+            }
+            assert!(Instant::now() < deadline, "the task's turn did not end");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let _ = socket.close(None);
+        while socket.read().is_ok() {}
+        (answer, got)
+    })
+}
+
+/// A session run through `run` itself, with the agent as this user:
+/// `[session] listen` is taken, the operator attaches with the headers
+/// serve would add, has a prompt answered with the run's secrets
+/// replaced, and leaves; the run then ends and hands back what the
+/// agent wrote in that turn. The bridge's own tests start the session
+/// without `run`, so they would pass while `run` refused `listen`.
+#[test]
+fn a_session_run_talks_to_its_operator_and_hands_back() {
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    // Not "session": a_signal_ends_the_run_and_the_agent has that case.
+    let job = Job::new("chat");
+    job.own_repository();
+    job.allow(pull_requests());
+    job.script(&json!([canary(), {"say": "Task done."}]));
+    let request = json!({"type": "create_pull_request",
+        "title": "docs: Add a greeting", "body": "The operator asked for one."});
+    let later = job.path(HOME_DIR).join(".config/fake-agent/later.json");
+    let later_steps = json!([
+        canary(),
+        {"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}},
+        {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
+            "content": format!("{request}\n")}},
+        {"write": {"title": "Write", "path": "{home}/out/outcome.json",
+            "content": "{\"summary\": \"Added a greeting.\", \"tests\": []}\n"}},
+        {"say": "Added a greeting."},
+    ]);
+    std::fs::write(later, later_steps.to_string()).unwrap();
+    let session = format!(
+        "[session]\nlisten = true\noperators = [\"{OPERATOR}\"]\norigins = [\"{ORIGIN}\"]\n\
+         idle-minutes = 1\n"
+    );
+    let client = operator_client("Please add a greeting.");
+    let got = job.own_run(&format!("{}{session}", own_config(&plain(&proxy))));
+    // Before the client's result: a run that never listened says why.
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    let (answer, sent) = client.join().unwrap();
+    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+    assert!(
+        got.stderr.contains("session: a client is attached"),
+        "{}",
+        got.all()
+    );
+    let said: String = sent
+        .iter()
+        .filter(|m| m["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect();
+    assert!(said.contains("Added a greeting."), "{sent:#?}");
+    let sent = serde_json::to_string(&sent).unwrap();
+    assert!(!sent.contains(&canary_text()), "{sent}");
+    assert!(sent.contains("[REDACTED]"), "{sent}");
+    assert_eq!(
+        job.json("out/work/harness/harness.json")["message"],
+        "the client left"
+    );
+    // The client's prompt went to the agent after the task's.
+    let acp = job
+        .transcript()
+        .into_iter()
+        .find(|(name, _)| name == "acp.jsonl")
+        .map(|(_, content)| String::from_utf8_lossy(&content).into_owned())
+        .unwrap();
+    assert!(acp.contains("Please add a greeting."), "{acp}");
+    // What the agent wrote in the client's turn is handed back as any
+    // run's is, for the separate check and apply jobs.
+    assert!(job.path(PATCH).is_file(), "{}", got.all());
+    assert!(job.text(PATCH).contains("GREETING.md"));
+    let outputs = job.text("out/safe-outputs/outputs.jsonl");
+    assert!(outputs.contains("docs: Add a greeting"), "{outputs}");
+    assert_eq!(proxy.run_states(), ["finished"]);
 }
 
 #[test]

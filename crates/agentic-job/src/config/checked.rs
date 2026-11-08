@@ -40,8 +40,7 @@ pub struct Host {
     /// `inference.front`, the broker's.
     pub refused: Vec<(String, u16)>,
     /// `None` for a task run, which no client attaches to; otherwise
-    /// setup serves the bridge's port on the tailnet and keeps the
-    /// sandbox user from it.
+    /// setup serves the bridge's port on the tailnet.
     pub session: Option<Listen>,
 }
 

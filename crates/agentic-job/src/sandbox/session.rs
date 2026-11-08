@@ -7,10 +7,13 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, Output, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
 
 use ::secure_host::setup::HTTPS_DISABLED;
 
@@ -27,6 +30,10 @@ const REVOKE_ATTEMPTS: u32 = 10;
 /// of `--kill-after`.
 const TIMED_OUT: [i32; 2] = [124, 137];
 const READY: u8 = 1;
+/// Root's directory for what the helper keeps between its calls.
+const CLAIM_DIR: &str = "/run/agentic-job";
+/// The record that this host has served its one session.
+const SERVED: &str = "session-served";
 
 pub(crate) struct Guard {
     // Dropping this socket asks root to revoke serve, including on early errors.
@@ -91,6 +98,7 @@ pub(super) fn serve(capability: Option<&str>) -> Result<()> {
     control
         .peer_addr()
         .context("session serve needs a control socket")?;
+    claim()?;
     let target = format!("http://127.0.0.1:{PORT}");
     let accept = capability.map(|capability| format!("--accept-app-caps={capability}"));
     let mut start = vec!["--bg", "--yes", "--https=443"];
@@ -102,6 +110,43 @@ pub(super) fn serve(capability: Option<&str>) -> Result<()> {
         || serve_command(&start).and_then(|out| started(&out)),
         || serve_command(&["--https=443", "off"]).and_then(|out| revoked(&out)),
     )
+}
+
+/// Refuses unless this is the host's first serve since boot, recorded in a
+/// directory of root's under `/run`. The host is thrown away after its job
+/// (docs/workflow.md), so this is once per job:
+/// after the run's own guard revokes serve and releases the port, a process
+/// the agent left behind could otherwise bind the port and have root
+/// publish its listener on the tailnet again.
+fn claim() -> Result<()> {
+    match rustix::fs::mkdir(CLAIM_DIR, Mode::RWXU) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(err) => return Err(err).with_context(|| format!("creating {CLAIM_DIR}")),
+    }
+    ::secure_host::helper::roots_alone(Path::new(CLAIM_DIR))?;
+    let dir = rustix::fs::open(
+        CLAIM_DIR,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .with_context(|| format!("opening {CLAIM_DIR}"))?;
+    claim_in(&dir)
+}
+
+/// Creates the served record in DIR, refusing if it is there already.
+fn claim_in(dir: &impl AsFd) -> Result<()> {
+    match rustix::fs::openat(
+        dir,
+        SERVED,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    ) {
+        Ok(_) => Ok(()),
+        Err(Errno::EXIST) => {
+            bail!("this job's session was served already; session serve runs once per job")
+        }
+        Err(err) => Err(err).with_context(|| format!("creating {CLAIM_DIR}/{SERVED}")),
+    }
 }
 
 fn serve_with(
@@ -275,6 +320,18 @@ mod tests {
         release.send(()).unwrap();
         guard.join().unwrap();
         assert_listener_released(queued);
+    }
+
+    #[test]
+    fn serve_is_claimed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::File::open(dir.path()).unwrap();
+        claim_in(&dir).unwrap();
+        let error = claim_in(&dir).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("runs once per job"),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -509,7 +509,6 @@ struct SecondUserAsks {
     front: bool,
     mcp: bool,
     private: bool,
-    session: bool,
     child: bool,
 }
 
@@ -519,6 +518,11 @@ struct SecondUserAsks {
 /// memory, as any process of the same uid can. The run token is the
 /// agent's anyway; each refusal names what it keeps from the agent
 /// otherwise.
+///
+/// `session.listen` is not among them: the bridge holds no credential,
+/// and the agent taking its one client slot ahead of the operator only
+/// denies the operator the session, which the agent could do anyway.
+/// No message over the bridge authorizes a write (specs/session.md).
 fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
     let refusals = [
         (
@@ -545,11 +549,6 @@ fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
             "a private target: the egress proxy holds the runner's user only under \
              egress.write-policy, and even then with the runner's own Actions-service writes, \
              so the agent could send its source to another repository's artifacts",
-        ),
-        (
-            asks.session,
-            "session.listen: only a second user was kept off the bridge's port, so the agent \
-             could attach to its own session ahead of the operator",
         ),
         (
             asks.child,
@@ -782,7 +781,6 @@ impl Plan {
             front: endpoint.as_ref().is_some_and(|endpoint| endpoint.front),
             mcp: mcp.is_some(),
             private: policy.private,
-            session: host.session.is_some(),
             child: child.is_some(),
         })?;
         let sandbox = Sandbox::own(&config, home)?;
@@ -1946,13 +1944,6 @@ mod tests {
             ),
             (
                 SecondUserAsks {
-                    session: true,
-                    ..none
-                },
-                Some("session.listen"),
-            ),
-            (
-                SecondUserAsks {
                     child: true,
                     ..none
                 },
@@ -1978,11 +1969,11 @@ mod tests {
             front: true,
             mcp: true,
             private: true,
-            session: true,
             child: true,
         };
         let err = format!("{:#}", refuse_without_second_user(all).unwrap_err());
-        assert_eq!(err.matches("; ").count(), 6, "{err}");
+        assert_eq!(err.matches("; ").count(), 5, "{err}");
+        assert!(!err.contains("session.listen"), "{err}");
     }
 
     #[test]

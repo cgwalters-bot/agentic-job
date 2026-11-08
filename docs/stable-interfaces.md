@@ -21,8 +21,9 @@ and the rest), the agent's brief, the built-in skills, and the
 Runner-only migration note (5 November 2026): `agent-user: runner` is the
 only accepted value. The `sandbox` option, superseded by #2989, was removed in
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) and is
-refused; it is no escape for private, session, child-agent or credentialed
-inference/MCP launch. See [breaking keys](plan.md#breaking-keys-and-safe-refusals).
+refused; it is no escape for private, child-agent or credentialed
+inference/MCP launch. A session (`session: true`) runs with the runner as
+the agent ([session runs](../specs/session.md)). See [breaking keys](plan.md#breaking-keys-and-safe-refusals).
 
 [`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml),
 called with `workflow_call`. Its `description:` fields and

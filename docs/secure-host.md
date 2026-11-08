@@ -230,7 +230,8 @@ writes from the run's tables: the image's setup then keeps that helper
 rather than installing itself (it must be a regular file there, and is
 made root's alone with its directories, or setup refuses), and holds
 the egress proxy and the network rules to what the run's tables ask
-(the broker under `inference.front`, the session bridge's port), which
+(the broker under `inference.front`), and serves the session bridge's
+port when the tables name one, which
 it does not read itself. agentic-job's readers refuse a table that no
 longer says what the run's tables ask. The pinned image, a release
 whose binary is agentic-job's and does all of setup, refuses that

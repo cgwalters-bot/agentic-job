@@ -93,7 +93,7 @@ separately owned non-goals propose post-1.0 P2 without moving their parent.
 | [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) | #674 | Question: propose P2 extraction, but `needs-design` still violates #596. Destination/name, governance and disclosure commitments remain operator decisions. |
 | [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) | #57 | Propose P2: RHEL caller, ruleset and chat acceptance outside staged 1.0 scope. |
 | [#556](https://github.com/cgwalters-forge/agentic-job/issues/556) | #596 | Keep: protected CODEOWNERS and chosen ruleset need operator action, not another policy implementation. |
-| [#536](https://github.com/cgwalters-forge/agentic-job/issues/536) | #976 | Propose P2: sessions/chat are explicit #596 non-goals; do not restore a second user. |
+| [#536](https://github.com/cgwalters-forge/agentic-job/issues/536) | #976 | Propose P2: sessions/chat are explicit #596 non-goals. Runner mode takes session.listen again for chat only (specs/session.md option (a)); no bridge message authorizes a write. Do not restore a second user. Left: reconnect, real tailnet/serve and hosted end-to-end proof. |
 | [#137](https://github.com/cgwalters-forge/agentic-job/issues/137) | #1311 | Propose P2: non-root plain-CI image and nested Podman proof, not credential isolation. |
 
 Reuse [#3143's findings](https://github.com/cgwalters-forge/agentic-job/issues/3143#issuecomment-6676297622):
@@ -234,7 +234,7 @@ Current safe refusal examples: runner admission rejects `register = "api-key"`
 and `[mcp.NAME]` before setup without needing a secret; the
 [MCP example](mcp.md#configuration) is tested as a refusal, not an enablement.
 `run --runner-home` refuses OIDC request credentials, `inference.front`, a
-private target, `session.listen`, `before-agent`, `setup.tools` and child-agent.
+private target, `before-agent`, `setup.tools` and child-agent.
 Do not remove `--runner-home` to evade the refusal. A private bounds opt-in or
 successful `config` parse does not grant launch support.
 
@@ -253,7 +253,7 @@ Links below name those inspected revisions, not a claim about future main.
 | actions [secure-host/hosted.toml](https://github.com/cgwalters-forge/actions/blob/f05e2372d3bd5540406d444e26c70ba8c845b07d/secure-host/hosted.toml) | lock-runner, deny-runner-metadata, deny-runner-reads true; no explicit removed-user keys | No active key deletion found. Keep host controls; absent user keys do not prevent the old image's default user creation. Explicit egress input must still select write-policy where required. |
 | tracker [.github/agentic-job/hosted.toml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/agentic-job/hosted.toml), supervisor.toml, acp-experiment.toml | allow-sockets set; setup.tools example commented, not active; no active create-user/user/groups/allow-existing-user/filesystem-view/before-agent/setup.tools in any of the eight top-level TOMLs | Tracker config owner: remove stale commented tools advice; retain probe compatibility until image migration, then reconcile ignored keys. No active removed-key deletion found; do not manufacture one. |
 | tracker [.github/agentic-job/acp-experiment.toml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/agentic-job/acp-experiment.toml) | child-agent name=vibe, model=zai-glm-5-3; limits.max-requests=400 | Disable that experiment/profile during migration; runner refuses child-agent. Do not revive UID-wide reaping to retain it. |
-| tracker [.github/workflows/dispatch.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/dispatch.yml), session.yml, supervisor.yml | actions cgwalters-agentic-job wrapper at main; session dispatch requests session=true | Tracker/actions owners must coordinate wrapper rollout and freeze a tested immutable revision. Hold session=true requests (including supervisor's optional session path) rather than falling back to a second user. Inert session operators/origins/watch-item are not session.listen. |
+| tracker [.github/workflows/dispatch.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/dispatch.yml), session.yml, supervisor.yml | actions cgwalters-agentic-job wrapper at main; session dispatch requests session=true | Tracker/actions owners must coordinate wrapper rollout and freeze a tested immutable revision. Session=true requests need a wrapper revision containing the runner-only chat slice, never a fallback to a second user; reconnect and real-tailnet acceptance are still unproven. Inert session operators/origins/watch-item are not session.listen. |
 | tracker [.github/workflows/review.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/review.yml) | actions cgwalters-review at `02d0342d682cf1c265668d7823009ae1936c4061` | Move only to a reviewed wrapper containing the runner/register migration; preserve review.toml and review-command.toml policy. A moving non-review wrapper update does not migrate this pin. |
 
 Devspace's `rhel10-kvm-smoke.toml` remains #589's owner question, outside
@@ -481,12 +481,13 @@ of #1735 creates. Sizes are the comment's.
 ## Interactive sessions
 
 A session run waits for one operator's prompts after its task's turn, over
-the tailnet ([session runs](../specs/session.md)); writes during a session
-are specified, not built, and no end-to-end session has run over a real
-tailnet. [#536](https://github.com/cgwalters-forge/agentic-job/issues/536)
-tracks the rest, waiting on the operator's dispatch credential, tailnet
-changes and cgwalters-forge/actions#29. [interactive.md](interactive.md)
-keeps the rest of the design.
+the tailnet ([session runs](../specs/session.md)), with the runner's user as
+the agent, which can take the bridge's one client slot itself. Writes during
+a session wait for a premise the agent cannot forge, and until then for the
+end-of-run check and apply. No client reconnects, and no end-to-end session
+has run over a real tailnet.
+[#536](https://github.com/cgwalters-forge/agentic-job/issues/536) tracks the
+rest. [interactive.md](interactive.md) keeps the rest of the design.
 
 ## What needs the operator
 

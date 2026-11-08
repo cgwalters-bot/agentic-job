@@ -31,6 +31,11 @@
 //! client is only another source of prompts. The agent's notifications
 //! reach the client once it has attached, with the run's secrets
 //! replaced; its permission requests stay with the session's policy.
+//!
+//! None of this keeps out the agent itself: it is the runner's user, as
+//! `run` is, and can connect on loopback with whatever headers it likes
+//! (agentic-job#2989). So nothing a client sends authorizes anything
+//! beyond a prompt: writes wait for the end-of-run check and apply.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -56,8 +61,7 @@ use crate::config;
 pub const PORT: u16 = 7790;
 /// Where `sandbox setup` leaves the address the client connects to,
 /// `wss://NAME/` for the runner's tailnet name, for the job to publish:
-/// secure-host's setup writes it for [`PORT`], which it keeps from the
-/// sandbox user.
+/// secure-host's setup writes it for [`PORT`].
 pub use ::secure_host::setup::SERVE_ENDPOINT as ENDPOINT_FILE;
 /// What `tailscale serve` sets to the tailnet login of a user's device
 /// (`tailscale serve --help`); it drops one the client sent.
@@ -327,8 +331,10 @@ pub struct Bridge {
 impl Bridge {
     /// Binds [`PORT`] on loopback, where the root helper's `tailscale serve` passes
     /// connections on. Loopback alone: the tailnet's peers come through
-    /// serve, which names them; the sandbox user is kept from this port
-    /// by the network rules (`sandbox::network`).
+    /// serve, which names them. The agent, the runner's user as `run`
+    /// is, can reach this port too and attach first with forged headers
+    /// (agentic-job#2989): that only denies the operator the session, and
+    /// no message over the bridge authorizes a write.
     pub fn bind(listen: Listen, redact: Redact) -> Result<Self> {
         let address = (std::net::Ipv4Addr::LOCALHOST, PORT);
         let listener = std::net::TcpListener::bind(address)

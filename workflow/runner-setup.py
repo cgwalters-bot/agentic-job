@@ -30,8 +30,9 @@ def main():
                      'drop the input, the runner is the only agent user')
         if agent_user != 'runner':
             sys.exit('agent-user must be runner')
-        if config.get('session', {}).get('listen'):
-            sys.exit('session.listen needs a second user, which there is none of since agentic-job#2989')
+        # session.listen is admitted: the agent can take its own bridge's
+        # client slot, but no bridge message authorizes a write
+        # (specs/session.md#recommendation-lift-the-refusal).
         return
     if mode != 'setup':
         sys.exit('expected admit or setup')

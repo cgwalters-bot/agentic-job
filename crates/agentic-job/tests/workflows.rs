@@ -1430,7 +1430,24 @@ fn runner_admission_precedes_setup_and_setup_is_isolated() {
             "[mcp.server]\nurl = 'https://example.com'",
             false,
         ),
-        ("false", "{}", "[session]\nlisten = true", false),
+        // A session is admitted, on or off; what holds without one still
+        // holds beside it.
+        ("false", "{}", "[session]\nlisten = true", true),
+        ("false", "{}", "[session]\nlisten = false", true),
+        ("true", "{}", "[session]\nlisten = true", false),
+        ("false", private, "[session]\nlisten = true", false),
+        (
+            "false",
+            "{}",
+            "[inference]\nregister = 'api-key'\n[session]\nlisten = true",
+            false,
+        ),
+        (
+            "false",
+            "{}",
+            "[mcp.server]\nurl = 'https://example.com'\n[session]\nlisten = true",
+            false,
+        ),
         ("false", "{}", "[setup]\npackages = []", true),
     ] {
         std::fs::write(&config, text).unwrap();

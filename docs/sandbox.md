@@ -25,7 +25,10 @@ creates no second user, and the job is the unit of trust. The agent can
 read whatever the runner's user can, so the job holds nothing the agent
 may not have; `run` refuses what only a second user could keep from it
 (an inference provider's key, an MCP credential, `inference.front`, a
-private target, `session.listen`, `[child-agent]`).
+private target, `[child-agent]`). `session.listen` is taken: the agent
+can attach to its own session's bridge ahead of the operator, which
+denies the operator the chat but gives it no credential or write: no
+message over the bridge authorizes one ([session runs](../specs/session.md)).
 It can also interfere with `run`, its transcript and limits, so check and
 apply must run on separate machines. `hidepid` hides **other users'**
 processes; it is not a same-UID credential boundary, and neither a clean

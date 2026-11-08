@@ -244,9 +244,9 @@ each run. agentic-job's `[session] watch-item` forwards new comments on the
 run's own item to the agent, and is off by default
 ([harness.md](harness.md#updates-of-the-runs-item)). An operator can also
 give a run further prompts over the tailnet after its task's turn
-([interactive.md](interactive.md#what-exists)). That needs an agent job
-with a second user: the reusable workflow has a `session` input, but its
-`run --runner-home` refuses a session.
+([interactive.md](interactive.md#what-exists)), through the reusable
+workflow's `session` input; the agent, the runner's user, can attach to
+its own session too, so nothing over that channel authorizes a write.
 
 **Audit.** `gh aw logs` and gh-aw's audit tooling read run history. The
 offline `agentic-job audit` command reads one run's downloaded artifacts and
