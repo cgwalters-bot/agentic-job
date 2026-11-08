@@ -16,7 +16,13 @@ sub-issue of that epic or marked post-1.0 (P2), with none in
 Earlier README audits #2199, #2738–#2741 and readiness correction
 [#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) are closed,
 not live owners. [#3245](https://github.com/cgwalters-forge/agentic-job/issues/3245)
-owns the new first-run documentation walkthrough, not stage deployment.
+owns only the bounded documentation slice: static revalidation shipped in
+[#3247](https://github.com/cgwalters-forge/agentic-job/pull/3247)
+([walkthrough](workflow.md#first-run-walkthrough-8-november-2026)).
+The authorized README-only live trial remains pending; stage deployment and
+credential evidence remain with
+[agent-board#282](https://github.com/cgwalters-forge/agent-board/issues/282).
+Finishing #3245's docs does not meet tracker#596's live acceptance bar.
 [#556](https://github.com/cgwalters-forge/agentic-job/issues/556) still owns
 CODEOWNERS/ruleset acceptance; shipped merge-policy code does not settle which
 ruleset requires code-owner review or the automation-token ownership constraint.
@@ -48,6 +54,8 @@ read via issues and GraphQL parent/project fields. Parent numbers below are in
 project items supplied Priority values: **P2 below is proposed, not applied**.
 A different parent alone does not satisfy #596's literal child-or-P2 bar.
 No issue, Priority, parentage, release policy or epic is changed by this ledger.
+The snapshot counts and parentage remain historical; the #3245 entries below
+note the later documentation completion in #3247, not new live evidence.
 The [hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
 and [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) are
 acceptance owners, not permission to build another local proxy. The operator's
@@ -69,7 +77,7 @@ separately owned non-goals propose post-1.0 P2 without moving their parent.
 
 | Open issue | Applied parent | Proposal / unresolved acceptance |
 | --- | --- | --- |
-| [#3245](https://github.com/cgwalters-forge/agentic-job/issues/3245) | #596 | Keep: README first-run walkthrough; actual trial pending. |
+| [#3245](https://github.com/cgwalters-forge/agentic-job/issues/3245) | #596 | Snapshot: keep README first-run walkthrough. Update: static documentation revalidation completed in [#3247](https://github.com/cgwalters-forge/agentic-job/pull/3247); authorized README-only live trial and agent-board#282 deployment evidence still pending. |
 | [#3244](https://github.com/cgwalters-forge/agentic-job/issues/3244) | #596 | Keep: this ledger, not metadata application. |
 | [#3225](https://github.com/cgwalters-forge/agentic-job/issues/3225) | none | Propose #596 child: retries/diagnostics shipped; workflow/scheduler infrastructure-outcome propagation, behavioral proof and image adoption remain. Do not restore removed network-control/container-control probes. |
 | [#3188](https://github.com/cgwalters-forge/agentic-job/issues/3188) | none | Question: #596 child or P2 under stated tracker#680 owner? Notification delivery shipped in part; cross-repository targeting remains. |
@@ -271,7 +279,7 @@ Historical fake-agent/config checks and closed audits establish narrower facts.
 | Epic bar | Shipped / missing evidence at the ledger snapshot |
 | --- | --- |
 | Fresh deploy passes | **Pending.** [agent-board#282](https://github.com/cgwalters-forge/agent-board/issues/282) still needs an approved real Actions-backed stage path, credential placement/authority and saved green implement/review/fix/triage report plus installed recurrence. Fake transport, templates and old runs are not this proof. Require exact runner/image/caller revisions and authenticated creation/cleanup receipts. |
-| README alone suffices | **Pending.** #3245 revalidates instructions after runner-only migration; closed #2738–#2741/#2864 are not a fresh agent's completed first run in cgwalters-forge-stage. Need README-only trial evidence, its exact release/config/pins and resolved walkthrough failures; config parsing or scripted fake launch is insufficient. |
+| README alone suffices | **Pending.** #3245's static documentation revalidation after runner-only migration completed in [#3247](https://github.com/cgwalters-forge/agentic-job/pull/3247), not a live first run. Closed #2738–#2741/#2864 are not a fresh agent's completed first run in cgwalters-forge-stage. Need a separately authorized README-only live trial, its exact release/config/pins and resolved walkthrough failures; agent-board#282 deployment evidence is still pending. Config parsing, scripted fake launch or this documentation cleanup is insufficient. |
 | v1.0 and stable formats, no JS | **Pending.** [stable interfaces](stable-interfaces.md) and [changelog](../CHANGELOG.md) exist, but their promise starts at 1.0, not at documentation merge. Need an actual published v1.0 tag/release and explicit freeze of config/safe-output contracts, #2026 fixture cleanup after tracker#1455 evidence, and cgwalters' exact JS exception decision or replacement coverage. Build releases/0.x tags do not establish this bar. |
 | Closed backlog | **Pending.** Only #556/#2026/#2811/#3244/#3245 are current #596 children. The other 21 require applied child/P2 dispositions or decisions; Priority was not visible in the returned project data. #1735 remains `needs-design`; a P2 proposal or different parent alone does not clear that clause. #3143 findings need follow-through, not a duplicate audit. |
 

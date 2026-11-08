@@ -1129,7 +1129,8 @@ A failure names the missing network route rather than blaming sandbox rules.
 ### First-run walkthrough (8 November 2026)
 
 This is a static revalidation of the README path, not a deployment report.
-It reuses the closed [README audit](https://github.com/cgwalters-forge/agentic-job/pull/2558),
+It reuses the closed [README audit](https://github.com/cgwalters-forge/agentic-job/pull/2435),
+[events/dispatch/review coverage](https://github.com/cgwalters-forge/agentic-job/pull/2558),
 [safe-output audit](https://github.com/cgwalters-forge/agentic-job/pull/2742) and
 [#3143 findings](https://github.com/cgwalters-forge/agentic-job/issues/3143#issuecomment-6675175322);
 it does not restart their broader reviews. Source checked on main at
