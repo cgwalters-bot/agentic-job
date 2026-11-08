@@ -379,6 +379,9 @@ pub struct Session {
     /// Whether `run` listens for a client, which `sandbox setup` exposes
     /// on the runner's tailnet name with `tailscale serve`.
     pub listen: bool,
+    /// Direct gateway listener, requiring a per-run secret instead of
+    /// Tailscale identity headers. Unset keeps the legacy loopback mode.
+    pub bind_address: Option<std::net::SocketAddr>,
     /// The tailnet logins that may attach, as `tailscale serve` names
     /// them in `Tailscale-User-Login`.
     pub operators: Vec<String>,

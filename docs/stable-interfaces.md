@@ -148,6 +148,11 @@ the next in the same major version.
   `[session] nudges` is an optional boolean, default false; it sends the
   agent two messages at times derived from `limits.timeout-minutes`
   ([nudges on the clock](harness.md#nudges-on-the-clock)).
+  `[session] bind-address` optionally selects a direct gateway listener when
+  `listen = true`, requiring a per-run `AGENTIC_JOB_ATTACH_SECRET` (64 hex
+  characters) in `run`'s environment and `Authorization: Bearer <secret>` on
+  each WebSocket handshake. Unset preserves the legacy listener's refusal on
+  runner-only jobs ([gateway deployment](interactive.md#gateway-deployment)).
   The keys of the removed sandbox user (`host.create-user`, `user`,
   `groups`, `allow-existing-user`, `filesystem-view`,
   `host.check.before-agent` and `setup.tools`) are refused by name

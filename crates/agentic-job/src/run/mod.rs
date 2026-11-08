@@ -782,7 +782,10 @@ impl Plan {
             front: endpoint.as_ref().is_some_and(|endpoint| endpoint.front),
             mcp: mcp.is_some(),
             private: policy.private,
-            session: host.session.is_some(),
+            session: host
+                .session
+                .as_ref()
+                .is_some_and(|listen| listen.bind_address.is_none()),
             child: child.is_some(),
         })?;
         let sandbox = Sandbox::own(&config, home)?;
@@ -802,7 +805,15 @@ impl Plan {
                 .check
                 .containers
                 .then(|| config.sandbox.check.container_image.clone()),
-            session: host.session,
+            session: host
+                .session
+                .map(|mut listen| -> Result<Listen> {
+                    if listen.bind_address.is_some() {
+                        listen.attach_secret = Some(session::bridge::AttachSecret::from_env()?);
+                    }
+                    Ok(listen)
+                })
+                .transpose()?,
             watch,
             nudges,
             identity: Identity {
@@ -1145,6 +1156,12 @@ impl Plan {
             mcp.map(|(local, credential)| (local.token(), credential)),
         )
         .chain(own_tokens())
+        .chain(
+            self.session
+                .as_ref()
+                .and_then(|listen| listen.attach_secret.as_ref())
+                .map(|secret| ("ACP attach secret", secret.expose().to_owned())),
+        )
         .chain(
             inference_addresses(self.endpoint.as_ref())
                 .into_iter()

@@ -232,6 +232,8 @@ fn bridge_and_client(
     let address = listener.local_addr().unwrap().to_string();
     let bridge = Bridge {
         listen: Listen {
+            bind_address: None,
+            attach_secret: None,
             operators: vec![OPERATOR.to_owned()],
             origins: vec![ORIGIN.to_owned()],
             capability: Some(CAPABILITY.to_owned()),
@@ -3019,6 +3021,8 @@ fn a_port_that_is_taken_is_refused() {
     // Taken by this test, or by something else already.
     let _held = TcpListener::bind(("127.0.0.1", bridge::PORT));
     let listen = Listen {
+        bind_address: None,
+        attach_secret: None,
         operators: vec![OPERATOR.to_owned()],
         origins: vec![ORIGIN.to_owned()],
         capability: None,

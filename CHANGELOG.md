@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Opt-in `[session] bind-address` allows a gateway to reach a job's ACP
+  listener without Tailscale identity headers. Each attach requires the
+  runner's per-run `AGENTIC_JOB_ATTACH_SECRET`; end-of-run check/apply remains
+  the only forge write path (#3249).
+
 - `sandbox check` retries its read of an outside host under
   `egress.write-policy` (`write-policy-read`) up to three times with a
   short backoff, logs why each try failed (DNS, connect, timeout, TLS or

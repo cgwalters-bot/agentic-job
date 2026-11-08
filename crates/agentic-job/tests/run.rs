@@ -319,6 +319,28 @@ fn plain(proxy: &Proxy) -> String {
     )
 }
 
+#[test]
+fn gateway_listener_requires_a_runner_supplied_secret() {
+    use agentic_job::session::bridge::ATTACH_SECRET_ENV;
+
+    let job = Job::new("gateway-secret");
+    let config = format!(
+        "[agent]\nname = \"fake\"\n[limits]\ntimeout-minutes = 5\nuncapped = true\n{NO_PROXY}\n[session]\nlisten = true\nbind-address = \"0.0.0.0:7790\"\n"
+    );
+    for secret in [None, Some(""), Some("not-a-run-secret")] {
+        let mut command = job.own_command(&config);
+        command.env_remove(ATTACH_SECRET_ENV);
+        if let Some(secret) = secret {
+            command.env(ATTACH_SECRET_ENV, secret);
+        }
+        let got = Finished::of(command.output().unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(got.stderr.contains(ATTACH_SECRET_ENV), "{}", got.all());
+        assert!(!got.stderr.contains("needs a second user"), "{}", got.all());
+        assert!(!job.path("out/work/checkout").exists());
+    }
+}
+
 fn contains(haystack: &[u8], needle: &str) -> bool {
     haystack
         .windows(needle.len())

@@ -22,6 +22,11 @@
 //! the bridge listening; the first client let in is the only one, and
 //! when it leaves the session ends.
 //!
+//! With `session.bind-address`, a gateway connects directly instead of
+//! through serve. Only `Authorization: Bearer <per-run secret>` admits a
+//! connection; Tailscale identity headers grant nothing. This authenticates
+//! network clients, not the agent running as this process's own uid.
+//!
 //! The client gets a narrow part of ACP: `initialize`; `session/new`,
 //! which attaches it to the session already running instead of starting
 //! another; `session/prompt` and `session/cancel`. Every other request is
@@ -54,6 +59,53 @@ use crate::config;
 /// so that both know it, and below Linux's ephemeral range, so that no
 /// outgoing connection holds it.
 pub const PORT: u16 = 7790;
+
+/// Supplied by the runner, never stored in the repository configuration.
+pub const ATTACH_SECRET_ENV: &str = "AGENTIC_JOB_ATTACH_SECRET";
+
+const ATTACH_SECRET_BYTES: usize = 64;
+
+/// A fresh 256-bit hex secret for one run. Debug output never exposes it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AttachSecret(String);
+
+impl std::fmt::Debug for AttachSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AttachSecret([REDACTED])")
+    }
+}
+
+impl AttachSecret {
+    pub fn new(value: String) -> Result<Self> {
+        ensure!(
+            value.len() == ATTACH_SECRET_BYTES && value.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{ATTACH_SECRET_ENV} must be 64 hexadecimal characters (32 random bytes)"
+        );
+        Ok(Self(value))
+    }
+
+    pub fn from_env() -> Result<Self> {
+        let value = std::env::var(ATTACH_SECRET_ENV)
+            .with_context(|| format!("session.bind-address requires {ATTACH_SECRET_ENV}"))?;
+        Self::new(value)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    fn matches(&self, value: &str) -> bool {
+        // Fixed-size comparison: do not reveal a matching prefix of the secret.
+        value.len() == ATTACH_SECRET_BYTES
+            && self
+                .0
+                .bytes()
+                .zip(value.bytes())
+                .fold(0, |diff, (a, b)| diff | (a ^ b))
+                == 0
+    }
+}
+
 /// Where `sandbox setup` leaves the address the client connects to,
 /// `wss://NAME/` for the runner's tailnet name, for the job to publish:
 /// secure-host's setup writes it for [`PORT`], which it keeps from the
@@ -118,6 +170,9 @@ pub type Redact = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// The session of a run's configuration, checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listen {
+    pub bind_address: Option<std::net::SocketAddr>,
+    /// Loaded by `run`, not by config validation; never serialized.
+    pub attach_secret: Option<AttachSecret>,
     pub operators: Vec<String>,
     pub origins: Vec<String>,
     /// The Tailscale app capability that lets a node in without a login.
@@ -142,6 +197,17 @@ impl Listen {
         if !listen {
             return Ok(None);
         }
+        let gateway = table.bind_address.is_some();
+        if let Some(address) = table.bind_address {
+            ensure!(
+                address.port() != 0,
+                "session.bind-address needs a nonzero port"
+            );
+            ensure!(
+                operators.is_empty() && capability.is_empty(),
+                "session.bind-address uses only the attach secret, not operators or capability"
+            );
+        }
         let capability = (!capability.is_empty()).then(|| capability.clone());
         if let Some(capability) = &capability {
             ensure!(
@@ -154,10 +220,10 @@ impl Listen {
         // runner spent for nothing. Operators may be empty where the
         // capability lets someone in; origins still bound browsers on
         // either path.
-        let fewest_operators = usize::from(capability.is_none());
+        let fewest_operators = usize::from(!gateway && capability.is_none());
         for (key, list, fewest) in [
             ("operators", operators, fewest_operators),
-            ("origins", origins, 1),
+            ("origins", origins, usize::from(!gateway)),
         ] {
             ensure!(
                 (fewest..=MAX_ALLOWED).contains(&list.len()),
@@ -190,6 +256,8 @@ impl Listen {
             "session.idle-minutes = {minutes} is over {MAX_IDLE_MINUTES}"
         );
         Ok(Some(Self {
+            bind_address: table.bind_address,
+            attach_secret: None,
             operators: operators.clone(),
             origins: origins.clone(),
             capability,
@@ -203,6 +271,20 @@ impl Listen {
     /// login or, where `session.capability` is set, by its capability;
     /// the capability's refusal is the one given once serve sent it.
     fn refusal(&self, request: &Request) -> Option<&'static str> {
+        if self.bind_address.is_some() {
+            // A reachable pod can forge serve headers. In direct mode none
+            // of those headers grants access: every upgrade needs the secret.
+            let supplied = one(request, "Authorization").and_then(|s| s.strip_prefix("Bearer "));
+            if !self
+                .attach_secret
+                .as_ref()
+                .zip(supplied)
+                .is_some_and(|(secret, value)| secret.matches(value))
+            {
+                return Some("missing or invalid attach secret");
+            }
+            return self.optional_origin_refusal(request);
+        }
         // None: let in by its login.
         let by_login = self.login_refusal(request)?;
         match &self.capability {
@@ -249,6 +331,10 @@ impl Listen {
         if !granted.contains_key(capability) {
             return Some(CAPABILITY_NOT_GRANTED);
         }
+        self.optional_origin_refusal(request)
+    }
+
+    fn optional_origin_refusal(&self, request: &Request) -> Option<&'static str> {
         // No Origin is a client that is no browser. A browser always
         // sends one, so a page of another site is still kept out.
         let allowed = |origin: &[u8]| self.origins.iter().any(|o| o.as_bytes() == origin);
@@ -318,21 +404,27 @@ fn is_origin(text: &str) -> bool {
 /// What a session is given to reach its client.
 pub struct Bridge {
     pub listen: Listen,
-    /// Bound already, on loopback, so that a port that is taken stops
+    /// Bound already, so that a port that is taken stops
     /// the run before the agent starts.
     pub listener: std::net::TcpListener,
     pub redact: Redact,
 }
 
 impl Bridge {
-    /// Binds [`PORT`] on loopback, where the root helper's `tailscale serve` passes
-    /// connections on. Loopback alone: the tailnet's peers come through
-    /// serve, which names them; the sandbox user is kept from this port
-    /// by the network rules (`sandbox::network`).
+    /// Binds the configured gateway address, or [`PORT`] on loopback,
+    /// where the root helper's `tailscale serve` passes
+    /// connections on. The latter is legacy mode: runner-only admission
+    /// refuses it, since no network rule prevents same-uid header forgery.
     pub fn bind(listen: Listen, redact: Redact) -> Result<Self> {
-        let address = (std::net::Ipv4Addr::LOCALHOST, PORT);
+        ensure!(
+            listen.bind_address.is_none() || listen.attach_secret.is_some(),
+            "session.bind-address requires {ATTACH_SECRET_ENV}"
+        );
+        let address = listen
+            .bind_address
+            .unwrap_or_else(|| (std::net::Ipv4Addr::LOCALHOST, PORT).into());
         let listener = std::net::TcpListener::bind(address)
-            .with_context(|| format!("listening on 127.0.0.1:{PORT} for the session's client"))?;
+            .with_context(|| format!("listening on {address} for the session's client"))?;
         Ok(Self {
             listen,
             listener,
@@ -498,12 +590,14 @@ impl Bridge {
     /// Starts listening for the client. SESSION_ID is the agent's
     /// session, once there is one: the client attaches to it.
     pub(super) fn start(self, session_id: watch::Receiver<Option<String>>) -> Result<Connected> {
-        let guard = if std::path::Path::new(ENDPOINT_FILE).exists() {
-            Some(crate::sandbox::session::Guard::start(&self.listener)?)
-        } else {
-            // Unprepared hosts are used by the loopback-only protocol tests.
-            None
-        };
+        let guard =
+            if self.listen.bind_address.is_none() && std::path::Path::new(ENDPOINT_FILE).exists() {
+                Some(crate::sandbox::session::Guard::start(&self.listener)?)
+            } else {
+                // Direct gateway mode needs no serve helper. Unprepared hosts
+                // are also used by the loopback-only protocol tests.
+                None
+            };
         self.listener
             .set_nonblocking(true)
             .context("listening for the session's client")?;
@@ -841,6 +935,147 @@ mod tests {
     const OPERATOR: &str = "operator@github";
     const ORIGIN: &str = "https://review.example.ts.net";
     const CAPABILITY: &str = "example.com/cap/agentic-job-session";
+
+    fn gateway() -> Listen {
+        let mut table = table(true, &[], &[], 0);
+        table.bind_address = Some("127.0.0.1:7790".parse().unwrap());
+        let mut listen = Listen::from_config(&table).unwrap().unwrap();
+        listen.attach_secret = Some(AttachSecret::new("a".repeat(ATTACH_SECRET_BYTES)).unwrap());
+        listen
+    }
+
+    #[test]
+    fn gateway_configuration_is_bounded_and_opt_in() {
+        for address in ["0.0.0.0:7790", "[::]:7790", "127.0.0.1:7791"] {
+            let text = format!("[session]\nlisten = true\nbind-address = {address:?}\n");
+            let config = config::Config::parse(&text).unwrap();
+            let listen = Listen::from_config(&config.session).unwrap().unwrap();
+            assert_eq!(listen.bind_address, Some(address.parse().unwrap()));
+            assert!(listen.attach_secret.is_none());
+            assert!(listen.refusal(&Request::default()).is_some());
+            assert!(Bridge::bind(listen, Arc::new(str::to_owned)).is_err());
+        }
+        for extra in [
+            "operators = [\"op@github\"]",
+            "capability = \"example.com/cap/attach\"",
+        ] {
+            let text =
+                format!("[session]\nlisten = true\nbind-address = \"0.0.0.0:7790\"\n{extra}\n");
+            let config = config::Config::parse(&text).unwrap();
+            assert!(Listen::from_config(&config.session).is_err());
+        }
+        for address in ["localhost:7790", "0.0.0.0:0", "0.0.0.0:65536"] {
+            let text = format!("[session]\nlisten = true\nbind-address = {address:?}\n");
+            assert!(
+                config::Config::parse(&text)
+                    .and_then(|c| Listen::from_config(&c.session))
+                    .is_err()
+            );
+        }
+        let config = config::Config::parse("[session]\nbind-address = \"0.0.0.0:7790\"\n").unwrap();
+        assert!(Listen::from_config(&config.session).unwrap().is_none());
+        for value in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "z".repeat(64),
+            format!("{}\n", "a".repeat(63)),
+        ] {
+            let err = AttachSecret::new(value.clone()).unwrap_err().to_string();
+            assert!(err.contains("64 hexadecimal"));
+            if !value.is_empty() {
+                assert!(!err.contains(&value));
+            }
+        }
+        assert!(!format!("{:?}", gateway()).contains(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn gateway_binds_the_configured_address() {
+        // Reserve a free port on a different loopback address, not the
+        // legacy 127.0.0.1:7790. Keep it reserved to test bind failure too.
+        let held = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+        let address = held.local_addr().unwrap();
+        let mut listen = gateway();
+        listen.bind_address = Some(address);
+        assert!(Bridge::bind(listen.clone(), Arc::new(str::to_owned)).is_err());
+        drop(held);
+        let bridge = Bridge::bind(listen, Arc::new(str::to_owned)).unwrap();
+        assert_eq!(bridge.listener.local_addr().unwrap(), address);
+    }
+
+    #[tokio::test]
+    async fn gateway_requires_the_secret_on_each_handshake() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut listen = gateway();
+        listen.origins = vec![ORIGIN.to_owned()];
+        let right = format!("Bearer {}", "a".repeat(64));
+        let wrong = format!("Bearer {}", "b".repeat(64));
+        // Refused clients cannot consume the only attach slot; even forged
+        // serve identities do not bypass the gateway's secret.
+        let client = async {
+            for (authorization, origin, accepted) in [
+                (None, None, false),
+                (Some(wrong.as_str()), None, false),
+                (Some(right.as_str()), Some("https://evil.example"), false),
+                (Some(right.as_str()), Some(ORIGIN), true),
+            ] {
+                let mut request = format!("ws://{address}/").into_client_request().unwrap();
+                request
+                    .headers_mut()
+                    .insert(LOGIN_HEADER, OPERATOR.parse().unwrap());
+                if let Some(value) = authorization {
+                    request
+                        .headers_mut()
+                        .insert("Authorization", value.parse().unwrap());
+                }
+                if let Some(value) = origin {
+                    request
+                        .headers_mut()
+                        .insert("Origin", value.parse().unwrap());
+                }
+                let stream = TcpStream::connect(address).await.unwrap();
+                let result = tokio_tungstenite::client_async(request, stream).await;
+                if accepted {
+                    assert!(result.is_ok());
+                } else {
+                    match result.unwrap_err() {
+                        tokio_tungstenite::tungstenite::Error::Http(response) => {
+                            assert_eq!(response.status(), StatusCode::FORBIDDEN)
+                        }
+                        err => panic!("expected HTTP 403, got {err}"),
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (socket, ()) = tokio::join!(admit(&listener, &listen), client);
+            drop(socket);
+        })
+        .await
+        .unwrap();
+
+        let mut request = Request::default();
+        request
+            .headers_mut()
+            .insert("Authorization", right.parse().unwrap());
+        assert_eq!(listen.refusal(&request), None); // A non-browser gateway.
+        request
+            .headers_mut()
+            .append("Authorization", right.parse().unwrap());
+        assert_eq!(
+            listen.refusal(&request),
+            Some("missing or invalid attach secret")
+        );
+        listen.attach_secret = None;
+        assert_eq!(
+            listen.refusal(&request),
+            Some("missing or invalid attach secret")
+        );
+    }
 
     #[tokio::test]
     async fn stalled_handshake_does_not_block_the_operator() {

@@ -249,7 +249,11 @@ impl Config {
                     port: *port,
                 })
                 .collect(),
-            serve_port: host.session.is_some().then_some(bridge::PORT),
+            serve_port: host
+                .session
+                .as_ref()
+                .filter(|listen| listen.bind_address.is_none())
+                .map(|_| bridge::PORT),
         }
     }
 
@@ -425,6 +429,12 @@ mod tests {
         assert_eq!(fake.host.session, None);
         assert_eq!(fake.watch, None);
         assert!(!fake.nudges);
+        let gateway = Config::parse(&format!(
+            "{FAKE}{CAPPED}[session]\nlisten = true\nbind-address = \"0.0.0.0:7790\"\n"
+        ))
+        .unwrap();
+        assert!(gateway.check().unwrap().host.session.is_some());
+        assert_eq!(gateway.prepared().unwrap().serve_port, None);
         let nudged = checked(&format!("{FAKE}{CAPPED}[session]\nnudges = true\n")).unwrap();
         assert!(nudged.nudges);
         // The bounds themselves are steer's to test.
