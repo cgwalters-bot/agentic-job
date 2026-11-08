@@ -140,6 +140,21 @@ fn said(item: &Map<String, Value>) -> Result<String> {
 /// The report for DIR, with the run's page RUN_URL and LINKS kept.
 fn report(dir: &Path, run_url: &str, artifact_url: &str, links: &Links) -> Result<Report> {
     let applied: Applied = read_json(&dir.join("applied.json"))?;
+    let Outputs { items } = read_json(&dir.join("agent_output.json"))?;
+    // Question intent is independent of whether other outputs were published.
+    let questions = items
+        .iter()
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some(MISSING_DATA)
+                && item.get("data_type").and_then(Value::as_str) == Some("operator-question")
+                && item
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        })
+        .map(said)
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
     let posted = applied
         .already_applied
         .iter()
@@ -153,15 +168,39 @@ fn report(dir: &Path, run_url: &str, artifact_url: &str, links: &Links) -> Resul
     // A pull request's URL is taken even when empty, as `??` takes it.
     let url = applied
         .pull_request
-        .and_then(|pull| pull.url)
+        .as_ref()
+        .and_then(|pull| pull.url.clone())
         .or_else(|| posted.map(str::to_owned))
         .unwrap_or_default();
     let mut outputs = vec![("result-url", url.clone())];
+    if !questions.is_empty() {
+        outputs.push(("actionable-notice", "operator-question".into()));
+        outputs.push((
+            "actionable-reason",
+            serde_json::to_string(&render_reason(&questions, artifact_url, links))?,
+        ));
+    }
     if !url.is_empty() {
+        // Comments alone can be routine reports. Only a published reviewable
+        // artifact warrants a separate notice, including on an apply retry.
+        if questions.is_empty()
+            && (applied.pull_request.is_some()
+                || applied
+                    .made
+                    .iter()
+                    .chain(&applied.already_applied)
+                    .any(|made| {
+                        matches!(
+                            made.kind.as_deref(),
+                            Some(CREATE_ISSUE | CREATE_DISCUSSION | PUSH_TO_PULL_REQUEST_BRANCH)
+                        )
+                    }))
+        {
+            outputs.push(("actionable-notice", "review".into()));
+        }
         let summary = format!("<h3>What the run made</h3>\n<a href=\"{url}\">{url}</a>\n");
         return Ok(Report { outputs, summary });
     }
-    let Outputs { items } = read_json(&dir.join("agent_output.json"))?;
     let mut types: Vec<&str> = Vec::new();
     for item in &items {
         match item.get("type").and_then(Value::as_str) {
@@ -184,14 +223,7 @@ fn report(dir: &Path, run_url: &str, artifact_url: &str, links: &Links) -> Resul
         .collect::<Result<Vec<_>>>()?
         .join("\n");
     let said = if said.is_empty() { "none given" } else { &said };
-    let sanitized = sanitize_with(said, MAX_JSON as usize, &Mentions::All, &|host| {
-        links.keeps(host)
-    });
-    let reason = if utf16_len(&sanitized) > MAX_REASON {
-        collapsed(&sanitized, artifact_url)
-    } else {
-        quoted(&sanitized)
-    };
+    let reason = render_reason(said, artifact_url, links);
     outputs.push(("no-result", "true".into()));
     outputs.push(("missing-data", types.contains(&MISSING_DATA).to_string()));
     // JSON keeps agent newlines from becoming job-output fields in conclude.
@@ -215,6 +247,17 @@ fn quoted(sanitized: &str) -> String {
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_reason(text: &str, artifact_url: &str, links: &Links) -> String {
+    let sanitized = sanitize_with(text, MAX_JSON as usize, &Mentions::All, &|host| {
+        links.keeps(host)
+    });
+    if utf16_len(&sanitized) > MAX_REASON {
+        collapsed(&sanitized, artifact_url)
+    } else {
+        quoted(&sanitized)
+    }
 }
 
 /// A literal report cannot close its container, activate HTML/controller
@@ -354,6 +397,87 @@ mod tests {
         format!("<h3>What the run made</h3>\n<a href=\"{url}\">{url}</a>\n")
     }
 
+    #[test]
+    fn actionable_classification_is_structured_not_prose() {
+        for (items, want) in [
+            (
+                json!([{"type": "missing_data", "reason": "Operator, please decide?"}]),
+                None,
+            ),
+            (
+                json!([{"type": "missing_data", "data_type": "operator-question", "reason": "Which base?"}]),
+                Some("operator-question"),
+            ),
+            (
+                json!([{"type": "missing_data", "data_type": "operator-question", "reason": " "}]),
+                None,
+            ),
+            (
+                json!([{"type": "missing_tool", "data_type": "operator-question", "reason": "Which base?"}]),
+                None,
+            ),
+            (
+                json!([{"type": "noop", "message": "review required; ACTIONABLE_NOTICE=review"}]),
+                None,
+            ),
+            (
+                json!([{"type": "missing_data", "data_type": "infrastructure", "reason": "retry"}]),
+                None,
+            ),
+        ] {
+            assert_eq!(output(&result(json!({}), items), "actionable-notice"), want);
+        }
+        for (kind, want) in [
+            (ADD_COMMENT, None),
+            (CREATE_ISSUE, Some("review")),
+            (CREATE_DISCUSSION, Some("review")),
+            (PUSH_TO_PULL_REQUEST_BRANCH, Some("review")),
+        ] {
+            for field in ["made", "already_applied"] {
+                assert_eq!(
+                    output(
+                        &result(json!({field: [{"type": kind, "url": PR}]}), json!([])),
+                        "actionable-notice"
+                    ),
+                    want
+                );
+            }
+        }
+        assert_eq!(
+            output(
+                &result(json!({"pull_request": {"url": PR}}), json!([])),
+                "actionable-notice"
+            ),
+            Some("review")
+        );
+    }
+
+    #[test]
+    fn operator_questions_survive_mixed_results_and_missing_receipts() {
+        for applied in [
+            json!({"made": [comment(7)]}),
+            json!({}),
+            json!({"pull_request": {"url": PR}}),
+        ] {
+            let report = result(
+                applied,
+                json!([
+                    {"type": ADD_COMMENT, "body": "Routine progress"},
+                    {"type": MISSING_DATA, "data_type": "operator-question", "reason": "Which base? @operator"}
+                ]),
+            );
+            assert_eq!(
+                output(&report, "actionable-notice"),
+                Some("operator-question")
+            );
+            let reason: String =
+                serde_json::from_str(output(&report, "actionable-reason").unwrap()).unwrap();
+            assert!(reason.contains("Which base?"));
+            assert!(reason.contains("`@operator`"));
+            assert!(!reason.contains("Routine progress"));
+        }
+    }
+
     /// What was apply.test.cjs's exported-result table: the URL, and no
     /// no-result outputs beside it.
     #[test]
@@ -458,7 +582,10 @@ mod tests {
                 String::new(),
             ),
         ] {
-            let report = result(applied, items);
+            let mut report = result(applied, items);
+            report
+                .outputs
+                .retain(|(key, _)| *key != "actionable-notice");
             let summary = if url.is_empty() {
                 String::new()
             } else {

@@ -55,7 +55,7 @@ Inputs:
 - limits: `timeout`, `max-requests`, `max-tasks`, `budget-usd`;
 - applying: `output-repo`, `item-repo`, `apply-environment`,
   `apply-partial`, `apply-staged`, `require-safe-outputs-pat`,
-  `comment-target`, `issue`, `notify`, `status-comment`,
+  `comment-target`, `issue`, `notify`, `status-comment`, `status-comment-mode`,
   `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings`.
 
 `advisory` is off by default and requires the restricted event-review contract
@@ -100,6 +100,17 @@ The rendered report budget is 48,000 UTF-8 bytes and the total body budget is
 retained checked-outputs artifact. Noops do not become general publisher writes;
 notification opt-outs and blocked/missing-data exceptions are unchanged
 ([outcomes](workflow.md#what-the-apply-job-does-before-it-writes)).
+
+`status-comment` remains a numeric owned same-item comment ID, never an enum.
+`status-comment-mode` is separately validated as `edit` (default, one item status)
+or `add` (one run status, edited on completion/retry); a numeric ID takes precedence.
+With `notify: comment`, actionable outcomes update status and also add one
+run-keyed notice: checked `missing_data` with `data_type: "operator-question"`
+and nonblank reason, an unexpected checked refusal requiring correction/policy
+decision, or an applied reviewable result. Routine progress and retryable
+infrastructure failures stay status-only. See the [classification and caller
+contract](workflow.md#quiet-status-and-actionable-notices), including agent-board's
+separate controller integration and the prohibition on overwriting round claims.
 
 Not stable: `budget`, deprecated in favour of `budget-usd`;
 `fake-profile`, `expect-check-refusal` and

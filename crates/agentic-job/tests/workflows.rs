@@ -2744,7 +2744,9 @@ fn no_result_reports_keep_notification_opt_outs_and_fixed_targets() {
     );
     assert_eq!(
         status["env"]["NO_RESULT_REASON"].as_str(),
-        Some("${{ steps.ended.outputs.no-result-reason }}")
+        Some(
+            "${{ steps.ended.outputs.no-result-reason || needs.apply.outputs.actionable-reason }}"
+        )
     );
 }
 
@@ -2784,6 +2786,151 @@ fn optional_apply_token_admission_holds_the_pat_in_one_step() {
             .count(),
         1
     );
+}
+
+#[test]
+fn quiet_status_mode_and_actionable_signals_cross_workflow_boundaries() {
+    for file in ["policy.yml", "agentic-job.yml", "dispatch.yml"] {
+        let doc = definition(file);
+        assert_eq!(
+            doc["on"]["workflow_call"]["inputs"]["status-comment-mode"]["default"].as_str(),
+            Some("edit"),
+            "{file}"
+        );
+        assert!(workflow(file).contains("status-comment-mode: ${{ inputs.status-comment-mode"));
+    }
+    let policy = definition("policy.yml");
+    let validation = named_step(&policy, "Validate status placement");
+    for (mode, ok) in [
+        ("edit", true),
+        ("add", true),
+        ("", false),
+        ("42", false),
+        ("EDIT", false),
+        ("edit\nadd", false),
+        ("$(exit 0)", false),
+    ] {
+        let output = Command::new("bash")
+            .args(["-e", "-c", validation["run"].as_str().unwrap()])
+            .env("STATUS_COMMENT_MODE", mode)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), ok, "{mode}: {output:?}");
+    }
+    assert!(
+        workflow("policy.yml").contains("STATUS_COMMENT_MODE: ${{ inputs.status-comment-mode }}")
+    );
+    let apply = definition("apply.yml");
+    let status = named_step(&apply, "Edit the status comment");
+    let gate = expression(&status["env"]["ACTIONABLE_NOTICE"])
+        .replace("fromJSON(inputs.policy)", "policy")
+        .replace("fromJSON(inputs.check)", "check");
+    for (notify, staged, expected_refusal, decision, result, want) in [
+        ("comment", "false", "false", "", "", ""),
+        ("comment", "false", "false", "true", "", "decision"),
+        ("comment", "false", "true", "true", "", ""),
+        ("comment", "false", "false", "", "review", "review"),
+        (
+            "comment",
+            "false",
+            "false",
+            "",
+            "operator-question",
+            "operator-question",
+        ),
+        ("none", "false", "false", "true", "review", ""),
+        ("reaction", "false", "false", "", "operator-question", ""),
+        ("comment", "true", "false", "true", "review", ""),
+    ] {
+        assert_eq!(
+            evaluate(
+                &gate,
+                &[
+                    ("policy.notify", Expr::text(notify)),
+                    ("policy.apply-staged", Expr::text(staged)),
+                    ("policy.expect-check-refusal", Expr::text(expected_refusal)),
+                    ("check.outputs.decision-required", Expr::text(decision)),
+                    ("needs.apply.outputs.actionable-notice", Expr::text(result)),
+                ]
+            )
+            .render(),
+            want
+        );
+    }
+    let check = definition("check.yml");
+    assert_eq!(
+        check["on"]["workflow_call"]["outputs"]["decision-required"]["value"].as_str(),
+        Some("${{ jobs.check.outputs.decision-required }}")
+    );
+    let refusal = named_step(&check, "Show why check refused the outputs");
+    assert!(
+        refusal["run"]
+            .as_str()
+            .unwrap()
+            .contains(".ok == false and (.errors | type == \"array\" and length > 0 and all(.[]; type == \"string\"))")
+    );
+    assert_eq!(
+        apply["jobs"]["apply"]["outputs"]["actionable-notice"].as_str(),
+        Some("${{ steps.result.outputs.actionable-notice }}")
+    );
+}
+
+#[test]
+fn refusal_notice_signal_distinguishes_checked_denials_from_infrastructure() {
+    let doc = definition("check.yml");
+    let step = named_step(&doc, "Show why check refused the outputs");
+    for (collector, checker, want, exit_code) in [
+        (
+            Some(r#"{"errors":["type disabled"],"items":[]}"#),
+            None,
+            true,
+            0,
+        ),
+        (
+            Some(r#"{"errors":[],"items":[]}"#),
+            Some(r#"{"ok":false,"errors":["protected file"]}"#),
+            true,
+            0,
+        ),
+        (
+            Some(r#"{"errors":[],"items":[]}"#),
+            Some(r#"{"ok":true,"errors":[]}"#),
+            false,
+            0,
+        ),
+        (Some(r#"{"errors":[],"items":[]}"#), None, false, 0),
+        (None, None, false, 0),
+        (Some("not JSON"), None, false, 2),
+        (Some(r#"{"errors":[true]}"#), None, false, 2),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(BIN, dir.path().join("agentic-job")).unwrap();
+        for (name, text) in [("agent_output.json", collector), ("report.json", checker)] {
+            if let Some(text) = text {
+                std::fs::write(dir.path().join(name), text).unwrap();
+            }
+        }
+        let output_path = dir.path().join("output");
+        std::fs::write(&output_path, "").unwrap();
+        let output = Command::new("bash")
+            .args(["-e", "-c", step["run"].as_str().unwrap()])
+            .env("JOB_DIR", dir.path())
+            .env("GH_AW_TMP", dir.path())
+            .env("GITHUB_OUTPUT", &output_path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(exit_code),
+            "collector={collector:?}, check={checker:?}: {output:?}"
+        );
+        let written = std::fs::read_to_string(output_path).unwrap();
+        assert_eq!(
+            written.contains("decision-required=true"),
+            want,
+            "collector={collector:?}, check={checker:?}: {written}"
+        );
+    }
 }
 
 #[test]
@@ -3403,10 +3550,11 @@ fn refusals_reach_the_conclusion_comment() {
             "{phase}: {shown:?}"
         );
         let reasons = std::fs::read_to_string(&reasons).unwrap();
+        assert!(reasons.lines().any(|line| line == "decision-required=true"));
         let reason = reasons
-            .strip_prefix("reason=")
-            .and_then(|reason| reason.strip_suffix('\n'))
-            .filter(|reason| !reason.is_empty() && !reason.contains('\n'))
+            .lines()
+            .find_map(|line| line.strip_prefix("reason="))
+            .filter(|reason| !reason.is_empty())
             .unwrap_or_else(|| panic!("{phase}: {reasons:?}"));
         let output = dir.path().join("step-output");
         let ended = run_step(
@@ -6831,6 +6979,7 @@ fn dispatch_takes_only_its_named_inputs() {
             "item-repo",
             "kind",
             "status-comment",
+            "status-comment-mode",
             "session",
             "idle-minutes",
             "runner"

@@ -306,6 +306,10 @@ on:
           Its opening hidden-comment lines are kept. Empty for the marked status comment
         type: string
         default: ""
+      status-comment-mode:
+        description: "Status placement: edit one item status (default), or add one status per run; numeric status-comment still takes precedence"
+        type: string
+        default: edit
       title-prefix:
         description: Put before the title of a pull request or an issue the run opens
         type: string
@@ -424,6 +428,9 @@ on:
       status-comment:
         description: The `status-comment` input, which conclude edits too
         value: ${{ jobs.policy.outputs.status-comment }}
+      status-comment-mode:
+        description: Validated status placement, edit or add
+        value: ${{ jobs.policy.outputs.status-comment-mode }}
       notified:
         description: "`true` when the notify job ran, failed or not, so that conclude reports how the run ended"
         value: ${{ jobs.notify.result != 'skipped' }}
@@ -507,6 +514,7 @@ jobs:
       event: ${{ inputs.event }}
       notify: ${{ inputs.notify }}
       status-comment: ${{ inputs.status-comment }}
+      status-comment-mode: ${{ inputs.status-comment-mode }}
     steps:
       # Outside the workspace, which the checkout below empties.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -540,6 +548,11 @@ jobs:
           elif [ "$EVENT/$REVIEW" = false/false ] && [ -z "$TASK_ARTIFACT" ]; then
             [ -n "$TASK" ] || { echo '::error::an agent run needs a task; an empty one is usually a job output the runner dropped because the secret masker changed it: pass the task as task-artifact'; exit 1; }
           fi
+      - name: Validate status placement
+        env:
+          STATUS_COMMENT_MODE: ${{ inputs.status-comment-mode }}
+        run: |
+          case "$STATUS_COMMENT_MODE" in edit|add) ;; *) echo '::error::status-comment-mode must be edit or add'; exit 1 ;; esac
       # The calling repository, for its bounds file.
       # The agent job checks out the same commit (the `ref` output), for
       # the setup script the configuration names.
@@ -1134,6 +1147,7 @@ jobs:
           APPLY_ROLE_BINDINGS: ${{ inputs.role-bindings }}
           STATUS_TOKEN: ${{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT || inputs.role-bindings != '' && secrets.STATUS_TOKEN || '' }}
           STATUS_COMMENT: ${{ inputs.status-comment }}
+          STATUS_COMMENT_MODE: ${{ inputs.status-comment-mode }}
         run: |
           chmod +x notify-bin/agentic-job
           notify-bin/agentic-job status | tee -a "$GITHUB_OUTPUT"

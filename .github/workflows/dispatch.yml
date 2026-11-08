@@ -48,6 +48,9 @@ on:
       status-comment:
         type: string
         default: ""
+      status-comment-mode:
+        type: string
+        default: edit
       session:
         type: boolean
         default: false
@@ -88,6 +91,11 @@ on:
           second comment; ignored unless the status credential wrote it on that item
         type: string
         default: ""
+      status-comment-mode:
+        description: Edit one item status, or add one status per run
+        type: choice
+        options: [edit, add]
+        default: edit
       session:
         description: >-
           After the task's turn, wait for the operator's prompts until idle or ended (docs/interactive.md);
@@ -246,5 +254,6 @@ jobs:
       # event's item (e2e-event), not on a dispatched comment-target.
       notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}
       status-comment: ${{ inputs.status-comment }}
+      status-comment-mode: ${{ inputs.status-comment-mode || 'edit' }}
       artifact-prefix: dispatch-${{ inputs.kind }}-
       branch-prefix: dispatch/${{ inputs.kind }}/

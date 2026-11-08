@@ -131,6 +131,10 @@ pub struct Status {
     pub body: String,
     /// The caller's comment for the item, by id.
     pub comment: Option<String>,
+    /// `add` keeps a separate status per run, still edited at completion.
+    pub add: bool,
+    /// Fixed classification from checked outputs or check's refusal verdict.
+    pub notice: bool,
 }
 
 impl Status {
@@ -144,6 +148,19 @@ impl Status {
         );
         let run = get("GITHUB_RUN_ID").unwrap_or_default();
         ensure!(is_number(&run), "status requires a numeric Actions run ID");
+        let mode = get("STATUS_COMMENT_MODE").unwrap_or_else(|| "edit".into());
+        ensure!(
+            matches!(mode.as_str(), "edit" | "add"),
+            "status-comment-mode must be edit or add"
+        );
+        let notice = get("ACTIONABLE_NOTICE").unwrap_or_default();
+        ensure!(
+            matches!(
+                notice.as_str(),
+                "" | "operator-question" | "decision" | "review"
+            ),
+            "invalid actionable notice classification"
+        );
         let body = body(
             &get("TEXT").unwrap_or_default(),
             get("NO_RESULT_REASON").as_deref(),
@@ -156,6 +173,8 @@ impl Status {
             run,
             body,
             comment: get("STATUS_COMMENT"),
+            add: mode == "add",
+            notice: !notice.is_empty(),
         })
     }
 
@@ -184,9 +203,14 @@ impl Status {
             let comments = comments.as_array().context("the comments are not a list")?;
             let found = comments.iter().find(|comment| {
                 github.owns(super::roles::Role::Status, comment, Some(author))
-                    && comment["body"]
-                        .as_str()
-                        .is_some_and(|body| body.ends_with(&format!("\n\n{MARKER}")))
+                    && comment["body"].as_str().is_some_and(|body| {
+                        body.ends_with(&format!("\n\n{MARKER}"))
+                            && (!self.add
+                                || body.contains(&format!(
+                                    "\n\n<!-- agentic-job-run: {} -->",
+                                    self.run
+                                )))
+                    })
             });
             if let Some(found) = found {
                 return self.edit(github, found);
@@ -200,6 +224,58 @@ impl Status {
             }
         }
         bail!("status comment lookup exceeded {MAX_PAGES} pages; refusing to create a duplicate")
+    }
+
+    /// Always update status first. A notice cannot become a status target, and
+    /// retries find only an owned exact run marker on this fixed item. The
+    /// workflow serializes this lookup/write with the status upsert.
+    pub fn publish(
+        &self,
+        github: &Github,
+        author: &str,
+        summary: &mut dyn FnMut(&str),
+    ) -> Result<Value> {
+        let status = self.upsert(github, author, summary)?;
+        if !self.notice || newer(status["body"].as_str().unwrap_or_default(), &self.run) {
+            return Ok(status);
+        }
+        let marker = format!("<!-- agentic-job-notice: {} -->", self.run);
+        for page in 1..=MAX_PAGES {
+            let comments = github.send(
+                "GET",
+                &format!(
+                    "/repos/{}/issues/{}/comments?per_page={PER_PAGE}&page={page}",
+                    self.repo, self.item
+                ),
+                None,
+            )?;
+            let comments = comments.as_array().context("the comments are not a list")?;
+            if comments.iter().any(|comment| {
+                github.owns(super::roles::Role::Status, comment, Some(author))
+                    && comment["body"].as_str().is_some_and(|body| {
+                        newer(body, &self.run) || body.ends_with(&format!("\n\n{marker}"))
+                    })
+            }) {
+                return Ok(status);
+            }
+            if comments.len() < PER_PAGE {
+                let body = format!(
+                    "{}\n\n{marker}",
+                    self.body
+                        .strip_suffix(MARKER)
+                        .context("status body has no marker")?
+                        .trim_end()
+                );
+                check_body(&body)?;
+                github.send(
+                    "POST",
+                    &format!("/repos/{}/issues/{}/comments", self.repo, self.item),
+                    Some(&json!({"body": body})),
+                )?;
+                return Ok(status);
+            }
+        }
+        bail!("actionable notice lookup exceeded {MAX_PAGES} pages; refusing to create a duplicate")
     }
 
     /// The caller's comment for the item (`STATUS_COMMENT`), when it is
@@ -308,7 +384,7 @@ pub fn run(_args: &Args) -> Result<Exit> {
     } else {
         JOB_TOKEN_AUTHOR.to_owned()
     };
-    let comment = status.upsert(&github, &author, &mut summary)?;
+    let comment = status.publish(&github, &author, &mut summary)?;
     if let Some(id) = comment["id"].as_u64() {
         println!("id={id}");
     }
@@ -746,6 +822,158 @@ mod tests {
     }
 
     #[test]
+    fn full_runs_and_conclude_retries_keep_status_and_notices_separate() {
+        for (add, actionable) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut comments: Vec<Value> = Vec::new();
+            for run in ["100", "101"] {
+                for phase in ["started", "finished", "finished"] {
+                    let mut routes = BTreeMap::from([
+                        (format!("{LIST}1"), (200, json!(comments))),
+                        (POST.into(), (201, json!({"id": comments.len() + 1}))),
+                    ]);
+                    for comment in &comments {
+                        let id = comment["id"].as_u64().unwrap();
+                        routes.insert(
+                            format!("PATCH /repos/o/r/issues/comments/{id}"),
+                            (200, json!({"id": id})),
+                        );
+                    }
+                    let (github, requests) = forge(routes);
+                    let mut update = status(run, "");
+                    update.add = add;
+                    update.notice = actionable && phase == "finished";
+                    update.body = body(phase, None, None, run).unwrap();
+                    update
+                        .publish(&github, JOB_TOKEN_AUTHOR, &mut |_| {})
+                        .unwrap();
+                    for request in requests.try_iter().filter(|r| !r.line.starts_with("GET ")) {
+                        let text = request.body["body"].as_str().unwrap();
+                        if request.line.starts_with("POST ") {
+                            comments.push(comment(
+                                comments.len() as u64 + 1,
+                                JOB_TOKEN_AUTHOR,
+                                text,
+                            ));
+                        } else {
+                            let id: u64 = request
+                                .line
+                                .split("/comments/")
+                                .nth(1)
+                                .unwrap()
+                                .split(' ')
+                                .next()
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            comments.iter_mut().find(|c| c["id"] == id).unwrap()["body"] =
+                                json!(text);
+                        }
+                    }
+                }
+            }
+            let statuses: Vec<_> = comments
+                .iter()
+                .filter(|c| c["body"].as_str().unwrap().ends_with(MARKER))
+                .collect();
+            assert_eq!(statuses.len(), if add { 2 } else { 1 });
+            assert!(
+                statuses
+                    .iter()
+                    .all(|c| c["body"].as_str().unwrap().starts_with("finished"))
+            );
+            assert_eq!(
+                comments.len() - statuses.len(),
+                if actionable { 2 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn notices_require_owned_markers_and_bounded_lookup_and_skip_stale_runs() {
+        let notice = "done\n\n<!-- agentic-job-notice: 100 -->";
+        for (login, stale, full, posts, ok) in [
+            (JOB_TOKEN_AUTHOR, false, false, 0, true),
+            ("mallory", false, false, 1, true),
+            ("mallory", true, false, 0, true),
+            ("mallory", false, true, 0, false),
+        ] {
+            let current = comment(
+                5,
+                JOB_TOKEN_AUTHOR,
+                &written(if stale { "101" } else { "100" }),
+            );
+            let mut routes = BTreeMap::from([
+                (NAMED.into(), (200, current)),
+                (
+                    "PATCH /repos/o/r/issues/comments/5".into(),
+                    (200, json!({"id": 5})),
+                ),
+                (POST.into(), (201, json!({"id": 6}))),
+            ]);
+            for page in 1..=MAX_PAGES {
+                routes.insert(
+                    format!("{LIST}{page}"),
+                    (
+                        200,
+                        if full {
+                            json!(vec![comment(6, login, notice); PER_PAGE])
+                        } else {
+                            json!([comment(6, login, notice)])
+                        },
+                    ),
+                );
+            }
+            let (github, requests) = forge(routes);
+            let mut update = status("100", "5");
+            update.notice = true;
+            assert_eq!(
+                update
+                    .publish(&github, JOB_TOKEN_AUTHOR, &mut |_| {})
+                    .is_ok(),
+                ok
+            );
+            let requests: Vec<_> = requests.try_iter().collect();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.line.starts_with("POST "))
+                    .count(),
+                posts
+            );
+            assert!(requests.len() <= MAX_PAGES as usize + 2);
+        }
+    }
+
+    #[test]
+    fn add_mode_keeps_run_status_but_does_not_page_after_a_newer_run() {
+        let old = comment(5, JOB_TOKEN_AUTHOR, &written("100"));
+        let newer = comment(6, JOB_TOKEN_AUTHOR, &written("101"));
+        let (github, requests) = forge(BTreeMap::from([
+            (format!("{LIST}1"), (200, json!([old, newer]))),
+            (
+                "PATCH /repos/o/r/issues/comments/5".into(),
+                (200, json!({"id": 5})),
+            ),
+        ]));
+        let mut update = status("100", "");
+        update.add = true;
+        update.notice = true;
+        update
+            .publish(&github, JOB_TOKEN_AUTHOR, &mut |_| {})
+            .unwrap();
+        let writes: Vec<_> = requests
+            .try_iter()
+            .filter(|r| !r.line.starts_with("GET "))
+            .collect();
+        assert_eq!(writes.len(), 1);
+        assert!(
+            writes[0]
+                .line
+                .starts_with("PATCH /repos/o/r/issues/comments/5")
+        );
+    }
+
+    #[test]
     fn total_body_budget_includes_preserved_markers() {
         let overhead = body("", None, Some("usd=1 partial=false"), "100")
             .unwrap()
@@ -784,6 +1012,10 @@ mod tests {
             ("REPO", "o/r/x", "caller repository"),
             ("GITHUB_RUN_ID", "1e3", "numeric Actions run ID"),
             ("NO_RESULT_REASON", "> not JSON", "not a JSON string"),
+            ("STATUS_COMMENT_MODE", "EDIT", "must be edit or add"),
+            ("STATUS_COMMENT_MODE", "5", "must be edit or add"),
+            ("ACTIONABLE_NOTICE", "true", "invalid actionable"),
+            ("ACTIONABLE_NOTICE", "review\nid=5", "invalid actionable"),
         ] {
             let env = BTreeMap::from([
                 ("REPO", "o/r"),

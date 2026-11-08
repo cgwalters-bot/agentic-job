@@ -321,6 +321,10 @@ on:
           Its opening hidden-comment lines are kept. Empty for the marked status comment
         type: string
         default: ""
+      status-comment-mode:
+        description: "Status placement: edit one item status (default), or add one status per run; numeric status-comment still takes precedence"
+        type: string
+        default: edit
       title-prefix:
         description: Put before the title of a pull request or an issue the run opens
         type: string
@@ -505,6 +509,7 @@ jobs:
       event: ${{ inputs.event }}
       notify: ${{ inputs.notify }}
       status-comment: ${{ inputs.status-comment }}
+      status-comment-mode: ${{ inputs.status-comment-mode }}
       title-prefix: ${{ inputs.title-prefix }}
       branch-prefix: ${{ inputs.branch-prefix }}
       artifact-prefix: ${{ inputs.artifact-prefix }}

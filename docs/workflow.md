@@ -145,7 +145,8 @@ the run link in the same comment. The rendered report has a 48,000-byte budget;
 overflow is explicitly disclosed with a link to the retained checked-outputs
 artifact, not silently discarded. Noops remain no-write requests: only this
 existing, opted-in status path publishes their reason on the fixed policy item.
-The same reason remains in the run summary; apply posts no separate notice.
+The same reason remains in the run summary. Routine progress, no-change reports,
+generic missing data/tools and retryable infrastructure failures add no notice.
 The shipped dispatch caller opts in except for reviews, which remain silent.
 Status comments prefer the explicitly supplied `SAFE_OUTPUTS_PAT`, including
 same-repository items, in notify and conclude only. Without it, same-repository
@@ -195,6 +196,59 @@ GitHub may replace a pending job in that concurrency group; notifications are
 best-effort, not a run gate. Existing unmarked comments are not deleted or migrated.
 Only the workflow's pinned source is checked out in these write-capable jobs,
 with persisted credentials disabled; no agent-produced code is executed.
+
+### Quiet status and actionable notices
+
+Repeated routine comments bury questions and results that need a person (#3057).
+`status-comment-mode: edit` (the default) keeps the item-scoped status upsert for
+started, finished, no-change, blocked and partial outcomes. It creates status only
+when absent. `add` explicitly requests one status per Actions run, still edited
+at completion and on retries. This separate validated enum does not change the
+numeric `status-comment` input: an owned, same-item ID takes precedence in both
+modes. Reusable, composed policy/apply and dispatch callers carry the same mode.
+Notifications remain off by default (`notify: none`).
+
+With `notify: comment`, conclude **also updates status** before adding at most one
+actionable notice per run and item. Classification is deterministic:
+
+- An accepted `missing_data` request with `data_type: "operator-question"` and
+  a nonblank `reason` is an explicit question to the operator. Its reason is the
+  question; context and alternatives retain their usual meaning. Other data types,
+  `missing_tool` and `noop` do not page anyone, regardless of their prose.
+- A check-generated report with `ok: false` and a nonempty `errors` array requires
+  a decision about correcting the proposal or changing caller policy. Check exports
+  a separate `decision-required` boolean; a nonempty string-error array from the
+  trusted collector is also a refusal, including count/type denials before check.
+  Diagnostic wording is not classification.
+  Expected-refusal trials do not notify. A crash, network failure, timeout or failed
+  handler without that verdict is not a decision-requiring refusal.
+- An actually published pull request, branch push, issue or discussion is a result
+  to review (including a partial result). Apply's receipts, including already-applied
+  receipts on retry, supply the signal. A comment alone is a routine report, not a
+  second notice. A staged trial adds no actionable notice.
+
+The existing checked `data_type` field carries only question intent, not a comment
+ID, repository or target. Collector limits and check still apply. The result reader
+is token-free; only fixed enum outputs reach the pinned status binary. Arbitrary
+report prose cannot choose a classification or redirect a write. Existing
+missing-data status exceptions for `none`/`reaction` remain status-only.
+
+To prevent retries from paging twice, notices end with an owned
+`agentic-job-notice: RUN_ID` marker distinct from the status marker. The lookup
+uses the same fixed item, identity and 20-page/100-comment bound as status; it
+fails closed on exhaustion. Copied markers from another author cannot suppress a
+notice. Status and notice writes share the item concurrency group; a superseded
+run adds no notice. Body budgets, caller-marker provenance exclusions, pinned
+policy-binary validation and status-token isolation remain unchanged. No code from
+the agent runs with notification credentials.
+
+For [agent-board#691](https://github.com/cgwalters-forge/agent-board/issues/691) and
+[#693](https://github.com/cgwalters-forge/agent-board/issues/693), the existing owned
+comment-ID interface is the integration point: the controller can pass a dedicated
+combined status comment's ID. **Do not pass a controller round-claim comment as
+`status-comment`: its visible claim text would be overwritten.** Ownership checks
+are not a claim-record detector. Controller caller integration is separate; this
+change does not alter agent-board or infer IDs from its markers.
 
 `policy` and `check` have `contents` and `actions` read; `agent` has `contents`,
 `issues`, `pull-requests` and `actions` read, not repository write

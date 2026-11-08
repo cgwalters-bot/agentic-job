@@ -104,6 +104,8 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       pull-request: ${{ steps.publish.outputs.created_pr_number || steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
       result-url: ${{ steps.result.outputs.result-url }}
+      actionable-notice: ${{ steps.result.outputs.actionable-notice }}
+      actionable-reason: ${{ steps.result.outputs.actionable-reason }}
       # `true` when the run handed back only noop, missing_tool or missing_data, for conclude.
       no-result: ${{ steps.result.outputs.no-result }}
       missing-data: ${{ steps.result.outputs.missing-data }}
@@ -1229,9 +1231,13 @@ jobs:
           STATUS_TOKEN: ${{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT || inputs.role-bindings != '' && secrets.STATUS_TOKEN || '' }}
           # Only with `notify: comment`: a missing-data status otherwise keeps to the marked comment.
           STATUS_COMMENT: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).status-comment || '' }}
+          STATUS_COMMENT_MODE: ${{ fromJSON(inputs.policy).status-comment-mode || 'edit' }}
+          # Check's refusal output exists only for a refused verdict, not an
+          # infrastructure failure. Expected refusals and staged trials stay quiet.
+          ACTIONABLE_NOTICE: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).apply-staged != 'true' && (fromJSON(inputs.check).outputs.decision-required == 'true' && fromJSON(inputs.policy).expect-check-refusal != 'true' && 'decision' || needs.apply.outputs.actionable-notice) || '' }}
           TEXT: ${{ steps.ended.outputs.text }}
           COST: ${{ fromJSON(inputs.agent).outputs.cost }}
-          NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason }}
+          NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason || needs.apply.outputs.actionable-reason }}
         run: |
           chmod +x "$RUNNER_TEMP/conclude-binary/agentic-job"
           "$RUNNER_TEMP/conclude-binary/agentic-job" status

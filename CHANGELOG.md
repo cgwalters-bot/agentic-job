@@ -24,6 +24,13 @@ says what a caller may rely on across versions.
 - The README is now a short introduction linking to the topic guides;
   the getting-started walkthrough lives in `docs/try-it.md` (#3375).
 
+- Quiet notifications retain one item status by default and also add one
+  retry-idempotent notice for an explicit checked operator question, unexpected
+  policy refusal or published reviewable result. The separate validated
+  `status-comment-mode: edit | add` input defaults to `edit`; numeric
+  `status-comment` IDs keep their meaning. Routine and infrastructure-only
+  outcomes stay status-only; notification opt-outs are unchanged (part of #3057).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

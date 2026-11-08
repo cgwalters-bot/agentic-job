@@ -34,6 +34,9 @@ on:
       refusal:
         description: Bounded refusal diagnostic, not authorization to apply
         value: ${{ jobs.check.outputs.refusal }}
+      decision-required:
+        description: True only for a checked policy refusal, not an infrastructure failure
+        value: ${{ jobs.check.outputs.decision-required }}
       has-patch:
         description: Whether the trusted checker report contains a patch
         value: ${{ jobs.check.outputs.has-patch }}
@@ -110,6 +113,7 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
       refusal: ${{ steps.refusal.outputs.reason }}
+      decision-required: ${{ steps.refusal.outputs.decision-required }}
       has-patch: ${{ steps.checked.outputs.has-patch }}
       verdict: ${{ steps.verdict.outputs.verdict }}
     steps:
@@ -243,6 +247,10 @@ jobs:
         if: ${{ failure() || steps.checked.outputs.refused == 'true' }}
         run: |
           "$JOB_DIR/agentic-job" diagnostics refusals "$GH_AW_TMP" --output "$GITHUB_OUTPUT"
+          if jq -e '.ok == false and (.errors | type == "array" and length > 0 and all(.[]; type == "string"))' "$GH_AW_TMP/report.json" > /dev/null 2>&1 ||
+             jq -e '.errors | type == "array" and length > 0 and all(.[]; type == "string")' "$GH_AW_TMP/agent_output.json" > /dev/null 2>&1; then
+            echo decision-required=true >> "$GITHUB_OUTPUT"
+          fi
       # Apply's handlers get the requests check accepted, and the patches
       # it checked by the names it reported. The secondary pull request's
       # goes apart, in secondary/, where neither the run's own trial nor a
