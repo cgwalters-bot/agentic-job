@@ -209,6 +209,13 @@ output ceiling `Max` of two. `Write` is the agent writing one more, a `comment`
 or an `invalid` one, while `phase` is `session`. The upload for request `n` is
 `SubSeq(file, 1, n)`: it cannot change, since `file` only grows.
 
+That assumes only `run` uploads to the run, which rested on the removed
+sandbox user. Since [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)
+the agent is the runner's user and could upload any content under that name,
+so the model no longer matches a session run. It is kept unchanged as the
+design for a replacement premise, and its results do not hold today
+([session.md](session.md#writes-during-a-session-specified-not-built)).
+
 `InSession` is one dispatch of tracker's session apply workflow, for any
 request, at any time, during the session or after it, any number of times:
 whether the operator confirmed it does not matter to these properties. It
