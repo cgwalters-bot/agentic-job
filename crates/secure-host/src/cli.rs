@@ -143,7 +143,9 @@ impl Command {
                 egress_image,
             } => setup::run_host(config, egress_image.as_deref()).map(|()| true),
             Self::Check(args) | Self::Sandbox(Sandbox::Check(args)) => {
-                check::run(args, Host::parse)
+                // This binary has no retryable exit state: an unreachable
+                // control fails as any other, its log line saying why.
+                check::run(args, Host::parse).map(|verdict| verdict == check::Verdict::Passed)
             }
             Self::Config(args) => compose::run(args).map(|()| true),
             Self::Image { config } => Ok(image::run(config)

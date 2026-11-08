@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `sandbox check` retries its read of an outside host under
+  `egress.write-policy` (`write-policy-read`) up to three times with a
+  short backoff, logs why each try failed (DNS, connect, timeout, TLS or
+  HTTP status), and exits 4, the retryable not-started state, when that
+  read is all that failed (#3225).
+
 - `[session] nudges = true` (off by default) sends the agent two messages
   on the clock: halfway through its timeout, to checkpoint and plan, and
   at five sixths of it, to finish and hand back. They go the way updates

@@ -67,9 +67,19 @@ admits a read of and refuses a POST to. Where there is none the read is
 skipped with a note, and a plain-HTTP POST to one of them outside the
 domain allowlist, which the proxy refuses, shows only that the proxy
 holds the runner's user; with no such host the POST is skipped too. The
-check adds no destination of its own. Images up to secure-host v0.6.9
-still read example.com, so until the pin moves past them secure-host's
-own check fails under an allowlist without it. The probes of
+check adds no destination of its own. The read, the one control that
+leaves the host, tries three times, 10 seconds each, waiting 5 then 10
+seconds between tries, and notes each failed try's class (`dns`,
+`connect`, `timeout`, `tls`, `http STATUS`, ...) with curl's message, so
+an outage of the host it reads does not fail a run that would have
+worked (#3225). When it still fails and nothing else does, `agentic-job
+sandbox check` says so and exits 4, the retryable not-started state,
+instead of 1; the `secure-host` binary exits 1 either way. A direct path
+out that this host broke fails the same way, so a retrier must bound its
+retries. The run action's `exit` and `failure-class` outputs do not carry
+this exit state yet. Images up to secure-host v0.6.9 still read
+example.com, so until the pin moves past them secure-host's own check
+fails under an allowlist without it. The probes of
 the egress policy, the tailnet and containers were the sandbox user's
 and went with it. `[host.check] control-url`, `fetch-repo`,
 `allow-sockets` and `allow-tcp-ports` are read only by images from

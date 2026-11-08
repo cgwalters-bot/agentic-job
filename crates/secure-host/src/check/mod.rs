@@ -92,6 +92,24 @@ pub struct Outcome {
 #[derive(Debug, Default)]
 pub struct Report {
     outcomes: Vec<Outcome>,
+    /// The ids of controls that failed only to reach a host outside this
+    /// one, after their retries: see [`Verdict::Unreachable`].
+    unreachable: BTreeSet<String>,
+}
+
+/// What a check came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Passed,
+    /// A probe or control came out wrong.
+    Failed,
+    /// Every failure was a control that could not reach a host outside
+    /// this one: the probes it stands behind prove nothing, so the check
+    /// still fails, but likely for the network's sake (a forge's or CDN's
+    /// outage), which a later run may not meet. A broken direct path out
+    /// of this host fails the same way, so a retrier must bound its
+    /// retries.
+    Unreachable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +137,15 @@ impl Report {
         });
     }
 
+    /// A control that must reach a host outside this one, which it did
+    /// or did not.
+    fn expect_reach(&mut self, id: &str, what: impl Into<String>, reached: bool) {
+        self.expect(Want::Succeed, id, what, reached);
+        if !reached {
+            self.unreachable.insert(id.to_owned());
+        }
+    }
+
     fn note(&self, text: &str) {
         println!("note: {}", crate::workflow_commands::escaped(text));
     }
@@ -139,11 +166,22 @@ impl Report {
     pub fn passed(&self) -> bool {
         self.outcomes.iter().all(|outcome| outcome.passed)
     }
+
+    pub fn verdict(&self) -> Verdict {
+        let failures = self.failures();
+        if failures.is_empty() {
+            Verdict::Passed
+        } else if failures.iter().all(|id| self.unreachable.contains(*id)) {
+            Verdict::Unreachable
+        } else {
+            Verdict::Failed
+        }
+    }
 }
 
 /// `sandbox check`, with root's copy of the configuration read by
-/// `parse`: whether the probes passed, now or as this job's record says.
-pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> Result<bool> {
+/// `parse`: what the probes came to, now or as this job's record says.
+pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> Result<Verdict> {
     ensure!(
         !host::is_root(),
         "`sandbox check` runs as the runner's user, whose hardening it probes; it has root do the rest through the helper"
@@ -154,9 +192,11 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
         .context("setup (`secure-host setup`, `agentic-job sandbox setup`) writes this file")?;
     let config = parse(&text).with_context(|| format!("in {}", path.display()))?;
     let record = job_record(record::binary, |name| std::env::var(name).ok(), &text);
+    let mut verdict = Verdict::Passed;
     let checked = once(args.mode(), record.as_ref(), || {
         let started = Instant::now();
         let report = probes(&config)?;
+        verdict = report.verdict();
         let failures = report.failures();
         if failures.is_empty() {
             println!(
@@ -172,6 +212,11 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
             ids.len(),
             ids.join(", ")
         );
+        if verdict == Verdict::Unreachable {
+            eprintln!(
+                "error: only controls that reach a host outside this one failed, after their retries: likely an outage of that host (an infrastructure failure), which a later run may not meet; the notes above say how each try failed"
+            );
+        }
         Ok(false)
     })?;
     Ok(match checked {
@@ -180,9 +225,9 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
                 "The sandbox checks passed earlier in this job, against this configuration ({}): not repeated",
                 file.display()
             );
-            true
+            Verdict::Passed
         }
-        Checked::Probed { passed } => passed,
+        Checked::Probed { .. } => verdict,
     })
 }
 
@@ -441,6 +486,28 @@ mod tests {
             report.failures().into_iter().collect::<Vec<_>>(),
             ["cron", "cron-control"]
         );
+    }
+
+    /// Only a check whose every failure is an unreachable outside host is
+    /// the network's; any other failure beside one is still the host's.
+    #[test]
+    fn only_unreachable_controls_make_an_infrastructure_failure() {
+        // (sudo-control reached, cron came out right, outside host reached)
+        let cases = [
+            ((true, true, true), Verdict::Passed),
+            ((true, true, false), Verdict::Unreachable),
+            ((true, false, true), Verdict::Failed),
+            ((true, false, false), Verdict::Failed),
+            ((false, true, false), Verdict::Failed),
+        ];
+        for ((sudo, cron, reached), verdict) in cases {
+            let mut report = Report::default();
+            report.expect(Want::Succeed, "sudo-control", "runner has sudo", sudo);
+            report.expect(Want::Fail, "cron", "no crontab", !cron);
+            report.expect_reach("read-control", "runner reads a host", reached);
+            assert_eq!(report.verdict(), verdict, "{sudo} {cron} {reached}");
+            assert_eq!(report.passed(), verdict == Verdict::Passed);
+        }
     }
 
     #[test]

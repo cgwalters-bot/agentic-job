@@ -1,11 +1,14 @@
 //! The probes of the runner's network: the cloud metadata service, and
 //! the egress proxy's write rules under `egress.write-policy`.
 
+use std::process::Stdio;
+use std::time::Duration;
+
 use anyhow::Result;
 
 use super::{Checker, Want};
-use crate::egress;
 use crate::proxy::policy::{Policy, Request};
+use crate::{egress, host};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
@@ -74,12 +77,17 @@ impl Checker<'_> {
         let runner = self.runner.name.clone();
         let (read, post) = control_urls(&egress::installed_policy()?.with_runner_writes()?);
         if let Some(read) = read {
-            let argv = direct(&["--fail", &read]);
-            self.report.expect(
-                Want::Succeed,
+            let argv = control_request(&read);
+            let report = &self.report;
+            let reached = retried(
+                std::thread::sleep,
+                || try_reach(&argv),
+                |line| report.note(&format!("write-policy-read: {line}")),
+            );
+            self.report.expect_reach(
                 "write-policy-read",
                 format!("{runner} reads {read} with no proxy set (egress.write-policy)"),
-                super::runner_reaches(&argv),
+                reached,
             );
         } else {
             self.report.note(&format!(
@@ -139,11 +147,96 @@ fn control_host(policy: &Policy) -> Option<&'static str> {
     })
 }
 
-const CURL: &[&str] = &["curl", "-sS", "-m", "30", "-o", "/dev/null"];
+const CURL: &[&str] = &["curl", "-sS", "-o", "/dev/null"];
+
+const NO_PROXY: &[&str] = &["--noproxy", "*"];
 
 /// Not through the egress proxy, whatever the environment says.
 fn direct<'a>(args: &[&'a str]) -> Vec<&'a str> {
-    [CURL, &["--noproxy", "*"], args].concat()
+    [CURL, &["-m", "30"], NO_PROXY, args].concat()
+}
+
+/// How many times a control that reaches a host outside this one tries
+/// before it fails the check: a forge's or CDN's brief outage made such
+/// controls fail whole runs that would have worked (agentic-job#3225).
+const CONTROL_TRIES: u32 = 3;
+
+/// The wait before the first retry, doubled before each one after it.
+const CONTROL_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Each try's limit in seconds: with the waits, 45 seconds at most in all.
+const CONTROL_MAX_TIME: &str = "10";
+
+/// The most of curl's error message a failed try logs.
+const MAX_DETAIL: usize = 200;
+
+/// A control's read of `url`, not through the egress proxy, printing the
+/// HTTP status, which names an origin's failure in the log.
+fn control_request(url: &str) -> Vec<&str> {
+    let limit = ["-m", CONTROL_MAX_TIME, "-w", "%{http_code}"];
+    [CURL, &limit, NO_PROXY, &["--fail", url]].concat()
+}
+
+/// Whether `attempt` succeeded within [`CONTROL_TRIES`], `sleep`ing a
+/// growing backoff between tries and `log`ging why each failed one did.
+fn retried(
+    mut sleep: impl FnMut(Duration),
+    mut attempt: impl FnMut() -> Result<(), String>,
+    mut log: impl FnMut(&str),
+) -> bool {
+    let mut wait = CONTROL_BACKOFF;
+    for n in 1..=CONTROL_TRIES {
+        let Err(why) = attempt() else {
+            return true;
+        };
+        log(&format!("try {n} of {CONTROL_TRIES} failed: {why}"));
+        if n < CONTROL_TRIES {
+            sleep(wait);
+            wait *= 2;
+        }
+    }
+    false
+}
+
+/// Runs the curl `argv` as the runner's user, this process: why it
+/// failed, if it did, as [`failure`] says.
+fn try_reach(argv: &[&str]) -> Result<(), String> {
+    let output = host::command(argv)
+        .and_then(|mut command| Ok(command.stdin(Stdio::null()).output()?))
+        .map_err(|err| format!("not run: {err:#}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(failure(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        stderr.lines().next().unwrap_or_default(),
+    ))
+}
+
+/// A failed curl's class, from its exit `code` and the HTTP status it
+/// printed, then its own message, cut to [`MAX_DETAIL`]: so a log tells a
+/// name that did not resolve, a refused or dropped connection, a broken
+/// TLS handshake and an origin's error status apart.
+fn failure(code: Option<i32>, status: &str, detail: &str) -> String {
+    let class = match code {
+        None => "killed".to_owned(),
+        Some(6) => "dns".to_owned(),
+        Some(7) => "connect".to_owned(),
+        Some(28) => "timeout".to_owned(),
+        Some(22) => format!("http {}", status.trim()),
+        Some(35 | 51 | 53 | 54 | 58 | 59 | 60 | 64 | 66 | 77 | 80 | 82 | 83 | 90 | 91) => {
+            "tls".to_owned()
+        }
+        Some(52 | 55 | 56) => "transfer".to_owned(),
+        Some(_) => "other".to_owned(),
+    };
+    let detail: String = detail.chars().take(MAX_DETAIL).collect();
+    match code {
+        Some(code) => format!("{class} (curl exit {code}: {detail})"),
+        None => format!("{class} ({detail})"),
+    }
 }
 
 /// The metadata service at its IPv4 address, not through the egress
@@ -253,11 +346,105 @@ mod tests {
         }
     }
 
+    /// A control fails only after its last try, waiting a growing backoff
+    /// between tries and logging each failure.
+    #[test]
+    fn a_control_retries_before_it_fails() {
+        let secs = Duration::from_secs;
+        // (the try that succeeds, if any) -> (reached, waits, log lines)
+        let cases = [
+            (Some(1), true, vec![], 0),
+            (Some(2), true, vec![secs(5)], 1),
+            (Some(3), true, vec![secs(5), secs(10)], 2),
+            (None, false, vec![secs(5), secs(10)], 3),
+        ];
+        for (succeeds, reached, waits, lines) in cases {
+            let (mut tries, mut slept, mut logged) = (0, Vec::new(), Vec::new());
+            let got = retried(
+                |wait| slept.push(wait),
+                || {
+                    tries += 1;
+                    if Some(tries) == succeeds {
+                        Ok(())
+                    } else {
+                        Err("connect (curl exit 7: refused)".to_owned())
+                    }
+                },
+                |line| logged.push(line.to_owned()),
+            );
+            assert_eq!(got, reached, "{succeeds:?}");
+            assert_eq!(slept, waits, "{succeeds:?}");
+            assert_eq!(logged.len(), lines, "{succeeds:?}");
+            assert!(tries <= CONTROL_TRIES, "{succeeds:?}");
+        }
+        let mut logged = Vec::new();
+        retried(
+            |_| {},
+            || Err("dns".to_owned()),
+            |line| logged.push(line.to_owned()),
+        );
+        assert_eq!(logged[2], "try 3 of 3 failed: dns");
+    }
+
+    #[test]
+    fn a_failed_try_names_its_class() {
+        let long = "x".repeat(MAX_DETAIL + 50);
+        let cut = format!("other (curl exit 3: {})", "x".repeat(MAX_DETAIL));
+        let cases = [
+            (
+                Some(6),
+                "000",
+                "Could not resolve host: example.com",
+                "dns (curl exit 6: Could not resolve host: example.com)",
+            ),
+            (
+                Some(7),
+                "000",
+                "Failed to connect",
+                "connect (curl exit 7: Failed to connect)",
+            ),
+            (
+                Some(28),
+                "000",
+                "timed out",
+                "timeout (curl exit 28: timed out)",
+            ),
+            (
+                Some(22),
+                "504",
+                "The requested URL returned error: 504",
+                "http 504 (curl exit 22: The requested URL returned error: 504)",
+            ),
+            (
+                Some(35),
+                "000",
+                "handshake",
+                "tls (curl exit 35: handshake)",
+            ),
+            (
+                Some(60),
+                "000",
+                "certificate",
+                "tls (curl exit 60: certificate)",
+            ),
+            (Some(56), "000", "reset", "transfer (curl exit 56: reset)"),
+            (None, "", "", "killed ()"),
+            (Some(3), "000", long.as_str(), cut.as_str()),
+        ];
+        for (code, status, detail, want) in cases {
+            assert_eq!(failure(code, status, detail), want, "{code:?}");
+        }
+    }
+
     /// The metadata requests go around any proxy the environment names,
     /// whose refusal would otherwise stand in for the rule on the uid.
     #[test]
     fn runner_requests_bypass_a_configured_proxy() {
-        for argv in [metadata_request(), direct(METADATA_V6)] {
+        for argv in [
+            metadata_request(),
+            direct(METADATA_V6),
+            control_request("https://example.com/"),
+        ] {
             assert!(
                 argv.windows(2).any(|pair| pair == ["--noproxy", "*"]),
                 "{argv:?}"

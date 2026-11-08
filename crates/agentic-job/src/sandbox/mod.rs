@@ -28,12 +28,14 @@ pub mod check {
     use crate::config::Config;
     use crate::exit::Exit;
 
-    /// In place of the glob's `run`, which returns whether they passed.
+    /// In place of the glob's `run`, which returns what they came to: a
+    /// check that failed only to reach outside the host is the retryable
+    /// [`Exit::NotStarted`], as the run it stood before never started.
     pub fn run(args: &Args) -> Result<Exit> {
-        Ok(if ::secure_host::check::run(args, Config::parse)? {
-            Exit::Success
-        } else {
-            Exit::Failure
+        Ok(match ::secure_host::check::run(args, Config::parse)? {
+            Verdict::Passed => Exit::Success,
+            Verdict::Failed => Exit::Failure,
+            Verdict::Unreachable => Exit::NotStarted,
         })
     }
 }
