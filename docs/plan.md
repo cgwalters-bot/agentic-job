@@ -12,45 +12,42 @@ The 1.0 bar is
 a fresh deploy passes, the README alone suffices, v1.0 is released with
 stable formats and no JavaScript, and every open issue here is either a
 sub-issue of that epic or marked post-1.0 (P2), with none in
-`needs-design`. Acceptance and operator decisions remain with
-[#556](https://github.com/cgwalters-forge/agentic-job/issues/556),
-[#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) and the
-README-linked documentation audits
-[#2738](https://github.com/cgwalters-forge/agentic-job/issues/2738) to
-[#2739](https://github.com/cgwalters-forge/agentic-job/issues/2739), which
-continue [#2199](https://github.com/cgwalters-forge/agentic-job/issues/2199)
-after [#2435](https://github.com/cgwalters-forge/agentic-job/pull/2435) and
-[#2558](https://github.com/cgwalters-forge/agentic-job/pull/2558).
-The harness/MCP/skills/run-contract audit
-[#2740](https://github.com/cgwalters-forge/agentic-job/issues/2740) and
-readiness-index/backlog reconciliation
-[#2741](https://github.com/cgwalters-forge/agentic-job/issues/2741) are closed;
-they are not outstanding audit owners. Merged implementation and closed
-documentation work do not establish fresh-deploy acceptance, v1.0 publication
-or caller configuration. Those remain tracker#596's acceptance questions;
-Issue #556 owns merge-policy/ruleset work and #2026 the remaining JavaScript decisions.
-Other work belongs to its own epic: the session and chat path, which
-tracker#596 leaves to [tracker#528](https://github.com/cgwalters-forge/tracker/issues/528),
-now to [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976);
-secure-host's split and security hardening to
-[tracker#674](https://github.com/cgwalters-forge/tracker/issues/674);
-other forges to [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786);
-the safe-outputs split to
-[tracker#1047](https://github.com/cgwalters-forge/tracker/issues/1047);
-review pacing ([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163))
-to [tracker#939](https://github.com/cgwalters-forge/tracker/issues/939);
-and the Ubuntu 26.04 rollout
-([#2400](https://github.com/cgwalters-forge/agentic-job/issues/2400)), whose
-live Renovate proof is still open, to
-[tracker#1054](https://github.com/cgwalters-forge/tracker/issues/1054).
+`needs-design`. All four bars remain pending; implementation is not acceptance.
+Earlier README audits #2199, #2738–#2741 and readiness correction
+[#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) are closed,
+not live owners. [#3245](https://github.com/cgwalters-forge/agentic-job/issues/3245)
+owns the new first-run documentation walkthrough, not stage deployment.
+[#556](https://github.com/cgwalters-forge/agentic-job/issues/556) still owns
+CODEOWNERS/ruleset acceptance; shipped merge-policy code does not settle which
+ruleset requires code-owner review or the automation-token ownership constraint.
+
+[#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) no longer
+requires manual fixture removal: cgwalters
+[chose an override](https://github.com/cgwalters-forge/agentic-job/issues/2026#issuecomment-6631996337).
+The existing opt-in and trusted public-base evidence shipped in #2914/#2919
+([capture](../crates/agentic-job/src/check/base.rs),
+[contract](safe-outputs.md#public-base-secret-evidence));
+[tracker#1455](https://github.com/cgwalters-forge/tracker/issues/1455) owns
+effective caller configuration and compatible producer/checker evidence before
+deletion. This ledger neither enables it nor removes the fixture.
+Still ask cgwalters: **does “no JavaScript left” exempt the JavaScript that only
+drives gh-aw's pinned scripts, as it already exempts apply.yml's steps?**
+That means validation.mjs, handlers.test.mjs/collect.cjs, the two probe
+github-script steps and CI's apply-guard rerun. The controller's exception
+recommendation is not cgwalters' decision; preserve parity coverage meanwhile.
 
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
 
-Snapshot: agentic-job `48ce32b35c91f876fa7b5c5a4e0b1a5034aefb27`;
-25 open issues returned by `gh issue list --state open --limit 300` on
-5 November 2026. This is a proposed disposition, **not** a label/close operation.
+### 1.0 disposition ledger (2026-11-08)
+
+Snapshot: source `6b9a75c`; 26 open issues at **2026-11-08 14:17 UTC**,
+read via issues and GraphQL parent/project fields. Parent numbers below are in
+`cgwalters-forge/tracker`; “none” means no parent, not no owner. No visible
+project items supplied Priority values: **P2 below is proposed, not applied**.
+A different parent alone does not satisfy #596's literal child-or-P2 bar.
+No issue, Priority, parentage, release policy or epic is changed by this ledger.
 The [hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
 and [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) are
 acceptance owners, not permission to build another local proxy. The operator's
@@ -58,48 +55,53 @@ acceptance owners, not permission to build another local proxy. The operator's
 requires no reachable credentials. The source-address recommendation on #2903
 is research, not an approved identity/deployment contract.
 
-Crucially, [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
-is **open, not merged** at this snapshot. Current source still creates the
-legacy user and accepts its keys. Its latest reviewed head is `8781322`;
-the earlier review found unenforced proxy policy and missing private-launch
-coverage. Neither review approval nor this documentation proves fresh-host
-acceptance. Runner-mode credential refusals already exist in
-[`refuse_without_second_user`](../crates/agentic-job/src/run/mod.rs), and the
-reusable agent job already has no OIDC permission. Complete removal and a
-release/pin migration must precede calling the deployment runner-only.
+Runner-only removal [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
+merged on 5 November; the parser now refuses removed user keys
+([tests](../crates/agentic-job/src/config/mod.rs)). The runner inventory,
+caller audit and local test records below the ledger are **5 November history**,
+not current deployment proof; #3001 owns their broader reconciliation.
 
 ### Proposed issue dispositions
 
-Each row accounts for one then-open issue. Keep operator holds and valid
-unrelated work; do not mass-close issues based on this table.
+Every open issue is listed once. Keep current #596 children there; for
+separately owned non-goals propose post-1.0 P2 without moving their parent.
+“Question” means a decision is needed, not a silently applied exception.
 
-| Issue | Proposed disposition and remaining acceptance/owner question |
-| --- | --- |
-| [#3001](https://github.com/cgwalters-forge/agentic-job/issues/3001) | This documentation/contract-test slice of tracker#1311; reconcile again when #2991 lands. No deployment or issue metadata changes. |
-| [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000) | tracker#1311 readiness gate: prove actual runner/subuid enforcement and refuse reachable CI/GitHub/supervisor credentials, with positive controls; retain as implementation owner. |
-| [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) | tracker#1311 client: endpoint-only settings/accounting after broker#60; no lifecycle bearer on same-UID runner, no fallback proxy. |
-| [#2997](https://github.com/cgwalters-forge/agentic-job/issues/2997) | tracker#1311 downstream usability, not a credential blocker. Preserve measured-build work; require before/after benchmarks before a split. Ask reporter for revision, pod limits and throttling/OOM evidence for the unconfirmed three-hour stall. |
-| [#2996](https://github.com/cgwalters-forge/agentic-job/issues/2996) | tracker#1311 GitLab docs owner; preserve needs-human. Need supported credentialless prerequisites and a checked caller, not a copy of the old TF two-user/key workaround. |
-| [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | tracker#1311 downstream evidence umbrella; preserve needs-human. Reported v0.6.5 GitLab/TF successes are historical two-user/API-key evidence, not runner-only acceptance. Retain #2996/#2997 and closed #2994/#2995 deliverables. |
-| [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) | tracker#1311 removal owner, implementation in open #2991. Require Ubuntu and RHEL rhel10-kvm-smoke setup/run proof before completion; do not duplicate removal here. |
-| [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | Keep needs-human acceptance umbrella. Operator must approve non-replayable identity/listener and trusted off-agent lifecycle owner in [broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60); [broker#61](https://github.com/cgwalters-bot/praxis-credential-broker/issues/61) owns external MCP. Old title's local proxy is superseded. |
-| [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) | [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215): separate VM-capable infrastructure hands back to a midstream draft; the [external-runner contract](dispatch.md#external-vm-runner-to-midstream-draft) separates external agent/check from trusted midstream apply, with a closed runner profile map and exact run correlation. Only the requirement is the operator's; the deployment, its disposability, limits, dispatch credential and broker admission are [unverified prerequisites](dispatch.md#status). Runtime slices below remain unimplemented; no arbitrary runner selectors or bounds changes. |
-| [#2864](https://github.com/cgwalters-forge/agentic-job/issues/2864) | [tracker#596](https://github.com/cgwalters-forge/tracker/issues/596); concrete corrections already present in sandbox-check's pin-linked record discussion and this plan's #2740/#2741 history. Propose operator verification then closure, retaining needs-human until verified; not new host acceptance. |
-| [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | [tracker#674](https://github.com/cgwalters-forge/tracker/issues/674) egress diagnostics/host evidence owner. Preserve exact-account allowlisting; verify refusal names host/method without signed query and release/image pin reaches callers. DNS existence alone is not evidence. |
-| [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | tracker#674 publication follow-up to #2070/#2642; enable prepare on published and archive paths only once the released image accepts it, then hosted proof for both. |
-| [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398) | [tracker#1047](https://github.com/cgwalters-forge/tracker/issues/1047), operator-gated P2 adoption: authorize destination/infrastructure and provide tested immutable standalone revision; preserve local library until then. |
-| [#2397](https://github.com/cgwalters-forge/agentic-job/issues/2397) | tracker#1047 deterministic live proof, not another CLI. Operator dispatches safe-outputs-cli.yml with publish=true and links run/comment on #64; offline tests do not settle it. |
-| [#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) | [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786): local CI `gitlab` job covers apply comments, fork MRs and inline discussions; retain bound-status/summary acceptance and stability follow-up, not mock success. |
-| [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110) | Redirected to a disposable local GitLab CE CI container like Forgejo: no gitlab.com group, environment or repository token needed. Live verification awaits CI. |
-| [#2071](https://github.com/cgwalters-forge/agentic-job/issues/2071) | tracker#674 table rename: [host] is read, with [sandbox] as a warned alias refused beside it ([stable interfaces](stable-interfaces.md#configuration-files)). Left: once #2656 moves the forwarder's pin to an image that reads [host], have `config --host` write [host] for it and move secure-host/*.toml to [host]; remove the alias only in a later release that the changelog lists as breaking first. Its old request to keep runner-sandbox is superseded by #2989; do not restore a user to satisfy that stale sentence. |
-| [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) | tracker#674 standalone binary/image owner; reuse reference draft #2642, not a duplicate split. Require no agent dependency and static/image/archive/published/hosted E2E evidence. |
-| [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | tracker#596, preserve needs-human: human removes key-bearing legacy corpus fixture; operator decides whether pinned gh-aw JS drivers are exempt. Do not weaken hand-back scans or delete valid parity coverage here. |
-| [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) | tracker#674 standalone-project epic; retain needs-design. Operator owns destination/name, governance and disclosure commitments; #2070/#2656 remain implementation/publication owners. |
-| [#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618) | Keep needs-human. Reconcile with #2903/#3000: do not lift key/MCP refusals merely because a reads rule or hidepid test passes. Operator must decide whether any residual non-credential isolation research remains after off-agent lifecycle design. |
-| [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) | [tracker#57](https://github.com/cgwalters-forge/tracker/issues/57) RHEL deployment owner; preserve needs-human/ruleset hold. Need runner-only rhel10-kvm-smoke setup, fix/rebase/fork and chat evidence; no write to that external caller in this slice. |
-| [#556](https://github.com/cgwalters-forge/agentic-job/issues/556) | tracker#596 merge-policy/ruleset owner; preserve needs-human. Confirm protected policy/CODEOWNERS and operator ruleset separately; credential work is not authority to relax it. |
-| [#536](https://github.com/cgwalters-forge/agentic-job/issues/536) | [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976) sessions, preserve needs-human. Runner mode refuses session.listen; do not restore a second user/bridge to unblock chat. Writes remain specified, not built. |
-| [#137](https://github.com/cgwalters-forge/agentic-job/issues/137) | tracker#1311 compatible plain-CI image work; retain prototype [#144](https://github.com/cgwalters-forge/agentic-job/pull/144). Operator decides publication; need actual non-root nested Podman/checkout/socket/process proof, not a credential isolation claim. |
+| Open issue | Applied parent | Proposal / unresolved acceptance |
+| --- | --- | --- |
+| [#3245](https://github.com/cgwalters-forge/agentic-job/issues/3245) | #596 | Keep: README first-run walkthrough; actual trial pending. |
+| [#3244](https://github.com/cgwalters-forge/agentic-job/issues/3244) | #596 | Keep: this ledger, not metadata application. |
+| [#3225](https://github.com/cgwalters-forge/agentic-job/issues/3225) | none | Propose #596 child: retries/diagnostics shipped; workflow/scheduler infrastructure-outcome propagation, behavioral proof and image adoption remain. Do not restore removed network-control/container-control probes. |
+| [#3188](https://github.com/cgwalters-forge/agentic-job/issues/3188) | none | Question: #596 child or P2 under stated tracker#680 owner? Notification delivery shipped in part; cross-repository targeting remains. |
+| [#3179](https://github.com/cgwalters-forge/agentic-job/issues/3179) | #786 | Propose P2: disposable GitLab startup/apply proof; do not reopen closed #2110/#2111. |
+| [#3143](https://github.com/cgwalters-forge/agentic-job/issues/3143) | #1311 | Question: promote its two known findings to #596 or defer P2? Audit done, filing/follow-through is not. |
+| [#3080](https://github.com/cgwalters-forge/agentic-job/issues/3080) | #1215 | Propose #596 child: metadata-probe CI stability, not new isolation design. |
+| [#3057](https://github.com/cgwalters-forge/agentic-job/issues/3057) | #939 | Propose P2: status-comment pacing outside the 1.0 proof. |
+| [#3001](https://github.com/cgwalters-forge/agentic-job/issues/3001) | #1311 | Propose #596 child: runner-only documentation/evidence, not a second audit. |
+| [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000) | #1311 | Propose #596 child: enforcement/credential refusal proof with positive controls. |
+| [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) | #1311 | Question: credentialless broker launch prerequisite for 1.0 or P2? Client code is not readiness. |
+| [#2997](https://github.com/cgwalters-forge/agentic-job/issues/2997) | #1311 | Propose P2: measured small-runner compile work; retain existing split work. |
+| [#2996](https://github.com/cgwalters-forge/agentic-job/issues/2996) | #1311 | Propose P2: GitLab caller docs need supported credentialless deployment. |
+| [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | #1311 | Propose P2: downstream GitLab/TF evidence; two-user/API-key runs are historical. |
+| [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | #1311 | Question: 1.0 prerequisite or P2? Operator owns identity/listener and off-agent lifecycle approval; no local proxy mandate. |
+| [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | #596 | Keep: exact-account egress diagnostics and caller release/image proof. |
+| [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656) | #674 | Propose #596 child: released-image preparation/pin acceptance, not only source wiring. |
+| [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398) | #1047 | Propose P2: operator-authorized standalone adoption and immutable revision. |
+| [#2397](https://github.com/cgwalters-forge/agentic-job/issues/2397) | #1047 | Propose P2: standalone CLI live publication proof; local tests do not settle it. |
+| [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) | #674 | Propose #596 child: standalone binary/image exists; released attested image and caller proof remain. |
+| [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | #596 | Keep: caller override evidence and exact gh-aw JS exception question above. |
+| [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) | #674 | Question: propose P2 extraction, but `needs-design` still violates #596. Destination/name, governance and disclosure commitments remain operator decisions. |
+| [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) | #57 | Propose P2: RHEL caller, ruleset and chat acceptance outside staged 1.0 scope. |
+| [#556](https://github.com/cgwalters-forge/agentic-job/issues/556) | #596 | Keep: protected CODEOWNERS and chosen ruleset need operator action, not another policy implementation. |
+| [#536](https://github.com/cgwalters-forge/agentic-job/issues/536) | #976 | Propose P2: sessions/chat are explicit #596 non-goals; do not restore a second user. |
+| [#137](https://github.com/cgwalters-forge/agentic-job/issues/137) | #1311 | Propose P2: non-root plain-CI image and nested Podman proof, not credential isolation. |
+
+Reuse [#3143's findings](https://github.com/cgwalters-forge/agentic-job/issues/3143#issuecomment-6676297622):
+umask-dependent positive fixtures and prepared-helper validation after host
+mutation. This is disposition of existing evidence, not another general audit.
+Closed #2989, #2891, #2071 and #1618 are not current open-work owners.
+Scratch E2E [#3240](https://github.com/cgwalters-forge/agentic-job/issues/3240)
+closed during this reconciliation, after the initial 27-issue read.
 
 Closed [#2994](https://github.com/cgwalters-forge/agentic-job/issues/2994)
 diagnostics and [#2995](https://github.com/cgwalters-forge/agentic-job/issues/2995)
@@ -217,14 +219,14 @@ without an owner are under `cgwalters-forge`.
 
 ### Breaking keys and safe refusals
 
-Today the legacy parser still accepts `sandbox.create-user`, `user`, `groups`,
-`allow-existing-user`, `filesystem-view`, `sandbox.check.before-agent` and
-`setup.tools`. **Do not describe their removal errors as landed.** #2991 proposes
-rejecting them by name with a diagnostic citing #2989, including explicit false
+Since merged #2991 the parser refuses `host.create-user`, `user`, `groups`,
+`allow-existing-user`, `filesystem-view`, `host.check.before-agent` and
+`setup.tools`, including through the `[sandbox]` alias. It rejects them by name
+with a diagnostic citing #2989, including explicit false
 values; callers must delete them, not set false. It also rejects
 `agent-user: sandbox` and requires `--runner-home`. The probe-only
 `sandbox.check.control-url`, `fetch-repo`, `allow-sockets` and `allow-tcp-ports`
-remain accepted/ignored in that proposal for the old image. Refusing those keys
+remain accepted/ignored for the old image. Refusing those keys
 too waits for image migration. Since #2071 these keys are under [host], and
 [sandbox] is its warned alias.
 
@@ -254,7 +256,7 @@ Links below name those inspected revisions, not a claim about future main.
 | tracker [.github/workflows/dispatch.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/dispatch.yml), session.yml, supervisor.yml | actions cgwalters-agentic-job wrapper at main; session dispatch requests session=true | Tracker/actions owners must coordinate wrapper rollout and freeze a tested immutable revision. Hold session=true requests (including supervisor's optional session path) rather than falling back to a second user. Inert session operators/origins/watch-item are not session.listen. |
 | tracker [.github/workflows/review.yml](https://github.com/cgwalters-forge/tracker/blob/fb7b0170e6906ed2ad20391838b123a97ecd0a19/.github/workflows/review.yml) | actions cgwalters-review at `02d0342d682cf1c265668d7823009ae1936c4061` | Move only to a reviewed wrapper containing the runner/register migration; preserve review.toml and review-command.toml policy. A moving non-review wrapper update does not migrate this pin. |
 
-Devspace's `rhel10-kvm-smoke.toml` remains #2989/#589's owner question, outside
+Devspace's `rhel10-kvm-smoke.toml` remains #589's owner question, outside
 the allowed tracker/actions audit. Who supplies its tested migration revision
 and RHEL run? Which external lifecycle owner and identity listener will support
 GitLab/TF without leaving CI/provider credentials in runner-readable state?
@@ -262,21 +264,23 @@ These are not answered by removing TOML keys or approving a bot's research.
 
 ### Acceptance evidence and missing proof
 
-| Evidence | Status and limits |
+These are #596's four completion bars, not a new test checklist. No qualifying
+fresh-deploy or first-run report is linked in the inspected acceptance owners.
+Historical fake-agent/config checks and closed audits establish narrower facts.
+
+| Epic bar | Shipped / missing evidence at the ledger snapshot |
 | --- | --- |
-| Documented fake/MCP configs and runner admission | **Passed**, `cargo test --locked -p agentic-job --test workflows documented_runner_configs_parse_and_obey_admission` (exit 0): parses fenced examples, admits fake and refuses MCP before setup. No privileged launch proof. |
-| Standalone documented MCP refusal | **Passed**, `cargo test --locked -p agentic-job --test run documented_mcp_config_is_refused_before_runner_launch -- --exact` (exit 0): no MCP credential, runner-home or harness launch; the expected Rust admission error is required. |
-| Existing runner fake-agent integration | **Passed** in `just check`: same-user environment clearing, clone/hand-back and OIDC/child refusal using fixtures and loopback broker. Does not prove same-UID memory isolation. |
-| Workspace/config/workflow consistency and fmt | **Passed**, `umask 077 && just fmt && just check` (exit 0), including all 80 workflow tests and workspace Clippy with warnings denied. An earlier 300s attempt timed out; default umask 0002 then failed three unchanged secure-host record tests; private umask resolves their temporary-directory assumption, not a hardening bug fix. Privileged tests stayed ignored and configured real-agent tests can return early. |
-| Markdown/site helper checks | **Passed**, `npx --yes markdownlint-cli2 '**/*.md'` (exit 0); `node --test site/links.test.mjs site/index.test.mjs` (exit 0, 8 tests). Site helper tests are not a full relative-link/fragment scan. |
-| Python egress | **Passed with skip**, `python3 -m unittest discover -s egress -v` (exit 0): 11 passed, live mitmproxy test skipped because mitmproxy is absent. |
-| Full offline fragments and shared workflow lint | **Skipped**, lychee/actionlint/zizmor unavailable locally; no workflow files changed. No full offline-fragment success or shared-lint execution claimed. |
-| Ubuntu fresh-host runner-only behavior | **Unrun here.** #2991 is open; need actual runner and subordinate-UID metadata/egress negative controls, setup-script CA trust, teardown and E2E at the released revision. Do not run destructive setup in this existing sandbox. |
-| RHEL/CentOS rhel10-kvm-smoke and SELinux/BPF | **Missing.** Earlier RHEL jobs in workflow.md predate this migration. Need secure-host plus post-lock setup script and runner launch evidence on enforcing image; static admission is not runtime proof. |
-| Testing Farm | **Missing.** #2993's reported v0.6.5 run uses a second user/API key; hidepid stacking is not same-UID proof. Need no readable tmt/CI credentials and externally owned identity/lifecycle, with controls. |
-| GitLab | **Missing live runner-only and current apply/summary proof.** Mock publisher tests and downstream old-topology pipeline do not replace #2110/#2111 and #2996 acceptance. |
-| Attested standalone image | **Missing.** Current source has no standalone host binary. Require #2070 build/dependency proof, publication/provenance verification at exact digest, both image paths and #2656 prepare proof after pin migration. |
-| Credentialless inference/accounting/MCP | **Future, unverified.** Require approved broker#60/#61 contracts, real peer preservation, spoof/shared/reused-identity refusals, positive inference/tools, usage outage failure, expiry/revocation and known-value credential-access controls. No local proxy or scan-only proof. |
+| Fresh deploy passes | **Pending.** [agent-board#282](https://github.com/cgwalters-forge/agent-board/issues/282) still needs an approved real Actions-backed stage path, credential placement/authority and saved green implement/review/fix/triage report plus installed recurrence. Fake transport, templates and old runs are not this proof. Require exact runner/image/caller revisions and authenticated creation/cleanup receipts. |
+| README alone suffices | **Pending.** #3245 revalidates instructions after runner-only migration; closed #2738–#2741/#2864 are not a fresh agent's completed first run in cgwalters-forge-stage. Need README-only trial evidence, its exact release/config/pins and resolved walkthrough failures; config parsing or scripted fake launch is insufficient. |
+| v1.0 and stable formats, no JS | **Pending.** [stable interfaces](stable-interfaces.md) and [changelog](../CHANGELOG.md) exist, but their promise starts at 1.0, not at documentation merge. Need an actual published v1.0 tag/release and explicit freeze of config/safe-output contracts, #2026 fixture cleanup after tracker#1455 evidence, and cgwalters' exact JS exception decision or replacement coverage. Build releases/0.x tags do not establish this bar. |
+| Closed backlog | **Pending.** Only #556/#2026/#2811/#3244/#3245 are current #596 children. The other 21 require applied child/P2 dispositions or decisions; Priority was not visible in the returned project data. #1735 remains `needs-design`; a P2 proposal or different parent alone does not clear that clause. #3143 findings need follow-through, not a duplicate audit. |
+
+Shipped source includes runner-key refusals, the public-base override and the
+standalone [secure-host binary](../crates/secure-host/src/main.rs); none proves
+released-image preparation, caller pin adoption, fresh-host negative controls
+with positive controls, credentialless broker lifecycle or downstream RHEL/TF/
+GitLab acceptance. Those retain the owners/dispositions above. No privileged
+setup, live dispatch, release or issue mutation is authorized by this ledger.
 
 ## Deployment history
 
@@ -328,9 +332,9 @@ Its read-only verifier also exercises event/review admission using that PR's
 payload and refuses the actual merge-group event; `e2e-review` remains PR-only.
 These are wiring claims, not hosted proof. No PR gains write or OIDC authority. This is follow-up
 to [queue rollout (#464)](https://github.com/cgwalters-forge/agentic-job/issues/464).
-[#2808](https://github.com/cgwalters-forge/agentic-job/issues/2808) owns the remaining acceptance: a successful hosted `merge_group` run
-of this revision showing dispatch review, head/verdict verification and cleanup. Local tests and the
-earlier queued run do not establish that proof; docs-only changes skip E2E too.
+[#2808](https://github.com/cgwalters-forge/agentic-job/issues/2808) is now closed,
+not a live acceptance owner. Its closure does not establish fresh-deploy #596
+acceptance; docs-only changes skip E2E too.
 
 Host gaps left open when the sandbox and run follow-ups closed, also
 untracked:
@@ -497,8 +501,9 @@ Forgejo and GitLab publishers exist
 GitLab end-to-end job now uses a disposable local CE container, following the
 operator's redirect of [#2110](https://github.com/cgwalters-forge/agentic-job/issues/2110),
 not a gitlab.com group or token. CI must establish live proof and stability;
-broader status/summary acceptance remains with
-[#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111).
+[#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) is closed;
+[#3179](https://github.com/cgwalters-forge/agentic-job/issues/3179) now owns
+disposable GitLab startup/apply proof.
 A caller's own agent job ([the pieces](workflow.md#the-pieces-and-an-agent-job-of-your-own))
 can be admitted by the broker only by repository, not by its workflow
 file, which widens admission ([inference admission](inference.md#which-workflows-a-broker-admits));
