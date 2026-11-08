@@ -146,22 +146,40 @@ It also needs these standard settings:
   actions it pins allowed if the repository restricts actions. The pull
   request's CI runs as an outside contributor's would.
 
-Commit both files to your default branch and start it:
+With `gh` authenticated as your operator account, run from your repository's
+checkout. Commit both files to your default branch and start it:
 
 ```sh
 gh workflow run agent.yml -f task='say hello'
+gh run list --workflow agent.yml --limit 1
+gh run view RUN_ID
+gh run watch RUN_ID --exit-status
 ```
 
-`COMMIT` may also be a release tag such as `v0.6.4`, which does not include
-later changes on main; binaries are prebuilt and attested, or built in the
-run ([versions and binaries](docs/workflow.md#things-a-caller-should-know)).
+Replace `RUN_ID` with the dispatched run's id. If `agent-apply` requires
+approval, approve the waiting environment job in Actions before expecting
+apply to finish. Inspect the check/apply summaries and `applied` artifact;
+a successful agent job alone does not mean a pull request was published.
+
+Replace `COMMIT` before committing. A release tag selects that release's
+workflow, not today's instructions: the old `v0.6.4` example predates
+runner-only enforcement and pins secure-host v0.6.3. `v0.6.12` enforces
+runner-only execution but still pins the older secure-host v0.6.9 image.
+Neither is evidence of a fresh deployment with main's host changes. See
+the [version walkthrough](docs/workflow.md#first-run-walkthrough-8-november-2026)
+before choosing a reviewed pin; binaries are prebuilt and attested, or built
+in the run ([versions and binaries](docs/workflow.md#things-a-caller-should-know)).
 
 **A real agent** needs a credential broker
 ([what a broker provides](docs/inference.md#what-a-broker-provides)), but
 it doesn't need any secret beyond `SAFE_OUTPUTS_PAT`. Replace
 `agent: fake` with `claude`, drop `max-requests: "0"` (the default caps at 150 requests, which the
 broker counts), and pass `inference-url` and `inference-audience` from the
-broker's operator and an `agent-runner` that reaches the broker;
+broker's operator and an `agent-runner` that reaches the broker in **both**
+the separate register job and the agent job. Keep the default
+`inference-register: github-oidc`; the operator must admit the caller's
+numeric repository id and exact workflow commit. Do not switch to `plain`
+to bypass an admission failure ([its limits](docs/inference.md#registering-without-proof));
 agentic-job doesn't provision runners. The
 [real agent checklist](docs/workflow.md#real-agent-checklist) has the rest.
 

@@ -1122,6 +1122,32 @@ before secure-host. This control sends no credentials
 and proves only reachability, not broker admission or model availability.
 A failure names the missing network route rather than blaming sandbox rules.
 
+### First-run walkthrough (8 November 2026)
+
+This is a static revalidation of the README path, not a deployment report.
+It reuses the closed [README audit](https://github.com/cgwalters-forge/agentic-job/pull/2558),
+[safe-output audit](https://github.com/cgwalters-forge/agentic-job/pull/2742) and
+[#3143 findings](https://github.com/cgwalters-forge/agentic-job/issues/3143#issuecomment-6675175322);
+it does not restart their broader reviews. Source checked on main at
+`d5dbe5015154a30a0e788e0fe24748341cb11912`:
+
+| In order | Source and local check | What still needs live evidence |
+| --- | --- | --- |
+| Choose the workflow and host | [v0.6.4 workflow](https://github.com/cgwalters-forge/agentic-job/blob/732db8c24295ee8d4a79de19f588e6f871d35fe0/.github/workflows/agentic-job.yml), hosted config and forwarder checked with `git show`: runner default, optional second user, actions `636b20b87bc94417999062ada22700ef4d6a8836`, host v0.6.3. [v0.6.12](https://github.com/cgwalters-forge/agentic-job/blob/eecc8c434e67a7607264ab3f7d90c88b6d02042a/.github/workflows/agent.yml): runner only, actions `466a490e983ff07e6fb076fa4bd8b4d5f918fcd6`, host v0.6.9 (`57119eeffa17ea41b383cfdaf8370b8abeba8868`). | A tested, attested host image and coherent caller pins; main's [prepare/image split](secure-host.md#the-agent-job) is not supplied by those older images. Do not pass `--prepared` to them. |
+| Copy caller and bounds | [README](../README.md#try-it), [workflow inputs](../.github/workflows/agentic-job.yml), [policy test](../crates/agentic-job/tests/policy.rs) `readme_caller_fits_its_bounds_and_configuration`: inputs/secret, permissions, source-relative config, base and output limits. | Public caller/target, enabled Actions and allowed pinned actions; disposable supported runner. No private-target or credential refusal is lifted. |
+| First scripted run | [example.yml](../.github/workflows/example.yml), [agent.yml](../.github/workflows/agent.yml), `max-requests: "0"`; existing policy/workflow tests use local fixtures, not a deployed caller. | Authorized dispatch from the default branch; inspect policy, host probes, agent, check and apply. A fake session is not a real-agent first run. |
+| First broker run | [checklist](#real-agent-checklist), [registration](#the-run-token), [inference](inference.md): separate OIDC register job, agent without OIDC, runtime URL/audience, exact admission and run-token handover. | Broker/network owner supplies reachability for both jobs, admission, model and agreed request/cost/time caps; expiry and trusted off-agent revocation. No provider key or MCP credential on the agent machine. |
+| First review | [review caller/configuration](review.md#another-repository), [review workflow](../.github/workflows/review.yml) and existing review/workflow tests: trusted-base files, read-only agent, separate register/check/submit/status. | Copy review bounds/task, set agent/model/network variables and broker admission for `review.yml`; authorized exact-head review and human merge approval. Model approval is not a security boundary. |
+| Check and apply | [apply contract](#what-the-apply-job-does-before-it-writes), [fork rules](#pull-requests-come-from-a-fork), [apply tests](../crates/agentic-job/tests/apply_workflow.rs): checked artifact ID/digest, isolated publisher, explicit `SAFE_OUTPUTS_PAT`. | Credential owner supplies the bot PAT (`repo`, `workflow`) in the branch-restricted `agent-apply` environment and any required approval; fork Actions must read back disabled. Inspect `applied.json` and the resulting draft, not just agent success. |
+
+No stage write, model dispatch, new credential or host setup was performed
+for this walkthrough. The deployment/credential owner remains
+[agent-board#282](https://github.com/cgwalters-forge/agent-board/issues/282).
+Separately authorized evidence is still required for the four real profiles,
+a fresh agent following only the README, bounded token authority and recurrence
+([acceptance bars](plan.md#acceptance-evidence-and-missing-proof)). Parsing,
+mocked handlers and passing local tests cannot establish those results.
+
 ### Agent configuration repositories and model names
 
 `agent-config-repo` selects a public configuration repository;
@@ -2423,8 +2449,10 @@ not its `build-DIGEST` release. Full-commit and branch pins retain the
 source-addressed path. Every tag from `v0.4.0` has the tagged selection
 path; older tags use the bootstrap code at their own commit.
 
-A caller pins the version's tag in place of a commit, for the reusable
-workflows and the actions alike:
+A caller can pin a version's tag in place of a commit, for the reusable
+workflows and the actions alike. This historical syntax example is not a
+recommendation to deploy v0.6.4 with main's runner-only instructions; compare
+the [version walkthrough](#first-run-walkthrough-8-november-2026):
 
 ```yaml
     uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@v0.6.4

@@ -21,8 +21,10 @@ reassigns, and the bounds' `bots` list its login. `review.toml` lists only
 id on github.com, has its pull requests reviewed without a `/review`.
 Unset, the default, every bot's pull request waits for that comment. Set,
 the agent reads such a pull request's text, upstream release notes
-included, without anyone having asked: it is data to a sandboxed agent
-without a credential, but it can steer the verdict. Dependabot has no
+included, without anyone having asked: it is data to a sandboxed agent,
+but it can steer the verdict. The agent holds a broker run token and, by
+default, a GitHub read token
+([current boundary](inference.md#current-boundary-5-november-2026)). Dependabot has no
 write access, so, as below, a person with write access still has to
 approve the merge: the review saves the `/review`, not that approval. The
 workflow, the bounds and the
@@ -40,7 +42,9 @@ This does not enable notifications for admitted reviews, change admission,
 or set a review commit status for a refused head.
 
 The agent starts in the base checkout with the exact admitted head SHA fetched
-beside it, inside the sandbox and with no credential: the head is data, and
+beside it, inside the sandbox. The head fetch uses no credential; the agent
+still holds the tokens [listed above](workflow.md#which-tokens-reach-what).
+The head is data, and
 nothing outside the sandbox checks it out or runs it. That is what makes forks
 safe to admit. One review's inference is bounded in `review.yml` by
 `max-requests: '150'`, `budget-usd: '5'` (US dollars) and
