@@ -385,7 +385,7 @@ pub fn run<P: Program>(
     let started = Instant::now();
     // Every stage is timed, so that the log accounts for all of setup's
     // time and not only for the stages that were thought slow.
-    let result = setup(read, egress_image);
+    let result = setup(read, egress_image, Path::new(SELF_COPY));
     println!(
         "Sandbox setup total: {:.3}s ({})",
         started.elapsed().as_secs_f64(),
@@ -402,9 +402,12 @@ struct Preflight<P> {
     resolvers: Vec<IpAddr>,
 }
 
+/// HELPER is [`SELF_COPY`], which tests replace only for the prepared
+/// helper's checks.
 fn setup<P: Program>(
     read: impl FnOnce() -> Result<Plan<P>>,
     egress_image: Option<&str>,
+    helper: &Path,
 ) -> Result<()> {
     let Preflight {
         plan,
@@ -414,6 +417,12 @@ fn setup<P: Program>(
         let plan = read()?;
         let file = plan.program.file();
         let (config, egress_config) = (file.sandbox(), file.egress());
+        // A prepared helper that is not there would otherwise be found
+        // only after the first changes, leaving a host that a retry
+        // refuses (CONFIG_DIR) and that cannot be finished.
+        if config.prepared.is_some() {
+            check_program_helper(helper)?;
+        }
         if let Some(image) = egress_image {
             egress::check_image_id(image)?;
             ensure!(
@@ -501,7 +510,7 @@ fn setup<P: Program>(
     }
     timed("install-self", || {
         if config.prepared.is_some() {
-            keep_program_helper(Path::new(SELF_COPY))?;
+            keep_program_helper(helper)?;
         } else {
             install_self()?;
         }
@@ -1219,8 +1228,21 @@ pub fn make_roots_alone(path: &Path) -> Result<()> {
 /// With [`config::Prepared`]: the program's step installed its own
 /// binary at PATH as the helper, which the runner's one sudo rule will
 /// name. It must be there as a file of its own, not a link; the caller
-/// then makes it root's alone with its directories, or refuses.
+/// then makes it root's alone with its directories, or refuses. The
+/// preflight checks it first ([`check_program_helper`]); this checks
+/// again, just before its directories are made root's alone.
 fn keep_program_helper(path: &Path) -> Result<()> {
+    check_program_helper(path)?;
+    println!(
+        "host.prepared: the helper is the program's, which its step installed at {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Refuses, changing nothing, a prepared helper at PATH that is missing
+/// or not a regular file of its own.
+fn check_program_helper(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path).with_context(|| {
         format!(
             "{}: host.prepared says a program's step installed the helper there, and none did",
@@ -1230,10 +1252,6 @@ fn keep_program_helper(path: &Path) -> Result<()> {
     ensure!(
         meta.is_file(),
         "{} is not a regular file: host.prepared keeps it as the helper",
-        path.display()
-    );
-    println!(
-        "host.prepared: the helper is the program's, which its step installed at {}",
         path.display()
     );
     Ok(())
@@ -1415,20 +1433,35 @@ mod tests {
     use super::*;
 
     /// With `[host.prepared]` the helper is the program's file, and
-    /// setup refuses rather than go on without one, or through a link.
+    /// setup refuses rather than go on without one, or through a link:
+    /// in its preflight, before the root check that a test not run as
+    /// root stops at, and so before any change to the host.
     #[test]
     fn a_prepared_host_keeps_only_a_helper_that_is_there() {
         let dir = tempfile::tempdir().unwrap();
         let helper = dir.path().join("agentic-job");
-        let err = keep_program_helper(&helper).unwrap_err();
-        assert!(format!("{err:#}").contains("none did"), "{err:#}");
-        fs::write(&helper, "binary").unwrap();
-        keep_program_helper(&helper).unwrap();
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&helper, &link).unwrap();
-        let err = keep_program_helper(&link).unwrap_err();
-        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
-        let err = keep_program_helper(dir.path()).unwrap_err();
+        let config = dir.path().join("config.toml");
+        fs::write(&config, "[host.prepared]\n").unwrap();
+        for (path, refused) in [
+            (helper.as_path(), "none did"),
+            (link.as_path(), "not a regular file"),
+            (dir.path(), "not a regular file"),
+        ] {
+            let err = keep_program_helper(path).unwrap_err();
+            assert!(format!("{err:#}").contains(refused), "{err:#}");
+            // As root, a regression would go on to change this host.
+            if !host::is_root() {
+                let err = setup(|| read_host(&config), None, path).unwrap_err();
+                assert!(format!("{err:#}").contains(refused), "{err:#}");
+            }
+        }
+        fs::write(&helper, "binary").unwrap();
+        check_program_helper(&helper).unwrap();
+        keep_program_helper(&helper).unwrap();
+        // A link to a helper that is there is refused too.
+        let err = check_program_helper(&link).unwrap_err();
         assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
     }
 

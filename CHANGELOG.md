@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Setup with `[host.prepared]` refuses a helper that is missing or not a
+  regular file in its preflight, before it changes the host (#3262).
+
 - Behavior change: `run` and the reusable workflow's runner admission take
   `[session] listen` (`session: true`) again, with the runner's user as the
   agent, for chat only. The agent can attach to its own session's bridge
