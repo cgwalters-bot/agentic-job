@@ -109,10 +109,15 @@ next image release:
 
 ### Deployed write-policy diagnostics
 
-The forwarder selects actions' reviewed [#180](https://github.com/cgwalters-forge/actions/pull/180)
-merge, with the attested v0.6.9 image (binary source revision
-`57119eeffa17ea41b383cfdaf8370b8abeba8868`), digest
+The forwarder selects actions commit
+`466a490e983ff07e6fb076fa4bd8b4d5f918fcd6`, the reviewed
+[#180](https://github.com/cgwalters-forge/actions/pull/180) deployment,
+whose `Containerfile.pin` names the attested v0.6.9 image, digest
 `sha256:008d34bf9598ef83d7859772200f26637814d2cd105028457208ddc87d69788b`.
+Before pulling it, the action verifies the digest's SLSA provenance against
+its signer, this repository's `release.yml` on `refs/heads/main`, built on a
+GitHub-hosted runner; the provenance it accepts names source revision
+`57119eeffa17ea41b383cfdaf8370b8abeba8868`, which the `v0.6.9` tag points at.
 It includes [#2816](https://github.com/cgwalters-forge/agentic-job/pull/2816):
 write-policy refusal responses name the method and connection host, never
 the path or signed query. The upload step itself prints that response even
@@ -120,16 +125,64 @@ when it cannot upload artifacts; no proxy-log artifact is needed for it.
 Image attestation verification, write-policy selection and token boundaries
 are unchanged by this pin update.
 
-For [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811), run a
-fresh example artifact upload with this corrected deployment, recording the
-image digest and binary revision and, if refused, the exact method/host.
-The historical hostless refusal does not establish an upload destination.
-A further exact-account, PUT-only admission needs a GitHub results-service
-signed-upload response or artifact redirect tying that account to GitHub,
-not just DNS existence. A successful run is one sample, not proof that every
-variable upload destination is admitted. Actions' example and tracker
-callers must also select the corrected deployment; this forwarder update
-does not move their pins.
+For [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811), the
+example workflow has now uploaded an artifact under this deployment on a
+hosted runner. Actions' [#228](https://github.com/cgwalters-forge/actions/pull/228)
+moves `example-plain-ci.yml` to that action commit and asserts the pin in
+its workflow test; the pull request run for its head
+`8c3486ee6006f4baf112b954ffafd3df6088640f`,
+[42487605263](https://github.com/cgwalters-forge/actions/actions/runs/42487605263),
+passed:
+
+- The build job's secure-host step verified the attestation of that digest,
+  set up the host with `egress: write-policy`, and passed the write-policy
+  sandbox checks: the runner reads with no proxy variable set, its POST to
+  `example.com` is refused, and the sandbox cannot reach the runner's listener.
+- `actions/upload-artifact` uploaded the one-file artifact 13620365713
+  (171 bytes, ZIP digest
+  `sha256:9955628b4bbcbd9ccb2c1b2a6ac1b8a3d47a107aae05529480221e12fac60d5e`)
+  with no refusal response.
+- The publish job downloaded it by ID, checked that digest and validated the
+  extracted file as one commit ID. Its download redirect named
+  `productionresultssa18`, one of the admitted accounts below, as the account
+  holding the artifact; the upload step's log names no host. So the run
+  shows one admitted destination, not where a refused upload would have gone.
+
+That is pull request evidence, not default-branch adoption. On 2026-11-09
+actions' `main` (`eef41d3b216c731fda0960d6c9876a6ab3cd159a`) still pins the
+example to `c9a9501729bc306f3efdc188056b51149c1c9398`, whose image is v0.6.4,
+digest `sha256:df9133ce3d7ca05c9de0c5eb7d1f6c662065288191ac857d6c877ab5833e5b49`;
+its latest example run
+[42488914598](https://github.com/cgwalters-forge/actions/actions/runs/42488914598)
+passed with that image and says nothing about the corrected one. #228 is
+approved and conflict-free but behind `main`, and its required `ci` check
+([42487605277](https://github.com/cgwalters-forge/actions/actions/runs/42487605277))
+fails in zizmor: four `ref-version-mismatch` warnings on the `# main`
+comments of wrapper pins in `cgwalters-agent.yml` and
+`cgwalters-agentic-job.yml`, files #228 does not change; `ci` fails the same
+way on `main`
+([42488914465](https://github.com/cgwalters-forge/actions/actions/runs/42488914465)).
+Once that check passes and #228 merges, record here the default branch's
+effective action and image and a post-merge example run's upload and
+consumer result; until then #2811 stays open. The pin is actions' to land;
+this repository does not duplicate it. Tracker and other callers of actions'
+wrappers must select the corrected deployment themselves: neither this
+forwarder update nor #228 moves their pins.
+
+The historical refusals, agentic-job run
+[41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777)
+and actions runs
+[42349245829](https://github.com/cgwalters-forge/actions/actions/runs/42349245829)
+and [42349923436](https://github.com/cgwalters-forge/actions/actions/runs/42349923436),
+still name no upload host: each ends with a PUT the egress proxy refused,
+and a download redirect in the same run names the account holding an
+artifact already uploaded, not the refused PUT's destination. One success
+does not show that every dynamic upload destination is admitted. A future
+refusal is recorded as its query-free method and host with run and step
+links, never a signed URL or header. A further exact-host, PUT-only admission needs verified GitHub
+ownership of that storage account, from a results-service signed-upload
+response or artifact redirect, and positive and negative boundary tests,
+not ranges, suffixes or DNS existence.
 
 Under `egress.write-policy`, the runner's storage writes go only to the
 results service's twenty `productionresultssaN` accounts from gh-aw,
