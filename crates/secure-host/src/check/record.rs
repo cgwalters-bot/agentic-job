@@ -202,6 +202,7 @@ mod tests {
     #[test]
     fn only_the_same_job_and_configuration_match() {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let temp = dir.path().to_str().unwrap();
         let vars = |job: &'static str| -> Vec<(&str, &str)> {
             vec![
@@ -271,6 +272,7 @@ mod tests {
     #[test]
     fn a_link_is_no_record_and_is_not_written_through() {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let (target, path) = (dir.path().join("target"), dir.path().join(FILE_NAME));
         fs::write(&target, b"record").unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
