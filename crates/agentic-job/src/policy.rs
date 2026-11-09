@@ -83,6 +83,9 @@ const MAX_OUTPUTS: &str = "max";
 /// and one that does is refused with a reason like any other.
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Caller-owned external-fetch receipt; never the external run's policy/config
+    #[arg(long, value_name = "FILE")]
+    pub external_receipt: Option<PathBuf>,
     /// Trusted admission's advisory target (never producer supplied)
     #[arg(long, requires = "advisory_head")]
     pub advisory_item: Option<u64>,
@@ -666,6 +669,7 @@ impl Compile for Bounds {
                 .collect(),
         };
         Ok(Policy {
+            external: None,
             advisory: None,
             allow_http: self.allow_http.clone(),
             context: Vec::new(),
@@ -818,6 +822,32 @@ pub fn run(args: &Args) -> Result<Exit> {
         });
     match compiled {
         Ok(mut policy) => {
+            if let Some(path) = &args.external_receipt {
+                let receipt = crate::external::Receipt::load(path)?;
+                receipt.record.caller_env()?;
+                receipt.record.policy(&policy)?;
+                ensure!(
+                    args.output_repo
+                        .as_deref()
+                        .is_none_or(|repo| repo == policy.repo),
+                    "external output repository must be the trusted target"
+                );
+                policy.external = Some(ExternalRun {
+                    caller_repository: receipt.record.caller_repository,
+                    caller_run_id: receipt.record.caller_run_id,
+                    caller_attempt: receipt.record.caller_attempt,
+                    repository: receipt.record.repository,
+                    run_id: receipt.run_id,
+                    base_commit: receipt.record.base_commit,
+                    raw_digest: receipt.raw.digest,
+                });
+                // External mode can only narrow the caller's publication policy.
+                if let Some(pull) = &mut policy.safe_outputs.create_pull_request {
+                    pull.draft = true;
+                    pull.ready_when_complete = false;
+                }
+                policy.validate()?;
+            }
             if policy.clone_url.starts_with(PLAIN_HTTP_PREFIX) {
                 eprintln!(
                     "warning: {} is cloned over plain HTTP, as the bounds allow for its host",

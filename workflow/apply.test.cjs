@@ -117,7 +117,8 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
 test('a staged apply skips every step that holds a credential, but one that only reads', () => {
   const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
   const steps = apply.split('\n    steps:\n')[1].split(/\n      - (?=name:|uses:|id:)/).slice(1);
-  const readOnly = ["name: The checked outputs are this run's check's\n"];
+  const readOnly = ["name: The checked outputs are this run's check's\n",
+    "name: Require policy's binary\n", "name: Release external output only after trusted detection\n"];
   let skipped = 0;
   for (const body of steps) {
     if (!/secrets\.SAFE_OUTPUTS_PAT|github\.token|gh api|git push/.test(body) || readOnly.some(name => body.startsWith(name))) continue;
@@ -365,8 +366,9 @@ test('the guard is policy binary, given the token and the trial, after the parti
   const condition = text => steps.find(step => step.includes(text)).match(/^        if: (.*)$/m)[1];
   assert.ok(workflow.indexOf("- name: Require policy's binary\n") < workflow.indexOf('id: trial'));
   assert.ok(workflow.indexOf('path: ${{ runner.temp }}/apply-binary') < workflow.indexOf('id: trial'));
-  assert.equal(condition("name: Require policy's binary\n"), condition('id: apply\n'));
-  assert.equal(condition('path: ${{ runner.temp }}/apply-binary'), condition('id: apply\n'));
+  const trustedBinary = "${{ fromJSON(inputs.policy).apply-staged != 'true' || fromJSON(inputs.policy).external-run-id != '' }}";
+  assert.equal(condition("name: Require policy's binary\n"), trustedBinary);
+  assert.equal(condition('path: ${{ runner.temp }}/apply-binary'), trustedBinary);
   assert.equal(condition('id: applied\n'), condition('id: apply\n'));
   assert.ok(workflow.indexOf('- name: Mark what a partial run') < workflow.indexOf('- name: Leave out what an earlier attempt applied'));
   const guardStep = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split(/\n      - /)[0];
@@ -620,7 +622,7 @@ async function applyImplement(body, { issue = dispatchedInput('issue', '64'), ex
     writeFileSync(join(root, 'config.json'), JSON.stringify({ create_pull_request: { max: 1, ready_when_complete: true } }));
     writeFileSync(join(root, 'report.json'), JSON.stringify({ ok: true, patch: { file: 'aw-agent-run-7.patch' } }));
     writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [{ ...pull, body }], errors: [] }));
-    const contexts = { policy: { issue, 'apply-staged': '', 'proposals-artifact': '' },
+    const contexts = { policy: { issue, 'apply-staged': '', 'proposals-artifact': '', 'external-run-id': '' },
       check: { outputs: { 'has-patch': 'true' } }, agent: { outputs: { exit } } };
     const env = { GH_AW_TMP: root, REPORT: join(root, 'report.json'), GITHUB_OUTPUT: join(root, 'output'), GITHUB_ENV: join(root, 'env'),
       GITHUB_WORKSPACE: root, RUNNER_TEMP: root, REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo', ITEM_REPO: 'owner/repo', ISSUE: issue };

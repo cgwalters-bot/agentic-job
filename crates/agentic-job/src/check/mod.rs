@@ -333,7 +333,7 @@ fn redirections_to(
     safe_outputs::check::redirections_to(item, policy, comment, &Apply)
 }
 
-fn is_handback_file(name: &str) -> bool {
+pub(crate) fn is_handback_file(name: &str) -> bool {
     name == OUTPUTS_FILE
         || name == BASE_FILE
         || name == SECONDARY_BASE_FILE
@@ -634,6 +634,7 @@ fn checked_test_evidence(
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
+    crate::external::caller_policy(&policy)?;
     let comment = args.comment_repo.as_deref().zip(args.comment_target);
     let public = args
         .base_secret_evidence
@@ -654,6 +655,25 @@ pub fn run(args: &Args) -> Result<Exit> {
         args.run_id.as_deref(),
         &public,
     )?;
+    if let Some(external) = &policy.external {
+        for item in &mut verdict.items {
+            if item_type(item) == crate::policy::CREATE_PULL_REQUEST {
+                let body = item.get("body").and_then(Value::as_str).unwrap_or_default();
+                let provenance = format!(
+                    "{body}\n\nExternal run: https://github.com/{}/actions/runs/{} (attempt 1).\nRaw hand-back API digest: `{}` (transfer integrity, not test provenance).",
+                    external.repository, external.run_id, external.raw_digest
+                );
+                if provenance.encode_utf16().count() > 60_000 {
+                    verdict
+                        .errors
+                        .push("external provenance would exceed the draft body budget".into());
+                    verdict.ok = false;
+                } else {
+                    item.insert("body".into(), Value::String(provenance));
+                }
+            }
+        }
+    }
     if policy.forge != crate::policy::Forge::Github
         && verdict
             .items

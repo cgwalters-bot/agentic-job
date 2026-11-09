@@ -565,6 +565,7 @@ mod tests {
 
     fn policy(kind: Kind, outputs: serde_json::Value) -> Policy {
         Policy {
+            external: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
@@ -919,6 +920,7 @@ mod brief_tests {
             "noop": {"max": 1}, "missing_tool": {"max": 1}, "missing_data": {"max": 1},
         });
         Policy {
+            external: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),

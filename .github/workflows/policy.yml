@@ -24,6 +24,10 @@ name: agentic-job policy
 on:
   workflow_call:
     inputs:
+      external-receipt:
+        description: Caller-owned external-fetch receipt JSON; empty preserves hosted mode. Never take this from the external producer.
+        type: string
+        default: ""
       role-bindings:
         description: Caller-only apply role identities; status uses STATUS_TOKEN instead of the legacy PAT
         type: string
@@ -325,6 +329,9 @@ on:
     # so that what they check and apply is what this call decided, and the
     # caller's agent job finds its trusted inputs here by upload ID.
     outputs:
+      external-run-id:
+        description: Matched external branch run ID, or empty for hosted mode
+        value: ${{ jobs.policy.outputs.external-run-id }}
       admitted:
         description: "`true` unless an event was refused; the agent job runs only then"
         value: ${{ jobs.policy.outputs.admitted }}
@@ -462,6 +469,7 @@ jobs:
       contents: read
     outputs:
       binary-artifact-id: ${{ steps.binary.outputs.artifact-id }}
+      external-run-id: ${{ steps.request.outputs.external-run-id }}
       policy-artifact-id: ${{ steps.policy.outputs.artifact-id }}
       # Whether the run goes on: `true` unless an event was refused.
       admitted: ${{ steps.event.outputs.admitted || 'true' }}
@@ -764,6 +772,8 @@ jobs:
           REVIEW: ${{ inputs.review }}
           CONTEXT_REPOS: ${{ inputs.context }}
           ADVISORY: ${{ inputs.advisory }}
+          EXTERNAL_RECEIPT: ${{ inputs.external-receipt }}
+          PROPOSALS_NAME: ${{ inputs.proposals-artifact }}
           GH_TOKEN: ${{ github.token }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
@@ -800,6 +810,13 @@ jobs:
           if [ "$ADVISORY" = true ]; then
             set -- "$@" --advisory-item "$target" --advisory-head "$(jq -er '.head.sha' "$JOB_DIR/event.json")"
           fi
+          if [ -n "$EXTERNAL_RECEIPT" ]; then
+            [ -z "$PROPOSALS_NAME" ] || { echo '::error::external proposals require an upload ID and digest, never a name'; exit 1; }
+            [ "$EVENT" != true ] && [ "$REVIEW" != true ] && [ -z "$REVIEW_ITEM$PUSH_ITEM" ] && [ "${OUTPUT_REPO:-$GITHUB_REPOSITORY}" = "$REPO" ] || exit 1
+            printf '%s' "$EXTERNAL_RECEIPT" > "$JOB_DIR/external-receipt.json"
+            [ "$(jq -er '.record.item' "$JOB_DIR/external-receipt.json")" = "$ISSUE" ] || exit 1
+            set -- "$@" --external-receipt "$JOB_DIR/external-receipt.json"
+          fi
           "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" --context-request "$CONTEXT_REPOS" \
             --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
             { echo "::error::The request was refused; this step's log says why"; exit 1; }
@@ -821,6 +838,7 @@ jobs:
           printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
           # The binary wrote and checked these: domain names, no comma.
           echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
+          echo "external-run-id=$(jq -r '.external.run_id // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
       # Uploaded for a refused event too: review.yml's refusal job writes
       # its status comment with it.
       - id: binary

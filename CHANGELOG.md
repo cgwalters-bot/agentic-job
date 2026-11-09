@@ -25,6 +25,13 @@ says what a caller may rely on across versions.
   refuses listening sessions even when enabled by the runner TOML rather
   than the dispatch input (#536).
 
+- Opt-in `external-fetch` correlates a caller-owned dispatch record with
+  exactly one attempt-1 Actions run, checks its pins/jobs/artifacts again
+  at release, and verifies the raw hand-back's API digest before bounded
+  extraction. Composed policy/check/apply can bind that receipt's exact
+  base and branch; external apply requires explicit successful trusted
+  detection. No external caller or deployment is enabled (#3293).
+
 - A run may hand back repeated-test evidence beside a pull request's
   patch, where the bounds' new `[github.test_evidence]` allows it (off by
   default). The evidence is `out/test-evidence.json` and one log per

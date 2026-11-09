@@ -84,6 +84,10 @@ pub enum Command {
     Event(event::Args),
     /// Check a dispatch.yml run's inputs and item, and write its agent, skills and task, before any policy job
     Dispatch(crate::dispatch::Args),
+    /// Correlate and fetch an external hand-back using a caller-owned dispatch record (read only)
+    ExternalFetch(crate::external::Args),
+    /// Refuse external apply unless this caller's trusted check and detection succeeded
+    ExternalRelease(crate::external::ReleaseArgs),
     /// Resolve trusted workflow review routing without running reviewed code
     #[command(subcommand)]
     Review(crate::review::Command),
@@ -134,6 +138,8 @@ impl Command {
             Self::Diagnostics(command) => command.run(),
             Self::Event(args) => event::run(args),
             Self::Dispatch(args) => crate::dispatch::run(args),
+            Self::ExternalFetch(args) => crate::external::run(args),
+            Self::ExternalRelease(args) => crate::external::release(args),
             Self::Review(command) => command.run(),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),

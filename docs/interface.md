@@ -31,6 +31,8 @@ are [listed in the plan](plan.md#breaking-keys-and-safe-refusals).
 | `apply --forge gitlab --server URL --repo GROUP/PROJECT --policy FILE --checked DIR --run-url URL [--comment-target IID --comment-target-kind issue\|pull-request [--run-summary]] [--push-repo GROUP/PROJECT] [--status STATE --status-sha SHA --status-ref REF --status-pipeline-id ID]` | the apply job | Publishes a checked note on the caller's issue or merge request, a merge request from the bounds' fork or a push to its open one, issues, label changes and closings to GitLab with `GITLAB_TOKEN`, or per-role tokens under `APPLY_ROLE_BINDINGS` ([roles](safe-outputs.md#forgejo-and-gitlab-roles)), then, with `--run-summary`, the run summary check accepted as a note there, then the caller's context-bound commit status ([safe outputs](safe-outputs.md#publishing-to-gitlab)). |
 | `applied --dir DIR --report FILE --output-repo OWNER/NAME --repo OWNER/NAME --item-repo OWNER/NAME [--comment-target N] [--branch-prefix P] [--artifact-prefix P] [--fork OWNER/NAME --base BRANCH --tree SHA --replacement-head SHA --made FILE] --token-is-pat BOOL` | the apply job | With `GH_TOKEN`, leaves out of `DIR/agent_output.json` what an earlier attempt of the job applied, names the rest and lists what it left out in `DIR/skipped.json`, before gh-aw's handlers run; pushes a replacement series itself and appends it to the `--made` file, which it then requires; refuses a close_issue naming a pull request or a transferred issue, a reply off the run's pull request and a pull request without a fork before writing anything ([running apply again](workflow.md#running-apply-again)). Exit 1 on a refusal. |
 | `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
+| `external-fetch --record FILE --archive FILE --outputs DIR --receipt FILE` | trusted read-only waiting job | Correlates an external dispatch, verifies API identities and the raw ZIP's digest, and extracts bounded raw files. All output paths must be new; see [external correlation](dispatch.md#binary-correlation-interface). |
+| `external-release --policy FILE --report FILE --detection-result success` | trusted apply job | Refuses external output without this caller's successful trusted check and detection. Hosted policy is unchanged. |
 | `workflows check [--root DIR] [--exemptions FILE]` | anyone | Refuses workflow files whose jobs neither run secure-host nor call the reusable workflow, and the other shapes in [workflows-check.md](workflows-check.md). Exit 1 names each file, job and step. |
 | `acp-drive start\|prompt\|events\|cancel\|status\|stop` | a run's agent | Starts the run's child agent and drives it over ACP ([harness.md](harness.md#a-second-agent)). |
 | `session connect ENDPOINT [--json]` | an operator or their agent | Joins a session run's conversation: each line of standard input is a prompt, and it prints what the agent says, or with `--json` each message from the bridge as one line ([session runs](../specs/session.md#wire)). |
@@ -66,6 +68,12 @@ request types, counts and text sanitization. `collect` ports these rules,
 and fixtures verify that it follows them. `--collected` is what
 `collect` made of the outputs, and is given by path so that it is never
 taken from what the agent's machine uploaded. [safe-outputs.md](safe-outputs.md) has both halves.
+
+`policy --external-receipt FILE` accepts only the trusted waiting job's
+receipt, after ordinary caller/organization bounds compilation. It pins
+check to the recorded base commit and external run's branch without
+trusting external policy/configuration. This is compose-only and off by
+default; the complete reusable workflow has no such input.
 
 `config` exists because a workflow gets a run's settings as strings from
 whoever called it. Each setting is the value of its one key and is never

@@ -124,7 +124,7 @@ The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
 designed, not built or deployed. This is its one list of follow-ups, in
 dependency order, for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-Only slice 4 is built. None has run on an external runner. Each slice is one implement-sized pull
+Slices 4 and 5 are built. None has run on an external runner. Each slice is one implement-sized pull
 request. None of them enables a profile, changes credentials, broker
 admission or bounds, or adds ostree or any other target. Repositories
 without an owner are under `cgwalters-forge`.
