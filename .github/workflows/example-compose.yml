@@ -184,6 +184,13 @@ jobs:
       - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
         with:
           config: ${{ runner.temp }}/agentic-job-host.toml
+      # As agent.yml does: what `[preflight]` asks of the host, proved as
+      # the agent's user before anything of the run's; without it, nothing.
+      # The policy-uploaded binary, not the host image's older CLI on PATH.
+      - name: Capability preflight
+        run: |
+          chmod +x .agentic-job/agentic-job
+          exec .agentic-job/agentic-job sandbox preflight --config .agentic-job/config.toml
       - name: The setup script
         env:
           AGENT_HOME: ${{ runner.temp }}/agent-home

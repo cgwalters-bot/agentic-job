@@ -42,6 +42,9 @@ pub struct Config {
     /// Remote MCP servers `run` serves the agent, by name, with a
     /// credential the agent never holds (`run::mcp`). At most one.
     pub mcp: BTreeMap<String, Mcp>,
+    /// What the host must prove before anything of the run's starts
+    /// (`sandbox preflight`). Off unless a key is set.
+    pub preflight: Preflight,
 }
 
 impl Config {
@@ -50,6 +53,7 @@ impl Config {
         let config: Self = toml::from_str(text).context("parsing the configuration")?;
         config.sandbox.refuse_removed()?;
         config.setup.refuse_removed()?;
+        config.preflight.validate()?;
         Ok(config)
     }
 
@@ -99,6 +103,9 @@ impl From<HostConfig> for Config {
 
 /// `[egress]`, which secure-host's setup reads. Step 5.
 pub use ::secure_host::config::Egress;
+
+/// `[preflight]`, which `sandbox preflight` reads.
+pub use crate::sandbox::preflight::{Libvirt, Preflight};
 
 /// The inference proxy and how a run announces itself to it. Step 6a.
 /// `run::inference::Endpoint::from_config` checks it.

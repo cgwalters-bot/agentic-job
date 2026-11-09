@@ -212,7 +212,7 @@ the next in the same major version.
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`, `run --config`): the tables
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
-  `[limits]`, `[session]` and `[commit]`
+  `[limits]`, `[session]`, `[commit]` and `[preflight]`
   ([files read](interface.md#files-read)).
   `run --config FILE` supports server configurations outside the workflow;
   it defaults to `config::ROOT_COPY` (`/etc/agentic-job/config.toml`), the
@@ -226,6 +226,10 @@ the next in the same major version.
   [trust assumptions](interface.md#files-read).
   `agentic-job config --no-session` refuses an effective `session.listen = true`,
   including one inherited from the file; review policy always uses it.
+  `[preflight]` has `kvm` (boolean), `libvirt` (only `"session"`, which
+  needs `kvm`) and the positive integers `vcpus` (at most 4096),
+  `memory-gib` (65536) and `disk-gib` (1048576), each off unless set; `config --host` leaves it out
+  ([capability preflight](dispatch.md#capability-preflight)).
   `[host]` (with `[host.check]` and `[host.prepared]`) was `[sandbox]`
   before #2071. `[sandbox]`, and a `sandbox.KEY` setting of `config`,
   are still read as a deprecated alias, with the same keys, defaults and

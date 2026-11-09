@@ -2290,6 +2290,40 @@ fn network_refuses_debug_logging_before_minting() {
 }
 
 #[test]
+fn capability_preflight_uses_the_policy_binary_after_host_setup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for file in ["agent.yml", "example-compose.yml"] {
+        let dir = tempfile::tempdir().unwrap();
+        let job = dir.path().join(".agentic-job");
+        std::fs::create_dir(&job).unwrap();
+        std::fs::copy(BIN, job.join("agentic-job")).unwrap();
+        // Artifact download does not preserve executable permissions.
+        std::fs::set_permissions(
+            job.join("agentic-job"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::write(job.join("config.toml"), "").unwrap();
+        let host_bin = dir.path().join("host-bin");
+        std::fs::create_dir(&host_bin).unwrap();
+        // The pinned host image can install an older CLI on PATH. It does
+        // not provide the new subcommand, even for a no-op configuration.
+        executable(
+            &host_bin.join("agentic-job"),
+            "#!/bin/sh\necho \"unrecognized subcommand 'preflight'\" >&2\nexit 2\n",
+        );
+        let output = run_step(
+            file,
+            "Capability preflight",
+            dir.path(),
+            &[("PATH", &format!("{}:/usr/bin:/bin", host_bin.display()))],
+        );
+        assert!(output.status.success(), "{file}: {output:?}");
+    }
+}
+
+#[test]
 fn composed_agents_keep_policy_source_and_trusted_edges() {
     let pinned = Regex::new(r"^actions/(checkout|download-artifact)@[0-9a-f]{40}$").unwrap();
     for (file, prefix) in [
@@ -2419,6 +2453,7 @@ fn composed_agents_keep_policy_source_and_trusted_edges() {
             "Check inference proxy reachability",
             "The host's configuration",
             "Refuse the old action's inputs",
+            "Capability preflight",
             "The setup script",
             "The session's endpoint",
             "Prove the host is secured",
@@ -2433,6 +2468,12 @@ fn composed_agents_keep_policy_source_and_trusted_edges() {
         assert_eq!(
             named_step(&doc, "Check inference proxy reachability")["run"].as_str(),
             Some("agentic-job secure-host inference .agentic-job/config.toml")
+        );
+        assert_eq!(
+            named_step(&doc, "Capability preflight")["run"].as_str(),
+            Some(
+                "chmod +x .agentic-job/agentic-job\nexec .agentic-job/agentic-job sandbox preflight --config .agentic-job/config.toml\n"
+            )
         );
         assert_eq!(
             steps

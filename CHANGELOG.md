@@ -171,6 +171,17 @@ says what a caller may rely on across versions.
   adoption. Forwarder/site pins remain unchanged pending actions#230;
   new-image hosted and agent E2E evidence remains pending (#2070/#2656).
 
+- A new, optional `[preflight]` table and `sandbox preflight` command,
+  which the agent job runs after secure-host and before the setup script:
+  as the agent's user, `kvm = true` opens `/dev/kvm` for reading and
+  writing, requires hardware virtualization and boots and stops a
+  one-sector guest with KVM and no emulation; `libvirt = "session"`
+  creates and destroys a guest in `qemu:///session`; `vcpus`,
+  `memory-gib` and `disk-gib` require effective resources. Each command
+  has a fixed time limit, and the libvirt guest is destroyed after any
+  failure, and on cancellation within the runner's grace. A file without the table checks nothing
+  (#3291).
+
 - The run action carries a host check that failed only to reach a host
   outside the runner, after its retries, as `exit` 4 with the new failure
   class `control_unreachable`, which the reusable workflows pass on and the

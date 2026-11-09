@@ -346,6 +346,9 @@ fn compose(args: &Args) -> Result<String> {
         if let Some(inference) = table.get_mut("inference").and_then(Value::as_table_mut) {
             inference.remove("allow-base-address-lines");
         }
+        // The runner's user runs the preflight from the run's file, after
+        // secure-host and before the setup script.
+        table.remove("preflight");
         // The released image the forwarder pins (v0.6.9) reads the host's
         // table only by its old name and refuses [host]; it also refuses
         // [host.prepared], which only an image of this source, reading
@@ -943,6 +946,30 @@ mod tests {
                 &[]
             ))
             .is_err()
+        );
+    }
+
+    /// `[preflight]` stays in a run's file for `sandbox preflight`, and a
+    /// host's file, which the released image parses strictly, leaves it
+    /// out once it is checked.
+    #[test]
+    fn host_config_omits_the_preflight() {
+        let run = Args {
+            boolean: settings(&["preflight.kvm=true"]),
+            ..args(None, RUN, LIMITS, &[])
+        };
+        assert!(composed(&run).preflight.kvm);
+        let text = compose(&Args { host: true, ..run }).unwrap();
+        let table: Table = toml::from_str(&text).unwrap();
+        assert!(table.get("preflight").is_none(), "{text}");
+        let bad = Args {
+            string: settings(&["preflight.libvirt=session"]),
+            ..host_args(&[], &[])
+        };
+        let err = format!("{:#}", compose(&bad).unwrap_err());
+        assert!(
+            err.contains("preflight.libvirt needs preflight.kvm"),
+            "{err}"
         );
     }
 

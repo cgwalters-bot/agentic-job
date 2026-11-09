@@ -138,7 +138,8 @@ The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
 designed, not built or deployed. This is its one list of follow-ups, in
 dependency order, for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-Slices 4 and 5 are built. None has run on an external runner. Each slice is one implement-sized pull
+Slices 3 (#3291), 4 and 5 are built. None has run on an external runner.
+Each slice is one implement-sized pull
 request. None of them enables a profile, changes credentials, broker
 admission or bounds, or adds ostree or any other target. Repositories
 without an owner are under `cgwalters-forge`.
@@ -173,6 +174,12 @@ without an owner are under `cgwalters-forge`.
    device and an unanswering session; the existing `libvirt` group refusal
    kept; the positive path covered by a privileged CI test where a
    KVM-capable runner exists, and otherwise listed as unverified.
+   Implemented in #3291 as `[preflight]` and `sandbox preflight`, with its
+   refusals tested against stand-ins; the positive path on a KVM host is
+   unverified. It runs in the agent job, before the setup script and any
+   model request, but after the `github-oidc` register job, which runs
+   on another machine: a refusal leaves that run token unused, not
+   unissued.
 4. **agentic-job — `test-evidence.json`.** `collect` accepts the file in
    the hand-back and check.yml's checked upload carries it. Check validates
    its shape and bounds, its attempt count against `max-attempts`, one

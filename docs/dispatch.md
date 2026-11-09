@@ -557,6 +557,9 @@ As read on 7 November 2026, these are **shipped**:
 - Apply's `agentic-job-applied` names, which stop a re-run of apply from
   posting twice ([running apply again](workflow.md#running-apply-again)).
 - Sandbox setup's refusal of an agent user in the `libvirt` group.
+- The [capability preflight](#capability-preflight)'s `[preflight]` table
+  and agent job step (#3291). Its refusals are tested against stand-ins;
+  its positive path has not run on a KVM host.
 
 `test-evidence.json` is **implemented but not enabled**: collect, check
 and apply handle it ([test evidence](safe-outputs.md#repeated-test-evidence)),
@@ -566,9 +569,9 @@ Read-only correlation/fetch and trusted re-check/release adapters are
 **implemented but not enabled**, with offline API and local staged-apply
 fixtures only; see [the binary interface](#binary-correlation-interface).
 These are **designed here but not implemented**: the runner profile map
-and its resolution, dispatch record creation/dispatch, the KVM preflight
-and the wrapper's external mode. No external caller has been enabled or
-credentialed, and no live cross-run apply has been demonstrated.
+and its resolution, dispatch record creation/dispatch and the wrapper's
+external mode. No external caller has been enabled or credentialed, and no
+live cross-run apply has been demonstrated.
 The [implementation slices](plan.md#external-runner-implementation-slices)
 list them in order.
 
@@ -693,10 +696,66 @@ existence is not proof. A missing capability refuses the job, and software
 emulation must not turn an unavailable KVM profile green.
 Each refusal needs its positive control: the same preflight passes on a
 KVM-capable host and boots and destroys a minimal guest.
+
+The external workflow's runner configuration asks for these in a
+`[preflight]` table, which the profile's `config` input selects, such as
+`kvm = true`, `libvirt = "session"`, `vcpus = 64`, `memory-gib = 250`
+and `disk-gib = 500`. Each limit is at most 4096 vCPUs, 65536 GiB of
+memory and 1048576 GiB of disk. `MemTotal` is below the installed memory
+by what firmware and the kernel keep, so a 256 GiB host asks for a
+little less. The agent job runs `agentic-job sandbox preflight`
+as the runner's user after secure-host, before the setup script, the
+target's code or any model request; only the earlier proxy reachability
+check has connected to the inference proxy, and it sends nothing.
+Registration under `github-oidc` is a separate job on another machine
+and comes first; its run token then goes unused and expires. The
+command refuses to run as root, and:
+
+- counts the CPUs the process may run on, the least of `MemTotal` and its
+  cgroups' `memory.max`, and the free space an unprivileged user has in
+  the working directory. Memory discovery maps membership through
+  `/proc/self/mountinfo` and requires the initial cgroup namespace.
+  It refuses unavailable limits, unmappable membership, subtree mounts
+  that hide ancestors, and a cgroup v1 memory controller rather than
+  treating these as unlimited memory. A cgroup namespace is refused even
+  with a mount rooted at `/`: tighter ancestor limits may be hidden;
+- for `kvm`, refuses a host that is not x86-64, opens `/dev/kvm`, not
+  followed if a link, for reading and writing, and requires `vmx` or
+  `svm` among the CPU's flags;
+- boots `qemu-system-x86_64` from PATH, or else RHEL's
+  `/usr/libexec/qemu-kvm`, with `-accel kvm -cpu host -machine q35` and
+  no fallback, from a boot sector it writes, whose code makes QEMU's
+  `isa-debug-exit` device end QEMU with a status only a guest that ran
+  can give, within 60 seconds;
+- for `libvirt = "session"`, asks `virsh -c qemu:///session uri`,
+  creates a transient KVM guest from the same sector, requires it
+  running, destroys it and checks that it is gone, each step within 60
+  seconds and the cleanup's two within 4 each. The cleanup runs after any
+  failure past the answer and on the job's cancellation (SIGINT or
+  SIGTERM, which the step's `exec` lets reach it), within the runner's
+  grace before SIGKILL; a cleanup that fails is reported with whatever
+  came before. A fresh random UUID identifies the guest in both its XML
+  and cleanup commands, so a failed create cannot stop an unrelated guest
+  with a reused name. Parsed commands run with `LC_ALL=C`.
+  Past that grace, the disposable host is the backstop.
+
+A refusal is one `::error::` line naming what failed, and fails the job.
+A command past its limit or a cancelled one is killed. The guest has no
+network and 16 MiB of memory. The image and domain are written to a
+temporary directory at run time; nothing binary is in the repository.
+Whether RHEL's QEMU build has `isa-debug-exit` has not been checked.
 Guest privilege and libvirt sockets stay inside the disposable host, never
 on a shared control host. The host must also meet the
 [runner requirements](workflow.md#what-a-caller-provides) and pass
 `sandbox check`.
+
+On an authorized disposable KVM host, as its unprivileged runner user, run
+`cargo test --locked -p agentic-job --test preflight -- --ignored` to exercise
+the public CLI's real KVM boot and session-libvirt creation and cleanup. This
+test requires QEMU, virsh and a working session instance; it does not install
+them or grant device access. Ordinary test runs explicitly ignore it. The
+stand-in unit tests are not evidence of a working guest, and the real-host
+positive path remains unverified until this test runs on a provisioned host.
 
 ### Resources, lifetime and cleanup
 

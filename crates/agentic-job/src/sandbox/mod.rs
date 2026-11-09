@@ -12,6 +12,7 @@ use clap::Subcommand;
 use crate::config::{Config, Egress, HostFile, Sandbox};
 use crate::exit::Exit;
 
+pub mod preflight;
 pub(crate) mod session;
 pub mod setup;
 
@@ -157,6 +158,8 @@ pub enum Command {
     Prepare(setup::PrepareArgs),
     /// Probe the runner's user's hardening, each probe with a positive control where one can be had
     Check(check::Args),
+    /// As the runner's user, before the run: prove the KVM, libvirt session and resources `[preflight]` asks for
+    Preflight(preflight::Args),
     /// Run secure-host's setup or probes, and add their time to the job summary
     #[command(hide = true)]
     Timed(timed::Args),
@@ -174,6 +177,7 @@ impl Command {
             Self::Setup(args) => setup::run(args),
             Self::Prepare(args) => setup::prepare(args),
             Self::Check(args) => check::run(args),
+            Self::Preflight(args) => preflight::run(args),
             Self::Timed(args) => timed::run(args),
             Self::Probe(args) => probe::run(args),
             Self::EgressProxy(args) => proxy::run(args).map(|()| Exit::Success),
