@@ -7,8 +7,8 @@ runner's user as the agent, which can attach to its own bridge ahead of the
 operator and so deny them the chat; no message over the bridge authorizes a
 write, which waits for the end-of-run check and apply
 ([session runs](../specs/session.md#recommendation-lift-the-refusal)). Do not
-create a second user or a local credential holder for it. A client that
-reconnects, and a run on a real tailnet, are still to do under
+create a second user or a local credential holder for it. A run on a real
+tailnet is still to do under
 [#536](https://github.com/cgwalters-forge/agentic-job/issues/536).
 The shipped dispatch caller starts one with `session=true`, on a runner
 the caller names in a closed map
@@ -16,11 +16,70 @@ the caller names in a closed map
 
 Partly built: a session run ([session runs](../specs/session.md))
 accepts an operator's prompts after its task's turn, through a bridge
-that listens on the runner's tailnet name behind `tailscale serve`. What follows is the earlier design note: a person, or another
+that listens on the runner's tailnet name behind `tailscale serve`, and a
+client attaches to it from anywhere on the tailnet, late or again
+([attaching](#attaching-to-a-session)). What follows that is the earlier
+design note: a person, or another
 program, attaches to the agent's session and works with it, while the
 agent stays inside the same [sandbox](sandbox.md),
 [inference proxy](inference.md) and [safe-outputs](safe-outputs.md)
 limits as an unattended run. It is why the agent is driven over ACP.
+
+## Attaching to a session
+
+The endpoint is `wss://NAME/`, for the runner's tailnet name, as the
+job's summary and its `session-endpoint` output give it, or as the
+caller's wrapper posts it to the dispatch issue while the session is
+live. From a tagged node the tailnet policy grants the caller's
+`[session] capability`:
+
+```sh
+agentic-job session connect wss://NAME/
+```
+
+The terminal client does not send an `Origin` header, so it cannot use
+the operator-login admission path: an ordinary device of an operator in
+`[session] operators` receives HTTP 403 (`no Origin`). That path requires
+a browser client with an allowed Origin; the terminal command above uses
+the capability path instead.
+
+It attaches with a replay of everything the session kept of the agent's
+notifications, so the task's turn, its words and its tool calls, scrolls
+by first, then the live stream; each line of standard input is then a
+prompt, answered before the next is sent. The end of the input (Ctrl-D,
+or a script's last line) leaves the session, which ends it. Ctrl-C
+detaches instead: the session goes on until its idle timeout, and the
+client prints the cursor it saw last, so that
+
+```sh
+agentic-job session connect --since CURSOR wss://NAME/
+```
+
+from the same or another device resumes with what was said meanwhile and
+nothing twice. When the connection drops, from a laptop's sleep or a
+tailnet hiccup, the client connects again by itself with that cursor, up
+to 30 times in a row two seconds apart, and says so on standard error; a
+prompt the bridge had, whose answer was lost with the connection, is not
+sent again, since the agent may be answering it, while one the bridge
+refused because a turn was running goes again. The bridge pings every 20
+seconds and drops a connection silent for 60, so a path that died without
+a close does not keep the client from coming back. Where the cursor is older than what the
+session kept (the latest 4096 notifications, up to 4 MiB), the bridge
+says which cursor it can replay from, the client takes it, and the rest
+is in the run's `acp.jsonl` artifact. `--json` prints each message from
+the bridge as one line for a program that drives the session, cursor
+included in `params._meta.botHarness.cursor`.
+
+Another ACP client, such as the chat pane, does the same over the
+[wire](../specs/session.md#wire): `session/new` with
+`_meta.botHarness.since`, a normal close (code 1000) to end the session,
+and any other end of the connection to come back later. A client that
+attaches without `since` gets only what follows, as the pane does today.
+
+The slot is one client's while it is connected. The agent, which is the
+runner's user, can take it with forged headers whenever it is free, as it
+could before the operator first came; that denies the operator the chat
+and nothing else, and nothing a client sends authorizes a write.
 
 The operator's words: "Another use case I have btw is interactive
 chats this is why ACP. We just mix in Tailscale or equiv. Should be a
@@ -54,9 +113,9 @@ to the agent (prompts and cancels over the bridge), who answers a
 permission request when a person is watching (the run's policy, still),
 how a prompt sent during a turn is held (it is refused: Claude Code's
 adapter would end the running turn for it) and what ends a session with
-a client (the client leaving, or an idle timeout). Still open is a
-client that joins a session already running: the bridge's client is
-attached when the session starts.
+a client (the client leaving on purpose, or an idle timeout). A client
+that joins a session already running, or comes back to one, gets the
+bridge's replay since its cursor.
 
 ## Who may attach
 

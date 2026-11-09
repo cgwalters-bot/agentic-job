@@ -11,8 +11,9 @@
 //! Every message from the agent passes the transcript's tap, and the tap
 //! hands its notifications to this list. Requests stay with the session:
 //! its policy answers permission requests whether or not a person is
-//! watching. Still open (docs/interactive.md): several clients, and one
-//! that joins a session already running.
+//! watching. The bridge keeps what passes here for a client that joins a
+//! session already running, or comes back to it. Still open
+//! (docs/interactive.md): several clients at once.
 //!
 //! The SDK's `Proxy` role is not what this is built on: it speaks
 //! `_proxy/*` to a conductor that owns both of its connections, and a

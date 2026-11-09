@@ -18,7 +18,10 @@ and [tracker#976](https://github.com/cgwalters-forge/tracker/issues/976) retain
 ownership; [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed the second user.
 
 **Implementation status**: first slice built: the bridge, listening behind `tailscale serve`,
-and the conversation. The chat pane
+and the conversation. Attaching from anywhere is built: the bridge numbers
+and keeps the agent's notifications, a client attaches with a replay since a
+cursor, and a connection that drops leaves the session waiting for the client
+to come back ([wire](#wire)). The chat pane
 ([review#66](https://github.com/cgwalters-forge/review/issues/66)) and
 tracker's session `workflow_dispatch`
 ([tracker#576](https://github.com/cgwalters-forge/tracker/issues/576)) are
@@ -126,9 +129,10 @@ bridge plays the agent toward the client and serves only these methods:
 | Client sends | Bridge does |
 | --- | --- |
 | `initialize` | answers itself, with no capabilities |
-| `session/new` | attaches the client to the running session and returns its id; `cwd` and `mcpServers` are ignored |
+| `session/new` | attaches the client to the running session and returns its id and the latest cursor; with `_meta.botHarness.since`, first replays the notifications kept after that cursor; `cwd` and `mcpServers` are ignored; a second one on a connection is refused |
 | `session/prompt` | sends a turn to the agent, and refuses the prompt if a turn is already running |
 | `session/cancel` | passes the cancel on to the agent's turn |
+| `_session/status` | after attaching, returns `{"running": true}` while the driver is executing a turn, or `false` while waiting for a prompt; does not start a turn or renew the idle timeout |
 | anything else | error `-32601` |
 
 Before attaching, the client receives no notifications. After attaching, it
@@ -136,6 +140,35 @@ receives every one of the agent's notifications, with the run's secrets
 replaced in each string, as in the job log. The task's turn may still run when
 the client attaches. Its prompts are refused until that turn ends, so it
 cancels the turn or waits for it.
+
+Each notification is numbered from 1, in `params._meta.botHarness.cursor`, and
+the bridge keeps the latest 4096 of them, up to 4 MiB, for the whole session.
+A `session/new` whose `_meta.botHarness.since` names a cursor (0 for all that
+is kept) is sent the kept notifications after it before its response, whose
+`result._meta.botHarness.cursor` is the latest; everything sent after the
+response is past it. So a client that comes late sees the task's turn, and
+one that comes back gets each notification once and in order. The bridge
+refuses, with `-32602` and the cursor it can take in `error.data.since`, a
+cursor past the latest (another session, most likely) and one so old that
+notifications after it are no longer kept, which the transcript still has.
+A response to a prompt is not replayed: a client that comes back during or
+after its turn learns from the updates what the agent did, and its next
+prompt is refused while a turn runs. Without `since`, as the chat pane
+attaches today, the client gets only what follows, as before.
+
+How a client's connection ends decides the session's end. A normal close
+(code 1000) means the client is done: the session ends, and a turn of the
+client's that still runs is cancelled. A connection that ends any other way,
+a close with another code or none, a failed read, or the bridge's own hang-up
+on a client that reads too slowly (code 1013, "try again later"), only
+dropped: the session goes on, a turn that runs finishes with nobody attached
+and what it says is kept, and the bridge listens again for a client, which
+passes the same checks. The idle timeout, which only a finished turn
+extends, still bounds a session nobody comes back to. The bridge pings the
+client every 20 seconds and drops a connection silent for 60, so a path lost
+without a close, a laptop asleep or a tunnel gone, does not hold the slot
+against the client coming back. The bridge closes with code 1000 when the
+session has ended.
 
 The handshake is refused with HTTP 403 unless it is let in by a login or by a
 capability. By a login, both of these hold:
@@ -177,16 +210,34 @@ job's steps on another runner could attach to the session. A refused handshake
 leaves the bridge listening.
 
 `agentic-job session connect ENDPOINT` is a client for a terminal or another
-agent. It sends `initialize` and `session/new`, then each line of standard
-input as a `session/prompt`, waiting for that turn's answer before the next.
-It sends a prompt again while the task's turn runs. It prints the agent's
-`agent_message_chunk` text with control characters replaced, so the agent
-cannot drive the operator's terminal. With `--json` it prints each message
-from the bridge as one line of JSON instead. It checks serve's certificate
-against Mozilla's roots, and takes `ws://` only to loopback. At the end of its
-input it leaves, which ends the session. The first client let in is the
-only one: later connections are closed unanswered, and when that client leaves
-the session ends.
+agent ([attaching](../docs/interactive.md#attaching-to-a-session)). It sends
+`initialize` and `session/new` since `--since` (0, all that is kept, by
+default), then each line of standard input as a `session/prompt`, waiting
+for that turn's answer before the next. It sends a prompt again while the
+task's turn runs. It prints the agent's `agent_message_chunk` text with
+control characters replaced, so the agent cannot drive the operator's
+terminal, and one line for each tool call that finished, as the job's log
+has it. With `--json` it prints each message from the bridge as one line of
+JSON instead. It checks serve's certificate against Mozilla's roots, and
+takes `ws://` only to loopback. When the connection drops it connects again
+with the cursor it last saw, two seconds apart and up to 30 times in a row,
+taking the cursor the bridge offers where its own is no longer kept, and
+trying again after a server error from serve, not after the bridge's 403; a
+prompt the bridge had, whose answer was lost with the connection, is not
+sent again, since the agent may be answering it, while one the bridge
+refused as a turn ran goes again. An unanswered prompt remains unresolved
+across drops: before taking more input or honoring EOF, the client polls
+`_session/status` once a second until the driver reports idle. This also
+handles a turn that finished while disconnected, without relying on a
+replayed message chunk or tool completion to mean the whole turn ended.
+If the status cannot be established, the client fails rather than closing
+normally and cancelling a possibly active turn.
+The bridge's pings also bound client-side silence to 60 seconds: a lost
+tunnel with no TCP close triggers reconnection rather than waiting forever.
+At the end of its input it leaves with a normal close,
+which ends the session; Ctrl-C only detaches, printing the cursor a later
+`connect --since` resumes from. The client let in is the only one while it
+is connected: later connections are closed unanswered.
 
 ## Trust boundaries
 
@@ -250,6 +301,14 @@ stops one thing:
   fail without exposing that process to the operator.
 - `Origin`s are `https://`, or `http://` for localhost only. Script injected
   into a plain-HTTP page elsewhere would connect with the operator's identity.
+- A connection that drops frees the one client slot until the idle timeout.
+  Whoever then passes the checks takes it, the agent with forged headers
+  included, as either could have before the operator first came; a client
+  that comes back passes the same checks, and the one that holds the slot
+  keeps it. The replay is the agent's notifications as the client would have
+  seen them live, redacted the same way, and the run publishes the whole
+  transcript as an artifact anyway: no new control gates it, since nothing
+  it shows is kept from anyone the login or capability check admits.
 
 Loopback is reachable by the runner's other processes: the job's own steps,
 as trusted as `run`, and since #2989 the agent too. Encryption to the operator's device comes from
@@ -277,9 +336,13 @@ prevent sustained connection flooding. Messages from the client are capped at
 512 KiB, twice the largest task. A longer message ends the connection. At most four client requests wait for the session at once. At most
 8 MiB of lines wait to be sent to the client. A response waits for room, so the
 bridge stops reading a client that does not read. An agent's notification that
-finds no room ends the connection, and the agent goes on. `session connect`
-takes messages of up to 8 MiB, the most the bridge queues, and refuses an
-input line or prompt over the bridge's 512 KiB.
+finds no room ends the connection, and the agent goes on. The bridge keeps
+the latest 4096 notifications, up to 4 MiB, half the room, so a replay
+always fits a client that has just come; older ones are only in the
+transcript. `session connect` takes messages of up to 8 MiB, the most the
+bridge queues, refuses an input line or prompt over the bridge's 512 KiB,
+and connects again up to 30 times in a row, two seconds apart. A connection
+silent for 60 seconds, pinged every 20, is dropped.
 
 ## Running a session without a second user
 
@@ -599,8 +662,15 @@ which can attach to its own session (see the status above). It has six parts:
   missing, other, duplicated or malformed capability. Then the
   operator attaches, is refused what the bridge does not serve, sends a prompt
   and reads the reply, cancels a turn, and goes quiet until the idle timeout.
+  A client attaches with a replay of the task's turn, drops its connection
+  during its own turn and comes back with its cursor to each notification
+  once and in order; one that fell behind is told the cursor it can have.
   `session connect` attaches over `ws://` through a stand-in for serve that
-  adds the capability, and drives two turns.
+  adds the capability, and drives two turns; its own tests have a stand-in
+  bridge drop the connection, and see it come back with its cursor, end
+  without a normal close on Ctrl-C, and stop at the bridge's normal close.
+  The bridge's own test, with the clock paused, sees a connection that
+  answers one ping and then goes silent dropped after the minute.
   These tests drive the bridge and the session driver without `run`.
   [run.rs](../crates/agentic-job/tests/run.rs) drives `run` itself with
   `listen`, as the runner's user: a scripted client on loopback attaches
@@ -617,9 +687,9 @@ No forge writes happen during the session. Still to do:
   `--accept-app-caps` forwards `Tailscale-App-Capabilities` as expected
   (Tailscale 1.92 or later; the tailnet-join action's pinned
   `tailscale/github-action` v4.3.0 installs 1.104.2 by default);
-- `session connect` against a real `wss://` endpoint;
-- a client that reconnects to the same session; today the session ends when
-  its client leaves;
+- `session connect` against a real `wss://` endpoint, and its reconnect
+  through `tailscale serve`, which may close an idle connection on its own
+  terms;
 - a replacement for the premise of [writes during the session](#writes-during-a-session-specified-not-built),
   then their runtime code, once the operator also decides on the dispatch
   credential; until then writes wait for the end-of-run apply;

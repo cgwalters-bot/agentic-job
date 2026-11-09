@@ -905,7 +905,13 @@ fn operator_client(prompt: &'static str) -> std::thread::JoinHandle<(Value, Vec<
             assert!(Instant::now() < deadline, "the task's turn did not end");
             std::thread::sleep(Duration::from_millis(100));
         };
-        let _ = socket.close(None);
+        // Leaving on purpose: a normal close ends the session, where a
+        // dropped connection would only have it wait.
+        let frame = tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Normal,
+            reason: "done".into(),
+        };
+        let _ = socket.close(Some(frame));
         while socket.read().is_ok() {}
         (answer, got)
     })
@@ -950,7 +956,7 @@ fn a_session_run_talks_to_its_operator_and_hands_back() {
     let (answer, sent) = client.join().unwrap();
     assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
     assert!(
-        got.stderr.contains("session: a client is attached"),
+        got.stderr.contains("session: a client is connected"),
         "{}",
         got.all()
     );

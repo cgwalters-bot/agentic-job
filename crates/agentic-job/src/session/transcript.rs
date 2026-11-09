@@ -44,7 +44,8 @@ pub struct Record {
 /// Where the condensed log goes: one line per event, for the job's log.
 pub type Log = Box<dyn Write + Send>;
 
-fn now() -> f64 {
+/// The time as the transcript records it: seconds since the epoch.
+pub(super) fn now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64())

@@ -56,6 +56,21 @@ says what a caller may rely on across versions.
 - Setup with `[host.prepared]` refuses a helper that is missing or not a
   regular file in its preflight, before it changes the host (#3262).
 
+- A session's client attaches from anywhere, late or again. The bridge
+  numbers the agent's notifications (`params._meta.botHarness.cursor`) and
+  keeps the latest 4096, up to 4 MiB; a `session/new` with
+  `_meta.botHarness.since` is sent what came after that cursor first, and
+  is refused with the cursor it can have where its own is past the latest
+  or no longer kept. Behavior change: a connection that ends without a
+  normal close (code 1000) no longer ends the session; it goes on to its
+  idle timeout, a turn that runs finishes, and the bridge listens for the
+  client again. A normal close ends it as before. `session connect`
+  replays since `--since` (everything kept by default), prints a line per
+  finished tool call, connects again with its cursor when the connection
+  drops, waits for an unanswered turn to finish before honoring input EOF
+  after reconnecting, and detaches on Ctrl-C, printing
+  the cursor to resume from (part of #536).
+
 - Behavior change: `run` and the reusable workflow's runner admission take
   `[session] listen` (`session: true`) again, with the runner's user as the
   agent, for chat only. The agent can attach to its own session's bridge

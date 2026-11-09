@@ -1485,11 +1485,16 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     cancelling.store(true, Ordering::Relaxed);
                     let _ = cx.send_notification(CancelNotification::new(sid.clone()));
                 }
+                Some(FromClient::Status(answer)) => {
+                    let _ = answer.send(true);
+                }
                 Some(FromClient::Prompt { answer, .. }) => {
                     let _ = answer.send(Err(TURN_RUNNING.to_owned()));
                 }
                 // The task's turn goes on without it, and ends the session.
-                None => {
+                // A client whose connection only dropped sends nothing:
+                // the session waits for it, as for its prompts.
+                None | Some(FromClient::Left) => {
                     tap.log(&[format!("⚠ {CLIENT_LEFT}: the task's turn goes on")]);
                     conversation = None;
                 }
@@ -2007,8 +2012,15 @@ async fn remind(
 /// own to end.
 async fn refuse_prompts(mut talk: Conversation) {
     while let Some(msg) = talk.from_client.recv().await {
-        if let FromClient::Prompt { answer, .. } = msg {
-            let _ = answer.send(Err(HANDING_BACK.to_owned()));
+        match msg {
+            FromClient::Prompt { answer, .. } => {
+                let _ = answer.send(Err(HANDING_BACK.to_owned()));
+            }
+            FromClient::Left => return,
+            FromClient::Cancel => {}
+            FromClient::Status(answer) => {
+                let _ = answer.send(true);
+            }
         }
     }
 }
@@ -2098,13 +2110,17 @@ async fn converse(
             next = from_client.recv() => next,
         };
         let (prompt, answer) = match next {
-            None => {
+            None | Some(FromClient::Left) => {
                 return Talked::Ended(
                     last_failed.unwrap_or_else(|| Ended::done(CLIENT_LEFT.to_owned())),
                 );
             }
             // No turn to cancel.
             Some(FromClient::Cancel) => continue,
+            Some(FromClient::Status(answer)) => {
+                let _ = answer.send(false);
+                continue;
+            }
             Some(FromClient::Prompt { prompt, answer }) => (prompt, answer),
         };
         let mut answer = Some(answer);
@@ -2169,10 +2185,16 @@ async fn converse(
                         cancelling.store(true, Ordering::Relaxed);
                         let _ = cx.send_notification(CancelNotification::new(sid.clone()));
                     }
+                    Some(FromClient::Status(answer)) => {
+                        let _ = answer.send(true);
+                    }
                     Some(FromClient::Prompt { answer, .. }) => {
                         let _ = answer.send(Err(TURN_RUNNING.to_owned()));
                     }
-                    None => {
+                    // A connection that only dropped is not this: the
+                    // turn goes on, and the client that comes back is
+                    // sent what it said.
+                    None | Some(FromClient::Left) => {
                         tap.log(&[format!("⚠ {CLIENT_LEFT}: cancelling its turn")]);
                         // A turn that never answered neither finished nor
                         // stopped: it fails rather than passing as done.

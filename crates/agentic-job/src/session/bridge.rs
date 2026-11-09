@@ -19,8 +19,12 @@
 //! browser on that device would otherwise lend the capability to any
 //! site. The tailnet policy's grant, not this repository, then decides
 //! which nodes may attach. A refused handshake leaves
-//! the bridge listening; the first client let in is the only one, and
-//! when it leaves the session ends.
+//! the bridge listening; the client let in is the only one while it is
+//! connected. When it leaves on purpose, with a normal close, the session
+//! ends. When its connection drops any other way, the session goes on
+//! without it until the idle timeout, and the bridge listens again for a
+//! client, which passes the same checks: the operator comes back from
+//! another device, or after a laptop's sleep, with the cursor it last saw.
 //!
 //! The client gets a narrow part of ACP: `initialize`; `session/new`,
 //! which attaches it to the session already running instead of starting
@@ -32,13 +36,23 @@
 //! reach the client once it has attached, with the run's secrets
 //! replaced; its permission requests stay with the session's policy.
 //!
+//! Each notification is numbered: its cursor is in `_meta.botHarness`
+//! ([`META_KEY`]), and the bridge keeps the latest within
+//! [`HISTORY_ENTRIES`] and [`HISTORY_BYTES`] ([`History`]). A client that
+//! names a cursor in its `session/new` (`_meta.botHarness.since`, 0 for
+//! all that is kept) is sent what came after it before the response,
+//! which names the latest cursor, and is refused with the cursor it can
+//! have where what it asks for is past the latest or no longer kept. So a
+//! client sees the task's turn when it attaches late, and nothing twice
+//! or missing when it comes back. The rest is in the run's transcript.
+//!
 //! None of this keeps out the agent itself: it is the runner's user, as
 //! `run` is, and can connect on loopback with whatever headers it likes
 //! (agentic-job#2989). So nothing a client sends authorizes anything
 //! beyond a prompt: writes wait for the end-of-run check and apply.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -51,7 +65,8 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 
 use crate::config;
 
@@ -96,6 +111,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HANDSHAKES: usize = 16;
 /// How long what is left to send the client gets once the session ended.
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
+/// How often the client is pinged, and how long a connection may be
+/// silent before it is taken for dropped: a path lost without a close (a
+/// laptop asleep, a tunnel gone) would otherwise hold the one client slot
+/// until the idle timeout, against the client coming back.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+pub(super) const SILENCE: Duration = Duration::from_secs(60);
 /// The longest message taken from the client: a prompt as large as the
 /// largest task, with room for its JSON. A longer one ends the bridge.
 pub(super) const MAX_MESSAGE_BYTES: usize = 2 * crate::run::MAX_TASK_BYTES as usize;
@@ -110,8 +131,25 @@ const PENDING_ANSWERS: usize = INBOX;
 /// agent's notification that finds no room hangs up on the client, and a
 /// response to the client waits for room, which stops the reading.
 pub(super) const MAX_QUEUED_BYTES: usize = 8 << 20;
+/// The most of the agent's notifications kept for a client that attaches
+/// late or comes back, and the most bytes of them: the latest are kept,
+/// and a replay always fits the room for a client that has just come.
+/// The whole conversation is in the run's transcript.
+pub const HISTORY_ENTRIES: usize = 4096;
+pub const HISTORY_BYTES: usize = MAX_QUEUED_BYTES / 2;
+/// The `_meta` key of what the bridge adds for its client: each
+/// notification's `cursor`, the latest in the response to `session/new`,
+/// and the `since` a client asks a replay from. The session's own key in
+/// what it sends the agent.
+pub const META_KEY: &str = super::permission::META_KEY;
+/// What the bridge's close frame says when the session has ended, and
+/// when it hangs up on a client that reads too slowly, which may come
+/// back.
+const SESSION_ENDED: &str = "the session ended";
+const FELL_BEHIND: &str = "the client fell behind: come back with its cursor";
 const PROTOCOL_VERSION: u64 = 1;
 const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
@@ -356,11 +394,17 @@ pub(super) enum FromClient {
         answer: oneshot::Sender<Result<Value, String>>,
     },
     Cancel,
+    /// Whether a turn is executing, sampled by the driver, not the socket.
+    Status(oneshot::Sender<bool>),
+    /// The client closed its connection normally: it is done, and the
+    /// session ends. A connection that drops any other way sends nothing;
+    /// the client may come back.
+    Left,
 }
 
 /// A line for the client, with the room it takes until it is written.
 struct Line {
-    text: String,
+    text: Arc<str>,
     _room: OwnedSemaphorePermit,
 }
 
@@ -373,6 +417,13 @@ struct HangUp {
 }
 
 impl HangUp {
+    fn new() -> Self {
+        Self {
+            room: Arc::new(Semaphore::new(MAX_QUEUED_BYTES)),
+            gone: Arc::new(watch::channel(false).0),
+        }
+    }
+
     fn now(&self) {
         self.room.close();
         self.gone.send_replace(true);
@@ -384,48 +435,48 @@ async fn hung_up(gone: &mut watch::Receiver<bool>) {
     let _ = gone.wait_for(|gone| *gone).await;
 }
 
-/// What goes to the client, in order, held to `MAX_QUEUED_BYTES`.
+/// Waits until the session has ended, or is gone with its sender.
+async fn session_ended(closing: &mut watch::Receiver<bool>) {
+    let _ = closing.wait_for(|closing| *closing).await;
+}
+
+/// What goes to one client's connection, in order, held to
+/// `MAX_QUEUED_BYTES`.
 #[derive(Clone)]
 struct Outbox {
     lines: mpsc::UnboundedSender<Line>,
     hang_up: HangUp,
-    /// Set once the response that attaches the client is queued: the
-    /// agent's notifications are sent only after it.
-    attached: Arc<AtomicBool>,
     redact: Redact,
 }
 
 impl Outbox {
-    /// MSG as a message's text, with the room it takes; none for one
-    /// that could never fit.
-    fn line(&self, msg: Value) -> (String, Option<u32>) {
-        let text = redacted(msg, &self.redact).to_string();
-        let size = u32::try_from(text.len())
+    /// Queues TEXT if there is room for it at once; hangs up otherwise,
+    /// and false: the agent is not held up by a client that does not
+    /// read.
+    fn queue(&self, text: Arc<str>) -> bool {
+        let room = u32::try_from(text.len())
             .ok()
-            .filter(|n| *n as usize <= MAX_QUEUED_BYTES);
-        (text, size)
-    }
-
-    /// Queues a notification of the agent's, or hangs up on a client
-    /// that leaves no room for it: the agent is not held up by a client.
-    fn notify(&self, msg: Value) {
-        if !self.attached.load(Ordering::Acquire) || self.hang_up.room.is_closed() {
-            return;
-        }
-        let (text, size) = self.line(msg);
-        let room = size.and_then(|n| self.hang_up.room.clone().try_acquire_many_owned(n).ok());
+            .filter(|n| *n as usize <= MAX_QUEUED_BYTES)
+            .and_then(|n| self.hang_up.room.clone().try_acquire_many_owned(n).ok());
         match room {
             Some(room) => {
                 let _ = self.lines.send(Line { text, _room: room });
+                true
             }
-            None => self.hang_up.now(),
+            None => {
+                self.hang_up.now();
+                false
+            }
         }
     }
 
     /// Queues a response once there is room for it; false once the
     /// client is gone.
     async fn send(&self, msg: Value) -> bool {
-        let (text, size) = self.line(msg);
+        let text: Arc<str> = redacted(msg, &self.redact).to_string().into();
+        let size = u32::try_from(text.len())
+            .ok()
+            .filter(|n| *n as usize <= MAX_QUEUED_BYTES);
         let Some(size) = size else {
             self.hang_up.now();
             return false;
@@ -434,6 +485,191 @@ impl Outbox {
             Ok(room) => self.lines.send(Line { text, _room: room }).is_ok(),
             Err(_) => false,
         }
+    }
+}
+
+/// The agent's notifications, numbered from 1, the latest kept within
+/// bounds for a client that attaches late or comes back.
+struct History {
+    kept: VecDeque<(u64, Arc<str>)>,
+    bytes: usize,
+    /// The cursor of the latest notification; 0 before the first.
+    latest: u64,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self::bounded(HISTORY_ENTRIES, HISTORY_BYTES)
+    }
+}
+
+impl History {
+    fn bounded(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            kept: VecDeque::new(),
+            bytes: 0,
+            latest: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    /// The cursor the next notification gets.
+    fn next(&self) -> u64 {
+        self.latest + 1
+    }
+
+    /// Keeps TEXT as the next notification, dropping the oldest beyond
+    /// the bounds.
+    fn push(&mut self, text: Arc<str>) {
+        self.latest = self.next();
+        self.bytes += text.len();
+        self.kept.push_back((self.latest, text));
+        while self.kept.len() > self.max_entries || self.bytes > self.max_bytes {
+            if let Some((_, old)) = self.kept.pop_front() {
+                self.bytes -= old.len();
+            }
+        }
+    }
+
+    /// The cursor all that is kept comes after: the earliest a client
+    /// can attach since.
+    fn oldest(&self) -> u64 {
+        self.kept
+            .front()
+            .map_or(self.latest, |(cursor, _)| cursor - 1)
+    }
+
+    /// The notifications after CURSOR, in order; or why they cannot be
+    /// replayed, with the cursor the client can attach since instead.
+    fn since(&self, cursor: u64) -> Result<impl Iterator<Item = &Arc<str>>, (String, u64)> {
+        if cursor > self.latest {
+            return Err((
+                format!(
+                    "cursor {cursor} is past the latest, {}: another session?",
+                    self.latest
+                ),
+                self.latest,
+            ));
+        }
+        let oldest = self.oldest();
+        if cursor < oldest {
+            return Err((
+                format!(
+                    "the {} notifications after cursor {cursor}, up to {oldest}, are no longer \
+                     kept: attach since {oldest}, and read them in the run's transcript",
+                    oldest - cursor
+                ),
+                oldest,
+            ));
+        }
+        Ok(self
+            .kept
+            .iter()
+            .skip_while(move |(c, _)| *c <= cursor)
+            .map(|(_, text)| text))
+    }
+}
+
+/// MSG with CURSOR in its `_meta`, where its params are an object, as
+/// ACP's are.
+fn with_cursor(mut msg: Value, cursor: u64) -> Value {
+    /// The object at KEY, put there over anything that is not one: the
+    /// agent's `_meta` does not get to keep the cursor out, which would
+    /// have a client that comes back sent the same stretch again.
+    fn object<'a>(map: &'a mut serde_json::Map<String, Value>, key: &str) -> &'a mut Value {
+        let value = map.entry(key).or_insert_with(|| json!({}));
+        if !value.is_object() {
+            *value = json!({});
+        }
+        value
+    }
+    if let Some(Value::Object(params)) = msg.get_mut("params")
+        && let Value::Object(meta) = object(params, "_meta")
+        && let Value::Object(ours) = object(meta, META_KEY)
+    {
+        ours.insert("cursor".to_owned(), json!(cursor));
+    }
+    msg
+}
+
+/// What the agent says: numbered and kept ([`History`]), and passed on to
+/// the client attached, if one is. One lock orders the two, so that a
+/// client that attaches with a replay gets each notification once.
+struct Relay {
+    inner: Mutex<RelayInner>,
+    redact: Redact,
+}
+
+struct RelayInner {
+    history: History,
+    /// The attached client's connection.
+    client: Option<Outbox>,
+}
+
+impl Relay {
+    fn new(redact: Redact, history: History) -> Self {
+        Self {
+            inner: Mutex::new(RelayInner {
+                history,
+                client: None,
+            }),
+            redact,
+        }
+    }
+
+    /// A panic while the lock was held loses nothing a later line needs.
+    fn lock(&self) -> MutexGuard<'_, RelayInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Numbers and keeps a notification of the agent's, and queues it for
+    /// the attached client, or hangs up on one that leaves no room for
+    /// it.
+    fn notify(&self, msg: Value) {
+        let mut inner = self.lock();
+        let cursor = inner.history.next();
+        let text: Arc<str> = redacted(with_cursor(msg, cursor), &self.redact)
+            .to_string()
+            .into();
+        inner.history.push(text.clone());
+        if inner.client.as_ref().is_some_and(|out| !out.queue(text)) {
+            inner.client = None;
+        }
+    }
+
+    /// Attaches OUT's client: queues the notifications after SINCE where
+    /// it asks for them, then the response RESPOND makes for the latest
+    /// cursor, which everything sent after it is past; false where the
+    /// client left no room, and was hung up on. Or why the replay cannot
+    /// be made, with the cursor it can be made from. All under the one
+    /// lock, so that nothing live comes before the response.
+    fn attach(
+        &self,
+        since: Option<u64>,
+        out: Outbox,
+        respond: impl FnOnce(u64) -> Value,
+    ) -> Result<bool, (String, u64)> {
+        let mut inner = self.lock();
+        if let Some(since) = since {
+            for text in inner.history.since(since)? {
+                if !out.queue(text.clone()) {
+                    return Err(("no room for the replay".to_owned(), since));
+                }
+            }
+        }
+        let response = redacted(respond(inner.history.latest), &self.redact).to_string();
+        if !out.queue(response.into()) {
+            return Ok(false);
+        }
+        inner.client = Some(out);
+        Ok(true)
+    }
+
+    fn detach(&self) {
+        self.lock().client = None;
     }
 }
 
@@ -453,9 +689,9 @@ pub(super) struct Close {
     guard: Option<crate::sandbox::session::Guard>,
     /// Listens, and then reads the client's messages.
     reader: tokio::task::JoinHandle<()>,
-    /// The writer, once a client was let in.
+    /// The writer of the latest connection, once a client was let in.
     writer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    done: oneshot::Sender<()>,
+    closing: watch::Sender<bool>,
 }
 
 impl Close {
@@ -468,7 +704,7 @@ impl Close {
         };
         self.reader.abort();
         // The writer sends what was queued for the client, and hangs up.
-        let _ = self.done.send(());
+        self.closing.send_replace(true);
         let writer = self
             .writer
             .lock()
@@ -493,10 +729,10 @@ type Socket = WebSocketStream<TcpStream>;
 struct Waiting {
     listener: TcpListener,
     listen: Listen,
-    out: Outbox,
+    relay: Arc<Relay>,
     inbox: mpsc::Sender<FromClient>,
     session_id: watch::Receiver<Option<String>>,
-    closing: oneshot::Receiver<()>,
+    closing: watch::Receiver<bool>,
     writer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -515,74 +751,99 @@ impl Bridge {
             .context("listening for the session's client")?;
         let listener =
             TcpListener::from_std(self.listener).context("listening for the session's client")?;
-        let (lines, outgoing) = mpsc::unbounded_channel();
-        let (gone, _) = watch::channel(false);
-        let hang_up = HangUp {
-            room: Arc::new(Semaphore::new(MAX_QUEUED_BYTES)),
-            gone: Arc::new(gone),
-        };
-        let out = Outbox {
-            lines,
-            hang_up,
-            attached: Arc::new(AtomicBool::new(false)),
-            redact: self.redact,
-        };
+        let relay = Arc::new(Relay::new(self.redact, History::default()));
         let (inbox, from_client) = mpsc::channel(INBOX);
-        let (done, closing) = oneshot::channel();
+        let (closing_tx, closing) = watch::channel(false);
         let writer = Arc::new(Mutex::new(None));
         let idle = self.listen.idle;
         let waiting = Waiting {
             listener,
             listen: self.listen,
-            out: out.clone(),
+            relay: relay.clone(),
             inbox,
             session_id,
             closing,
             writer: writer.clone(),
         };
-        let reader = tokio::spawn(serve(waiting, outgoing));
+        let reader = tokio::spawn(serve(waiting));
         Ok(Connected {
             // A client that went away, or has not come yet, is no reason
-            // to stop the agent.
-            send: Box::new(move |msg| out.notify(msg)),
+            // to stop the agent: what it says is kept for the next.
+            send: Box::new(move |msg| relay.notify(msg)),
             from_client,
             idle,
             close: Close {
                 guard,
                 reader,
                 writer,
-                done,
+                closing: closing_tx,
             },
         })
     }
 }
 
+/// How a client's connection ended.
+enum Gone {
+    /// With a normal close: the client is done, and the session ends.
+    Left,
+    /// Any other way, the bridge's hang-up included: the client may come
+    /// back.
+    Dropped,
+}
+
 /// Takes connections until one is let in, and then serves it alone: a
-/// later connection is closed unanswered, and the session ends when this
-/// client leaves.
-async fn serve(waiting: Waiting, outgoing: mpsc::UnboundedReceiver<Line>) {
+/// later connection is closed unanswered. When the client's connection
+/// drops, listens again for one; when the client leaves, the session
+/// ends.
+async fn serve(waiting: Waiting) {
     let Waiting {
         listener,
         listen,
-        out,
+        relay,
         inbox,
-        session_id,
+        mut session_id,
         closing,
         writer,
     } = waiting;
-    let socket = admit(&listener, &listen).await;
-    eprintln!("session: a client is attached");
-    let (sink, stream) = socket.split();
-    let hang_up = out.hang_up.clone();
-    *writer.lock().unwrap_or_else(PoisonError::into_inner) =
-        Some(tokio::spawn(write_lines(sink, outgoing, closing, hang_up)));
-    // The port stays owned until serve is revoked, even if reaping fails:
-    // an agent that bound it once
-    // it was free would be handed every later connection through serve,
-    // with the operator's login on it.
-    tokio::select! {
-        () = read_lines(stream, out, inbox, session_id) => {}
-        () = refuse_all(&listener) => {}
+    loop {
+        let socket = admit(&listener, &listen).await;
+        eprintln!("session: a client is connected");
+        let (sink, stream) = socket.split();
+        let (lines, outgoing) = mpsc::unbounded_channel();
+        let hang_up = HangUp::new();
+        let out = Outbox {
+            lines,
+            hang_up: hang_up.clone(),
+            redact: relay.redact.clone(),
+        };
+        *writer.lock().unwrap_or_else(PoisonError::into_inner) = Some(tokio::spawn(write_lines(
+            sink,
+            outgoing,
+            closing.clone(),
+            hang_up.clone(),
+        )));
+        // The port stays owned until serve is revoked, even if reaping
+        // fails: an agent that bound it once it was free would be handed
+        // every later connection through serve, with the operator's login
+        // on it.
+        let gone = tokio::select! {
+            gone = read_lines(stream, out, &relay, &inbox, &mut session_id) => gone,
+            () = refuse_all(&listener) => Gone::Dropped,
+        };
+        relay.detach();
+        match gone {
+            Gone::Left => {
+                eprintln!("session: the client left");
+                // Nothing more reaches a client that closed; the writer
+                // ends with the session.
+                let _ = inbox.send(FromClient::Left).await;
+                break;
+            }
+            Gone::Dropped => {
+                hang_up.now();
+                eprintln!("session: the client's connection dropped: it can come back");
+            }
+        }
     }
     refuse_all(&listener).await;
 }
@@ -673,35 +934,56 @@ fn redacted(value: Value, redact: &Redact) -> Value {
 }
 
 /// Writes the client's messages until the session has ended and they are
-/// all sent, the connection fails or it is hung up.
+/// all sent, the connection fails or it is hung up, pinging the client
+/// meanwhile. The close frame says which: a normal close for the
+/// session's end, "try again later" for a hang-up.
 async fn write_lines(
     mut write: SplitSink<Socket, Message>,
     mut outgoing: mpsc::UnboundedReceiver<Line>,
-    mut closing: oneshot::Receiver<()>,
+    mut closing: watch::Receiver<bool>,
     hang_up: HangUp,
 ) {
     let mut gone = hang_up.gone.subscribe();
-    let mut closed = false;
+    let mut closed = *closing.borrow();
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping.tick().await;
+    let mut ping_due = false;
     loop {
+        // A write the client does not take is no reason to wait past a
+        // hang-up.
+        if ping_due {
+            ping_due = false;
+            let sent = tokio::select! {
+                r = write.send(Message::Ping(Default::default())) => r.is_ok(),
+                () = hung_up(&mut gone) => false,
+            };
+            if !sent {
+                break;
+            }
+        }
         let line = if closed {
             outgoing.try_recv().ok()
         } else {
             tokio::select! {
                 line = outgoing.recv() => line,
-                _ = &mut closing => {
+                () = session_ended(&mut closing) => {
                     closed = true;
                     continue;
                 }
                 () = hung_up(&mut gone) => None,
+                // The client answers with a pong, which the reader hears.
+                _ = ping.tick() => {
+                    ping_due = true;
+                    continue;
+                }
             }
         };
         let Some(line) = line else {
             break;
         };
-        // A write the client does not take is no reason to wait past a
-        // hang-up.
         let written = tokio::select! {
-            r = write.send(Message::text(line.text)) => r.is_ok(),
+            r = write.send(Message::text(&*line.text)) => r.is_ok(),
             () = hung_up(&mut gone) => false,
         };
         if !written {
@@ -709,7 +991,24 @@ async fn write_lines(
         }
     }
     hang_up.now();
-    let _ = write.close().await;
+    // The session's end, whether this writer heard of it or its sender
+    // went with the reader.
+    let (code, reason) = if closed || *closing.borrow() || closing.has_changed().is_err() {
+        (CloseCode::Normal, SESSION_ENDED)
+    } else {
+        (CloseCode::Again, FELL_BEHIND)
+    };
+    let frame = CloseFrame {
+        code,
+        reason: reason.into(),
+    };
+    // A client that takes nothing, the one hung up on for that among
+    // them, does not keep this writer and its socket for the run's life.
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        let _ = write.send(Message::Close(Some(frame))).await;
+        let _ = write.close().await;
+    })
+    .await;
 }
 
 fn response(id: Value, result: Value) -> Value {
@@ -720,22 +1019,58 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// An error with DATA for the client to act on.
+fn error_with(id: Value, code: i64, message: &str, data: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message, "data": data}})
+}
+
+/// The cursor a `session/new` with PARAMS asks a replay from: none where
+/// it asks for none, or why what it names is not a cursor.
+fn since(params: &Value) -> Result<Option<u64>, &'static str> {
+    let meta = match params {
+        Value::Null => return Ok(None),
+        Value::Object(params) => params.get("_meta"),
+        _ => return Err("params is not an object"),
+    };
+    let ours = match meta {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(meta)) => meta.get(META_KEY),
+        Some(_) => return Err("_meta is not an object"),
+    };
+    match ours {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(ours)) => match ours.get("since") {
+            None | Some(Value::Null) => Ok(None),
+            Some(since) => since
+                .as_u64()
+                .map(Some)
+                .ok_or("_meta.botHarness.since is not a cursor: a whole number, 0 for all kept"),
+        },
+        Some(_) => Err("_meta.botHarness is not an object"),
+    }
+}
+
 /// Reads the client's messages until it closes the connection, sends
-/// one too long or the session stops listening; returning closes the
-/// session's inbox, which ends the conversation.
+/// one too long, is hung up on, or the session stops listening; how the
+/// connection ended.
 async fn read_lines(
     mut read: SplitStream<Socket>,
     out: Outbox,
-    inbox: mpsc::Sender<FromClient>,
-    mut session_id: watch::Receiver<Option<String>>,
-) {
+    relay: &Relay,
+    inbox: &mpsc::Sender<FromClient>,
+    session_id: &mut watch::Receiver<Option<String>>,
+) -> Gone {
     let mut gone = out.hang_up.gone.subscribe();
     let pending = Arc::new(Semaphore::new(PENDING_ANSWERS));
-    let mut attached = None;
+    let mut attached: Option<String> = None;
     loop {
         let read = tokio::select! {
-            read = read.next() => read,
-            () = hung_up(&mut gone) => return,
+            // Silent past the pings' answers: the path is gone.
+            read = tokio::time::timeout(SILENCE, read.next()) => match read {
+                Ok(read) => read,
+                Err(_) => return Gone::Dropped,
+            },
+            () = hung_up(&mut gone) => return Gone::Dropped,
         };
         let parsed = match read {
             // Each text message is one of ACP's.
@@ -743,12 +1078,16 @@ async fn read_lines(
             Some(Ok(Message::Binary(_))) => None,
             // Answered by the library, or nothing.
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
-            // Closed, failed, or a message over the limit.
-            Some(Ok(Message::Close(_)) | Err(_)) | None => return,
+            // The client is done.
+            Some(Ok(Message::Close(Some(frame)))) if frame.code == CloseCode::Normal => {
+                return Gone::Left;
+            }
+            // Closed otherwise, failed, or a message over the limit.
+            Some(Ok(Message::Close(_)) | Err(_)) | None => return Gone::Dropped,
         };
         let Some(msg) = parsed else {
             if !out.send(error(Value::Null, PARSE_ERROR, "not JSON")).await {
-                return;
+                return Gone::Dropped;
             }
             continue;
         };
@@ -768,22 +1107,71 @@ async fn read_lines(
                 ))
                 .await
             }
-            (Some(id), Some("session/new")) => {
-                let Ok(sid) = session_id
-                    .wait_for(Option::is_some)
-                    .await
-                    .map(|sid| sid.clone())
-                else {
-                    return;
+            (Some(id), Some("session/new")) if attached.is_some() => {
+                // A second replay would repeat what the first sent.
+                out.send(error(
+                    id,
+                    INVALID_REQUEST,
+                    "already attached: one session/new a connection",
+                ))
+                .await
+            }
+            (Some(id), Some("session/new")) => match since(params) {
+                Err(why) => out.send(error(id, INVALID_PARAMS, why)).await,
+                Ok(since) => {
+                    let Ok(sid) = session_id
+                        .wait_for(Option::is_some)
+                        .await
+                        .map(|sid| sid.clone())
+                    else {
+                        return Gone::Dropped;
+                    };
+                    let respond = |latest| {
+                        let result = json!({
+                            "sessionId": sid,
+                            "_meta": {META_KEY: {"cursor": latest}},
+                        });
+                        response(id.clone(), result)
+                    };
+                    match relay.attach(since, out.clone(), respond) {
+                        Ok(sent) => {
+                            attached = sid;
+                            sent
+                        }
+                        Err((why, from)) => {
+                            out.send(error_with(
+                                id,
+                                INVALID_PARAMS,
+                                &why,
+                                json!({"since": from}),
+                            ))
+                            .await
+                        }
+                    }
+                }
+            },
+            (Some(id), Some("_session/status")) if ours => {
+                let Ok(slot) = pending.clone().acquire_owned().await else {
+                    return Gone::Dropped;
                 };
-                attached.clone_from(&sid);
-                let sent = out.send(response(id, json!({"sessionId": sid}))).await;
-                out.attached.store(true, Ordering::Release);
-                sent
+                let (tx, rx) = oneshot::channel();
+                if inbox.send(FromClient::Status(tx)).await.is_err() {
+                    return Gone::Dropped;
+                }
+                let out = out.clone();
+                tokio::spawn(async move {
+                    let msg = match rx.await {
+                        Ok(running) => response(id, json!({"running": running})),
+                        Err(_) => error(id, INTERNAL_ERROR, "the session has ended"),
+                    };
+                    out.send(msg).await;
+                    drop(slot);
+                });
+                true
             }
             (Some(id), Some("session/prompt")) if ours => {
                 let Ok(slot) = pending.clone().acquire_owned().await else {
-                    return;
+                    return Gone::Dropped;
                 };
                 let (tx, rx) = oneshot::channel();
                 let prompt = params["prompt"].clone();
@@ -792,7 +1180,7 @@ async fn read_lines(
                     .await
                     .is_err()
                 {
-                    return;
+                    return Gone::Dropped;
                 }
                 let out = out.clone();
                 tokio::spawn(async move {
@@ -816,7 +1204,7 @@ async fn read_lines(
             }
             (None, Some("session/cancel")) if ours => {
                 if inbox.send(FromClient::Cancel).await.is_err() {
-                    return;
+                    return Gone::Dropped;
                 }
                 true
             }
@@ -833,7 +1221,7 @@ async fn read_lines(
             (None, _) => true,
         };
         if !sent {
-            return;
+            return Gone::Dropped;
         }
     }
 }
@@ -882,6 +1270,64 @@ mod tests {
         .await
         .expect("one stalled handshake must not hold up an operator for ten seconds");
         drop(stalled);
+    }
+
+    /// A connection that goes silent is pinged, and taken for dropped
+    /// once nothing has come back for [`SILENCE`]: a path lost without a
+    /// close does not hold the slot until the idle timeout. The clock is
+    /// paused, so the minute passes at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_connection_is_dropped_after_the_pings() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = async {
+            let stream = TcpStream::connect(address).await.unwrap();
+            let (client, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream)
+                .await
+                .unwrap();
+            client
+        };
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        };
+        let (mut client, server) = tokio::join!(client, server);
+        let (sink, stream) = server.split();
+        let (lines, outgoing) = mpsc::unbounded_channel();
+        let hang_up = HangUp::new();
+        let out = Outbox {
+            lines,
+            hang_up: hang_up.clone(),
+            redact: Arc::new(str::to_owned),
+        };
+        let (_closing, closing) = watch::channel(false);
+        let writer = tokio::spawn(write_lines(sink, outgoing, closing, hang_up));
+        let relay = Relay::new(Arc::new(str::to_owned), History::default());
+        let (inbox, _from_client) = mpsc::channel(INBOX);
+        let (_session_id, mut session_id) = watch::channel(None);
+        let started = tokio::time::Instant::now();
+        // The client answers the first ping, and then goes silent.
+        let client = async {
+            let msg = client.next().await.unwrap().unwrap();
+            assert!(matches!(msg, Message::Ping(_)), "{msg:?}");
+            let pinged = tokio::time::Instant::now();
+            client
+                .send(Message::Pong(Default::default()))
+                .await
+                .unwrap();
+            (pinged, client)
+        };
+        let reader = read_lines(stream, out, &relay, &inbox, &mut session_id);
+        let ((pinged, client), gone) = tokio::join!(client, reader);
+        let dropped = tokio::time::Instant::now();
+        assert!(matches!(gone, Gone::Dropped));
+        assert!(pinged - started >= PING_INTERVAL, "{:?}", pinged - started);
+        assert!(dropped - pinged >= SILENCE, "{:?}", dropped - pinged);
+        // Serve would hang up on the client's connection here.
+        writer.abort();
+        drop(client);
     }
 
     fn table(
@@ -1238,5 +1684,154 @@ mod tests {
             redacted(msg, &redact),
             json!({"a": ["[REDACTED] \"quoted\"", 1, {"[REDACTED]": "x"}], "b": null})
         );
+    }
+
+    /// The cursor goes into the notification's `_meta`, beside what is
+    /// there, and nowhere a client could mistake for the agent's words.
+    #[test]
+    fn the_cursor_is_in_meta() {
+        let cases = [
+            (
+                json!({"method": "session/update", "params": {"sessionId": "s", "update": {}}}),
+                json!({"method": "session/update", "params": {"sessionId": "s", "update": {},
+                       "_meta": {"botHarness": {"cursor": 7}}}}),
+            ),
+            (
+                json!({"method": "x", "params": {"_meta": {"other": 1, "botHarness": {"a": 2}}}}),
+                json!({"method": "x", "params": {"_meta": {"other": 1,
+                       "botHarness": {"a": 2, "cursor": 7}}}}),
+            ),
+            // Not ACP's shape: left as it is.
+            (json!({"method": "x"}), json!({"method": "x"})),
+            (
+                json!({"method": "x", "params": [1]}),
+                json!({"method": "x", "params": [1]}),
+            ),
+            // The agent's `_meta`, where it is no object, does not keep
+            // the cursor out.
+            (
+                json!({"method": "x", "params": {"_meta": "text"}}),
+                json!({"method": "x", "params": {"_meta": {"botHarness": {"cursor": 7}}}}),
+            ),
+            (
+                json!({"method": "x", "params": {"_meta": {"botHarness": 1}}}),
+                json!({"method": "x", "params": {"_meta": {"botHarness": {"cursor": 7}}}}),
+            ),
+        ];
+        for (msg, want) in cases {
+            assert_eq!(with_cursor(msg, 7), want);
+        }
+    }
+
+    /// The history keeps the latest within its bounds, replays after a
+    /// cursor it still has, and says from where it can otherwise.
+    #[test]
+    fn the_history_is_bounded_and_replays_since_a_cursor() {
+        let text = |n: u64| -> Arc<str> { format!("n{n}").into() };
+        let mut history = History::bounded(3, 1 << 10);
+        assert_eq!(history.latest, 0);
+        assert_eq!(history.oldest(), 0);
+        assert_eq!(history.since(0).unwrap().count(), 0);
+        for n in 1..=5 {
+            assert_eq!(history.next(), n);
+            history.push(text(n));
+        }
+        assert_eq!(history.latest, 5);
+        assert_eq!(history.oldest(), 2);
+        // (since, the replay, or the error and the cursor to attach since)
+        type Replay<'a> = Result<&'a [&'a str], (&'a str, u64)>;
+        let cases: &[(u64, Replay)] = &[
+            (2, Ok(&["n3", "n4", "n5"])),
+            (3, Ok(&["n4", "n5"])),
+            (5, Ok(&[])),
+            (1, Err(("the 1 notifications after cursor 1, up to 2", 2))),
+            (0, Err(("the 2 notifications after cursor 0, up to 2", 2))),
+            (6, Err(("cursor 6 is past the latest, 5", 5))),
+            (u64::MAX, Err(("is past the latest, 5", 5))),
+        ];
+        for (since, want) in cases {
+            let got = history
+                .since(*since)
+                .map(|lines| lines.map(|l| l.to_string()).collect::<Vec<_>>());
+            match (got, want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, *want, "since {since}"),
+                (Err((why, from)), Err((want, want_from))) => {
+                    assert!(why.contains(want), "since {since}: {why}");
+                    assert_eq!(from, *want_from, "since {since}");
+                }
+                (got, want) => panic!("since {since}: {got:?}, wanted {want:?}"),
+            }
+        }
+        // By bytes too: one line over the limit leaves nothing kept, and
+        // the cursor to attach since is the latest.
+        let mut history = History::bounded(3, 4);
+        history.push("abcde".into());
+        assert_eq!((history.latest, history.bytes, history.oldest()), (1, 0, 1));
+        history.push("ab".into());
+        history.push("cd".into());
+        assert_eq!(history.oldest(), 1);
+        assert_eq!(history.since(1).unwrap().count(), 2);
+    }
+
+    /// A client attached with a replay gets each notification once, in
+    /// order, and the relay drops a client that leaves no room.
+    #[test]
+    fn a_replay_and_the_live_stream_do_not_overlap() {
+        let relay = Relay::new(Arc::new(str::to_owned), History::bounded(8, 1 << 20));
+        let notification = |n: u64| json!({"method": "session/update", "params": {"n": n}});
+        for n in 1..=3 {
+            relay.notify(notification(n));
+        }
+        let (lines, mut outgoing) = mpsc::unbounded_channel();
+        let out = Outbox {
+            lines,
+            hang_up: HangUp::new(),
+            redact: Arc::new(str::to_owned),
+        };
+        let respond = |latest| json!({"id": 1, "result": {"latest": latest}});
+        assert_eq!(relay.attach(Some(1), out.clone(), respond), Ok(true));
+        relay.notify(notification(4));
+        // The replay, the response naming the latest, then the live
+        // stream: each notification once, and none before the response.
+        let mut lines = Vec::new();
+        while let Ok(line) = outgoing.try_recv() {
+            let msg: Value = serde_json::from_str(&line.text).unwrap();
+            let cursor = msg["params"]["_meta"][META_KEY]["cursor"].as_u64();
+            lines.push((cursor, msg["result"]["latest"].as_u64()));
+            if cursor.is_some() {
+                assert_eq!(
+                    msg["params"]["n"],
+                    msg["params"]["_meta"][META_KEY]["cursor"]
+                );
+            }
+        }
+        assert_eq!(
+            lines,
+            [
+                (Some(2), None),
+                (Some(3), None),
+                (None, Some(3)),
+                (Some(4), None)
+            ]
+        );
+        // Hung up on for a notification that could never fit, and detached.
+        relay.notify(json!({"method": "x", "params": {"big": "x".repeat(MAX_QUEUED_BYTES)}}));
+        assert!(out.hang_up.room.is_closed());
+        assert!(relay.lock().client.is_none());
+        assert_eq!(relay.lock().history.latest, 5);
+        // Another client: what was asked for fits, or is refused with the
+        // cursor it can have.
+        let (lines, _outgoing) = mpsc::unbounded_channel();
+        let out = Outbox {
+            lines,
+            hang_up: HangUp::new(),
+            redact: Arc::new(str::to_owned),
+        };
+        let err = relay.attach(Some(9), out.clone(), respond).unwrap_err();
+        assert!(err.0.contains("past the latest, 5"), "{}", err.0);
+        assert_eq!(err.1, 5);
+        assert!(relay.lock().client.is_none());
+        assert_eq!(relay.attach(None, out, respond), Ok(true));
+        assert!(relay.lock().client.is_some());
     }
 }
