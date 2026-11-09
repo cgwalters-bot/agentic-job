@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 
 use crate::config::{Config, Egress, HostFile, Sandbox};
@@ -141,6 +141,10 @@ impl HostFile for Config {
     fn session_serve(&self) -> Result<()> {
         let listen = crate::session::bridge::Listen::from_config(&self.session)?
             .context("session serve needs session.listen")?;
+        ensure!(
+            listen.on_tailnet(),
+            "session serve is for the tailnet: session.bind is reached without it"
+        );
         session::serve(listen.capability.as_deref())
     }
 }

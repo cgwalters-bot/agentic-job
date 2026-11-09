@@ -113,7 +113,11 @@ fn read(args: &Args) -> Result<Plan<Job>> {
         text,
         direct,
         refused,
-        served_port: session.is_some().then_some(bridge::PORT),
+        // A gateway's `session.bind` is reached without serve.
+        served_port: session
+            .as_ref()
+            .is_some_and(bridge::Listen::on_tailnet)
+            .then_some(bridge::PORT),
         packages: config.setup.packages.clone(),
         program: Job {
             config,
@@ -286,6 +290,35 @@ fn install_vibe() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The legacy setup path must not ask for Tailscale for a gateway,
+    /// just as the prepared-host configuration must not.
+    #[test]
+    fn only_tailnet_sessions_ask_setup_to_serve() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for (session, port) in [
+            ("", None),
+            (
+                "[session]\nlisten = true\noperators = [\"op@github\"]\n\
+                 origins = [\"https://r.example.ts.net\"]\n",
+                Some(bridge::PORT),
+            ),
+            ("[session]\nlisten = true\nbind = \"0.0.0.0:7790\"\n", None),
+        ] {
+            use std::io::{Seek, Write};
+
+            file.as_file_mut().set_len(0).unwrap();
+            file.rewind().unwrap();
+            write!(file, "[agent]\nname = \"fake\"\n{session}").unwrap();
+            let plan = read(&Args {
+                config: file.path().to_owned(),
+                egress_image: None,
+                host_only: false,
+            })
+            .unwrap();
+            assert_eq!(plan.served_port, port, "{session}");
+        }
+    }
 
     /// The proxy secure-host starts is this binary's `sandbox
     /// egress-proxy`, with every option it may be given.

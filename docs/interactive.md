@@ -13,6 +13,8 @@ tailnet is still to do under
 The shipped dispatch caller starts one with `session=true`, on a runner
 the caller names in a closed map
 ([start a session](dispatch.md#start-a-session-on-a-chosen-runner)).
+A run without a tailnet can be reached through an
+[attach gateway](#an-attach-gateway) instead.
 
 Partly built: a session run ([session runs](../specs/session.md))
 accepts an operator's prompts after its task's turn, through a bridge
@@ -105,6 +107,51 @@ session run it holds the bridge's one client, which
 The ACP SDK's `Proxy` role is not what this builds on. It speaks
 `_proxy/*` to a conductor that owns both of its connections, and a run
 with no client side has nothing for a conductor to own.
+
+## An attach gateway
+
+A self-hosted runner's job pod has no tailnet identity of its own, so
+nothing there can be served on the tailnet. Instead an attach gateway,
+which only the operator reaches, connects to each job's bridge on the
+cluster's network. The job's runner configuration says where the bridge
+listens:
+
+```toml
+[session]
+listen = true
+bind = "0.0.0.0:7790"
+```
+
+The runner makes a secret for each run, such as `openssl rand -hex 32`
+(32 to 1024 bytes of visible ASCII), gives it to the gateway, and starts
+`run` with it in `AGENTIC_JOB_ATTACH_TOKEN`, for one in the job pod's
+environment; the reusable workflow does not pass it. Without it `run` stops
+before the agent starts. The gateway opens the WebSocket with
+`Authorization: Bearer SECRET`; every connection without that header,
+or with another secret, is refused with 403, and the bridge goes on
+listening for the right one. The protocol after the handshake is the
+same as on the tailnet: one client, prompts and cancels only.
+
+The secret keeps out whatever else reaches that address, such as
+another job's pod. Such a peer can still open connections faster than
+the gateway finishes its handshake, of which the bridge holds a few at
+once, and so delay or deny the operator the chat. It does not keep out the agent, which is the
+runner's user as `run` is and can read `run`'s environment: as on the
+tailnet, it can take the one client slot ahead of the gateway, which
+only denies the operator the chat. Nothing `run` starts inherits the
+variable, and every log of the run is redacted of it. `tailscale serve`
+is not set up for the port, and `session.operators`, `session.origins`
+and `session.capability` are refused beside `bind`: nothing in front of
+the bridge would set the headers they check, so any client could send
+them. A browser cannot set the header on a WebSocket, so a page cannot
+attach either; the gateway is the one to authenticate the person.
+
+Writes are where they always are: nothing sent over the bridge
+authorizes one, and they wait for the end-of-run check and apply job.
+The bridge speaks plain WebSocket, so the cluster's network, not this
+bridge, keeps the secret from being read on the way; keep the gateway's
+path to the pod on a network that only it and the job share, or
+encrypted by the cluster.
 
 ## Still to design
 

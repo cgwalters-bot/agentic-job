@@ -185,6 +185,11 @@ the next in the same major version.
   `[session] nudges` is an optional boolean, default false; it sends the
   agent two messages at times derived from `limits.timeout-minutes`
   ([nudges on the clock](harness.md#nudges-on-the-clock)).
+  `[session] bind` is an optional `ADDRESS:PORT`, default empty (the
+  tailnet); with `listen` it moves the bridge there for an attach gateway,
+  which `run` then admits only with the attach secret of its environment's
+  `AGENTIC_JOB_ATTACH_TOKEN`
+  ([an attach gateway](interactive.md#an-attach-gateway)).
   The keys of the removed sandbox user (`host.create-user`, `user`,
   `groups`, `allow-existing-user`, `filesystem-view`,
   `host.check.before-agent` and `setup.tools`) are refused by name

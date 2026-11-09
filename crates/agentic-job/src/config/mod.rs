@@ -390,6 +390,11 @@ pub struct Session {
     /// a login, such as a tagged agent host: the tailnet policy's grants
     /// decide who holds it. Empty for none.
     pub capability: String,
+    /// Where `run` listens instead, `ADDRESS:PORT`, for an attach gateway
+    /// that reaches the job without the tailnet: no `tailscale serve`,
+    /// and a client is let in only with the run's attach secret
+    /// (`session::bridge::ATTACH_TOKEN_VAR`). Empty for the tailnet.
+    pub bind: String,
     /// How long the session waits for the client's next prompt. Zero
     /// means the default.
     pub idle_minutes: u64,

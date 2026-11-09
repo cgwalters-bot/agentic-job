@@ -26,6 +26,17 @@
 //! client, which passes the same checks: the operator comes back from
 //! another device, or after a laptop's sleep, with the cursor it last saw.
 //!
+//! With `session.bind`, for an attach gateway that reaches a job with no
+//! tailnet identity (a runner's pod), `run` listens on that address
+//! instead, with no `tailscale serve` in front, so no header but the
+//! client's own reaches the bridge and the tailnet's are not looked at.
+//! A client is let in only by `Authorization: Bearer SECRET`, where
+//! SECRET is the run's attach secret, which the runner gives `run` in
+//! [`ATTACH_TOKEN_VAR`] and the gateway alone holds besides. It keeps out
+//! whatever else reaches that address, such as other jobs on the
+//! cluster's network. A browser cannot set that header on a WebSocket, so
+//! a page cannot attach either.
+//!
 //! The client gets a narrow part of ACP: `initialize`; `session/new`,
 //! which attaches it to the session already running instead of starting
 //! another; `session/prompt` and `session/cancel`. Every other request is
@@ -52,6 +63,7 @@
 //! beyond a prompt: writes wait for the end-of-run check and apply.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -97,6 +109,17 @@ const CAPABILITIES_NOT_ASCII: &str =
     "Tailscale-App-Capabilities is not plain ASCII within its limit";
 const CAPABILITIES_NOT_OBJECT: &str = "Tailscale-App-Capabilities is not a JSON object";
 const CAPABILITY_NOT_GRANTED: &str = "the app capabilities do not include session.capability";
+/// The variable of `run`'s environment that holds the attach secret with
+/// `session.bind`. Nothing `run` starts inherits it
+/// (`session::process::NOT_INHERITED`), and its `_TOKEN` suffix has every
+/// log of the run redacted of it.
+pub const ATTACH_TOKEN_VAR: &str = "AGENTIC_JOB_ATTACH_TOKEN";
+/// How long an attach secret may be, in bytes: at least 128 bits written
+/// as hex, and within a header.
+const ATTACH_TOKEN_LEN: std::ops::RangeInclusive<usize> = 32..=1024;
+const BEARER: &str = "Bearer ";
+const NO_ATTACH_TOKEN: &str = "no Authorization: Bearer with the attach secret";
+const WRONG_ATTACH_TOKEN: &str = "the attach secret is not this run's";
 /// How long the session waits for a prompt unless `session.idle-minutes`
 /// says otherwise: a runner waiting for nobody still costs its minutes.
 const DEFAULT_IDLE_MINUTES: u64 = 10;
@@ -164,6 +187,8 @@ pub struct Listen {
     pub origins: Vec<String>,
     /// The Tailscale app capability that lets a node in without a login.
     pub capability: Option<String>,
+    /// Where `run` listens for a gateway instead of the tailnet.
+    pub bind: Option<SocketAddr>,
     pub idle: Duration,
 }
 
@@ -175,6 +200,7 @@ impl Listen {
             operators,
             origins,
             capability,
+            bind,
             idle_minutes,
             ..
         } = table;
@@ -183,6 +209,37 @@ impl Listen {
         // run.
         if !listen {
             return Ok(None);
+        }
+        let minutes = match *idle_minutes {
+            0 => DEFAULT_IDLE_MINUTES,
+            n => n,
+        };
+        ensure!(
+            minutes <= MAX_IDLE_MINUTES,
+            "session.idle-minutes = {minutes} is over {MAX_IDLE_MINUTES}"
+        );
+        let idle = Duration::from_secs(minutes * 60);
+        if !bind.is_empty() {
+            let address: SocketAddr = bind.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "session.bind: {bind:?} is not an ADDRESS:PORT, such as 0.0.0.0:{PORT}"
+                )
+            })?;
+            ensure!(address.port() != 0, "session.bind: {bind:?} needs a port");
+            // Nothing in front of the bridge sets the tailnet's headers
+            // there: any client could send them.
+            ensure!(
+                operators.is_empty() && origins.is_empty() && capability.is_empty(),
+                "session.bind admits by the attach secret alone: leave session.operators, \
+                 session.origins and session.capability out"
+            );
+            return Ok(Some(Self {
+                operators: Vec::new(),
+                origins: Vec::new(),
+                capability: None,
+                bind: Some(address),
+                idle,
+            }));
         }
         let capability = (!capability.is_empty()).then(|| capability.clone());
         if let Some(capability) = &capability {
@@ -223,20 +280,19 @@ impl Listen {
                  in lower case, or http:// for localhost"
             );
         }
-        let minutes = match *idle_minutes {
-            0 => DEFAULT_IDLE_MINUTES,
-            n => n,
-        };
-        ensure!(
-            minutes <= MAX_IDLE_MINUTES,
-            "session.idle-minutes = {minutes} is over {MAX_IDLE_MINUTES}"
-        );
         Ok(Some(Self {
             operators: operators.clone(),
             origins: origins.clone(),
             capability,
-            idle: Duration::from_secs(minutes * 60),
+            bind: None,
+            idle,
         }))
+    }
+
+    /// Whether setup serves the bridge's port on the tailnet: not for a
+    /// gateway's `session.bind`.
+    pub fn on_tailnet(&self) -> bool {
+        self.bind.is_none()
     }
 
     /// Why REQUEST, a client's handshake, is refused; `None` to let it
@@ -357,12 +413,70 @@ fn is_origin(text: &str) -> bool {
     host_ok && port_ok && (!local || matches!(host, "localhost" | "127.0.0.1"))
 }
 
+/// The run's attach secret, kept only as its SHA-256 digest, which a
+/// client's is compared with: digests of equal length, compared in full,
+/// tell a client nothing of the secret by how long the comparison took.
+#[derive(Clone)]
+pub struct AttachSecret(ring::digest::Digest);
+
+impl AttachSecret {
+    pub fn new(secret: &str) -> Result<Self> {
+        ensure!(
+            ATTACH_TOKEN_LEN.contains(&secret.len())
+                && secret.bytes().all(|b| b.is_ascii_graphic()),
+            "{ATTACH_TOKEN_VAR} must be {} to {} bytes of visible ASCII, such as \
+             `openssl rand -hex 32`",
+            ATTACH_TOKEN_LEN.start(),
+            ATTACH_TOKEN_LEN.end()
+        );
+        Ok(Self(digest(secret.as_bytes())))
+    }
+
+    /// Why REQUEST is refused; `None` where its one `Authorization` is
+    /// the bearer of this secret.
+    fn refusal(&self, request: &Request) -> Option<&'static str> {
+        let presented = one(request, "Authorization").and_then(|v| v.strip_prefix(BEARER));
+        let Some(presented) = presented else {
+            return Some(NO_ATTACH_TOKEN);
+        };
+        let presented = digest(presented.as_bytes());
+        let differs = presented
+            .as_ref()
+            .iter()
+            .zip(self.0.as_ref())
+            .fold(0, |acc, (a, b)| acc | (a ^ b));
+        (differs != 0).then_some(WRONG_ATTACH_TOKEN)
+    }
+}
+
+fn digest(bytes: &[u8]) -> ring::digest::Digest {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+}
+
+/// Who may attach: by the tailnet's headers, or with `session.bind` by
+/// the attach secret alone.
+struct Admission {
+    listen: Listen,
+    secret: Option<AttachSecret>,
+}
+
+impl Admission {
+    fn refusal(&self, request: &Request) -> Option<&'static str> {
+        match &self.secret {
+            Some(secret) => secret.refusal(request),
+            None => self.listen.refusal(request),
+        }
+    }
+}
+
 /// What a session is given to reach its client.
 pub struct Bridge {
     pub listen: Listen,
-    /// Bound already, on loopback, so that a port that is taken stops
-    /// the run before the agent starts.
+    /// Bound already, so that a port that is taken stops the run before
+    /// the agent starts.
     pub listener: std::net::TcpListener,
+    /// The attach secret, with `session.bind`.
+    pub secret: Option<AttachSecret>,
     pub redact: Redact,
 }
 
@@ -373,13 +487,31 @@ impl Bridge {
     /// is, can reach this port too and attach first with forged headers
     /// (agentic-job#2989): that only denies the operator the session, and
     /// no message over the bridge authorizes a write.
+    ///
+    /// With `session.bind`, binds that address instead, and takes the
+    /// attach secret from [`ATTACH_TOKEN_VAR`], without which the run does
+    /// not start. The agent can read it from this process's environment
+    /// as it could forge serve's headers: the secret keeps out the
+    /// network, not the agent.
     pub fn bind(listen: Listen, redact: Redact) -> Result<Self> {
-        let address = (std::net::Ipv4Addr::LOCALHOST, PORT);
+        let secret = match listen.bind {
+            Some(_) => {
+                let secret = std::env::var(ATTACH_TOKEN_VAR).with_context(|| {
+                    format!("session.bind needs the run's attach secret in {ATTACH_TOKEN_VAR}")
+                })?;
+                Some(AttachSecret::new(&secret)?)
+            }
+            None => None,
+        };
+        let address = listen
+            .bind
+            .unwrap_or((std::net::Ipv4Addr::LOCALHOST, PORT).into());
         let listener = std::net::TcpListener::bind(address)
-            .with_context(|| format!("listening on 127.0.0.1:{PORT} for the session's client"))?;
+            .with_context(|| format!("listening on {address} for the session's client"))?;
         Ok(Self {
             listen,
             listener,
+            secret,
             redact,
         })
     }
@@ -728,7 +860,7 @@ type Socket = WebSocketStream<TcpStream>;
 /// What waits for the client to be let in.
 struct Waiting {
     listener: TcpListener,
-    listen: Listen,
+    admission: Admission,
     relay: Arc<Relay>,
     inbox: mpsc::Sender<FromClient>,
     session_id: watch::Receiver<Option<String>>,
@@ -740,7 +872,7 @@ impl Bridge {
     /// Starts listening for the client. SESSION_ID is the agent's
     /// session, once there is one: the client attaches to it.
     pub(super) fn start(self, session_id: watch::Receiver<Option<String>>) -> Result<Connected> {
-        let guard = if std::path::Path::new(ENDPOINT_FILE).exists() {
+        let guard = if self.listen.on_tailnet() && std::path::Path::new(ENDPOINT_FILE).exists() {
             Some(crate::sandbox::session::Guard::start(&self.listener)?)
         } else {
             // Unprepared hosts are used by the loopback-only protocol tests.
@@ -758,7 +890,10 @@ impl Bridge {
         let idle = self.listen.idle;
         let waiting = Waiting {
             listener,
-            listen: self.listen,
+            admission: Admission {
+                listen: self.listen,
+                secret: self.secret,
+            },
             relay: relay.clone(),
             inbox,
             session_id,
@@ -798,7 +933,7 @@ enum Gone {
 async fn serve(waiting: Waiting) {
     let Waiting {
         listener,
-        listen,
+        admission,
         relay,
         inbox,
         mut session_id,
@@ -806,7 +941,7 @@ async fn serve(waiting: Waiting) {
         writer,
     } = waiting;
     loop {
-        let socket = admit(&listener, &listen).await;
+        let socket = admit(&listener, &admission).await;
         eprintln!("session: a client is connected");
         let (sink, stream) = socket.split();
         let (lines, outgoing) = mpsc::unbounded_channel();
@@ -850,7 +985,7 @@ async fn serve(waiting: Waiting) {
 
 /// A stalled unauthenticated connection cannot occupy the only admission
 /// slot. Bound both the number of pending upgrades and their lifetime.
-async fn admit(listener: &TcpListener, listen: &Listen) -> Socket {
+async fn admit(listener: &TcpListener, admission: &Admission) -> Socket {
     let mut pending = Vec::new();
     loop {
         tokio::select! {
@@ -860,7 +995,7 @@ async fn admit(listener: &TcpListener, listen: &Listen) -> Socket {
                     // slots: a newcomer displaces the oldest pending upgrade.
                     drop(pending.remove(0));
                 }
-                pending.push(Box::pin(tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(stream, listen))));
+                pending.push(Box::pin(tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(stream, admission))));
             }
             (result, index, _) = async { futures::future::select_all(pending.iter_mut()).await }, if !pending.is_empty() => {
                 drop(pending.remove(index));
@@ -893,13 +1028,13 @@ async fn refuse_all(listener: &TcpListener) {
     }
 }
 
-/// The WebSocket handshake on STREAM, refused unless LISTEN lets the
+/// The WebSocket handshake on STREAM, refused unless ADMISSION lets the
 /// client in; why it was refused otherwise.
 // The refusal's type is tungstenite's `Callback`'s.
 #[allow(clippy::result_large_err)]
-async fn handshake(stream: TcpStream, listen: &Listen) -> Result<Socket, String> {
+async fn handshake(stream: TcpStream, admission: &Admission) -> Result<Socket, String> {
     let mut refused = None;
-    let check = |request: &Request, response: Response| match listen.refusal(request) {
+    let check = |request: &Request, response: Response| match admission.refusal(request) {
         None => Ok(response),
         Some(why) => {
             refused = Some(why);
@@ -1247,6 +1382,10 @@ mod tests {
         let listen = Listen::from_config(&table(true, &[OPERATOR], &[ORIGIN], 0))
             .unwrap()
             .unwrap();
+        let admission = Admission {
+            listen,
+            secret: None,
+        };
         let mut stalled = Vec::new();
         for _ in 0..MAX_HANDSHAKES {
             stalled.push(TcpStream::connect(address).await.unwrap());
@@ -1263,7 +1402,7 @@ mod tests {
                 let stream = TcpStream::connect(address).await.unwrap();
                 tokio_tungstenite::client_async(request, stream).await
             };
-            let (server, client) = tokio::join!(admit(&listener, &listen), client);
+            let (server, client) = tokio::join!(admit(&listener, &admission), client);
             client.unwrap();
             drop(server);
         })
@@ -1328,6 +1467,92 @@ mod tests {
         // Serve would hang up on the client's connection here.
         writer.abort();
         drop(client);
+    }
+
+    /// A gateway's connections to `session.bind`, over a real socket:
+    /// refused without the attach secret or with another, let in with it.
+    #[tokio::test]
+    async fn a_gateway_attaches_with_the_secret_alone() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = config::Session {
+            bind: address.to_string(),
+            ..table(true, &[], &[], 0)
+        };
+        let admission = Admission {
+            listen: Listen::from_config(&config).unwrap().unwrap(),
+            secret: Some(AttachSecret::new(SECRET).unwrap()),
+        };
+        let server = tokio::spawn(async move { admit(&listener, &admission).await });
+        let connect = |headers: Vec<(&'static str, String)>| async move {
+            let mut request = format!("ws://{address}/").into_client_request().unwrap();
+            for (name, value) in headers {
+                request.headers_mut().append(name, value.parse().unwrap());
+            }
+            let stream = TcpStream::connect(address).await.unwrap();
+            tokio_tungstenite::client_async(request, stream).await
+        };
+        let wrong = SECRET.replace('0', "1");
+        // The tailnet's headers count for nothing here.
+        for refused in [
+            vec![
+                (LOGIN_HEADER, OPERATOR.to_owned()),
+                ("Origin", ORIGIN.to_owned()),
+            ],
+            vec![("Authorization", format!("{BEARER}{wrong}"))],
+            vec![("Authorization", SECRET.to_owned())],
+        ] {
+            let err = connect(refused.clone()).await.unwrap_err();
+            assert!(err.to_string().contains("403"), "{refused:?}: {err}");
+        }
+        assert!(!server.is_finished());
+        connect(vec![("Authorization", format!("{BEARER}{SECRET}"))])
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn who_has_the_attach_secret() {
+        let secret = AttachSecret::new(SECRET).unwrap();
+        let bearer = format!("{BEARER}{SECRET}");
+        let cases: &[(&[&str], Option<&str>)] = &[
+            (&[&bearer], None),
+            (&[], Some(NO_ATTACH_TOKEN)),
+            (&[SECRET], Some(NO_ATTACH_TOKEN)),
+            (&[&format!("Basic {SECRET}")], Some(NO_ATTACH_TOKEN)),
+            (&[&bearer, &bearer], Some(NO_ATTACH_TOKEN)),
+            (&[&format!("{bearer}0")], Some(WRONG_ATTACH_TOKEN)),
+            (&[&bearer[..bearer.len() - 1]], Some(WRONG_ATTACH_TOKEN)),
+            (&[BEARER], Some(WRONG_ATTACH_TOKEN)),
+        ];
+        for &(values, expected) in cases {
+            let mut request = Request::new(());
+            for value in values {
+                request
+                    .headers_mut()
+                    .append("Authorization", value.parse().unwrap());
+            }
+            assert_eq!(secret.refusal(&request), expected, "{values:?}");
+        }
+        for refused in [
+            &SECRET[1..],
+            &"x".repeat(*ATTACH_TOKEN_LEN.end() + 1),
+            &format!("{} ", &SECRET[1..]),
+            "",
+        ] {
+            let err = AttachSecret::new(refused).err().unwrap().to_string();
+            assert!(err.contains(ATTACH_TOKEN_VAR), "{refused:?}: {err}");
+        }
     }
 
     fn table(
@@ -1397,17 +1622,33 @@ mod tests {
                 ),
                 10 * 60,
             ),
+            // A gateway's address, with nobody named: the secret admits.
+            (with_bind(table(true, &[], &[], 0), "0.0.0.0:7790"), 10 * 60),
+            (with_bind(table(true, &[], &[], 5), "[::]:8000"), 5 * 60),
         ];
         for (table, idle_s) in cases {
             let listen = Listen::from_config(&table).unwrap().unwrap();
             assert_eq!(listen.operators, table.operators);
             assert_eq!(listen.origins, table.origins);
             assert_eq!(
-                listen.capability.unwrap_or_default(),
+                listen.capability.clone().unwrap_or_default(),
                 table.capability,
                 "{table:?}"
             );
+            assert_eq!(
+                listen.bind.map(|a| a.to_string()).unwrap_or_default(),
+                table.bind
+            );
+            assert_eq!(listen.on_tailnet(), table.bind.is_empty());
             assert_eq!(listen.idle, Duration::from_secs(idle_s));
+        }
+    }
+
+    /// TABLE with `session.bind = ADDRESS`.
+    fn with_bind(table: config::Session, address: &str) -> config::Session {
+        config::Session {
+            bind: address.to_owned(),
+            ..table
         }
     }
 
@@ -1490,6 +1731,38 @@ mod tests {
             (
                 with_capability(table(true, &[], &[], 0), CAPABILITY),
                 "session.origins needs 1 to",
+            ),
+            (
+                with_bind(table(true, &[], &[], 0), "0.0.0.0"),
+                "is not an ADDRESS:PORT",
+            ),
+            (
+                with_bind(table(true, &[], &[], 0), "gateway.example:7790"),
+                "is not an ADDRESS:PORT",
+            ),
+            (
+                with_bind(table(true, &[], &[], 0), "0.0.0.0:0"),
+                "needs a port",
+            ),
+            (
+                with_bind(table(true, &[], &[], MAX_IDLE_MINUTES + 1), "0.0.0.0:7790"),
+                "is over",
+            ),
+            // The tailnet's headers would be the client's own there.
+            (
+                with_bind(table(true, &[OPERATOR], &[], 0), "0.0.0.0:7790"),
+                "by the attach secret alone",
+            ),
+            (
+                with_bind(table(true, &[], &[ORIGIN], 0), "0.0.0.0:7790"),
+                "by the attach secret alone",
+            ),
+            (
+                with_bind(
+                    with_capability(table(true, &[], &[], 0), CAPABILITY),
+                    "0.0.0.0:7790",
+                ),
+                "by the attach secret alone",
             ),
         ];
         let long = format!("example.com/cap/{}", "x".repeat(MAX_NAME_BYTES));

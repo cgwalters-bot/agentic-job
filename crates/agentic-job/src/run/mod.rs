@@ -523,6 +523,8 @@ struct SecondUserAsks {
 /// and the agent taking its one client slot ahead of the operator only
 /// denies the operator the session, which the agent could do anyway.
 /// No message over the bridge authorizes a write (specs/session.md).
+/// Nor is `session.bind`'s attach secret, which the agent can read: with
+/// it, it or whoever it gives it to can only take that same slot.
 fn refuse_without_second_user(asks: SecondUserAsks) -> Result<()> {
     let refusals = [
         (

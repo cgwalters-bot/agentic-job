@@ -248,7 +248,11 @@ impl Config {
                     port: *port,
                 })
                 .collect(),
-            serve_port: host.session.is_some().then_some(bridge::PORT),
+            serve_port: host
+                .session
+                .as_ref()
+                .is_some_and(Listen::on_tailnet)
+                .then_some(bridge::PORT),
         }
     }
 

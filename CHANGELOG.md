@@ -54,6 +54,14 @@ says what a caller may rely on across versions.
   base and branch; external apply requires explicit successful trusted
   detection. No external caller or deployment is enabled (#3293).
 
+- `[session] bind` (off by default) has a session's bridge listen on that
+  address for an attach gateway, such as a self-hosted runner's job pod
+  with no tailnet identity, instead of behind `tailscale serve`. There a
+  client is let in only with `Authorization: Bearer` and the run's attach
+  secret, which the runner passes `run` in `AGENTIC_JOB_ATTACH_TOKEN`;
+  without it `run` does not start. Writes still wait for the end-of-run
+  check and apply (part of #536, #3249).
+
 - A run may hand back repeated-test evidence beside a pull request's
   patch, where the bounds' new `[github.test_evidence]` allows it (off by
   default). The evidence is `out/test-evidence.json` and one log per

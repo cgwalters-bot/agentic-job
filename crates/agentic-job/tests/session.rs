@@ -392,9 +392,11 @@ fn bridge_and_client(
             operators: vec![OPERATOR.to_owned()],
             origins: vec![ORIGIN.to_owned()],
             capability: Some(CAPABILITY.to_owned()),
+            bind: None,
             idle,
         },
         listener,
+        secret: None,
         redact: Arc::new(|text: &str| text.replace(SECRET, "[REDACTED]")),
     };
     let thread = std::thread::spawn(move || {
@@ -3259,6 +3261,7 @@ fn a_port_that_is_taken_is_refused() {
         operators: vec![OPERATOR.to_owned()],
         origins: vec![ORIGIN.to_owned()],
         capability: None,
+        bind: None,
         idle: Duration::from_secs(60),
     };
     let err = Bridge::bind(listen, Arc::new(str::to_owned)).err().unwrap();

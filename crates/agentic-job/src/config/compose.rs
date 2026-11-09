@@ -1101,6 +1101,8 @@ mod tests {
     fn the_prepared_table_says_what_the_run_asks_of_the_host() {
         let session = "[session]\nlisten = true\noperators = [\"op@github\"]\n\
                        origins = [\"https://review.example.ts.net\"]\n";
+        // A gateway reaches it without serve.
+        let gateway = "[session]\nlisten = true\nbind = \"0.0.0.0:7790\"\n";
         let front = "[inference]\nurl = \"http://100.64.0.1:18080\"\nregister = \"plain\"\n\
                      front = true\n";
         let host = |from: &std::path::Path, prepared: bool| Args {
@@ -1112,6 +1114,7 @@ mod tests {
         for (file, refused, port) in [
             ("", &[][..], None),
             (session, &[][..], Some(crate::session::bridge::PORT)),
+            (gateway, &[][..], None),
             (front, &[("100.64.0.1", 18080)][..], None),
         ] {
             let mut from = tempfile::NamedTempFile::new().unwrap();
