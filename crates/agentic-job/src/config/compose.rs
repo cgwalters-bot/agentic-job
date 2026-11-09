@@ -64,6 +64,9 @@ pub struct Args {
     /// user runs it after setup, which runs none
     #[arg(long)]
     pub no_script: bool,
+    /// Refuse an effective listening session, including one enabled in the file
+    #[arg(long)]
+    pub no_session: bool,
     /// Write `[host.prepared]` from the run's tables: for an agent job
     /// whose `sandbox prepare` runs before the secure-host image, whose
     /// setup reads none of them
@@ -316,6 +319,10 @@ fn compose(args: &Args) -> Result<String> {
     let text = toml::to_string(&table).context("writing the configuration")?;
     // As its readers will see it: parsed from the text that is printed.
     let config = Config::parse(&text)?;
+    ensure!(
+        !args.no_session || !config.session.listen,
+        "A review cannot be a session: its verdict is a merge gate (session.listen must be false)"
+    );
     config.check_held()?;
     if args.host {
         config.check_host()?;
@@ -375,6 +382,7 @@ mod tests {
             boolean: Vec::new(),
             host: false,
             no_script: false,
+            no_session: false,
             prepared: false,
             repo: None,
             inference_address: None,

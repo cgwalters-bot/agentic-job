@@ -2,7 +2,7 @@
 # Pin the reusable call, and the target job's checkout, to this source
 # commit; see docs/dispatch.md.
 name: dispatch
-run-name: ${{ inputs.kind }} ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}${{ inputs.item-repo && format(' for {0}', inputs.repo) || '' }}
+run-name: ${{ inputs.kind }} ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}${{ inputs.item-repo && format(' for {0}', inputs.repo) || '' }}${{ inputs.session && ' session' || '' }}${{ inputs.runner && format(' on {0}', inputs.runner) || '' }}
 
 on:
   workflow_call:
@@ -48,6 +48,15 @@ on:
       status-comment:
         type: string
         default: ""
+      session:
+        type: boolean
+        default: false
+      idle-minutes:
+        type: string
+        default: ""
+      runner:
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       task:
@@ -79,6 +88,20 @@ on:
           second comment; ignored unless the status credential wrote it on that item
         type: string
         default: ""
+      session:
+        description: >-
+          After the task's turn, wait for the operator's prompts until idle or ended (docs/interactive.md);
+          the runner's configuration says who may attach. Not for review
+        type: boolean
+        default: false
+      idle-minutes:
+        description: With `session`, how long it waits for the next prompt (empty for 10, at most 60)
+        type: string
+        default: ""
+      runner:
+        description: A runner named in the AGENT_RUNNERS variable; empty for AGENT_RUNNER and AGENT_CONFIG
+        type: string
+        default: ""
 
 permissions: {}
 # One run per kind and item: GitHub keeps at most one run pending in a
@@ -99,6 +122,8 @@ jobs:
       task: ${{ steps.target.outputs.task }}
       agent: ${{ steps.target.outputs.agent }}
       skills: ${{ steps.target.outputs.skills }}
+      runner: ${{ steps.target.outputs.runner }}
+      config: ${{ steps.target.outputs.config }}
     # Trusted pinned code only; no target checkout and no write token. The
     # binary is the one `run`'s policy job takes: a release's, by its
     # attested checksums for this source, else a build of this source.
@@ -124,6 +149,11 @@ jobs:
           ITEM_REPO: ${{ inputs.item-repo }}
           PROFILE: ${{ inputs.kind }}
           TASK: ${{ inputs.task }}
+          SESSION: ${{ inputs.session }}
+          SCRIPTED: ${{ inputs.scripted }}
+          # A scripted run names none: it runs on hosted Ubuntu.
+          RUNNER: ${{ !inputs.scripted && inputs.runner || '' }}
+          AGENT_RUNNERS: ${{ vars.AGENT_RUNNERS }}
           AGENT: ${{ inputs.scripted && 'fake' || vars.AGENT || 'fake' }}
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
           AGENT_RUNNER: ${{ vars.AGENT_RUNNER }}
@@ -180,11 +210,17 @@ jobs:
       agent-config-repo: ${{ (needs.target.outputs.agent == 'opencode' || needs.target.outputs.agent == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
       agent-config-path: ${{ (needs.target.outputs.agent == 'opencode' || needs.target.outputs.agent == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       agent-skills: ${{ needs.target.outputs.skills == 'true' }}
-      agent-runner: ${{ inputs.scripted && '"ubuntu-26.04"' || vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
+      # A named runner's labels and configuration come from AGENT_RUNNERS,
+      # which `agentic-job dispatch` checked above, never from the input.
+      agent-runner: ${{ inputs.scripted && '"ubuntu-26.04"' || needs.target.outputs.runner || vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
       # The caller's runner configuration, else this repository's own for
       # hosted ubuntu-26.04 at the pinned commit: policy.yml checks this
       # source out at .agentic-job-source, so no caller keeps a copy of it.
-      config: ${{ !inputs.scripted && vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}
+      config: ${{ !inputs.scripted && (needs.target.outputs.config || vars.AGENT_CONFIG) || '.agentic-job-source/.github/agentic-job/hosted.toml' }}
+      # The configuration's [session] table says who may attach; the
+      # session's writes still wait for check and apply after it ends.
+      session: ${{ inputs.session }}
+      idle-minutes: ${{ inputs.idle-minutes }}
       fake-profile: ${{ needs.target.outputs.agent == 'fake' && ((inputs.kind == 'triage' || inputs.kind == 'research') && 'comment' || (inputs.kind == 'fix' && 'implement' || inputs.kind)) || '' }}
       max-requests: ${{ needs.target.outputs.agent == 'fake' && '0' || '150' }}
       review: ${{ inputs.kind == 'review' }}

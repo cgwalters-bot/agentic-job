@@ -17,6 +17,14 @@ says what a caller may rely on across versions.
   under `made` in `applied.json`, not under `already_applied`, which now
   holds it only when an earlier attempt had pushed that same head (#3322).
 
+- The shipped `dispatch.yml` caller can start a session (`session`, off by
+  default, and `idle-minutes`) and run the agent job on a `runner` named in
+  the caller's new `AGENT_RUNNERS` variable, a closed map of names to
+  `runs-on` labels and runner configuration. `agentic-job dispatch`
+  refuses an unknown or malformed entry and scripted sessions. Review policy
+  refuses listening sessions even when enabled by the runner TOML rather
+  than the dispatch input (#536).
+
 - A run may hand back repeated-test evidence beside a pull request's
   patch, where the bounds' new `[github.test_evidence]` allows it (off by
   default). The evidence is `out/test-evidence.json` and one log per

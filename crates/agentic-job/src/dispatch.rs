@@ -37,6 +37,22 @@ const AGENT_VARIABLES: &[&str] = &[
 
 const APPLY_ENVIRONMENT: &str = "APPLY_ENVIRONMENT";
 
+/// The caller's closed map of runners a dispatch may name: a JSON object
+/// of names, each `{"runs-on": LABELS, "config": PATH}`.
+const AGENT_RUNNERS: &str = "AGENT_RUNNERS";
+
+/// The keys of a runner's entry, all required.
+const RUNNER_KEYS: &[&str] = &["runs-on", "config"];
+
+/// The most of AGENT_RUNNERS read, in bytes.
+const MAX_RUNNERS: usize = 16 << 10;
+
+/// The most labels a runner's `runs-on` lists.
+const MAX_LABELS: usize = 16;
+
+/// The longest label or configuration path, in bytes.
+const MAX_RUNNER_FIELD: usize = 256;
+
 /// The largest item number JavaScript holds exactly, as the workflow's
 /// expressions and the forge's clients read it.
 const MAX_ITEM: u64 = (1 << 53) - 1;
@@ -126,6 +142,10 @@ pub struct Outputs {
     pub agent: String,
     pub skills: bool,
     pub task: String,
+    /// The named runner's labels as JSON, empty for AGENT_RUNNER.
+    pub runner: String,
+    /// The named runner's configuration, empty for AGENT_CONFIG.
+    pub config: String,
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -155,6 +175,8 @@ pub fn run(args: &Args) -> Result<Exit> {
     output(&mut text, "agent", &outputs.agent);
     output(&mut text, "skills", &outputs.skills.to_string());
     output(&mut text, "task", &outputs.task);
+    output(&mut text, "runner", &outputs.runner);
+    output(&mut text, "config", &outputs.config);
     std::fs::OpenOptions::new()
         .append(true)
         .open(&args.output)
@@ -203,6 +225,17 @@ pub fn target(
         "AGENT must be fake, opencode, claude or vibe"
     );
     let real = agent != FAKE;
+    // A review's verdict is a merge gate: an operator's chat with the
+    // reviewer must not steer it.
+    ensure!(
+        !(env("SESSION") == "true" && profile == "review"),
+        "A review cannot be a session: its verdict is a merge gate"
+    );
+    ensure!(
+        !(env("SESSION") == "true" && env("SCRIPTED") == "true"),
+        "A scripted dispatch cannot be a session: disable scripted and configure a session runner"
+    );
+    let (runner, config) = named_runner(&env("RUNNER"), &env(AGENT_RUNNERS))?;
     // A broker's registration by the job's identity token. The reusable
     // workflow refuses a provider's API key (`api-key`, and
     // INFERENCE_PROVIDER `github`, which it turns into `api-key`): the
@@ -226,6 +259,8 @@ pub fn target(
             .iter()
             .copied()
             .filter(|key| env(key).trim().is_empty())
+            // A named runner stands for AGENT_RUNNER.
+            .filter(|key| runner.is_empty() || *key != "AGENT_RUNNER")
             .collect()
     } else {
         Vec::new()
@@ -317,7 +352,71 @@ pub fn target(
         agent,
         skills,
         task,
+        runner,
+        config,
     })
+}
+
+/// The labels, as JSON, and configuration path of the runner NAME in
+/// MAP, the caller's AGENT_RUNNERS; both empty for no name. A dispatch
+/// names a runner and nothing else, so that its inputs, which a plan or
+/// a script may fill in from an issue, cannot send the job to labels the
+/// caller did not set up for it, such as a persistent runner that holds
+/// credentials, or to another configuration than that runner's.
+fn named_runner(name: &str, map: &str) -> Result<(String, String)> {
+    if name.is_empty() {
+        return Ok(Default::default());
+    }
+    ensure!(
+        map.len() <= MAX_RUNNERS,
+        "{AGENT_RUNNERS} exceeds {} KiB",
+        MAX_RUNNERS >> 10
+    );
+    let map: serde_json::Map<String, Value> = serde_json::from_str(map)
+        .with_context(|| format!("{AGENT_RUNNERS} must be a JSON object of runner names"))?;
+    let Some(entry) = map.get(name) else {
+        let known: Vec<&str> = map.keys().map(String::as_str).collect();
+        bail!(
+            "Unknown runner {name:?}; {AGENT_RUNNERS} names: {}",
+            known.join(", ")
+        );
+    };
+    let entry = entry
+        .as_object()
+        .filter(|entry| entry.len() == RUNNER_KEYS.len())
+        .filter(|entry| RUNNER_KEYS.iter().all(|key| entry.contains_key(*key)));
+    let Some(entry) = entry else {
+        bail!("Runner {name:?} must have exactly `runs-on` and `config`");
+    };
+    let field = |value: &Value| {
+        value
+            .as_str()
+            .filter(|text| !text.is_empty() && text.len() <= MAX_RUNNER_FIELD)
+            .filter(|text| !text.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let labels = match &entry["runs-on"] {
+        Value::Array(labels) if (1..=MAX_LABELS).contains(&labels.len()) => {
+            labels.iter().map(field).collect::<Option<Vec<_>>>()
+        }
+        Value::Array(_) => None,
+        label => field(label).map(|label| vec![label]),
+    };
+    let Some(labels) = labels else {
+        bail!(
+            "Runner {name:?}'s `runs-on` must be a label or 1 to {MAX_LABELS} labels, each 1 to {MAX_RUNNER_FIELD} bytes"
+        );
+    };
+    // A path in the caller's checkout, as AGENT_CONFIG is.
+    let config = field(&entry["config"]).filter(|config| {
+        std::path::Path::new(config)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    });
+    let Some(config) = config else {
+        bail!("Runner {name:?}'s `config` must be a relative path without `..`");
+    };
+    Ok((serde_json::to_string(&labels)?, config))
 }
 
 /// The item as the task quotes it: its repository, number, title and
@@ -597,11 +696,180 @@ mod tests {
                 ));
             }
         }
+        cases.push((
+            "a review session".into(),
+            vec![("PROFILE", "review"), ("SESSION", "true")],
+            pull(),
+            "A review cannot be a session: its verdict is a merge gate",
+        ));
+        cases.push((
+            "a scripted session".into(),
+            vec![("SCRIPTED", "true"), ("SESSION", "true")],
+            issue(),
+            "A scripted dispatch cannot be a session: disable scripted and configure a session runner",
+        ));
+        let runners = [
+            (
+                "not JSON",
+                "hosted",
+                "AGENT_RUNNERS must be a JSON object of runner names",
+            ),
+            (
+                "[]",
+                "hosted",
+                "AGENT_RUNNERS must be a JSON object of runner names",
+            ),
+            (
+                RUNNERS,
+                "rhel",
+                "Unknown runner \"rhel\"; AGENT_RUNNERS names: hosted, devspace",
+            ),
+            (
+                r#"{"x": "ubuntu"}"#,
+                "x",
+                "Runner \"x\" must have exactly `runs-on` and `config`",
+            ),
+            (
+                r#"{"x": {"runs-on": "a"}}"#,
+                "x",
+                "must have exactly `runs-on` and `config`",
+            ),
+            (
+                r#"{"x": {"runs-on": "a", "config": "c", "env": {}}}"#,
+                "x",
+                "must have exactly `runs-on` and `config`",
+            ),
+            (
+                r#"{"x": {"runs-on": [], "config": "c"}}"#,
+                "x",
+                "`runs-on` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "", "config": "c"}}"#,
+                "x",
+                "`runs-on` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": 1, "config": "c"}}"#,
+                "x",
+                "`runs-on` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": ["a", 1], "config": "c"}}"#,
+                "x",
+                "`runs-on` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "a\nb", "config": "c"}}"#,
+                "x",
+                "`runs-on` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "a", "config": ""}}"#,
+                "x",
+                "`config` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "a", "config": "/etc/c"}}"#,
+                "x",
+                "`config` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "a", "config": "../c"}}"#,
+                "x",
+                "`config` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "a", "config": "a/../../c"}}"#,
+                "x",
+                "`config` must be",
+            ),
+            (
+                r#"{"x": {"runs-on": "a", "config": ["c"]}}"#,
+                "x",
+                "`config` must be",
+            ),
+        ];
+        let too_many = format!(r#"{{"x": {{"runs-on": {:?}, "config": "c"}}}}"#, ["a"; 17]);
+        let too_long = format!(
+            r#"{{"x": {{"runs-on": "{}", "config": "c"}}}}"#,
+            "a".repeat(257)
+        );
+        let too_big = format!(r#"{{"x": "{}"}}"#, " ".repeat(MAX_RUNNERS));
+        for (map, name, error) in runners.iter().copied().chain([
+            (
+                &*too_many,
+                "x",
+                "`runs-on` must be a label or 1 to 16 labels",
+            ),
+            (&*too_long, "x", "each 1 to 256 bytes"),
+            (&*too_big, "x", "AGENT_RUNNERS exceeds 16 KiB"),
+        ]) {
+            cases.push((
+                format!("runner {name:?} of {map:.40}"),
+                vec![("RUNNER", name), (AGENT_RUNNERS, map)],
+                issue(),
+                error,
+            ));
+        }
         for (name, set, data, error) in cases {
             let (result, _) = dispatch(&set, Ok(data));
             let err = format!("{:#}", result.expect_err(&name));
             assert!(err.contains(error), "{name}: {err}");
         }
+    }
+
+    /// The caller's runners, as the tests name them.
+    const RUNNERS: &str = r#"{
+        "hosted": {"runs-on": "ubuntu-26.04", "config": "hosted.toml"},
+        "devspace": {"runs-on": ["self-hosted", "devspace"], "config": ".github/agentic-job/devspace.toml"}
+    }"#;
+
+    /// A named runner gives its labels and configuration, and stands for
+    /// AGENT_RUNNER; no name leaves both to the repository's variables.
+    /// A session is any profile's but review's.
+    #[test]
+    fn a_named_runner_and_a_session() {
+        for (name, runner, config) in [
+            ("", "", ""),
+            ("hosted", r#"["ubuntu-26.04"]"#, "hosted.toml"),
+            (
+                "devspace",
+                r#"["self-hosted","devspace"]"#,
+                ".github/agentic-job/devspace.toml",
+            ),
+        ] {
+            let mut set: Vec<_> = READY
+                .iter()
+                .copied()
+                .filter(|(key, _)| name.is_empty() || *key != "AGENT_RUNNER")
+                .collect();
+            set.extend([
+                ("AGENT", "claude"),
+                ("PROFILE", "research"),
+                ("SESSION", "true"),
+                ("RUNNER", name),
+                (AGENT_RUNNERS, RUNNERS),
+            ]);
+            let outputs = dispatch(&set, Ok(issue())).0.unwrap();
+            assert_eq!((&*outputs.runner, &*outputs.config), (runner, config));
+        }
+        // Without a name, AGENT_RUNNER is still wanted.
+        let set = [("AGENT", "claude"), ("AGENT_MODEL", "m")];
+        let err = dispatch(&set, Ok(issue())).0.unwrap_err().to_string();
+        assert!(err.contains(": AGENT_RUNNER, INFERENCE_URL"), "{err}");
+        for profile in ["implement", "triage", "fix"] {
+            let set = [
+                ("PROFILE", profile),
+                ("SESSION", "true"),
+                (APPLY_ENVIRONMENT, "agent-apply"),
+            ];
+            let data = if profile == "fix" { pull() } else { issue() };
+            dispatch(&set, Ok(data)).0.expect(profile);
+        }
+        dispatch(&[("PROFILE", "review"), ("SESSION", "false")], Ok(pull()))
+            .0
+            .unwrap();
     }
 
     /// Nothing is read of the forge before the inputs are admitted, and a
@@ -712,6 +980,8 @@ mod tests {
                     agent: agent.to_owned(),
                     skills,
                     task: format!("Profile: {profile}. {instructions}{TAIL}"),
+                    runner: String::new(),
+                    config: String::new(),
                 },
                 "{profile} {agent}"
             );

@@ -10,6 +10,9 @@ write, which waits for the end-of-run check and apply
 create a second user or a local credential holder for it. A client that
 reconnects, and a run on a real tailnet, are still to do under
 [#536](https://github.com/cgwalters-forge/agentic-job/issues/536).
+The shipped dispatch caller starts one with `session=true`, on a runner
+the caller names in a closed map
+([start a session](dispatch.md#start-a-session-on-a-chosen-runner)).
 
 Partly built: a session run ([session runs](../specs/session.md))
 accepts an operator's prompts after its task's turn, through a bridge

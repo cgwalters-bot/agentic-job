@@ -192,6 +192,8 @@ Set operator-controlled repository variables (not dispatch inputs):
 - `AGENT_MODEL`: the model name the selected agent and broker support.
 - `AGENT_RUNNER`: JSON runner labels, for example
   `["self-hosted","agentic-job"]`, for a disposable proxy-reachable image.
+- `AGENT_RUNNERS`: optional, the runners a dispatch may name
+  ([below](#start-a-session-on-a-chosen-runner)).
 - `INFERENCE_URL`: the reachable broker URL, for example `http://BROKER:PORT`.
 - `INFERENCE_AUDIENCE`: the broker's configured GitHub OIDC audience.
 - Not, for now, a provider's API key: preflight refuses `INFERENCE_REGISTER`
@@ -268,6 +270,59 @@ too. A repository/organization secret also works; environment protection rules
 still gate apply, and the environment's same-name secret takes precedence.
 Never use `secrets: inherit`. For same-repository triage, research and review
 the apply job uses its job token instead; no environment is needed.
+
+## Start a session on a chosen runner
+
+One dispatch starts a [session](interactive.md): the agent works on the
+item's task in a checkout of `repo`, as any dispatch's does, and then
+waits for the operator's prompts until it has been idle for `idle-minutes`
+(10 if empty, at most 60) or the operator ends it. `runner` picks where it
+runs:
+
+```sh
+gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 -f kind=research \
+  -f task='Wait for my questions' -f session=true -f runner=devspace
+```
+
+`runner` is a name, never labels or a path. It is looked up in the
+`AGENT_RUNNERS` repository variable, a JSON object the repository's
+maintainers set, which maps each name to its `runs-on` labels and the
+caller's runner configuration for that image:
+
+```json
+{
+  "hosted": {"runs-on": "ubuntu-26.04", "config": ".github/agentic-job/hosted.toml"},
+  "devspace": {"runs-on": ["self-hosted", "devspace"], "config": ".github/agentic-job/devspace.toml"}
+}
+```
+
+A dispatch's inputs are often filled in by a plan or a script from an
+issue's text. Naming an entry of a closed map, rather than passing labels,
+keeps them from sending the job to a runner the deployment did not set up
+for it, such as a persistent one that holds credentials, or from pairing a
+runner with another image's configuration. `agentic-job dispatch` refuses
+an unknown name, an entry with keys other than `runs-on` and `config`, more
+than 16 labels, a label or path over 256 bytes or with control characters,
+and a path that is absolute or has `..`. With no `runner`, the job runs on
+`AGENT_RUNNER` with `AGENT_CONFIG`, as before; a named runner stands in for
+`AGENT_RUNNER`. A scripted run ignores `runner` and runs on hosted Ubuntu.
+The name chooses the agent job's runner only: policy, check and apply stay
+on the reusable workflow's default.
+
+`session` is off by default and refused for `review`, whose verdict is a
+merge gate that a conversation must not steer. Policy refuses an effective
+`session.listen = true` for a review, even when the runner configuration
+enables it and the dispatch input is false. Scripted dispatches also refuse
+`session=true`; disable `scripted` and configure a session runner instead. The
+table's other keys say who may attach and from which page, and the runner
+must already be on the tailnet ([session runs](../specs/session.md#shape)):
+the shipped caller has no network join, and `hosted.toml` has no
+`[session]` table, so a session needs a named runner, or `AGENT_RUNNER` and
+`AGENT_CONFIG`, set up for one. A session adds no write: what the agent
+proposes is checked and applied after the session ends, under the same
+profile's outputs and the same bounds. While a session waits, another
+dispatch of the same kind and item waits behind it in its concurrency
+group.
 
 ## Giving runs a toolchain
 

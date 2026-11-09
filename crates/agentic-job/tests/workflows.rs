@@ -2348,6 +2348,102 @@ fn wrapper_forwards_policy_settings_without_reinterpretation() {
 }
 
 #[test]
+fn a_named_review_runner_cannot_enable_a_session_through_its_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("bin")).unwrap();
+    std::fs::copy(BIN, dir.path().join("bin/agentic-job")).unwrap();
+    let config = dir.path().join("session.toml");
+    std::fs::write(
+        &config,
+        "[session]\nlisten = true\noperators = [\"operator@example.com\"]\norigins = [\"https://session.example\"]\n",
+    )
+    .unwrap();
+    let env = std::collections::BTreeMap::from([
+        ("PROFILE", "review"),
+        ("AGENT", "fake"),
+        ("TARGET_REPO", "example/repo"),
+        ("GITHUB_REPOSITORY", "example/repo"),
+        ("TARGET_ITEM", "1"),
+        ("SESSION", "false"),
+        ("RUNNER", "session"),
+        (
+            "AGENT_RUNNERS",
+            r#"{"session":{"runs-on":"ubuntu-26.04","config":"session.toml"}}"#,
+        ),
+    ]);
+    let selected = agentic_job::dispatch::target(
+        &|key| env.get(key).copied().unwrap_or_default().to_owned(),
+        &|| Ok("main".to_owned()),
+        &mut |_, _| Ok(serde_json::json!({"number": 1, "pull_request": {}})),
+    )
+    .unwrap();
+    assert_eq!(selected.config, "session.toml");
+    let policy = definition("policy.yml");
+    let step = named_step(&policy, "Write the configuration");
+    assert_eq!(step["env"]["REVIEW"].as_str(), Some("${{ inputs.review }}"));
+    assert_eq!(
+        step["env"]["SESSION"].as_str(),
+        Some("${{ inputs.session && 'true' || '' }}")
+    );
+    // False leaves TOML intact. Ordinary runs may listen; reviews must fail
+    // before an agent runner is spent, with no configuration emitted.
+    for (review, session, accepted) in [
+        ("false", "", true),
+        ("true", "", false),
+        ("true", "true", false),
+    ] {
+        let result = run_step(
+            "policy.yml",
+            "Write the configuration",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("CONFIG", &selected.config),
+                ("AGENT", &selected.agent),
+                ("REPO", "example/repo"),
+                ("TIMEOUT", "15"),
+                ("BUDGET", "100"),
+                ("SESSION", session),
+                ("REVIEW", review),
+            ],
+        );
+        assert_eq!(result.status.success(), accepted, "{result:?}");
+        if !accepted {
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("A review cannot be a session"),
+                "{result:?}"
+            );
+            assert!(
+                std::fs::read(dir.path().join("config.toml"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+    let refused = Command::new(BIN)
+        .args(["dispatch", "--output"])
+        .arg(dir.path().join("output"))
+        .env_clear()
+        .envs(env)
+        .env("PROFILE", "research")
+        .env("SESSION", "true")
+        .env("SCRIPTED", "true")
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(ERROR));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("A scripted dispatch cannot be a session")
+    );
+    assert!(!dir.path().join("output").exists());
+    let dispatch = definition("dispatch.yml");
+    assert_eq!(
+        named_step(&dispatch, "target")["env"]["SCRIPTED"].as_str(),
+        Some("${{ inputs.scripted }}")
+    );
+}
+
+#[test]
 fn policy_config_uses_its_own_binary_and_host_config_keeps_user_mode() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("bin")).unwrap();
@@ -2382,6 +2478,7 @@ fn policy_config_uses_its_own_binary_and_host_config_keeps_user_mode() {
         "AGENTS",
         "SETUP",
         "SESSION",
+        "REVIEW",
         "IDLE_MINUTES",
         "WRITE_POLICY",
     ] {
@@ -4196,11 +4293,9 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             "needs: target",
             r"(?m)^  group: dispatch-\$\{\{ inputs\.kind \}\}-\$\{\{ inputs\.repo \}\}-\$\{\{ inputs\.item-repo \}\}-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$",
         ],
-        &[
-            r"(?m)^\s+runner:",
-            "secrets: inherit",
-            r"secrets\.INFERENCE_API_KEY",
-        ],
+        // The policy, check and apply jobs' `runner` is left to its
+        // default: the_dispatch_caller_fixes_capabilities_and_token_boundary.
+        &["secrets: inherit", r"secrets\.INFERENCE_API_KEY"],
     ),
     ("dispatch.yml", "target", &[], &[r"secrets(?:[.:]|\[)"]),
     (
@@ -4336,7 +4431,7 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
     (
         "dispatch.yml",
         "",
-        &["config: ${{ !inputs.scripted && vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}"],
+        &["config: ${{ !inputs.scripted && (needs.target.outputs.config || vars.AGENT_CONFIG) || '.agentic-job-source/.github/agentic-job/hosted.toml' }}"],
     ),
     // Policy hands on the issue it checked, not the input.
     (
@@ -6687,9 +6782,11 @@ if grep -qx "$n" lost; then echo 'unexpected end of JSON input' >&2; exit 1; fi
 /// What a dispatch may choose. status-comment only chooses which of the
 /// status credential's own comments on the item `agentic-job status`
 /// edits (docs/workflow.md says what a wrong id replaces); it grants no
-/// new permission.
+/// new permission. `session` and `idle-minutes` go to agentic-job.yml's
+/// inputs of the same names, and `runner` only names an entry of the
+/// caller's AGENT_RUNNERS, which `agentic-job dispatch` checks.
 #[test]
-fn dispatch_takes_only_task_repo_item_item_repo_kind_and_status_comment() {
+fn dispatch_takes_only_its_named_inputs() {
     let doc = definition("dispatch.yml");
     let inputs: Vec<&str> = doc["on"]["workflow_dispatch"]["inputs"]
         .as_hash()
@@ -6705,7 +6802,10 @@ fn dispatch_takes_only_task_repo_item_item_repo_kind_and_status_comment() {
             "item",
             "item-repo",
             "kind",
-            "status-comment"
+            "status-comment",
+            "session",
+            "idle-minutes",
+            "runner"
         ]
     );
 }
@@ -6864,8 +6964,36 @@ fn the_dispatch_caller_fixes_capabilities_and_token_boundary() {
         "inference-audience: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_AUDIENCE || '' }}",
         "inference-register: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_REGISTER || 'github-oidc' }}",
         "inference-provider: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_PROVIDER || '' }}",
+        "session: ${{ inputs.session }}",
+        "idle-minutes: ${{ inputs.idle-minutes }}",
+        "RUNNER: ${{ !inputs.scripted && inputs.runner || '' }}",
+        "AGENT_RUNNERS: ${{ vars.AGENT_RUNNERS }}",
     ] {
         assert!(text.contains(line), "{line}");
+    }
+    assert!(with["runner"].is_badvalue(), "{:?}", with["runner"]);
+    // A named runner's checked labels and configuration come before the
+    // variables, and a scripted run takes hosted Ubuntu and this source's
+    // configuration whatever is named.
+    let hosted = "\"ubuntu-26.04\"";
+    let source = ".agentic-job-source/.github/agentic-job/hosted.toml";
+    for (scripted, named, wanted) in [
+        (false, true, ("[\"devspace\"]", "devspace.toml")),
+        (false, false, ("[\"self-hosted\"]", "agent.toml")),
+        (true, true, (hosted, source)),
+        (true, false, (hosted, source)),
+    ] {
+        let output = |value: &str| Expr::text(if named { value } else { "" });
+        let context = [
+            ("inputs.scripted", Expr::Bool(scripted)),
+            ("needs.target.outputs.runner", output("[\"devspace\"]")),
+            ("needs.target.outputs.config", output("devspace.toml")),
+            ("vars.AGENT_RUNNER", Expr::text("[\"self-hosted\"]")),
+            ("vars.AGENT_CONFIG", Expr::text("agent.toml")),
+        ];
+        let got = ["agent-runner", "config"]
+            .map(|input| evaluate(expression(&with[input]), &context).render());
+        assert_eq!(got, [wanted.0, wanted.1], "{scripted} {named}");
     }
     let forwarded: Vec<&str> = doc["jobs"]["run"]["secrets"]
         .as_hash()

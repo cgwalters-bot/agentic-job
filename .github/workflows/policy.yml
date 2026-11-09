@@ -868,6 +868,7 @@ jobs:
           BUDGET_USD: ${{ inputs.budget-usd }}
           # Off sets nothing, so the caller's file stands.
           SESSION: ${{ inputs.session && 'true' || '' }}
+          REVIEW: ${{ inputs.review }}
           IDLE_MINUTES: ${{ inputs.idle-minutes }}
           PACKAGES: ${{ inputs.packages }}
           NPM: ${{ inputs.npm }}
@@ -882,7 +883,9 @@ jobs:
           WRITE_POLICY: ${{ inputs.egress-write-policy && 'true' || '' }}
           REPO: ${{ inputs.repo }}
         run: |
-          "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} --repo "$REPO" \
+          review=()
+          if [ "$REVIEW" = true ]; then review=(--no-session); fi
+          "$JOB_DIR/bin/agentic-job" config "${review[@]}" ${CONFIG:+--from "$CONFIG"} --repo "$REPO" \
             --string agent.name="$AGENT" --string agent.model="$MODEL" --string agent.config-repo="$CONFIG_REPO" \
             --string agent.config-ref="$CONFIG_REF" --string agent.config-path="$CONFIG_PATH" \
             --boolean agent.skills="$SKILLS" \

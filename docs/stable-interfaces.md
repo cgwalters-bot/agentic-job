@@ -137,6 +137,8 @@ the next in the same major version.
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
   `[limits]`, `[session]` and `[commit]`
   ([files read](interface.md#files-read)).
+  `agentic-job config --no-session` refuses an effective `session.listen = true`,
+  including one inherited from the file; review policy always uses it.
   `[host]` (with `[host.check]` and `[host.prepared]`) was `[sandbox]`
   before #2071. `[sandbox]`, and a `sandbox.KEY` setting of `config`,
   are still read as a deprecated alias, with the same keys, defaults and
