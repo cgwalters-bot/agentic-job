@@ -224,6 +224,17 @@ jobs:
         with:
           config: ${{ runner.temp }}/agentic-job-host.toml
           image-archive: ${{ inputs.secure-host-image-artifact-id != '' && format('{0}/secure-host-image/secure-host.tar', runner.temp) || '' }}
+      # With `[preflight]`: as the runner's user, the agent's, before the
+      # setup script, the target or inference, prove KVM, a libvirt session
+      # and resources by using them (docs/dispatch.md#capability-preflight).
+      # A file without the table checks nothing. `exec`, so that a
+      # cancellation's signals reach it and it destroys its guest.
+      # Use the policy-uploaded binary: the pinned host image may replace
+      # the CLI on PATH with an older release without this subcommand.
+      - name: Capability preflight
+        run: |
+          chmod +x .agentic-job/agentic-job
+          exec .agentic-job/agentic-job sandbox preflight --config .agentic-job/config.toml
       # The configuration's `setup.script`, the caller's, for a toolchain:
       # as the runner's user, the agent's, without root, in the agent's
       # home and with its variables.
