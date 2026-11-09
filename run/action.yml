@@ -154,7 +154,7 @@ runs:
         if [ "$state" = 4 ]; then
           echo "exit=4" >> "$GITHUB_OUTPUT"
           echo "failure-class=control_unreachable" >> "$GITHUB_OUTPUT"
-          echo '::error::the host check could not reach a host outside the runner after its retries (control_unreachable): the agent did not start; the run can be tried again'
+          echo '::error::agentic-job run ended with exit state 4 (control_unreachable): the host check could not reach a host outside the runner after its retries; the agent did not start; the run can be tried again'
         fi
         exit "$state"
     # The policy job's commit must be this action's: a caller that names

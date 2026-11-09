@@ -171,6 +171,11 @@ says what a caller may rely on across versions.
   adoption. Forwarder/site pins remain unchanged pending actions#230;
   new-image hosted and agent E2E evidence remains pending (#2070/#2656).
 
+- The host-only `control_unreachable` failure now emits the canonical
+  `agentic-job run ended with exit state 4` annotation, so agent-board can
+  recognize that the agent never started even though the composite run step
+  failed. Outputs and fail-closed gating are unchanged (#3225).
+
 - The run action carries a host check that failed only to reach a host
   outside the runner, after its retries, as `exit` 4 with the new failure
   class `control_unreachable`, which the reusable workflows pass on and the
