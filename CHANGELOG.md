@@ -9,6 +9,14 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The run action carries a host check that failed only to reach a host
+  outside the runner, after its retries, as `exit` 4 with the new failure
+  class `control_unreachable`, which the reusable workflows pass on and the
+  status comment names; its job still fails before the agent starts. A
+  dispatcher may requeue such a run a bounded number of times. Any other
+  failure of the check fails the job with no exit state or class, as
+  before (#3225).
+
 - Setup with `[host.prepared]` refuses a helper that is missing or not a
   regular file in its preflight, before it changes the host (#3262).
 

@@ -1916,12 +1916,18 @@ in `run/summary.rs`): `timeout`, `budget`, `stall` or `agent_exit`, or,
 for a model provider's failure the session could not get past
 ([harness.md](harness.md#limits)), `inference_rate_limited`,
 `inference_overloaded`, `inference_unreachable`, `inference_quota` or
-`inference_unauthorized`. The action checks the word against that list
-before it becomes an output, and `apply.yml`'s `conclude` checks it again
+`inference_unauthorized`. One more is the action's own and never in
+`summary.json`: `control_unreachable`, with `exit` 4, when the host check
+before `run` ([sandbox-check.md](sandbox-check.md#the-egress-policy-and-containers))
+failed only to reach a host outside the runner after its retries, so the
+probes behind that control proved nothing and the agent never started
+(#3225). The action checks the summary's word against the summary's
+list, and no other word, before it becomes an output, and `apply.yml`'s
+`conclude` checks it again, with the action's own word beside the list,
 before it goes into the comment, as it does `secret-at` and `over-budget`:
 where and what kind, never the agent's words, which stay in the summary
-and the log. A test (`tests/failure_class.rs`) holds the three lists to
-one. Empty for a run that ended well.
+and the log. A test (`tests/failure_class.rs`) holds the lists to the
+binary's. Empty for a run that ended well.
 
 What a caller does with it is the caller's. The reusable workflow cannot
 retry a whole run: the run token is single-use, and re-running the
@@ -1931,7 +1937,10 @@ dispatcher that reads `failure-class` can requeue a run that ended on
 which a wait clears, and should not requeue one that ended on
 `inference_quota` or `inference_unauthorized`, which it will not; the
 `resends` and `resend_wait_s` fields of `summary.json` say how much the
-session already waited. A run whose agent handed back after the failure
+session already waited. It may requeue one that ended on
+`control_unreachable` a bounded number of times: an outage of the host
+the control reads passes, but a runner whose own way out is broken fails
+the same way on every try. A run whose agent handed back after the failure
 is filed `budget` or `timeout`, with the class in `summary.json`'s
 `provider_error`: a partial result, not a failure to repeat. The class
 is a fixed word, but it is read from words the agent controls (the error

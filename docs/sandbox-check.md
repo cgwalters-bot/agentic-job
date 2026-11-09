@@ -77,8 +77,11 @@ worked (#3225). When it still fails and nothing else does, `agentic-job
 sandbox check` says so and exits 4, the retryable not-started state,
 instead of 1; the `secure-host` binary exits 1 either way. A direct path
 out that this host broke fails the same way, so a retrier must bound its
-retries. The run action's `exit` and `failure-class` outputs do not carry
-this exit state yet. Images up to secure-host v0.6.9 still read
+retries. The run action carries that exit state as its `exit` output, 4,
+with the failure class `control_unreachable`
+([workflow.md](workflow.md#why-a-run-failed)); its job still fails
+before the agent starts, and no check record is left for the next check.
+Images up to secure-host v0.6.9 still read
 example.com, so until the pin moves past them secure-host's own check
 fails under an allowlist without it. The probes of
 the egress policy, the tailnet and containers were the sandbox user's

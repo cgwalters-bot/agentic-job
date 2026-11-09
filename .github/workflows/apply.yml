@@ -1115,8 +1115,9 @@ jobs:
           STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ && ( -z "$PR_REPO" || "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ) ]]
-          # A fixed word or nothing: the same list as the run action's.
-          [[ "$FAILURE_CLASS" =~ ^(timeout|budget|stall|agent_exit|inference_(rate_limited|overloaded|unreachable|quota|unauthorized))$ ]] || FAILURE_CLASS=
+          # A fixed word or nothing: the run action's summary kinds, and
+          # its host step's own `control_unreachable`.
+          [[ "$FAILURE_CLASS" =~ ^(timeout|budget|stall|agent_exit|inference_(rate_limited|overloaded|unreachable|quota|unauthorized)|control_unreachable)$ ]] || FAILURE_CLASS=
           case "$RESULTS" in
             success/success/success) text="✅ [$WORKFLOW]($RUN_URL) ended well${PR:+ and opened pull request $PR_REPO#$PR}." reaction=rocket
               if [ "$NO_RESULT" = true ]; then

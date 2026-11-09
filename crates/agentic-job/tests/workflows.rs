@@ -1011,6 +1011,68 @@ fn run_requires_locked_host_and_consistent_user_before_probing() {
     );
 }
 
+/// The host check's exit 4, only the outside-host control failed, is the
+/// step's `exit` and `failure-class` (#3225), fixed words the action's
+/// outputs take ahead of `run`'s; the step still fails with the check's
+/// state, as it does on any other failure, which sets nothing.
+#[test]
+fn the_host_check_carries_only_an_unreachable_control_as_a_class() {
+    let doc = definition("run/action.yml");
+    assert_eq!(
+        named_step(&doc, "Prove the host is secured")["id"].as_str(),
+        Some("host")
+    );
+    for (output, step) in [("exit", "exit"), ("failure-class", "failure-class")] {
+        assert_eq!(
+            doc["outputs"][output]["value"].as_str(),
+            Some(
+                format!("${{{{ steps.host.outputs.{step} || steps.run.outputs.{step} }}}}")
+                    .as_str()
+            )
+        );
+    }
+    for (state, outputs) in [
+        (0, ""),
+        (1, ""),
+        (2, ""),
+        (4, "exit=4\nfailure-class=control_unreachable\n"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(&dir.path().join("python3"), "#!/bin/sh\nexit 0\n");
+        executable(
+            &dir.path().join("agentic-job"),
+            &format!(
+                "#!/bin/sh\n[ \"$*\" = 'sandbox check --unless-passed' ] || exit 99\nexit {state}\n"
+            ),
+        );
+        let output = dir.path().join("output");
+        let search = format!("{}:/usr/bin:/bin", dir.path().display());
+        let result = run_step(
+            "run/action.yml",
+            "Prove the host is secured",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("AGENT_USER", "runner"),
+                ("RUNNER_HOME", "/tmp/home"),
+                ("GITHUB_OUTPUT", path(&output)),
+            ],
+        );
+        assert_eq!(result.status.code(), Some(state), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap_or_default(),
+            outputs,
+            "{state}"
+        );
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert_eq!(
+            stdout.contains("::error::") && stdout.contains("control_unreachable"),
+            state == 4,
+            "{state}: {stdout}"
+        );
+    }
+}
+
 /// curl's mock refuses a token on argv and requires the authorization header
 /// on stdin; it is shared by the scope and publication probes.
 const MOCK_CURL: &str = r#"#!/bin/bash

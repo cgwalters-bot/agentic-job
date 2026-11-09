@@ -44,17 +44,24 @@ inputs:
     default: ""
 outputs:
   exit:
-    description: Exit state of agentic-job run
-    value: ${{ steps.run.outputs.exit }}
+    description: >-
+      Exit state of agentic-job run, or 4 when the check of the host before it failed only to
+      reach a host outside the runner, so that `run` never started. The check sets its outputs
+      only when it exits 4, which fails the job, so at most one of the two steps has any
+    value: ${{ steps.host.outputs.exit || steps.run.outputs.exit }}
   failure-class:
     description: >-
       For a run that did not end well, what it ended on, as one of the summary's failure kinds
       (`timeout`, `budget`, `stall`, `agent_exit`, `inference_rate_limited`, `inference_overloaded`,
-      `inference_unreachable`, `inference_quota`, `inference_unauthorized`): a caller's dispatcher
-      may requeue a run on the first three inference kinds, which a wait clears, a bounded number
-      of times (the class is read from the agent's words, which the agent controls), and should
-      not on `inference_quota` or `inference_unauthorized`. Empty for a run that ended well
-    value: ${{ steps.run.outputs.failure-class }}
+      `inference_unreachable`, `inference_quota`, `inference_unauthorized`), or
+      `control_unreachable` when the check of the host before the run could not reach a host
+      outside the runner after its retries, so the agent never started (exit 4; the action's own
+      word, not the summary's): a caller's dispatcher may requeue a run on the first three
+      inference kinds, which a wait clears, and on `control_unreachable`, each a bounded number
+      of times (an inference class is read from the agent's words, which the agent controls; a
+      host whose own way out is broken fails like an outage), and should not on `inference_quota`
+      or `inference_unauthorized`. Empty for a run that ended well
+    value: ${{ steps.host.outputs.failure-class || steps.run.outputs.failure-class }}
   over-budget:
     description: >-
       For a run that ended well although the cost its agent reported went over the budget, how far
@@ -118,7 +125,15 @@ runs:
     # the runner's user between secure-host and this one run unprobed and
     # can write that record themselves: a caller that runs repository code
     # there gives secure-host `check: false`.
+    # The check exits 4 when its only failure was a control that could
+    # not reach a host outside the runner after its retries (#3225): the
+    # probes behind it proved nothing, so the job still fails here and
+    # the agent does not start, but as `exit=4` with the fixed class
+    # `control_unreachable`, the action's own word, which a dispatcher
+    # may requeue on a bounded number of times. Any other failure of the
+    # check fails the job with no exit state or class, as before.
     - name: Prove the host is secured
+      id: host
       shell: bash
       env:
         AGENT_USER: ${{ inputs.agent-user }}
@@ -134,7 +149,14 @@ runs:
         # [sandbox] is [host]'s deprecated name (agentic-job#2071); setup
         # refused a file with both.
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("host", c.get("sandbox", {})).get("lock-runner", True) is True else "run requires a locked host")'
-        agentic-job sandbox check --unless-passed
+        state=0
+        agentic-job sandbox check --unless-passed || state=$?
+        if [ "$state" = 4 ]; then
+          echo "exit=4" >> "$GITHUB_OUTPUT"
+          echo "failure-class=control_unreachable" >> "$GITHUB_OUTPUT"
+          echo '::error::the host check could not reach a host outside the runner after its retries (control_unreachable): the agent did not start; the run can be tried again'
+        fi
+        exit "$state"
     # The policy job's commit must be this action's: a caller that names
     # another commit for an action would run one version's binary and
     # settings with another's steps. Pinned remotely, the ref is the
@@ -254,7 +276,8 @@ runs:
           echo "stopped-early=true" >> "$GITHUB_OUTPUT"
         # What a run that did not end well ended on: the kind of the one
         # failure in summary.json that is the run's (a tool_error is a
-        # tool's), one of the binary's fixed words and nothing else, so
+        # tool's), one of the binary's fixed words and nothing else (not
+        # the host step's control_unreachable, which no summary has), so
         # that it can be an output and go into a status comment. The
         # message beside it is the agent's and stays in summary.md and
         # the condensed log, never in an output or a workflow command.

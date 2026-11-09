@@ -71,6 +71,17 @@ Both `runner` and `agent-runner` default to the JSON string
 `"ubuntu-26.04"`. Explicit labels and runner groups still resolve in the
 calling repository; architecture-specific and special runners are not remapped.
 
+Outputs `exit` and `failure-class` say how a run that did not end well
+ended ([why a run failed](workflow.md#why-a-run-failed)). `exit` is
+`agentic-job run`'s state (0, 1, 3, 4, 124), or 4 when the host check
+before it failed only to reach a host outside the runner, so the agent
+never started. `failure-class` is empty or one fixed word: `timeout`,
+`budget`, `stall`, `agent_exit`, `inference_rate_limited`,
+`inference_overloaded`, `inference_unreachable`, `inference_quota`,
+`inference_unauthorized`, or `control_unreachable` for that host check.
+A new word may come in any release; a caller treats one it does not know
+as a failure to look at, not to requeue.
+
 `status-comment` preserves opening whole-line hidden caller comments, except
 tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
 [status provenance contract](workflow.md#optional-threat-detection).

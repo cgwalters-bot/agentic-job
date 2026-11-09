@@ -74,7 +74,9 @@ pub const META_INFERENCE_ADDRESS: &str = "inference_address";
 /// the fixed words `run/action.yml` lets through as its `failure-class`
 /// output, and `apply.yml`'s `conclude` into the status comment. A caller
 /// requeues on the first three inference kinds, which a wait may clear,
-/// and not on `inference_quota` or `inference_unauthorized`.
+/// and not on `inference_quota` or `inference_unauthorized`. The action
+/// lets no other word out of `summary.json`; [`CONTROL_UNREACHABLE`] is
+/// its own.
 pub const FAILURE_KINDS: [&str; 9] = [
     "timeout",
     "budget",
@@ -86,6 +88,13 @@ pub const FAILURE_KINDS: [&str; 9] = [
     "inference_quota",
     "inference_unauthorized",
 ];
+/// The one `failure-class` that is the run action's own and never in
+/// `summary.json`: `sandbox check` before `run` exited 4, failing only to
+/// reach a host outside the runner (#3225), so the agent never started.
+/// `conclude` takes it beside [`FAILURE_KINDS`]; a caller may requeue on
+/// it a bounded number of times, as a host whose own way out is broken
+/// fails the same way.
+pub const CONTROL_UNREACHABLE: &str = "control_unreachable";
 
 /// What `run` measured or was configured with.
 #[derive(Debug, Clone)]

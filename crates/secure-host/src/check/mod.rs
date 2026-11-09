@@ -192,11 +192,10 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
         .context("setup (`secure-host setup`, `agentic-job sandbox setup`) writes this file")?;
     let config = parse(&text).with_context(|| format!("in {}", path.display()))?;
     let record = job_record(record::binary, |name| std::env::var(name).ok(), &text);
-    let mut verdict = Verdict::Passed;
     let checked = once(args.mode(), record.as_ref(), || {
         let started = Instant::now();
         let report = probes(&config)?;
-        verdict = report.verdict();
+        let verdict = report.verdict();
         let failures = report.failures();
         if failures.is_empty() {
             println!(
@@ -204,7 +203,7 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
                 report.outcomes().len(),
                 started.elapsed().as_secs_f64()
             );
-            return Ok(true);
+            return Ok(verdict);
         }
         let ids: Vec<&str> = failures.into_iter().collect();
         eprintln!(
@@ -217,7 +216,7 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
                 "error: only controls that reach a host outside this one failed, after their retries: likely an outage of that host (an infrastructure failure), which a later run may not meet; the notes above say how each try failed"
             );
         }
-        Ok(false)
+        Ok(verdict)
     })?;
     Ok(match checked {
         Checked::Recorded(file) => {
@@ -227,7 +226,7 @@ pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> R
             );
             Verdict::Passed
         }
-        Checked::Probed { .. } => verdict,
+        Checked::Probed(verdict) => verdict,
     })
 }
 
@@ -275,20 +274,21 @@ enum Checked {
     /// Took the record, this file, of a check earlier in the job, and
     /// probed nothing.
     Recorded(PathBuf),
-    /// Made the probes, which all passed or not.
-    Probed { passed: bool },
+    /// Made the probes, which came to this.
+    Probed(Verdict),
 }
 
 /// The probes, `probe`, as `mode` says. Every check consumes `record`
 /// (its file and what it must say) before anything else, whether it
 /// takes it or not; only [`Mode::UnlessPassed`] takes it in place of the
 /// probes, and only [`Mode::Record`] writes one, after probes that all
-/// passed. So a record means that secure-host's check passed and no agent
-/// ran since, and it spares one check at most.
+/// passed: none after an unreachable control either, whose probes proved
+/// nothing. So a record means that secure-host's check passed and no
+/// agent ran since, and it spares one check at most.
 fn once(
     mode: Mode,
     record: Option<&JobRecord>,
-    probe: impl FnOnce() -> Result<bool>,
+    probe: impl FnOnce() -> Result<Verdict>,
 ) -> Result<Checked> {
     if let Some(JobRecord { file, content }) = record {
         let held = match content {
@@ -299,9 +299,9 @@ fn once(
             return Ok(Checked::Recorded(file.clone()));
         }
     }
-    let passed = probe()?;
+    let verdict = probe()?;
     // Without the record the next check only probes again.
-    if passed
+    if verdict == Verdict::Passed
         && mode == Mode::Record
         && let Some(JobRecord {
             file,
@@ -311,7 +311,7 @@ fn once(
     {
         eprintln!("warning: no record of this check for later in the job: {err:#}");
     }
-    Ok(Checked::Probed { passed })
+    Ok(Checked::Probed(verdict))
 }
 
 /// Probes the host `config` describes as the runner's user. `Err` is a
@@ -575,13 +575,24 @@ mod tests {
     #[test]
     fn only_secure_hosts_check_spares_the_next_one_until_an_agent_runs() {
         use Mode::{Probe, Record, UnlessPassed};
-        /// What the probes of a check come to: all pass, one fails, or
-        /// they cannot be made.
+        /// What the probes of a check come to: all pass, one fails, only
+        /// an outside host was out of reach, or they cannot be made.
         #[derive(Debug, Clone, Copy)]
         enum Probes {
             Pass,
             Fail,
+            Unreachable,
             Err,
+        }
+        impl Probes {
+            fn verdict(self) -> Result<Verdict> {
+                match self {
+                    Self::Pass => Ok(Verdict::Passed),
+                    Self::Fail => Ok(Verdict::Failed),
+                    Self::Unreachable => Ok(Verdict::Unreachable),
+                    Self::Err => anyhow::bail!("not made"),
+                }
+            }
         }
         /// A step of the job: a check, or something starting the agent
         /// (`run`).
@@ -669,6 +680,16 @@ mod tests {
                 &[Check(Record, Fail), Check(UnlessPassed, Pass)],
                 &[Probed, Probed],
             ),
+            // Nor does one whose only failure was an outside host out of
+            // reach (#3225): its probes proved nothing.
+            (
+                true,
+                &[
+                    Check(Record, Probes::Unreachable),
+                    Check(UnlessPassed, Pass),
+                ],
+                &[Probed, Probed],
+            ),
             // Written anew after it was taken, it spares one more.
             (
                 true,
@@ -723,11 +744,7 @@ mod tests {
                     made = true;
                     // The record is gone before any probe is made.
                     assert!(!file.exists(), "{case}");
-                    match probes {
-                        Pass => Ok(true),
-                        Fail => Ok(false),
-                        Probes::Err => anyhow::bail!("not made"),
-                    }
+                    probes.verdict()
                 });
                 got.push(match result {
                     Ok(Checked::Recorded(taken)) => {
@@ -735,8 +752,9 @@ mod tests {
                         assert!(!made, "{case}");
                         Took
                     }
-                    Ok(Checked::Probed { passed }) => {
-                        assert!(made && passed == matches!(probes, Pass), "{case}");
+                    Ok(Checked::Probed(verdict)) => {
+                        assert!(made, "{case}");
+                        assert_eq!(verdict, probes.verdict().unwrap(), "{case}");
                         Probed
                     }
                     Err(_) => Did::Err,
@@ -748,8 +766,8 @@ mod tests {
         assert!(job_record(|| Ok("0.1 ab".to_owned()), |_| None, "").is_none());
         forget(|_| None).unwrap();
         assert_eq!(
-            once(UnlessPassed, None, || Ok(true)).unwrap(),
-            Checked::Probed { passed: true }
+            once(UnlessPassed, None, || Ok(Verdict::Passed)).unwrap(),
+            Checked::Probed(Verdict::Passed)
         );
     }
 

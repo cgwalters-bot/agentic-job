@@ -28,15 +28,43 @@ pub mod check {
     use crate::config::Config;
     use crate::exit::Exit;
 
-    /// In place of the glob's `run`, which returns what they came to: a
-    /// check that failed only to reach outside the host is the retryable
-    /// [`Exit::NotStarted`], as the run it stood before never started.
+    /// In place of the glob's `run`, which returns what they came to, as
+    /// an exit state ([`exit`]).
     pub fn run(args: &Args) -> Result<Exit> {
-        Ok(match ::secure_host::check::run(args, Config::parse)? {
+        Ok(exit(::secure_host::check::run(args, Config::parse)?))
+    }
+
+    /// The exit state of a check that came to `verdict`: a check that
+    /// failed only to reach outside the host is the retryable
+    /// [`Exit::NotStarted`], as the run it stood before never started;
+    /// the run action names it `control_unreachable`, and the agent does
+    /// not start after either failure.
+    pub fn exit(verdict: Verdict) -> Exit {
+        match verdict {
             Verdict::Passed => Exit::Success,
             Verdict::Failed => Exit::Failure,
             Verdict::Unreachable => Exit::NotStarted,
-        })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The states the run action branches on: 4 is the check's own
+        /// word for an outside host out of reach, and any other failure
+        /// is 1, a hardening failure beside the control included.
+        #[test]
+        fn an_unreachable_control_is_the_retryable_state() {
+            let cases = [
+                (Verdict::Passed, 0),
+                (Verdict::Failed, 1),
+                (Verdict::Unreachable, 4),
+            ];
+            for (verdict, code) in cases {
+                assert_eq!(exit(verdict).code(), code, "{verdict:?}");
+            }
+        }
     }
 }
 
