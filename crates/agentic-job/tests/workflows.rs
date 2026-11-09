@@ -1470,40 +1470,103 @@ fn the_host_check_carries_only_an_unreachable_control_as_a_class() {
         (2, ""),
         (4, "exit=4\nfailure-class=control_unreachable\n"),
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        executable(&dir.path().join("python3"), "#!/bin/sh\nexit 0\n");
-        executable(
-            &dir.path().join("agentic-job"),
-            &format!(
-                "#!/bin/sh\n[ \"$*\" = 'sandbox check --unless-passed' ] || exit 99\nexit {state}\n"
-            ),
-        );
-        let output = dir.path().join("output");
-        let search = format!("{}:/usr/bin:/bin", dir.path().display());
-        let result = run_step(
-            "run/action.yml",
-            "Prove the host is secured",
-            dir.path(),
-            &[
-                ("PATH", &search),
-                ("AGENT_USER", "runner"),
-                ("RUNNER_HOME", "/tmp/home"),
-                ("GITHUB_OUTPUT", path(&output)),
-            ],
-        );
+        let (result, actual_outputs) = host_check_step(state);
         assert_eq!(result.status.code(), Some(state), "{result:?}");
+        assert_eq!(actual_outputs, outputs, "{state}");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let annotation = "agentic-job run ended with exit state 4 (control_unreachable): the host check could not reach a host outside the runner after its retries; the agent did not start; the run can be tried again";
         assert_eq!(
-            std::fs::read_to_string(&output).unwrap_or_default(),
-            outputs,
+            stdout,
+            if state == 4 {
+                format!("::error::{annotation}\n")
+            } else {
+                String::new()
+            },
             "{state}"
         );
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        assert_eq!(
-            stdout.contains("::error::") && stdout.contains("control_unreachable"),
-            state == 4,
-            "{state}: {stdout}"
-        );
     }
+}
+
+fn host_check_step(state: i32) -> (std::process::Output, String) {
+    let dir = tempfile::tempdir().unwrap();
+    executable(&dir.path().join("python3"), "#!/bin/sh\nexit 0\n");
+    executable(
+        &dir.path().join("agentic-job"),
+        &format!(
+            "#!/bin/sh\n[ \"$*\" = 'sandbox check --unless-passed' ] || exit 99\nexit {state}\n"
+        ),
+    );
+    let output = dir.path().join("output");
+    let search = format!("{}:/usr/bin:/bin", dir.path().display());
+    let result = run_step(
+        "run/action.yml",
+        "Prove the host is secured",
+        dir.path(),
+        &[
+            ("PATH", &search),
+            ("AGENT_USER", "runner"),
+            ("RUNNER_HOME", "/tmp/home"),
+            ("GITHUB_OUTPUT", path(&output)),
+        ],
+    );
+    (result, std::fs::read_to_string(output).unwrap_or_default())
+}
+
+/// Run the real scheduler, not a local copy of its predicate. CI supplies
+/// the pinned source; a private clone leaves that checkout untouched.
+#[test]
+#[ignore = "needs AGENTIC_JOB_TEST_AGENT_BOARD at the pinned revision and its Cargo dependencies"]
+fn agent_board_classifies_the_failed_host_composite() {
+    use std::io::Write;
+
+    const PIN: &str = "ca122be554c61d374da91260b29daab5bf8a65e8";
+    let source = std::env::var("AGENTIC_JOB_TEST_AGENT_BOARD").expect("agent-board checkout");
+    let head = std::process::Command::new("git")
+        .args(["-C", &source, "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), PIN);
+    let scratch = tempfile::tempdir().unwrap();
+    let board = scratch.path().join("agent-board");
+    assert!(
+        std::process::Command::new("git")
+            .args(["clone", "--quiet", "--shared", "--no-hardlinks", &source])
+            .arg(&board)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut tests = std::fs::OpenOptions::new()
+        .append(true)
+        .open(board.join("crates/board-forge/src/pass/tests.rs"))
+        .unwrap();
+    tests
+        .write_all(include_bytes!("data/agent-board/failed-composite.rs"))
+        .unwrap();
+    let (result, _) = host_check_step(4);
+    assert_eq!(result.status.code(), Some(4));
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let message = stdout.trim_end().strip_prefix("::error::").unwrap();
+    assert!(
+        std::process::Command::new("cargo")
+            .current_dir(&board)
+            .args([
+                "test",
+                "--locked",
+                "-p",
+                "board-forge",
+                "--lib",
+                "pass::tests::agentic_job_failed_composite",
+                "--",
+                "--exact",
+                "--nocapture"
+            ])
+            .env("AGENTIC_JOB_HOST_ANNOTATION", message)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 /// curl's mock refuses a token on argv and requires the authorization header

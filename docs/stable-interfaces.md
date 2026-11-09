@@ -132,6 +132,13 @@ never started. `failure-class` is empty or one fixed word: `timeout`,
 A new word may come in any release; a caller treats one it does not know
 as a failure to look at, not to requeue.
 
+For the host-only `control_unreachable` failure, the run action also emits
+a failure annotation beginning `agentic-job run ended with exit state 4`
+followed by a space, `(control_unreachable):` and host diagnostics. This is the
+existing scheduler not-started contract, including when the outer composite
+step fails; ordinary host failures and success do not emit this annotation.
+The host check still fails closed without starting the agent.
+
 `status-comment` preserves opening whole-line hidden caller comments, except
 tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
 [status provenance contract](workflow.md#optional-threat-detection).

@@ -2010,6 +2010,37 @@ where and what kind, never the agent's words, which stay in the summary
 and the log. A test (`tests/failure_class.rs`) holds the lists to the
 binary's. Empty for a run that ended well.
 
+The host-only failure also emits an error annotation beginning
+`agentic-job run ended with exit state 4 (control_unreachable):`, followed
+by the failed control's context and the fact that the agent did not start.
+This preserves the scheduler's existing not-started contract when the outer
+`Run ./.agentic-job-source/run` composite step fails. Source checked:
+[agent-board starts.rs at ca122be554c61d374da91260b29daab5bf8a65e8](https://github.com/cgwalters-forge/agent-board/blob/ca122be554c61d374da91260b29daab5bf8a65e8/crates/board-forge/src/pass/starts.rs).
+`before_agent` accepts a failed run step when any failure annotation matches
+`not_started`; its `ended_with` predicate accepts the exit-state-4 prefix
+followed by a non-digit. `tests/workflows.rs` checks the exact annotation.
+Its ignored `agent_board_classifies_the_failed_host_composite` test feeds
+the emitted message to that pinned agent-board's real `before_agent` path
+through its replay harness, with a failed outer composite step. It checks
+the rerun write for the canonical annotation and no rerun for the old host
+message, absent message, exit-state-40 near miss, quoted message or warning
+annotation. CI's `corpus` job supplies the pinned checkout; locally set
+`AGENTIC_JOB_TEST_AGENT_BOARD` to that checkout and run
+`cargo test --locked --test workflows agent_board_classifies_the_failed_host_composite -- --ignored --exact`.
+This is a mocked forge replay, not a live scheduler retry.
+
+Deployment needs a caller pin containing this action change and a host
+`agentic-job sandbox check` binary containing the control-only exit-4
+classification (#3227/#3281). The host step uses the installed binary on
+`PATH`, not the policy job's binary used later by `run`. Image adoption
+remains under #2070/#2656; this change publishes no image or release and
+changes no caller settings or retry policy. Fresh-host CI and a deployed
+scheduler run remain necessary to verify the end-to-end behavior. Mixed
+control and hardening failures remain exit 1, with no not-started annotation;
+no failed check writes a passing record or permits an agent start. Probe
+retry bounds, TLS verification, proxy behavior and job/token separation are
+unchanged.
+
 What a caller does with it is the caller's. The reusable workflow cannot
 retry a whole run: the run token is single-use, and re-running the
 agent's job alone is refused ([the run token](#the-run-token)). A

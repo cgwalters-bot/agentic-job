@@ -495,6 +495,17 @@ jobs:
         env:
           AGENTIC_JOB: target/debug/agentic-job
           GH_AW_JS: ${{ env.GH_AW }}/actions/setup/js
+      # Read-only replay of the actual scheduler's failed-composite path;
+      # no forge token, service or inference endpoint is used by the test.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cgwalters-forge/agent-board
+          ref: ca122be554c61d374da91260b29daab5bf8a65e8
+          path: agent-board
+          persist-credentials: false
+      - run: cargo test --locked --test workflows agent_board_classifies_the_failed_host_composite -- --ignored --exact --nocapture
+        env:
+          AGENTIC_JOB_TEST_AGENT_BOARD: ${{ github.workspace }}/agent-board
 
   # crates/agentic-job/tests/publication.rs: what gh-aw's handlers send to
   # GitHub, run by apply.yml's own scripts in the github-script it pins,
