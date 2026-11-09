@@ -9,6 +9,15 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- A run may hand back repeated-test evidence beside a pull request's
+  patch, where the bounds' new `[github.test_evidence]` allows it (off by
+  default). The evidence is `out/test-evidence.json` and one log per
+  attempt. Check binds its base and head to the checked patch and refuses
+  a malformed manifest, too many attempts, a dropped or extra attempt, and
+  an unsafe, linked or oversized log. Apply refuses a tree other than the
+  one the patch makes. Otherwise the draft gets each outcome's count and a
+  link to the run (#3292).
+
 - The run action carries a host check that failed only to reach a host
   outside the runner, after its retries, as `exit` 4 with the new failure
   class `control_unreachable`, which the reusable workflows pass on and the

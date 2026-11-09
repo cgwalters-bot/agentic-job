@@ -31,6 +31,7 @@ use super::clone::{self, Checkout};
 use super::enter::Runner;
 use crate::check::checkpoint::{self, Checkpoint};
 use crate::check::memory::{self, MemoryFiles};
+use crate::check::test_evidence;
 use crate::check::{
     BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, SECONDARY_BASE_FILE, patch_file_name,
     patch_file_name_in,
@@ -50,6 +51,10 @@ pub(crate) const REPLACEMENT_PATH: &str = "out/replacement.json";
 /// Under the sandbox user's home: the agent's notes across runs (#119),
 /// handed back as `memory.json` where the policy has `[memory]`.
 pub(crate) const MEMORY_DIR: &str = "memory";
+/// Under the sandbox user's home: where the agent leaves repeated-test
+/// evidence and its logs, handed back by the same names where the policy
+/// has `[test_evidence]`.
+pub(crate) const AGENT_EVIDENCE_DIR: &str = "out";
 /// The most one entry of the memory directory's listing takes: its type,
 /// a space, the longest name `check` takes, and the NUL that ends it.
 const MEMORY_ENTRY_BYTES: usize = 2 + 64 + 1;
@@ -758,6 +763,9 @@ pub struct Change {
     /// Why the memory directory was not handed back. Apart from the
     /// change: either goes without the other.
     pub memory_dropped: Option<String>,
+    /// Why the test evidence was not handed back, which leaves the change
+    /// without it, and its draft saying none was.
+    pub test_evidence_dropped: Option<String>,
     /// Why the agent's requests file was not handed back, which takes
     /// the change with it ([`requests_refused`]).
     pub requests_dropped: Option<String>,
@@ -791,6 +799,7 @@ impl Change {
         for why in [
             &mut self.dropped,
             &mut self.memory_dropped,
+            &mut self.test_evidence_dropped,
             &mut self.requests_dropped,
             &mut self.secondary_dropped,
         ]
@@ -1411,7 +1420,85 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
             Err(why) => change.memory_dropped = Some(why),
         }
     }
+    if let Some(rules) = &request.policy.test_evidence {
+        match pack_test_evidence(request, rules, &change) {
+            Ok(files) => {
+                for (name, content) in files {
+                    create_dir(request.safe_outputs)?;
+                    write(&request.safe_outputs.join(name), &content)?;
+                }
+            }
+            Err(why) => change.test_evidence_dropped = Some(why),
+        }
+    }
     Ok(change)
+}
+
+/// The agent's `~/out/test-evidence.json` and the logs of its attempts,
+/// by their names in the hand-back, read by the request's runner as the
+/// agent's change is; none where there is no manifest. `Err` is why they
+/// are not handed back: `check` would refuse them, and the change with
+/// them. Their tree is apply's to bind; the rest is held to `check`'s
+/// rules here, against the base of the patch CHANGE handed back.
+fn pack_test_evidence(
+    request: &Request<'_>,
+    rules: &crate::policy::TestEvidence,
+    change: &Change,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let out = request.home.join(AGENT_EVIDENCE_DIR);
+    let shown = |name: &str| format!("~/{AGENT_EVIDENCE_DIR}/{name}");
+    let manifest_name = test_evidence::TEST_EVIDENCE_FILE;
+    let max = test_evidence::MAX_MANIFEST_BYTES as usize;
+    let manifest = match read_agent_file(request.runner, &out.join(manifest_name), max) {
+        AgentFile::Absent => return Ok(Vec::new()),
+        AgentFile::Refused => {
+            return Err(format!(
+                "{} is not a regular file of at most {} KiB",
+                shown(manifest_name),
+                max >> 10
+            ));
+        }
+        AgentFile::Taken(bytes) => bytes,
+    };
+    if request
+        .policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .is_some()
+    {
+        return Err("test evidence goes only beside a pull request's patch".to_owned());
+    }
+    let base = change.patch["base"]
+        .as_str()
+        .filter(|_| change.patch["bytes"].is_u64())
+        .ok_or_else(|| "no patch was handed back to bind the test evidence to".to_owned())?;
+    let max = usize::try_from(rules.max_log_bytes).unwrap_or(usize::MAX - 1);
+    let mut files = vec![(manifest_name.to_owned(), manifest)];
+    for attempt in 1..=rules.max_attempts {
+        let name = test_evidence::log_name(attempt);
+        match read_agent_file(request.runner, &out.join(&name), max) {
+            AgentFile::Absent => {}
+            AgentFile::Refused => {
+                return Err(format!(
+                    "{} is not a regular file of at most {max} bytes",
+                    shown(&name)
+                ));
+            }
+            AgentFile::Taken(bytes) => files.push((name, bytes)),
+        }
+    }
+    let logs: std::collections::BTreeSet<&str> =
+        files[1..].iter().map(|(name, _)| name.as_str()).collect();
+    test_evidence::check(&files[0].1, &logs, rules, base).map_err(|err| format!("{err:#}"))?;
+    // The upload gate and `check` would refuse the whole hand-back for it,
+    // change and all: the evidence alone goes.
+    if let Some((name, _)) = files
+        .iter()
+        .find(|(_, content)| crate::redact::is_secret_shaped(content))
+    {
+        return Err(format!("a secret-shaped string in {}", shown(name)));
+    }
+    Ok(files)
 }
 
 /// The memory directory DIR as `memory.json`, read by RUNNER as the
@@ -1921,6 +2008,7 @@ mod tests {
             allowed_domains: Vec::new(),
             allow_http: Vec::new(),
             memory: None,
+            test_evidence: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,
@@ -4407,6 +4495,233 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["memory.json"]);
+    }
+
+    /// `~/out/test-evidence.json` and its logs are handed back beside the
+    /// patch where the policy has `[test_evidence]`, and `check` takes them
+    /// from there; evidence `check` would refuse is dropped, never the
+    /// change with it.
+    #[test]
+    fn test_evidence_is_handed_back_beside_the_patch() {
+        use crate::check::test_evidence::tests::{manifest, rules};
+        let mut tested = policy(Kind::Branch, pull_requests());
+        tested.test_evidence = Some(crate::policy::TestEvidence {
+            max_log_bytes: 64,
+            ..rules()
+        });
+        let untested = policy(Kind::Branch, pull_requests());
+        let logs = "printf one > out/test-evidence-1.log && printf two > out/test-evidence-2.log \
+                    && printf three > out/test-evidence-3.log";
+        let token = "gh".to_owned() + "p_" + &"a1B2".repeat(10);
+        let secret = format!("{logs} && printf {token} > out/test-evidence-2.log");
+        let link = format!("{logs} && ln -sf ../work/r/a.txt out/test-evidence-2.log");
+        let big = format!("{logs} && head -c 65 /dev/zero > out/test-evidence-2.log");
+        let dir = format!("{logs} && rm out/test-evidence-2.log && mkdir out/test-evidence-2.log");
+        let missing = format!("{logs} && rm out/test-evidence-3.log");
+        let stale = |m: &mut Value| m["head"] = json!("3333333333333333333333333333333333333333");
+        let drop_last = |m: &mut Value| {
+            m["attempts"].as_array_mut().unwrap().pop();
+        };
+        let keep = |_: &mut Value| {};
+        // (the case, the agent's script in its home, the change to the
+        // manifest, whether it changes the checkout, the policy, and the
+        // files handed back beside the patch or why the evidence was dropped)
+        type Case<'a> = (
+            &'a str,
+            &'a str,
+            &'a dyn Fn(&mut Value),
+            bool,
+            &'a Policy,
+            Result<usize, &'a str>,
+        );
+        let cases: &[Case] = &[
+            ("evidence", logs, &keep, true, &tested, Ok(4)),
+            ("no [test_evidence]", logs, &keep, true, &untested, Ok(0)),
+            (
+                "no change",
+                logs,
+                &keep,
+                false,
+                &tested,
+                Err("no patch was handed back to bind the test evidence to"),
+            ),
+            (
+                "another head",
+                logs,
+                &stale,
+                true,
+                &tested,
+                Err("head 3333333333333333333333333333333333333333 is not"),
+            ),
+            (
+                "a dropped attempt",
+                &missing,
+                &drop_last,
+                true,
+                &tested,
+                Err("plans 3 attempts and reports 2"),
+            ),
+            (
+                "a missing log",
+                &missing,
+                &keep,
+                true,
+                &tested,
+                Err("attempt 3 has no log, test-evidence-3.log"),
+            ),
+            (
+                "a linked log",
+                &link,
+                &keep,
+                true,
+                &tested,
+                Err("~/out/test-evidence-2.log is not a regular file of at most 64 bytes"),
+            ),
+            (
+                "a directory for a log",
+                &dir,
+                &keep,
+                true,
+                &tested,
+                Err("~/out/test-evidence-2.log is not a regular file"),
+            ),
+            (
+                "an oversized log",
+                &big,
+                &keep,
+                true,
+                &tested,
+                Err("~/out/test-evidence-2.log is not a regular file of at most 64 bytes"),
+            ),
+            (
+                "a secret in a log",
+                &secret,
+                &keep,
+                true,
+                &tested,
+                Err("a secret-shaped string in ~/out/test-evidence-2.log"),
+            ),
+        ];
+        for (name, script, change_manifest, changes, policy, want) in cases {
+            let home = Home::new();
+            let mut evidence = manifest();
+            evidence["base"] = json!(home.checkout.base_commit);
+            evidence["head"] = json!(home.checkout.base_commit);
+            change_manifest(&mut evidence);
+            std::fs::write(home.path("out/test-evidence.json"), evidence.to_string()).unwrap();
+            sh(home.dir.path(), script);
+            if *changes {
+                sh(&home.checkout.dir, "echo two >> a.txt");
+            }
+            let change = home.collect(policy, &config::Commit::default());
+            assert_eq!(change.dropped, None, "{name}");
+            assert_eq!(change.patch["bytes"].is_u64(), *changes, "{name}");
+            let evidence: Vec<String> = home
+                .handed_back()
+                .into_iter()
+                .filter(|file| file.starts_with("test-evidence"))
+                .collect();
+            match want {
+                Ok(count) => {
+                    assert_eq!(change.test_evidence_dropped, None, "{name}");
+                    assert_eq!(evidence.len(), *count, "{name}");
+                }
+                Err(want) => {
+                    let why = change.test_evidence_dropped.unwrap_or_default();
+                    assert!(why.contains(want), "{name}: {why}");
+                    assert!(!why.contains(&token), "{name}: {why}");
+                    assert_eq!(evidence, Vec::<String>::new(), "{name}");
+                }
+            }
+            if *changes {
+                let verdict = home.verdict(policy);
+                assert!(verdict.ok, "{name}: {:?}", verdict.errors);
+                assert_eq!(verdict.test_evidence.is_some(), *want == Ok(4), "{name}");
+            }
+        }
+    }
+
+    /// From the agent's `~/out` to the draft: `collect` hands the evidence
+    /// back, `check` reports it, and apply's binding takes it only for the
+    /// tree that `git am` of the checked patch on its base makes, as
+    /// apply.yml's trial does. A manifest of the tree before the change is
+    /// refused there.
+    #[test]
+    fn test_evidence_goes_from_collect_through_check_to_the_draft() {
+        use crate::apply::test_evidence::{Args, run};
+        use crate::check::test_evidence::tests::{manifest, rules};
+        let mut policy = policy(Kind::Branch, pull_requests());
+        policy.test_evidence = Some(rules());
+        let base_tree = |home: &Home| sh(&home.checkout.dir, "git rev-parse 'HEAD^{tree}'");
+        for (name, stale) in [("the patched tree", false), ("the base's tree", true)] {
+            let home = Home::new();
+            // The tree the tests ran on: the base with the change, as the
+            // agent's own index makes it, then left unstaged again.
+            let tested = sh(
+                &home.checkout.dir,
+                "echo two >> a.txt && git add a.txt && git write-tree && git reset -q",
+            );
+            let tested = if stale { base_tree(&home) } else { tested };
+            let mut evidence = manifest();
+            evidence["base"] = json!(home.checkout.base_commit);
+            evidence["head"] = json!(home.checkout.base_commit);
+            evidence["tree"] = json!(tested.trim());
+            std::fs::write(home.path("out/test-evidence.json"), evidence.to_string()).unwrap();
+            sh(
+                home.dir.path(),
+                "printf one > out/test-evidence-1.log && printf two > out/test-evidence-2.log \
+                 && printf three > out/test-evidence-3.log",
+            );
+            let change = home.collect(&policy, &config::Commit::default());
+            assert_eq!(change.test_evidence_dropped, None, "{name}");
+            let verdict = home.verdict(&policy);
+            assert!(verdict.ok, "{name}: {:?}", verdict.errors);
+            let patch = home
+                .path("safe-outputs")
+                .join(&verdict.patch.as_ref().unwrap().file);
+            let applied = sh(
+                &home.checkout.dir,
+                &format!(
+                    "git worktree add -q --detach ../trial {} && cd ../trial && \
+                     git -c user.name=t -c user.email=t@example.invalid am -q --keep-cr {} && \
+                     git rev-parse 'HEAD^{{tree}}'",
+                    home.checkout.base_commit,
+                    patch.display()
+                ),
+            );
+            let args = Args {
+                report: home.path("report.json"),
+                file: home.path("agent_output.json"),
+                tree: applied.trim().to_owned(),
+                run_url: "https://github.com/o/r/actions/runs/7".into(),
+            };
+            std::fs::write(&args.report, serde_json::to_vec(&verdict).unwrap()).unwrap();
+            let items: Vec<_> = verdict.items.iter().map(|item| json!(item)).collect();
+            std::fs::write(
+                &args.file,
+                json!({"items": items, "errors": []}).to_string(),
+            )
+            .unwrap();
+            match run(&args) {
+                Ok(_) if !stale => {
+                    let output: Value =
+                        serde_json::from_slice(&std::fs::read(&args.file).unwrap()).unwrap();
+                    let body = output["items"][0]["body"].as_str().unwrap();
+                    assert!(
+                        body.contains("1 pass, 2 fail, 0 skipped, 0 not run"),
+                        "{body}"
+                    );
+                    assert!(body.contains("/actions/runs/7)."), "{body}");
+                }
+                Err(err) if stale => {
+                    assert!(
+                        format!("{err:#}").contains("ran on another change"),
+                        "{err:#}"
+                    );
+                }
+                got => panic!("{name}: {got:?}"),
+            }
+        }
     }
 
     #[test]

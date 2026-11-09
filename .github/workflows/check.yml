@@ -240,7 +240,9 @@ jobs:
       # goes apart, in secondary/, where neither the run's own trial nor a
       # handler looking for the run's patch can take it; its request is
       # left out of the handlers' file, and apply's `secondary-pull-request`
-      # reads it from the report, with the policy beside it.
+      # reads it from the report, with the policy beside it. Test evidence
+      # check accepted goes too, every log of it (check refused any other):
+      # the draft links this upload for it, and apply binds its tree.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         run: |
@@ -254,6 +256,8 @@ jobs:
           [ -z "$patch" ] || cp "$JOB_DIR/safe-outputs/$patch" "$GH_AW_TMP"
           secondary=$(jq -r '.secondary_patch.file // empty' "$GH_AW_TMP/report.json")
           [ -z "$secondary" ] || cp "$JOB_DIR/safe-outputs/$secondary" "$GH_AW_TMP/secondary"
+          jq -e '.test_evidence == null' "$GH_AW_TMP/report.json" > /dev/null ||
+            cp "$JOB_DIR/safe-outputs/test-evidence.json" "$JOB_DIR"/safe-outputs/test-evidence-*.log "$GH_AW_TMP"
       # A review's inline findings, for when apply posts its verdict as the
       # comment (review.yml submitted no review): in that comment's body
       # after the verdict line, not as a second review without a verdict
@@ -279,5 +283,7 @@ jobs:
             ${{ env.GH_AW_TMP }}/aw-*.patch
             ${{ env.GH_AW_TMP }}/replacement.json
             ${{ env.GH_AW_TMP }}/secondary/aw-*.patch
+            ${{ env.GH_AW_TMP }}/test-evidence.json
+            ${{ env.GH_AW_TMP }}/test-evidence-*.log
           retention-days: 30
           if-no-files-found: error

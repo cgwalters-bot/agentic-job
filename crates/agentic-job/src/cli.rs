@@ -59,6 +59,8 @@ pub enum Command {
     Apply(crate::apply::Args),
     /// Link checked pull requests to the caller's issue before publication
     LinkIssue(crate::apply::issue_reference::Args),
+    /// Hold checked test evidence to the tree apply's trial made of the patch, and count its outcomes in the pull request
+    TestEvidence(crate::apply::test_evidence::Args),
     /// Leave out of apply's checked outputs what an earlier attempt applied, and name the rest
     Applied(crate::apply::applied::Args),
     /// Say in step outputs and the job summary where what apply made is, or why a run made nothing, from applied.json
@@ -121,6 +123,7 @@ impl Command {
             Self::Detect(args) => crate::detect::run(args),
             Self::Apply(args) => crate::apply::run(args),
             Self::LinkIssue(args) => crate::apply::issue_reference::run(args),
+            Self::TestEvidence(args) => crate::apply::test_evidence::run(args),
             Self::Applied(args) => crate::apply::applied::run(args),
             Self::Result(args) => crate::apply::result::run(args),
             Self::Publish(args) => crate::apply::publish::run(args),

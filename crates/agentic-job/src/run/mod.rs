@@ -1314,6 +1314,12 @@ impl Plan {
             if let Some(why) = &change.memory_dropped {
                 eprintln!("warning: no memory handed back: {}", enter::one_line(why));
             }
+            if let Some(why) = &change.test_evidence_dropped {
+                eprintln!(
+                    "warning: no test evidence handed back: {}",
+                    enter::one_line(why)
+                );
+            }
             change
         };
         // One that changed nothing, or whose change was not handed back,

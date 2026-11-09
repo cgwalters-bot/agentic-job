@@ -26,6 +26,7 @@ pub mod replacement;
 pub mod result;
 pub mod secondary;
 pub mod status;
+pub mod test_evidence;
 
 use std::path::{Path, PathBuf};
 

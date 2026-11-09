@@ -121,6 +121,12 @@ pub const MAX_MEMORY_BYTES: u64 = 1024 * KB;
 /// that runs (`.html`, `.svg`).
 pub const MEMORY_EXTENSIONS: &[&str] = &["md", "txt", "json", "jsonl", "csv"];
 
+/// The ceilings of `[github.test_evidence]`: twice the 5 attempts the
+/// external runner contract plans (docs/dispatch.md), and a log no bigger
+/// than the largest file a hand-back already holds (its requests).
+pub const MAX_TEST_ATTEMPTS: u32 = 10;
+pub const MAX_TEST_LOG_BYTES: u64 = 1024 * KB;
+
 /// The one top-level dot-folder bounds may exempt from protection, for
 /// repositories they name exactly.
 pub const EXEMPTABLE_DOT_FOLDER: &str = ".github";
@@ -772,6 +778,42 @@ impl OutputLimit {
     }
 }
 
+/// `[github.test_evidence]`: the repeated-test evidence a run may hand
+/// back beside its patch (`test-evidence.json`, docs/dispatch.md), and
+/// how much. Absent, `check` refuses any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestEvidence {
+    /// The most attempts one manifest may plan, and so hold.
+    #[serde(default = "TestEvidence::default_max_attempts")]
+    pub max_attempts: u32,
+    /// The most each attempt's log may hold.
+    #[serde(default = "TestEvidence::default_max_log_bytes")]
+    pub max_log_bytes: u64,
+}
+
+impl TestEvidence {
+    fn default_max_attempts() -> u32 {
+        5
+    }
+
+    fn default_max_log_bytes() -> u64 {
+        256 * KB
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=MAX_TEST_ATTEMPTS).contains(&self.max_attempts),
+            "test_evidence.max_attempts must be from 1 to {MAX_TEST_ATTEMPTS}"
+        );
+        ensure!(
+            (1..=MAX_TEST_LOG_BYTES).contains(&self.max_log_bytes),
+            "test_evidence.max_log_bytes must be from 1 to {MAX_TEST_LOG_BYTES}"
+        );
+        Ok(())
+    }
+}
+
 /// What `policy.json` holds: the request, once it is within the bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -815,6 +857,9 @@ pub struct Policy {
     /// The bounds' `[github.memory]`, where every bounds file has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<Memory>,
+    /// The bounds' `[github.test_evidence]`, where every bounds file has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_evidence: Option<TestEvidence>,
     /// The bounds' [`Forge`].
     #[serde(default)]
     pub forge: Forge,

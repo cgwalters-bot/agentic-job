@@ -646,6 +646,7 @@ impl Compile for Bounds {
             private,
             allowed_domains: link_domains().to_vec(),
             memory: self.memory().cloned(),
+            test_evidence: self.test_evidence().cloned(),
             forge: self.forge(),
             contract: CONTRACT,
             secondary_pull_request: secondary.and_then(|secondary| {
@@ -4073,6 +4074,28 @@ max_patch_files = 10
             assert_eq!(got.extensions, want.3, "{table}");
         }
 
+        // `[github.test_evidence]` likewise; without it, none.
+        assert_eq!(all.test_evidence, None);
+        assert!(
+            !serde_json::to_string(&all)
+                .unwrap()
+                .contains("test_evidence")
+        );
+        for (table, want) in [
+            ("", (5, 256 * KB)),
+            (
+                "max_attempts = 10\nmax_log_bytes = 1048576",
+                (10, 1024 * KB),
+            ),
+            ("max_attempts = 1\nmax_log_bytes = 1", (1, 1)),
+        ] {
+            let bounds: Bounds =
+                toml::from_str(&format!("{BOUNDS}\n[github.test_evidence]\n{table}")).unwrap();
+            bounds.validate().unwrap();
+            let got = bounds.compile(&request()).unwrap().test_evidence.unwrap();
+            assert_eq!((got.max_attempts, got.max_log_bytes), want, "{table}");
+        }
+
         let pr = policy().safe_outputs.create_pull_request.unwrap();
         assert!(pr.draft);
         assert!(pr.protect_top_level_dot_folders);
@@ -4133,6 +4156,34 @@ max_patch_files = 10
             ..tight
         };
         assert!(intersect(both, with_memory(disjoint)).is_err());
+        // Test evidence only where both files have it, within the tighter
+        // of each bound.
+        let evidence = |max_attempts, max_log_bytes| TestEvidence {
+            max_attempts,
+            max_log_bytes,
+        };
+        let tested = |policy: &Policy, rules: TestEvidence| Policy {
+            test_evidence: Some(rules),
+            ..policy.clone()
+        };
+        assert_eq!(
+            intersect(tested(&a, evidence(5, 10)), b.clone())
+                .unwrap()
+                .test_evidence,
+            None
+        );
+        assert_eq!(
+            intersect(a.clone(), tested(&b, evidence(5, 10)))
+                .unwrap()
+                .test_evidence,
+            None
+        );
+        assert_eq!(
+            intersect(tested(&a, evidence(3, 100)), tested(&b, evidence(5, 10)))
+                .unwrap()
+                .test_evidence,
+            Some(evidence(3, 10))
+        );
         for (left, right) in [(a.clone(), b.clone()), (b, a)] {
             let policy = intersect(left, right).unwrap();
             assert_eq!(policy.max_outputs, 2);
@@ -4525,6 +4576,37 @@ max_patch_files = 10
                 "an unknown memory key",
                 format!("{BOUNDS}\n[github.memory]\nbranch = \"x\"\n"),
                 "unknown field `branch`",
+            ),
+            (
+                "an unknown test evidence key",
+                format!("{BOUNDS}\n[github.test_evidence]\nmax_logs = 1\n"),
+                "unknown field `max_logs`",
+            ),
+            (
+                "no test attempts",
+                format!("{BOUNDS}\n[github.test_evidence]\nmax_attempts = 0\n"),
+                "test_evidence.max_attempts must be from 1 to 10",
+            ),
+            (
+                "too many test attempts",
+                format!("{BOUNDS}\n[github.test_evidence]\nmax_attempts = 11\n"),
+                "test_evidence.max_attempts must be from 1 to 10",
+            ),
+            (
+                "empty test logs",
+                format!("{BOUNDS}\n[github.test_evidence]\nmax_log_bytes = 0\n"),
+                "test_evidence.max_log_bytes must be from 1 to 1048576",
+            ),
+            (
+                "a test log too big",
+                format!("{BOUNDS}\n[github.test_evidence]\nmax_log_bytes = 1048577\n"),
+                "test_evidence.max_log_bytes must be from 1 to 1048576",
+            ),
+            (
+                "test evidence in [forgejo]",
+                "[forgejo]\npush_repo = \"bot/r\"\n[forgejo.test_evidence]\n[forgejo.outputs]\nnoop = { max = 1 }\n"
+                    .to_owned(),
+                "unknown field `test_evidence`",
             ),
             (
                 "no memory files",

@@ -505,9 +505,13 @@ As read on 7 November 2026, these are **shipped**:
   posting twice ([running apply again](workflow.md#running-apply-again)).
 - Sandbox setup's refusal of an agent user in the `libvirt` group.
 
+`test-evidence.json` is **implemented but not enabled**: collect, check
+and apply handle it ([test evidence](safe-outputs.md#repeated-test-evidence)),
+off unless the bounds have `[github.test_evidence]`, which no caller sets.
+
 These are **designed here but not implemented**: the runner profile map
 and its resolution, the dispatch record and run correlation, cross-run apply,
-the KVM preflight, `test-evidence.json` and the wrapper's external mode.
+the KVM preflight and the wrapper's external mode.
 The [implementation slices](plan.md#external-runner-implementation-slices)
 list them in order.
 
@@ -809,10 +813,12 @@ one pass after two failures is not three passes. A changed patch/head needs
 a new evidence set. Check validates the bounded evidence manifest and its
 association with the checked patch; it cannot prove test truth from prose.
 Cancellation or missing logs cannot count as a successful repeated run.
-The manifest must bind the checked-out base/head and the patched tree,
-which check recomputes. Attempt counts must fit the profile's
-`max-attempts`, with one outcome and one regular-file log per attempt under
-existing artifact size limits. Failed attempts are not dropped; the draft
+The manifest must bind the checked-out base/head and the patched tree.
+Check holds the base and head to the checked patch's base. Apply refuses
+any tree other than the one its trial makes by applying that patch. Attempt
+counts must fit the profile's `max-attempts`, which tracker's bounds carry
+as `[github.test_evidence] max_attempts`. Each attempt has one outcome and
+one regular-file log, within the bounds' `max_log_bytes`. Failed attempts are not dropped; the draft
 summarizes the count of each outcome and links the external run.
 
 Runtime acceptance remains outstanding: demonstrate an admitted external

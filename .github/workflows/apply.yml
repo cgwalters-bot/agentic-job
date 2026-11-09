@@ -580,6 +580,20 @@ jobs:
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
           "$RUNNER_TEMP/apply-binary/agentic-job" link-issue --file "$GH_AW_TMP/agent_output.json" \
             --item-repo "$ITEM_REPO" --output-repo "$OUTPUT_REPO" --issue "$ISSUE"
+      # Test evidence check accepted describes tests of the tree it names:
+      # the trial above made the checked patch's, and any other stops the
+      # job before anything is published. The pull request then counts each
+      # outcome and links this run, whose checked upload holds the logs.
+      # Without evidence nothing changes. Before the guard, as above.
+      - name: Hold test evidence to the patch's tree
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        env:
+          TREE: ${{ steps.trial.outputs.tree }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" test-evidence --report "$REPORT" --file "$GH_AW_TMP/agent_output.json" \
+            --tree "$TREE" --run-url "$RUN_URL"
       # A re-run of this job applies check's accepted outputs again, and
       # gh-aw's handlers would post each comment, issue and pull request
       # again. Each is named by this run, its place and its digest, the

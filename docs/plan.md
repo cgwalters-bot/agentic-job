@@ -124,7 +124,7 @@ The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
 designed, not built or deployed. This is its one list of follow-ups, in
 dependency order, for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-None is filed yet and none has run. Each slice is one implement-sized pull
+Only slice 4 is built. None has run on an external runner. Each slice is one implement-sized pull
 request. None of them enables a profile, changes credentials, broker
 admission or bounds, or adds ostree or any other target. Repositories
 without an owner are under `cgwalters-forge`.
@@ -166,7 +166,12 @@ without an owner are under `cgwalters-forge`.
    tree against the checked patch. Apply states each outcome's count in the
    draft with a link to the run. Acceptance: refusals for a tree that is
    not the patch's, too many attempts, a dropped attempt and a symlinked or
-   oversized log.
+   oversized log. Implemented for
+   [#3292](https://github.com/cgwalters-forge/agentic-job/issues/3292),
+   off by default ([test evidence](safe-outputs.md#repeated-test-evidence)).
+   Check binds the base and head. Apply's trial binds the tree, because
+   check has no repository. Tracker's bounds still need
+   `[github.test_evidence]` before slice 7 can use it.
 5. **agentic-job — Correlate, fetch and re-check an external run.** A
    binary subcommand does steps 3 to 5 of
    [correlation](dispatch.md#correlating-a-dispatch-with-its-external-run)

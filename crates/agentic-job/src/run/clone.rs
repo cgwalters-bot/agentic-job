@@ -675,6 +675,7 @@ mod tests {
             allowed_domains: Vec::new(),
             allow_http: Vec::new(),
             memory: None,
+            test_evidence: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,

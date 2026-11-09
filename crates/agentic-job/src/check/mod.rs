@@ -14,12 +14,13 @@
 //! rules of [`read_patch`]. This is the run's side of it: the hand-back
 //! holds only the files it may, within their sizes, read without
 //! following a link, and free of private keys (other secret-shaped
-//! strings are warnings: see [`redact`]); its memory and checkpoint
-//! ([`memory`], [`checkpoint`]); and the report.
+//! strings are warnings: see [`redact`]); its memory, checkpoint and test
+//! evidence ([`memory`], [`checkpoint`], [`test_evidence`]); and the report.
 
 pub mod base;
 pub mod checkpoint;
 pub mod memory;
+pub mod test_evidence;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -151,6 +152,11 @@ pub struct Verdict {
     /// What an accepted `memory.json` holds, in counts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<memory::MemoryInfo>,
+    /// What accepted `test-evidence.json` says, in names, commits and
+    /// counts: apply holds its tree to the patch's and puts its counts in
+    /// the draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_evidence: Option<test_evidence::Info>,
     /// The run is blocked, not failed: see [`Verdict::is_blocked`]. Apply
     /// reports it so and succeeds.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -180,6 +186,7 @@ impl Verdict {
             checkpoint: None,
             warnings: Vec::new(),
             memory: None,
+            test_evidence: None,
             blocked: false,
             run_summary: None,
         }
@@ -262,6 +269,15 @@ impl Verdict {
                 memory.files, memory.bytes
             ));
         }
+        // Where the bounds take evidence, its absence is said, so that a
+        // patch without it is not read as tested.
+        match &self.test_evidence {
+            Some(evidence) => lines.push(format!("- {}", evidence.line())),
+            None if policy.test_evidence.is_some() && self.patch.is_some() => {
+                lines.push("- test evidence: none handed back; no test result is claimed".into());
+            }
+            None => {}
+        }
         lines.extend(
             self.errors
                 .iter()
@@ -323,6 +339,8 @@ fn is_handback_file(name: &str) -> bool {
         || name == SECONDARY_BASE_FILE
         || name == replacement::REPLACEMENT_FILE
         || name == memory::MEMORY_FILE
+        || name == test_evidence::TEST_EVIDENCE_FILE
+        || test_evidence::is_log_name(name)
         || is_patch_file_name(name)
 }
 
@@ -337,6 +355,13 @@ fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
             .memory
             .as_ref()
             .map_or(MAX_UNEXPECTED_MEMORY_BYTES, memory::max_json_bytes),
+        test_evidence::TEST_EVIDENCE_FILE => test_evidence::MAX_MANIFEST_BYTES,
+        _ if test_evidence::is_log_name(name) => policy
+            .test_evidence
+            .as_ref()
+            .map_or(test_evidence::MAX_UNEXPECTED_LOG_BYTES, |rules| {
+                rules.max_log_bytes
+            }),
         replacement::REPLACEMENT_FILE => policy.max_patch_bytes,
         _ => policy
             .secondary_pull_request
@@ -547,15 +572,64 @@ fn verdict_of(
         errors
     };
     let trusted = Trusted { comment, run_id };
-    let checked =
+    let mut checked =
         safe_outputs::check::check(&handback, collected, policy, trusted, &Apply, lifecycle);
+    let evidence = checked_test_evidence(&contents, &checked.items, checked.patch.as_ref(), policy);
+    let test_evidence = evidence.unwrap_or_else(|error| {
+        checked.errors.push(format!("test evidence: {error:#}"));
+        None
+    });
     Ok(Verdict {
         secondary_patch: checked.secondary_patch,
         checkpoint,
         warnings,
         memory,
+        test_evidence,
         ..Verdict::new(checked.errors, checked.items, checked.patch)
     })
+}
+
+/// The hand-back's test evidence, if any, held to the policy and bound to
+/// PATCH, the run's own pull request's checked patch: none to bind it to,
+/// a replacement series or a push, which has no draft to summarize it in,
+/// refuses it.
+fn checked_test_evidence(
+    contents: &BTreeMap<String, Vec<u8>>,
+    items: &[Map<String, Value>],
+    patch: Option<&PatchInfo>,
+    policy: &Policy,
+) -> Result<Option<test_evidence::Info>> {
+    let logs: BTreeSet<&str> = contents
+        .keys()
+        .map(String::as_str)
+        .filter(|name| test_evidence::is_log_name(name))
+        .collect();
+    let Some(manifest) = contents.get(test_evidence::TEST_EVIDENCE_FILE) else {
+        if let Some(log) = logs.first() {
+            anyhow::bail!("{log} without {}", test_evidence::TEST_EVIDENCE_FILE);
+        }
+        return Ok(None);
+    };
+    let Some(rules) = &policy.test_evidence else {
+        anyhow::bail!(
+            "{} without a [test_evidence] bound",
+            test_evidence::TEST_EVIDENCE_FILE
+        );
+    };
+    let patch = patch
+        .filter(|patch| patch.commit_files.is_none())
+        .filter(|_| {
+            items
+                .iter()
+                .all(|item| item_type(item) != PUSH_TO_PULL_REQUEST_BRANCH)
+        })
+        .with_context(|| {
+            format!(
+                "{} without a pull request's checked patch to bind it to",
+                test_evidence::TEST_EVIDENCE_FILE
+            )
+        })?;
+    test_evidence::check(manifest, &logs, rules, &patch.base_commit).map(Some)
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -2920,6 +2994,7 @@ mod tests {
         .unwrap();
         symlink(&secret, out.join(OUTPUTS_FILE)).unwrap();
         symlink(&secret, out.join(memory::MEMORY_FILE)).unwrap();
+        symlink(&secret, out.join(test_evidence::log_name(1))).unwrap();
         std::fs::create_dir(out.join(BASE_FILE)).unwrap();
         let collected = dir.path().join("agent_output.json");
         std::fs::write(&collected, r#"{"items":[],"errors":[]}"#).unwrap();
@@ -2932,7 +3007,8 @@ mod tests {
             [
                 "base.json is not a regular file",
                 "memory.json is not a regular file",
-                "outputs.jsonl is not a regular file"
+                "outputs.jsonl is not a regular file",
+                "test-evidence-1.log is not a regular file"
             ]
         );
         // The collector's result is the check's own input: a bad one is
@@ -3067,6 +3143,171 @@ mod tests {
         }
         let report = serde_json::to_value(Handback::pull_request().check()).unwrap();
         assert!(report.get("memory").is_none());
+    }
+
+    /// `test-evidence.json` and its logs are held to the policy's
+    /// `[test_evidence]` and bound to the pull request's checked patch; a
+    /// report and the summary count every outcome. A hand-back without
+    /// any is checked as before, and said to claim no test result where
+    /// the bounds take evidence.
+    #[test]
+    fn test_evidence_is_bound_to_the_checked_patch() {
+        use test_evidence::tests::{manifest, rules};
+        let mut with_evidence = policy();
+        with_evidence.test_evidence = Some(rules());
+        let without = policy();
+        let mut push = crate::policy::tests::push_policy();
+        push.test_evidence = Some(rules());
+        let config = push
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        config.replacement_max_commits = 1;
+        config.replacement_base = Some(BASE.into());
+        let mail = patch_of("src/a.rs").replace(&format!("{BASE_COMMIT_HEADER}: {BASE}\n"), "");
+        let log = |n: u32| "x".repeat(n as usize);
+        let evidence = |handback: Handback, manifest: Value| {
+            handback
+                .with(
+                    test_evidence::TEST_EVIDENCE_FILE,
+                    Some(manifest.to_string()),
+                )
+                .with("test-evidence-1.log", Some(log(1)))
+                .with("test-evidence-2.log", Some(log(2)))
+                .with("test-evidence-3.log", Some(log(3)))
+        };
+        let tested = || evidence(Handback::pull_request(), manifest());
+        let mut stale = manifest();
+        stale["base"] = json!("3333333333333333333333333333333333333333");
+        let mut dropped = manifest();
+        dropped["attempts"].as_array_mut().unwrap().pop();
+        let replacing = Handback {
+            items: vec![
+                json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "Fix\n\nWhy.", "branch": "agent-run-12"}),
+            ],
+            files: vec![(
+                replacement::REPLACEMENT_FILE,
+                json!({"base_commit": BASE, "commits": [mail]}).to_string(),
+            )],
+            ..Handback::default()
+        };
+        let noop_only = Handback {
+            items: vec![noop()],
+            ..Handback::default()
+        };
+        // (the case, the hand-back, the policy, what refuses it)
+        let cases: Vec<(&str, Handback, &Policy, Option<&str>)> = vec![
+            ("evidence beside a patch", tested(), &with_evidence, None),
+            (
+                "no [test_evidence]",
+                tested(),
+                &without,
+                Some("test evidence: test-evidence.json without a [test_evidence] bound"),
+            ),
+            (
+                "a log without a manifest",
+                Handback::pull_request().with("test-evidence-1.log", Some(log(1))),
+                &with_evidence,
+                Some("test evidence: test-evidence-1.log without test-evidence.json"),
+            ),
+            (
+                "no patch to bind it to",
+                evidence(noop_only, manifest()),
+                &with_evidence,
+                Some("test-evidence.json without a pull request's checked patch"),
+            ),
+            (
+                "beside a replacement",
+                evidence(replacing, manifest()),
+                &push,
+                Some("test-evidence.json without a pull request's checked patch"),
+            ),
+            (
+                "tested on another base",
+                evidence(Handback::pull_request(), stale),
+                &with_evidence,
+                Some("base 3333333333333333333333333333333333333333 is not 1111"),
+            ),
+            (
+                "a dropped attempt",
+                evidence(Handback::pull_request(), dropped),
+                &with_evidence,
+                Some("plans 3 attempts and reports 2"),
+            ),
+            (
+                "an oversized log",
+                tested().with("test-evidence-2.log", Some(log(1025))),
+                &with_evidence,
+                Some("test-evidence-2.log is 1025 bytes, over 1024"),
+            ),
+            (
+                "a log beyond the attempts",
+                tested().with("test-evidence-4.log", Some(log(4))),
+                &with_evidence,
+                Some("test-evidence-4.log is the log of no attempt"),
+            ),
+            (
+                "a log of another name",
+                tested().with("test-evidence-1.txt", Some(log(1))),
+                &with_evidence,
+                Some("unexpected file \"test-evidence-1.txt\""),
+            ),
+        ];
+        for (name, handback, policy, want) in cases {
+            let verdict = handback.check_against(policy);
+            match want {
+                None => {
+                    assert_eq!(verdict.errors, Vec::<String>::new(), "{name}");
+                    let info = verdict.test_evidence.clone().unwrap();
+                    assert_eq!(
+                        [
+                            info.planned,
+                            info.pass,
+                            info.fail,
+                            info.skipped,
+                            info.not_run
+                        ],
+                        [3, 1, 2, 0, 0],
+                        "{name}"
+                    );
+                    let report = serde_json::to_value(&verdict).unwrap();
+                    assert_eq!(report["test_evidence"]["tree"], json!(info.tree), "{name}");
+                    assert!(
+                        verdict.markdown(policy).contains(
+                            "1 pass, 2 fail, 0 skipped, 0 not run; not every attempt passed"
+                        ),
+                        "{name}"
+                    );
+                }
+                Some(want) => {
+                    assert!(
+                        verdict.errors.iter().any(|error| error.contains(want)),
+                        "{name}: {:?}",
+                        verdict.errors
+                    );
+                    assert_eq!(verdict.test_evidence, None, "{name}");
+                }
+            }
+        }
+        // Without evidence: accepted as before, and said to claim nothing
+        // only where the bounds take evidence.
+        for (policy, said) in [(&with_evidence, true), (&without, false)] {
+            let verdict = Handback::pull_request().check_against(policy);
+            assert_eq!(verdict.errors, Vec::<String>::new());
+            assert!(
+                serde_json::to_value(&verdict)
+                    .unwrap()
+                    .get("test_evidence")
+                    .is_none()
+            );
+            assert_eq!(
+                verdict
+                    .markdown(policy)
+                    .contains("- test evidence: none handed back; no test result is claimed\n"),
+                said
+            );
+        }
     }
 
     #[test]

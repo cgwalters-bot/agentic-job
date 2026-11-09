@@ -450,6 +450,15 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
                     .to_owned(),
             });
         }
+        if let Some(why) = change.test_evidence_dropped {
+            report.problems.push(Problem {
+                at: format!("~/{}", capture::AGENT_EVIDENCE_DIR),
+                what: why,
+                fix: "report every planned attempt of the tests on the patched tree, each with \
+                      its regular-file log, within the policy's [test_evidence] bounds"
+                    .to_owned(),
+            });
+        }
         if outputs.is_dir() {
             let path = scratch.path().join("collected.json");
             let collected = collect::collect_dir(&outputs, policy)?;
@@ -1201,6 +1210,7 @@ mod tests {
             allowed_domains: crate::policy::link_domains().to_vec(),
             allow_http: Vec::new(),
             memory: None,
+            test_evidence: None,
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,

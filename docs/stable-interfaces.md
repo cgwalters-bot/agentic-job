@@ -124,7 +124,7 @@ the next in the same major version.
   `max_patch_bytes`, `max_patch_files`, `protected`, `commit_author`,
   `native_handlers` and `dedupe`, the table `[unprotected_files]`, and
   exactly one forge section: `[github]` (`[github.outputs.TYPE]`,
-  `[github.trigger]`, `[github.memory]` and
+  `[github.trigger]`, `[github.memory]`, `[github.test_evidence]` and
   `[github.secondary_pull_request]`), `[forgejo]`
   (`[forgejo.outputs.TYPE]` and `push_repo`) or `[gitlab]`
   (`[gitlab.outputs.TYPE]` and `push_repo`)
@@ -295,6 +295,10 @@ What a producer leaves for `run` to take
   `done`, `left`, `next`). An open checkpoint keeps work draft; malformed
   checkpoint fences in a PR body or push message refuse only under that bound
   ([ready or draft](safe-outputs.md#ready-or-draft)).
+- Where the bounds have `[github.test_evidence]`, `out/test-evidence.json`,
+  schema `agentic-job/test-evidence/v1`, and its logs
+  `out/test-evidence-N.log`
+  ([test evidence](safe-outputs.md#repeated-test-evidence)).
 
 A job other than the agent's hands back through `proposals-artifact`:
 an artifact holding `outputs.jsonl`, and optionally `base.json` and one

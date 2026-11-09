@@ -1112,7 +1112,8 @@ refused, and with organization bounds both files must name the same
 forge. Each section has its own `outputs` table, which is required and
 off GitHub may list only the [neutral profile](#neutral-profile).
 `[github]` alone also holds what only GitHub implements today:
-`[github.trigger]` ([events](events.md)), `[github.memory]` (below) and
+`[github.trigger]` ([events](events.md)), `[github.memory]` (below),
+`[github.test_evidence]` ([test evidence](#repeated-test-evidence)) and
 `[github.secondary_pull_request]` ([below](#a-secondary-pull-request)).
 `[forgejo]` and `[gitlab]` hold `push_repo = "OWNER/NAME"`, the fork that
 [Forgejo's](#publishing-to-forgejo) or [GitLab's](#publishing-to-gitlab)
@@ -1561,6 +1562,84 @@ whether the patch's `From:` line identifies its real author
 first two are settled by the apply job; `commit_author`, when configured,
 pins the declared author but does not prove authorship:
 [what the apply job does before it writes](workflow.md#what-the-apply-job-does-before-it-writes).
+
+### Repeated test evidence
+
+A run may hand back what a test run on its change did, beside a pull
+request's patch, as
+[the external runner contract](dispatch.md#repeated-test-evidence-and-acceptance)
+asks: `test-evidence.json` and one log per attempt,
+`test-evidence-N.log`. It is off by default. A `[github.test_evidence]`
+table in the bounds turns it on, and with organization bounds both files
+must have it, within the smaller of each limit:
+
+```toml
+[github.test_evidence]
+max_attempts = 5       # at most 10
+max_log_bytes = 262144 # each log; at most 1 MiB
+```
+
+The agent writes the manifest and the logs to `~/out`. `run` takes them
+as it takes the requests, as the sandbox user, without following a link.
+It drops the evidence, and never the change, if the manifest is not a
+regular file of at most 64 KiB, if a log is not a regular file within
+`max_log_bytes`, or if any of it holds a secret-shaped string. It also
+drops what `check` would refuse, evidence where the policy allows a push,
+and evidence without a patch. The reason goes to the job's log, and `agentic-job handback check`
+reports it.
+
+```json
+{
+  "schema": "agentic-job/test-evidence/v1",
+  "base": "COMMIT", "head": "COMMIT", "tree": "TREE",
+  "image": "quay.io/example/bootc@sha256:...",
+  "test": "install-to-disk",
+  "command": "cargo xtask test-install",
+  "profile": "devspace-rhel10-64",
+  "resources": {"cpus": 64, "memory_mib": 262144, "disk_gib": 500},
+  "planned_attempts": 3,
+  "attempts": [
+    {"attempt": 1, "outcome": "fail", "duration_s": 600, "log": "test-evidence-1.log"},
+    {"attempt": 2, "outcome": "not-run", "duration_s": 0, "log": "test-evidence-2.log"},
+    {"attempt": 3, "outcome": "pass", "duration_s": 590, "log": "test-evidence-3.log"}
+  ]
+}
+```
+
+`check` refuses the evidence, and with it the hand-back, in these cases:
+
+- the bounds have no `[github.test_evidence]`;
+- it is beside a push or a replacement series, or there is no patch;
+- a log has no manifest, or a field is unknown, missing or given twice;
+- the schema is not this one;
+- `base` or `head` is not the commit the checked patch applies to;
+- `tree` is not a full object ID;
+- the image, test or profile is not a name of letters, digits and
+  `._:/@+=-`, or the command is not one line of at most 1024 characters;
+- a resource is zero;
+- more attempts are planned than `max_attempts`, or other than all the
+  planned attempts are reported, numbered 1 to N in order;
+- an outcome is not `pass`, `fail`, `skipped` or `not-run`;
+- a duration is over a day;
+- a log is not `test-evidence-N.log` for its attempt, or is missing,
+  a link, not a regular file or over `max_log_bytes`;
+- a log belongs to no attempt.
+
+The report's `test_evidence` holds the names, the base, the tree and the
+count of each outcome. The command and the logs are not in it.
+
+Check runs without the repository, so it cannot see the tree. Apply
+can. Its trial applies the checked patch to its base. Before anything is
+published, `agentic-job test-evidence` refuses a manifest whose `tree` is
+not the tree that trial made. It then adds one paragraph to the pull
+request: the count of each outcome, whether every planned attempt
+passed, and a link to the run, whose checked upload holds the manifest
+and the logs. One pass after two failures is not a repeated pass, and the
+paragraph says so. A valid manifest shows that the evidence belongs to
+this patch. It does not show that the tests say what is true. Where the
+bounds take evidence and none came, check's summary says that no test
+result is claimed. A hand-back without evidence is otherwise checked
+and applied as before.
 
 ## Who applies
 
@@ -2583,7 +2662,7 @@ layout and the report: it reads the directory without following a link,
 holds each file to its size, refuses a private key and warns of other
 secret-shaped strings (`redact.rs`, whose patterns stay here, apart from
 the library and from [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026)),
-checks `memory.json` and the checkpoint, and writes `Verdict`; `apply/`'s
+checks `memory.json`, test evidence and the checkpoint, and writes `Verdict`; `apply/`'s
 commands, the files they read and the tokens they take from the
 environment, the status comment (`status.rs`), the result
 (`result.rs`), the guard against applying twice (`applied.rs`) and the

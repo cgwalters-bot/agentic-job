@@ -14,9 +14,9 @@ use serde::Deserialize;
 
 use crate::contract::{
     DEFAULT_PROTECTED_FILES, ForgeAdmission, KB, MAX_PROTECTED_GLOBS, MAX_PULL_REQUESTS, Memory,
-    OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, REPO_RE, Secondary, UPDATE_FIELDS,
-    allows_http, check_comment_on_duplicate, check_commit_author, check_native_handlers,
-    check_secondary, dotted, glob, validate_dot_folders, validate_protected,
+    OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, REPO_RE, Secondary, TestEvidence,
+    UPDATE_FIELDS, allows_http, check_comment_on_duplicate, check_commit_author,
+    check_native_handlers, check_secondary, dotted, glob, validate_dot_folders, validate_protected,
 };
 use crate::{CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, OUTPUT_TYPES, PUSH_TO_PULL_REQUEST_BRANCH};
 
@@ -118,6 +118,12 @@ pub struct GithubBounds<Trigger = toml::Table> {
     /// memory is handed back, and `check` refuses one.
     #[serde(default)]
     pub memory: Option<Memory>,
+    /// Repeated-test evidence beside a pull request's patch: `run` hands
+    /// back `test-evidence.json` and its logs, `check` binds them to the
+    /// checked patch and apply to the tree it applies. Absent, `check`
+    /// refuses any.
+    #[serde(default)]
+    pub test_evidence: Option<TestEvidence>,
     /// One exact further repository a run may propose a pull request to
     /// (#1075). Kept apart from `repos`, which admits repositories to work
     /// on, so that admitting one is no permission to write to it. `check`
@@ -284,6 +290,11 @@ impl<Trigger> Bounds<Trigger> {
         self.github.as_ref()?.memory.as_ref()
     }
 
+    /// `[github.test_evidence]`.
+    pub fn test_evidence(&self) -> Option<&TestEvidence> {
+        self.github.as_ref()?.test_evidence.as_ref()
+    }
+
     /// `[github.secondary_pull_request]`.
     pub fn secondary_pull_request(&self) -> Option<&SecondaryPullRequest> {
         self.github.as_ref()?.secondary_pull_request.as_ref()
@@ -375,6 +386,9 @@ impl<Trigger> Bounds<Trigger> {
         );
         if let Some(memory) = self.memory() {
             memory.validate()?;
+        }
+        if let Some(evidence) = self.test_evidence() {
+            evidence.validate()?;
         }
         // Only `[github]` holds one, so it is GitHub's; apply off GitHub
         // pushes to `push_repo` alone.
@@ -539,6 +553,14 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             )]);
         }
         (Some(own), Some(_)) => Some(own),
+        _ => None,
+    };
+    // Test evidence likewise.
+    policy.test_evidence = match (policy.test_evidence, other.test_evidence) {
+        (Some(own), Some(bound)) => Some(TestEvidence {
+            max_attempts: own.max_attempts.min(bound.max_attempts),
+            max_log_bytes: own.max_log_bytes.min(bound.max_log_bytes),
+        }),
         _ => None,
     };
     // Memory only where both files allow it, within the tighter of each.
