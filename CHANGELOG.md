@@ -31,6 +31,13 @@ says what a caller may rely on across versions.
   `status-comment` IDs keep their meaning. Routine and infrastructure-only
   outcomes stay status-only; notification opt-outs are unchanged (part of #3057).
 
+- Source builds are also published as versioned OCI file artifacts to GHCR.
+  Policy and dispatch can prefer anonymous OCI pulls with the repository
+  variable `SOURCE_BUILD_OCI=true`, after the publisher's anonymous verification
+  passes; it is off by default. Legacy build and version releases remain.
+  `build-release-report` produces a dry-run ledger from release and resolved
+  pin snapshots, retaining unresolved builds and never deleting releases (#3357).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

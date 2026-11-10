@@ -66,6 +66,12 @@ Inputs:
   `comment-target`, `issue`, `notify`, `status-comment`, `status-comment-mode`,
   `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings`.
 
+The optional repository variable `SOURCE_BUILD_OCI=true` enables OCI-first
+source-build transport in policy and dispatch (off by default, pending public
+package verification). It does not change `build-binary` or version-pin behavior,
+the publisher identity or the attestation/checksum contract. See
+[binary distribution](workflow.md#where-the-binary-comes-from).
+
 `advisory` is off by default and requires the restricted event-review contract
 in [head-bound advisory publication](safe-outputs.md#head-bound-advisory-publication).
 It publishes prose or nothing, never a review verdict/status or classifier result.

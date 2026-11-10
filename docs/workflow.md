@@ -2434,7 +2434,8 @@ None of them reads the agent's home; the uploads take only what `run`
 put under its own directory after the gate. The agent was the same user,
 so they treat everything else on the machine as its.
 
-**Where the binary comes from.**
+## Where the binary comes from
+
 For branch and full-commit workflow pins,
 [`secure-host/binary.sh`](../secure-host/binary.sh) hashes the content,
 modes and names of `Cargo.lock`, `Cargo.toml`, `crates`, `egress`, the
@@ -2451,6 +2452,30 @@ Replacing release assets, signing from a PR or using another workflow
 cannot substitute a binary. The trust anchor is GitHub's attestation
 service and this repository's main-branch publishing workflow, not a
 mutable release tag or the caller repository's cache.
+
+The concrete rollout failure is an initially private or unpublished GHCR package
+stranding a caller that could still use Releases. OCI-first fetching is therefore
+off by default: set the calling repository's variable `SOURCE_BUILD_OCI=true`
+only after `pin.yml` passes its anonymous postflight. Policy and dispatch both
+map this setting to the bootstrap's `BUILD_OCI=true`. The trusted workflow sets
+`WORKFLOW_REPOSITORY` to its own repository and `BUILD_REGISTRY` to `ghcr.io`,
+never the event or caller's repository. No package credentials reach readers.
+
+When enabled, the source digest selects
+`ghcr.io/PUBLISHER_OWNER/agentic-job-build:FULL_DIGEST` (owner lowercased).
+This is an OCI image manifest with artifact type
+`application/vnd.agentic-job.build.v1`, not a runnable image. Its six named file
+layers are `release.json`, `provenance.jsonl`, the three
+`*-x86_64-unknown-linux-musl` binaries and `world_write.bpf.o`.
+The bootstrap resolves the tag once, refetches the manifest by SHA-256, and
+downloads only those exact names by layer digest, without extracting an archive.
+Requests have 120-second and byte limits (1 MiB manifest, 256 MiB per layer).
+It then verifies the same bundled `pin.yml` attestation, repository, source,
+target, release name and all payload checksums before anything can execute.
+Registry writers and mutable OCI tags are not new trust anchors.
+Only a tag lookup returning HTTP 404 with `MANIFEST_UNKNOWN` permits legacy
+Release lookup; authentication, throttling, network and verification errors stop.
+
 Version-tagged workflow pins instead select the version's release and
 `release.yml` attestation, as described at the
 [start of this page](#running-it-on-github).
@@ -2474,18 +2499,62 @@ that run included. A cache is also one per calling repository, where a
 release is fetched by every caller.
 
 When main's source changes, the `prebuilt` workflow (`pin.yml`) makes an
-uncached build and publishes its source-addressed release. No branch,
+uncached build and publishes its source-addressed release and OCI artifact. No branch,
 pull request or human merge is needed. Commits that only change docs or
 workflow usage share their source's release. A run started before the
 build finishes still builds locally; subsequent runs fetch the prebuilt.
 The build job has only contents-read access. The publishing job executes
-no built binaries; it has contents-write to publish, OIDC and
+no built binaries; it has contents-write and packages-write to publish, OIDC and
 attestations-write to sign the manifest, and no pull-requests permission.
 Uploads are staged in a draft release and published only when complete;
 rerunning repairs an interrupted draft. Repeated builds of the same source
 leave the first published release intact.
+The isolated publisher installs checksum-pinned ORAS, verifies existing OCI
+artifacts instead of overwriting a source tag, and verifies anonymous pull plus
+offline provenance after publication. A newly created GHCR package may need to
+be made public in its package settings before that postflight succeeds; rerun
+the workflow afterward. Keep OCI-first disabled until it succeeds. Old pinned
+scripts cannot learn a new transport, so this migration still publishes both
+formats and does not change `v*` releases.
 
-**Versions to pin.** A version is released by hand: raise the
+### Build-release retention dry run
+
+`cargo run --quiet --locked -p agentic-job --bin build-release-report < snapshot.json`
+prints a deterministic per-build retention ledger. It is a manual, offline
+report, not an org crawler or a cleanup job, and has no deletion operation.
+Collect all pages of the publisher's Releases API into `releases`; for example,
+`gh api --paginate --slurp repos/OWNER/REPO/releases | jq 'add'` gives that array.
+The other required fields are `pins` and `unresolved`:
+
+```json
+{
+  "releases": [],
+  "pins": [{
+    "caller": "example-org/caller",
+    "reference": "refs/heads/main",
+    "wrapper": "example-org/actions/.github/workflows/job.yml",
+    "wrapper_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }],
+  "unresolved": ["Non-default refs, retained versions and queued runs not yet inspected"]
+}
+```
+
+Resolve each caller's workflow/action pins transitively, recording the full
+wrapper/action SHA and the source digest at its ultimate tool pin, not just
+searching for literal `build-*` strings. Include supported non-default refs,
+retained tags and queued/in-flight runs. Record any visibility, rate-limit,
+resolution or inventory gap in `unresolved`; missing fields are an error, not
+an empty reference set. The report distinguishes `referenced` from
+`no-observed-pin-reference`, but **keeps every release**, even with an empty
+unresolved list. A snapshot is evidence supplied by its collector, not proof
+of org-wide completeness. No release is proven safe to delete by this tool.
+Actual cleanup requires separately authorized, freshly rechecked exhaustive
+inventory; do not delete Git tags as a side effect. No such cleanup is in this PR.
+
+## Versions to pin
+
+A version is released by hand: raise the
 workspace's version in `Cargo.toml`, move
 [CHANGELOG.md](../CHANGELOG.md)'s Unreleased entries under that
 version, merge, and run the `release`

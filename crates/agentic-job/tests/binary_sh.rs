@@ -20,7 +20,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 
-const REPOSITORY: &str = "cgwalters-forge/agentic-job";
+const REPOSITORY: &str = "example-org/tool";
 const TARGET: &str = "x86_64-unknown-linux-musl";
 const NAMES: [&str; 3] = ["agentic-job", "fake-agent", "secure-host"];
 const OBJECT: &str = "world_write.bpf.o";
@@ -77,8 +77,28 @@ const CARGO: &str = r#"
 echo "cargo $*" >> "$STUB_LOG"; mkdir -p target/x86_64-unknown-linux-musl/release
 for name in agentic-job fake-agent secure-host; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
 
-const STUBS: [(&str, &str); 7] = [
+const CURL: &str = r#"
+out=''
+for ((i=1; i<=$#; i++)); do
+  arg=${!i}
+  if [ "$arg" = --output ]; then j=$((i+1)); out=${!j}; fi
+done
+url=${!#}
+if [[ "$url" == https://ghcr.io/token* ]]; then printf '%s' '{"token":"anonymous"}'; exit 0; fi
+file="$STUB_FILES/${url#https://}"
+if [ -f "$file" ]; then
+  echo "oci $url" >> "$STUB_LOG"
+  cat "$file" > "$out"; printf '200'
+elif [ -n "${OCI_FAIL-}" ]; then
+  printf '{}' > "$out"; printf '%s' "$OCI_FAIL"
+else
+  printf '%s' '{"errors":[{"code":"MANIFEST_UNKNOWN"}]}' > "$out"; printf '404'
+fi
+"#;
+
+const STUBS: [(&str, &str); 8] = [
     ("gh", GH),
+    ("curl", CURL),
     ("sleep", r#"echo "sleep $*" >> "$STUB_LOG""#),
     ("clang", CLANG),
     ("musl-gcc", "exit 0"),
@@ -248,6 +268,7 @@ fn run(root: &Path, args: &[&str], opts: Opts) -> Run {
         .env("STUB_FILES", served)
         .env("STUB_LOG", &log)
         .env("GITHUB_OUTPUT", &output)
+        .env("WORKFLOW_REPOSITORY", REPOSITORY)
         .envs(opts.env);
     let result = spawn(&mut command);
     Run {
@@ -673,6 +694,7 @@ fn source_addressed_releases_verify_before_trusting_bytes_and_fail_closed() {
                 files,
                 fail,
                 gh_fail,
+                env: env(&[("BUILD_OCI", "true")]),
                 ..Opts::default()
             },
         );
@@ -730,6 +752,162 @@ fn source_addressed_releases_verify_before_trusting_bytes_and_fail_closed() {
             }
         }
     }
+}
+
+#[test]
+fn oci_builds_resolve_once_verify_offline_and_never_fallback_on_failure() {
+    let tree = tree();
+    let root = tree.path();
+    let source = digest(root);
+    let base = "https://ghcr.io/v2/example-org/agentic-job-build";
+    let release = json!({
+        "repository": REPOSITORY, "release": format!("build-{source}"),
+        "target": TARGET, "source": source, "sha256": checksums(),
+    });
+    for bad in [
+        None,
+        Some("schema"),
+        Some("size"),
+        Some("checksum"),
+        Some("digest"),
+        Some("source"),
+        Some("signature"),
+        Some("bytes"),
+        Some("missing"),
+        Some("duplicate"),
+    ] {
+        let parent = tempdir("oci-");
+        let out = parent.path().join("bin");
+        let mut release = release.clone();
+        if bad == Some("source") {
+            release["source"] = json!("b".repeat(64));
+        }
+        if bad == Some("checksum") {
+            release["sha256"][OBJECT] = json!("f".repeat(64));
+        }
+        let mut payloads = assets("", |_| BYTES.to_owned());
+        payloads.push(("/release.json".to_owned(), release.to_string()));
+        payloads.push(("/provenance.jsonl".to_owned(), "bundle".to_owned()));
+        let mut files = Vec::new();
+        let mut layers = Vec::new();
+        for (name, bytes) in payloads {
+            let name = name.trim_start_matches('/');
+            let sum = sha256(&bytes);
+            let layer_sum = if bad == Some("missing") && name == OBJECT {
+                "f".repeat(64)
+            } else {
+                sum.clone()
+            };
+            layers.push(json!({"mediaType": "application/octet-stream", "size": bytes.len(),
+                "digest": format!("sha256:{layer_sum}"), "annotations": {"org.opencontainers.image.title": name}}));
+            if bad != Some("missing") || name != OBJECT {
+                files.push((
+                    format!("{base}/blobs/sha256:{sum}"),
+                    if bad == Some("bytes") && name == OBJECT {
+                        "tampered".to_owned()
+                    } else {
+                        bytes
+                    },
+                ));
+            }
+        }
+        if bad == Some("duplicate") {
+            layers[0] = layers[1].clone();
+        }
+        if bad == Some("size") {
+            layers[0]["size"] = json!(268435457);
+        }
+        let manifest = json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": if bad == Some("schema") { "unknown" } else { "application/vnd.agentic-job.build.v1" }, "layers": layers}).to_string();
+        files.push((format!("{base}/manifests/{source}"), manifest.clone()));
+        files.push((
+            format!("{base}/manifests/sha256:{}", sha256(&manifest)),
+            if bad == Some("digest") {
+                "changed".to_owned()
+            } else {
+                manifest
+            },
+        ));
+        let result = run(
+            root,
+            &["get", "--out", s(&out)],
+            Opts {
+                files,
+                env: env(&[("BUILD_OCI", "true")]),
+                gh_fail: bad == Some("signature"),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            Some(if bad.is_some() { 1 } else { 0 }),
+            "{bad:?}: {}",
+            result.stderr
+        );
+        assert!(
+            !result
+                .log
+                .iter()
+                .any(|line| line.starts_with("fetch ") || line.starts_with("cargo ")),
+            "{bad:?}: {:?}",
+            result.log
+        );
+        assert_eq!(
+            result
+                .log
+                .iter()
+                .filter(|line| line.ends_with(&format!("/manifests/{source}")))
+                .count(),
+            1
+        );
+        if bad.is_none() {
+            fetched(&out);
+            assert!(result.stdout.contains("fetched OCI"));
+            assert!(
+                result
+                    .log
+                    .iter()
+                    .any(|line| line.contains("--bundle")
+                        && line.contains("pin.yml@refs/heads/main"))
+            );
+        }
+    }
+    for status in ["401", "403", "404", "429", "500"] {
+        let out = tempdir("oci-fail-");
+        let result = run(
+            root,
+            &["get", "--out", s(out.path())],
+            Opts {
+                env: env(&[("BUILD_OCI", "true"), ("OCI_FAIL", status)]),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(result.status, Some(1), "{status}: {}", result.stderr);
+        assert!(result.log.is_empty(), "{status}: {:?}", result.log);
+    }
+}
+
+#[test]
+fn oci_rollout_is_off_by_default_and_publisher_absence_is_explicit() {
+    let tree = tree();
+    let out = tempdir("legacy-default-");
+    let result = run(
+        tree.path(),
+        &["get", "--out", s(out.path())],
+        Opts {
+            env: env(&[("OCI_FAIL", "403")]),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(result.status, Some(0), "{}", result.stderr);
+    assert!(result.log.contains(&cargo_build()));
+    let result = run(
+        tree.path(),
+        &["verify-oci", "--out", s(out.path())],
+        Opts::default(),
+    );
+    assert_eq!(result.status, Some(2), "{}", result.stderr);
+    assert!(result.log.is_empty());
 }
 
 #[test]
@@ -946,7 +1124,7 @@ fn branches_commit_pins_and_caller_refs_do_not_select_tagged_assets() {
         );
         assert_eq!(result.status, Some(0), "{}", result.stderr);
         assert!(
-            !result.log.iter().any(|line| line.contains("example/tool")),
+            !result.log.iter().any(|line| line.contains("/tags/v")),
             "{workflow_ref:?}"
         );
         assert!(

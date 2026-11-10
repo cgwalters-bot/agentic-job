@@ -1,7 +1,7 @@
 # Gets a source-addressed release using its attested manifest, or builds
 # this source when no manifest has been published yet. It runs before any
 # agentic-job exists on the machine, so it is shell and not the binary's
-# Rust. It uses sha256sum, jq, coreutils' timeout and gh, which `gh`
+# Rust. It uses curl, sha256sum, jq, coreutils' timeout and gh, which `gh`
 # installs where it is missing; every step after it is the binary's.
 #
 # What decides that a file is the release's is its checksum in the
@@ -17,6 +17,8 @@
 # nothing on trust but this repository's attestation.
 #
 #   binary.sh get --out DIR [--build]   the binaries, into DIR
+#     WORKFLOW_REPOSITORY=OWNER/NAME from the trusted workflow is required
+#     BUILD_OCI=true prefers anonymous GHCR files (default false)
 #   binary.sh object --out DIR          the world-write policy object, into DIR
 #   binary.sh digest [--root DIR]       the digest of the source at DIR
 #   binary.sh gh                        install gh, where it is missing
@@ -24,6 +26,7 @@
 #                                       one GitHub URL, with bounded retries
 #   binary.sh pin --dist DIR --release TAG [--repository OWNER/NAME]
 #                                       release.json for a build of this source
+#   binary.sh verify-oci --out DIR      publisher pre/postflight; absent exits 2
 #
 # The action and the reusable workflow's policy job both run `get`, the
 # workflows that publish a release run `pin`, and
@@ -39,7 +42,9 @@ shopt -s dotglob nullglob
 # This repository at this file's commit.
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-REPOSITORY=cgwalters-forge/agentic-job
+# Set by the trusted workflow, never the caller's repository or event input.
+REPOSITORY=${WORKFLOW_REPOSITORY-}
+OCI_TYPE=application/vnd.agentic-job.build.v1
 
 # What the binaries are built from. Whatever the build comes to read from
 # elsewhere (an `include_str!` of a file outside these, a toolchain file)
@@ -218,7 +223,11 @@ take() {
   for name in "${NAMES[@]}" "$OBJECT"; do
     asset=$name-$TARGET mode=0755
     [ "$name" != "$OBJECT" ] || asset=$name mode=0644
-    fetch "$from/$asset" "$out/$name.part"
+    if [[ "$from" == /* ]]; then
+      cp -- "$from/$asset" "$out/$name.part"
+    else
+      fetch "$from/$asset" "$out/$name.part"
+    fi
     found=$(sha256 < "$out/$name.part")
     want=$(jq -r --arg name "$name" '.sha256[$name]' "$manifest")
     [ "$found" = "$want" ] || fail "$name of $release has SHA-256 $found, and the pin says $want: refusing it"
@@ -270,6 +279,12 @@ fetch_release() {
   from="https://github.com/$REPOSITORY/releases/download/$release"
   fetch "$from/release.json" "$out/release.json" missing || { rm -f -- "$out/release.json"; return 0; }
   fetch "$from/provenance.jsonl" "$out/provenance.jsonl"
+  verify_build "$source" "$out" "$from"
+  fetched=release
+}
+
+verify_build() {
+  local source=$1 out=$2 from=$3 release="build-$1"
   # Verify before trusting any manifest field. A release editor cannot
   # substitute bytes or attest a manifest from a PR or another workflow.
   gh attestation verify "$out/release.json" --bundle "$out/provenance.jsonl" \
@@ -279,7 +294,67 @@ fetch_release() {
     '.repository == $repository and .release == $release and .target == $target and .source == $source' \
     "$out/release.json" > /dev/null || fail "release manifest does not describe this source: refusing it"
   take "$out/release.json" "$from" "$out"
-  fetched=release
+}
+
+# OCI is only a transport: registry writers cannot substitute executable
+# bytes because the same offline attestation and source/checksum checks apply.
+# No archive extraction or registry-supplied paths. Each request has a time
+# and byte bound; only MANIFEST_UNKNOWN on the source tag permits fallback.
+oci_request() {
+  local url=$1 file=$2 limit=$3 missing=${4-} status
+  status=$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 120 --max-filesize "$limit" \
+    -H "Authorization: Bearer $oci_token" -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+    --output "$file" --write-out '%{http_code}' "$url") || fail "OCI transport failed: $url"
+  [ "$status" != 200 ] || return 0
+  if [ "$missing" = missing ] && [ "$status" = 404 ] &&
+      jq -e '.errors | length == 1 and .[0].code == "MANIFEST_UNKNOWN"' "$file" > /dev/null; then
+    return 1
+  fi
+  fail "OCI request failed (HTTP $status): $url"
+}
+
+fetch_oci() {
+  local source=$1 out=$2 owner=${REPOSITORY%/*} registry=${BUILD_REGISTRY:-ghcr.io}
+  local package="${owner,,}/agentic-job-build" base stage manifest digest name layer sum size oci_token=""
+  local token_auth=()
+  [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "trusted WORKFLOW_REPOSITORY is required"
+  # Registry selection belongs to trusted workflow configuration. Initial
+  # transport is GHCR's anonymous bearer protocol, not arbitrary auth realms.
+  [ "$registry" = ghcr.io ] || fail "unsupported build registry: $registry"
+  base="https://$registry/v2/$package"
+  stage=$(mktemp -d "$(realpath "$out")/oci.XXXXXXXX")
+  if [ -n "${OCI_PUBLISH_TOKEN-}" ]; then
+    token_auth=(--user "${GITHUB_ACTOR:?}:$OCI_PUBLISH_TOKEN")
+  fi
+  # Only the isolated publisher supplies credentials. Readers are anonymous.
+  curl --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 \
+    --max-filesize 65536 "${token_auth[@]}" \
+    "https://$registry/token?service=$registry&scope=repository:$package:pull" > "$stage/token" || fail "OCI token request failed"
+  oci_token=$(jq -er '.token | select(type == "string" and length > 0)' "$stage/token") || fail "no anonymous OCI token"
+  manifest="$stage/manifest"
+  if ! oci_request "$base/manifests/$source" "$manifest" 1048576 missing; then
+    rm -rf -- "$stage"
+    return 0
+  fi
+  digest=$(sha256 < "$manifest")
+  # Resolve the mutable tag once, then use only the manifest's digest.
+  oci_request "$base/manifests/sha256:$digest" "$stage/resolved" 1048576
+  [ "$(sha256 < "$stage/resolved")" = "$digest" ] || fail "OCI manifest digest mismatch"
+  jq -e --arg type "$OCI_TYPE" '.schemaVersion == 2 and .artifactType == $type and
+    .mediaType == "application/vnd.oci.image.manifest.v1+json" and (.layers | length == 6)' "$manifest" > /dev/null || fail "unsupported OCI build schema"
+  for name in release.json provenance.jsonl "${NAMES[@]/%/-$TARGET}" "$OBJECT"; do
+    layer=$(jq -ce --arg name "$name" '[.layers[] | select(.annotations["org.opencontainers.image.title"] == $name)] | select(length == 1) | .[0]' "$manifest") || fail "OCI build missing or duplicate $name"
+    sum=$(jq -er '.digest' <<< "$layer")
+    [[ "$sum" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid OCI layer digest"
+    size=$(jq -er '.size | select(type == "number" and . > 0 and . <= 268435456 and . == floor)' <<< "$layer") || fail "invalid OCI layer size"
+    oci_request "$base/blobs/$sum" "$stage/$name" "$size"
+    [ "$(sha256 < "$stage/$name")" = "${sum#sha256:}" ] || fail "OCI layer checksum mismatch: $name"
+  done
+  cp -- "$stage/release.json" "$stage/provenance.jsonl" "$out/"
+  verify_build "$source" "$out" "$stage"
+  rm -rf -- "$stage"
+  fetched=oci
 }
 
 object() {
@@ -312,12 +387,17 @@ get() {
   source=$(digest "$ROOT")
   mkdir -p -- "$out"
   if [ "$asked" != true ]; then
+    [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "trusted WORKFLOW_REPOSITORY is required"
     need_gh
     fetch_tagged "$source" "$out"
+    # Avoid stranding existing callers on an initially private/unpublished
+    # GHCR package. Enable only after pin.yml's anonymous postflight passes.
+    if [ -z "$fetched" ] && [ "${BUILD_OCI:-false}" = true ]; then fetch_oci "$source" "$out"; fi
     [ -n "$fetched" ] || fetch_release "$source" "$out"
   fi
   case $fetched in
     tagged) echo "fetched tagged release by its attested checksums" ;;
+    oci) echo "fetched OCI build-$source by its attested checksums" ;;
     release) echo "fetched build-$source by its attested checksums" ;;
     *)
       if [ "$asked" = true ]; then
@@ -336,6 +416,7 @@ get() {
 pin() {
   local dist=$1 release=$2 repository=${3:-$REPOSITORY} sums='{}' name file sum source
   [ -n "$dist" ] && [ -n "$release" ] || fail "pin: --dist DIR and --release TAG are required"
+  [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "pin: --repository OWNER/NAME is required"
   for name in "${NAMES[@]}" "$OBJECT"; do
     file=$name-$TARGET
     [ "$name" != "$OBJECT" ] || file=$name
@@ -375,6 +456,8 @@ main() {
     digest) digest "$root" ;;
     pin) pin "$dist" "$release" "$repository" ;;
     gh) need_gh ;;
+    # Publisher preflight/postflight: no source build or legacy fallback.
+    verify-oci) [ -n "$out" ] || fail "verify-oci: --out DIR is required"; mkdir -p -- "$out"; local fetched=""; fetch_oci "$(digest "$ROOT")" "$out"; [ "$fetched" = oci ] || exit 2 ;;
     # Exit status 2 for an absent resource, with --missing.
     fetch) [ -n "$url" ] && [ -n "$out" ] || fail "fetch: --url URL and --out FILE are required"; fetch "$url" "$out" "$missing" || exit 2 ;;
     *) fail "usage: binary.sh get|object|digest|pin|gh|fetch [options]" ;;

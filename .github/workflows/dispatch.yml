@@ -148,6 +148,9 @@ jobs:
       - name: Get the binary
         env:
           GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          BUILD_REGISTRY: ghcr.io
+          BUILD_OCI: ${{ vars.SOURCE_BUILD_OCI == 'true' }}
         run: bash .agentic-job-source/secure-host/binary.sh get --out "$RUNNER_TEMP/agentic-job-bin"
       # The checks, the item's read and the task: `agentic-job dispatch`.
       - id: target
