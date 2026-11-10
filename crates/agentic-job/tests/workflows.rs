@@ -3514,7 +3514,7 @@ jobs:
     steps:
       - uses: actions/checkout@{PIN}
         with: {{persist-credentials: false}}
-      - uses: cgwalters-forge/agentic-job/secure-host@{PIN}
+      - uses: example-org/runner/secure-host@{PIN}
       - run: make check
 "
     )
@@ -3567,17 +3567,17 @@ fn deterministic_example_passes_when_pinned() {
     let text = std::fs::read_to_string(root().join(FILE)).unwrap();
     let mut pinned = text.clone();
     for (local, remote) in [
-        ("./secure-host", "cgwalters-forge/actions/secure-host"),
+        ("./secure-host", "example-org/actions/secure-host"),
         (
             "./.github/workflows/agentic-job.yml",
-            "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml",
+            "example-org/runner/.github/workflows/agent.yml",
         ),
     ] {
         let from = format!("uses: {local} ");
         assert_eq!(pinned.matches(&from).count(), 1, "{local}");
         pinned = pinned.replace(&from, &format!("uses: {remote}@{PIN} "));
     }
-    let (status, stdout, stderr) = checked(&[(FILE, &pinned)], &[]);
+    let (status, stdout, stderr) = checked(&[(FILE, &pinned), (LIST, IDENTITIES)], &[]);
     assert_eq!(status, 0, "{stdout}{stderr}");
     // As it is here, unpinned, only the exemption admits it.
     let (status, stdout, _) = checked(&[(FILE, &text)], &[]);
@@ -3669,6 +3669,15 @@ fn deterministic_example_hands_back_what_check_accepts() {
 
 const LIST: &str = ".github/agentic-job/workflows.toml";
 
+const IDENTITIES: &str = r#"
+[identities]
+reusable_workflows = ["example-org/runner/.github/workflows/agent.yml"]
+agent_actions = ["example-org/runner/run", "example-org/runner/prepare"]
+[identities.secure_host]
+"example-org/runner/secure-host" = "check"
+"example-org/actions/secure-host" = "write-policy"
+"#;
+
 /// Files by path, extra arguments, the exit status, and what stdout or
 /// stderr must say.
 type Case<'a> = (&'a [(&'a str, &'a str)], &'a [&'a str], i32, &'a [&'a str]);
@@ -3678,10 +3687,32 @@ fn trees() {
     let good = passing();
     let cases: &[Case] = &[
         (&[], &[], 0, &["0 problem(s)"]),
-        (&[(".github/workflows/a.yml", &good)], &[], 0, &[]),
+        (
+            &[(".github/workflows/a.yml", &good), (LIST, IDENTITIES)],
+            &[],
+            0,
+            &[],
+        ),
+        (
+            &[(".github/workflows/a.yml", &good)],
+            &[],
+            1,
+            &["neither runs secure-host"],
+        ),
         (
             &[
                 (".github/workflows/a.yml", &good),
+                (LIST, IDENTITIES),
+                ("base.toml", ""),
+            ],
+            &["--exemptions", "ROOT/base.toml"],
+            1,
+            &["neither runs secure-host"],
+        ),
+        (
+            &[
+                (".github/workflows/a.yml", &good),
+                (LIST, IDENTITIES),
                 (".github/workflows/b.yaml", FAILING),
                 (".github/workflows/notes.txt", "not a workflow"),
                 (".github/workflows/sub/c.yml", FAILING),

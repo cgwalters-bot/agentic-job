@@ -1,6 +1,6 @@
 //! The job shape `workflows check` requires of one workflow file, ported
 //! from workflow-compiler's `src/shape.rs` and the lints of its
-//! `lib/gha.ncl` (cgwalters-forge/workflow-compiler, main). There they held
+//! `lib/gha.ncl` (see docs/workflows-check.md). There they held
 //! for compiled output; here they hold for a file written by hand.
 //!
 //! Every job either calls the reusable workflow, which holds the agent,
@@ -17,23 +17,63 @@
 //! Script expressions use a closed allowlist of direct property references;
 //! unknown contexts and expression syntax are refused rather than interpreted.
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use anyhow::{Result, ensure};
 use regex::Regex;
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// The reusable workflow, which a caller names at a commit.
-pub const REUSABLE_WORKFLOW: &str = "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml";
+/// Caller-owned identities, read from trusted base configuration, never from
+/// the proposed workflows. Otherwise a proposal could name its own action as
+/// hardening and run untrusted code with root. No identity is trusted by default.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Identities {
+    pub reusable_workflows: Vec<String>,
+    pub secure_host: BTreeMap<String, HardeningInputs>,
+    pub agent_actions: Vec<String>,
+}
 
-/// The action that hardens a job's host, at its old path and at its
-/// standalone path in cgwalters-forge/actions (tracker#674); both take the
-/// same inputs.
-const STANDALONE_SECURE_HOST: &str = "cgwalters-forge/actions/secure-host";
+/// Closed input profiles, not caller-supplied input allowlists.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HardeningInputs {
+    Check,
+    WritePolicy,
+}
 
-const SECURE_HOST_ACTIONS: &[&str] = &[
-    "cgwalters-forge/agentic-job/secure-host",
-    STANDALONE_SECURE_HOST,
-];
+impl Identities {
+    pub fn validate(&self) -> Result<()> {
+        for name in self
+            .reusable_workflows
+            .iter()
+            .chain(self.secure_host.keys())
+            .chain(self.agent_actions.iter())
+        {
+            ensure!(
+                PINNED.is_match(&format!("{name}@{}", "0".repeat(40)))
+                    && !name
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                    && *name == name.to_ascii_lowercase(),
+                "workflow identity {name:?} must be a lowercase owner/repo[/path] without a ref"
+            );
+        }
+        Ok(())
+    }
+
+    fn is_secure_host(&self, step: &Value) -> bool {
+        step.get("uses")
+            .and_then(Value::as_str)
+            .is_some_and(|u| self.secure_host.contains_key(&action_of(u)))
+    }
+
+    fn write_policy(&self, uses: &str) -> bool {
+        self.secure_host.get(&action_of(uses)) == Some(&HardeningInputs::WritePolicy)
+    }
+}
 
 /// Actions that may run before secure-host, while the runner's user still
 /// has root: GitHub's own, which the runner image already trusts, for
@@ -110,8 +150,6 @@ const DEPLOY_PERMISSIONS: &[(&str, &str)] = &[
 /// and files; only the reusable workflow's agent job runs one, in the
 /// sandbox, with its outputs checked on another machine.
 const AGENT_ACTIONS: &[&str] = &[
-    "cgwalters-forge/agentic-job/prepare",
-    "cgwalters-forge/agentic-job/run",
     "anthropics/claude-code-action",
     "anthropics/claude-code-base-action",
     "google-github-actions/run-gemini-cli",
@@ -144,7 +182,7 @@ const CHECKOUT: &str = "actions/checkout";
 const GITHUB_SCRIPT: &str = "actions/github-script";
 
 const PIN_INSTEAD: &str = "name it by a full 40-hex commit, with the tag in a comment";
-const CALL_INSTEAD: &str = "call cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT, which runs the agent in the sandbox";
+const CALL_INSTEAD: &str = "call a caller-configured reusable workflow at a full commit, which runs the agent in the sandbox";
 
 fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("a valid pattern")
@@ -167,12 +205,6 @@ static AGENT_COMMAND: LazyLock<Regex> = LazyLock::new(|| re(r"(?-u:\b)agentic-jo
 static SECRETS: LazyLock<Regex> = LazyLock::new(|| re(r"(?i-u)\bsecrets\b"));
 static STATUS_FUNCTION: LazyLock<Regex> =
     LazyLock::new(|| re(r"(?i-u)\b(always|failure|cancelled|success)\s*\("));
-
-fn is_secure_host(step: &Value) -> bool {
-    step.get("uses")
-        .and_then(Value::as_str)
-        .is_some_and(|u| SECURE_HOST_ACTIONS.contains(&action_of(u).as_str()))
-}
 
 fn is_checkout(step: &Value) -> bool {
     step.get("uses")
@@ -363,6 +395,7 @@ fn deploy_problems(
 /// injection into the downloader/check, and make the check unskippable. This
 /// certifies shape, not the safety of the trusted scripts after verification.
 fn trusted_consumer(
+    identities: &Identities,
     workflow: &Value,
     jobs: &Map<String, Value>,
     job: &Map<String, Value>,
@@ -383,7 +416,7 @@ fn trusted_consumer(
                 .get(*name)
                 .and_then(|j| j.get("steps"))
                 .and_then(Value::as_array)
-                .is_some_and(|s| s.iter().any(is_secure_host))
+                .is_some_and(|s| s.iter().any(|step| identities.is_secure_host(step)))
         })
         || ["env", "defaults"]
             .iter()
@@ -582,7 +615,7 @@ fn miscased(map: &Map<String, Value>) -> Option<&str> {
 
 /// Why the secure-host step at `step` might leave the runner's user its
 /// root or not run at all, if it might.
-fn weakened(step: &Map<String, Value>) -> Option<String> {
+fn weakened(step: &Map<String, Value>, identities: &Identities) -> Option<String> {
     if step.contains_key("if") || step.contains_key("continue-on-error") {
         return Some("has `if:` or `continue-on-error:`, so the job may go on without it".into());
     }
@@ -593,7 +626,7 @@ fn weakened(step: &Map<String, Value>) -> Option<String> {
     let standalone = step
         .get("uses")
         .and_then(Value::as_str)
-        .is_some_and(|u| action_of(u) == STANDALONE_SECURE_HOST);
+        .is_some_and(|u| identities.write_policy(u));
     for (key, value) in inputs {
         if !(safe_hardening_input(key, value)
             || (standalone
@@ -608,9 +641,7 @@ fn weakened(step: &Map<String, Value>) -> Option<String> {
     None
 }
 
-/// Classified against secure-host/action.yml, which forwards to
-/// cgwalters-forge/actions/secure-host, and the old action a commit before
-/// the forward names. Only `check: true` means the same to both: the old
+/// The common secure-host input profile admits only `check: true`: the old
 /// action's `lock`, `egress`, `deny-runner-metadata` and `build` fail the
 /// forwarder, and at an old commit their admitted values were its defaults
 /// or a choice of how to get the binary. Files, identities, service lists,
@@ -742,7 +773,7 @@ fn execution_problems(value: &Value, scope: &str, literal_matrix: bool) -> Vec<S
 }
 
 /// The problems of `workflow`, a parsed workflow file.
-pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
+pub fn check_workflow(workflow: &Value, identities: &Identities) -> Vec<Problem> {
     let mut problems = Vec::new();
     let mut add = |job: Option<&str>, step: Option<&str>, what: String, instead: &str| {
         problems.push(Problem {
@@ -816,14 +847,14 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
         }
         if let Some(uses) = job.get("uses") {
             let uses = uses.as_str().unwrap_or("");
-            if action_of(uses) != REUSABLE_WORKFLOW {
+            if !identities.reusable_workflows.contains(&action_of(uses)) {
                 add(
                     job_name,
                     None,
                     format!(
                         "calls {uses}, which neither is the reusable workflow nor runs secure-host"
                     ),
-                    "call cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT, or write the steps in a job that runs secure-host",
+                    "call a caller-configured reusable workflow at a full commit, or write the steps in a job that runs configured secure-host",
                 );
             } else if !PINNED.is_match(uses) {
                 add(
@@ -839,7 +870,9 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
             .get("steps")
             .and_then(Value::as_array)
             .map_or(&[], Vec::as_slice);
-        let secure_host = steps.iter().position(is_secure_host);
+        let secure_host = steps
+            .iter()
+            .position(|step| identities.is_secure_host(step));
         let Some(secure_host) = secure_host else {
             if steps.iter().any(is_deploy_pages) {
                 for (step, what, instead) in deploy_problems(workflow, job, steps, literal_matrix) {
@@ -852,7 +885,7 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     .and_then(Value::as_str)
                     .is_some_and(|u| action_of(u) == DOWNLOAD_ARTIFACT)
             }) {
-                if !trusted_consumer(workflow, jobs, job, steps) {
+                if !trusted_consumer(identities, workflow, jobs, job, steps) {
                     add(
                         job_name,
                         None,
@@ -866,7 +899,7 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                 job_name,
                 None,
                 "neither runs secure-host nor calls the reusable workflow".into(),
-                "add a step `uses: cgwalters-forge/actions/secure-host@COMMIT` (or cgwalters-forge/agentic-job/secure-host@COMMIT) before the job's untrusted steps, or call cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT",
+                "add a caller-configured secure-host action at a full commit before untrusted steps, or call a configured reusable workflow",
             );
             continue;
         };
@@ -992,8 +1025,8 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     "write the key in lowercase",
                 );
             }
-            if is_secure_host(step_value)
-                && let Some(why) = weakened(step)
+            if identities.is_secure_host(step_value)
+                && let Some(why) = weakened(step, identities)
             {
                 add(
                     job_name,
@@ -1002,7 +1035,7 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     if step
                         .get("uses")
                         .and_then(Value::as_str)
-                        .is_some_and(|u| action_of(u) == STANDALONE_SECURE_HOST)
+                        .is_some_and(|u| identities.write_policy(u))
                     {
                         "run it unconditionally; omit inputs, or set only `check: true` and/or literal `egress: write-policy`"
                     } else {
@@ -1063,7 +1096,9 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
             if action.as_deref().is_some_and(|a| {
                 AGENT_ACTIONS
                     .iter()
-                    .any(|agent| a == *agent || a.starts_with(&format!("{agent}/")))
+                    .copied()
+                    .chain(identities.agent_actions.iter().map(String::as_str))
+                    .any(|agent| a == agent || a.starts_with(&format!("{agent}/")))
             }) || run.is_some_and(|r| AGENT_COMMAND.is_match(r))
             {
                 add(
@@ -1105,7 +1140,62 @@ mod tests {
     use crate::workflows::yaml;
 
     const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
-    const SECURE_HOST: &str = "cgwalters-forge/agentic-job/secure-host";
+    const SECURE_HOST: &str = "example-org/runner/secure-host";
+    const STANDALONE_SECURE_HOST: &str = "example-org/actions/secure-host";
+    const SECURE_HOST_ACTIONS: &[&str] = &[SECURE_HOST, STANDALONE_SECURE_HOST];
+    const REUSABLE_WORKFLOW: &str = "example-org/runner/.github/workflows/agent.yml";
+
+    fn identities() -> Identities {
+        Identities {
+            reusable_workflows: vec![REUSABLE_WORKFLOW.into()],
+            secure_host: BTreeMap::from([
+                (SECURE_HOST.into(), HardeningInputs::Check),
+                (STANDALONE_SECURE_HOST.into(), HardeningInputs::WritePolicy),
+            ]),
+            agent_actions: vec![
+                "example-org/runner/prepare".into(),
+                "example-org/runner/run".into(),
+            ],
+        }
+    }
+
+    fn check_workflow(workflow: &Value) -> Vec<Problem> {
+        super::check_workflow(workflow, &identities())
+    }
+
+    #[test]
+    fn identities_are_explicit_and_validated() {
+        identities().validate().unwrap();
+        for action in [SECURE_HOST, STANDALONE_SECURE_HOST] {
+            let text = workflow(&format!(
+                "permissions: {{}}\nsteps:\n  - uses: {action}@PIN"
+            ));
+            let value = yaml::parse(&text).unwrap();
+            assert!(check_workflow(&value).is_empty());
+            assert!(!super::check_workflow(&value, &Identities::default()).is_empty());
+        }
+        let value = yaml::parse(&workflow(&format!(
+            "permissions: {{}}\nuses: {REUSABLE_WORKFLOW}@PIN"
+        )))
+        .unwrap();
+        assert!(check_workflow(&value).is_empty());
+        assert!(!super::check_workflow(&value, &Identities::default()).is_empty());
+        for name in [
+            "",
+            "./action",
+            "owner/repo@main",
+            "owner/*",
+            "owner/../repo",
+            "OWNER/repo",
+            "owner//repo",
+        ] {
+            let config = Identities {
+                reusable_workflows: vec![name.into()],
+                ..Identities::default()
+            };
+            assert!(config.validate().is_err(), "{name}");
+        }
+    }
 
     // The external secure-host README contract, adapted to a real payload
     // checksum and a standalone first check instead of `verify-digest`.
@@ -1122,7 +1212,7 @@ jobs:
     steps:
       - uses: actions/checkout@PIN
         with: {persist-credentials: false}
-      - uses: cgwalters-forge/actions/secure-host@PIN
+      - uses: example-org/actions/secure-host@PIN
         with: {egress: write-policy}
       - run: make test
       - id: digest
@@ -1220,8 +1310,8 @@ jobs:
             ("needs: build", "needs: build", true),
             ("needs: build", "needs: [build]", true),
             (
-                "cgwalters-forge/actions/secure-host@PIN",
-                "cgwalters-forge/agentic-job/secure-host@PIN",
+                "example-org/actions/secure-host@PIN",
+                "example-org/runner/secure-host@PIN",
                 false,
             ),
             (
@@ -1418,7 +1508,7 @@ jobs:
         }
         for action in [
             "someone/agentic-job/secure-host@PIN",
-            "cgwalters-forge/agentic-job/secure-host@main",
+            "example-org/runner/secure-host@main",
         ] {
             let text = workflow(&format!("permissions: {{}}\nsteps:\n  - uses: {action}"));
             assert!(
@@ -1529,7 +1619,7 @@ steps:
   - run: sudo apt-get install -y just
   - uses: actions/checkout@PIN
     with: {persist-credentials: false}
-  - uses: cgwalters-forge/agentic-job/secure-host@PIN
+  - uses: example-org/runner/secure-host@PIN
   - uses: Swatinem/rust-cache@PIN
   - uses: ./local-action
   - env: {TITLE: '${{ github.event.issue.title }}'}
@@ -1541,11 +1631,11 @@ steps:
     const CASES: &[(&str, &[&str])] = &[
         (GOOD, &[]),
         (
-            "permissions: {}\nuses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@PIN\nwith: {task: '${{ inputs.task }}'}",
+            "permissions: {}\nuses: example-org/runner/.github/workflows/agent.yml@PIN\nwith: {task: '${{ inputs.task }}'}",
             &[],
         ),
         (
-            "permissions: {}\nuses: CGWalters-Forge/agentic-job/.github/workflows/agentic-job.yml@main",
+            "permissions: {}\nuses: Example-Org/runner/.github/workflows/agent.yml@main",
             &["a ref that can move"],
         ),
         (
@@ -1557,11 +1647,11 @@ steps:
             &["neither is the reusable workflow"],
         ),
         (
-            "uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@PIN",
+            "uses: example-org/runner/.github/workflows/agent.yml@PIN",
             &["no `permissions:` map"],
         ),
         (
-            "permissions: read-all\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: read-all\nsteps:\n  - uses: example-org/runner/secure-host@PIN",
             &["no `permissions:` map"],
         ),
         (
@@ -1570,31 +1660,31 @@ steps:
         ),
         ("permissions: {}", &["neither runs secure-host"]),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@v1",
-            &["(cgwalters-forge/agentic-job/secure-host@v1) uses"],
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@v1",
+            &["(example-org/runner/secure-host@v1) uses"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: Swatinem/rust-cache@PIN\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {}\nsteps:\n  - uses: Swatinem/rust-cache@PIN\n  - uses: example-org/runner/secure-host@PIN",
             &["runs Swatinem/rust-cache@"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: ./setup\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {}\nsteps:\n  - uses: ./setup\n  - uses: example-org/runner/secure-host@PIN",
             &["local action ./setup with root"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - uses: actions/upload-artifact@v4",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - uses: actions/upload-artifact@v4",
             &["actions/upload-artifact@v4, a ref that can move"],
         ),
         (
-            "permissions: {}\ncontainer: fedora\nservices: {db: {image: postgres}}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - uses: docker://alpine@sha256:00",
+            "permissions: {}\ncontainer: fedora\nservices: {db: {image: postgres}}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - uses: docker://alpine@sha256:00",
             &["`container:`", "`services:`", "Docker action"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: actions/checkout@PIN\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: 'true'}\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: '${{ inputs.p }}'}\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {}\nsteps:\n  - uses: actions/checkout@PIN\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: 'true'}\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: '${{ inputs.p }}'}\n  - uses: example-org/runner/secure-host@PIN",
             &["step 1 (actions/checkout@", "step 2 (", "step 3 ("],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - run: echo ${{ github.event.pull_request.title }}\n  - run: echo ${{ github.head_ref }}\n  - run: echo ${{ inputs.x }}\n  - run: echo ${{ needs.a.outputs.b }}\n  - run: echo ${{ toJSON(github) }}\n  - run: echo ${{ GITHUB . EVENT . comment.body }}",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - run: echo ${{ github.event.pull_request.title }}\n  - run: echo ${{ github.head_ref }}\n  - run: echo ${{ inputs.x }}\n  - run: echo ${{ needs.a.outputs.b }}\n  - run: echo ${{ toJSON(github) }}\n  - run: echo ${{ GITHUB . EVENT . comment.body }}",
             &[
                 "github.event.pull_request.title",
                 "github.head_ref",
@@ -1605,51 +1695,51 @@ steps:
             ],
         ),
         (
-            "permissions: {}\nenv: {T: '${{ github.event.issue.title }}'}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - run: echo ${{ env.t }}\n  - run: echo ${{ toJSON(env) }}\n  - env: {T: fixed}\n    run: echo ${{ env.T }}\n  - uses: actions/github-script@PIN\n    with: {script: 'core.info(\"${{ github.event.comment.body }}\")'}",
+            "permissions: {}\nenv: {T: '${{ github.event.issue.title }}'}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - run: echo ${{ env.t }}\n  - run: echo ${{ toJSON(env) }}\n  - env: {T: fixed}\n    run: echo ${{ env.T }}\n  - uses: actions/github-script@PIN\n    with: {script: 'core.info(\"${{ github.event.comment.body }}\")'}",
             &["env.t", "toJSON(env)", "env.T", "github.event.comment.body"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - uses: cgwalters-forge/agentic-job/run@PIN\n  - uses: anthropics/claude-code-action@PIN\n  - run: agentic-job run --policy p.json",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - uses: example-org/runner/run@PIN\n  - uses: anthropics/claude-code-action@PIN\n  - run: agentic-job run --policy p.json",
             &[
-                "(cgwalters-forge/agentic-job/run@",
+                "(example-org/runner/run@",
                 "(anthropics/claude-code-action@",
                 "(agentic-job run",
             ],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n    with: {lock: false}\n  - uses: actions/checkout@PIN\n    if: false\n    with: {persist-credentials: false}",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n    with: {lock: false}\n  - uses: actions/checkout@PIN\n    if: false\n    with: {persist-credentials: false}",
             &["sets `lock` outside"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n    if: github.event_name == 'push'",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n    if: github.event_name == 'push'",
             &["`if:` or `continue-on-error:`"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n    continue-on-error: true",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n    continue-on-error: true",
             &["`if:` or `continue-on-error:`"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n    with: {config: host.toml}",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n    with: {config: host.toml}",
             &["sets `config` outside"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n    with: {config: host.toml, lock: 'true'}",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n    with: {config: host.toml, lock: 'true'}",
             &["sets `config` outside"],
         ),
         (
-            "permissions: {}\nenv: {A: '${{ github.event.issue.title }}'}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - env: {B: '${{ env.A }}'}\n    run: echo ${{ env.B }}",
+            "permissions: {}\nenv: {A: '${{ github.event.issue.title }}'}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - env: {B: '${{ env.A }}'}\n    run: echo ${{ env.B }}",
             &["env.B"],
         ),
         (
-            "permissions: {}\nstrategy: {matrix: {t: '${{ fromJSON(needs.a.outputs.l) }}'}}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - run: echo ${{ matrix.t }}",
+            "permissions: {}\nstrategy: {matrix: {t: '${{ fromJSON(needs.a.outputs.l) }}'}}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - run: echo ${{ matrix.t }}",
             &["matrix.t"],
         ),
         (
-            "permissions: {}\nstrategy: {matrix: {t: [a, b]}}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - run: echo ${{ matrix.t }}",
+            "permissions: {}\nstrategy: {matrix: {t: [a, b]}}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - run: echo ${{ matrix.t }}",
             &[],
         ),
         (
-            "Permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - Uses: evil/x@v1\n    name: x",
+            "Permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - Uses: evil/x@v1\n    name: x",
             &[
                 "spells `Permissions`",
                 "no `permissions:` map",
@@ -1657,11 +1747,11 @@ steps:
             ],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - uses: Anthropics/claude-code-action/base@PIN",
+            "permissions: {}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - uses: Anthropics/claude-code-action/base@PIN",
             &["runs an agent"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: CGWalters-Forge/actions/secure-host@PIN\n    with: {check: true}\n  - run: make",
+            "permissions: {}\nsteps:\n  - uses: Example-Org/actions/secure-host@PIN\n    with: {check: true}\n  - run: make",
             &[],
         ),
         (
@@ -1669,19 +1759,19 @@ steps:
             &["neither runs secure-host"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/actions/secure-host@PIN\n  - run: make",
+            "permissions: {}\nsteps:\n  - uses: example-org/actions/secure-host@PIN\n  - run: make",
             &[],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/actions/secure-host@v1\n  - run: make",
-            &["(cgwalters-forge/actions/secure-host@v1) uses"],
+            "permissions: {}\nsteps:\n  - uses: example-org/actions/secure-host@v1\n  - run: make",
+            &["(example-org/actions/secure-host@v1) uses"],
         ),
         // Lookalikes of the new path: another repository of the owner, a
         // sibling or nested action, and the repository's root action.
         (
-            "permissions: {}\nsteps:\n  - uses: cgwalters-forge/actions-fork/secure-host@PIN\n  - uses: cgwalters-forge/actions/secure-host-x@PIN\n  - uses: cgwalters-forge/actions/secure-host/x@PIN\n  - uses: cgwalters-forge/actions@PIN\n  - run: make",
+            "permissions: {}\nsteps:\n  - uses: example-org/actions-fork/secure-host@PIN\n  - uses: example-org/actions/secure-host-x@PIN\n  - uses: example-org/actions/secure-host/x@PIN\n  - uses: example-org/actions@PIN\n  - run: make",
             &[
-                "neither runs secure-host nor calls the reusable workflow: add a step `uses: cgwalters-forge/actions/secure-host@COMMIT` (or cgwalters-forge/agentic-job/secure-host@COMMIT)",
+                "neither runs secure-host nor calls the reusable workflow: add a caller-configured secure-host action",
             ],
         ),
         // The checker is not told which repository it checks, so not even
@@ -1692,26 +1782,26 @@ steps:
             &["neither runs secure-host"],
         ),
         (
-            "permissions: {}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: false}\n  - run: make deps\n  - uses: actions/setup-go@PIN\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {}\nsteps:\n  - uses: actions/checkout@PIN\n    with: {persist-credentials: false}\n  - run: make deps\n  - uses: actions/setup-go@PIN\n  - uses: example-org/runner/secure-host@PIN",
             &[
                 "step 2 (make deps) runs after checkout",
                 "step 3 (actions/setup-go@",
             ],
         ),
         (
-            "permissions: {contents: read, id-token: none}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN\n  - run: cat secrets.md",
+            "permissions: {contents: read, id-token: none}\nsteps:\n  - uses: example-org/runner/secure-host@PIN\n  - run: cat secrets.md",
             &[],
         ),
         (
-            "permissions: {contents: read, id-token: write}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {contents: read, id-token: write}\nsteps:\n  - uses: example-org/runner/secure-host@PIN",
             &["grants `id-token`"],
         ),
         (
-            "permissions: {ID-TOKEN: read}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {ID-TOKEN: read}\nsteps:\n  - uses: example-org/runner/secure-host@PIN",
             &["grants `ID-TOKEN`"],
         ),
         (
-            "permissions: {id-token: ~}\nsteps:\n  - uses: cgwalters-forge/agentic-job/secure-host@PIN",
+            "permissions: {id-token: ~}\nsteps:\n  - uses: example-org/runner/secure-host@PIN",
             &["grants `id-token`"],
         ),
         // The deploy-only shape, and each way out of it.

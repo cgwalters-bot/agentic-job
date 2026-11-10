@@ -299,7 +299,7 @@ mod tests {
     }
 
     fn policy() -> Policy {
-        let mut policy = crate::policy::tests::push_policy_to("bot/bootc");
+        let mut policy = crate::policy::tests::push_policy_to("bot/example");
         policy.safe_outputs.others.insert(
             "add_comment".to_owned(),
             crate::policy::OutputLimit {
@@ -313,8 +313,8 @@ mod tests {
     fn target() -> Target<'static> {
         Target {
             forge: Forge::Forgejo,
-            repo: "bootc-dev/bootc",
-            push_repo: Some("bot/bootc"),
+            repo: "example-org/example",
+            push_repo: Some("bot/example"),
             comment_target: Some(64),
             run_url: RUN,
             status: Some((State::Success, HEAD)),

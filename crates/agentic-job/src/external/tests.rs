@@ -9,7 +9,7 @@ fn record() -> Record {
         caller_run_id: 90,
         caller_attempt: 1,
         profile_commit: "a".repeat(40),
-        target_repository: "bootc-dev/bootc".into(),
+        target_repository: "example-org/example".into(),
         target_branch: "main".into(),
         base_commit: "b".repeat(40),
         item: 42,

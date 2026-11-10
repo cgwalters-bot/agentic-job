@@ -120,6 +120,11 @@ says what a caller may rely on across versions.
   owned by the applying account, secret by default, with allowlisted update IDs
   and one short fixed-target issue comment linking the exact revision (#3401).
 
+- `workflows check` reads reusable-workflow, secure-host and additional agent
+  action identities from `[identities]` in its trusted exemptions file, with
+  no trusted deployment identities by default. Existing callers must configure
+  their action paths; this repository's caller is updated (#3353).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

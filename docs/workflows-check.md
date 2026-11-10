@@ -20,12 +20,9 @@ installing a trusted check; nothing is enabled in their repositories by default.
 
 ## What each job must be
 
-Every job must do one of four things. It can call the reusable workflow
-`cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml` at a
-40-hex commit, which holds the agent, check and apply jobs. It can
-have steps that include secure-host, named as
-`cgwalters-forge/agentic-job/secure-host` or by its standalone path
-`cgwalters-forge/actions/secure-host`, to which the first now forwards.
+Every job must do one of four things. It can call a caller-configured reusable
+workflow at a 40-hex commit, which holds the agent, check and apply jobs. It can
+have steps that include a caller-configured secure-host action.
 Or it can be a [deploy-only Pages job](#deploy-only-pages-jobs) or a
 [trusted artifact consumer](#trusted-artifact-consumers). Each
 refusal below names the file, the job and the step (by number, with its
@@ -45,9 +42,39 @@ name, action or first script line), and says what to write instead.
 | A job without its own `permissions:` map | A job token with the workflow's or the repository's default grant, which may be write |
 | Any expression outside the closed execution-context allowlist in the fields below, including every `env.*` expression; any expression in `uses` | Text supplied by others becoming code or selecting code run with the job's token; env shadowing cannot bypass this rule |
 | `actions/checkout` without `persist-credentials: false` | The job's token left in `.git/config`, where every later step and anything it hands the sandbox can read it |
-| An agent step outside the reusable workflow: the `prepare` and `run` actions of this repository, Claude Code, Codex and Gemini CLI actions, or `agentic-job run` in a script | An agent running as the runner's user with the job's token and files, with no sandbox and no check of its outputs on another machine |
+| An agent step outside the reusable workflow: caller-configured agent actions, Claude Code, Codex and Gemini CLI actions, or `agentic-job run` in a script | An agent running as the runner's user with the job's token and files, with no sandbox and no check of its outputs on another machine |
 | A key these rules read (`uses`, `run`, `permissions`, `container` and the like) spelled in another case | A file that GitHub might read differently from this check |
 | Case-folded duplicate action inputs or env keys | GitHub choosing a different value from the checker; action inputs are read case-insensitively, including `lock`, `config`, `script` and `persist-credentials` |
+
+### Caller identities
+
+A proposal must not be able to name its own action as hardening and then run
+untrusted steps with root. Deployment identities therefore come from the same
+trusted base-branch file as exemptions, never the proposed tree's configuration.
+The optional `[identities]` table defaults to empty: no reusable workflow or
+hardening action is trusted implicitly. The file retains its 64 KiB limit,
+regular-file checks and rejection of unknown keys. Names are lowercase exact
+`owner/repo[/path]` paths without refs or wildcards; workflow uses still need
+40-hex pins. For example:
+
+```toml
+[identities]
+reusable_workflows = ["example-org/runner/.github/workflows/agent.yml"]
+agent_actions = ["example-org/runner/prepare", "example-org/runner/run"]
+
+[identities.secure_host]
+"example-org/runner/secure-host" = "check"
+"example-org/actions/secure-host" = "write-policy"
+```
+
+Both secure-host profiles admit only the existing closed hardening inputs:
+`check` allows `check: true`; `write-policy` additionally allows literal
+`egress: write-policy`. Neither permits arbitrary configuration inputs or
+skipping hardening. `agent_actions` adds paths (and their subpaths) refused
+outside the reusable workflow, beside the built-in third-party agent actions.
+Only configure implementations whose hardening and sandbox contracts you trust.
+This repository's deployment settings live in
+[its caller configuration](../.github/agentic-job/workflows.toml).
 
 ### Deploy-only Pages jobs
 
@@ -157,13 +184,13 @@ does not permit expressions and the checker refuses every expression.
 Container shorthand strings are images. Container and Docker fields are
 checked even though secure-host jobs also refuse containers outright.
 
-The hardening boundary must use one of the two secure-host paths at a
+The hardening boundary must use a configured secure-host path at a
 40-hex commit; a local action is not certified. The closed input table is:
 
-| Path | Admitted input | Value |
+| Configured profile | Admitted input | Value |
 | --- | --- | --- |
-| Either secure-host path | `check` | Literal `true` (YAML boolean or string) |
-| Only `cgwalters-forge/actions/secure-host` | `egress` | Literal `write-policy` |
+| Either profile | `check` | Literal `true` (YAML boolean or string) |
+| `write-policy` only | `egress` | Literal `write-policy` |
 
 `check: true` means the same to the forwarder and the old action before the
 forward. The standalone action's write policy opts into restricting HTTP writes
@@ -252,8 +279,9 @@ in `.github/agentic-job/workflows.toml`:
 An exempt file is not parsed or checked. Its name and reason are printed,
 and an entry for a file that does not exist is refused. When the files
 come from a proposal, pass the base branch's list with `--exemptions`
-so that the proposal cannot exempt itself. Without the option, the file
-under `--root` is read, and a missing one exempts nothing.
+so that the proposal cannot exempt itself or change trusted identities. Without
+the option, the file under `--root` is read, and a missing one exempts nothing
+and trusts no deployment identities.
 Deleting or renaming an exempt workflow is therefore refused, including with
 an explicit `--exemptions` file. A maintainer must land the exemption removal
 first, then delete or rename the workflow in a subsequent proposal.
