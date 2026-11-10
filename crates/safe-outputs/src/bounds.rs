@@ -43,8 +43,8 @@ pub struct Bounds<Trigger = toml::Table> {
     /// or without a port or user.
     #[serde(default)]
     pub allow_http: Vec<String>,
-    /// Globs of OWNER/NAME; see [`glob`].
-    pub repos: Vec<String>,
+    /// Globs of OWNER/NAME or opt-in live organization rules.
+    pub repos: Vec<RepoRule>,
     /// Globs of base branches.
     pub bases: Vec<String>,
     /// The most outputs a run may hand back in all.
@@ -99,6 +99,43 @@ pub struct Bounds<Trigger = toml::Table> {
     pub forgejo: Option<NeutralBounds>,
     #[serde(default)]
     pub gitlab: Option<NeutralBounds>,
+}
+
+/// Repository admission, with existing string globs retained for compatibility.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RepoRule {
+    Pattern(String),
+    Organization(Organization),
+}
+
+/// A live GitHub organization rule. Fork admission is deliberately not configurable.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Organization {
+    pub org: String,
+    pub forks: bool,
+}
+
+impl From<String> for RepoRule {
+    fn from(pattern: String) -> Self {
+        Self::Pattern(pattern)
+    }
+}
+
+impl From<&str> for RepoRule {
+    fn from(pattern: &str) -> Self {
+        Self::Pattern(pattern.to_owned())
+    }
+}
+
+impl std::fmt::Display for RepoRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pattern(pattern) => f.write_str(pattern),
+            Self::Organization(rule) => write!(f, "{{org = {:?}, forks = false}}", rule.org),
+        }
+    }
 }
 
 /// `[github]`: every output type, and what only GitHub implements today.
@@ -320,13 +357,13 @@ impl<Trigger> Bounds<Trigger> {
         }
         let forge = self.forge();
         let outputs = self.outputs();
-        for (name, list) in [
-            ("hosts", &self.hosts),
-            ("repos", &self.repos),
-            ("bases", &self.bases),
-        ] {
+        for (name, list) in [("hosts", &self.hosts), ("bases", &self.bases)] {
             ensure!(!list.is_empty(), "`{name}` is empty, so no run is allowed");
         }
+        ensure!(
+            !self.repos.is_empty(),
+            "`repos` is empty, so no run is allowed"
+        );
         for host in &self.allow_http {
             ensure!(
                 self.hosts.iter().any(|own| own.eq_ignore_ascii_case(host)),
@@ -337,7 +374,45 @@ impl<Trigger> Bounds<Trigger> {
                 "allow_http may not name {host:?}: {NEVER_PLAIN_HTTP} serves https"
             );
         }
-        for pattern in self.repos.iter().chain(&self.bases) {
+        let has_org = self
+            .repos
+            .iter()
+            .any(|rule| matches!(rule, RepoRule::Organization(_)));
+        for rule in &self.repos {
+            match rule {
+                RepoRule::Pattern(pattern) => {
+                    glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
+                    ensure!(
+                        !has_org
+                            || (REPO_RE.is_match(pattern)
+                                && !pattern.contains('*')
+                                && !dotted(pattern)),
+                        "organization repos rules may be combined only with exact repository entries, not {pattern:?}"
+                    );
+                }
+                RepoRule::Organization(rule) => {
+                    ensure!(
+                        forge == Forge::Github
+                            && self
+                                .hosts
+                                .iter()
+                                .all(|host| host.eq_ignore_ascii_case("github.com")),
+                        "organization repos rules require GitHub and hosts = [\"github.com\"]"
+                    );
+                    ensure!(
+                        !rule.forks,
+                        "organization repos rules require forks = false"
+                    );
+                    ensure!(
+                        REPO_RE.is_match(&format!("{}/repo", rule.org))
+                            && !rule.org.starts_with(['.', '-']),
+                        "invalid repository organization {:?}",
+                        rule.org
+                    );
+                }
+            }
+        }
+        for pattern in &self.bases {
             glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
         }
         ensure!(!outputs.is_empty(), "`outputs` lists no output type");

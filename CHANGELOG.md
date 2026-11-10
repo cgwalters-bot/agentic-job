@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
+  admit live, non-fork, non-archived repositories owned by that organization.
+  Exact repository entries remain explicit exceptions (#3332).
+
 - Apply lists a replacement series it pushed to a pull request's branch
   under `made` in `applied.json`, not under `already_applied`, which now
   holds it only when an earlier attempt had pushed that same head (#3322).

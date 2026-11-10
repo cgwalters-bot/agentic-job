@@ -129,7 +129,9 @@ the next in the same major version.
   (`[forgejo.outputs.TYPE]` and `push_repo`) or `[gitlab]`
   (`[gitlab.outputs.TYPE]` and `push_repo`)
   ([the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy),
-  [events](events.md)). `allowed_domains` is accepted and ignored.
+  [events](events.md)). `repos` accepts existing string globs and opt-in
+  `{org = "ORG", forks = false}` rules on GitHub, checked against live owner,
+  fork and archived metadata at policy time. `allowed_domains` is accepted and ignored.
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`): the tables
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,

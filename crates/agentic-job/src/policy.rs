@@ -22,8 +22,8 @@ use dispatch::admission as dispatch_admission;
 // intersection of two bounds files' policies are the safe-outputs
 // library's; reading the files, and admitting and compiling a request
 // against bounds, stay here.
+use safe_outputs::bounds::{RepoRule, dot_folders, host_name, intersect, protected_files, under};
 pub use safe_outputs::bounds::{SecondaryPullRequest, Unprotected};
-use safe_outputs::bounds::{dot_folders, host_name, intersect, protected_files, under};
 pub use safe_outputs::contract::*;
 pub use safe_outputs::{
     CONTRACT, CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, Forge, GH_AW_LINK_DOMAINS, HIDE_COMMENT,
@@ -226,7 +226,15 @@ impl Load for Bounds {
 /// Compiling one run's request, as the command line gives it, within a
 /// bounds file: the request is agentic-job's, so this stays here.
 pub trait Compile {
-    fn compile(&self, request: &Request<'_>) -> Result<Policy, Vec<String>>;
+    fn compile(&self, request: &Request<'_>) -> Result<Policy, Vec<String>> {
+        self.compile_with(request, &mut context::forge())
+    }
+
+    fn compile_with(
+        &self,
+        request: &Request<'_>,
+        read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+    ) -> Result<Policy, Vec<String>>;
 }
 
 impl Compile for Bounds {
@@ -236,7 +244,11 @@ impl Compile for Bounds {
     /// pattern before it is used, the messages quote them escaped, and
     /// the policy is serialized by serde: a quote or a newline in one can
     /// neither add a key to `policy.json` nor a line to the log.
-    fn compile(&self, request: &Request<'_>) -> Result<Policy, Vec<String>> {
+    fn compile_with(
+        &self,
+        request: &Request<'_>,
+        read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+    ) -> Result<Policy, Vec<String>> {
         let Request {
             repo,
             clone_url,
@@ -258,7 +270,11 @@ impl Compile for Bounds {
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
         // Whether `repos` admits it is checked below, where the outputs
         // asked for say whether `own_author` may.
-        let listed = repo_ok && glob_matches(&self.repos, repo);
+        let listed = repo_ok
+            && admits_repo(&self.repos, repo, read).unwrap_or_else(|error| {
+                errors.push(error.to_string());
+                false
+            });
         // Checked against the repository only if that is a name at all.
         if repo_ok && let Some(problem) = self.clone_url_problem(clone_url, repo) {
             errors.push(problem);
@@ -269,11 +285,18 @@ impl Compile for Bounds {
         if let Some(item_repo) = item_repo
             && (!REPO_RE.is_match(item_repo)
                 || dotted(item_repo)
-                || !glob_matches(&self.repos, item_repo))
+                || !admits_repo(&self.repos, item_repo, read).unwrap_or_else(|error| {
+                    errors.push(error.to_string());
+                    false
+                }))
         {
             errors.push(format!(
                 "item repo {item_repo:?} is not within the bounds ({})",
-                self.repos.join(", ")
+                self.repos
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         // A private repository's content is only as private as where the
@@ -354,11 +377,23 @@ impl Compile for Bounds {
                 types.contains(&PUSH_TO_PULL_REQUEST_BRANCH)
                     && pull_author.is_some_and(|author| author.eq_ignore_ascii_case(own))
             });
-        let by_author = repo_ok && !listed && own_author.is_some();
+        // An opt-in organization policy admits only its live repositories and
+        // exact exceptions: author admission must not recover a live refusal.
+        let by_author = repo_ok
+            && !listed
+            && own_author.is_some()
+            && !self
+                .repos
+                .iter()
+                .any(|rule| matches!(rule, RepoRule::Organization(_)));
         if !listed && !by_author {
             errors.push(format!(
                 "repo {repo:?} is not within the bounds ({})",
-                self.repos.join(", ")
+                self.repos
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if by_author {
@@ -687,6 +722,42 @@ fn carries_patch(output: &str) -> bool {
     matches!(output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH)
 }
 
+/// A name prefix alone must not admit a fork, archived repository or transfer.
+/// Exact entries are explicit exceptions. Validation forbids mixing org rules
+/// with legacy globs, which would otherwise bypass the live restrictions.
+fn admits_repo(
+    rules: &[RepoRule],
+    repo: &str,
+    read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+) -> Result<bool> {
+    if rules.iter().any(|rule| {
+        matches!(rule, RepoRule::Pattern(pattern)
+        if glob(pattern).is_ok_and(|regex| regex.is_match(repo)))
+    }) {
+        return Ok(true);
+    }
+    let Some((owner, _)) = repo.split_once('/') else {
+        return Ok(false);
+    };
+    if !rules.iter().any(|rule| {
+        matches!(rule, RepoRule::Organization(rule)
+        if rule.org.eq_ignore_ascii_case(owner))
+    }) {
+        return Ok(false);
+    }
+    let live = read(&format!("repos/{repo}"))
+        .with_context(|| format!("cannot confirm organization repository {repo:?}"))?;
+    Ok(live["full_name"]
+        .as_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(repo))
+        && live["owner"]["login"]
+            .as_str()
+            .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+        && live["owner"]["type"] == "Organization"
+        && live["fork"] == false
+        && live["archived"] == false)
+}
+
 pub fn run(args: &Args) -> Result<Exit> {
     let bounds = Bounds::load(&args.allow)?;
     let org_bounds = args.org_allow.as_deref().map(Bounds::load).transpose()?;
@@ -711,11 +782,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     for item in &context {
         for bound in std::iter::once(&bounds).chain(org_bounds.iter()) {
             ensure!(
-                item.public
-                    || bound
-                        .repos
-                        .iter()
-                        .any(|pattern| glob(pattern).is_ok_and(|regex| regex.is_match(&item.repo))),
+                item.public || admits_repo(&bound.repos, &item.repo, &mut context::forge())?,
                 "context repository {:?} is outside caller bounds",
                 item.repo
             );
@@ -822,6 +889,167 @@ missing_data = { max = 3 }
         let bounds: Bounds = toml::from_str(BOUNDS).unwrap();
         bounds.validate().unwrap();
         bounds
+    }
+
+    #[test]
+    fn organization_rules_check_live_repositories() {
+        use serde_json::json;
+
+        let bounds: Bounds = toml::from_str(&BOUNDS.replace(
+            "repos = [\"bootc-dev/*\", \"composefs/*\", \"cgwalters-bot/*\", \"cgwalters-forge/*\"]",
+            "repos = [{org = \"bootc-dev\", forks = false}]",
+        )).unwrap();
+        bounds.validate().unwrap();
+        let live = json!({"full_name": REPO, "owner": {"login": "bootc-dev", "type": "Organization"},
+            "fork": false, "archived": false});
+        let mut push = push_bounds();
+        push.repos = bounds.repos.clone();
+        push.github
+            .as_mut()
+            .unwrap()
+            .outputs
+            .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+            .unwrap()
+            .own_author = Some("applying-bot".into());
+        push.validate().unwrap();
+        let push_request = Request {
+            pull_author: Some("applying-bot"),
+            ..push_request()
+        };
+        for (pointer, value, allowed) in [
+            ("/fork", json!(false), true),
+            ("/fork", json!(true), false),
+            ("/archived", json!(true), false),
+            ("/owner/login", json!("another"), false),
+            ("/owner/type", json!("User"), false),
+            ("/full_name", json!("another/bootc"), false),
+            ("/fork", json!(null), false),
+            ("/archived", json!(null), false),
+            ("/owner/login", json!(null), false),
+            ("/owner/login", json!("BOOTC-DEV"), true),
+        ] {
+            let mut answer = live.clone();
+            *answer.pointer_mut(pointer).unwrap() = value;
+            let mut calls = 0;
+            let result = bounds.compile_with(&request(), &mut |path| {
+                assert_eq!(path, "repos/bootc-dev/bootc");
+                calls += 1;
+                Ok(answer.clone())
+            });
+            assert_eq!(result.is_ok(), allowed, "{pointer}: {answer}");
+            assert_eq!(calls, 1);
+            assert_eq!(
+                push.compile_with(&push_request, &mut |_| Ok(answer.clone()))
+                    .is_ok(),
+                allowed,
+                "own_author must not bypass {pointer}: {answer}"
+            );
+        }
+        assert!(
+            bounds
+                .compile_with(&request(), &mut |_| anyhow::bail!("unavailable"))
+                .is_err()
+        );
+        let other = Request {
+            repo: "another/bootc",
+            clone_url: "https://github.com/another/bootc",
+            ..request()
+        };
+        assert!(
+            bounds
+                .compile_with(&other, &mut |_| panic!("not this org"))
+                .is_err()
+        );
+        let item = Request {
+            item_repo: Some("bootc-dev/item"),
+            ..request()
+        };
+        assert!(
+            bounds
+                .compile_with(&item, &mut |path| {
+                    let mut answer = live.clone();
+                    if path == "repos/bootc-dev/item" {
+                        answer["full_name"] = json!("bootc-dev/item");
+                        answer["fork"] = json!(true);
+                    }
+                    Ok(answer)
+                })
+                .is_err()
+        );
+
+        // Exact entries retain their existing authority, including exceptions
+        // for forks, archived repositories and other owners, without an API read.
+        let mut exact = bounds.clone();
+        exact.repos.extend([REPO.into(), "another/bootc".into()]);
+        for request in [request(), other] {
+            assert!(
+                exact
+                    .compile_with(&request, &mut |_| panic!("exact entry"))
+                    .is_ok()
+            );
+        }
+        // Organization bounds must independently admit the repository.
+        assert!(
+            bounds
+                .compile_with(&request(), &mut |_| Ok(live.clone()))
+                .is_ok()
+        );
+        let mut org = bounds.clone();
+        org.repos = vec!["another/repo".into()];
+        assert!(
+            org.compile_with(&request(), &mut |_| panic!("no rule"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn organization_rule_validation() {
+        for (rule, valid) in [
+            ("{org = \"bootc-dev\", forks = false}", true),
+            ("{org = \"bootc-dev\", forks = true}", false),
+            ("{org = \"bootc-dev\"}", false),
+            (
+                "{org = \"bootc-dev\", forks = false, archived = true}",
+                false,
+            ),
+            ("{org = \"*\", forks = false}", false),
+            ("{org = \"a/b\", forks = false}", false),
+            ("{org = \".hidden\", forks = false}", false),
+            ("{org = \"\", forks = false}", false),
+        ] {
+            let text = BOUNDS.replacen(
+                "repos = [\"bootc-dev/*\", \"composefs/*\", \"cgwalters-bot/*\", \"cgwalters-forge/*\"]",
+                &format!("repos = [{rule}]"), 1,
+            );
+            let result = toml::from_str::<Bounds>(&text)
+                .map_err(anyhow::Error::from)
+                .and_then(|bounds| bounds.validate());
+            assert_eq!(result.is_ok(), valid, "{rule}: {result:?}");
+            if valid {
+                for pattern in ["bootc-dev/*", "*/*", "another/*", "bootc-dev/**"] {
+                    let mixed = text.replacen(
+                        &format!("repos = [{rule}]"),
+                        &format!("repos = [{rule}, {pattern:?}]"),
+                        1,
+                    );
+                    assert!(
+                        toml::from_str::<Bounds>(&mixed)
+                            .unwrap()
+                            .validate()
+                            .is_err(),
+                        "{pattern}"
+                    );
+                }
+                let other_host =
+                    text.replace("hosts = [\"github.com\"]", "hosts = [\"example.com\"]");
+                assert!(
+                    toml::from_str::<Bounds>(&other_host)
+                        .unwrap()
+                        .validate()
+                        .is_err()
+                );
+            }
+        }
     }
 
     fn request() -> Request<'static> {
@@ -4805,7 +5033,7 @@ max_patch_files = 10
     #[test]
     fn what_policy_writes_run_can_clone() {
         let all = Bounds {
-            repos: vec!["*/*".to_owned()],
+            repos: vec!["*/*".into()],
             ..bounds()
         };
         for name in [".", "..", "...", "....."] {

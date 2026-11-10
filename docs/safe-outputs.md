@@ -1084,6 +1084,24 @@ it (`--repo`, `--clone-url`, `--base`, `--kind`, `--outputs`,
 `--outputs all` is every type the bounds list, and `--max-outputs max`
 their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
+On GitHub, `repos` may also contain `{org = "cgwalters-forge", forks = false}`.
+This is opt-in: no shipped bounds enable it. Policy reads the live repository
+through `GITHUB_API_URL` with the read-only `GH_TOKEN`, and requires its
+`full_name` and organization owner to match, and both `fork` and `archived`
+to be false. Missing metadata or an API failure refuses admission, rather
+than trusting an organization name prefix that could admit forks or transferred
+repositories. The rule requires `hosts = ["github.com"]`; `forks = true`
+and unknown rule keys are refused. Exact string entries can explicitly admit
+forks, archived repositories or other owners. Organization rules may be combined
+only with exact string entries, not globs; `own_author` admission cannot bypass
+their restrictions. Existing bounds containing only string globs are unchanged.
+Item repositories are checked the same
+way, and both bounds files must independently admit them when `--org-allow`
+is used. Each needed metadata read has a 1 MiB response limit, a 120-second
+timeout and no redirects; `check` consumes only the resulting concrete
+repository policy, never an organization-wide permission. Patch/output limits
+and exact-name protection exemptions are unchanged.
+
 A top-level `private = true` admits a target that is not public, under
 the conditions of [private repositories](private-repositories.md); it is
 off by default. A top-level `allow_http`, empty by default, lists hosts
