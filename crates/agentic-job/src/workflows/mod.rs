@@ -51,16 +51,18 @@ pub struct Args {
     /// The repository whose .github/workflows is checked
     #[arg(long, default_value = ".")]
     pub root: PathBuf,
-    /// The exemptions file, from the base branch where the files checked are a proposal's [default: ROOT/.github/agentic-job/workflows.toml]
+    /// The exemptions and identities file, from the base branch where the files checked are a proposal's [default: ROOT/.github/agentic-job/workflows.toml]
     #[arg(long)]
     pub exemptions: Option<PathBuf>,
 }
 
-/// The exemptions file: each workflow file, by name, that is not held to
-/// the rules, and why.
+/// Trusted caller configuration: deployment identities and each workflow file,
+/// by name, that is not held to the rules, and why.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Exemptions {
+    #[serde(default)]
+    identities: rules::Identities,
     #[serde(default)]
     exempt: BTreeMap<String, String>,
 }
@@ -94,6 +96,7 @@ fn read_exemptions(path: &Path, explicit: bool) -> Result<Exemptions> {
             path.display()
         );
     }
+    exemptions.identities.validate()?;
     Ok(exemptions)
 }
 
@@ -124,7 +127,7 @@ fn workflow_names(root: &Path) -> Result<Vec<String>> {
 }
 
 /// The problems of the workflow file `name` under `root`, each a line.
-fn check_file(root: &Path, name: &str) -> Vec<String> {
+fn check_file(root: &Path, name: &str, identities: &rules::Identities) -> Vec<String> {
     let file = format!("{WORKFLOWS_DIR}/{name}");
     let parsed = files::read_regular(&root.join(&file), MAX_WORKFLOW_BYTES)
         .map_err(anyhow::Error::new)
@@ -138,7 +141,7 @@ fn check_file(root: &Path, name: &str) -> Vec<String> {
             )];
         }
     };
-    rules::check_workflow(&workflow)
+    rules::check_workflow(&workflow, identities)
         .into_iter()
         .map(|p| {
             let at: Vec<String> = [p.job.map(|j| format!("job {j}")), p.step]
@@ -178,7 +181,7 @@ fn check(args: &Args) -> Result<Exit> {
             continue;
         }
         checked += 1;
-        problems.extend(check_file(&args.root, name));
+        problems.extend(check_file(&args.root, name, &exemptions.identities));
     }
     for problem in &problems {
         println!("{problem}");

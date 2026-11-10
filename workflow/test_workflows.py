@@ -15,10 +15,11 @@ class WorkflowBlobTests(unittest.TestCase):
         pin = "0123456789abcdef0123456789abcdef01234567"
         good = ("on: push\njobs:\n  test:\n    permissions: {contents: read}\n"
                 "    runs-on: ubuntu-24.04\n    steps:\n"
-                f"      - uses: cgwalters-forge/agentic-job/secure-host@{pin}\n"
+                f"      - uses: example-org/hardening/secure-host@{pin}\n"
                 "      - run: echo good\n")
         cases = [
             ("good.yaml", good, True),
+            ("untrusted.yml", good.replace("example-org/hardening", "other-org/hardening"), False),
             ("bad.yml", "jobs: {bad: {runs-on: ubuntu-24.04, steps: []}}", False),
             (".yml", "jobs: {bad: {runs-on: ubuntu-24.04, steps: []}}", False),
             (".yaml", "jobs: {bad: {runs-on: ubuntu-24.04, steps: []}}", False),
@@ -44,7 +45,10 @@ class WorkflowBlobTests(unittest.TestCase):
                 original = workflows / "exempt.yml"
                 original.write_text("base exemption")
                 exemptions = repo / "base.toml"
-                exemptions.write_text('[exempt]\n"exempt.yml" = "base policy"\n')
+                exemptions.write_text(
+                    '[identities.secure_host]\n'
+                    '"example-org/hardening/secure-host" = "check"\n'
+                    '[exempt]\n"exempt.yml" = "base policy"\n')
                 git(repo, "add", ".")
                 git(repo, "commit", "-qm", "base")
                 base = git(repo, "rev-parse", "HEAD").decode().strip()
@@ -68,7 +72,10 @@ class WorkflowBlobTests(unittest.TestCase):
                 # A proposed exemption must not silence the bad workflow.
                 proposed_policy = repo / ".github/agentic-job/workflows.toml"
                 proposed_policy.parent.mkdir()
-                proposed_policy.write_text(f'[exempt]\n"{name}" = "proposed bypass"\n')
+                proposed_policy.write_text(
+                    '[identities.secure_host]\n'
+                    '"other-org/hardening/secure-host" = "check"\n'
+                    f'[exempt]\n"{name}" = "proposed bypass"\n')
                 git(repo, "add", ".")
                 if content == "gitlink":
                     git(repo, "update-index", "--add", "--cacheinfo",

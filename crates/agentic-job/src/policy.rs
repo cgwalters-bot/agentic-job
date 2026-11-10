@@ -1020,17 +1020,17 @@ pub(crate) mod tests {
     use super::*;
     use safe_outputs::bounds::{NeutralBounds, NeutralOutputs};
 
-    /// The old tree's allowlist, as a bounds file.
+    /// Example caller bounds, shared with policy consumers' tests.
     pub(crate) const BOUNDS: &str = r#"
 hosts = ["github.com"]
-repos = ["bootc-dev/*", "composefs/*", "cgwalters-bot/*", "cgwalters-forge/*"]
+repos = ["example-org/*", "example-project/*", "example-bot/*", "example-forge/*"]
 bases = ["main", "master", "bot/**"]
 max_outputs = 5
 max_patch_bytes = 8388608
 max_patch_files = 100
 
 [unprotected_files]
-repos = ["cgwalters-bot/homegit", "cgwalters-forge/review"]
+repos = ["example-bot/config", "example-forge/review"]
 files = ["CONTRIBUTING.md", "AGENTS.md"]
 
 [github.outputs]
@@ -1041,7 +1041,7 @@ missing_tool = { max = 3 }
 missing_data = { max = 3 }
 "#;
 
-    const REPO: &str = "bootc-dev/bootc";
+    const REPO: &str = "example-org/example";
 
     pub(crate) fn bounds() -> Bounds {
         let bounds: Bounds = toml::from_str(BOUNDS).unwrap();
@@ -1054,11 +1054,11 @@ missing_data = { max = 3 }
         use serde_json::json;
 
         let bounds: Bounds = toml::from_str(&BOUNDS.replace(
-            "repos = [\"bootc-dev/*\", \"composefs/*\", \"cgwalters-bot/*\", \"cgwalters-forge/*\"]",
-            "repos = [{org = \"bootc-dev\", forks = false}]",
+            "repos = [\"example-org/*\", \"example-project/*\", \"example-bot/*\", \"example-forge/*\"]",
+            "repos = [{org = \"example-org\", forks = false}]",
         )).unwrap();
         bounds.validate().unwrap();
-        let live = json!({"full_name": REPO, "owner": {"login": "bootc-dev", "type": "Organization"},
+        let live = json!({"full_name": REPO, "owner": {"login": "example-org", "type": "Organization"},
             "fork": false, "archived": false});
         let mut push = push_bounds();
         push.repos = bounds.repos.clone();
@@ -1081,17 +1081,17 @@ missing_data = { max = 3 }
             ("/archived", json!(true), false),
             ("/owner/login", json!("another"), false),
             ("/owner/type", json!("User"), false),
-            ("/full_name", json!("another/bootc"), false),
+            ("/full_name", json!("another/example"), false),
             ("/fork", json!(null), false),
             ("/archived", json!(null), false),
             ("/owner/login", json!(null), false),
-            ("/owner/login", json!("BOOTC-DEV"), true),
+            ("/owner/login", json!("EXAMPLE-ORG"), true),
         ] {
             let mut answer = live.clone();
             *answer.pointer_mut(pointer).unwrap() = value;
             let mut calls = 0;
             let result = bounds.compile_with(&request(), &mut |path| {
-                assert_eq!(path, "repos/bootc-dev/bootc");
+                assert_eq!(path, "repos/example-org/example");
                 calls += 1;
                 Ok(answer.clone())
             });
@@ -1110,8 +1110,8 @@ missing_data = { max = 3 }
                 .is_err()
         );
         let other = Request {
-            repo: "another/bootc",
-            clone_url: "https://github.com/another/bootc",
+            repo: "another/example",
+            clone_url: "https://github.com/another/example",
             ..request()
         };
         assert!(
@@ -1120,15 +1120,15 @@ missing_data = { max = 3 }
                 .is_err()
         );
         let item = Request {
-            item_repo: Some("bootc-dev/item"),
+            item_repo: Some("example-org/item"),
             ..request()
         };
         assert!(
             bounds
                 .compile_with(&item, &mut |path| {
                     let mut answer = live.clone();
-                    if path == "repos/bootc-dev/item" {
-                        answer["full_name"] = json!("bootc-dev/item");
+                    if path == "repos/example-org/item" {
+                        answer["full_name"] = json!("example-org/item");
                         answer["fork"] = json!(true);
                     }
                     Ok(answer)
@@ -1139,7 +1139,7 @@ missing_data = { max = 3 }
         // Exact entries retain their existing authority, including exceptions
         // for forks, archived repositories and other owners, without an API read.
         let mut exact = bounds.clone();
-        exact.repos.extend([REPO.into(), "another/bootc".into()]);
+        exact.repos.extend([REPO.into(), "another/example".into()]);
         for request in [request(), other] {
             assert!(
                 exact
@@ -1270,8 +1270,8 @@ missing_data = { max = 3 }
     #[test]
     fn organization_rule_validation() {
         for (rule, valid) in [
-            ("{org = \"bootc-dev\", forks = false}", true),
-            ("{org = \"bootc-dev\", forks = true}", false),
+            ("{org = \"example-org\", forks = false}", true),
+            ("{org = \"example-org\", forks = true}", false),
             (
                 "{org = \"example-org\", forks = true, properties = { category = \"mirror\" }, topics = [\"managed-fork\"]}",
                 true,
@@ -1288,9 +1288,9 @@ missing_data = { max = 3 }
                 "{org = \"example-org\", forks = true, properties = { category = \"\" }, topics = [\"managed-fork\"]}",
                 false,
             ),
-            ("{org = \"bootc-dev\"}", false),
+            ("{org = \"example-org\"}", false),
             (
-                "{org = \"bootc-dev\", forks = false, archived = true}",
+                "{org = \"example-org\", forks = false, archived = true}",
                 false,
             ),
             ("{org = \"*\", forks = false}", false),
@@ -1299,7 +1299,7 @@ missing_data = { max = 3 }
             ("{org = \"\", forks = false}", false),
         ] {
             let text = BOUNDS.replacen(
-                "repos = [\"bootc-dev/*\", \"composefs/*\", \"cgwalters-bot/*\", \"cgwalters-forge/*\"]",
+                "repos = [\"example-org/*\", \"example-project/*\", \"example-bot/*\", \"example-forge/*\"]",
                 &format!("repos = [{rule}]"), 1,
             );
             let result = toml::from_str::<Bounds>(&text)
@@ -1307,7 +1307,7 @@ missing_data = { max = 3 }
                 .and_then(|bounds| bounds.validate());
             assert_eq!(result.is_ok(), valid, "{rule}: {result:?}");
             if valid {
-                for pattern in ["bootc-dev/*", "*/*", "another/*", "bootc-dev/**"] {
+                for pattern in ["example-org/*", "*/*", "another/*", "example-org/**"] {
                     let mixed = text.replacen(
                         &format!("repos = [{rule}]"),
                         &format!("repos = [{rule}, {pattern:?}]"),
@@ -1336,7 +1336,7 @@ missing_data = { max = 3 }
     fn request() -> Request<'static> {
         Request {
             repo: REPO,
-            clone_url: "https://github.com/bootc-dev/bootc",
+            clone_url: "https://github.com/example-org/example",
             base: "main",
             kind: Kind::Branch,
             outputs: "create_pull_request,noop",
@@ -1413,12 +1413,16 @@ missing_data = { max = 3 }
             ("push-policy.json", None, push_policy()),
             (
                 "push-policy.json",
-                Some("bot/bootc"),
-                push_policy_to("bot/bootc"),
+                Some("bot/example"),
+                push_policy_to("bot/example"),
             ),
         ] {
             let text = std::fs::read_to_string(data.join(file)).unwrap();
             let mut fixture: Policy = serde_json::from_str(&text).unwrap();
+            // Destination names are incidental to these shared contract
+            // fixtures; this module uses its own neutral caller identity.
+            fixture.repo = REPO.to_owned();
+            fixture.clone_url = request().clone_url.to_owned();
             fixture.allowed_domains = link_domains().to_vec();
             fixture.push_repo = push_repo.map(str::to_owned);
             if push_repo.is_some() {
@@ -1430,7 +1434,7 @@ missing_data = { max = 3 }
 
     const SECONDARY: &str = r#"
 [github.secondary_pull_request]
-repo = "cgwalters-forge/misctool"
+repo = "example-forge/tools"
 base = "main"
 branch_prefix = "agentic-job/"
 max = 1
@@ -1467,7 +1471,7 @@ max_patch_files = 10
                 "[github.secondary_pull_request]",
                 "[[github.secondary_pull_request]]",
             ),
-            ("repo = \"cgwalters-forge/misctool\"\n", ""),
+            ("repo = \"example-forge/tools\"\n", ""),
             ("base = \"main\"\n", ""),
             ("branch_prefix = \"agentic-job/\"\n", ""),
             ("max = 1\n", ""),
@@ -1489,14 +1493,14 @@ max_patch_files = 10
             ("agentic-job/", "bot/agentic-job/", true),
             ("max_patch_bytes = 65536", "max_patch_bytes = 1024", true),
             ("max_patch_files = 10", "max_patch_files = 1", true),
-            ("cgwalters-forge/misctool", "cgwalters-forge/*", false),
-            ("cgwalters-forge/misctool", "cgwalters-forge/**", false),
-            ("cgwalters-forge/misctool", "https://github.com/a/b", false),
-            ("cgwalters-forge/misctool", "a/../b", false),
-            ("cgwalters-forge/misctool", "owner", false),
-            ("cgwalters-forge/misctool", "-owner/repo", false),
-            ("cgwalters-forge/misctool", "owner/.repo", false),
-            ("cgwalters-forge/misctool", "owner/..", false),
+            ("example-forge/tools", "example-forge/*", false),
+            ("example-forge/tools", "example-forge/**", false),
+            ("example-forge/tools", "https://github.com/a/b", false),
+            ("example-forge/tools", "a/../b", false),
+            ("example-forge/tools", "owner", false),
+            ("example-forge/tools", "-owner/repo", false),
+            ("example-forge/tools", "owner/.repo", false),
+            ("example-forge/tools", "owner/..", false),
             ("main", "", false),
             ("main", "release/*", false),
             ("main", "main:other", false),
@@ -1522,28 +1526,28 @@ max_patch_files = 10
             ("max_patch_files = 10", "max_patch_files = 0", false),
             (
                 "max_patch_files = 10\n",
-                &unprotected("cgwalters-forge/misctool", ".github"),
+                &unprotected("example-forge/tools", ".github"),
                 true,
             ),
             (
                 "max_patch_files = 10\n",
-                &unprotected("CGWALTERS-FORGE/MISCTOOL", ".github"),
+                &unprotected("EXAMPLE-FORGE/TOOLS", ".github"),
                 true,
             ),
             // The primary output's repository, or any other.
             (
                 "max_patch_files = 10\n",
-                &unprotected("bootc-dev/bootc", ".github"),
+                &unprotected("example-org/example", ".github"),
                 false,
             ),
             (
                 "max_patch_files = 10\n",
-                &unprotected("cgwalters-forge/*", ".github"),
+                &unprotected("example-forge/*", ".github"),
                 false,
             ),
             (
                 "max_patch_files = 10\n",
-                &unprotected("cgwalters-forge/misctool", ".husky"),
+                &unprotected("example-forge/tools", ".husky"),
                 false,
             ),
         ] {
@@ -1569,13 +1573,13 @@ max_patch_files = 10
             // Without a pull request of its own, a run opens none there.
             (REPO, "add_comment,noop", None, Ok(false)),
             (
-                "cgwalters-forge/misctool",
+                "example-forge/tools",
                 "create_pull_request",
                 None,
                 Err("the repository the run works on"),
             ),
             (
-                "CGWALTERS-FORGE/MISCTOOL",
+                "EXAMPLE-FORGE/TOOLS",
                 "create_pull_request",
                 None,
                 Err("the repository the run works on"),
@@ -1583,19 +1587,19 @@ max_patch_files = 10
             (
                 REPO,
                 "create_pull_request",
-                Some("cgwalters-forge/MiscTool"),
+                Some("example-forge/Tools"),
                 Err("the repository the run applies to"),
             ),
             (
-                "cgwalters-forge/secondary",
+                "example-forge/secondary",
                 "create_pull_request",
                 None,
                 Err("conflicts with the secondary directory"),
             ),
-            // `misctool` under `agentic-job/` would name its patch as one
-            // of `misctool-agentic-job` on the run's own branch.
+            // `tools` under `agentic-job/` would name its patch as one
+            // of `tools-agentic-job` on the run's own branch.
             (
-                "cgwalters-forge/misctool-agentic-job",
+                "example-forge/tools-agentic-job",
                 "create_pull_request",
                 None,
                 Err("choose another branch_prefix"),
@@ -1603,7 +1607,7 @@ max_patch_files = 10
             (
                 REPO,
                 "create_pull_request",
-                Some("cgwalters-forge/MiscTool-Agentic-Job"),
+                Some("example-forge/Tools-Agentic-Job"),
                 Err("choose another branch_prefix"),
             ),
         ];
@@ -1646,8 +1650,8 @@ max_patch_files = 10
         // in the primary bounds; the secondary inherits none of that.
         let configured = configured();
         let request = Request {
-            repo: "cgwalters-bot/homegit",
-            clone_url: "https://github.com/cgwalters-bot/homegit",
+            repo: "example-bot/config",
+            clone_url: "https://github.com/example-bot/config",
             ..request()
         };
         let policy = configured.compile(&request).unwrap();
@@ -1656,7 +1660,7 @@ max_patch_files = 10
         let secondary = policy.secondary_pull_request.as_ref().unwrap();
         assert_eq!(
             secondary.clone_url,
-            "https://github.com/cgwalters-forge/misctool"
+            "https://github.com/example-forge/tools"
         );
         assert_eq!((secondary.base.as_str(), secondary.max), ("main", 1));
         assert_eq!(secondary.branch_prefix, "agentic-job/");
@@ -1671,7 +1675,7 @@ max_patch_files = 10
         // Its own exemptions, for itself alone.
         let text = format!(
             "{BOUNDS}{SECONDARY}\n[github.secondary_pull_request.unprotected_files]\n\
-             repos = [\"cgwalters-forge/misctool\"]\nfiles = [\"go.mod\"]\n\
+             repos = [\"example-forge/tools\"]\nfiles = [\"go.mod\"]\n\
              dot_folders = [\".github\"]\n"
         );
         let exempt: Bounds = toml::from_str(&text).unwrap();
@@ -1718,18 +1722,18 @@ max_patch_files = 10
             (
                 "a patch named as one of the run's own repository",
                 |policy| {
-                    policy.repo = "cgwalters-forge/misctool-agentic-job".into();
+                    policy.repo = "example-forge/tools-agentic-job".into();
                 },
             ),
             ("the output repository", |policy| {
-                policy.push_repo = Some("cgwalters-forge/MiscTool".into());
+                policy.push_repo = Some("example-forge/Tools".into());
             }),
             ("a patch named as one of the output repository", |policy| {
-                policy.push_repo = Some("cgwalters-forge/misctool-agentic-job".into());
+                policy.push_repo = Some("example-forge/tools-agentic-job".into());
             }),
             ("a clone URL that is no URL", |policy| {
                 policy.secondary_pull_request.as_mut().unwrap().clone_url =
-                    "ext::sh -c x/cgwalters-forge/misctool".into();
+                    "ext::sh -c x/example-forge/tools".into();
             }),
             ("unprotected dot-folders", |policy| {
                 policy
@@ -1749,7 +1753,7 @@ max_patch_files = 10
                 policy.secondary_pull_request.as_mut().unwrap().max = 2;
             }),
             ("a glob of repositories", |policy| {
-                policy.secondary_pull_request.as_mut().unwrap().repo = "cgwalters-forge/*".into();
+                policy.secondary_pull_request.as_mut().unwrap().repo = "example-forge/*".into();
             }),
         ];
         for (what, change) in cases {
@@ -1783,7 +1787,7 @@ max_patch_files = 10
             bounds().compile(&request()).unwrap(),
             toml::from_str::<Bounds>(&format!(
                 "{BOUNDS}{}",
-                SECONDARY.replace("misctool", "othertool")
+                SECONDARY.replace("tools", "othertool")
             ))
             .unwrap()
             .compile(&request())
@@ -1809,8 +1813,8 @@ max_patch_files = 10
     fn dot_folder_bounds_are_exact_and_intersect() {
         for (repos, admitted) in [
             (vec![REPO], true),
-            (vec!["BOOTC-DEV/BOOTC"], true),
-            (vec!["bootc-dev/other"], false),
+            (vec!["EXAMPLE-ORG/EXAMPLE"], true),
+            (vec!["example-org/other"], false),
         ] {
             let mut bounds = bounds();
             bounds.unprotected_files.repos = repos.into_iter().map(str::to_owned).collect();
@@ -1881,7 +1885,7 @@ max_patch_files = 10
             );
         }
         let mut bounds = bounds();
-        bounds.unprotected_files.repos = vec!["bootc-dev/*".into()];
+        bounds.unprotected_files.repos = vec!["example-org/*".into()];
         assert!(bounds.validate().is_err());
     }
 
@@ -1966,6 +1970,8 @@ max_patch_files = 10
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../workflow/analysis.toml");
         let bounds: Bounds = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         bounds.validate().unwrap();
+        let repo = bounds.repos[0].to_string();
+        let clone_url = format!("https://github.com/{repo}");
         for (base, outputs, allowed) in [
             ("main", "add_comment", true),
             ("bot/w2-37863744105", "add_comment", true),
@@ -1976,8 +1982,8 @@ max_patch_files = 10
             ("main", MARK_READY, false),
         ] {
             let result = bounds.compile(&Request {
-                repo: "cgwalters-forge/agentic-job",
-                clone_url: "https://github.com/cgwalters-forge/agentic-job",
+                repo: &repo,
+                clone_url: &clone_url,
                 base,
                 kind: Kind::Analysis,
                 outputs,
@@ -2741,18 +2747,21 @@ max_patch_files = 10
             ("ok", ok, None),
             (
                 "another owner",
-                own("evil/bootc", "https://github.com/evil/bootc"),
-                Some("repo \"evil/bootc\" is not within"),
+                own("evil/example", "https://github.com/evil/example"),
+                Some("repo \"evil/example\" is not within"),
             ),
             (
                 "a repo of another case",
-                own("BOOTC-DEV/bootc", "https://github.com/bootc-dev/bootc"),
+                own(
+                    "EXAMPLE-ORG/example",
+                    "https://github.com/example-org/example",
+                ),
                 None,
             ),
             (
                 "a malformed repo",
                 Request {
-                    repo: "bootc-dev/bootc/x",
+                    repo: "example-org/example/x",
                     ..ok
                 },
                 Some("repo "),
@@ -2760,7 +2769,7 @@ max_patch_files = 10
             (
                 "a repo of dots",
                 Request {
-                    repo: "bootc-dev/..",
+                    repo: "example-org/..",
                     ..ok
                 },
                 Some("repo "),
@@ -2883,7 +2892,7 @@ max_patch_files = 10
             (
                 "a clone URL with .git",
                 Request {
-                    clone_url: "https://github.com/bootc-dev/bootc.git",
+                    clone_url: "https://github.com/example-org/example.git",
                     ..ok
                 },
                 None,
@@ -2891,7 +2900,7 @@ max_patch_files = 10
             (
                 "a clone URL of another host",
                 Request {
-                    clone_url: "https://evil.example/bootc-dev/bootc",
+                    clone_url: "https://evil.example/example-org/example",
                     ..ok
                 },
                 Some("host"),
@@ -2899,7 +2908,7 @@ max_patch_files = 10
             (
                 "a clone URL of another repository",
                 Request {
-                    clone_url: "https://github.com/evil/bootc",
+                    clone_url: "https://github.com/evil/example",
                     ..ok
                 },
                 Some("does not name"),
@@ -2907,7 +2916,7 @@ max_patch_files = 10
             (
                 "a clone URL with a user",
                 Request {
-                    clone_url: "https://x@github.com/bootc-dev/bootc",
+                    clone_url: "https://x@github.com/example-org/example",
                     ..ok
                 },
                 Some("host"),
@@ -2915,7 +2924,7 @@ max_patch_files = 10
             (
                 "a clone URL with a port",
                 Request {
-                    clone_url: "https://github.com:444/bootc-dev/bootc",
+                    clone_url: "https://github.com:444/example-org/example",
                     ..ok
                 },
                 Some("host"),
@@ -2923,7 +2932,7 @@ max_patch_files = 10
             (
                 "a clone URL over ssh",
                 Request {
-                    clone_url: "ssh://github.com/bootc-dev/bootc",
+                    clone_url: "ssh://github.com/example-org/example",
                     ..ok
                 },
                 Some("is not https://"),
@@ -2931,7 +2940,7 @@ max_patch_files = 10
             (
                 "a clone URL with more",
                 Request {
-                    clone_url: "https://github.com/bootc-dev/bootc/../x",
+                    clone_url: "https://github.com/example-org/example/../x",
                     ..ok
                 },
                 Some("does not name"),
@@ -2939,7 +2948,7 @@ max_patch_files = 10
             (
                 "a clone URL with a query",
                 Request {
-                    clone_url: "https://github.com/bootc-dev/bootc?x=1",
+                    clone_url: "https://github.com/example-org/example?x=1",
                     ..ok
                 },
                 Some("does not name"),
@@ -2947,7 +2956,7 @@ max_patch_files = 10
             (
                 "an item in another repository the bounds allow",
                 Request {
-                    item_repo: Some("cgwalters-forge/tracker"),
+                    item_repo: Some("example-forge/tracker"),
                     ..ok
                 },
                 None,
@@ -2963,7 +2972,7 @@ max_patch_files = 10
             (
                 "an item in a repository of dots",
                 Request {
-                    item_repo: Some("cgwalters-forge/.."),
+                    item_repo: Some("example-forge/.."),
                     ..ok
                 },
                 Some("item repo "),
@@ -2971,7 +2980,7 @@ max_patch_files = 10
             (
                 "an item in a malformed repository",
                 Request {
-                    item_repo: Some("cgwalters-forge/tracker/x"),
+                    item_repo: Some("example-forge/tracker/x"),
                     ..ok
                 },
                 Some("item repo "),
@@ -3011,7 +3020,7 @@ max_patch_files = 10
         };
         let (opted, default) = (with("\"forge.internal\""), with(""));
         let https = Request {
-            clone_url: "https://forge.internal/bootc-dev/bootc",
+            clone_url: "https://forge.internal/example-org/example",
             ..request()
         };
         for (own, org, expected) in [
@@ -3030,21 +3039,21 @@ max_patch_files = 10
         const HOST: Option<&str> = Some("host");
         // The URL, and what bounds with and without the opt-in say of it.
         let cases = [
-            ("http://forge.internal/bootc-dev/bootc", None, PLAIN),
-            ("https://forge.internal/bootc-dev/bootc", None, None),
-            ("http://forge.internal/bootc-dev/bootc.git", None, PLAIN),
-            ("http://FORGE.internal/bootc-dev/bootc", None, PLAIN),
-            ("http://other.internal/bootc-dev/bootc", PLAIN, PLAIN),
-            ("http://github.com/bootc-dev/bootc", PLAIN, PLAIN),
-            ("http://forge.internal:8080/bootc-dev/bootc", HOST, HOST),
-            ("http://x@forge.internal/bootc-dev/bootc", HOST, HOST),
+            ("http://forge.internal/example-org/example", None, PLAIN),
+            ("https://forge.internal/example-org/example", None, None),
+            ("http://forge.internal/example-org/example.git", None, PLAIN),
+            ("http://FORGE.internal/example-org/example", None, PLAIN),
+            ("http://other.internal/example-org/example", PLAIN, PLAIN),
+            ("http://github.com/example-org/example", PLAIN, PLAIN),
+            ("http://forge.internal:8080/example-org/example", HOST, HOST),
+            ("http://x@forge.internal/example-org/example", HOST, HOST),
             (
-                "http://forge.internal/evil/bootc",
+                "http://forge.internal/evil/example",
                 Some("does not name"),
                 PLAIN,
             ),
             (
-                "httpx://forge.internal/bootc-dev/bootc",
+                "httpx://forge.internal/example-org/example",
                 Some("is not"),
                 Some("is not"),
             ),
@@ -3086,14 +3095,14 @@ max_patch_files = 10
         };
         assert_eq!(
             ported
-                .compile(&on("http://forge.internal:3000/bootc-dev/bootc"))
+                .compile(&on("http://forge.internal:3000/example-org/example"))
                 .unwrap()
                 .allow_http,
             ["forge.internal:3000"]
         );
         assert!(
             ported
-                .compile(&on("http://forge.internal:3001/bootc-dev/bootc"))
+                .compile(&on("http://forge.internal:3001/example-org/example"))
                 .is_err()
         );
     }
@@ -3103,19 +3112,22 @@ max_patch_files = 10
     #[test]
     fn github_with_a_port_user_or_root_is_github() {
         for (url, github) in [
-            ("https://github.com/bootc-dev/bootc", true),
-            ("https://GitHub.com./bootc-dev/bootc", true),
-            ("https://github.com:443/bootc-dev/bootc", true),
-            ("https://x@github.com:443/bootc-dev/bootc", true),
-            ("https://u:p@github.com/bootc-dev/bootc", true),
-            ("http://api.github.com.:80/bootc-dev/bootc", true),
-            ("http://[::1]:80/bootc-dev/bootc", false),
-            ("https://forge.example/bootc-dev/bootc", false),
-            ("https://github.com.evil/bootc-dev/bootc", false),
-            ("https://xgithub.com/bootc-dev/bootc", false),
-            ("https://forge.example/github.com/bootc", false),
-            ("https://github.com@forge.example/bootc-dev/bootc", false),
-            ("https://forge.example:443/bootc-dev/bootc", false),
+            ("https://github.com/example-org/example", true),
+            ("https://GitHub.com./example-org/example", true),
+            ("https://github.com:443/example-org/example", true),
+            ("https://x@github.com:443/example-org/example", true),
+            ("https://u:p@github.com/example-org/example", true),
+            ("http://api.github.com.:80/example-org/example", true),
+            ("http://[::1]:80/example-org/example", false),
+            ("https://forge.example/example-org/example", false),
+            ("https://github.com.evil/example-org/example", false),
+            ("https://xgithub.com/example-org/example", false),
+            ("https://forge.example/github.com/example", false),
+            (
+                "https://github.com@forge.example/example-org/example",
+                false,
+            ),
+            ("https://forge.example:443/example-org/example", false),
         ] {
             assert_eq!(on_github(url), github, "{url}");
         }
@@ -3165,17 +3177,17 @@ max_patch_files = 10
                 true,
                 true,
                 Request {
-                    output_repo: Some("bootc-dev/other"),
+                    output_repo: Some("example-org/other"),
                     ..own
                 },
-                Some("not \"bootc-dev/other\""),
+                Some("not \"example-org/other\""),
             ),
             (
                 "private, the item in another repository",
                 true,
                 true,
                 Request {
-                    item_repo: Some("bootc-dev/other"),
+                    item_repo: Some("example-org/other"),
                     ..own
                 },
                 Some("item is in its own repository"),
@@ -3185,8 +3197,8 @@ max_patch_files = 10
                 true,
                 true,
                 Request {
-                    output_repo: Some("BOOTC-DEV/BOOTC"),
-                    item_repo: Some("Bootc-Dev/Bootc"),
+                    output_repo: Some("EXAMPLE-ORG/EXAMPLE"),
+                    item_repo: Some("Example-Org/Example"),
                     ..own
                 },
                 None,
@@ -3300,11 +3312,11 @@ max_patch_files = 10
     /// file names the same fork for its branch, which is never the target.
     #[test]
     fn push_repo_bounds_private_pull_requests_off_github() {
-        const FORK: &str = "bot/bootc";
+        const FORK: &str = "bot/example";
         let forge = Request {
             private: true,
             output_repo: Some(REPO),
-            clone_url: "https://forge.example/bootc-dev/bootc",
+            clone_url: "https://forge.example/example-org/example",
             outputs: "create_pull_request,noop",
             ..request()
         };
@@ -3332,7 +3344,7 @@ max_patch_files = 10
             (
                 "private, named in both in another case",
                 Some(FORK),
-                Some("BOT/Bootc"),
+                Some("BOT/Example"),
                 forge,
                 None,
             ),
@@ -3377,24 +3389,24 @@ max_patch_files = 10
             ),
             (
                 "the target itself",
-                Some("Bootc-Dev/Bootc"),
-                Some("Bootc-Dev/Bootc"),
+                Some("Example-Org/Example"),
+                Some("Example-Org/Example"),
                 public,
-                Some("is of the owner of \"bootc-dev/bootc\""),
+                Some("is of the owner of \"example-org/example\""),
             ),
             (
                 "the target's owner's",
-                Some("bootc-dev/fork"),
-                Some("bootc-dev/fork"),
+                Some("example-org/fork"),
+                Some("example-org/fork"),
                 public,
-                Some("is of the owner of \"bootc-dev/bootc\""),
+                Some("is of the owner of \"example-org/example\""),
             ),
             (
                 "private, on GitHub",
                 Some(FORK),
                 Some(FORK),
                 Request {
-                    clone_url: "https://github.com/bootc-dev/bootc",
+                    clone_url: "https://github.com/example-org/example",
                     ..forge
                 },
                 Some("can't create_pull_request"),
@@ -3406,7 +3418,7 @@ max_patch_files = 10
                 Some(FORK),
                 Some(FORK),
                 Request {
-                    clone_url: "https://github.com:443/bootc-dev/bootc",
+                    clone_url: "https://github.com:443/example-org/example",
                     ..forge
                 },
                 Some("can't create_pull_request"),
@@ -3455,7 +3467,7 @@ max_patch_files = 10
                     (result, _) => panic!("{name}: {result:?}"),
                 }
             }
-            for push_repo in ["bot", "bot/../x", "bot/..", "a b/c", "bot/bootc.git"] {
+            for push_repo in ["bot", "bot/../x", "bot/..", "a b/c", "bot/example.git"] {
                 let bounds = on_forge(bounds(), forge, push_repo);
                 assert!(bounds.validate().is_err(), "{push_repo}");
             }
@@ -3463,10 +3475,10 @@ max_patch_files = 10
         // Nor does a policy.json written by hand name the target.
         for (push_repo, ok) in [
             (FORK, true),
-            ("Bootc-Dev/Bootc", false),
-            ("bootc-dev/fork", false),
+            ("Example-Org/Example", false),
+            ("example-org/fork", false),
             ("bot/..", false),
-            ("bot/bootc.git", false),
+            ("bot/example.git", false),
         ] {
             let policy = Policy {
                 push_repo: Some(push_repo.to_owned()),
@@ -3669,10 +3681,10 @@ max_patch_files = 10
     /// A push keeps the bounds' fork, which is never of the target's owner.
     #[test]
     fn push_keeps_the_fork() {
-        let policy = push_policy_to("bot/bootc");
-        assert_eq!(policy.push_repo.as_deref(), Some("bot/bootc"));
+        let policy = push_policy_to("bot/example");
+        assert_eq!(policy.push_repo.as_deref(), Some("bot/example"));
         policy.validate().unwrap();
-        let bounds = on_forge(push_bounds(), Forge::Forgejo, "bootc-dev/fork");
+        let bounds = on_forge(push_bounds(), Forge::Forgejo, "example-org/fork");
         let errors = bounds.compile(&push_request()).unwrap_err();
         assert!(
             errors
@@ -3789,7 +3801,7 @@ max_patch_files = 10
             (
                 "the same repository, in another case",
                 Request {
-                    output_repo: Some("Bootc-Dev/Bootc"),
+                    output_repo: Some("Example-Org/Example"),
                     ..ok
                 },
                 None,
@@ -3800,9 +3812,9 @@ max_patch_files = 10
             (
                 "another repository the bounds allow runs in",
                 Request {
-                    repo: "bootc-dev/other",
-                    clone_url: "https://github.com/bootc-dev/other",
-                    output_repo: Some("bootc-dev/other"),
+                    repo: "example-org/other",
+                    clone_url: "https://github.com/example-org/other",
+                    output_repo: Some("example-org/other"),
                     ..ok
                 },
                 None,
@@ -3820,10 +3832,10 @@ max_patch_files = 10
             (
                 "outputs applied in another repository",
                 Request {
-                    output_repo: Some("cgwalters-bot/bootc"),
+                    output_repo: Some("example-bot/example"),
                     ..ok
                 },
-                Some("not to \"cgwalters-bot/bootc\""),
+                Some("not to \"example-bot/example\""),
             ),
             (
                 "no repository the outputs are applied in",
@@ -3875,7 +3887,7 @@ max_patch_files = 10
     /// `repos` does not list, and what else that admits: nothing.
     #[test]
     fn own_author_admits_only_a_push_to_its_own_pull_request() {
-        const BOT: &str = "cgwalters-bot";
+        const BOT: &str = "example-bot";
         let mut bounds = push_bounds();
         bounds
             .outputs_mut()
@@ -3885,9 +3897,9 @@ max_patch_files = 10
             .own_author = Some(BOT.into());
         bounds.validate().unwrap();
         let ok = Request {
-            repo: "ostreedev/ostree",
-            clone_url: "https://github.com/ostreedev/ostree",
-            output_repo: Some("ostreedev/ostree"),
+            repo: "upstream-org/project",
+            clone_url: "https://github.com/upstream-org/project",
+            output_repo: Some("upstream-org/project"),
             pull_author: Some(BOT),
             outputs: "push_to_pull_request_branch,noop,missing_tool,missing_data",
             ..push_request()
@@ -3900,7 +3912,7 @@ max_patch_files = 10
             (
                 "its login in another case",
                 Request {
-                    pull_author: Some("CGWalters-Bot"),
+                    pull_author: Some("Example-Bot"),
                     ..ok
                 },
                 Ok(Some(BOT)),
@@ -3928,7 +3940,7 @@ max_patch_files = 10
                     pull_author: Some("carol"),
                     ..ok
                 },
-                Err("repo \"ostreedev/ostree\" is not within the bounds"),
+                Err("repo \"upstream-org/project\" is not within the bounds"),
             ),
             (
                 "an app's pull request",
@@ -3953,7 +3965,7 @@ max_patch_files = 10
                     ..ok
                 },
                 Err(
-                    "output type \"add_comment\" is not for \"ostreedev/ostree\", which the bounds admit only for a push",
+                    "output type \"add_comment\" is not for \"upstream-org/project\", which the bounds admit only for a push",
                 ),
             ),
             (
@@ -3963,7 +3975,7 @@ max_patch_files = 10
                     max_outputs: "max",
                     ..ok
                 },
-                Err("is not for \"ostreedev/ostree\""),
+                Err("is not for \"upstream-org/project\""),
             ),
             (
                 "no push",
@@ -3982,17 +3994,17 @@ max_patch_files = 10
             (
                 "an item in another unlisted repository",
                 Request {
-                    item_repo: Some("ostreedev/other"),
+                    item_repo: Some("upstream-org/other"),
                     ..ok
                 },
-                Err("item repo \"ostreedev/other\" is not within the bounds"),
+                Err("item repo \"upstream-org/other\" is not within the bounds"),
             ),
             (
                 "a repository that is not a name",
                 Request {
-                    repo: "ostreedev/../x",
-                    clone_url: "https://github.com/ostreedev/../x",
-                    output_repo: Some("ostreedev/../x"),
+                    repo: "upstream-org/../x",
+                    clone_url: "https://github.com/upstream-org/../x",
+                    output_repo: Some("upstream-org/../x"),
                     ..ok
                 },
                 Err("is not within the bounds"),
@@ -4030,7 +4042,7 @@ max_patch_files = 10
         );
         // An organization file that lists the repository keeps the check.
         let mut org = push_bounds();
-        org.repos.push("ostreedev/*".into());
+        org.repos.push("upstream-org/*".into());
         let both = intersect(bounds.compile(&ok).unwrap(), org.compile(&ok).unwrap()).unwrap();
         let push = both.safe_outputs.push_to_pull_request_branch.unwrap();
         assert_eq!(push.author.as_deref(), Some(BOT));
@@ -4159,7 +4171,7 @@ max_patch_files = 10
             ("add_comment", "max = 1\nbranches = ['x']", false),
             (
                 PUSH_TO_PULL_REQUEST_BRANCH,
-                "max = 1\nbranches = ['agent-run-*']\nown_author = 'cgwalters-bot'",
+                "max = 1\nbranches = ['agent-run-*']\nown_author = 'example-bot'",
                 true,
             ),
             (
@@ -4172,11 +4184,7 @@ max_patch_files = 10
                 "max = 1\nbranches = ['agent-run-*']\nown_author = ''",
                 false,
             ),
-            (
-                "add_comment",
-                "max = 1\nown_author = 'cgwalters-bot'",
-                false,
-            ),
+            ("add_comment", "max = 1\nown_author = 'example-bot'", false),
         ] {
             assert_eq!(valid(output, text), ok, "{output} {text}");
         }
@@ -4632,7 +4640,7 @@ max_patch_files = 10
             (
                 with(r#"["add_comment"]"#).replace(
                     "[github.outputs]",
-                    "[forgejo]\npush_repo = \"bot/bootc\"\n[forgejo.outputs]",
+                    "[forgejo]\npush_repo = \"bot/example\"\n[forgejo.outputs]",
                 ),
                 "only for GitHub",
             ),
@@ -4906,8 +4914,8 @@ max_patch_files = 10
         org.outputs_mut().unwrap().remove("missing_data");
         org.unprotected_files = Unprotected::default();
         let request = Request {
-            repo: "cgwalters-bot/homegit",
-            clone_url: "https://github.com/cgwalters-bot/homegit",
+            repo: "example-bot/config",
+            clone_url: "https://github.com/example-bot/config",
             outputs: "all",
             max_outputs: "max",
             ..request()
@@ -5026,13 +5034,13 @@ max_patch_files = 10
     fn docs_are_unprotected_only_where_the_bounds_say() {
         let bounds = bounds();
         let cases = [
-            ("cgwalters-bot/homegit", true),
-            ("CGWalters-Bot/Homegit", true),
-            ("cgwalters-forge/review", true),
+            ("example-bot/config", true),
+            ("Example-Bot/Config", true),
+            ("example-forge/review", true),
             (REPO, false),
             // Named exactly: a glob of the same owner is not enough.
-            ("cgwalters-bot/bootc", false),
-            ("cgwalters-forge/homegit", false),
+            ("example-bot/example", false),
+            ("example-forge/config", false),
         ];
         for (repo, own) in cases {
             let protected = protected_files(&bounds.unprotected_files, repo);
@@ -5053,10 +5061,10 @@ max_patch_files = 10
     #[test]
     fn globs() {
         let cases = [
-            ("bootc-dev/*", "bootc-dev/bootc", true),
-            ("bootc-dev/*", "BOOTC-DEV/Bootc", true),
-            ("bootc-dev/*", "bootc-dev/a/b", false),
-            ("bootc-dev/*", "xbootc-dev/a", false),
+            ("example-org/*", "example-org/example", true),
+            ("example-org/*", "EXAMPLE-ORG/Example", true),
+            ("example-org/*", "example-org/a/b", false),
+            ("example-org/*", "xexample-org/a", false),
             ("bot/**", "bot/a/b", true),
             ("bot/**", "bot", false),
             ("main", "main", true),
@@ -5198,7 +5206,7 @@ max_patch_files = 10
             ),
             (
                 "the old top-level push_repo",
-                format!("push_repo = \"bot/bootc\"\n{BOUNDS}"),
+                format!("push_repo = \"bot/example\"\n{BOUNDS}"),
                 "unknown field `push_repo`",
             ),
             (
@@ -5260,7 +5268,7 @@ max_patch_files = 10
             (
                 "no repositories",
                 with(
-                    "repos = [\"bootc-dev/*\", \"composefs/*\", \"cgwalters-bot/*\", \"cgwalters-forge/*\"]",
+                    "repos = [\"example-org/*\", \"example-project/*\", \"example-bot/*\", \"example-forge/*\"]",
                     "repos = []",
                 ),
                 "`repos` is empty",
@@ -5602,7 +5610,7 @@ max_patch_files = 10
             ..bounds()
         };
         for name in [".", "..", "...", "....."] {
-            let repo = format!("bootc-dev/{name}");
+            let repo = format!("example-org/{name}");
             let clone_url = format!("https://github.com/{repo}");
             let request = Request {
                 repo: &repo,
@@ -5614,19 +5622,23 @@ max_patch_files = 10
         }
         let long_base = format!("bot/{}", "x".repeat(196));
         let cases = [
-            (REPO, "https://github.com/bootc-dev/bootc", "main"),
-            (REPO, "https://GitHub.com/bootc-dev/bootc.git", "master"),
+            (REPO, "https://github.com/example-org/example", "main"),
+            (REPO, "https://GitHub.com/example-org/example.git", "master"),
             (
-                "cgwalters-bot/a.b_c-d",
-                "https://github.com/cgwalters-bot/a.b_c-d",
+                "example-bot/a.b_c-d",
+                "https://github.com/example-bot/a.b_c-d",
                 "bot/a.b_c-d/e",
             ),
             (
-                "composefs/_",
-                "https://github.com/composefs/_",
+                "example-project/_",
+                "https://github.com/example-project/_",
                 long_base.as_str(),
             ),
-            ("bootc-dev/.x", "https://github.com/bootc-dev/.x", "bot/_/-"),
+            (
+                "example-org/.x",
+                "https://github.com/example-org/.x",
+                "bot/_/-",
+            ),
         ];
         for (repo, clone_url, base) in cases {
             let request = Request {

@@ -915,7 +915,7 @@ mod tests {
             (json!({}), true),
             (json!({"repo": "TRACKER/ITEMS", "item_number": 64}), true),
             (json!({"repo": "tracker/items", "pr_number": "64"}), true),
-            (json!({"repo": "bootc-dev/bootc"}), false),
+            (json!({"repo": "example-org/example"}), false),
             (json!({"item_number": 65}), false),
             (json!({"pr": 65}), false),
             (json!({"pr_number": 65}), false),
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     fn base_json() -> String {
-        json!({"repo": "bootc-dev/bootc", "ref": "main", "commit": BASE}).to_string()
+        json!({"repo": "example-org/example", "ref": "main", "commit": BASE}).to_string()
     }
 
     /// A hand-back and the collector's result for it.
@@ -2012,7 +2012,7 @@ mod tests {
                     (PUSH_PATCH, patch_of("src/new.rs").replace(BASE, HEAD)),
                     (
                         BASE_FILE,
-                        json!({"repo": "bootc-dev/bootc", "ref": "agent-run-12", "commit": HEAD})
+                        json!({"repo": "example-org/example", "ref": "agent-run-12", "commit": HEAD})
                             .to_string(),
                     ),
                 ],
@@ -2096,7 +2096,7 @@ mod tests {
         #[test]
         fn what_is_refused_of_a_push() {
             let stale_base =
-                json!({"repo": "bootc-dev/bootc", "ref": "agent-run-12", "commit": BASE})
+                json!({"repo": "example-org/example", "ref": "agent-run-12", "commit": BASE})
                     .to_string();
             let cases: Vec<(&str, Handback, &str)> = vec![
                 (
@@ -2116,8 +2116,8 @@ mod tests {
                 ),
                 (
                     "another repository",
-                    with_item(json!({"repo": "evil/bootc"})),
-                    "with repo \"evil/bootc\", which is not the policy's",
+                    with_item(json!({"repo": "evil/example"})),
+                    "with repo \"evil/example\", which is not the policy's",
                 ),
                 (
                     "a head that moved since the run was asked for",
@@ -2532,7 +2532,7 @@ mod tests {
             (json!({"reason": "outdated"}), item, false),
             (json!({"reason": null}), item, false),
             (json!({"reason": ["SPAM"]}), item, false),
-            (json!({"repo": "bootc-dev/bootc"}), item, false),
+            (json!({"repo": "example-org/example"}), item, false),
             (json!({"repo": "other/repo"}), item, false),
             // No triggering item to hold the handler to.
             (json!({}), None, false),
@@ -2595,7 +2595,7 @@ mod tests {
             ),
             (
                 "create_pull_request_review_comment",
-                json!({"path": "a", "line": 3, "body": "b", "repo": "bootc-dev/bootc"}),
+                json!({"path": "a", "line": 3, "body": "b", "repo": "example-org/example"}),
                 item,
                 false,
             ),
@@ -3061,24 +3061,27 @@ mod tests {
             ),
             (
                 "a base.json for another repo",
-                pr().with(BASE_FILE, other_base("bootc-dev/other", "main", BASE)),
+                pr().with(BASE_FILE, other_base("example-org/other", "main", BASE)),
                 "base.json is not",
             ),
             (
                 "a base.json for another base",
-                pr().with(BASE_FILE, other_base("bootc-dev/bootc", "bot/x", BASE)),
+                pr().with(BASE_FILE, other_base("example-org/example", "bot/x", BASE)),
                 "base.json is not",
             ),
             (
                 "a base.json with a short commit",
-                pr().with(BASE_FILE, other_base("bootc-dev/bootc", "main", "1111111")),
+                pr().with(
+                    BASE_FILE,
+                    other_base("example-org/example", "main", "1111111"),
+                ),
                 "base.json is not",
             ),
             (
                 "a patch of another base commit",
                 pr().with(
                     BASE_FILE,
-                    other_base("bootc-dev/bootc", "main", &"0".repeat(40)),
+                    other_base("example-org/example", "main", &"0".repeat(40)),
                 ),
                 "is not the base commit",
             ),
@@ -3188,7 +3191,8 @@ mod tests {
 
     #[test]
     fn a_request_may_repeat_what_the_policy_says() {
-        let base = json!({"repo": "Bootc-Dev/BOOTC", "ref": "main", "commit": BASE}).to_string();
+        let base =
+            json!({"repo": "Example-Org/EXAMPLE", "ref": "main", "commit": BASE}).to_string();
         assert!(
             Handback::pull_request()
                 .with(BASE_FILE, Some(base))
@@ -3197,7 +3201,7 @@ mod tests {
         );
         let request = json!({
             "type": "create_pull_request", "title": "t", "body": "b", "branch": BRANCH,
-            "repo": "Bootc-Dev/bootc", "base": "main", "draft": true,
+            "repo": "Example-Org/example", "base": "main", "draft": true,
         });
         let verdict = Handback {
             items: vec![request],

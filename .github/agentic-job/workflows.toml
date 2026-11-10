@@ -7,6 +7,14 @@
 # its own CI. Its files call them by local path, to test this revision,
 # where a caller names cgwalters-forge/agentic-job/...@COMMIT; or are the
 # reusable workflow's own jobs; or build, release and test the binaries.
+[identities]
+reusable_workflows = ["cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml"]
+agent_actions = ["cgwalters-forge/agentic-job/prepare", "cgwalters-forge/agentic-job/run"]
+
+[identities.secure_host]
+"cgwalters-forge/agentic-job/secure-host" = "check"
+"cgwalters-forge/actions/secure-host" = "write-policy"
+
 [exempt]
 "feed.yml" = "Opt-in maintenance on trusted default-branch code only; downloads domain data without executing it, with a dedicated publishing token restricted to the final step."
 "agentic-job.yml" = "The reusable workflow itself: its agent job is agent.yml's; register, the only job with id-token, runs the policy job's binary alone; and policy, check and apply run no untrusted step."
