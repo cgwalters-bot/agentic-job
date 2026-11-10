@@ -30,13 +30,15 @@ impl Command {
                 let built = library::trial(args, repo, &super::read_checked).map_err(shown)?;
                 println!("head={}\ntree={}", built.head, built.tree);
             }
-            Self::Push(args) => push(
-                repo,
-                &args.remote,
-                &args.branch,
-                &args.original_head,
-                &args.replacement_head,
-            )?,
+            Self::Push(args) => {
+                push(
+                    repo,
+                    &args.remote,
+                    &args.branch,
+                    &args.original_head,
+                    &args.replacement_head,
+                )?;
+            }
         }
         Ok(Exit::Success)
     }
@@ -54,7 +56,7 @@ pub(super) fn push(
     branch: &str,
     original: &str,
     replacement: &str,
-) -> Result<()> {
+) -> Result<bool> {
     library::push(repo, remote, branch, original, replacement).map_err(shown)
 }
 

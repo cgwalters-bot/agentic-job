@@ -15,7 +15,8 @@
 //! comment: the handlers comment before they close. An issue someone
 //! reopened stays open. A push found already applied, as one commit with
 //! the checked tree on the pinned head, is left out; a replacement series
-//! is pushed here with a lease and never reaches the handler.
+//! is pushed here with a lease and never reaches the handler, and is
+//! recorded as made, or as applied if the branch was already at its head.
 //!
 //! Before anything is written, a close_issue naming a pull request or a
 //! transferred issue refuses the run, and so does a reply to a review
@@ -89,6 +90,9 @@ pub struct Args {
     /// check's report.json
     #[arg(long, value_name = "FILE")]
     pub report: PathBuf,
+    /// gh-aw's safe-output-items.jsonl, appended a replacement series pushed here; required for one
+    #[arg(long, value_name = "FILE")]
+    pub made: Option<PathBuf>,
     /// The repository pull requests and issues are opened in
     #[arg(long)]
     pub output_repo: String,
@@ -482,14 +486,15 @@ pub(super) trait Workspace {
     /// The parents (`%P`) and tree of [`FETCHED`].
     fn fetched(&self) -> Result<(String, String)>;
 
-    /// `agentic-job replacement push`.
+    /// `agentic-job replacement push`: whether it pushed, not found the
+    /// branch already there.
     fn push_replacement(
         &self,
         remote: &str,
         branch: &str,
         original: &str,
         replacement: &str,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 }
 
 /// The job's checkout, the working directory.
@@ -509,7 +514,7 @@ impl Workspace for Checkout {
         branch: &str,
         original: &str,
         replacement: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         super::replacement::push(Path::new("."), remote, branch, original, replacement)
     }
 }
@@ -521,6 +526,8 @@ pub(super) struct Decided {
     pub output: Js,
     /// skipped.json's entries.
     pub skipped: Vec<Js>,
+    /// The replacement series pushed here, for safe-output-items.jsonl.
+    pub made: Vec<Js>,
 }
 
 /// The run the guard works for.
@@ -689,7 +696,7 @@ impl Guard<'_> {
                 js_string(config.get("target"))
             )
         };
-        let (mut kept, mut skipped) = (Vec::new(), Vec::new());
+        let (mut kept, mut skipped, mut made) = (Vec::new(), Vec::new(), Vec::new());
         for (index, item) in items.iter().enumerate() {
             let kind = item.get("type").and_then(Js::as_str).unwrap_or_default();
             if kind == PUSH_TO_PULL_REQUEST_BRANCH {
@@ -697,27 +704,36 @@ impl Guard<'_> {
                 let config = read_js(&args.dir.join("config.json"))?;
                 let config = config.get(PUSH_TO_PULL_REQUEST_BRANCH).unwrap_or(&Js::Null);
                 let head = config.get("head").and_then(Js::as_str);
-                let applied = if truthy(report.get("patch").and_then(|p| p.get("commit_files"))) {
-                    self.workspace.push_replacement(
+                let entry = Js::of(&[
+                    ("type", Js::String(kind.to_owned())),
+                    ("url", Js::String(pull_url(config))),
+                ]);
+                if truthy(report.get("patch").and_then(|p| p.get("commit_files"))) {
+                    // Made only if pushed now: a branch already at the
+                    // rebuilt head is an earlier attempt's push.
+                    ensure!(
+                        args.made.is_some(),
+                        "a replacement series is to be pushed, and --made names no file to record it in"
+                    );
+                    let pushed = self.workspace.push_replacement(
                         &format!("{GITHUB}/{}", args.fork),
                         &args.base,
                         head.unwrap_or_default(),
                         &args.replacement_head,
                     )?;
-                    true
-                } else {
-                    // The fork was checked and fetched before the trial.
-                    // Like the post-push check, require exactly one parent
-                    // and the checked tree: an unrelated advance is not
-                    // applied.
-                    let (parents, tree) = self.workspace.fetched()?;
-                    head == Some(parents.as_str()) && tree == args.tree
-                };
-                if applied {
-                    skipped.push(Js::of(&[
-                        ("type", Js::String(kind.to_owned())),
-                        ("url", Js::String(pull_url(config))),
-                    ]));
+                    if pushed {
+                        made.push(entry);
+                    } else {
+                        skipped.push(entry);
+                    }
+                    continue;
+                }
+                // The fork was checked and fetched before the trial. Like
+                // the post-push check, require exactly one parent and the
+                // checked tree: an unrelated advance is not applied.
+                let (parents, tree) = self.workspace.fetched()?;
+                if head == Some(parents.as_str()) && tree == args.tree {
+                    skipped.push(entry);
                 } else {
                     kept.push(item.clone());
                 }
@@ -760,6 +776,7 @@ impl Guard<'_> {
         Ok(Decided {
             output: document,
             skipped,
+            made,
         })
     }
 
@@ -986,6 +1003,18 @@ fn guard(args: &Args) -> Result<()> {
         "skipped.json",
         Js::Array(decided.skipped.clone()).stringify(),
     )?;
+    // decide refuses a replacement series without --made before pushing.
+    if let Some(path) = args.made.as_ref().filter(|_| !decided.made.is_empty()) {
+        let mut made = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        for entry in &decided.made {
+            writeln!(made, "{}", entry.stringify())
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
+    }
     if !decided.skipped.is_empty() {
         append("GITHUB_STEP_SUMMARY", &summary(&decided.skipped))?;
     }
@@ -1031,6 +1060,10 @@ mod tests {
         /// The trial's tree.
         checked_tree: &'static str,
         replacement: bool,
+        /// Whether an earlier attempt pushed the replacement series.
+        already_pushed: bool,
+        /// Whether `--made` names a file.
+        made: bool,
         item_repo: &'static str,
         /// The issues and pull requests that are open.
         open: Vec<u64>,
@@ -1056,6 +1089,8 @@ mod tests {
                 tree: "checked",
                 checked_tree: "checked",
                 replacement: false,
+                already_pushed: false,
+                made: true,
                 item_repo: "owner/repo",
                 open: Vec::new(),
                 issue_data: Vec::new(),
@@ -1076,6 +1111,8 @@ mod tests {
     struct Fake {
         parents: String,
         tree: String,
+        /// Whether the branch is already at the replacement head.
+        already_pushed: bool,
         pushes: RefCell<Vec<[String; 4]>>,
     }
 
@@ -1090,11 +1127,11 @@ mod tests {
             branch: &str,
             original: &str,
             replacement: &str,
-        ) -> Result<()> {
+        ) -> Result<bool> {
             self.pushes
                 .borrow_mut()
                 .push([remote, branch, original, replacement].map(str::to_owned));
-            Ok(())
+            Ok(!self.already_pushed)
         }
     }
 
@@ -1102,6 +1139,7 @@ mod tests {
     struct Outcome {
         kept: Vec<Value>,
         skipped: Vec<Value>,
+        made: Vec<Value>,
         outputs: Vec<(String, String)>,
         summary: String,
         /// What was asked of the forge, as `kind detail`.
@@ -1284,6 +1322,7 @@ mod tests {
         let args = Args {
             dir: dir.path().to_owned(),
             report: dir.path().join("report.json"),
+            made: o.made.then(|| dir.path().join("safe-output-items.jsonl")),
             output_repo: "owner/repo".into(),
             repo: "owner/source".into(),
             item_repo: o.item_repo.into(),
@@ -1299,6 +1338,7 @@ mod tests {
         let workspace = Fake {
             parents: o.parents.into(),
             tree: o.tree.into(),
+            already_pushed: o.already_pushed,
             pushes: RefCell::default(),
         };
         let me = identity(&github, o.pat);
@@ -1334,6 +1374,7 @@ mod tests {
         Ok(Outcome {
             kept: kept.iter().map(Js::to_value).collect(),
             skipped: decided.skipped.iter().map(Js::to_value).collect(),
+            made: decided.made.iter().map(Js::to_value).collect(),
             outputs,
             summary,
             queries,
@@ -1547,28 +1588,42 @@ mod tests {
     #[test]
     fn a_replacement_is_pushed_with_the_leased_applier_and_never_reaches_the_handler() {
         let item = json!({"type": "push_to_pull_request_branch", "branch": "agent-run-7"});
-        let options = Options {
+        let entry = json!({"type": "push_to_pull_request_branch", "url": "https://github.com/owner/repo/pull/42"});
+        // A series pushed over an earlier run's head is made, not found
+        // applied; only a re-run's own series already there is.
+        for already_pushed in [false, true] {
+            let options = Options {
+                replacement: true,
+                already_pushed,
+                ..Options::default()
+            };
+            let result = ok(std::slice::from_ref(&item), &[], &options);
+            assert_eq!(
+                result.pushes,
+                [[
+                    "https://github.com/bot/repo",
+                    "agent-run-7",
+                    "head",
+                    "replacement-head"
+                ]
+                .map(str::to_owned)]
+            );
+            assert_eq!(result.kept, Vec::<Value>::new());
+            let (made, skipped) = if already_pushed {
+                (vec![], vec![entry.clone()])
+            } else {
+                (vec![entry.clone()], vec![])
+            };
+            assert_eq!(result.made, made, "{already_pushed}");
+            assert_eq!(result.skipped, skipped, "{already_pushed}");
+        }
+        // With nowhere to record it, nothing is pushed.
+        let unrecorded = Options {
             replacement: true,
+            made: false,
             ..Options::default()
         };
-        let result = ok(&[item], &[], &options);
-        assert_eq!(
-            result.pushes,
-            [[
-                "https://github.com/bot/repo",
-                "agent-run-7",
-                "head",
-                "replacement-head"
-            ]
-            .map(str::to_owned)]
-        );
-        assert_eq!(result.kept, Vec::<Value>::new());
-        assert_eq!(
-            result.skipped,
-            [
-                json!({"type": "push_to_pull_request_branch", "url": "https://github.com/owner/repo/pull/42"})
-            ]
-        );
+        assert!(refusal(&[item], &[], &unrecorded).contains("--made names no file"));
     }
 
     #[test]

@@ -63,7 +63,11 @@ fn finish(args: &Args, transition: impl FnOnce(&str, u64, bool) -> Result<Value>
             .as_array()
             .is_some_and(|items| items.iter().any(|item| item["type"] == PUSH))
     };
-    if !pushed(&outputs["items"]) && !pushed(&applied["already_applied"]) {
+    if !["made", "already_applied"]
+        .iter()
+        .any(|key| pushed(&applied[*key]))
+        && !pushed(&outputs["items"])
+    {
         return Ok(());
     }
     let target = config[PUSH]["target"]
@@ -246,13 +250,19 @@ mod tests {
 
     #[test]
     fn readiness_is_off_without_opt_in_or_a_push() {
-        for (opted, pushed, already) in [
-            (false, true, false),
-            (true, false, false),
-            (true, false, true),
+        // A replacement series never reaches the handler: the guard
+        // records it as made, or as applied by an earlier attempt.
+        for (opted, pushed, recorded) in [
+            (false, true, None),
+            (true, false, None),
+            (true, false, Some("already_applied")),
+            (true, false, Some("made")),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let applied = json!({"already_applied": if already { vec![json!({"type": PUSH})] } else { vec![] }});
+            let mut applied = json!({"made": [], "already_applied": []});
+            if let Some(key) = recorded {
+                applied[key] = json!([{"type": PUSH}]);
+            }
             for (name, value) in [
                 (
                     "config.json",
@@ -279,7 +289,7 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(called, opted && already);
+            assert_eq!(called, opted && recorded.is_some(), "{recorded:?}");
         }
     }
 }

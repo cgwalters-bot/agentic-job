@@ -230,13 +230,14 @@ fn apply_series(mails: &[&str], checked: &[Vec<&str>], temp: &Path, dir: &Path) 
 /// Pushes `replacement` over `branch` with a lease on the pinned head. A
 /// branch already at `replacement` is this series pushed by an earlier
 /// attempt; any other head, the same tree included, is a concurrent write.
+/// Returns whether this call pushed, false for a branch already there.
 pub fn push(
     repo: &Path,
     remote: &str,
     branch: &str,
     original: &str,
     replacement: &str,
-) -> Result<()> {
+) -> Result<bool> {
     ensure!(
         COMMIT_RE.is_match(original) && COMMIT_RE.is_match(replacement),
         "Invalid replacement heads"
@@ -249,7 +250,7 @@ pub fn push(
     };
     let head = current(repo)?;
     if head == replacement {
-        return Ok(());
+        return Ok(false);
     }
     ensure!(
         head == original,
@@ -268,7 +269,7 @@ pub fn push(
         current(repo)? == replacement,
         "Replacement head was not pushed"
     );
-    Ok(())
+    Ok(true)
 }
 
 /// Runs git in REPO without hooks, signing or the machine's and user's
@@ -488,9 +489,14 @@ mod tests {
         }
 
         let pushed = || run(Path::new(remote), &["rev-parse", "refs/heads/agent-run-1"]);
-        push(&repo, remote, "agent-run-1", &original, &first.head).unwrap();
-        push(&repo, remote, "agent-run-1", &original, &first.head).unwrap();
+        // A re-run finds its own series there and pushes nothing.
+        assert!(push(&repo, remote, "agent-run-1", &original, &first.head).unwrap());
+        assert!(!push(&repo, remote, "agent-run-1", &original, &first.head).unwrap());
         assert_eq!(pushed(), first.head);
+        // A later run's series over it is pushed, not found applied.
+        assert!(push(&repo, remote, "agent-run-1", &first.head, &two.head).unwrap());
+        assert!(!push(&repo, remote, "agent-run-1", &first.head, &two.head).unwrap());
+        assert_eq!(pushed(), two.head);
         // Another head, whatever its tree, is a concurrent write.
         run(
             &repo,

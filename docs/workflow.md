@@ -1994,7 +1994,8 @@ day. `applied.json` names what the apply job made:
  "pull_request": {"number": 12, "url": "..."}, "handlers": {}}
 ```
 
-`made` is gh-aw's own list. `pull_request` is null when none was opened,
+`made` is gh-aw's own list, plus a replacement series the guard pushed
+itself (`type` and the pull request's `url`). `pull_request` is null when none was opened,
 and `refused` then says whether the forge refused it to Actions after
 the branch was pushed; nothing in `made` stands for it then.
 `already_applied` lists what an earlier attempt of the job had posted
@@ -2104,7 +2105,10 @@ A push to a pull request's branch uses the same guard, summary and
 `already_applied` list, but needs no new marker. If the fetched fork branch
 already holds exactly one commit on the policy's pinned head with the tree
 the patch trial checked, the guard leaves out that push and succeeds without
-pushing. Other outputs keep their original positions for their hidden markers.
+pushing. A replacement series the guard pushes with a lease counts as
+applied only if the branch is already at the rebuilt head; one it pushes
+over another head, such as an earlier run's, is listed in `made`.
+Other outputs keep their original positions for their hidden markers.
 The final step fetches and verifies that branch again, including a skipped
 push; unrelated branch advances and merge commits do not count as applied.
 

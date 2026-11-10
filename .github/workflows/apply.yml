@@ -623,7 +623,9 @@ jobs:
       # step's: it refuses a close_issue naming a pull request or a
       # transferred issue, a reply off the run's pull request and a pull
       # request without a fork before writing anything, and pushes a
-      # replacement series itself, as `agentic-job replacement push` does.
+      # replacement series itself, as `agentic-job replacement push` does,
+      # recording it in $MADE, or as already applied if the branch was
+      # already at the rebuilt head.
       - name: Leave out what an earlier attempt applied
         id: applied
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
@@ -641,7 +643,7 @@ jobs:
           REPLACEMENT_HEAD: ${{ steps.trial.outputs.head }}
         run: |
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
-          "$RUNNER_TEMP/apply-binary/agentic-job" applied --dir "$GH_AW_TMP" --report "$REPORT" \
+          "$RUNNER_TEMP/apply-binary/agentic-job" applied --dir "$GH_AW_TMP" --report "$REPORT" --made "$MADE" \
             --output-repo "$OUTPUT_REPO" --repo "$REPO" --item-repo "$ITEM_REPO" --comment-target "$COMMENT_TARGET" \
             --branch-prefix "$BRANCH_PREFIX" --artifact-prefix "$ARTIFACT_PREFIX" --fork "$FORK" --base "$BASE" \
             --tree "$TREE" --replacement-head "$REPLACEMENT_HEAD" --token-is-pat "$TOKEN_IS_PAT"
@@ -1006,7 +1008,7 @@ jobs:
           # branch itself, in the fork, has to hold the commit, on the head
           # it was for.
           if jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
-             jq -e 'any(.already_applied[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/applied.json" > /dev/null; then
+             jq -e 'any((.made + .already_applied)[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/applied.json" > /dev/null; then
             head=$(jq -r '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
             git fetch --no-tags "https://github.com/$FORK" "+refs/heads/$BASE:refs/agentic-job/pushed"
             if [ -n "$REPLACEMENT_HEAD" ]; then

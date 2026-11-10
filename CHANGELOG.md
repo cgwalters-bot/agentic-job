@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Apply lists a replacement series it pushed to a pull request's branch
+  under `made` in `applied.json`, not under `already_applied`, which now
+  holds it only when an earlier attempt had pushed that same head (#3322).
+
 - A run may hand back repeated-test evidence beside a pull request's
   patch, where the bounds' new `[github.test_evidence]` allows it (off by
   default). The evidence is `out/test-evidence.json` and one log per

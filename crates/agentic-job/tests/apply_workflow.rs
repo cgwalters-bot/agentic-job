@@ -506,7 +506,9 @@ fn pushed_branch_is_one_commit_on_pinned_head_with_checked_tree() {
         ("moved", true, 0),
         ("pushed", true, 1),
     ] {
-        for skipped in [false, true] {
+        // Pushed by the handler, or recorded by the guard as an earlier
+        // attempt's push or a replacement series it pushed itself.
+        for recorded in [None, Some("already_applied"), Some("made")] {
             let dir = TempDir::new().unwrap();
             let root = dir.path();
             let fork = root.join("fork.git");
@@ -567,13 +569,14 @@ fn pushed_branch_is_one_commit_on_pinned_head_with_checked_tree() {
             json_file(
                 &tmp,
                 "agent_output.json",
-                &json!({"items":if skipped {json!([])} else {json!([push])}}),
+                &json!({"items":if recorded.is_some() {json!([])} else {json!([push])}}),
             );
-            json_file(
-                &tmp,
-                "applied.json",
-                &json!({"pull_request":null,"refused":false,"already_applied":if skipped {json!([push])} else {json!([])}}),
-            );
+            let mut applied =
+                json!({"pull_request":null,"refused":false,"made":[],"already_applied":[]});
+            if let Some(key) = recorded {
+                applied[key] = json!([push]);
+            }
+            json_file(&tmp, "applied.json", &applied);
             let out = run_step(
                 &work,
                 "Every output was applied",
@@ -603,7 +606,7 @@ fn pushed_branch_is_one_commit_on_pinned_head_with_checked_tree() {
                     } else {
                         "agent-run-12 of bot/repo does not hold the checked change as one commit on"
                     }),
-                    "{tip} skipped={skipped}: {}",
+                    "{tip} recorded={recorded:?}: {}",
                     text(&out)
                 );
             }
