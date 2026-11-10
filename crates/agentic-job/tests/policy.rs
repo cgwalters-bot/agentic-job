@@ -397,21 +397,15 @@ fn documented_proposals_request_fits_shipped_and_small_bounds() {
     }
 }
 
-/// The README's "Try it" caller and bounds, as the policy job would take
+/// The getting-started caller and bounds, as the policy job would take
 /// them: its request fits its bounds, and its configuration, read from
 /// this source as `config` names it, composes with the scripted agent's
 /// inputs, while the default request cap is refused without a broker.
 #[test]
-fn readme_caller_fits_its_bounds_and_configuration() {
+fn try_it_caller_fits_its_bounds_and_configuration() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
-    let section = readme
-        .split("## Try it\n")
-        .nth(1)
-        .unwrap()
-        .split("\n## ")
-        .next()
-        .unwrap();
+    let guide = std::fs::read_to_string(root.join("docs/try-it.md")).unwrap();
+    let section = guide.as_str();
     let block = |fence: &str| {
         section
             .split(fence)

@@ -120,9 +120,9 @@ contains no secret.
 | `[setup]` | `packages`, `npm`, `agents` (pinned in the binary), and a `script` for toolchains; optional `tools` for a caller-pinned installer ([toolchains](dispatch.md#giving-runs-a-toolchain)); `repo-packages` only in a file given to `agentic-job config`, which adds the `--repo` entry to `packages` |
 | `[inference]` | `url`; `register`, one of `github-oidc`, `plain` and `token-file`, with no default; `audience`; `token-file`; `identity-proxy`; `anthropic-url` and `openai-url` |
 | `[agent]` | `name`, `model`, and `config-repo`, `config-ref`, `config-path` for a public repository holding its configuration; `skills` to install the built-in [skills](skills.md) |
-| `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` and a sandbox user (`run --runner-home` refuses it) |
+| `[child-agent]` | Legacy configuration for `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent); current `run` refuses it because there is no second user |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped`; `max-repeats` ([repeated tool calls](harness.md#limits), off by default) |
-| `[mcp.NAME]` | `url`, `secret` (only `MCP_TOKEN`) and `allowed` of one remote [MCP server](mcp.md) `run` serves the agent with a credential it never holds |
+| `[mcp.NAME]` | Legacy configuration for `url`, `secret` (only `MCP_TOKEN`) and `allowed` of a remote [MCP server](mcp.md); current `run` refuses it because the same-UID agent could read its credential |
 | `[session]` | `listen`, `operators`, `origins`, `capability` (a Tailscale app capability that lets tagged nodes in) and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default); `nudges` for [nudges on the clock](harness.md#nudges-on-the-clock) (off by default) |
 | `[commit]` | `author` and `trailers` of the hand-back's commit; a bounds file's `commit_author` ([safe outputs](safe-outputs.md#the-bounds-and-the-policy)) takes the place of `author`; `format` to format the agent's Rust first ([off by default](safe-outputs.md#what-the-agent-does)) |
 

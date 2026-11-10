@@ -2946,14 +2946,14 @@ fn a_compaction_has_the_task_restated() {
 /// one that left its session and process group does, since the agent is
 /// this user and nothing kills every process of it (agentic-job#2989).
 ///
-/// The second tool call waits until its process has left: `$!` is known
-/// before the child has called setsid, and a session that ended in
-/// between killed it with the group it was still in.
+/// The detached shell publishes its own PID after setsid, then answers a
+/// probe created only after the session ends. `/proc` may hide a process
+/// outside this session, and `kill -0` alone would also accept a zombie.
 #[test]
 fn only_the_agents_group_is_stopped() {
     const STRAYS: &str = r#"[
       {"execute": {"title": "Bash", "command": "sleep 600 >/dev/null 2>&1 </dev/null & echo $! > stray"}},
-      {"execute": {"title": "Bash", "command": "setsid sleep 600 >/dev/null 2>&1 </dev/null & echo $! > escaped; for try in $(seq 200); do [ \"$(ps -o sid= -p $! | tr -d ' ')\" != \"$!\" ] || break; sleep 0.05; done"}},
+      {"execute": {"title": "Bash", "command": "setsid sh -c 'echo $$ > escaped; for try in $(seq 600); do if [ -e probe ]; then echo alive > alive; exec sleep 600; fi; sleep 0.05; done' >/dev/null 2>&1 </dev/null & for try in $(seq 200); do [ ! -s escaped ] || exit 0; sleep 0.05; done; exit 1"}},
       {"say": "Left two behind."}
     ]"#;
     let r = run(
@@ -2970,18 +2970,25 @@ fn only_the_agents_group_is_stopped() {
         let text = std::fs::read_to_string(r.path("work").join(name)).unwrap();
         text.trim().parse().unwrap()
     };
-    assert!(
-        !session::process::is_running(pid("stray")),
-        "the background process survived"
-    );
     let escaped = pid("escaped");
-    assert!(
-        session::process::is_running(escaped),
-        "the process that left its session was killed with the group"
-    );
+    let stray_survived = session::process::is_running(pid("stray"));
+    std::fs::write(r.path("work").join("probe"), "probe").unwrap();
+    let alive = r.path("work").join("alive");
+    for _ in 0..200 {
+        if alive.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Clean up before either assertion, including when the probe failed.
     let _ = Command::new("kill")
         .args(["-KILL", &escaped.to_string()])
         .status();
+    assert!(!stray_survived, "the background process survived");
+    assert!(
+        alive.exists(),
+        "the process that left its session did not answer after group cleanup"
+    );
 }
 
 /// What the agent says that the client must not see.

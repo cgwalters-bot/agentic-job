@@ -27,7 +27,7 @@ replaces that tree, even when the option is off or no configuration
 repository is specified. Other harnesses' directories are left alone. Embedded
 procedures win over source files at the same paths.
 
-To use agenthome's skills, set `agent.config-repo` (or the caller's
+To use skills from a configuration repository, set `agent.config-repo` (or the caller's
 `AGENT_CONFIG_REPO` repository variable) to the configuration repository
 that owns them, enable skills, and name the skill in the task, for example
 "Use the ast-explore skill to investigate this issue." No repository names
@@ -44,9 +44,9 @@ It reads committed Git blobs rather than following checkout links. These
 checks prevent a source tree from redirecting file reads or destination
 paths; they do not make skill instructions trustworthy. Do not put secrets
 or arbitrary configuration in that tree. Tool installation is separate:
-this does not execute agenthome's `install-tools` step or skill scripts.
+this does not execute a caller's tool installer or skill scripts.
 
-The [dispatch caller](dispatch.md) turns it on for `implement` with
+For example, the shipped [dispatch caller](dispatch.md) turns it on for `implement` with
 `claude`, `opencode` or `vibe`, and its task then names the skill ("Use the
 implement skill") in place of the procedure. Other profiles and agents keep the
 prompt they had. The review caller does not use it yet: its standing task
@@ -54,8 +54,8 @@ is still passed as the task.
 
 ## Where each agent reads them
 
-The binary embeds the files and `run` writes them, as the sandbox user,
-into that user's home:
+The binary embeds the files and `run` writes them into the agent's home,
+as the runner's user:
 
 | Agent | Skills | Subagents | Source read |
 | --- | --- | --- | --- |

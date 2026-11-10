@@ -307,7 +307,7 @@ changing who decides takes the owner:
 /.github/CODEOWNERS @OWNER
 ```
 
-For this repository the owner is `@cgwalters`: the person, since an
+For example, for this repository the owner is `@cgwalters`: the person, since an
 organization cannot be a code owner, and not the `cgwalters-bot` account
 automation acts as, since the rule holds nothing if automation can approve as
 the code owner. The owner adds the file, as check refuses it from any run, and
@@ -448,7 +448,7 @@ A review on every push spends whatever model the variables name, out of
 sight of the scheduler that paces every other run by pool: on 28 October
 about 95 reviews took one subscription to 79% of its weekly limit
 ([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
-agent-board's pass can start reviews itself instead
+For example, agent-board's pass can start reviews itself instead
 ([its `pr.reviewPools`](https://github.com/cgwalters-forge/agent-board/blob/main/docs/pass.md#reviews)),
 by dispatching `review.yml` on the default branch with three string
 inputs:
@@ -502,7 +502,7 @@ never enters the group.
 
 Dispatching reviews saves nothing while each push still starts one. With
 the repository variable `REVIEW_RECORD_ONLY`, a JSON array of user ids
-(unset is off; agent-board's bot, `cgwalters-bot`, is `[17814078]`), a
+(unset is off; for example, `[12345]`), a
 `pull_request_target` event for a pull request from a fork by one of those
 authors runs the policy job as before, tries a
 [carried approval](#carried-approvals) on a `synchronize` whether or not
@@ -517,6 +517,9 @@ pull requests, a pull request from a branch of the repository itself and
 `/review` keep their review on the event.
 
 ### Rollout
+
+**Caller-specific example:** the tracker/actions integration below illustrates
+coordinated rollout; other schedulers supply their own configuration.
 
 Turning this on changes who starts reviews, so the pieces move together;
 nothing here enables it:
@@ -537,6 +540,9 @@ Reporting what reviews spend next to dispatches remains
 ([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
 
 ## Draft classifier reviews
+
+**Caller-specific example:** this section describes agent-board's classifier
+contract, not a required coordinator or setup for agentic-job.
 
 agent-board's pass can sort its draft pull requests into quick and deep
 by a review's classification

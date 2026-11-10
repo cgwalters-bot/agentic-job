@@ -234,7 +234,7 @@ changes what the broker has to admit
 with passwordless sudo initially and systemd 257+, Node and apt-get or dnf;
 see [runner requirements](workflow.md#what-a-caller-provides).
 
-Configure the [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker) to verify GitHub identity tokens with the chosen audience
+Configure your inference broker to verify GitHub identity tokens with the chosen audience
 and admit the caller repository. Confirm registration and per-run budgets
 before real tasks. No model API key goes on the runner. Narrowing broker
 admission to a specific caller remains optional hardening tracked in
@@ -516,6 +516,9 @@ another repository. A misled run's closes are undone by reopening, and each
 says why on the issue.
 
 ## External VM runner to midstream draft
+
+**Caller-specific design example:** the named repositories and settings in this
+section illustrate one proposed deployment, not generic setup requirements.
 
 This is the contract for running a job's agent and check stages on separate
 VM-capable infrastructure while a trusted apply job in `cgwalters-forge`
@@ -980,6 +983,9 @@ a KVM-capable host boots and destroys a minimal guest, one run matches its
 runtime proof has run here.
 
 ## Forgejo Actions caller
+
+This is a caller-specific integration example with agent-board, not a
+requirement for adopting agentic-job.
 
 [workflow/forgejo/dispatch.yml](../workflow/forgejo/dispatch.yml) is the
 caller agent-board's Forgejo dispatch starts; a caller copies it to

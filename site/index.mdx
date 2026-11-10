@@ -11,7 +11,7 @@ hero:
   # body's are: they are relative to this page, the root of the site.
   actions:
     - text: Get started
-      link: overview/#try-it
+      link: docs/try-it/
       icon: right-arrow
     - text: How it works
       link: docs/workflow/
@@ -56,7 +56,7 @@ your tokens. agentic-job gives all three the same defence.
 ## Try it in a workflow
 
 Any job can harden its runner with one step, as in the
-[README](../README.md#core-features); pin `COMMIT` to a commit you have
+[host guide](../docs/secure-host.md#example-harden-a-deterministic-job); pin `COMMIT` to a commit you have
 read. Everything that needs root goes before it.
 
 ```yaml
@@ -87,6 +87,6 @@ write ordinary workflow YAML with no compiler.
 
 ## Read more
 
-- [Quickstart](../README.md#try-it): a first run with the scripted agent, no model needed.
+- [Quickstart](../docs/try-it.md): a first run with the scripted agent, no model needed.
 - [Running it on GitHub](../docs/workflow.md): the reusable workflow, its jobs and tokens.
 - [Inference through a proxy](../docs/inference.md): reaching a model without holding its key.

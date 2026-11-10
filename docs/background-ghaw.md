@@ -84,10 +84,9 @@ host, and keeps rootless podman and host KVM. Under the reusable workflow,
 secure-host first removes general root access and the metadata service,
 and the agent then runs as the runner's user. That job holds nothing the
 agent may not read: read-only permissions, no `id-token` and no secret but
-the run token ([workflow.md](workflow.md)). The CLI's `run` without
-`--runner-home` instead runs the agent as a second Unix user, with nftables
-rules keyed on that user's uid ([sandbox.md](sandbox.md)); the reusable
-workflow does not offer that mode. `[egress] write-policy`, off by default,
+the run token ([workflow.md](workflow.md)). The CLI requires `--runner-home`
+and runs the agent as its own user too; the second-user mode was removed
+([sandbox.md](sandbox.md)). `[egress] write-policy`, off by default,
 holds the runner's user to the same egress policy
 ([egress write policy](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#egress-write-policy-opt-in)).
 Egress goes through the binary's own Rust proxy
@@ -99,10 +98,9 @@ domain allowlist is opt-in: `mode = "allowlist"`
 
 gh-aw runs on private repositories as on public ones. Here runs are
 public-only, and the reusable workflow refuses a private target or caller
-whatever the bounds say. An agent job of the caller's own, with a second
-user, can opt in through every bounds file. It then also needs the
-allowlist, may target only the caller's own repository, and hands back no
-patch ([private repositories](private-repositories.md)).
+whatever the bounds say. Standalone `run` also refuses a private target:
+the policy's legacy private opt-in does not bypass the runner-only launch
+refusal ([private repositories](private-repositories.md)).
 
 Under the reusable workflow the model key never reaches the runner: it
 stays with a broker on another machine. A `register` job of its own

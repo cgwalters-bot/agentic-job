@@ -123,8 +123,8 @@ private target only if all of these hold, each checked where it is enforced:
 
 One condition cannot be checked: **the runner's own logs must not be public.**
 Use a runner whose provisioning and diagnostic logs only the repository's
-audience can read, such as the caller's own. Some providers, including
-bootc-dev's devspace runners, publish theirs. The runner is a workflow input,
+audience can read, such as the caller's own. Some providers publish theirs.
+The runner is a workflow input,
 so a caller that opts in should not let a dispatcher choose it. Inference
 access and retention are likewise the caller's decision.
 
@@ -134,6 +134,8 @@ input a dispatcher can set. BPF host evidence and release binaries improve other
 boundaries; they do not make a private run safe on their own.
 
 ## A reference caller
+
+**Legacy example only:** this fixture is not supported private-run setup.
 
 [`.github/agentic-job/private-digest/`](../.github/agentic-job/private-digest/workflow.yml)
 composes the conditions above for one job: a digest posted as one comment on

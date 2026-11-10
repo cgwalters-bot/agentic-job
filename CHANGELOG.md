@@ -13,6 +13,9 @@ says what a caller may rely on across versions.
   to accept own-branch pushes by repository pattern, alongside the existing
   per-repository opt-in file (#3402). The default remains off.
 
+- The README is now a short introduction linking to the topic guides;
+  the getting-started walkthrough lives in `docs/try-it.md` (#3375).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

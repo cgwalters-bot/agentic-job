@@ -4,8 +4,13 @@
 
 The sandbox, ACP harness, output checks and reusable workflow exist.
 Real-agent runs and calls from another repository have happened, as
-reported in the [README](../README.md#what-is-real-today). They are not
+reported in the [workflow guide](workflow.md#what-has-run-and-what-has-not). They are not
 evidence that every runner image or caller configuration works.
+
+**Caller-specific examples:** the named external repositories, rollout settings
+and historical audits below record this project's deployments and planning.
+They are not required setup for adopters; agentic-job takes repository identities
+and policy from each caller's configuration.
 
 The 1.0 bar is
 [tracker#596](https://github.com/cgwalters-forge/tracker/issues/596):

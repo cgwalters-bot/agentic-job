@@ -22,6 +22,26 @@ job uses the action, and where the binary and image come from. Those
 documents describe the pinned image, which can lag this repository's
 main branch. They cover later host changes when the pin moves.
 
+## Example: harden a deterministic job
+
+Everything that needs root runs before the hardening step. Replace `COMMIT`
+with a reviewed pin:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    steps:
+      - run: sudo apt-get install -y libfoo-dev   # root: before the step
+      - uses: actions/checkout@v7
+      - uses: cgwalters-forge/actions/secure-host@COMMIT
+      - run: make check                           # runner's user, no sudo
+```
+
+Losing root does not hide the job's tokens from later steps. The reusable
+workflow keeps write credentials in separate jobs
+([token boundaries](workflow.md#which-tokens-reach-what)).
+
 ## The public action forwards to cgwalters-forge/actions/secure-host
 
 [`secure-host/action.yml`](../secure-host/action.yml) forwards to

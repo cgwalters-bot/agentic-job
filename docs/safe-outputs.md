@@ -1017,7 +1017,7 @@ with no per-repository entry, where the push's bound names that account:
 [github.outputs.push_to_pull_request_branch]
 max = 1
 branches = ["agent-run-*", "dispatch/**"]
-own_author = "cgwalters-bot"
+own_author = "example-bot"
 ```
 
 Off by default and supported only on GitHub; Forgejo and GitLab bounds
@@ -1755,7 +1755,7 @@ prints too.
 CI drives `collect` and the handlers with the scripted agent, and
 [`safe-outputs-probe.yml`](../.github/workflows/safe-outputs-probe.yml)
 drives gh-aw's own collector and handlers on two fixtures when dispatched. Deployment evidence is in the
-[README](../README.md#what-is-real-today).
+[workflow guide](workflow.md#what-has-run-and-what-has-not).
 
 ### The publication corpus
 

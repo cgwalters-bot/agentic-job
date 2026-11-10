@@ -12,7 +12,7 @@ join ([interactive.md](interactive.md)). Where its code sits and what
 it is handed is in [layout.md](layout.md#the-session).
 
 CI drives the scripted `fake` agent. Real-agent deployment evidence is
-reported in the [README](../README.md#what-is-real-today); configuration
+reported in the [workflow guide](workflow.md#what-has-run-and-what-has-not); configuration
 unit tests alone do not show that an adapter works.
 
 ## What it does

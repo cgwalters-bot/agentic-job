@@ -10,7 +10,8 @@ reintroduce them. Standalone host extraction stays with
 [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070), reference draft
 [#2642](https://github.com/cgwalters-forge/agentic-job/pull/2642), and publication
 follow-up [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656).
-There is no standalone secure-host binary target in this checkout yet.
+The standalone `secure-host` binary target exists in this checkout;
+released-image adoption is separate from the source implementation.
 Commands, configuration and exit states
 are in [interface.md](interface.md); deployment is in [workflow.md](workflow.md).
 
@@ -29,8 +30,7 @@ The split is under way ([#1623](https://github.com/cgwalters-forge/agentic-job/i
 So far it holds bounded file reads (`files.rs`), host users and the
 programs root may run (`host.rs`), the network rules (`network.rs`), the
 egress proxy's setup and the proxy itself (`egress.rs`, `proxy/`) with
-the `[egress]` table (`config.rs`), the mount view (`view.rs`), the
-probe of reachable listeners (`local.rs`), the platform, apt and
+the `[egress]` table (`config.rs`), the platform, apt and
 world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`), the
 Worker-diagnostics rule (`worker_diagnostics.rs`), and the privileged
 seam: the helper's fixed operations (`helper.rs`), how the runner's
@@ -259,3 +259,9 @@ Markdown linting and offline links, proxy tests and release-pin checks (one
 `lint` job), static builds, sandbox mutation tests and scripted-agent E2E runs. The `ci` job
 gathers their results. Host tests need disposable runners with root and
 systemd 257; they are not safe to run on a workstation.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](../LICENSE-APACHE)
+or [MIT license](../LICENSE-MIT) at your option. User-visible changes are
+recorded in the [changelog](../CHANGELOG.md).

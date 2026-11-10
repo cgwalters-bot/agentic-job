@@ -288,14 +288,14 @@ Shell-tool working directory persistence is agent-specific; use relative paths
 from the initial root rather than assuming a `cd` in one tool call changes later
 calls.
 
-The tracker dispatcher, external workflow wrapper and agent-board plan schema
-must forward this input separately; they are not changed here.
+External dispatchers, workflow wrappers and job-plan schemas must forward this
+input separately; they are not changed here.
 
 ## External execution and trusted midstream publication
 
 The [external VM-runner contract](dispatch.md#external-vm-runner-to-midstream-draft)
 separates execution location from publication target: an external deployment
-such as the bootc-dev devspace runs agent and isolated check stages without
+using disposable VM runners runs agent and isolated check stages without
 forge-write credentials. The trusted caller
 [correlates](dispatch.md#correlating-a-dispatch-with-its-external-run) its
 dispatch with exactly one external run attempt, then hands that run's raw
@@ -346,7 +346,7 @@ The jobs of a caller, with a privileged step before the agent and a step
 after it, inside a workflow declaring string inputs `item`, `task` and
 `repo`. Here `item` is an existing issue number in `repo`, which is also
 the calling repository. The bounds must allow `analysis` and
-`add_comment,noop`, as the shipped bounds do; the README's minimal
+`add_comment,noop`, as the shipped bounds do; the [Try it](try-it.md) guide's minimal
 pull-request-only bounds do not. `example-org/network-join` stands in for whichever action
 of yours needs root, pinned by commit. The agent is the runner's user,
 so this job holds no `id-token`, and it runs the scripted agent, which
@@ -667,6 +667,10 @@ calls too, is open work (#1842).
 ## What has run, and what has not
 
 Read this before relying on it.
+
+**Deployment examples, not adopter setup:** the named caller repositories and
+runner fleets below are historical evidence for particular configurations.
+No caller-specific repository, account or network is required by agentic-job.
 
 - The branch pipeline runs in this repository's CI on same-repository pull requests, twice,
   with the scripted agent (`fake`): once to the end, and once stopped at
@@ -1001,7 +1005,7 @@ and the apply environment token described below, not the job token.
 
 [`.github/workflows/example.yml`](../.github/workflows/example.yml) is a
 complete one, for the scripted agent, started by hand; the
-[README](../README.md#try-it) has the same caller written for another
+[Try it](try-it.md) has the same caller written for another
 repository. Copy it and `.github/agentic-job/allow.toml` to the same paths.
 Either copy `.github/agentic-job/hosted.toml` too, or set `config` to
 `.agentic-job-source/.github/agentic-job/hosted.toml`, which the workflow
@@ -1139,7 +1143,7 @@ it does not restart their broader reviews. Source checked on main at
 | In order | Source and local check | What still needs live evidence |
 | --- | --- | --- |
 | Choose the workflow and host | [v0.6.4 workflow](https://github.com/cgwalters-forge/agentic-job/blob/732db8c24295ee8d4a79de19f588e6f871d35fe0/.github/workflows/agentic-job.yml), hosted config and forwarder checked with `git show`: runner default, optional second user, actions `636b20b87bc94417999062ada22700ef4d6a8836`, host v0.6.3. [v0.6.12](https://github.com/cgwalters-forge/agentic-job/blob/eecc8c434e67a7607264ab3f7d90c88b6d02042a/.github/workflows/agent.yml): runner only, actions `466a490e983ff07e6fb076fa4bd8b4d5f918fcd6`, host v0.6.9 (`57119eeffa17ea41b383cfdaf8370b8abeba8868`). | A tested, attested host image and coherent caller pins; main's [prepare/image split](secure-host.md#the-agent-job) is not supplied by those older images. Do not pass `--prepared` to them. |
-| Copy caller and bounds | [README](../README.md#try-it), [workflow inputs](../.github/workflows/agentic-job.yml), [policy test](../crates/agentic-job/tests/policy.rs) `readme_caller_fits_its_bounds_and_configuration`: inputs/secret, permissions, source-relative config, base and output limits. | Public caller/target, enabled Actions and allowed pinned actions; disposable supported runner. No private-target or credential refusal is lifted. |
+| Copy caller and bounds | [Try it](try-it.md), [workflow inputs](../.github/workflows/agentic-job.yml), [policy test](../crates/agentic-job/tests/policy.rs) `try_it_caller_fits_its_bounds_and_configuration`: inputs/secret, permissions, source-relative config, base and output limits. | Public caller/target, enabled Actions and allowed pinned actions; disposable supported runner. No private-target or credential refusal is lifted. |
 | First scripted run | [example.yml](../.github/workflows/example.yml), [agent.yml](../.github/workflows/agent.yml), `max-requests: "0"`; existing policy/workflow tests use local fixtures, not a deployed caller. | Authorized dispatch from the default branch; inspect policy, host probes, agent, check and apply. A fake session is not a real-agent first run. |
 | First broker run | [checklist](#real-agent-checklist), [registration](#the-run-token), [inference](inference.md): separate OIDC register job, agent without OIDC, runtime URL/audience, exact admission and run-token handover. | Broker/network owner supplies reachability for both jobs, admission, model and agreed request/cost/time caps; expiry and trusted off-agent revocation. No provider key or MCP credential on the agent machine. |
 | First review | [review caller/configuration](review.md#another-repository), [review workflow](../.github/workflows/review.yml) and existing review/workflow tests: trusted-base files, read-only agent, separate register/check/submit/status. | Copy review bounds/task, set agent/model/network variables and broker admission for `review.yml`; authorized exact-head review and human merge approval. Model approval is not a security boundary. |

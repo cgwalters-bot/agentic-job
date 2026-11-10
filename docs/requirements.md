@@ -208,7 +208,7 @@ Event bounds restrict actors and forks, and can end at a deadline. See
 
 CI uses the scripted agent for E2E runs, mutation tests for host probes,
 mock inference servers and a corpus of requests and patches. Real-agent
-deployment evidence is reported in the [README](../README.md#what-is-real-today),
+deployment evidence is reported in the [workflow guide](workflow.md#what-has-run-and-what-has-not),
 not implied by unit tests. This documentation review did not run hosted
 workflows or verify remote deployment state.
 
