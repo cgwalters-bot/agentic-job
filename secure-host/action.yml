@@ -95,7 +95,7 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         if [ -z "$CONFIG" ]; then
-          default=$(bash "$ACTION_PATH/default-config.sh")
+          default=$(bash "$ACTION_PATH/../crates/secure-host/default-config.sh")
           CONFIG="$ACTION_PATH/$default"
         fi
         printf 'path=%s\n' "$CONFIG" >> "$GITHUB_OUTPUT"

@@ -165,7 +165,7 @@ jobs:
           checkout=$(bash secure-host/binary.sh digest)
           test "$archive" = "$checkout"
       # The egress proxy's policy, with the tests that came with it.
-      - run: python3 -m unittest discover -s egress -v
+      - run: python3 -m unittest discover -s crates/secure-host/egress -v
       # As `sandbox setup` installs it: every file by a hash of
       # egress/requirements.txt, and wheels only. Then with the hashes
       # changed, which pip must refuse for that reason and no other.
@@ -173,8 +173,8 @@ jobs:
         env:
           PIP: "pip download --quiet --disable-pip-version-check --require-hashes --only-binary :all:"
         run: |
-          $PIP --dest "$RUNNER_TEMP/wheels" -r egress/requirements.txt
-          sed 's/--hash=sha256:..../--hash=sha256:0000/' egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
+          $PIP --dest "$RUNNER_TEMP/wheels" -r crates/secure-host/egress/requirements.txt
+          sed 's/--hash=sha256:..../--hash=sha256:0000/' crates/secure-host/egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
           if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
           grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
       # The proxy as those wheels install it, offline and by the same
@@ -183,8 +183,8 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/proxy"
           "$RUNNER_TEMP/proxy/bin/pip" install --quiet --disable-pip-version-check --no-index --require-hashes \
-            --only-binary :all: --find-links "$RUNNER_TEMP/wheels" -r egress/requirements.txt
-          "$RUNNER_TEMP/proxy/bin/python" -m unittest discover -s egress -p test_live.py -v
+            --only-binary :all: --find-links "$RUNNER_TEMP/wheels" -r crates/secure-host/egress/requirements.txt
+          "$RUNNER_TEMP/proxy/bin/python" -m unittest discover -s crates/secure-host/egress -p test_live.py -v
       # The forge's shared workflow check, once the WORKFLOW_LINT repository
       # variable names it (Justfile). Before gh-aw's workflows are checked
       # out below, where zizmor would find them. Read-only token, no secret.
@@ -216,7 +216,7 @@ jobs:
             pkg/workflow/data
           persist-credentials: false
       - run: node safe-outputs/validation.mjs gh-aw --check
-      - run: python3 -B egress/ecosystems.py gh-aw --check
+      - run: python3 -B crates/secure-host/egress/ecosystems.py gh-aw --check
 
   # The JavaScript outside site/ may only shrink: new logic goes in the
   # Rust binary. A change fails if it adds a .js, .mjs, .cjs or .ts file
