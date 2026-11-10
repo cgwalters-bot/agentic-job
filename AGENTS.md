@@ -6,6 +6,20 @@ Start with the [README](README.md) for usage, limitations and topic documentatio
 
 **Run `just fmt` and then `just check` before every commit you hand back; a change that fails `just check` isn't done.**
 
+## Design principles
+
+agentic-job is a generic GitHub agentic-workflow tool that any repository can
+adopt, in the spirit of [gh-aw](https://github.github.com/gh-aw/).
+It knows nothing of agent-board, this organization, or any particular repository,
+custom property, topic, label or account. Repository rules, including which
+repositories are midstream forks and how they are treated, come from the caller's
+configuration, never from code.
+
+Generic mechanisms are fine: for example, the `{org, forks}` bounds rule takes
+the organization as a parameter. Names of our repositories, properties or topics
+must not appear in non-test code or defaults. Test fixtures use neutral example
+names such as `example-org/example`, not our real repositories.
+
 ## Layout
 
 - `crates/agentic-job/`: CLI, policy, event admission, sessions, sandbox, run, check and audit code.
