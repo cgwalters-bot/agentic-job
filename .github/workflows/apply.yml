@@ -95,7 +95,7 @@ jobs:
     # for partial work. The exit state comes from the agent's machine and
     # decides only this; the check job decided whether it may be applied.
     if: >-
-      ${{ !cancelled() && fromJSON(inputs.check).result == 'success' && (fromJSON(inputs.policy).proposals-artifact != '' || format('{0}', fromJSON(inputs.agent).outputs.exit) == '0' ||
+      ${{ !cancelled() && fromJSON(inputs.check).result == 'success' && (fromJSON(inputs.policy).external-run-id != '' || fromJSON(inputs.policy).proposals-artifact != '' || format('{0}', fromJSON(inputs.agent).outputs.exit) == '0' ||
           (fromJSON(inputs.policy).apply-partial == 'true' && contains(fromJSON('["3", "124"]'), fromJSON(inputs.agent).outputs.exit))) && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
     runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
     timeout-minutes: 15
@@ -232,7 +232,7 @@ jobs:
       # ID supplied by the caller without binding it to policy's upload
       # in this run: an agent upload is executable code too.
       - name: Require policy's binary
-        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' || fromJSON(inputs.policy).external-run-id != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
@@ -243,11 +243,21 @@ jobs:
             jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
               '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' || fromJSON(inputs.policy).external-run-id != '' }}
         with:
           artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           path: ${{ runner.temp }}/apply-binary
           digest-mismatch: error
+      # A green external detect job may have skipped its detector. Only this
+      # caller's explicit successful detector output can release publication.
+      - name: Release external output only after trusted detection
+        env:
+          DETECTION: ${{ fromJSON(inputs.check).outputs.detection-result }}
+        run: |
+          if jq -e '.external != null' "$GH_AW_TMP/policy.json" > /dev/null; then
+            chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+            "$RUNNER_TEMP/apply-binary/agentic-job" external-release --policy "$GH_AW_TMP/policy.json" --report "$REPORT" --detection-result "$DETECTION"
+          fi
       # Prevent a missing/misbound role from borrowing the legacy PAT. Reject
       # legacy handlers and replacement pushes before the first fork write.
       - name: Check caller role credentials and routing
@@ -336,7 +346,8 @@ jobs:
       # branch, which the handler pushes to by the pull request's number.
       - name: The pull request's branch is this run's
         run: |
-          jq -e --arg want "agent-run-$GITHUB_RUN_ID" --arg base "$BASE" \
+          branch_run=$(jq -r --arg run "$GITHUB_RUN_ID" '.external.run_id // $run' "$GH_AW_TMP/policy.json")
+          jq -e --arg want "agent-run-$branch_run" --arg base "$BASE" \
             'all(.items[] | select(.type == "create_pull_request"); .branch == $want)
              and all(.items[] | select(.type == "push_to_pull_request_branch"); .branch == $base)' "$GH_AW_TMP/agent_output.json"
       # The commit the patch says it starts from is the hand-back's own
@@ -385,7 +396,7 @@ jobs:
       - name: Decide whether the work is complete
         id: complete
         env:
-          EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
+          EXIT: ${{ (fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.policy).external-run-id != '') && '0' || fromJSON(inputs.agent).outputs.exit }}
         run: |
           case "${EXIT:-0}" in
             0) checkpoint=$(jq -r '.checkpoint.reason // ""' "$REPORT") ;;
@@ -546,7 +557,7 @@ jobs:
       # run's push: its commit would land on an open pull request with
       # nothing on it to say the work was cut short.
       - name: Mark what a partial run opens or posts
-        if: ${{ fromJSON(inputs.policy).proposals-artifact == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}
+        if: ${{ fromJSON(inputs.policy).proposals-artifact == '' && fromJSON(inputs.policy).external-run-id == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}
         env:
           STOPPED: ${{ fromJSON(inputs.agent).outputs.exit == '124' && 'its timeout' || 'a request, task or spending limit, or an error that ended the agent''s turn' }}
         run: |
@@ -926,7 +937,7 @@ jobs:
           PR: ${{ steps.publish.outputs.created_pr_number || steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
           PR_URL: ${{ steps.publish.outputs.created_pr_url || steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
           FORK: ${{ steps.fork.outputs.repo }}
-          EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
+          EXIT: ${{ (fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.policy).external-run-id != '') && '0' || fromJSON(inputs.agent).outputs.exit }}
           CHECKPOINT: ${{ steps.complete.outputs.checkpoint }}
           STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
           BLOCKED: ${{ steps.blocked.outputs.blocked }}
@@ -1108,8 +1119,8 @@ jobs:
       - name: How the run ended
         id: ended
         env:
-          RESULTS: ${{ fromJSON(inputs.policy).proposals-artifact != '' && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
-          EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
+          RESULTS: ${{ (fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.policy).external-run-id != '') && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
+          EXIT: ${{ fromJSON(inputs.policy).external-run-id != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
           # The run action's fixed word for what the run ended on, checked
           # again below against the same list before it goes into the text.
           FAILURE_CLASS: ${{ fromJSON(inputs.agent).outputs.failure-class }}

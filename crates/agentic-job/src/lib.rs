@@ -18,6 +18,7 @@ pub mod config;
 pub mod dispatch;
 pub mod event;
 pub mod exit;
+pub mod external;
 // The `::` is the secure-host crate's, not the `secure_host` module's.
 pub use ::secure_host::files;
 pub mod handback;

@@ -1993,6 +1993,7 @@ mod tests {
 
     fn policy(kind: Kind, outputs: Value) -> Policy {
         Policy {
+            external: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),

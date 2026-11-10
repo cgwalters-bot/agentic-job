@@ -818,6 +818,9 @@ impl TestEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
+    /// Caller-owned external provenance. Never read from the producer's policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalRun>,
     /// Trusted, head-bound prose publication; absent for ordinary reviews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisory: Option<Advisory>,
@@ -876,6 +879,19 @@ pub struct Policy {
     /// what apply publishes with `agentic-job publish`, not gh-aw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_handlers: Vec<String>,
+}
+
+/// The trusted caller's external receipt, reduced to check/apply identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRun {
+    pub caller_repository: String,
+    pub caller_run_id: u64,
+    pub caller_attempt: u64,
+    pub repository: String,
+    pub run_id: u64,
+    pub base_commit: String,
+    pub raw_digest: String,
 }
 
 /// Match HTTP authorities exactly, including ports, without DNS resolution.
@@ -1144,6 +1160,36 @@ impl Policy {
     /// the dot-folders protected.
     pub fn validate(&self) -> Result<()> {
         check_context(&self.context)?;
+        if let Some(external) = &self.external {
+            ensure!(
+                REPO_RE.is_match(&external.caller_repository)
+                    && REPO_RE.is_match(&external.repository)
+                    && external.caller_run_id > 0
+                    && external.caller_attempt > 0
+                    && external.run_id > 0
+                    && COMMIT_RE.is_match(&external.base_commit)
+                    && external
+                        .raw_digest
+                        .strip_prefix("sha256:")
+                        .is_some_and(|d| d.len() == 64
+                            && d.bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+                "invalid trusted external identity"
+            );
+            ensure!(
+                self.forge == Forge::Github
+                    && self.kind == Kind::Branch
+                    && self.advisory.is_none()
+                    && self.secondary_pull_request.is_none()
+                    && self.safe_outputs.push_to_pull_request_branch.is_none()
+                    && self
+                        .safe_outputs
+                        .create_pull_request
+                        .as_ref()
+                        .is_some_and(|p| !p.ready_when_complete),
+                "external runs require one draft-only GitHub implement target"
+            );
+        }
         if let Some(advisory) = &self.advisory {
             advisory.validate(self)?;
         }

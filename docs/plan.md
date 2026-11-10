@@ -124,7 +124,7 @@ The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
 designed, not built or deployed. This is its one list of follow-ups, in
 dependency order, for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-Only slice 4 is built. None has run on an external runner. Each slice is one implement-sized pull
+Slices 4 and 5 are built. None has run on an external runner. Each slice is one implement-sized pull
 request. None of them enables a profile, changes credentials, broker
 admission or bounds, or adds ostree or any other target. Repositories
 without an owner are under `cgwalters-forge`.
@@ -187,7 +187,10 @@ without an owner are under `cgwalters-forge`.
    detect job, a second artifact of either name, a download that does not
    match its digest, a late run, a replayed run, a hand-back on another
    base, and a skipped trusted detection. The external `policy.json` is
-   never read. It needs no deployment.
+   never read. It needs no deployment. Implemented for
+   [#3293](https://github.com/cgwalters-forge/agentic-job/issues/3293),
+   off by default and tested against offline fixtures only
+   ([binary interface](dispatch.md#binary-correlation-interface)).
 6. **actions — External mode of the wrapper.** In
    `.github/workflows/cgwalters-agentic-job.yml`, a mode that runs policy,
    agent and check only: no apply job, no `SAFE_OUTPUTS_PAT`, the kind,

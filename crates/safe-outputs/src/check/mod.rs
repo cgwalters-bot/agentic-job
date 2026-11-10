@@ -953,12 +953,37 @@ pub fn check(
         .safe_outputs
         .push_to_pull_request_branch
         .as_ref()
-        .map(|push| push.head.as_str());
+        .map(|push| push.head.as_str())
+        .or_else(|| {
+            policy
+                .external
+                .as_ref()
+                .map(|external| external.base_commit.as_str())
+        });
     let request = carrier.and_then(|(output, _)| {
         items
             .iter()
             .find(|item| item_type(item) == output && secondary_target(item, policy).is_none())
     });
+    if let Some(external) = &policy.external {
+        let expected = format!("{RUN_BRANCH_PREFIX}{}", external.run_id);
+        if let Some(request) = request
+            && request.get("branch").and_then(Value::as_str) != Some(expected.as_str())
+        {
+            errors.push("external request branch is not the trusted external run's".into());
+        }
+        // Even a no-op hand-back must not carry a different base snapshot.
+        if let Some(content) = handback.base {
+            let base = serde_json::from_slice::<Base>(content).ok();
+            if !base.is_some_and(|base| {
+                base.repo == policy.repo
+                    && base.r#ref == policy.base
+                    && base.commit == external.base_commit
+            }) {
+                errors.push("external base.json differs from the trusted dispatch base".into());
+            }
+        }
+    }
     // Its branch names its patch, so that is the run's under the prefix,
     // as `run` writes it: never a name that gh-aw's handler could take for
     // the run's own pull request's patch (`Secondary::branch`). It is this

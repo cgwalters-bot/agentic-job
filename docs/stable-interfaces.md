@@ -16,6 +16,13 @@ names and their contents (`policy.json`, `summary.json`, `applied.json`
 and the rest), the agent's brief, the built-in skills, and the
 `agentic-job` commands other than through the files below.
 
+The opt-in [external correlation interface](dispatch.md#binary-correlation-interface)
+is currently internal: `policy.yml`'s `external-receipt` input and
+`external-run-id` output, `check.yml`'s `detection-result` output, the
+dispatch record/receipt and the binary fetch/release commands. These do
+not add an external mode to the stable complete reusable workflow, enable
+a caller, or change hosted defaults.
+
 ## The reusable workflow
 
 Runner-only migration note (5 November 2026): `agent-user: runner` is the

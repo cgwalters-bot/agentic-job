@@ -17,6 +17,121 @@ const TRIAL: &str =
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn external_detection_cannot_be_skipped_to_release_a_checked_upload() {
+    let doc = definition("check.yml");
+    assert_eq!(
+        doc["on"]["workflow_call"]["outputs"]["detection-result"]["value"].as_str(),
+        Some("${{ jobs.detect.outputs.detection-result }}")
+    );
+    assert_eq!(
+        doc["jobs"]["detect"]["outputs"]["detection-result"].as_str(),
+        Some("${{ steps.detector.outcome }}")
+    );
+    let release = doc["jobs"]["detect"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("release"))
+        .unwrap();
+    let dir = TempDir::new().unwrap();
+    for (external, detection, expected) in [
+        ("", "skipped", 0),
+        ("7", "success", 0),
+        ("7", "", 1),
+        ("7", "skipped", 1),
+        ("7", "failure", 1),
+        ("7", "cancelled", 1),
+    ] {
+        let output = dir.path().join("output");
+        status(
+            &bash(
+                dir.path(),
+                release["run"].as_str().unwrap(),
+                &[
+                    ("EXTERNAL_RUN", external),
+                    ("DETECTION", detection),
+                    ("ARTIFACT", "12"),
+                    ("DIGEST", "digest"),
+                    ("GITHUB_OUTPUT", output.to_str().unwrap()),
+                ],
+            ),
+            expected,
+        );
+    }
+    let apply = definition("apply.yml");
+    let steps = apply["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let release = steps
+        .iter()
+        .position(|s| {
+            s["name"].as_str() == Some("Release external output only after trusted detection")
+        })
+        .unwrap();
+    let fork = steps
+        .iter()
+        .position(|s| s["name"].as_str() == Some("Fork the output repository for the pull request"))
+        .unwrap();
+    assert!(release < fork);
+    assert!(steps[release]["if"].is_badvalue()); // staged mode cannot bypass it
+}
+
+#[test]
+fn external_without_a_local_agent_result_is_not_partial() {
+    let apply = definition("apply.yml");
+    let normalized_exit = "${{ (fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.policy).external-run-id != '') && '0' || fromJSON(inputs.agent).outputs.exit }}";
+    for name in ["Decide whether the work is complete", "Write applied.json"] {
+        assert_eq!(
+            step(&apply, "apply", name)["env"]["EXIT"].as_str(),
+            Some(normalized_exit)
+        );
+    }
+    assert_eq!(
+        step(&apply, "apply", "Mark what a partial run opens or posts")["if"].as_str(),
+        Some(
+            "${{ fromJSON(inputs.policy).proposals-artifact == '' && fromJSON(inputs.policy).external-run-id == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}"
+        )
+    );
+    let conclude = step(&apply, "conclude", "How the run ended");
+    assert_eq!(
+        conclude["env"]["RESULTS"].as_str(),
+        Some(
+            "${{ (fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.policy).external-run-id != '') && 'success' || fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}"
+        )
+    );
+    assert_eq!(
+        conclude["env"]["EXIT"].as_str(),
+        Some(
+            "${{ fromJSON(inputs.policy).external-run-id != '' && '0' || fromJSON(inputs.agent).outputs.exit }}"
+        )
+    );
+    for pr in ["", "42"] {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("handler-config.json"), "{}").unwrap();
+        fs::write(dir.path().join("skipped.json"), "[]").unwrap();
+        status(
+            &bash(
+                dir.path(),
+                step(&apply, "apply", "Write applied.json")["run"]
+                    .as_str()
+                    .unwrap(),
+                &[
+                    ("GH_AW_TMP", dir.path().to_str().unwrap()),
+                    ("MADE", dir.path().join("made.jsonl").to_str().unwrap()),
+                    ("OUTPUT_REPO", "owner/target"),
+                    ("EXIT", "0"),
+                    ("PR", pr),
+                    ("PR_URL", "https://github.com/owner/target/pull/42"),
+                ],
+            ),
+            0,
+        );
+        let report: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("applied.json")).unwrap()).unwrap();
+        assert_eq!(report["partial"], false);
+        assert_eq!(report["pull_request"].is_null(), pr.is_empty());
+    }
+}
+
+#[test]
 fn advisory_uses_the_same_check_artifact_and_cancellation_gates() {
     let policy = definition("policy.yml");
     assert_eq!(

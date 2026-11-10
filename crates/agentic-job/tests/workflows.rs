@@ -2314,6 +2314,9 @@ fn agent_credentials_stay_in_their_deterministic_jobs_and_steps() {
 fn wrapper_forwards_policy_settings_without_reinterpretation() {
     let wrapper = definition("agentic-job.yml");
     let policy = definition("policy.yml");
+    // Cross-run output must use the caller's explicit policy/check/apply
+    // composition, never the wrapper's same-run agent production path.
+    assert!(wrapper["on"]["workflow_call"]["inputs"]["external-receipt"].is_badvalue());
     let own = [
         "agent-runner",
         "github-reads",
@@ -2326,6 +2329,7 @@ fn wrapper_forwards_policy_settings_without_reinterpretation() {
             .unwrap()
             .keys()
             .map(|key| key.as_str().unwrap().to_owned())
+            .filter(|key| key != "external-receipt")
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -3729,9 +3733,9 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "apply",
         &[
             r"&& fromJSON\(inputs.policy\).expect-check-refusal != 'true' \}\}",
-            r"fromJSON\(inputs.check\).result == 'success' && \(fromJSON\(inputs.policy\).proposals-artifact != ''",
-            r"fromJSON\(inputs.policy\).proposals-artifact == '' && format\('\{0\}', fromJSON\(inputs.agent\).outputs.exit\) != '0'",
-            r"(?s)- name: Write applied.json.*EXIT: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact != '' && '0' \|\| fromJSON\(inputs.agent\).outputs.exit \}\}",
+            r"fromJSON\(inputs.check\).result == 'success' && \(fromJSON\(inputs.policy\).external-run-id != '' \|\| fromJSON\(inputs.policy\).proposals-artifact != ''",
+            r"fromJSON\(inputs.policy\).proposals-artifact == '' && fromJSON\(inputs.policy\).external-run-id == '' && format\('\{0\}', fromJSON\(inputs.agent\).outputs.exit\) != '0'",
+            r"(?s)- name: Write applied.json.*EXIT: \$\{\{ \(fromJSON\(inputs.policy\).proposals-artifact != '' \|\| fromJSON\(inputs.policy\).external-run-id != ''\) && '0' \|\| fromJSON\(inputs.agent\).outputs.exit \}\}",
             r"if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}",
         ],
         &[r"pull_request.head|refs/pull"],
@@ -4890,6 +4894,30 @@ fn request(env: &[(&str, &str)]) -> (Output, tempfile::TempDir) {
         &all,
     );
     (output, dir)
+}
+
+#[test]
+fn external_output_repository_defaults_to_the_caller_as_apply_does() {
+    for (repo, output_repo, accepted) in [
+        ("o/r", "", true),
+        ("o/other", "", false),
+        ("o/other", "o/other", true),
+        ("o/r", "o/other", false),
+    ] {
+        let (output, _) = request(&[
+            ("REPO", repo),
+            ("OUTPUT_REPO", output_repo),
+            ("EXTERNAL_RECEIPT", r#"{"record":{"item":64}}"#),
+            ("ISSUE", "64"),
+            ("FAKE_SAFE_OUTPUTS", "{}"),
+        ]);
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{repo}/{output_repo}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// The policy command is told when apply holds only the job token, where

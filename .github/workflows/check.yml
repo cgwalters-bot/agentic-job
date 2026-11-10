@@ -22,6 +22,9 @@ on:
         type: string
         default: ""
     outputs:
+      detection-result:
+        description: success only if trusted detection actually ran and succeeded; skipped otherwise
+        value: ${{ jobs.detect.outputs.detection-result }}
       artifact-id:
         description: Immutable checked upload ID for apply; absent on refusal
         value: ${{ jobs.detect.outputs.artifact-id }}
@@ -64,6 +67,7 @@ jobs:
     outputs:
       artifact-id: ${{ steps.release.outputs.artifact-id }}
       artifact-digest: ${{ steps.release.outputs.artifact-digest }}
+      detection-result: ${{ steps.detector.outcome }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ vars.AGENTIC_JOB_DETECT_MODEL != '' }}
@@ -77,6 +81,7 @@ jobs:
           artifact-ids: ${{ needs.check.outputs.artifact-id }}
           path: .agentic-job/checked
       - name: Detect threats without a repository write token
+        id: detector
         if: ${{ vars.AGENTIC_JOB_DETECT_MODEL != '' }}
         env:
           MODEL: ${{ vars.AGENTIC_JOB_DETECT_MODEL }}
@@ -87,7 +92,10 @@ jobs:
         env:
           ARTIFACT: ${{ needs.check.outputs.artifact-id }}
           DIGEST: ${{ needs.check.outputs.artifact-digest }}
+          EXTERNAL_RUN: ${{ fromJSON(inputs.policy).external-run-id }}
+          DETECTION: ${{ steps.detector.outcome }}
         run: |
+          [ -z "$EXTERNAL_RUN" ] || [ "$DETECTION" = success ] || { echo '::error::external output requires trusted detection'; exit 1; }
           echo "artifact-id=$ARTIFACT" >> "$GITHUB_OUTPUT"
           echo "artifact-digest=$DIGEST" >> "$GITHUB_OUTPUT"
 

@@ -564,9 +564,13 @@ As read on 7 November 2026, these are **shipped**:
 and apply handle it ([test evidence](safe-outputs.md#repeated-test-evidence)),
 off unless the bounds have `[github.test_evidence]`, which no caller sets.
 
+Read-only correlation/fetch and trusted re-check/release adapters are
+**implemented but not enabled**, with offline API and local staged-apply
+fixtures only; see [the binary interface](#binary-correlation-interface).
 These are **designed here but not implemented**: the runner profile map
-and its resolution, the dispatch record and run correlation, cross-run apply,
-the KVM preflight and the wrapper's external mode.
+and its resolution, dispatch record creation/dispatch, the KVM preflight
+and the wrapper's external mode. No external caller has been enabled or
+credentialed, and no live cross-run apply has been demonstrated.
 The [implementation slices](plan.md#external-runner-implementation-slices)
 list them in order.
 
@@ -821,6 +825,93 @@ run in progress, so it holds the retry until the first has ended. GitHub
 keeps only one pending run per group, so a third dispatch replaces a
 queued second. The draft names the external run's URL and attempt and the
 raw hand-back's digest.
+
+### Binary correlation interface
+
+An unrelated run, a second attempt or a substituted hand-back must not
+become publication authority. The one opt-in mechanism is a **caller-owned
+record and receipt**, never a producer-supplied policy or configuration.
+No command here dispatches a workflow or needs a write credential. Record
+creation, random-ID generation, profile admission and dispatch are the
+caller's responsibility and are not implemented by this slice.
+
+`external-fetch --record record.json --archive raw.zip --outputs raw --receipt receipt.json`
+reads at most 64 KiB of strict JSON. The record has exactly these fields:
+
+- `dispatch_id`: 32 lowercase hex digits, newly generated before dispatch;
+  `caller_repository`, positive numeric `caller_run_id` and `caller_attempt`;
+- `profile_commit`: the reviewed map commit; `kind`: exactly `implement`;
+  `target_repository`, `target_branch`, `base_commit` and positive `item`;
+- `repository`, positive numeric `repository_id`, `workflow` (a flat
+  `.github/workflows/NAME.yml` path), `reference`, `commit` and positive
+  numeric `triggering_actor_id` of the dispatch credential;
+- `agentic_job` and `actions`: the two reusable-workflow commits;
+  `artifact_prefix` (ASCII letters, digits, underscore or hyphen);
+- `actions_workflow`, `policy_workflow` and `check_workflow`: distinct
+  `OWNER/REPO/.github/workflows/NAME.yml` identities chosen by the caller;
+  the first must match `actions`, and the other two `agentic_job`;
+- `check_job` and `detect_job`: distinct, exact API job names as composed
+  by the pinned external caller, including reusable-call prefixes;
+- `dispatched_at` and `deadline`: RFC3339 timestamps; `returned_run_id`:
+  null, or the positive numeric ID returned by dispatch.
+
+All commit pins are full lowercase SHAs. The record never visits the
+external machine. Fetch requires the caller's `GITHUB_REPOSITORY`,
+`GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` to agree. It reads the read-only
+`GH_TOKEN` and HTTPS `GITHUB_API_URL` from the deployment environment.
+API credentials are never forwarded to an artifact-storage redirect.
+HTTP failures refuse rather than silently choosing another result.
+
+Fetch polls at most every 15 seconds, stops matching after ten minutes,
+and stops waiting/downloading at the record's deadline (at most 330 minutes
+from dispatch). Every request has a maximum 15-second timeout, further
+limited by the remaining lifetime. Each metadata page is at most 4 MiB;
+each list is at most ten pages of 100 entries. Pagination overflow refuses
+rather than assuming uniqueness from a partial list. The ZIP and its total
+expanded contents are each at most 128 MiB, with at most 256 flat,
+regular hand-back files, no duplicate paths and no restored archive modes.
+The entry count and duplicate names are checked on the archive's own
+central directory before the ZIP library indexes it, which would otherwise
+merge duplicates; only single-disk, non-ZIP64 archives are accepted.
+The ordinary checker then applies its stricter per-file and patch bounds.
+
+All output paths must be new. A refusal writes no receipt authorizing a
+result; an I/O failure may leave partial output, which must be discarded.
+The receipt holds `record`, numeric `run_id`, `attempt` (1), and `checked`
+and `raw`, each an `id` and `digest` (`sha256:HEX`) from the Actions API.
+The checked artifact is an early filter only: fetch never downloads or
+trusts its policy/config/report. The downloaded raw artifact is fetched
+by API ID and hashed before extraction; the API digest is transfer
+integrity, not provenance or proof that any reported tests ran.
+
+The trusted caller uploads **only the extracted raw files** into its own
+run, retaining that upload's ID and digest. It composes the same-pinned
+`policy.yml`, `check.yml` and `apply.yml` directly, not the complete wrapper:
+
+- Pass the caller-owned receipt JSON as policy's `external-receipt` input
+  (default empty), with the normal caller bounds, target branch and item.
+  The binary's equivalent is `policy --external-receipt receipt.json`.
+  This supports only one draft-only GitHub implement target, not fix,
+  secondary targets or a different output repository.
+- Pass the new raw upload's ID and digest to check, never a legacy artifact
+  name. The ordinary collector and patch/protected-path/size checks still
+  run. `base.json` must match the record's exact commit; the request's
+  branch must be `agent-run-EXTERNAL-RUN-ID`, not the caller's run ID.
+- Check exposes `detection-result`: `success` only if the trusted detector
+  step ran successfully. An external check releases no upload if detection
+  was skipped. Apply additionally runs `external-release --policy FILE
+  --report FILE --detection-result RESULT` before any publication, including
+  in staged mode, rejecting absent/skipped/failed detection and another
+  caller's policy. A green external detect job cannot disable this gate.
+
+Apply retains its existing target-head ancestry, exact git-am trial,
+changed-path comparison, bounds and fork/owner-branch checks. Idempotency
+names remain keyed to the **caller's** run, while the branch names the
+external run. Apply-only retries may retain the original policy within
+the same caller run; another caller run or an earlier attempt cannot
+reuse it. The draft includes the external run URL, attempt and raw digest.
+Hosted calls omit `external-receipt` and retain optional detection and all
+existing same-run artifact associations. No shipped caller sets this input.
 
 ### Checked hand-back and trusted apply
 
