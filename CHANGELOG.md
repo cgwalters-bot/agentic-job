@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Prepare `crates/secure-host/` for standalone extraction: explicit Cargo
+  metadata, local egress inputs, independent documentation and a CI template.
+  Existing deployed host paths and action pins remain unchanged (#1735).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

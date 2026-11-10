@@ -1212,7 +1212,7 @@ It also adds the file's `[setup.repo-packages]` list for the target
 repository ([a target's toolchain](dispatch.md#giving-runs-a-toolchain)).
 There is no workflow input for the egress proxy's write rules: `[egress]
 policy` in this file names a file that replaces
-[the binary's](../egress/policy.toml). `sandbox setup` reads that path on
+[the binary's](../crates/secure-host/egress/policy.toml). `sandbox setup` reads that path on
 the agent machine, as root, from the job's workspace, which is the calling
 repository checked out at the policy job's commit; give a path in that
 repository, relative to its root. Without a rule there, any request but

@@ -6555,7 +6555,11 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
 #[test]
 fn the_forwarded_policy_leaves_storage_to_the_runner_writes() {
     use secure_host::proxy::policy::{ECOSYSTEMS, Policy, Request};
-    let shipped = Policy::parse(&workflow("egress/policy.toml"), ECOSYSTEMS).unwrap();
+    let shipped = Policy::parse(
+        &workflow("crates/secure-host/egress/policy.toml"),
+        ECOSYSTEMS,
+    )
+    .unwrap();
     fn request<'a>(method: &'a str, host: &'a str) -> Request<'a> {
         Request {
             method,
@@ -7351,5 +7355,18 @@ fn the_shipped_dispatch_setups_hand_back_through_a_fake_agent_session() {
             assert!(toolchain.is_match(body), "{body}");
             assert_eq!(git(&work, &["status", "--porcelain"]), "");
         }
+    }
+}
+#[test]
+fn confinement_action_runs_both_probe_phases() {
+    let action = workflow(".github/actions/confine-probe/action.yml");
+    assert!(action.contains("\n  using: node24\n"));
+    // Without a post entry the runner runs no post step, losing that proof.
+    for key in ["main", "post"] {
+        let script = workflow(&format!(".github/actions/confine-probe/{key}.mjs"));
+        assert!(action.contains(&format!("\n  {key}: {key}.mjs\n")));
+        assert!(script.contains(&format!(
+            "spawnSync('secure-host', ['probe', 'confined', '{key}']"
+        )));
     }
 }

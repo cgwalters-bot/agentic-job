@@ -10,7 +10,8 @@ reintroduce them. Standalone host extraction stays with
 [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070), reference draft
 [#2642](https://github.com/cgwalters-forge/agentic-job/pull/2642), and publication
 follow-up [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656).
-There is no standalone secure-host binary target in this checkout yet.
+The standalone binary and its extraction root are in `crates/secure-host/`;
+see its [extraction instructions](../crates/secure-host/EXTRACTION.md).
 Commands, configuration and exit states
 are in [interface.md](interface.md); deployment is in [workflow.md](workflow.md).
 
@@ -48,11 +49,12 @@ network probes with their embedded scripts, the runner confinement probe
 (`check/confine.rs`, re-exported as `sandbox::probe`) that CI's `confined`
 job runs before and after the lock, and the record of a passing
 check, bound to the binary, configuration and job, that entering the
-sandbox user removes; and the timed stages and `sandbox timed`
-(`timed.rs`). agentic-job re-exports each at its old path (`files`,
+sandbox user removes; and the informational stage timer (`timed.rs`).
+agentic-job re-exports the host interfaces at their old paths (`files`,
 `sandbox::host`, `sandbox::helper`, `sandbox::setup`, `sandbox::check`,
-`sandbox::timed`, `config::Sandbox`, `secure_host::apt`, ...), with
-`check::run` and `timed::run` mapping the results to its exit states.
+`config::Sandbox`, `secure_host::apt`, ...), with `check::run` mapping
+the results to its exit states. The consumer's `sandbox/timed.rs` owns
+`sandbox timed`, its fixed setup/check commands and summary collection.
 Four seams keep agents out: agentic-job's
 `main` hands `host::bare` the agent's variables to leave out too; it
 gives `egress::start` the binary and command that run the proxy; its
@@ -226,12 +228,12 @@ lists the files to change, the adapter contract and the security tests.
 ## Other directories
 
 `secure-host/` holds the standalone action, hosted configuration, release
-pin and binary-fetch script. `egress/` holds the mitmproxy addon, policy,
+pin and binary-fetch script. `crates/secure-host/egress/` holds the mitmproxy addon, policy,
 hashed dependencies and Python tests; the Rust proxy, the default in
 place of mitmproxy, is `crates/secure-host/src/proxy/`. The runtime Python files, default
 policy, ecosystem identifiers and requirements file are embedded in the
 binary; the tests are not. Regenerate the identifiers with
-`python3 egress/ecosystems.py GH_AW_CHECKOUT` when changing gh-aw's pin.
+`python3 crates/secure-host/egress/ecosystems.py GH_AW_CHECKOUT` when changing gh-aw's pin.
 `skills/` holds the agents' [skills](skills.md) and subagents, also
 embedded.
 

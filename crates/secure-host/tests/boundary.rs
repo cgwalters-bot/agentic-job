@@ -43,6 +43,14 @@ fn no_agent_crate_is_a_dependency() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(refused(&text), Vec::<String>::new());
+    let manifest: toml::Table = text.parse().unwrap();
+    // Inheritance silently makes extraction depend on the parent checkout.
+    for table in ["package", "lints", "dependencies"] {
+        assert!(
+            !manifest[table].to_string().contains("workspace"),
+            "{table}"
+        );
+    }
 }
 
 #[test]

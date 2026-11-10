@@ -581,9 +581,6 @@ pub fn run(args: &Args) -> Result<bool> {
 mod tests {
     use super::*;
 
-    /// The action's directory, from this crate's.
-    const ACTION: &str = "../../.github/actions/confine-probe";
-
     fn results(pairs: &[(&'static str, bool)]) -> Results {
         pairs.iter().copied().collect()
     }
@@ -653,17 +650,6 @@ mod tests {
         let problem = |regular, uid, mode| fixture_problem(Some((regular, uid, mode)));
         let inval = format!("kill(0) failed with {}", Errno::INVAL);
         let stat = "2041 (Runner.Worker) S 1990 2041 2041 0 -1";
-
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(ACTION);
-        let action = fs::read_to_string(dir.join("action.yml")).unwrap();
-        // Without a post entry the runner runs no post step, and the job
-        // passes without the proof secure-host's threat model claims.
-        let steps = |key: &str| {
-            let script = dir.join(format!("{key}.mjs"));
-            let script = fs::read_to_string(script).unwrap();
-            let spawned = format!("spawnSync('secure-host', ['probe', 'confined', '{key}']");
-            action.contains(&format!("\n  {key}: {key}.mjs\n")) && script.contains(&spawned)
-        };
 
         // [what, whether it holds]
         let cases = [
@@ -763,9 +749,6 @@ mod tests {
             ),
             ("no name", parse_stat("7 S 1").is_none()),
             // The action probes in both its main and its post step.
-            ("the main step", steps("main")),
-            ("the post step", steps("post")),
-            ("a node24 action", action.contains("\n  using: node24\n")),
         ];
         for (what, holds) in cases {
             assert!(holds, "{what}");

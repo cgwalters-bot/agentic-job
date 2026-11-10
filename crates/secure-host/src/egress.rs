@@ -30,15 +30,15 @@ use crate::proxy::policy::{ECOSYSTEMS, Policy, normalize_host};
 
 /// The addon and what it needs, as they are in `egress/`: the binary
 /// carries them, since it is all a runner gets.
-const ADDON: &str = include_str!("../../../egress/addon.py");
+const ADDON: &str = include_str!("../egress/addon.py");
 
-const POLICY_PY: &str = include_str!("../../../egress/policy.py");
+const POLICY_PY: &str = include_str!("../egress/policy.py");
 
-const POLICY_TOML: &str = include_str!("../../../egress/policy.toml");
+const POLICY_TOML: &str = include_str!("../egress/policy.toml");
 
 /// mitmproxy and everything it depends on, each at one version and with
 /// the hashes of its files: generated from `egress/requirements.in`.
-const REQUIREMENTS: &str = include_str!("../../../egress/requirements.txt");
+const REQUIREMENTS: &str = include_str!("../egress/requirements.txt");
 
 pub const EGRESS_USER: &str = "egress-proxy";
 
@@ -1206,7 +1206,7 @@ mod tests {
     /// names.
     #[test]
     fn every_requirement_is_pinned_with_hashes() {
-        const DIRECT: &str = include_str!("../../../egress/requirements.in");
+        const DIRECT: &str = include_str!("../egress/requirements.in");
         let is_entry = |line: &&str| !line.starts_with(['#', ' ']) && !line.is_empty();
         let lines: Vec<&str> = REQUIREMENTS.lines().collect();
         let entries: Vec<&str> = lines.iter().copied().filter(is_entry).collect();

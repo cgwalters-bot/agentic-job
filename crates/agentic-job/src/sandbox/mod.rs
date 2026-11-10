@@ -86,18 +86,7 @@ pub mod probe {
     }
 }
 
-/// secure-host's timed setup and probes, its status an exit state.
-pub mod timed {
-    pub use ::secure_host::timed::*;
-
-    use anyhow::Result;
-
-    use crate::exit::Exit;
-
-    pub fn run(args: &Args) -> Result<Exit> {
-        ::secure_host::timed::run(args).map(Exit::Command)
-    }
-}
+pub mod timed;
 
 /// secure-host's helper, with `run` reading root's copy of the
 /// configuration as agentic-job's.

@@ -48,7 +48,7 @@ REPOSITORY=cgwalters-forge/agentic-job
 # decides what a release holds: a release published before that changed
 # lacks a file this one requires, and must not be taken for this source.
 # `skills` and `workflow/review.md` are the agents' skills, built in.
-BUILT_FROM=(Cargo.lock Cargo.toml crates egress skills workflow/review.md secure-host/binary.sh)
+BUILT_FROM=(Cargo.lock Cargo.toml crates skills workflow/review.md secure-host/binary.sh)
 
 # The scripted agent too: a run with `agent: fake` needs it. secure-host
 # is what the image holds: the host's side, with no agent code.

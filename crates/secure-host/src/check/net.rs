@@ -292,7 +292,7 @@ mod tests {
         // (policy, the URL read, the URL POSTed to)
         let cases = [
             (
-                include_str!("../../../../egress/policy.toml").to_owned(),
+                include_str!("../../egress/policy.toml").to_owned(),
                 Some("https://example.com/"),
                 Some("https://example.com/"),
             ),

@@ -119,10 +119,7 @@ mod tests {
         let release = dir.path().join("os-release");
         std::fs::write(&release, text).unwrap();
         std::process::Command::new("bash")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../secure-host/default-config.sh"
-            ))
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/default-config.sh"))
             .arg(release)
             .output()
             .unwrap()

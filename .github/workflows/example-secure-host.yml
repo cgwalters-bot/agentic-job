@@ -63,7 +63,7 @@ jobs:
         run: |
           # The network is open for reads.
           curl --fail --silent --show-error --output /dev/null https://github.com/
-          python3 -m unittest discover -s egress 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          python3 -m unittest discover -s crates/secure-host/egress 2>&1 | tee "$RUNNER_TEMP/report.txt"
           # unittest ends on `OK`, or `OK (skipped=N)`: test_live.py skips
           # here, where mitmproxy is not installed; the lint job runs it.
           if ! grep -Eqx 'OK( \(skipped=[0-9]+\))?' "$RUNNER_TEMP/report.txt"; then

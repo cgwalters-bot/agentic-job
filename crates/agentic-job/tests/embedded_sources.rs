@@ -12,7 +12,7 @@
 use std::path::{Component, Path, PathBuf};
 
 /// What the digest covers that the build may include, from the root.
-const INCLUDABLE_DIRS: &[&str] = &["crates", "egress", "skills"];
+const INCLUDABLE_DIRS: &[&str] = &["crates", "skills"];
 const INCLUDABLE_FILES: &[&str] = &["workflow/review.md"];
 const INCLUDE_MACROS: &[&str] = &["include", "include_str", "include_bytes"];
 
@@ -270,11 +270,15 @@ fn includes_are_found_by_tokens_and_resolved() {
             false,
         ),
         (
-            r#"const A: &[u8] = include_bytes!("../egress/policy.toml",);"#,
+            r#"const A: &[u8] = include_bytes!("secure-host/egress/policy.toml",);"#,
             false,
         ),
         (r#"const A: &str = include_str!("agents.toml");"#, false),
-        (r#"const A: &str = include_str!(r"../egress/x");"#, false),
+        (
+            r#"const A: &str = include_str!(r"secure-host/egress/x");"#,
+            false,
+        ),
+        (r#"const A: &str = include_str!("../egress/x");"#, true),
         (r#"const A: &str = include_str!("../README.md");"#, true),
         (r#"const A: &str = include_str!("../workflow/x.md");"#, true),
         (r#"const A: &str = include_str!("../../outside");"#, true),

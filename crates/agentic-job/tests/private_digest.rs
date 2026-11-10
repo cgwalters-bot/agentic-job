@@ -517,7 +517,8 @@ fn the_configuration_keeps_the_agent_behind_the_allowlist() {
         ]
     );
     secure_host::egress::check_private_policy(&text).unwrap();
-    let shipped = std::fs::read_to_string(root().join("egress/policy.toml")).unwrap();
+    let shipped =
+        std::fs::read_to_string(root().join("crates/secure-host/egress/policy.toml")).unwrap();
     for refused in [
         text.replace("mode = \"allowlist\"\n", ""),
         {
