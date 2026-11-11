@@ -139,7 +139,7 @@ fn pull_request(
     if policy.forge != Forge::Github {
         errors.push("a secondary pull request off GitHub".to_owned());
     }
-    if let Err(err) = footer(caller, run_url) {
+    if let Err(err) = footer(policy.provenance_footer.as_deref(), caller, run_url) {
         errors.push(format!("{err:#}"));
     }
     // The base and the draft flag, which only the policy decides.
@@ -226,7 +226,12 @@ fn pull_request(
                 base_commit,
                 branch,
                 title: title.to_owned(),
-                body: with_footer(&mentions::filter(body, "github"), caller, run_url),
+                body: with_footer(
+                    &mentions::filter(body, "github"),
+                    policy.provenance_footer.as_deref(),
+                    caller,
+                    run_url,
+                ),
                 patch,
                 files,
             })

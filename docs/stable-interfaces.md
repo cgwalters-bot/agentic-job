@@ -191,7 +191,9 @@ the next in the same major version.
   (`agentic-job policy --allow`, `agentic-job event --allow`): top-level
   `hosts`, `allow_http`, `repos`, `bases`, `private`, `max_outputs`,
   `max_patch_bytes`, `max_patch_files`, `protected`, `commit_author`,
-  `native_handlers` and `dedupe`, the table `[unprotected_files]`, and
+  `native_handlers` and `dedupe`, the table `[unprotected_files]`, the
+  table `[provenance]` (`footer`, replacing the line apply writes under
+  every published body), and
   exactly one forge section: `[github]` (`[github.outputs.TYPE]`,
   `[github.trigger]`, `[github.memory]`, `[github.test_evidence]` and
   `[github.secondary_pull_request]`), `[forgejo]`

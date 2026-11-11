@@ -1250,6 +1250,7 @@ mod tests {
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,
             native_handlers: Vec::new(),
+            provenance_footer: None,
         };
         let run = RunFile {
             host_isolation: config::Isolation::Managed,

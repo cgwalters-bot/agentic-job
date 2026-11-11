@@ -132,6 +132,7 @@ impl Job {
             contract: agentic_job::policy::CONTRACT,
             secondary_pull_request: None,
             native_handlers: Vec::new(),
+            provenance_footer: None,
         };
         serde_json::to_string(&policy).unwrap()
     }

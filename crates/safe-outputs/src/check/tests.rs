@@ -667,3 +667,111 @@ fn comments_go_to_the_trusted_target_only() {
         assert_eq!(comment(extra.clone()), [want], "{extra}");
     }
 }
+
+/// The bounds' `[provenance] footer` is the caller's attribution policy:
+/// with one, every body apply writes it under must end with it, so a
+/// body ending in a trailer block, which would stay last, is refused —
+/// by check, before anything is published, and by apply again. Without
+/// one, a trailer block keeps its place as it always has.
+#[test]
+fn a_configured_provenance_footer_ends_the_published_body() {
+    let mut with_footer = policy();
+    with_footer.provenance_footer = Some(
+        "> An LLM operated by Example Org wrote this; it has not been \
+              reviewed yet. [Run]({run_url})"
+            .to_owned(),
+    );
+    let refused = |output: &str| {
+        format!(
+            "a {output} whose body ends with a trailer block, which would leave the block, \
+             not the policy's provenance footer, as its last lines"
+        )
+    };
+    let comment = |policy: &Policy, body: &str| {
+        redirections_to(
+            json!({"type": "add_comment", "body": body})
+                .as_object()
+                .unwrap(),
+            policy,
+            Some((REPO, 7)),
+            &Fake::default(),
+        )
+    };
+    for body in ["Why.", "Why.\n\n", "Why.\nCloses #5"] {
+        assert!(comment(&with_footer, body).is_empty(), "{body:?}");
+    }
+    for body in ["Why.\n\nCloses #5", "Closes #5", "Why.\n\nKey: value"] {
+        assert_eq!(
+            comment(&with_footer, body),
+            [refused("add_comment")],
+            "{body:?}"
+        );
+    }
+    // Without the key, a trailer block ends the body as it always has.
+    assert!(comment(&policy(), "Why.\n\nCloses #5").is_empty());
+    // Every body-bearing output is held to it, not a comment's alone.
+    for (output, extra) in [
+        ("create_issue", json!({"title": "Why"})),
+        ("close_issue", json!({"repo": REPO, "issue_number": 7})),
+    ] {
+        let mut item = json!({"type": output, "body": "Why.\n\nCloses #5"});
+        item.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            redirections_to(
+                item.as_object().unwrap(),
+                &with_footer,
+                None,
+                &Fake::default()
+            ),
+            [refused(output)],
+            "{output}"
+        );
+    }
+    // A request of a type whose body apply does not write the footer
+    // under is left to the other rules, whatever they say of it.
+    let labels = json!({"type": "add_labels", "labels": ["bug"]});
+    assert_eq!(
+        redirections_to(
+            labels.as_object().unwrap(),
+            &with_footer,
+            None,
+            &Fake::default()
+        ),
+        redirections_to(
+            labels.as_object().unwrap(),
+            &policy(),
+            None,
+            &Fake::default()
+        )
+    );
+    // An update's body reaches gh-aw's handler as written, with no footer
+    // under it, so a configured footer refuses it; an update that changes
+    // no body, and every update without a footer configured, stay allowed.
+    with_footer.safe_outputs.others.insert(
+        "update_issue".to_owned(),
+        OutputLimit {
+            max: 1,
+            fields: vec!["body".to_owned(), "title".to_owned()],
+            ..OutputLimit::default()
+        },
+    );
+    let mut no_footer = with_footer.clone();
+    no_footer.provenance_footer = None;
+    let update = |policy: &Policy, extra: Value| {
+        let mut item = json!({"type": "update_issue", "repo": REPO, "issue_number": 7});
+        item.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        redirections_to(item.as_object().unwrap(), policy, None, &Fake::default())
+    };
+    let refused_body = "a update_issue with a body, which apply does not write the policy's \
+                        provenance footer under";
+    assert_eq!(
+        update(&with_footer, json!({"body": "Why.", "title": "New"})),
+        [refused_body]
+    );
+    assert!(update(&with_footer, json!({"title": "New"})).is_empty());
+    assert!(update(&no_footer, json!({"body": "Why.", "title": "New"})).is_empty());
+}

@@ -709,6 +709,7 @@ impl Compile for Bounds {
             max_patch_bytes: self.max_patch_bytes,
             safe_outputs,
             commit_author: self.commit_author.clone(),
+            provenance_footer: self.provenance_footer().map(str::to_owned),
             push_repo: push_repo.filter(|_| to_fork).map(str::to_owned),
             private,
             allowed_domains: link_domains().to_vec(),

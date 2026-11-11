@@ -42,6 +42,23 @@ use crate::{
     OUTPUTS_FILE, PUSH_TO_PULL_REQUEST_BRANCH, REVIEW_THREAD_OUTPUTS,
 };
 
+/// The outputs whose body apply writes the footer under, whose policy the
+/// bounds' `[provenance] footer` may replace. A hand-kept parallel of
+/// what apply's `with_footer` calls cover (comments, pull requests,
+/// issues, inline and closing comments, and the run summary note): a type
+/// added to one and not the other drifts, so keep the two in step.
+/// `update_issue` and `update_pull_request` are absent on purpose: they
+/// reach gh-aw's handlers, which apply does not footer, so a configured
+/// footer refuses their `body` outright below.
+const FOOTERED_OUTPUTS: &[&str] = &[
+    "add_comment",
+    "create_issue",
+    CREATE_PULL_REQUEST,
+    CREATE_REVIEW_COMMENT,
+    "close_issue",
+    "close_pull_request",
+];
+
 /// Which repository, branch and commit a patch is against.
 pub const BASE_FILE: &str = "base.json";
 
@@ -279,6 +296,39 @@ pub fn redirections_to(
                 )
             }),
     );
+    // The bounds' `[provenance] footer` is the caller's attribution
+    // policy: the published body must end with it, not only hold it.
+    // apply writes the footer before a trailing trailer block, so a body
+    // ending in one would leave the block last; refuse it here, on the
+    // trusted side, rather than publish a body the policy disallows.
+    if policy.provenance_footer.is_some()
+        && FOOTERED_OUTPUTS.contains(&output)
+        && item
+            .get("body")
+            .and_then(Value::as_str)
+            .is_some_and(|body| !crate::apply::footer_is_last(body))
+    {
+        problems.push(format!(
+            "a {output} whose body ends with a trailer block, which would leave the block, \
+             not the policy's provenance footer, as its last lines"
+        ));
+    }
+    // An update's body reaches gh-aw's handler as written, with no footer
+    // of apply's under it, so a configured attribution policy cannot hold
+    // for it: refuse the body rather than publish text the policy does
+    // not allow. An update that changes no body stays allowed.
+    if policy.provenance_footer.is_some()
+        && matches!(output, "update_issue" | "update_pull_request")
+        && item
+            .get("body")
+            .and_then(Value::as_str)
+            .is_some_and(|body| !body.is_empty())
+    {
+        problems.push(format!(
+            "a {output} with a body, which apply does not write the policy's provenance \
+             footer under"
+        ));
+    }
     if output == "add_comment"
         && let Some((_, target)) = comment
     {

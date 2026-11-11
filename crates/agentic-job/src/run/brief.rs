@@ -646,6 +646,7 @@ mod tests {
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,
             native_handlers: Vec::new(),
+            provenance_footer: None,
         }
     }
 
@@ -1054,6 +1055,7 @@ mod brief_tests {
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,
             native_handlers: Vec::new(),
+            provenance_footer: None,
         }
     }
 

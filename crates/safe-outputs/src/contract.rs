@@ -258,6 +258,43 @@ pub fn check_commit_author(author: &str) -> Result<()> {
     Ok(())
 }
 
+/// The most the bounds' `[provenance] footer` may be, in characters:
+/// what every published body ends with, so it must stay short enough to
+/// read as one attribution.
+pub const MAX_PROVENANCE_FOOTER_CHARS: usize = 500;
+
+/// Whether FOOTER may be a bounds file's `[provenance] footer`. It ends
+/// every published body, so an empty one names nobody, and one holding
+/// the applied marker would make `check` refuse every request: a body
+/// with the footer holds it.
+pub fn check_provenance_footer(footer: &str) -> Result<()> {
+    ensure!(
+        !footer.trim().is_empty(),
+        "provenance footer is empty, so a published body names no one"
+    );
+    ensure!(
+        footer.chars().count() <= MAX_PROVENANCE_FOOTER_CHARS,
+        "provenance footer is over {MAX_PROVENANCE_FOOTER_CHARS} characters"
+    );
+    ensure!(
+        !footer.chars().any(|c| c != '\n' && c.is_control()),
+        "provenance footer holds a control character"
+    );
+    ensure!(
+        !footer
+            .lines()
+            .any(|line| line.trim_start().starts_with('/')),
+        "provenance footer holds a line starting with `/`, which would publish as a live \
+         quick action on GitLab"
+    );
+    let marker = crate::check::APPLIED_MARKER;
+    ensure!(
+        !footer.to_ascii_lowercase().contains(marker),
+        "provenance footer holds {marker}, which check refuses in a body"
+    );
+    Ok(())
+}
+
 /// The transports a clone may use. `https` is what a caller's bounds
 /// admit; `file` reads only what the sandbox user can, and is for tests
 /// and a mirror on the machine. Anything else git knows (`ext::`, which
@@ -918,6 +955,13 @@ pub struct Policy {
     /// what apply publishes with `agentic-job publish`, not gh-aw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_handlers: Vec<String>,
+    /// The bounds' `[provenance] footer`: what apply writes under every
+    /// published body instead of its own line naming the caller, with
+    /// `{run_url}` where the run's link goes. Absent, that line; `check`
+    /// also holds body-bearing requests to it (see
+    /// [`crate::check::redirections_to`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_footer: Option<String>,
 }
 
 /// The trusted caller's external receipt, reduced to check/apply identities.
@@ -1328,6 +1372,9 @@ impl Policy {
         )?;
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
+        }
+        if let Some(footer) = &self.provenance_footer {
+            check_provenance_footer(footer)?;
         }
         if let Some(push_repo) = &self.push_repo {
             ensure!(
