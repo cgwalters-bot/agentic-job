@@ -90,6 +90,7 @@ pub(super) fn plan(
             item["body"].as_str().context("missing body")?,
             target.forge.syntax(),
         ),
+        policy.provenance_footer.as_deref(),
         target.provenance.name,
         target.run_url,
     );
