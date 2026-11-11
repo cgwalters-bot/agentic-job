@@ -849,13 +849,20 @@ fn branch_push(
 
 /// The fork a branch is pushed to: never the target, whose own CI would
 /// run it with the target's secrets, and the one the bounds name, not one
-/// the caller's command line or the hand-back chose.
+/// the caller's command line or the hand-back chose. The exception is
+/// the caller's own-branch-repos bounds accepting the repository itself.
 fn bound_fork<'a>(policy: &Policy, target: &Target<'a>, output: &str) -> Result<&'a str> {
     let missing = || format!("a {output}, and the caller gave no --push-repo for its branch");
     let push_repo = target.push_repo.with_context(missing)?;
+    let own = push_repo.eq_ignore_ascii_case(&policy.repo)
+        && policy
+            .safe_outputs
+            .accepts_own_branches(&policy.repo)
+            .unwrap_or(false);
     anyhow::ensure!(
-        !owner(push_repo).eq_ignore_ascii_case(owner(&policy.repo)),
-        "--push-repo {push_repo} is of the owner of {}; its branch goes to another owner's fork",
+        own || !owner(push_repo).eq_ignore_ascii_case(owner(&policy.repo)),
+        "--push-repo {push_repo} is of the owner of {}; its branch goes to another owner's fork, \
+         or the caller's own-branch-repos bounds accept the repository itself",
         policy.repo
     );
     anyhow::ensure!(
@@ -1432,6 +1439,65 @@ mod tests {
                 body: want
             }
         );
+    }
+
+    /// The caller's own-branch-repos bounds accept the repository itself
+    /// as the push target on GitLab, where a fork would otherwise be
+    /// required; without them, or for another of the owner's
+    /// repositories, it is refused as before.
+    #[test]
+    fn own_branch_push_repos() {
+        let own = |policy: &mut Policy, target: &mut Target<'static>| {
+            on_gitlab(std::path::Path::new(""), policy, target);
+            policy.safe_outputs.own_branch_repos = vec![vec!["Bootc-Dev/*".to_owned()]];
+            policy.push_repo = Some("bootc-dev/bootc".to_owned());
+            target.push_repo = Some("bootc-dev/bootc");
+        };
+        let dir = checked(&[pull_request_item()]);
+        let (mut policy, mut for_pull) = (policy(), target(None));
+        own(&mut policy, &mut for_pull);
+        let [Op::PullRequest(pr)] = &plan(&upload(dir.path()), &policy, &for_pull).unwrap()[..]
+        else {
+            panic!("a pull request")
+        };
+        assert_eq!(pr.push_repo, "bootc-dev/bootc");
+
+        let dir = checked_push(&[push_item()]);
+        let (mut policy, mut for_push) = (push_policy(), target(None));
+        own(&mut policy, &mut for_push);
+        let [Op::Push(push)] = &plan(&upload(dir.path()), &policy, &for_push).unwrap()[..] else {
+            panic!("a push")
+        };
+        assert_eq!(push.push_repo, "bootc-dev/bootc");
+
+        for (patterns, push_repo, want) in [
+            (
+                Vec::new(),
+                "bootc-dev/bootc",
+                "is of the owner of bootc-dev/bootc",
+            ),
+            (
+                vec!["other/*".to_owned()],
+                "bootc-dev/bootc",
+                "is of the owner of",
+            ),
+            (
+                vec!["bootc-dev/*".to_owned()],
+                "bootc-dev/fork",
+                "is of the owner of",
+            ),
+        ] {
+            let mut policy = push_policy();
+            policy.safe_outputs.own_branch_repos = vec![patterns];
+            policy.push_repo = Some(push_repo.to_owned());
+            let mut refused = target(None);
+            refused.push_repo = Some(push_repo);
+            let errors = plan(&upload(dir.path()), &policy, &refused).unwrap_err();
+            assert!(
+                errors.iter().any(|e| e.contains(want)),
+                "{push_repo}: {errors:?}"
+            );
+        }
     }
 
     /// On GitLab a label request's item is of the kind its field names,

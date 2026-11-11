@@ -142,6 +142,8 @@ the next in the same major version.
   `[github.outputs] own-branch-repos` optionally lists repository patterns
   accepting new PR branches and fix pushes without a per-repository file;
   it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).
+  `[gitlab.outputs] own-branch-repos` does the same on GitLab, where the
+  bounds' `push_repo` then names the repository itself.
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`): the tables
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,

@@ -184,15 +184,28 @@ pub struct GithubOutputs {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NeutralBounds {
-    pub outputs: BTreeMap<String, OutputLimit>,
+    pub outputs: NeutralOutputs,
     /// The fork (OWNER/NAME) `apply` pushes a pull request's branch to,
     /// never the target repository: the target's CI then runs the agent's
     /// code as a fork's. Only the bounds name it, never a hand-back; it
     /// also lets a private run off GitHub open a pull request
     /// (docs/safe-outputs.md#publishing-to-forgejo and
-    /// #publishing-to-gitlab).
+    /// #publishing-to-gitlab). The exception is `[gitlab.outputs]`
+    /// own-branch-repos accepting the repository itself.
     #[serde(default)]
     pub push_repo: Option<String>,
+}
+
+/// Neutral output limits; `[gitlab.outputs]` also accepts repository
+/// patterns for pushes to the repository itself, as `[github.outputs]`
+/// does. Forgejo's publisher has no such acceptance, so its bounds
+/// refuse the patterns.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NeutralOutputs {
+    #[serde(default, rename = "own-branch-repos")]
+    pub own_branch_repos: Vec<String>,
+    #[serde(flatten)]
+    pub types: BTreeMap<String, OutputLimit>,
 }
 
 /// `[github.secondary_pull_request]`: its own repository, base, branches and
@@ -312,7 +325,7 @@ impl<Trigger> Bounds<Trigger> {
         static NONE: BTreeMap<String, OutputLimit> = BTreeMap::new();
         match (&self.github, self.neutral()) {
             (Some(github), _) => &github.outputs.types,
-            (None, Some(neutral)) => &neutral.outputs,
+            (None, Some(neutral)) => &neutral.outputs.types,
             (None, None) => &NONE,
         }
     }
@@ -323,7 +336,7 @@ impl<Trigger> Bounds<Trigger> {
             return Some(&mut github.outputs.types);
         }
         let neutral = self.forgejo.as_mut().or(self.gitlab.as_mut());
-        neutral.map(|neutral| &mut neutral.outputs)
+        neutral.map(|neutral| &mut neutral.outputs.types)
     }
 
     /// `[github.trigger]`.
@@ -368,6 +381,17 @@ impl<Trigger> Bounds<Trigger> {
         let outputs = self.outputs();
         if let Some(github) = &self.github {
             crate::contract::validate_own_branch_repos(&github.outputs.own_branch_repos)?;
+        }
+        // GitLab's bounds may accept own-branch pushes as GitHub's do;
+        // Forgejo's publisher never pushes to the repository itself.
+        if let Some(forgejo) = &self.forgejo {
+            ensure!(
+                forgejo.outputs.own_branch_repos.is_empty(),
+                "own-branch-repos is GitLab's, not Forgejo's"
+            );
+        }
+        if let Some(gitlab) = &self.gitlab {
+            crate::contract::validate_own_branch_repos(&gitlab.outputs.own_branch_repos)?;
         }
         for (name, list) in [("hosts", &self.hosts), ("bases", &self.bases)] {
             ensure!(!list.is_empty(), "`{name}` is empty, so no run is allowed");
@@ -1022,6 +1046,53 @@ events = ["issues"]
                 assert_eq!(present, github_only, "{section}");
             }
         }
+    }
+
+    /// `[gitlab.outputs] own-branch-repos` names the repositories whose
+    /// own branches apply may push to, as GitHub's bounds do; Forgejo's
+    /// section refuses them, and the patterns are held to GitHub's limits.
+    #[test]
+    fn gitlab_own_branch_repos() {
+        let section = "[gitlab]\npush_repo = \"bot/bootc\"\n\
+                 [gitlab.outputs]\ncreate_pull_request = { max = 1 }\nnoop = { max = 1 }\n\
+                 own-branch-repos = [\"example-org/*\"]\n";
+        let bounds = validated(&format!("{}{section}", neutral())).unwrap();
+        assert_eq!(
+            bounds.gitlab.as_ref().unwrap().outputs.own_branch_repos,
+            ["example-org/*"]
+        );
+        assert_eq!(bounds.outputs().len(), 2);
+        assert!(bounds.push_repo().is_some());
+        let error = validated(&format!(
+            "{}{}",
+            neutral(),
+            section.replace("[gitlab", "[forgejo")
+        ))
+        .unwrap_err();
+        assert!(error.contains("own-branch-repos is GitLab's"), "{error}");
+        let own = |patterns: &str| {
+            format!(
+                "{}[gitlab]\npush_repo = \"bot/bootc\"\n\
+                 [gitlab.outputs]\ncreate_pull_request = {{ max = 1 }}\nnoop = {{ max = 1 }}\n\
+                 own-branch-repos = {patterns}\n",
+                neutral()
+            )
+        };
+        for (patterns, want) in [
+            ("[\"\"]", "patterns must be 1"),
+            (
+                format!("[\"{}\"]", "a".repeat(257)).as_str(),
+                "patterns must be 1",
+            ),
+            (
+                format!("{:?}", vec!["*"; 101]).as_str(),
+                "at most 100 patterns",
+            ),
+        ] {
+            let error = validated(&own(patterns)).unwrap_err();
+            assert!(error.contains(want), "{patterns}: {error}");
+        }
+        validated(&own("[]")).unwrap();
     }
 
     /// What a bounds file may not say about its forge: each refusal, and

@@ -1230,11 +1230,16 @@ impl Policy {
             check_commit_author(author)?;
         }
         if let Some(push_repo) = &self.push_repo {
+            // The repository itself is the one own-branch-repos bounds
+            // accept, the caller choosing its CI execution; anything
+            // else of the same owner stays refused.
+            let own = push_repo.eq_ignore_ascii_case(&self.repo)
+                && self.safe_outputs.accepts_own_branches(&self.repo)?;
             ensure!(
                 REPO_RE.is_match(push_repo)
                     && !dotted(push_repo)
                     && !push_repo.ends_with(".git")
-                    && !same_owner(push_repo, &self.repo),
+                    && (!same_owner(push_repo, &self.repo) || own),
                 "push_repo {push_repo:?} is not another owner's repository than {:?}",
                 self.repo
             );
@@ -1258,8 +1263,9 @@ impl Policy {
         self.forge.check_outputs(self.safe_outputs.types())?;
         self.safe_outputs.validate_own_branch_repos()?;
         ensure!(
-            self.forge == Forge::Github || self.safe_outputs.own_branch_repos.is_empty(),
-            "own-branch-repos is supported only on GitHub"
+            matches!(self.forge, Forge::Github | Forge::Gitlab)
+                || self.safe_outputs.own_branch_repos.is_empty(),
+            "own-branch-repos is supported only on GitHub and GitLab"
         );
         for output in self.safe_outputs.others.keys() {
             ensure!(

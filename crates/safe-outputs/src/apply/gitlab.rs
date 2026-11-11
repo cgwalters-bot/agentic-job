@@ -2,7 +2,10 @@
 //! caller's issue or merge request, and a merge request from a branch
 //! pushed over git to the fork the bounds name, opened on the fork with
 //! the repository as its `target_project_id`. Never a branch of the
-//! repository itself, for the reason Forgejo's publisher gives. Also an
+//! repository itself, for the reason Forgejo's publisher gives, unless
+//! the caller's own-branch-repos bounds accept the repository's own
+//! branches, where the push and the merge request both target the
+//! repository itself. Also an
 //! issue, labels added to or removed from an issue or a merge request,
 //! and one closed with a note saying why; a commit pushed on the branch of
 //! the policy's merge request, in that fork, under a lease on the head the
@@ -107,10 +110,13 @@ pub struct Gitlab {
     comment_kind: Option<Kind>,
     /// Trusted deployment context, never taken from the checked JSONL.
     status_context: Option<(String, u64)>,
+    /// Whether the checked caller bounds accept this repository's own
+    /// branches ([`Self::accepting_own_branches`]).
+    own_branches: bool,
 }
 
 /// What GitLab says of a project, as far as a push to it needs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Project {
     id: u64,
     path: String,
@@ -323,6 +329,7 @@ impl Gitlab {
             recover_pushed_commit: None,
             comment_kind: None,
             status_context: None,
+            own_branches: false,
         })
     }
 
@@ -367,6 +374,15 @@ impl Gitlab {
     /// is posted.
     pub fn commenting_on(mut self, kind: Option<Kind>) -> Self {
         self.comment_kind = kind;
+        self
+    }
+
+    /// Whether the checked policy's own-branch-repos bounds accept this
+    /// repository's own branches: trusted caller configuration from the
+    /// policy check alone, never a request or the agent's output. With
+    /// it, `push_repo` may name the repository itself.
+    pub fn accepting_own_branches(mut self, own: bool) -> Self {
+        self.own_branches = own;
         self
     }
 
@@ -719,6 +735,20 @@ impl Gitlab {
         Ok(())
     }
 
+    /// The repository's project and the branch's: the fork's, as
+    /// [`Self::check_fork`] holds it, or the repository's own where the
+    /// checked caller bounds accept own branches and PUSH_REPO names the
+    /// repository itself. A same-group repository other than the
+    /// repository itself is refused either way.
+    fn check_target(&self, push_repo: &str, private_run: bool) -> Result<(Project, Project)> {
+        if self.own_branches && push_repo.eq_ignore_ascii_case(&self.repo) {
+            let project = self.project(&self.repo)?;
+            return Ok((project.clone(), project));
+        }
+        self.other_owner(push_repo)?;
+        self.check_fork(push_repo, private_run)
+    }
+
     /// Git with the token, as GitLab takes it over HTTP, committing as
     /// COMMITTER.
     fn git<'a>(&'a self, committer: &'a Committer) -> Git<'a> {
@@ -757,10 +787,9 @@ impl Gitlab {
     /// of the repository's project, by the ID read, into that project,
     /// open, from the bounds' fork, by its ID, and the branch the policy
     /// read, at the head the run was asked for; and the fork as
-    /// [`Self::check_fork`] holds it.
+    /// [`Self::check_target`] holds it.
     fn push_target(&self, push: &BranchPush) -> Result<String> {
-        self.other_owner(&push.push_repo)?;
-        let (target, fork) = self.check_fork(&push.push_repo, push.private)?;
+        let (target, fork) = self.check_target(&push.push_repo, push.private)?;
         let number = push.number;
         let mr = reference(Kind::PullRequest, number);
         let path = format!("/projects/{}/merge_requests/{number}", target.id);
@@ -890,15 +919,15 @@ impl Publisher for Gitlab {
 
     fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
         // `plan` refuses this too; held here as well, as nothing else
-        // stands between the agent's code and the repository's CI.
-        self.other_owner(&pr.push_repo)?;
+        // stands between the agent's code and the repository's CI, unless
+        // the checked caller bounds accept the repository's own branches.
         let pushing = || format!("pushing {} to {}", pr.branch, pr.push_repo);
         let (target, fork) = self
-            .check_fork(&pr.push_repo, pr.private)
+            .check_target(&pr.push_repo, pr.private)
             .with_context(pushing)?;
         let commit = self.push(pr).with_context(pushing)?;
         // Opened on the fork, the branch's project, for the repository,
-        // both by the IDs `check_fork` read.
+        // both by the IDs `check_target` read.
         let path = format!("/projects/{}/merge_requests", fork.id);
         let opened = || -> Result<Made> {
             let answer = self.request(
@@ -2513,6 +2542,71 @@ mod tests {
         assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), pr.base_commit);
     }
 
+    /// Where the caller's own-branch-repos bounds accept the repository,
+    /// the branch and the merge request both target the repository
+    /// itself; without that acceptance, or for another of its group's
+    /// repositories, apply refuses before any write.
+    #[test]
+    fn opens_a_merge_request_in_the_repository_itself() {
+        let (root, mut pr) = repository();
+        pr.push_repo = "owner/name".into();
+        let (server, requests) = mock(vec![
+            ok(&repo()),
+            (
+                201,
+                json!({"id": 91, "iid": 9, "project_id": 1, "target_project_id": 1,
+                    "web_url": "https://gitlab.example/owner/name/-/merge_requests/9"})
+                .to_string(),
+            ),
+        ]);
+        let mut opened = gitlab(&server).accepting_own_branches(true);
+        opened.git = root.path().display().to_string();
+        let made = opened.open_pull_request(&pr).unwrap();
+        assert_eq!(made.number, Some(9));
+        let request = requests.recv().unwrap();
+        assert_eq!(request.line, "GET /api/v4/projects/owner%2Fname HTTP/1.1");
+        let request = requests.recv().unwrap();
+        assert_eq!(
+            request.line,
+            "POST /api/v4/projects/1/merge_requests HTTP/1.1"
+        );
+        assert_eq!(
+            request.body,
+            json!({"source_branch": "agent-run-7", "target_branch": "main",
+                "target_project_id": 1, "title": "WIP: Fix it", "description": "Why."})
+        );
+        // The branch is in the repository itself, and nowhere else.
+        assert_eq!(
+            sh(
+                &root.path().join("owner/name.git"),
+                &["rev-parse", "agent-run-7~"]
+            ),
+            pr.base_commit
+        );
+        assert_eq!(
+            sh(&root.path().join("fork/name.git"), &["for-each-ref"]),
+            ""
+        );
+        for (own, push_repo) in [(false, "owner/name"), (true, "owner/other")] {
+            let (root, mut pr) = repository();
+            pr.push_repo = push_repo.into();
+            let (server, requests) = mock(vec![]);
+            let mut gitlab = gitlab(&server).accepting_own_branches(own);
+            gitlab.git = root.path().display().to_string();
+            let err = format!("{:#}", gitlab.open_pull_request(&pr).unwrap_err());
+            assert!(err.contains("another owner's fork"), "{push_repo}: {err}");
+            assert_eq!(requests.iter().count(), 0, "{push_repo}: nothing asked");
+            assert_eq!(
+                sh(
+                    &root.path().join("owner/name.git"),
+                    &["for-each-ref", "--format=%(refname)"]
+                ),
+                "refs/heads/main",
+                "{push_repo}: no push"
+            );
+        }
+    }
+
     /// As Forgejo's: publication reads and opens, git pushes with the
     /// fork-push token, and no form of either token is in an error.
     #[test]
@@ -2574,6 +2668,48 @@ mod tests {
         );
         let fork = root.path().join("fork/name.git");
         assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), pr.base_commit);
+    }
+
+    /// A push to the branch of a merge request the repository itself
+    /// holds, under the caller's own-branch acceptance; without it, the
+    /// repository's group is refused as before.
+    #[test]
+    fn pushes_to_an_own_branch_merge_request() {
+        let (root, mut push) = pull_request_branch();
+        push.push_repo = "owner/name".into();
+        // The merge request's branch is the repository's own.
+        sh(
+            &root.path().join("owner/name.git"),
+            &["update-ref", "refs/heads/agent-run-7", "refs/heads/main"],
+        );
+        let (server, requests) = push_gitlab(
+            merge_request(1, "agent-run-7", &push.head),
+            push.head.clone(),
+            json!([]),
+            &[],
+        );
+        let mut accepted = gitlab(&server).accepting_own_branches(true);
+        accepted.git = root.path().display().to_string();
+        assert_eq!(accepted.push_to_branch(&push).unwrap(), MR_9_URL);
+        assert_eq!(
+            sh(
+                &root.path().join("owner/name.git"),
+                &["rev-parse", "agent-run-7~"]
+            ),
+            push.head
+        );
+        let lines: Vec<String> = requests.try_iter().map(|request| route(&request)).collect();
+        assert_eq!(lines, ["GET /api/v4/projects/owner%2Fname", MR]);
+        let (server, _requests) = push_gitlab(
+            merge_request(1, "agent-run-7", &push.head),
+            push.head.clone(),
+            json!([]),
+            &[],
+        );
+        let mut refused = gitlab(&server);
+        refused.git = root.path().display().to_string();
+        let err = format!("{:#}", refused.push_to_branch(&push).unwrap_err());
+        assert!(err.contains("another owner's fork"), "{err}");
     }
 
     /// A push project that is not the repository's fork, or one more can

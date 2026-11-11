@@ -473,12 +473,36 @@ impl Compile for Bounds {
         // its CI as the repository's own, with its secrets. Nor is it the
         // target's owner's: Forgejo reads a pull request's head of that
         // owner as the target's own branch. A pull request's branch and a
-        // push to one both go to that fork.
+        // push to one both go to that fork. The exception is GitLab's
+        // own-branch-repos bounds accepting the repository itself, as
+        // GitHub's accept the applying account's own repositories.
         let to_fork =
             types.contains(&CREATE_PULL_REQUEST) || types.contains(&PUSH_TO_PULL_REQUEST_BRANCH);
+        // The caller's own-branch bounds accept the repository itself as
+        // the push target, on GitHub and GitLab: the CI trust choice of
+        // docs/safe-outputs.md, never a hand-back's.
+        let own_branch_repos = self
+            .github
+            .as_ref()
+            .map(|github| &github.outputs.own_branch_repos)
+            .or_else(|| {
+                self.gitlab
+                    .as_ref()
+                    .map(|gitlab| &gitlab.outputs.own_branch_repos)
+            })
+            .filter(|patterns| !patterns.is_empty())
+            .map(|patterns| vec![patterns.clone()])
+            .unwrap_or_default();
+        let own_branches = SafeOutputs {
+            own_branch_repos: own_branch_repos.clone(),
+            ..Default::default()
+        }
+        .accepts_own_branches(repo)
+        .unwrap_or(false);
         if let Some(push_repo) = push_repo
             && to_fork
             && same_owner(push_repo, repo)
+            && !(push_repo.eq_ignore_ascii_case(repo) && own_branches)
         {
             errors.push(format!(
                 "push_repo {push_repo:?} is of the owner of {repo:?}, not another owner's fork"
@@ -627,12 +651,7 @@ impl Compile for Bounds {
                 .is_some_and(|bound| bound.ready_when_complete)
         };
         let safe_outputs = SafeOutputs {
-            own_branch_repos: self
-                .github
-                .as_ref()
-                .filter(|github| !github.outputs.own_branch_repos.is_empty())
-                .map(|github| vec![github.outputs.own_branch_repos.clone()])
-                .unwrap_or_default(),
+            own_branch_repos,
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
                 max: limit(CREATE_PULL_REQUEST).max,
                 protected_files: protected_files(&self.unprotected_files, repo),
@@ -896,7 +915,7 @@ pub fn run(args: &Args) -> Result<Exit> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use safe_outputs::bounds::NeutralBounds;
+    use safe_outputs::bounds::{NeutralBounds, NeutralOutputs};
 
     /// The old tree's allowlist, as a bounds file.
     pub(crate) const BOUNDS: &str = r#"
@@ -3353,7 +3372,10 @@ max_patch_files = 10
     pub(crate) fn on_forge(mut bounds: Bounds, forge: Forge, fork: &str) -> Bounds {
         let github = bounds.github.take().unwrap();
         let section = Some(NeutralBounds {
-            outputs: github.outputs.types,
+            outputs: NeutralOutputs {
+                types: github.outputs.types,
+                ..Default::default()
+            },
             push_repo: Some(fork.to_owned()),
         });
         match forge {
@@ -4099,6 +4121,61 @@ max_patch_files = 10
             invalid.safe_outputs.own_branch_repos = vec![patterns];
             assert!(invalid.validate().is_err());
         }
+    }
+
+    /// GitLab's own-branch bounds accept the repository itself as the
+    /// push target, where a fork would otherwise be required: off by
+    /// default, one pattern list per bounds file, and only the repository
+    /// itself, not another of its owner's.
+    #[test]
+    fn gitlab_own_branch_repos_accept_the_repository_itself() {
+        let compile = |patterns: &[&str], fork: &str| {
+            let mut bounds = on_forge(bounds(), Forge::Gitlab, fork);
+            bounds.gitlab.as_mut().unwrap().outputs.own_branch_repos =
+                patterns.iter().map(|s| (*s).to_owned()).collect();
+            bounds.validate().unwrap();
+            bounds.compile(&request())
+        };
+        let policy = compile(&["bootc-dev/*"], REPO).unwrap();
+        // Check's policy loader and serialized handler configuration
+        // retain it, and the policy names the repository itself.
+        let policy: Policy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        policy.validate().unwrap();
+        assert_eq!(policy.push_repo.as_deref(), Some(REPO));
+        assert!(policy.safe_outputs.accepts_own_branches(REPO).unwrap());
+        assert!(
+            !policy
+                .safe_outputs
+                .accepts_own_branches("other/repo")
+                .unwrap()
+        );
+        // Off by default, and only where the patterns match the repository.
+        for (patterns, fork, want) in [
+            (&[][..], REPO, "is of the owner of"),
+            (&["other/*"][..], REPO, "is of the owner of"),
+            (&["bootc-dev/*"][..], "bootc-dev/fork", "is of the owner of"),
+        ] {
+            let errors = compile(patterns, fork).unwrap_err();
+            assert!(
+                errors.iter().any(|e| e.contains(want)),
+                "{patterns:?} {fork}: {errors:?}"
+            );
+        }
+        // Both bounds files must accept it.
+        let mut other = compile(&["*/bootc"], REPO).unwrap();
+        let both = intersect(policy.clone(), other.clone()).unwrap();
+        assert!(both.safe_outputs.accepts_own_branches(REPO).unwrap());
+        other.safe_outputs.own_branch_repos = vec![vec!["other/*".to_owned()]];
+        let either = intersect(policy, other).unwrap();
+        assert!(!either.safe_outputs.accepts_own_branches(REPO).unwrap());
+        // A hand-written policy is held to the same rules.
+        let mut hand = compile(&["other/*"], "bot/bootc").unwrap();
+        hand.push_repo = Some(REPO.to_owned());
+        assert!(hand.validate().is_err());
+        hand.safe_outputs.own_branch_repos = vec![vec!["bootc-dev/*".to_owned()]];
+        hand.validate().unwrap();
+        hand.forge = Forge::Forgejo;
+        assert!(hand.validate().is_err());
     }
 
     /// Off unless bounds say so, for the patch's carriers alone, and on

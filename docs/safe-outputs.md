@@ -968,6 +968,15 @@ accept that CI execution, with no extra gate, in its dispatch and fix bounds:
 own-branch-repos = ["example-org/*"]
 ```
 
+GitLab's bounds accept the same choice with `[gitlab.outputs]
+own-branch-repos`, where the bounds' `push_repo` then names the
+repository itself rather than a fork
+([publishing to GitLab](#publishing-to-gitlab)); Forgejo's bounds
+refuse the patterns, as its publisher has no such acceptance. On
+GitLab a project's path may nest (`group/sub/repo`), and a pattern's
+`*` stops at a `/`: `group/*` matches `group/repo` but not
+`group/sub/repo`, which needs `group/**` or its full path.
+
 This is off by default (an empty list), accepts at most 100 patterns of 1–256
 bytes, and uses the existing case-insensitive repository glob syntax (`*`
 within a segment, `**` across segments). Check validates these bounds and
@@ -2337,6 +2346,14 @@ for `noop`, `missing_tool` and `missing_data`:
   project as its `target_project_id`. The fork must be GitLab's fork of
   that project (`forked_from_project`), and private unless the project
   is public and the run is not private. A draft is a `Draft:` title.
+  The exception is `[gitlab.outputs] own-branch-repos` patterns
+  accepting the project itself: the bounds then name it as `push_repo`,
+  and the branch and the merge request both target the project itself,
+  whose CI runs the agent's commit with its secrets — the caller's
+  trust choice, off by default, exactly as
+  [GitHub's own-branch bounds](#pushing-to-a-pull-requests-branch)
+  make it. No other project of the group is accepted, and the
+  branch, patch and credential boundaries are unchanged.
 - `push_to_pull_request_branch` adds one commit to the branch of the
   policy's merge request, as on Forgejo
   ([pushing to a pull request's branch](#pushing-to-a-pull-requests-branch-on-forgejo)):
@@ -2348,7 +2365,10 @@ for `noop`, `missing_tool` and `missing_data`:
   `target_project_id`), open, from the fork by its ID
   (`source_project_id`) and the policy's branch (`source_branch`), at
   the head the run was asked for (`sha`). A merge request from the
-  project itself or another fork, merged, closed or moved on is refused.
+  project itself or another fork, merged, closed or moved on is refused
+  — except a merge request the project itself holds, from its own
+  branch, under the same own-branch-repos acceptance as a new merge
+  request above.
 - `--status` sets the caller's commit status after every other write,
   off by default, never from agent JSONL. To prevent attaching a result
   to the wrong pipeline or taking over another run's job, GitLab requires
