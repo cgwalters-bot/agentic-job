@@ -627,6 +627,44 @@ What the checks stop is unfinished work opening ready for review, where a
 reader or a poller would take it for finished: a stopped run cannot claim
 to be complete, and a checkpoint check cannot read is refused, not ignored.
 
+#### Unchanged completion remains unavailable
+
+The threat is an agent-authored `outcome.json` or `noop` clearing an unfinished
+continuation, or evidence from another target, head, run or attempt doing so.
+There is currently **no accepted unchanged-completion candidate or checked
+completion field**. A missing checkpoint in the check report is not proof of
+completion. An unchanged result cannot trigger the readiness transition above,
+even with `ready_when_complete`; that path still requires a push.
+
+The missing binding is concrete. `Policy` binds the repository and a push's
+target/head, but has no producer run/attempt identity. `run::handback::Request`
+has a run ID, not an attempt. `check::Args` has a trusted run ID and optional
+comment target/review head, but no attempt or complete unchanged-result context;
+`Trusted` passes only comment destination and run ID to the library. The workflow
+does not pass `--review-head` to this check invocation. Finally, the checked
+artifact ID/name/digest check in `apply.yml` binds the run **not the attempt**:
+an earlier attempt's artifact can pass. An agent-supplied attempt or an inference
+registration record does not repair that end-to-end binding.
+
+Before carrying accepted evidence, the existing policy/check context and checked
+artifact provenance must bind the admitted repository, PR, exact head, producer
+run and attempt together, without reading identities from agent output. Required
+verification must also be specified by trusted context; the agent cannot choose
+an empty required set. Missing context, identity mismatches, changed output
+claimed as unchanged, absent/malformed/incomplete checkpoints, stopped outcomes,
+and failed or unavailable required verification must fail closed. This is a
+prerequisite, not a new receipt, option or caller opt-in in this version.
+
+Today the producer saves outcomes as diagnostics outside the hand-back. The
+collector sanitizes requests; check validates bounded no-follow files, secrets,
+policy/patch constraints and checkpoints in accepted PR/push text. Agent-reported
+test commands and exit codes in outcomes are not independently executed or
+verified by check. Even a future identity-bound checked claim would not prove
+semantic completion. Existing repeated-test evidence is agent-authored and bound
+to a proposed patch, not an unchanged-completion authority. Legacy outcomes and
+noops remain compatible as diagnostics; putting a raw outcome or an invented
+completion-evidence file into the hand-back is refused as an unexpected file.
+
 ### Requesting reviewers and assigning users
 
 Both notify whoever they name, so an agent could otherwise page anyone with

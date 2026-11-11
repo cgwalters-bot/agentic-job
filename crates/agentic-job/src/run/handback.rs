@@ -3562,6 +3562,127 @@ mod tests {
         assert!(!home.path("safe-outputs").exists());
     }
 
+    /// Until policy/check/artifact provenance binds the workflow attempt,
+    /// an unchanged outcome is diagnostic text, never checked completion.
+    #[test]
+    fn unchanged_completion_claims_are_not_checked_evidence() {
+        let cases = [
+            ("complete", json!({"checkpoint": {"complete": true}})),
+            ("absent checkpoint", json!({"checkpoint": null})),
+            ("incomplete", json!({"checkpoint": {"complete": false}})),
+            ("malformed checkpoint", json!({"checkpoint": "complete"})),
+            ("stopped", json!({"stopped_early": "timeout"})),
+            (
+                "failed verification",
+                json!({"tests": [{"command": "just check", "exit_code": 1}]}),
+            ),
+            ("unavailable verification", json!({"tests": []})),
+            ("wrong repository", json!({"repo": "other/repo"})),
+            ("wrong target", json!({"target": 999})),
+            ("wrong head", json!({"head": "b".repeat(40)})),
+            ("wrong run", json!({"run_id": "999"})),
+            ("wrong attempt", json!({"run_attempt": 999})),
+        ];
+        for (name, fields) in cases {
+            let home = Home::new();
+            let mut policy = crate::policy::tests::push_policy();
+            let push = policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap();
+            push.head.clone_from(&home.checkout.base_commit);
+            push.ready_when_complete = true;
+            let mut outcome = json!({
+                "summary": "No change required",
+                "checkpoint": {"complete": true},
+                "stopped_early": null,
+                "tests": [{"command": "just check", "exit_code": 0}],
+                // Deliberately untrusted claims, not a proposed wire format.
+                "unchanged_completion": {
+                    "repo": policy.repo, "target": push.target,
+                    "head": home.checkout.base_commit, "run_id": RUN_ID, "run_attempt": 1
+                }
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                if outcome["unchanged_completion"].get(key).is_some() {
+                    outcome["unchanged_completion"][key] = value.clone();
+                } else if value.is_null() {
+                    outcome.as_object_mut().unwrap().remove(key);
+                } else {
+                    outcome[key] = value.clone();
+                }
+            }
+            std::fs::write(
+                home.path(AGENT_OUTCOME),
+                serde_json::to_vec(&outcome).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                home.path(AGENT_OUTPUTS),
+                json!({
+                    "type": "noop", "message": "Already complete",
+                    "unchanged_completion": outcome["unchanged_completion"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let change = home.collect(&policy, &config::Commit::default());
+            assert!(!change.handed_back_patch(), "{name}");
+            assert_eq!(home.handed_back(), [OUTPUTS_FILE], "{name}");
+            assert_eq!(home.outcome(), outcome, "{name}");
+
+            // Use the real collector, not Home::verdict's collector stand-in.
+            let config = serde_json::to_value(&policy.safe_outputs).unwrap();
+            let outputs = std::fs::read(home.path("safe-outputs/outputs.jsonl")).unwrap();
+            let collected = safe_outputs::collect::collect_bytes(
+                &outputs,
+                config.as_object().unwrap(),
+                policy.forge,
+                &|host| policy.keeps_link_to(host),
+            )
+            .unwrap();
+            let collected_path = home.path("collected.json");
+            std::fs::write(&collected_path, serde_json::to_vec(&collected).unwrap()).unwrap();
+            let check = || {
+                check::check_run_outputs(
+                    &home.path("safe-outputs"),
+                    &collected_path,
+                    &policy,
+                    RUN_ID,
+                )
+                .unwrap()
+            };
+            let verdict = check();
+            assert!(verdict.ok, "{name}: {:?}", verdict.errors);
+            assert!(
+                verdict.patch.is_none() && verdict.checkpoint.is_none(),
+                "{name}"
+            );
+            let report = serde_json::to_value(&verdict).unwrap();
+            assert!(report.get("unchanged_completion").is_none(), "{name}");
+            assert!(
+                report["items"][0].get("unchanged_completion").is_none(),
+                "{name}"
+            );
+
+            // Smuggling the raw outcome or an invented evidence file into
+            // the checked upload must fail, rather than authenticate it.
+            for file in [OUTCOME_FILE, "unchanged-completion.json"] {
+                let path = home.path(&format!("safe-outputs/{file}"));
+                std::fs::write(&path, serde_json::to_vec(&outcome).unwrap()).unwrap();
+                let verdict = check();
+                assert!(!verdict.ok, "{name}: {file}");
+                assert!(
+                    verdict.errors.iter().any(|e| e.contains("unexpected file")),
+                    "{name}: {:?}",
+                    verdict.errors
+                );
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
     /// A push is handed back as a patch named for the pull request's
     /// branch, against the head the policy pins, and the check takes it.
     #[test]
