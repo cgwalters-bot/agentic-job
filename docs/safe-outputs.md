@@ -953,18 +953,32 @@ of the target or of the other fork run the agent's commit with whatever
 secrets, write token and OIDC access they hold
 ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
 [#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). So apply
-pushes to any head repository but its own fork only when that repository's
-default branch has the file `.github/agentic-job/accept-owner-branches`
-naming that repository (`owner/repo`) on a line of its own. Write access
-given to the account is not that acceptance, nor is a file a fork inherited
-from the target it was made or synced from, which names the target. It is
-the head repository's own decision, not a caller's: only a commit to its
-default branch adds the file, which apply never pushes. The same file also
-lets the applying account open new pull requests from branches of a
-repository [it owns](workflow.md#a-repository-the-applying-account-owns),
-where those branches get the same workflows. Refusing `.github`
+pushes to any head repository but its own fork only when one of two sources
+accepts it: the caller's bounds match that head repository, or its default
+branch has `.github/agentic-job/accept-owner-branches` naming that repository
+(`owner/repo`) on a line of its own. Write access alone is not acceptance;
+a fork's inherited file naming its parent does not accept the fork.
+
+The threat is running agent-written code in a repository whose workflows can
+reach credentials or other privileged resources. The caller may choose to
+accept that CI execution, with no extra gate, in its dispatch and fix bounds:
+
+```toml
+[github.outputs]
+own-branch-repos = ["example-org/*"]
+```
+
+This is off by default (an empty list), accepts at most 100 patterns of 1–256
+bytes, and uses the existing case-insensitive repository glob syntax (`*`
+within a segment, `**` across segments). Check validates these bounds and
+binds them into apply's configuration; organization bounds must also match
+the head repository. The repository file remains an independent source of
+acceptance. Both sources cover fix pushes and new PR branches in repositories
+the applying account [owns](workflow.md#a-repository-the-applying-account-owns).
+Neither grants write access or bypasses branch protection, default-branch
+refusals, patch limits or `.github` protection. Refusing `.github`
 keeps the agent from adding workflows there, not from changing the build
-scripts, tests and local actions the existing ones run. Add it only to a repository whose
+scripts, tests and local actions the existing ones run. Accept only a repository whose
 workflows give a branch nothing an agent is not to have; where that
 repository is also the caller, keep its apply environment to the default
 branch, so that a branch's workflows cannot use its token. Any other head

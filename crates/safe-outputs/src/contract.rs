@@ -958,6 +958,11 @@ pub fn check_context(context: &[ContextRepo]) -> Result<()> {
 /// gh-aw's safe-outputs configuration: a table per output type allowed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafeOutputs {
+    /// One pattern list per trusted bounds file; all must accept the head
+    /// repository. Empty means no caller acceptance (the repository file
+    /// remains an independent source).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_branch_repos: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_pull_request: Option<PullRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1100,6 +1105,27 @@ pub enum ProtectedFilesPolicy {
 }
 
 impl SafeOutputs {
+    pub fn accepts_own_branches(&self, repo: &str) -> Result<bool> {
+        self.validate_own_branch_repos()?;
+        Ok(!self.own_branch_repos.is_empty()
+            && self.own_branch_repos.iter().all(|patterns| {
+                patterns
+                    .iter()
+                    .any(|pattern| glob(pattern).is_ok_and(|pattern| pattern.is_match(repo)))
+            }))
+    }
+
+    fn validate_own_branch_repos(&self) -> Result<()> {
+        ensure!(
+            self.own_branch_repos.len() <= 2,
+            "own-branch-repos: at most two bounds files"
+        );
+        for patterns in &self.own_branch_repos {
+            validate_own_branch_repos(patterns)?;
+        }
+        Ok(())
+    }
+
     /// The ceiling of an output type, if the run may hand it back.
     pub fn max_of(&self, output: &str) -> Option<u32> {
         match output {
@@ -1230,6 +1256,11 @@ impl Policy {
             self.contract
         );
         self.forge.check_outputs(self.safe_outputs.types())?;
+        self.safe_outputs.validate_own_branch_repos()?;
+        ensure!(
+            self.forge == Forge::Github || self.safe_outputs.own_branch_repos.is_empty(),
+            "own-branch-repos is supported only on GitHub"
+        );
         for output in self.safe_outputs.others.keys() {
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str())
@@ -1336,6 +1367,25 @@ impl Policy {
         }
         Ok(())
     }
+}
+
+/// Bound pattern compilation in policy/check and apply. These are caller
+/// patterns, never a producer-selected repository or a grant of push access.
+pub(crate) fn validate_own_branch_repos(patterns: &[String]) -> Result<()> {
+    const MAX_PATTERNS: usize = 100;
+    const MAX_PATTERN_BYTES: usize = 256;
+    ensure!(
+        patterns.len() <= MAX_PATTERNS,
+        "own-branch-repos: at most {MAX_PATTERNS} patterns"
+    );
+    for pattern in patterns {
+        ensure!(
+            !pattern.is_empty() && pattern.len() <= MAX_PATTERN_BYTES,
+            "own-branch-repos: patterns must be 1–{MAX_PATTERN_BYTES} bytes"
+        );
+        glob(pattern).context("own-branch-repos: invalid pattern")?;
+    }
+    Ok(())
 }
 
 /// A glob as a pattern: `*` is anything within one path segment, `**`

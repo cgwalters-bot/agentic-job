@@ -139,6 +139,9 @@ the next in the same major version.
   [events](events.md)). `repos` accepts existing string globs and opt-in
   `{org = "ORG", forks = false}` rules on GitHub, checked against live owner,
   fork and archived metadata at policy time. `allowed_domains` is accepted and ignored.
+  `[github.outputs] own-branch-repos` optionally lists repository patterns
+  accepting new PR branches and fix pushes without a per-repository file;
+  it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`): the tables
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,

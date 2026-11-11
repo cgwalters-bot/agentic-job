@@ -312,6 +312,18 @@ fn handlers(dir: &Path, config: &Value, overrides: &[(&str, &str)]) -> (Output, 
     (out, result)
 }
 
+#[test]
+fn caller_branch_acceptance_is_not_a_handler_operation() {
+    let dir = TempDir::new().unwrap();
+    let (out, config) = handlers(
+        dir.path(),
+        &json!({"own_branch_repos": [["example-org/*"]], "noop": {"max": 1}}),
+        &[],
+    );
+    status(&out, 0);
+    assert_eq!(config, json!({"noop": {"max": 1}}));
+}
+
 fn handler_settings() -> (String, String) {
     let step = step(&definition("apply.yml"), "apply", HANDLERS);
     (

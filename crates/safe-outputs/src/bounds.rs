@@ -145,7 +145,7 @@ impl std::fmt::Display for RepoRule {
 #[serde(deny_unknown_fields)]
 pub struct GithubBounds<Trigger = toml::Table> {
     /// The output types a run may ask for, and the ceiling of each.
-    pub outputs: BTreeMap<String, OutputLimit>,
+    pub outputs: GithubOutputs,
     /// Which events may start a run, and who may start one
     /// (`agentic-job event`). Absent, none may.
     #[serde(default = "Option::default")]
@@ -168,6 +168,15 @@ pub struct GithubBounds<Trigger = toml::Table> {
     /// opens it.
     #[serde(default)]
     pub secondary_pull_request: Option<SecondaryPullRequest>,
+}
+
+/// GitHub output limits and the caller's acceptance of repository CI execution.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GithubOutputs {
+    #[serde(default, rename = "own-branch-repos")]
+    pub own_branch_repos: Vec<String>,
+    #[serde(flatten)]
+    pub types: BTreeMap<String, OutputLimit>,
 }
 
 /// `[forgejo]` or `[gitlab]`: output types of [`crate::NEUTRAL_OUTPUTS`]
@@ -302,7 +311,7 @@ impl<Trigger> Bounds<Trigger> {
     pub fn outputs(&self) -> &BTreeMap<String, OutputLimit> {
         static NONE: BTreeMap<String, OutputLimit> = BTreeMap::new();
         match (&self.github, self.neutral()) {
-            (Some(github), _) => &github.outputs,
+            (Some(github), _) => &github.outputs.types,
             (None, Some(neutral)) => &neutral.outputs,
             (None, None) => &NONE,
         }
@@ -311,7 +320,7 @@ impl<Trigger> Bounds<Trigger> {
     /// [`Self::outputs`], to change; `None` without a section.
     pub fn outputs_mut(&mut self) -> Option<&mut BTreeMap<String, OutputLimit>> {
         if let Some(github) = &mut self.github {
-            return Some(&mut github.outputs);
+            return Some(&mut github.outputs.types);
         }
         let neutral = self.forgejo.as_mut().or(self.gitlab.as_mut());
         neutral.map(|neutral| &mut neutral.outputs)
@@ -357,6 +366,9 @@ impl<Trigger> Bounds<Trigger> {
         }
         let forge = self.forge();
         let outputs = self.outputs();
+        if let Some(github) = &self.github {
+            crate::contract::validate_own_branch_repos(&github.outputs.own_branch_repos)?;
+        }
         for (name, list) in [("hosts", &self.hosts), ("bases", &self.bases)] {
             ensure!(!list.is_empty(), "`{name}` is empty, so no run is allowed");
         }
@@ -656,6 +668,18 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
         _ => None,
     };
     policy.max_outputs = policy.max_outputs.min(other.max_outputs);
+    // Keep each caller's patterns separate: a repository must match both,
+    // not their union. No glob-pattern intersection is needed.
+    if policy.safe_outputs.own_branch_repos.is_empty()
+        || other.safe_outputs.own_branch_repos.is_empty()
+    {
+        policy.safe_outputs.own_branch_repos.clear();
+    } else {
+        policy
+            .safe_outputs
+            .own_branch_repos
+            .extend(other.safe_outputs.own_branch_repos);
+    }
     policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
     policy.safe_outputs.others.retain(|name, limit| {
         if let Some(bound) = other.safe_outputs.others.get(name) {

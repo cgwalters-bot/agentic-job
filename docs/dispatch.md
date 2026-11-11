@@ -83,13 +83,9 @@ cannot push to (saying so), one that is neither a fork of the target nor the tar
 head repository's default branch or a protected branch, and the `.github`
 exemption anywhere but that account's own fork, whose Actions it turns off. A branch
 of any other head repository, the target itself or someone else's fork, is
-refused unless that repository's default branch has the file
-[`.github/agentic-job/accept-owner-branches`](safe-outputs.md#pushing-to-a-pull-requests-branch)
-naming it:
-a push there runs its `push` and `pull_request` workflows on
-agent-written code with their secrets, write token and OIDC
-([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
-[#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). Like
+refused unless the caller's `own-branch-repos` bounds or the repository's
+default-branch opt-in file accept it; see the
+[acceptance policy and CI trade-off](safe-outputs.md#pushing-to-a-pull-requests-branch). Like
 implement it needs `APPLY_ENVIRONMENT`. It is **off** in the shipped bounds;
 to enable it for a target, add to `dispatch.toml`
 
@@ -114,10 +110,9 @@ PR: its text and the comment belong there, with the same allowlist and token
 requirements. This grants no posting permission in unlisted repositories.
 
 Apply refuses a target the applying account owns, as it has no fork of it,
-unless the target's default branch has the file
-[`.github/agentic-job/accept-owner-branches`](workflow.md#a-repository-the-applying-account-owns)
-naming it; its CI then runs the agent's branch with its secrets. A `fix`
-to such a pull request is pushed to its branch under the same file.
+unless the caller's `own-branch-repos` bounds or the target's default-branch
+opt-in file accept it ([owned repositories](workflow.md#a-repository-the-applying-account-owns)).
+A `fix` to such a pull request uses the same acceptance policy.
 
 Every run's result can be found from the issue it was dispatched for. A draft
 PR gets a `Closes #N` line for an issue in the output repository, or

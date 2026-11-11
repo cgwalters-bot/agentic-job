@@ -627,6 +627,12 @@ impl Compile for Bounds {
                 .is_some_and(|bound| bound.ready_when_complete)
         };
         let safe_outputs = SafeOutputs {
+            own_branch_repos: self
+                .github
+                .as_ref()
+                .filter(|github| !github.outputs.own_branch_repos.is_empty())
+                .map(|github| vec![github.outputs.own_branch_repos.clone()])
+                .unwrap_or_default(),
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
                 max: limit(CREATE_PULL_REQUEST).max,
                 protected_files: protected_files(&self.unprotected_files, repo),
@@ -938,6 +944,7 @@ missing_data = { max = 3 }
             .as_mut()
             .unwrap()
             .outputs
+            .types
             .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
             .unwrap()
             .own_author = Some("applying-bot".into());
@@ -3346,7 +3353,7 @@ max_patch_files = 10
     pub(crate) fn on_forge(mut bounds: Bounds, forge: Forge, fork: &str) -> Bounds {
         let github = bounds.github.take().unwrap();
         let section = Some(NeutralBounds {
-            outputs: github.outputs,
+            outputs: github.outputs.types,
             push_repo: Some(fork.to_owned()),
         });
         match forge {
@@ -4024,6 +4031,73 @@ max_patch_files = 10
                 ..OutputLimit::default()
             };
             assert_eq!(limit.validate(output).is_ok(), accepted, "{output} {total}");
+        }
+    }
+
+    #[test]
+    fn own_branch_repos_are_caller_bounds_and_intersect() {
+        let compile = |patterns: &[&str]| {
+            let mut bounds = bounds();
+            bounds.github.as_mut().unwrap().outputs.own_branch_repos =
+                patterns.iter().map(|s| (*s).to_owned()).collect();
+            bounds.compile(&request()).unwrap()
+        };
+        let parsed: Bounds = toml::from_str(&format!(
+            "{BOUNDS}\nown-branch-repos = [\"example-org/*\"]\n"
+        ))
+        .unwrap();
+        let policy = parsed.compile(&request()).unwrap();
+        // Check's policy loader and serialized handler configuration retain it.
+        let policy: Policy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        policy.validate().unwrap();
+        assert!(
+            policy
+                .safe_outputs
+                .accepts_own_branches("Example-Org/repo")
+                .unwrap()
+        );
+        assert!(
+            !policy
+                .safe_outputs
+                .accepts_own_branches("other/repo")
+                .unwrap()
+        );
+        assert!(
+            !compile(&[])
+                .safe_outputs
+                .accepts_own_branches("example-org/repo")
+                .unwrap()
+        );
+        for (other, accepted) in [
+            (vec!["*/repo"], true),
+            (vec!["other/*"], false),
+            (vec![], false),
+        ] {
+            let both = intersect(policy.clone(), compile(&other)).unwrap();
+            assert_eq!(
+                both.safe_outputs
+                    .accepts_own_branches("example-org/repo")
+                    .unwrap(),
+                accepted
+            );
+            assert!(
+                !both
+                    .safe_outputs
+                    .accepts_own_branches("example-org/else")
+                    .unwrap()
+            );
+        }
+        for patterns in [
+            vec![String::new()],
+            vec!["a".repeat(257)],
+            vec!["*".into(); 101],
+        ] {
+            let mut bounds = bounds();
+            bounds.github.as_mut().unwrap().outputs.own_branch_repos = patterns.clone();
+            assert!(bounds.validate().is_err());
+            let mut invalid = policy.clone();
+            invalid.safe_outputs.own_branch_repos = vec![patterns];
+            assert!(invalid.validate().is_err());
         }
     }
 

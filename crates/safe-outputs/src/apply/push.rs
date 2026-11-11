@@ -27,8 +27,8 @@
 //! - never with `.github` exempted, as a workflow file the agent wrote
 //!   would run there with them: only the user's fork has Actions off;
 //! - a branch of the output repository itself, or of another's fork of
-//!   it, only where that repository accepts it ([`OWNER_BRANCHES`] naming
-//!   it on its default branch, which only a commit there adds), and of no
+//!   it, only where the caller's bounds accept it or that repository does
+//!   ([`OWNER_BRANCHES`] naming it on its default branch), and of no
 //!   other repository: write access is given for people's commits, not as
 //!   an acceptance that the fork's own workflows run an agent's with the
 //!   fork's secrets. The output repository's CI runs a fork's commit as a
@@ -170,8 +170,20 @@ fn current_base(github: &Github, repository: &str, pull: &Value) -> Result<Strin
     }
 }
 
-/// Whether NAME's default branch has [`OWNER_BRANCHES`] naming NAME.
-fn accepts_owner_branches(github: &Github, name: &str) -> Result<bool> {
+/// Whether checked caller bounds or NAME's default-branch file accept NAME.
+fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result<bool> {
+    let acceptance = crate::contract::SafeOutputs {
+        own_branch_repos: config
+            .get("own_branch_repos")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .context("own-branch-repos: invalid checked configuration")?
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    if acceptance.accepts_own_branches(name)? {
+        return Ok(true);
+    }
     // Without a ref this reads the default branch.
     let Some(file) = github.get_optional(&format!("/repos/{name}/contents/{OWNER_BRANCHES}"))?
     else {
@@ -331,10 +343,10 @@ pub fn target(
                     .into(),
             ));
         }
-        if !accepts_owner_branches(github, output)? {
+        if !accepts_owner_branches(github, &config, output)? {
             return Err(refuse(format!(
                 "apply as an account that does not own it, or, for a new pull request, add \
-                 {OWNER_BRANCHES} naming {output} to its default branch"
+                 {OWNER_BRANCHES} naming {output} to its default branch, or accept it in the caller's own-branch-repos bounds"
             )));
         }
         return Ok(Target {
@@ -452,7 +464,7 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
         "{what} is from {name}:{base}, a protected branch or one rules apply to, which a push \
          never goes to"
     );
-    if !own && !accepts_owner_branches(github, name)? {
+    if !own && !accepts_owner_branches(github, config, name)? {
         let from = if itself {
             format!("a branch of {name} itself")
         } else {
@@ -460,7 +472,7 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
         };
         bail!(
             "{what} is from {from}, whose CI would run the pushed commit with its secrets: add \
-             {OWNER_BRANCHES} naming {name} to its default branch to accept that"
+             {OWNER_BRANCHES} naming {name} to its default branch to accept that, or accept it in the caller's own-branch-repos bounds"
         );
     }
     let current_base = if args.replacement {
@@ -663,6 +675,45 @@ mod tests {
         Target {
             repo: Some(repo.into()),
             current_base: base,
+        }
+    }
+
+    #[test]
+    fn caller_own_branch_repos() {
+        for new in [false, true] {
+            for (patterns, accepted) in [
+                (json!([["O/*"]]), true),
+                (json!([["other/*"]]), false),
+                (json!([["o/*"], ["*/r"]]), true),
+                (json!([["o/*"], ["other/*"]]), false),
+                (json!([]), false),
+            ] {
+                let mut case = Case::new();
+                if new {
+                    case.new_pull_request();
+                    case.me("o");
+                } else {
+                    case.from("o/r", false);
+                }
+                case.config["own_branch_repos"] = patterns.clone();
+                let (result, asked) = case.run();
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "new={new}, {patterns}: {result:?}"
+                );
+                if accepted {
+                    assert_eq!(result.unwrap(), pushed_to("o/r", None));
+                    assert!(!asked.iter().any(|path| path.contains(OWNER_BRANCHES)));
+                }
+            }
+        }
+        // The actual head fork, not the upstream target, must match.
+        for (pattern, accepted) in [("carol/*", true), ("o/*", false)] {
+            let mut case = Case::new();
+            case.routes.remove(ACCEPTS);
+            case.config["own_branch_repos"] = json!([[pattern]]);
+            assert_eq!(case.run().0.is_ok(), accepted);
         }
     }
 

@@ -1664,28 +1664,20 @@ access to it, and its CI runs the change as a fork's pull request.
 
 An account has no fork of its own repository, so apply refuses an output
 repository owned by the user `GET /user` names, unless the repository
-accepts its owner's branches: its default branch has the file
-`.github/agentic-job/accept-owner-branches` naming it (`owner/repo`) on a
-line of its own, the file a fix push [checks too](safe-outputs.md#pushing-to-a-pull-requests-branch).
-No bounds file lists such repositories; each one says so itself, in a
-commit to its default branch that an agent's patch cannot make, and a
-fork inherits a file naming its parent, not itself.
+accepts its owner's branches through either the caller's `own-branch-repos`
+bounds or its default-branch `.github/agentic-job/accept-owner-branches`
+file. A fix push uses the same two sources; see the
+[acceptance policy and CI trade-off](safe-outputs.md#pushing-to-a-pull-requests-branch).
 
 Then a new pull request's branch is pushed to that repository itself and
 the pull request opened from it; another account's token still forks.
-That gives up what the fork is for: the repository's `push` and
-`pull_request` workflows run the agent's commit with its secrets, a write
-token and OIDC, and its Actions are not turned off. Add the file only to a
-repository whose workflows give a branch nothing an agent is not to have;
-where it is also the caller, keep its apply environment to the default
-branch, so that a branch's workflows cannot use its token.
 Apply refuses the pull request where the bounds exempt `.github` for it
 (`unprotected_files` with `dot_folders`), as a workflow file the agent
 wrote would then run on its own branch. Its pull requests are not a
 fork's: event and review callers there take them as the owner's
 same-repository pull requests, whatever their bounds say about `forks`. A
 fix pushed to one of them goes to the repository's branch under the same
-file.
+acceptance policy.
 
 Every agent's pull request but one in an
 [owned repository](#a-repository-the-applying-account-owns) is then a
