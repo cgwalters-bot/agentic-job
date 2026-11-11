@@ -41,6 +41,22 @@ static AZURE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?-u:\b)(https?://)azure\.archive\.ubuntu\.com(/|\s|$)").expect("a valid pattern")
 });
 
+/// The mirror lists apt's `mirror+file:` method reads, in priority order.
+const MIRROR_LISTS: &[&str] = &["apt-mirrors.txt", "apt-mirrors-security.txt"];
+
+/// Every mirror the runner lists is an ubuntu.com name, so Canonical's DNS
+/// outage of 2026-11-11 (actions/runner-images#15296) failed every package
+/// install. kernel.org mirrors the same signed archive, security pocket
+/// included, and apt still checks it against the Ubuntu keys; at the lowest
+/// priority it is only tried after the runner's own mirrors.
+const FALLBACK_MIRROR: &str = "https://mirrors.edge.kernel.org/ubuntu/";
+
+/// A list of Ubuntu archive or security mirrors. kernel.org has no
+/// ubuntu-ports, so a ports list gets no fallback.
+static UBUNTU: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^https?://(archive|security)\.ubuntu\.com/ubuntu").expect("a valid pattern")
+});
+
 pub fn configure(apt: &Path) -> Result<()> {
     if !apt.exists() {
         return Ok(());
@@ -62,7 +78,19 @@ pub fn configure(apt: &Path) -> Result<()> {
         }
         let old =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let updated = AZURE.replace_all(&old, "${1}archive.ubuntu.com${2}");
+        let mut updated = AZURE
+            .replace_all(&old, "${1}archive.ubuntu.com${2}")
+            .into_owned();
+        if MIRROR_LISTS.iter().any(|name| path == apt.join(name))
+            && UBUNTU.is_match(&updated)
+            && !updated.contains(FALLBACK_MIRROR)
+        {
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(FALLBACK_MIRROR);
+            updated.push_str("\tpriority:9\n");
+        }
         if updated != old {
             fs::write(&path, &*updated).with_context(|| format!("writing {}", path.display()))?;
         }
@@ -87,12 +115,12 @@ mod tests {
             (
                 "apt-mirrors.txt",
                 "http://azure.archive.ubuntu.com/ubuntu\nhttp://archive.ubuntu.com/ubuntu\n",
-                "http://archive.ubuntu.com/ubuntu\nhttp://archive.ubuntu.com/ubuntu\n",
+                "http://archive.ubuntu.com/ubuntu\nhttp://archive.ubuntu.com/ubuntu\nhttps://mirrors.edge.kernel.org/ubuntu/\tpriority:9\n",
             ),
             (
                 "apt-mirrors-security.txt",
-                "http://security.ubuntu.com/ubuntu\n",
-                "http://security.ubuntu.com/ubuntu\n",
+                "http://security.ubuntu.com/ubuntu",
+                "http://security.ubuntu.com/ubuntu\nhttps://mirrors.edge.kernel.org/ubuntu/\tpriority:9\n",
             ),
             (
                 "sources.list",
@@ -153,6 +181,21 @@ mod tests {
             );
         }
         configure(&apt.join("missing")).unwrap();
+    }
+
+    /// kernel.org has no ubuntu-ports: a ports mirror list gets no fallback.
+    #[test]
+    fn ports_mirror_list_gets_no_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let apt = dir.path();
+        fs::create_dir(apt.join("apt.conf.d")).unwrap();
+        let ports = "http://ports.ubuntu.com/ubuntu-ports\tpriority:1\n";
+        fs::write(apt.join("apt-mirrors.txt"), ports).unwrap();
+        configure(apt).unwrap();
+        assert_eq!(
+            fs::read_to_string(apt.join("apt-mirrors.txt")).unwrap(),
+            ports
+        );
     }
 
     /// What the timeout is for: apt itself abandons a body that stalls
