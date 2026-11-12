@@ -153,6 +153,14 @@ pub fn resolve(github: &Github, args: &ResolveArgs) -> Result<Resolved> {
 /// The head of PULL's base branch now, in REPOSITORY. Only the forge names
 /// that branch; no producer-provided ref or commit is used to resolve it.
 fn current_base(github: &Github, repository: &str, pull: &Value) -> Result<String> {
+    // Every push resolves its base here, replacement or not: a failed,
+    // ambiguous or mismatched association keeps the PR's own target, as
+    // before upstream targets were resolved, rather than refusing the push.
+    let upstream = upstream_pull(github, repository, pull).unwrap_or(None);
+    let (repository, pull) = upstream
+        .as_ref()
+        .map(|(repo, pull)| (repo.as_str(), pull))
+        .unwrap_or((repository, pull));
     let base = &pull["base"];
     let branch = base["ref"].as_str().filter(|branch| !branch.is_empty());
     let (true, Some(branch)) = (same(&base["repo"]["full_name"], repository), branch) else {
@@ -168,6 +176,61 @@ fn current_base(github: &Github, repository: &str, pull: &Value) -> Result<Strin
         Some(sha) if object["type"] == "commit" && COMMIT_RE.is_match(sha) => Ok(sha.to_owned()),
         _ => bail!("the base branch {branch} of {repository} is not at a commit"),
     }
+}
+
+/// A fork-side PR can track the same branch as an upstream PR. Only the
+/// forge-reported parent and a unique, exact same-head association by the same
+/// author may supply its target: issue text, another branch or another user
+/// must not choose a replacement root.
+/// This changes no push destination or authority; replacement remains opt-in.
+fn upstream_pull(
+    github: &Github,
+    repository: &str,
+    pull: &Value,
+) -> Result<Option<(String, Value)>> {
+    if !same(&pull["head"]["repo"]["full_name"], repository) {
+        return Ok(None);
+    }
+    let repo = github.send("GET", &format!("/repos/{repository}"), None)?;
+    if repo["fork"] != true {
+        return Ok(None);
+    }
+    let parent = repo["parent"]["full_name"]
+        .as_str()
+        .filter(|name| is_repo(name))
+        .context("the fork has no valid parent repository")?;
+    let branch = pull["head"]["ref"]
+        .as_str()
+        .filter(|branch| !branch.is_empty())
+        .context("the fork pull request has no head branch")?;
+    let head = segment(&format!("{}:{branch}", owner(repository)));
+    // Two results suffice to refuse ambiguity; never choose a prefix of a list.
+    let answer = github.send(
+        "GET",
+        &format!("/repos/{parent}/pulls?state=open&head={head}&per_page=2"),
+        None,
+    )?;
+    let pulls = answer
+        .as_array()
+        .context("upstream pull requests are not a list")?;
+    let [upstream] = pulls.as_slice() else {
+        return Ok(None);
+    };
+    // Anyone who can read the fork can open a parent PR from its branch
+    // against any parent branch; only the fork PR's own author may choose
+    // the target that way.
+    let matches = upstream["state"] == "open"
+        && pull["user"]["login"]
+            .as_str()
+            .is_some_and(|login| is_login(login) && same(&upstream["user"]["login"], login))
+        && same(&upstream["base"]["repo"]["full_name"], parent)
+        && same(&upstream["head"]["repo"]["full_name"], repository)
+        && upstream["head"]["ref"] == branch
+        && upstream["head"]["sha"] == pull["head"]["sha"]
+        && upstream["head"]["sha"]
+            .as_str()
+            .is_some_and(|sha| COMMIT_RE.is_match(sha));
+    Ok(matches.then(|| (parent.to_owned(), upstream.clone())))
 }
 
 /// Whether checked caller bounds or NAME's default-branch file accept NAME.
@@ -714,6 +777,54 @@ mod tests {
             case.routes.remove(ACCEPTS);
             case.config["own_branch_repos"] = json!([[pattern]]);
             assert_eq!(case.run().0.is_ok(), accepted);
+        }
+    }
+
+    #[test]
+    fn upstream_target_requires_a_unique_same_head_pull_else_keeps_its_own() {
+        const UPSTREAM: &str = "GET /repos/upstream/r/pulls?state=open&head=o%3Afix/x&per_page=2";
+        let mut case = Case::new();
+        case.from("o/r", true);
+        case.edit("GET /repos/o/r", "fork", json!(true));
+        case.edit(
+            "GET /repos/o/r",
+            "parent",
+            json!({"full_name": "upstream/r"}),
+        );
+        let pull = case.routes[PULL].1.clone();
+        let mut upstream = pull.clone();
+        upstream["base"] = json!({"ref": "release/topic", "repo": {"full_name": "upstream/r"}});
+        case.set(
+            "GET /repos/upstream/r/git/ref/heads/release/topic",
+            200,
+            json!({"object": {"type": "commit", "sha": sha('d')}}),
+        );
+        // Anything but one exact match keeps the PR's own target, 'c'.
+        let mut answers = vec![
+            (200, json!([]), sha('c')),
+            (200, json!([upstream]), sha('d')),
+            (200, json!([upstream, upstream]), sha('c')),
+            (200, json!({}), sha('c')),
+            (404, json!({"message": "Not Found"}), sha('c')),
+        ];
+        for (pointer, value) in [
+            ("/state", json!("closed")),
+            ("/user/login", json!("mallory")),
+            ("/base/repo/full_name", json!("unrelated/r")),
+            ("/head/repo/full_name", json!("another/r")),
+            ("/head/ref", json!("another-branch")),
+            ("/head/sha", json!(sha('e'))),
+        ] {
+            let mut mismatched = upstream.clone();
+            *mismatched.pointer_mut(pointer).unwrap() = value;
+            answers.push((200, json!([mismatched]), sha('c')));
+        }
+        for (status, answer, expected) in answers {
+            let mut routes = case.routes.clone();
+            routes.insert(UPSTREAM.into(), (status, answer.clone()));
+            let (github, _requests) = forge(routes);
+            let result = current_base(&github, "o/r", &pull);
+            assert_eq!(result.unwrap(), expected, "{status} {answer}");
         }
     }
 

@@ -1014,6 +1014,16 @@ the file `replacement.json`. Its strict JSON shape is:
 brief names it), or the current head of the PR's base branch resolved by
 trusted apply. A newer snapshot between the policy head and the current head
 is also accepted after apply proves both ancestry relationships.
+To squash or reword without rebasing, `BASE_SHA` may also be the unique merge
+base of the policy-pinned PR head and target branch snapshot. For a
+fork-to-upstream PR this is the upstream target, not the fork's `main`.
+For a fork-side PR whose head is in that same fork, policy and apply look
+for a unique open PR in the forge-reported parent with the same author and
+the exact same head repository, branch and commit. When present, that PR
+supplies the target snapshot. A failed lookup, no match, several matches or
+a mismatched one retain the addressed PR's target rather than refusing the
+push. This read-only association never changes the push destination or
+grants publication authority.
 Policy resolves the branch ref, not the PR's possibly stale
 base SHA, and run fetches that snapshot into the producer checkout. Each string is one plain
 `git format-patch --stdout --no-signature --no-renames -1 COMMIT` mail with
@@ -1025,6 +1035,8 @@ run does not append its ordinary single-commit trailers to these mails.
 Do not include `base.json` or an `aw-*.patch` alongside a replacement.
 Run copies the series without resetting the producer's checkout; it does
 not collect additional uncommitted changes on this path.
+`handback replace` refuses a replay whose final tree differs from the
+producer's intended `HEAD` tree, including an incomplete revision range.
 
 The entire JSON fits `max_patch_bytes`. Check bounds the number of mails,
 checks each with the ordinary path/type rules, and bounds the union of
@@ -1040,12 +1052,14 @@ same tree, refuses the replacement. The final remote head is verified.
 The policy base remains an admitted snapshot if the branch advances. A fix
 run may also fetch a newer head and rebase onto it; apply independently reads
 the PR's base branch and its current head. A base other than those exact
-heads must be between them, proved by ancestry before materializing or pushing.
+heads must be between them, or be the unique merge base of the policy-pinned
+PR head and target snapshot, proved by ancestry before materializing or pushing.
 Check validates the claimed full commit ID, not its
 forge membership. A head that advances again before apply resolves it does
 not invalidate the earlier snapshot; a rewritten history that no longer
 contains it requires a new proposal or the policy snapshot. This prevents an arbitrary producer
-commit from becoming the root of the replacement series.
+commit from becoming the root of the replacement series. An arbitrary older
+ancestor is not admitted: it could omit target changes from the checked mails.
 
 `push_to_pull_request_branch` lets a follow-up run fix an open pull request:
 its change goes onto that pull request's branch as one commit, not into a new

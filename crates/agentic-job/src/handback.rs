@@ -1129,6 +1129,8 @@ fn replace(repo: &Path, base: &str, range: Option<&str>, output: &Path) -> Resul
                 "-c",
                 "core.hooksPath=/dev/null",
                 "am",
+                // As apply replays it: CRLF content is the commit's own.
+                "--keep-cr",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1148,6 +1150,11 @@ fn replace(repo: &Path, base: &str, range: Option<&str>, output: &Path) -> Resul
         );
         commits.push(String::from_utf8(mail).context("replacement mail must be UTF-8")?);
     }
+    ensure!(
+        git(scratch.path(), &["rev-parse", "HEAD^{tree}"])?
+            == git(repo, &["rev-parse", "HEAD^{tree}"])?,
+        "replacement final tree differs from the intended HEAD tree; include the complete series"
+    );
     let bytes = serde_json::to_vec(&Replacement {
         base_commit: base.into(),
         commits,
@@ -1843,6 +1850,22 @@ mod tests {
         assert!(replace(p, "HEAD", Some("HEAD~1..HEAD"), &output).is_err());
         assert_eq!(std::fs::read(&output).unwrap(), bytes);
         assert!(replace(p, "HEAD", None, &output).is_err());
+        // A range can replay cleanly yet omit part of the intended tree.
+        std::fs::write(p.join("second"), "retained\n").unwrap();
+        git(p, &["add", "second"]).unwrap();
+        git(p, &["commit", "-qm", "Second change"]).unwrap();
+        let error = replace(p, base.trim(), Some("HEAD~2..HEAD~1"), &output).unwrap_err();
+        assert!(
+            error.to_string().contains("intended HEAD tree"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), bytes);
+        replace(p, base.trim(), None, &output).unwrap();
+        // CRLF lines replay as they were committed.
+        std::fs::write(p.join("crlf"), "one\r\ntwo\r\n").unwrap();
+        git(p, &["add", "crlf"]).unwrap();
+        git(p, &["commit", "-qm", "CRLF change"]).unwrap();
+        replace(p, base.trim(), None, &output).unwrap();
     }
 
     /// A replacement series is scanned mail by mail as a change is, its

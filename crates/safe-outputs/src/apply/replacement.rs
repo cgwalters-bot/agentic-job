@@ -132,7 +132,10 @@ pub fn trial(
         })
         .collect::<Result<Vec<_>>>()?;
     git(repo, &["fetch", "--no-tags", &args.remote, base])?;
-    if base != pinned && base != args.current_base {
+    if base != pinned
+        && base != args.current_base
+        && !is_pr_merge_base(repo, &args.remote, base, pinned, config)?
+    {
         // The base branch can advance while the producer works. Accept
         // its earlier snapshot only after proving it belongs to the
         // history of the head trusted apply resolved, never an arbitrary
@@ -158,6 +161,26 @@ pub fn trial(
         )?;
     }
     materialize(base, &mails, &paths, &args.temp, repo)
+}
+
+/// Only the PR's actual divergence point may precede the policy snapshot.
+/// An arbitrary ancestor would let a producer omit target changes from the
+/// checked series. Both tips come from trusted configuration, not the series.
+fn is_pr_merge_base(
+    repo: &Path,
+    remote: &str,
+    base: &str,
+    pinned: &str,
+    config: &Value,
+) -> Result<bool> {
+    let head = config["head"].as_str().unwrap_or("");
+    if !COMMIT_RE.is_match(head) {
+        return Ok(false);
+    }
+    git(repo, &["fetch", "--no-tags", remote, pinned])?;
+    git(repo, &["fetch", "--no-tags", remote, head])?;
+    // Multiple merge bases are ambiguous: do not admit any one of them.
+    Ok(git(repo, &["merge-base", "--all", pinned, head])? == base)
 }
 
 /// Applies each mail of a series on `base` in a worktree of its own and
@@ -384,6 +407,148 @@ mod tests {
     fn write(path: &Path, value: &Value) -> PathBuf {
         std::fs::write(path, value.to_string()).unwrap();
         path.to_owned()
+    }
+
+    #[test]
+    fn replacement_retains_upstream_merge_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("producer");
+        std::fs::create_dir(&repo).unwrap();
+        run(&repo, &["init", "-q", "--initial-branch=main"]);
+        run(&repo, &["config", "user.name", "Test"]);
+        run(&repo, &["config", "user.email", "test@example.com"]);
+        let older = commit(&repo, "fork-main.txt", "fork main");
+        run(&repo, &["checkout", "-qb", "upstream-main"]);
+        let base = commit(&repo, "upstream.txt", "upstream base");
+        run(&repo, &["checkout", "-qb", "bot/topic"]);
+        let message = "First change\n\nReviewed-by: Reviewer <reviewer@example.com>";
+        commit(&repo, "a.txt", message);
+        let original = commit(&repo, "b.txt", "Second change");
+        let intended_tree = run(&repo, &["rev-parse", "HEAD^{tree}"]);
+
+        // Reword the first commit and retain the second, without rebasing.
+        run(&repo, &["checkout", "-q", "--detach", "HEAD~"]);
+        run(
+            &repo,
+            &[
+                "commit",
+                "--amend",
+                "-qm",
+                &format!("{message}\n\nExplanation."),
+            ],
+        );
+        let first = mail(&repo);
+        run(&repo, &["cherry-pick", &original]);
+        let second = mail(&repo);
+        run(&repo, &["checkout", "-q", "upstream-main"]);
+        let pinned = commit(&repo, "advanced.txt", "upstream advanced");
+        let remote_dir = temp.path().join("remote");
+        run(temp.path(), &["init", "--bare", "-q", "remote"]);
+        let remote = remote_dir.to_str().unwrap();
+        run(
+            &repo,
+            &["push", "-q", remote, "main", "upstream-main", "bot/topic"],
+        );
+
+        // Apply has only trusted remote history, not the producer checkout.
+        let consumer = temp.path().join("consumer");
+        std::fs::create_dir(&consumer).unwrap();
+        run(&consumer, &["init", "-q"]);
+        let fork_pull = serde_json::json!({"number": 42, "state": "open",
+            "user": {"login": "example-bot"}, "head": {
+            "repo": {"full_name": "example-org/example"}, "ref": "bot/topic", "sha": original
+        }, "base": {"repo": {"full_name": "example-org/example"}, "ref": "main", "sha": older}});
+        let mut upstream_pull = fork_pull.clone();
+        upstream_pull["base"] = serde_json::json!({
+            "repo": {"full_name": "upstream/example"}, "ref": "main", "sha": base
+        });
+        let (github, _requests) = super::super::testing::forge([
+            ("GET /repos/example-org/example/pulls/42".into(), (200, fork_pull)),
+            ("GET /repos/example-org/example".into(), (200, serde_json::json!({
+                "fork": true, "parent": {"full_name": "upstream/example"}
+            }))),
+            ("GET /repos/upstream/example/pulls?state=open&head=example-org%3Abot/topic&per_page=2".into(),
+                (200, serde_json::json!([upstream_pull]))),
+            ("GET /repos/upstream/example/git/ref/heads/main".into(),
+                (200, serde_json::json!({"object": {"type": "commit", "sha": pinned}}))),
+        ].into());
+        let resolved = super::super::push::resolve(
+            &github,
+            &super::super::push::ResolveArgs {
+                event: "false".into(),
+                review: "false".into(),
+                kind: "branch".into(),
+                item: "42".into(),
+                repo: "example-org/example".into(),
+                output_repo: "example-org/example".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.base, pinned,
+            "policy must resolve upstream, not fork main"
+        );
+        let config = serde_json::json!({"push_to_pull_request_branch": {
+            "head": resolved.head, "replacement_base": resolved.base, "replacement_max_commits": 2
+        }});
+        let args = TrialArgs {
+            report: temp.path().join("report.json"),
+            series: temp.path().join("replacement.json"),
+            config: write(&temp.path().join("config.json"), &config),
+            current_base: pinned.clone(),
+            remote: remote.to_owned(),
+            temp: temp.path().to_owned(),
+        };
+        let propose = |claimed: &str| {
+            write(
+                &args.report,
+                &serde_json::json!({"patch": {
+                    "base_commit": claimed, "commit_files": [["a.txt"], ["b.txt"]]
+                }}),
+            );
+            write(
+                &args.series,
+                &serde_json::json!({
+                    "base_commit": claimed, "commits": [first, second]
+                }),
+            );
+        };
+        propose(&base);
+        let built = trial(&args, &consumer, &read).unwrap();
+        assert_eq!(built.tree, intended_tree);
+        assert_eq!(
+            run(&consumer, &["rev-parse", &format!("{}~2", built.head)]),
+            base
+        );
+        assert!(
+            run(
+                &consumer,
+                &["show", "-s", "--format=%B", &format!("{}~", built.head)]
+            )
+            .contains("Reviewed-by: Reviewer <reviewer@example.com>")
+        );
+        assert!(push(&consumer, remote, "bot/topic", &original, &built.head).unwrap());
+        assert!(!push(&consumer, remote, "bot/topic", &original, &built.head).unwrap());
+
+        // Neither an older target ancestor nor a PR-only commit is a base.
+        for claimed in [&older, &original] {
+            propose(claimed);
+            let error = trial(&args, &consumer, &read).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Unchecked replacement series"),
+                "{error:#}"
+            );
+        }
+        propose(&base);
+        let mut missing_head = config.clone();
+        missing_head["push_to_pull_request_branch"]["head"] = Value::Null;
+        write(&args.config, &missing_head);
+        assert!(trial(&args, &consumer, &read).is_err());
+        println!(
+            "upstream merge-base replacement: 2 commits rebuilt; intended tree and Reviewed-by preserved; leased push and retry succeeded; older ancestor, PR-only base and missing trusted head refused"
+        );
     }
 
     #[test]

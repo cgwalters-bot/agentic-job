@@ -339,6 +339,14 @@ What a producer leaves for `run` to take
   `done`, `left`, `next`). An open checkpoint keeps work draft; malformed
   checkpoint fences in a PR body or push message refuse only under that bound
   ([ready or draft](safe-outputs.md#ready-or-draft)).
+- An opt-in `out/replacement.json` series may start at the unique merge base
+  of the policy-pinned PR head and target snapshot, as well as the admitted
+  target-branch snapshots. Apply proves the base from trusted history; a
+  fork PR uses its upstream target, not the fork's default branch
+  ([replacement series](safe-outputs.md#the-bounds-and-the-policy)).
+  A fork-side PR uses a unique open same-head PR in its forge-reported parent
+  to resolve that target. `handback replace` requires the replayed final tree
+  to equal the producer's intended `HEAD` tree before writing the series.
 - Where the bounds have `[github.test_evidence]`, `out/test-evidence.json`,
   schema `agentic-job/test-evidence/v1`, and its logs
   `out/test-evidence-N.log`

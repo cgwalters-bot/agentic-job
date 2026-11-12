@@ -1720,6 +1720,7 @@ mod tests {
                 .unwrap();
             config.replacement_max_commits = 2;
             config.replacement_base = Some(pinned.clone());
+            config.head = proposal_head.clone();
             let series = json!({"base_commit": base, "commits": [first, second]});
             let verdict = Handback {
                 items: vec![push()],
