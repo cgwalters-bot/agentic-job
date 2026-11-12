@@ -184,6 +184,8 @@ struct Setup<'a> {
     client: Option<(Play, Duration)>,
     /// Handshakes that client's thread makes first, each to be refused.
     refused_first: &'static [Headers],
+    /// Construct the bridge through the gateway's production bind path.
+    gateway: bool,
     /// Standard input for `agentic-job session connect --json`, which
     /// then is the client in place of the one played, through a stand-in
     /// for serve that passes on `GRANTED`; what it prints is what the
@@ -384,10 +386,11 @@ fn bridge_and_client(
     connect: Option<&'static str>,
     connect_drop: bool,
     connect_blackhole: bool,
+    gateway: bool,
 ) -> (Bridge, std::thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    let bridge = Bridge {
+    let mut bridge = Bridge {
         listen: Listen {
             operators: vec![OPERATOR.to_owned()],
             origins: vec![ORIGIN.to_owned()],
@@ -399,6 +402,18 @@ fn bridge_and_client(
         secret: None,
         redact: Arc::new(|text: &str| text.replace(SECRET, "[REDACTED]")),
     };
+    if gateway {
+        let table = agentic_job::config::Session {
+            listen: true,
+            bind: address.clone(),
+            ..Default::default()
+        };
+        let listen = Listen::from_config(&table).unwrap().unwrap();
+        let redact = bridge.redact.clone();
+        drop(bridge);
+        bridge = Bridge::bind(listen, redact).unwrap();
+        assert_eq!(bridge.listener.local_addr().unwrap().to_string(), address);
+    }
     let thread = std::thread::spawn(move || {
         for headers in refused {
             assert_eq!(
@@ -410,7 +425,8 @@ fn bridge_and_client(
         if let Some(stdin) = connect {
             return connect_through_serve(&address, stdin, connect_drop, connect_blackhole);
         }
-        let mut client = Client::connect(&address, ADMITTED).unwrap();
+        let headers = if gateway { GATEWAY_ADMITTED } else { ADMITTED };
+        let mut client = Client::connect(&address, headers).unwrap();
         play(&mut client);
         client.leave();
         client.got
@@ -661,6 +677,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
                 setup.connect,
                 setup.connect_drop,
                 setup.connect_blackhole,
+                setup.gateway,
             )
         })
         .unzip();
@@ -3269,6 +3286,86 @@ fn a_port_that_is_taken_is_refused() {
         format!("{err:#}").contains("listening on 127.0.0.1:"),
         "{err:#}"
     );
+}
+
+const ATTACH_SECRET: &str = "0123456789abcdef0123456789abcdef";
+const GATEWAY_ADMITTED: Headers = &[("Authorization", "Bearer 0123456789abcdef0123456789abcdef")];
+
+/// Isolate environment changes in subprocesses: no test mutates the
+/// multithreaded test runner's environment.
+#[test]
+fn a_gateway_uses_the_configured_bind_and_environment_secret() {
+    const CASE_VAR: &str = "AGENTIC_JOB_TEST_ATTACH_CASE";
+    let Ok(case) = std::env::var(CASE_VAR) else {
+        for case in ["missing", "invalid", "valid"] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "a_gateway_uses_the_configured_bind_and_environment_secret",
+                    "--nocapture",
+                ])
+                .env(CASE_VAR, case)
+                .env_remove(bridge::ATTACH_TOKEN_VAR);
+            if case != "missing" {
+                child.env(
+                    bridge::ATTACH_TOKEN_VAR,
+                    if case == "valid" {
+                        ATTACH_SECRET
+                    } else {
+                        "short"
+                    },
+                );
+            }
+            assert!(child.status().unwrap().success(), "{case}");
+        }
+        return;
+    };
+    if case != "valid" {
+        let table = agentic_job::config::Session {
+            listen: true,
+            bind: "127.0.0.1:7790".to_owned(),
+            ..Default::default()
+        };
+        let listen = Listen::from_config(&table).unwrap().unwrap();
+        let err = Bridge::bind(listen, Arc::new(str::to_owned)).err().unwrap();
+        let why = format!("{err:#}");
+        assert!(why.contains(bridge::ATTACH_TOKEN_VAR), "{why}");
+        assert!(
+            why.contains(if case == "missing" {
+                "needs"
+            } else {
+                "must be"
+            }),
+            "{why}"
+        );
+        return;
+    }
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            gateway: true,
+            files: &[("script.json", "[]"), ("later.json", LATER)],
+            timeout_s: 60,
+            client: Some((
+                |client| {
+                    let sid =
+                        client.request(1, "session/new", json!({}))["result"]["sessionId"].clone();
+                    client.wait_for_the_task(&sid);
+                    let answer = client.request(2, "session/prompt", text_prompt(&sid, "hi"));
+                    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+                },
+                Duration::from_secs(60),
+            )),
+            refused_first: &[
+                &[],
+                ADMITTED,
+                &[("Authorization", "Bearer fedcba9876543210fedcba9876543210")],
+            ],
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
 }
 
 /// Handshakes `tailscale serve` would pass on without the operator's
