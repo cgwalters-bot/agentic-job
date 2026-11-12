@@ -184,43 +184,80 @@ fn materialize(
 
 fn apply_series(mails: &[&str], checked: &[Vec<&str>], temp: &Path, dir: &Path) -> Result<Built> {
     let file = temp.join("replacement-mail.patch");
-    let file_arg = file.to_str().context("the mail's path is not UTF-8")?;
     for (index, (mail, checked)) in mails.iter().zip(checked).enumerate() {
-        let before = git(dir, &["rev-parse", "HEAD"])?;
-        std::fs::write(&file, mail).with_context(|| format!("writing {}", file.display()))?;
-        let mut am = COMMITTER.to_vec();
-        am.extend([
-            "am",
-            "--keep-cr",
-            "--committer-date-is-author-date",
-            file_arg,
-        ]);
-        git(dir, &am)?;
-        if git(dir, &["show", "-s", "--format=%P", "HEAD"])? != before {
-            bail!("Nonlinear replacement");
+        match apply_mail(dir, &file, mail, checked)? {
+            Applied::Built(_) => {}
+            Applied::Failed(error) => return Err(error),
+            Applied::Nonlinear => bail!("Nonlinear replacement"),
+            Applied::Unchecked => bail!("Replacement commit {} changed unchecked paths", index + 1),
         }
-        let changed = git(
-            dir,
-            &[
-                "-c",
-                "core.quotePath=false",
-                "diff",
-                "--name-only",
-                "--no-renames",
-                &before,
-                "HEAD",
-            ],
-        )?;
-        let mut changed: Vec<&str> = changed.split('\n').collect();
-        let mut checked = checked.clone();
-        changed.sort_unstable();
-        checked.sort_unstable();
-        ensure!(
-            changed == checked,
-            "Replacement commit {} changed unchecked paths",
-            index + 1
-        );
     }
+    built(dir)
+}
+
+/// What one mail did to a worktree.
+pub(crate) enum Applied {
+    Built(Built),
+    /// git am refused the mail, with git's message, which holds the
+    /// agent's text; the worktree is back where it was.
+    Failed(anyhow::Error),
+    /// git am made something other than one commit on HEAD.
+    Nonlinear,
+    /// The commit changed other paths than check read for it.
+    Unchecked,
+}
+
+/// Applies MAIL on the HEAD of the worktree DIR as one commit, with
+/// [`COMMITTER`] and the author's date, so that the same mail on the same
+/// parent is the same commit; FILE holds the mail for git am. An error is
+/// the worktree's, not the mail's.
+pub(crate) fn apply_mail(dir: &Path, file: &Path, mail: &str, checked: &[&str]) -> Result<Applied> {
+    let file_arg = file.to_str().context("the mail's path is not UTF-8")?;
+    let before = git(dir, &["rev-parse", "HEAD"])?;
+    std::fs::write(file, mail).with_context(|| format!("writing {}", file.display()))?;
+    let mut am = COMMITTER.to_vec();
+    am.extend([
+        "am",
+        "--keep-cr",
+        "--committer-date-is-author-date",
+        file_arg,
+    ]);
+    if let Err(error) = git(dir, &am) {
+        // A mail git could not read leaves no session to abort.
+        let session = git(dir, &["rev-parse", "--git-path", "rebase-apply"])?;
+        if dir.join(session).exists() {
+            let mut abort = COMMITTER.to_vec();
+            abort.extend(["am", "--abort"]);
+            git(dir, &abort)?;
+        }
+        return Ok(Applied::Failed(error));
+    }
+    if git(dir, &["show", "-s", "--format=%P", "HEAD"])? != before {
+        return Ok(Applied::Nonlinear);
+    }
+    let changed = git(
+        dir,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            &before,
+            "HEAD",
+        ],
+    )?;
+    let mut changed: Vec<&str> = changed.split('\n').collect();
+    let mut checked = checked.to_vec();
+    changed.sort_unstable();
+    checked.sort_unstable();
+    if changed != checked {
+        return Ok(Applied::Unchecked);
+    }
+    Ok(Applied::Built(built(dir)?))
+}
+
+fn built(dir: &Path) -> Result<Built> {
     Ok(Built {
         head: git(dir, &["rev-parse", "HEAD"])?,
         tree: git(dir, &["rev-parse", "HEAD^{tree}"])?,

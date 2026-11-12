@@ -177,21 +177,31 @@ caller's full commit ID. Patches are plain `git format-patch --stdout
 --no-signature -1` mails, without a base header, describing only their own step's
 diff. As for a replacement series, each needs exactly one valid `Date` header,
 so that rebuilding a step gives the same commit. The checker supplies the root
-provenance header to the existing patch
-reader; it does not prove that the mails apply in order or authenticate resulting
-commit IDs. Invalid envelopes refuse the whole proposal. A step refusal returns
-the accepted prefix and the first refused position (one-based), never inspecting
-steps above it. No accepted prefix is itself a publishable receipt.
+provenance header to the existing patch reader; it does not itself apply the
+mails. Invalid envelopes refuse the whole
+proposal. A step refusal returns the accepted prefix and the first refused
+position (one-based), never inspecting steps above it. No accepted prefix is
+itself a publishable receipt.
 
-Remaining slices must wire this into trusted bounds and digest-bound check
-artifacts, construct and verify the commits in order, and publish each branch/PR
-against its predecessor, appending that step's closing line. Publication must
-stop on refusal without removing earlier PRs. Fix rounds must lease the selected
-step's head and replay/recheck every descendant before updating it; a conflict
-must stop restacking, not silently drop a step. The publisher must keep the stack
-rebased after parent changes/merges, not rely on PR retargeting to rewrite git
-history. Those publication/restacking paths, their three-step integration tests,
-per-step PR receipts and the series' total cost report are not implemented here.
+The experimental `safe_outputs::apply::stack` module builds the accepted steps
+in the caller's repository, one commit per step on its predecessor, with
+`git am` and the fixed committer a [replacement series](#pushing-to-a-pull-requests-branch)
+uses, so the same mails on the same base are the same commits. Each commit must
+change exactly the paths check read for its step. For a fix round, `restack`
+rebuilds the whole stack from its checked steps with the fixed one replaced by
+its checked fix: the steps below are the same commits as before, and every step
+above is rechecked by being built again on the fix. Nothing is replayed from a
+branch check did not read. A step that does not apply,
+or changes other paths, stops the stack at its position with a fixed reason, so
+a conflict never drops a step silently. Neither function pushes or publishes.
+
+Remaining slices must wire both into trusted bounds and digest-bound check
+artifacts, then push each step's branch with a lease and open its PR against its
+predecessor, appending that step's closing line. Publication must stop on
+refusal without removing earlier PRs. The publisher must keep the stack rebased
+after parent changes/merges with `restack`, not rely on PR retargeting to
+rewrite git history. Those publication paths, their end-to-end tests, per-step
+PR receipts and the series' total cost report are not implemented yet.
 
 ## Caller-bound publisher roles
 

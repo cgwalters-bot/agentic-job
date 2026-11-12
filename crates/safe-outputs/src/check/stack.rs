@@ -1,11 +1,12 @@
 //! Experimental, read-only validation of an ordered stack proposal.
 //!
-//! A later publisher must construct each commit on its predecessor, compare
-//! actual changed paths, bind the checked bytes to trusted artifacts and apply
-//! the ordinary publication gates. This is not a publishable receipt and is not
-//! accepted by the CLI or workflows. Secret scanning belongs to the caller, as
-//! for the ordinary library checker; `inspect` must check each step's entire
-//! content before it can enter the accepted prefix.
+//! [`crate::apply::stack`] builds each commit on its predecessor and compares
+//! its actual changed paths; a later publisher must bind the checked bytes to
+//! trusted artifacts and apply the ordinary publication gates. This is not a
+//! publishable receipt and is not accepted by the CLI or workflows. Secret
+//! scanning belongs to the caller, as for the ordinary library checker;
+//! `inspect` must check each step's entire content before it can enter the
+//! accepted prefix.
 
 use std::collections::BTreeSet;
 

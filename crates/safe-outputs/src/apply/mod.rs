@@ -39,6 +39,7 @@ pub mod push;
 pub mod replacement;
 pub mod roles;
 pub mod secondary;
+pub mod stack;
 /// For tests alone, the library's and its callers', which turn on
 /// `test-support` for theirs: a failure there is a test's.
 #[cfg(any(test, feature = "test-support"))]
