@@ -25,7 +25,8 @@ pub const NETWORK_CONFIG: &str =
     "Acquire::http::Timeout \"10\";\nAcquire::https::Timeout \"10\";\nAcquire::Retries \"3\";\n";
 
 /// Where the configuration above goes, under `apt.conf.d`.
-const NETWORK_CONFIG_FILE: &str = "99-agentic-job-network";
+const NETWORK_CONFIG_FILE: &str =
+    crate::runtime::name("99-secure-host-network", "99-agentic-job-network");
 
 /// The mirror lists and source lists the runner's image configures.
 const SOURCES: &[&str] = &[
@@ -138,7 +139,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                fs::read_to_string(apt.join("apt.conf.d/99-agentic-job-network")).unwrap(),
+                fs::read_to_string(apt.join("apt.conf.d").join(NETWORK_CONFIG_FILE)).unwrap(),
                 NETWORK_CONFIG
             );
         }

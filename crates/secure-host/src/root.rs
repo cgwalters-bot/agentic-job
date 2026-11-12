@@ -165,7 +165,7 @@ mod tests {
                 "sudo",
                 "-n",
                 "--",
-                "/usr/local/libexec/agentic-job",
+                helper::SELF_COPY,
                 "helper",
                 "egress-log",
                 "--from",

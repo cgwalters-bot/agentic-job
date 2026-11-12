@@ -30,7 +30,10 @@ use crate::{host, platform, worker_diagnostics};
 
 /// Where the loader pins the world-write policy: a link for each of its
 /// programs, and its map.
-pub const WORLD_WRITE_PIN: &str = "/sys/fs/bpf/agentic-job-world-write";
+pub const WORLD_WRITE_PIN: &str = crate::runtime::name(
+    "/sys/fs/bpf/secure-host-world-write",
+    "/sys/fs/bpf/agentic-job-world-write",
+);
 
 /// The policy's programs, each pinned as a link under `WORLD_WRITE_PIN/links`.
 pub const WORLD_WRITE_LINKS: &[&str] = &[

@@ -18,6 +18,12 @@ and the rest), the agent's brief, the built-in skills, and the
 
 ## The reusable workflow
 
+Standalone secure-host builds use a neutral runtime layout. This workspace's
+consumer opts into `legacy-runtime` to match its digest-pinned deployed image;
+its root-owned paths and workflow interface do not change. See the
+[layout migration contract](../crates/secure-host/README.md#compatibility-and-publication)
+before building a replacement image or moving consumers to that layout.
+
 Runner-only migration note (5 November 2026): `agent-user: runner` is the
 only accepted value. The `sandbox` option, superseded by #2989, was removed in
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) and is

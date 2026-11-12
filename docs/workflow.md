@@ -2312,9 +2312,9 @@ package manager.
 things from the network before the rules load, each pinned in this
 repository (the first only with `[egress] rust-proxy = false`). mitmproxy and
 all it depends on are installed with `pip --require-hashes
---only-binary :all:` from `egress/requirements.txt`, which names each
+--only-binary :all:` from `crates/secure-host/egress/requirements.txt`, which names each
 at one version with the hashes of its files: pip installs no file that is not one of those, and builds nothing. That
-file is generated from `egress/requirements.in`, whose first lines give
+file is generated from `crates/secure-host/egress/requirements.in`, whose first lines give
 the command. The threat feed is fetched at one commit of its repository
 and must have the SHA-256 written beside it (`DENYLIST_COMMIT` and
 `DENYLIST_SHA256` in `crates/secure-host/src/egress.rs`): a

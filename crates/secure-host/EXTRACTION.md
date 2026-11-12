@@ -42,6 +42,9 @@ publication and privileged runtime CI still need their own reviewed setup.
 
 The action remains in its existing repository for now; the forwarding action
 and binary fetcher outside this directory are not exported. Existing callers
-continue using the existing release. Before removing legacy binary aliases,
-installation names or BPF pins, migrate those callers together with the new
-release; never reuse a passing check record across binaries/configurations.
+continue using the existing release. The exported crate's default layout is
+neutral; `legacy-runtime` is only for consumers still pinned to the old layout.
+Verify both `cargo test --locked` and `cargo test --locked --features legacy-runtime`
+in the export. Migrate callers, the action and its image pin on fresh hosts
+together before dropping the compatibility feature. Never reuse a passing
+check record across binaries/configurations or layouts.

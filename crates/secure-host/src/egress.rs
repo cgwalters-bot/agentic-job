@@ -56,11 +56,17 @@ pub const TRANSPARENT_PORT: u16 = 3129;
 /// directory and command, or RHEL's.
 const SYSTEM_TRUST: &[(&str, &str)] = &[
     (
-        "/usr/local/share/ca-certificates/agentic-job-egress-proxy.crt",
+        crate::runtime::name(
+            "/usr/local/share/ca-certificates/secure-host-egress-proxy.crt",
+            "/usr/local/share/ca-certificates/agentic-job-egress-proxy.crt",
+        ),
         "update-ca-certificates",
     ),
     (
-        "/etc/pki/ca-trust/source/anchors/agentic-job-egress-proxy.pem",
+        crate::runtime::name(
+            "/etc/pki/ca-trust/source/anchors/secure-host-egress-proxy.pem",
+            "/etc/pki/ca-trust/source/anchors/agentic-job-egress-proxy.pem",
+        ),
         "update-ca-trust",
     ),
 ];

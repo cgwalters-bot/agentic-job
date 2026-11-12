@@ -47,8 +47,12 @@ const IMAGE_OBJECT: &str = "/world_write.bpf.o";
 /// call it (`agentic-job sandbox check`).
 pub const HOST_BINARY: &str = "/usr/local/bin/secure-host";
 pub const HOST_ALIAS: &str = "/usr/local/bin/agentic-job";
-const HOST_OBJECT_DIR: &str = "/usr/local/lib/agentic-job";
-const HOST_OBJECT: &str = "/usr/local/lib/agentic-job/world_write.bpf.o";
+const HOST_OBJECT_DIR: &str =
+    crate::runtime::name("/usr/local/lib/secure-host", "/usr/local/lib/agentic-job");
+const HOST_OBJECT: &str = crate::runtime::name(
+    "/usr/local/lib/secure-host/world_write.bpf.o",
+    "/usr/local/lib/agentic-job/world_write.bpf.o",
+);
 /// util-linux's, on Ubuntu and RHEL alike.
 const NSENTER: &str = "/usr/bin/nsenter";
 /// Every namespace of the host's init but the user namespace, which a
@@ -175,7 +179,9 @@ pub fn run(config: &Path) -> Result<()> {
     );
     let steps = host_steps(config, &image, deny_runner_reads(config)?)?;
     install(&mut binary, HOST_BINARY, 0o755)?;
-    install(&mut binary, HOST_ALIAS, 0o755)?;
+    if cfg!(feature = "legacy-runtime") {
+        install(&mut binary, HOST_ALIAS, 0o755)?;
+    }
     fs::create_dir_all(HOST_OBJECT_DIR).with_context(|| format!("creating {HOST_OBJECT_DIR}"))?;
     install(&mut object, HOST_OBJECT, 0o644)?;
     for args in steps {
@@ -191,7 +197,7 @@ pub fn run(config: &Path) -> Result<()> {
             .with_context(|| format!("starting {NSENTER}"))?;
         ensure!(status.success(), "{NSENTER} {}: {status}", args.join(" "));
     }
-    println!("secure-host: the host is set up; {HOST_BINARY} and {HOST_ALIAS} are installed");
+    println!("secure-host: the host is set up; {HOST_BINARY} is installed");
     Ok(())
 }
 

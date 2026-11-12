@@ -39,7 +39,10 @@ pub const BUS_NAME: &str = "org.freedesktop.resolve1";
 /// After the packages' policies in `/usr/share/dbus-1/system.d`, so that
 /// its default-context deny comes after resolved's own allow, and the
 /// last matching rule wins; user policies apply after every default.
-pub const BUS_POLICY: &str = "/etc/dbus-1/system.d/agentic-job-resolved.conf";
+pub const BUS_POLICY: &str = crate::runtime::name(
+    "/etc/dbus-1/system.d/secure-host-resolved.conf",
+    "/etc/dbus-1/system.d/agentic-job-resolved.conf",
+);
 
 /// The upstream servers resolved's stub forwards to.
 pub const UPSTREAM_RESOLV_CONF: &str = "/run/systemd/resolve/resolv.conf";
@@ -51,7 +54,10 @@ const OTHER_ACCESS: u32 = 0o007;
 /// anything else, makes them again without other users' access.
 const DROP_IN_DIR: &str = "/etc/systemd/system";
 
-const DROP_IN: &str = "agentic-job-close-resolved.conf";
+const DROP_IN: &str = crate::runtime::name(
+    "secure-host-close-resolved.conf",
+    "agentic-job-close-resolved.conf",
+);
 
 /// Whether resolved is running or can start. Inactive is not
 /// absent: a call on the bus or a connection to one of its sockets

@@ -146,7 +146,10 @@ fn read_host(config: &Path) -> Result<Plan<Host>> {
 /// Where setup leaves the address a client reaches [`Plan::served_port`]
 /// at, `wss://NAME/` for the runner's tailnet name, for the job to
 /// publish: agentic-job's session bridge.
-pub const SERVE_ENDPOINT: &str = "/etc/agentic-job/session-endpoint";
+pub const SERVE_ENDPOINT: &str = crate::runtime::name(
+    "/etc/secure-host/session-endpoint",
+    "/etc/agentic-job/session-endpoint",
+);
 
 pub const HTTPS_DISABLED: &str =
     "the tailnet has HTTPS certificates disabled; enable them in the admin console";
@@ -193,7 +196,7 @@ fn tailnet_name(status: &serde_json::Value) -> Result<&str> {
 
 /// Root's: the configuration `run` reads, and what else setup leaves for
 /// the supervisor. That it exists also says setup ran here before.
-pub const CONFIG_DIR: &str = "/etc/agentic-job";
+pub const CONFIG_DIR: &str = crate::runtime::name("/etc/secure-host", "/etc/agentic-job");
 
 /// The copy of this program that the helper's sudo rule names, at the
 /// path callers know.
@@ -202,10 +205,16 @@ pub use crate::helper::SELF_COPY;
 /// Root-owned, world-writable and not sticky, on the root filesystem, with
 /// [`WORLD_WRITE_PROBE_FILE`] in it: what the world-write policy must keep
 /// every other user from changing, which `sandbox check` tries.
-pub const WORLD_WRITE_PROBE_DIR: &str = "/etc/agentic-job/world-write-probe";
+pub const WORLD_WRITE_PROBE_DIR: &str = crate::runtime::name(
+    "/etc/secure-host/world-write-probe",
+    "/etc/agentic-job/world-write-probe",
+);
 
 /// Root-owned, mode 0666.
-pub const WORLD_WRITE_PROBE_FILE: &str = "/etc/agentic-job/world-write-probe/file";
+pub const WORLD_WRITE_PROBE_FILE: &str = crate::runtime::name(
+    "/etc/secure-host/world-write-probe/file",
+    "/etc/agentic-job/world-write-probe/file",
+);
 
 /// Where secure-host's loader (`secure-host world-write`) pins the
 /// world-write policy, and its programs' links.
@@ -213,7 +222,10 @@ pub use crate::world_write::{WORLD_WRITE_LINKS, WORLD_WRITE_PIN};
 
 /// The last matching sudoers rule wins, and this file is read last.
 /// No dot in the name: sudo skips such files.
-const SUDOERS_DENY: &str = "/etc/sudoers.d/zz-agentic-job-sandbox";
+const SUDOERS_DENY: &str = crate::runtime::name(
+    "/etc/sudoers.d/zz-secure-host-sandbox",
+    "/etc/sudoers.d/zz-agentic-job-sandbox",
+);
 
 const VISUDO_CHECK: &[&str] = &["visudo", "-q", "-c", "-f"];
 
@@ -221,7 +233,10 @@ const VISUDO_CHECK: &[&str] = &["visudo", "-q", "-c", "-f"];
 /// that also covers `pkexec`, and lingering, which is a polkit action.
 const POLKIT_RULES_DIR: &str = "/etc/polkit-1/rules.d";
 
-const POLKIT_DENY: &str = "/etc/polkit-1/rules.d/00-agentic-job-sandbox.rules";
+const POLKIT_DENY: &str = crate::runtime::name(
+    "/etc/polkit-1/rules.d/00-secure-host-sandbox.rules",
+    "/etc/polkit-1/rules.d/00-agentic-job-sandbox.rules",
+);
 
 /// A group that is root by another name, through a daemon that does as
 /// its members ask or a device they may write. A process keeps the groups
@@ -785,7 +800,7 @@ fn require_world_write_policy(pin: &Path) -> Result<()> {
         .collect();
     ensure!(
         missing.is_empty(),
-        "the world-write policy is not loaded ({} has no link for {}): load it first, as secure-host does with `agentic-job secure-host world-write`",
+        "the world-write policy is not loaded ({} has no link for {}): load it first with `secure-host world-write`",
         pin.display(),
         missing.join(", ")
     );
@@ -1702,7 +1717,10 @@ mod tests {
         // The lock alone: there is no second user to write a rule for.
         assert_eq!(
             sudoers_rules("runner"),
-            "runner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: /usr/local/libexec/agentic-job helper *\n"
+            format!(
+                "runner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: {} helper *\n",
+                helper::SELF_COPY
+            )
         );
         assert_eq!(
             polkit_deny(&["runner"]),
@@ -1778,7 +1796,7 @@ mod tests {
             runner_sudo_rules(),
             [
                 "(ALL : ALL) !ALL",
-                "(root) NOPASSWD: /usr/local/libexec/agentic-job helper *"
+                &format!("(root) NOPASSWD: {} helper *", helper::SELF_COPY)
             ]
         );
     }

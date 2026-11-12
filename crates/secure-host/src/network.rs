@@ -35,7 +35,8 @@ use crate::host;
 pub const TABLE: &str = "runner_sandbox";
 
 /// The ruleset `sandbox setup` loaded, kept for whoever wants to read it.
-pub const RULES_FILE: &str = "/etc/agentic-job/rules.nft";
+pub const RULES_FILE: &str =
+    crate::runtime::name("/etc/secure-host/rules.nft", "/etc/agentic-job/rules.nft");
 
 const METADATA_ADDRESS: &str = "169.254.169.254";
 

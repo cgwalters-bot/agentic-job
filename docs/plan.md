@@ -454,7 +454,7 @@ of #1735 creates. Sizes are the comment's.
    `github-actions`, [renovate.json](../.github/renovate.json) only runner
    labels, and no workflow runs cargo-audit, cargo-deny or osv-scanner, so
    nothing updates `Cargo.lock` or the hash-pinned
-   `egress/requirements.txt`. Add the `cargo` and `pip` ecosystems to
+   `crates/secure-host/egress/requirements.txt`. Add the `cargo` and `pip` ecosystems to
    Dependabot with the same cooldown, and a `cargo deny check advisories`
    (or osv-scanner) job.
 6. Release SBOM, Scorecard-visible provenance and a `v*` tag ruleset
