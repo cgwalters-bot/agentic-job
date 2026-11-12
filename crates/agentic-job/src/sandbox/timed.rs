@@ -35,10 +35,11 @@ const MAX_LINE: usize = 1024;
 const MAX_STAGES: usize = 16 * 1024;
 
 /// What setup and check print for each timed stage or independent probe.
+/// Accept the previous prefix too, while callers still use pinned host releases.
 /// ASCII digits only: a kept line is ASCII, so trimming cuts no character.
 static STAGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^Sandbox (?:setup|check) stage ([a-z0-9-]+): ([0-9]+\.[0-9]{3})s \((?:ok|failed)\)$",
+        r"^(?:Secure-host|Sandbox) (?:setup|check) stage ([a-z0-9-]+): ([0-9]+\.[0-9]{3})s \((?:ok|failed)\)$",
     )
     .expect("a valid pattern")
 });
@@ -222,7 +223,7 @@ mod tests {
     use super::*;
 
     fn stage(name: &str) -> String {
-        format!("Sandbox setup stage {name}: 0.123s (ok)\n")
+        format!("Secure-host setup stage {name}: 0.123s (ok)\n")
     }
 
     #[test]
@@ -305,7 +306,7 @@ mod tests {
             stages.feed(line.as_bytes());
         }
         assert!(stages.kept.len() <= MAX_STAGES);
-        assert!(stages.kept.starts_with("Sandbox setup stage packages"));
+        assert!(stages.kept.starts_with("Secure-host setup stage packages"));
         assert!(stages.kept.ends_with("(ok)\n"));
     }
 
@@ -313,7 +314,10 @@ mod tests {
     fn status_passes_through_and_the_summary_is_written() {
         let dir = tempfile::tempdir().unwrap();
         let cases = [
-            ("printf 'Sandbox setup stage packages: 0.123s (ok)\\n'", 0),
+            (
+                "printf 'Secure-host setup stage packages: 0.123s (ok)\\n'",
+                0,
+            ),
             ("exit 7", 7),
             ("kill -TERM $$", 1),
         ];

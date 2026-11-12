@@ -452,7 +452,7 @@ In a container on Ubuntu 26.04 through the same egress proxy, installing
 `cargo` took 24 seconds (70 packages, most of them `gcc` and LLVM, which
 the hosted image partly has already), and a cold `cargo test --workspace
 --locked --no-run` of this repository 68 seconds. The hosted runner's
-`Sandbox setup stage packages` line in the agent job's log is the
+`Secure-host setup stage packages` line (previously `Sandbox setup stage packages`) in the agent job's log is the
 authoritative figure.
 
 The scripted review session checks it: when the checkout has a

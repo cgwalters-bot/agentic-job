@@ -8,14 +8,26 @@ use std::time::Instant;
 use anyhow::Result;
 
 /// Log a stage's duration and preserve its result, including failures.
-/// The output format is also consumed by existing job summary adapters.
+/// Consumers may parse these informational lines, but timing is not a check record.
 pub fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
     let started = Instant::now();
     let result = run();
     println!(
-        "Sandbox {kind} stage {name}: {:.3}s ({})",
+        "Secure-host {kind} stage {name}: {:.3}s ({})",
         started.elapsed().as_secs_f64(),
         if result.is_ok() { "ok" } else { "failed" }
     );
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_values_and_errors() {
+        assert_eq!(stage("setup", "fixture", || Ok(42)).unwrap(), 42);
+        let error = stage::<()>("check", "fixture", || anyhow::bail!("probe failed")).unwrap_err();
+        assert_eq!(error.to_string(), "probe failed");
+    }
 }

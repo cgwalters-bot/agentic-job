@@ -587,7 +587,7 @@ jobs:
           sudo target/debug/agentic-job sandbox setup --config "$RUNNER_TEMP/sandbox-ci.toml" 2>&1 | tee "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Threat feed:' "$RUNNER_TEMP/sandbox-setup.log"
           grep -F 'Egress proxy (Rust)' "$RUNNER_TEMP/sandbox-setup.log"
-          grep -qE '^Sandbox setup stage privileged-binary-allowlist: [0-9]+[.][0-9]{3}s [(]ok[)]$' "$RUNNER_TEMP/sandbox-setup.log"
+          grep -qE '^Secure-host setup stage privileged-binary-allowlist: [0-9]+[.][0-9]{3}s [(]ok[)]$' "$RUNNER_TEMP/sandbox-setup.log"
       # From here on this job's user has no sudo: root is the test's
       # service, or the helper.
       - name: "The runner's user has no root after setup"

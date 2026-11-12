@@ -11,6 +11,8 @@ says what a caller may rely on across versions.
 
 - Prepare `crates/secure-host/` for standalone extraction: explicit Cargo
   metadata, local egress inputs, independent documentation and a CI template.
+  Stage timings use a `Secure-host` prefix; the consumer summary adapter
+  accepts both it and the old `Sandbox` prefix during release migration.
   Existing deployed host paths and action pins remain unchanged (#1735).
 
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
