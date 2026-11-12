@@ -1,4 +1,5 @@
 # Recipes the workflows run, so a check reads the same here and in CI.
+# Timings below are observations on one unprivileged runner, not CI guarantees.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
@@ -6,16 +7,49 @@ set positional-arguments := true
 test-feed-refresh:
     cargo test --locked -p agentic-job --bin refresh-feed
 
+# Format Rust before check.
 fmt:
     cargo fmt --all
     cargo fmt --manifest-path crates/secure-host/fuzz/Cargo.toml
 
 # What CI's rust job runs; nothing slower or networked beyond Cargo's fetch.
 check:
-    cargo fmt --all --check
-    cargo clippy --workspace --all-targets --locked -- -D warnings
-    cargo test --workspace --locked
+    just fmt-check
+    just clippy
+    just test
     just fuzz-check
+
+# Dependencies already checked: 19 seconds.
+build:
+    cargo build --locked
+
+# Under 1 second.
+fmt-check:
+    cargo fmt --all --check
+
+# Cold dependency cache: 42 seconds.
+clippy:
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+
+# Including compilation: 92 seconds; session tests alone took 22 seconds.
+test:
+    cargo test --workspace --locked
+
+# Under 1 second; local fixtures, no forge or inference credentials.
+proxy-test:
+    python3 -m unittest discover -s egress -v
+
+# 4 seconds including download; CI's markdownlint-cli2-action uses the same glob/config.
+markdown-lint:
+    npx --yes markdownlint-cli2 '**/*.md'
+
+# CI's relative-link/anchor check; requires lychee, timing not measured.
+markdown-links:
+    lychee --offline --include-fragments --no-progress "**/*.md"
+
+# Requires musl-tools and rustup target add x86_64-unknown-linux-musl; CI limit 30 minutes.
+build-static:
+    cargo build --release --locked --target x86_64-unknown-linux-musl -p agentic-job
 
 # Bounded corpus replay; coverage-guided fuzzing is opt-in (fuzz/README.md).
 fuzz-check:
@@ -105,6 +139,7 @@ release-check version:
 # as an option. The analyzers read this checkout's configuration, a pull
 # request's included, so workflow-ingress.yml, not this, is the gate.
 # actionlint, zizmor and a denial of ubuntu-latest over this checkout.
+# Needs just, cargo, network and docker (or CONTAINER=podman); 5 seconds cached.
 workflow-lint source:
     #!/usr/bin/env bash
     set -euo pipefail

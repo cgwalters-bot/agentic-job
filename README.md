@@ -39,3 +39,4 @@ Follow the [getting-started walkthrough](docs/try-it.md) to run the scripted age
 - [Agent harnesses](docs/harness.md), [inference](docs/inference.md), [MCP](docs/mcp.md) and [skills](docs/skills.md).
 - [Design and trust](docs/requirements.md), [related projects](docs/related-projects.md) and [interactive sessions](docs/interactive.md).
 - [Project layout and license](docs/layout.md), [stable interfaces](docs/stable-interfaces.md) and [remaining work](docs/plan.md).
+- [Contributing](docs/contributing.md): design constraints, checks, code conventions and security boundaries.

@@ -796,7 +796,7 @@ The linked Rust unit/integration tests and Node workflow tests are the current
 evidence; there is no `run-contract-compliance` fixture directory yet. Sandbox
 probes need a prepared host, and old-tree parity tests need external inputs;
 a skipped privileged path is not a conformance result. Follow
-[AGENTS.md](../AGENTS.md#build-and-checks) for commands and prerequisites.
+[the contributor guide](../docs/contributing.md#build-and-checks) for commands and prerequisites.
 
 A first compliance set should reuse the hand-back corpus as input/expected
 accept-or-refuse vectors, keyed by RC-005 through RC-008, beginning with a valid
