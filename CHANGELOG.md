@@ -61,6 +61,11 @@ says what a caller may rely on across versions.
   a fixed one (#3438). CLI/workflow stack publication is not yet supported; the
   one-PR hand-back limit is unchanged.
 
+- Toolchain documentation no longer advertises the removed `setup.tools`
+  installer; it points callers to signed distribution packages or their own
+  unprivileged setup script after lockdown. The removed key remains refused
+  (#3376).
+
 - Rendered sessions retain opencode's tool names when later updates replace
   their titles with commands or filenames (#596).
 
