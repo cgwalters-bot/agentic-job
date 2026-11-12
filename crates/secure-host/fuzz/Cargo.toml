@@ -1,0 +1,32 @@
+[package]
+name = "secure-host-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# libFuzzer's entry points do not inherit the production workspace's lints.
+[workspace]
+members = ["."]
+resolver = "3"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+secure-host = { path = ".." }
+toml = "1.0"
+
+[[bin]]
+name = "host_config"
+path = "fuzz_targets/host_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "os_release"
+path = "fuzz_targets/os_release.rs"
+test = false
+doc = false
+bench = false

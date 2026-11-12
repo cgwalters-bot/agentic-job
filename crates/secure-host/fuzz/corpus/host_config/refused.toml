@@ -1,0 +1,6 @@
+[host]
+lock-runner = false
+deny-runner-metadata = true
+[egress]
+proxy = true
+direct = ["https://example.invalid:443"]

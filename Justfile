@@ -8,12 +8,20 @@ test-feed-refresh:
 
 fmt:
     cargo fmt --all
+    cargo fmt --manifest-path crates/secure-host/fuzz/Cargo.toml
 
 # What CI's rust job runs; nothing slower or networked beyond Cargo's fetch.
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --locked -- -D warnings
     cargo test --workspace --locked
+    just fuzz-check
+
+# Bounded corpus replay; coverage-guided fuzzing is opt-in (fuzz/README.md).
+fuzz-check:
+    cargo fmt --manifest-path crates/secure-host/fuzz/Cargo.toml --check
+    CARGO_TARGET_DIR=target cargo clippy --manifest-path crates/secure-host/fuzz/Cargo.toml --all-targets --locked -- -D warnings
+    CARGO_TARGET_DIR=target cargo test --manifest-path crates/secure-host/fuzz/Cargo.toml --lib --locked
 
 refresh-feed:
     cargo run --quiet --locked -p agentic-job --bin refresh-feed -- update

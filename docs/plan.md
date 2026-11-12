@@ -485,12 +485,12 @@ of #1735 creates. Sizes are the comment's.
    `world-write-runtime`). Once the [crate split](layout.md#rust-workspace)
    is done, publish a `cargo llvm-cov` report, from the privileged jobs
    too if practical.
-9. Fuzzing of the config and os-release parsers (M, low priority, this
-   repository now). Add a cargo-fuzz target, in its own workspace since
-   the workspace lints forbid unsafe code, for the `[egress]` and
-   `[host]` tables in `crates/secure-host/src/config.rs` and the
-   `/etc/os-release` check in `crates/secure-host/src/platform.rs`, for
-   Scorecard's Fuzzing check; running it in CI is the operator's.
+9. Sustained parser fuzzing (M, low priority). The opt-in
+   [cargo-fuzz targets](../crates/secure-host/fuzz/README.md) cover the
+   `[egress]` and `[host]` configuration and `/etc/os-release` parsers in
+   their own workspace; `just check` replays their seed corpora and boundary
+   tests. Coverage-guided CI scheduling or a hosted fuzzing service remains
+   to be set up; the local smoke runs do not establish a Scorecard result.
 10. Naming (S, decision only, operator). Nothing called `secure-host`
     exists on crates.io, npm or PyPI, but the name is generic and close to
     the DoD's "Secure Host Baseline". Choose the name for step 5 and

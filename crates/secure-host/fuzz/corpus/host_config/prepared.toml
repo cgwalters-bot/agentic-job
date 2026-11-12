@@ -1,0 +1,9 @@
+[host.prepared]
+serve-port = 443
+[[host.prepared.refuse]]
+host = "example.invalid"
+port = 443
+[egress]
+proxy = true
+rust-proxy = true
+write-policy = true

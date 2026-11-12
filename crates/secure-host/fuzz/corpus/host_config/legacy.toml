@@ -1,0 +1,4 @@
+[sandbox]
+close-resolved = true
+[egress]
+proxy = true
