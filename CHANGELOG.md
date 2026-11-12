@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Rendered sessions retain opencode's tool names when later updates replace
+  their titles with commands or filenames (#596).
+
 - The Ubuntu packages stage bounds apt downloads and any index refresh to
   45 seconds (plus at most 5 seconds to kill stuck download processes),
   with a DNS/connectivity diagnostic instead of minutes of retries. It

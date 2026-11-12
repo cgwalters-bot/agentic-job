@@ -220,6 +220,7 @@ fn texts(content: &Value) -> String {
 
 struct Tool {
     block: usize,
+    name: Option<String>,
     start: Option<f64>,
     end: Option<f64>,
     fields: Value,
@@ -367,6 +368,12 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
                 push(&mut raw, false, String::new(), parent);
                 Tool {
                     block,
+                    // Opencode replaces the initial tool name with a command
+                    // or filename in updates. Keep the name for the summary;
+                    // the changing command remains visible in rawInput.
+                    name: (kind == "tool_call")
+                        .then(|| u["title"].as_str().map(str::to_owned))
+                        .flatten(),
                     start: (kind == "tool_call").then_some(record.ts),
                     end: None,
                     fields: serde_json::json!({}),
@@ -418,6 +425,7 @@ pub(super) fn render(records: &[Record], redactor: &Shared) -> Session {
         let f = &tool.fields;
         let name = f["_meta"]["claudeCode"]["toolName"]
             .as_str()
+            .or(tool.name.as_deref())
             .or(f["title"].as_str())
             .unwrap_or("Tool");
         let duration = tool.start.zip(tool.end).map_or_else(
@@ -964,6 +972,36 @@ mod tests {
     }
 
     #[test]
+    fn tool_label_survives_title_updates() {
+        for (initial, metadata, expected) in [
+            (Some("bash"), None, "bash"),
+            (Some("Run command"), Some("Bash"), "Bash"),
+            (None, None, "updated title"),
+        ] {
+            let mut records = Vec::new();
+            if let Some(title) = initial {
+                records.push(record(
+                    0.0,
+                    json!({"sessionUpdate":"tool_call","toolCallId":"t","title":title}),
+                ));
+            }
+            let mut update = json!({"sessionUpdate":"tool_call_update","toolCallId":"t","title":"updated title","status":"completed","rawInput":{"command":"echo done"}});
+            if let Some(name) = metadata {
+                update["_meta"] = json!({"claudeCode":{"toolName":name}});
+            }
+            records.push(record(1.0, update));
+            let redactor = Shared::new(crate::redact::Redactor::new::<&str>([]).unwrap());
+            let session = render(&records, &redactor);
+            assert!(
+                session.full.contains(&format!("<summary>{expected} —")),
+                "{}",
+                session.full
+            );
+            assert!(session.full.contains("echo done"));
+        }
+    }
+
+    #[test]
     fn staged_summaries_pass_the_gate_and_respect_session_setting() {
         for enabled in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -1129,6 +1167,15 @@ mod tests {
             // only the finished runs hold, redacted.
             let redactor = Shared::new(crate::redact::Redactor::new([CANARY]).unwrap());
             let session = render(&records, &redactor);
+            if dir == "opencode" {
+                for (tool, calls, _) in c.tools {
+                    assert_eq!(
+                        session.full.matches(&format!("<summary>{tool} —")).count() as u64,
+                        *calls,
+                        "{dir}: {tool}"
+                    );
+                }
+            }
             let calls: u64 = c.tools.iter().map(|(_, calls, _)| calls).sum();
             assert_eq!(
                 session.full.matches("\n<details><summary>").count() as u64

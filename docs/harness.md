@@ -79,6 +79,8 @@ duration, reported status and exit code when available, and at most 8192 bytes
 of output with an omitted-byte count. Transcript punctuation is encoded to
 prevent HTML or Markdown injection, including closing a generated details block.
 Joined text is redacted again so secrets split across streamed chunks stay hidden.
+Tool labels retain the initial name when opencode replaces its title with a
+command or filename; the updated arguments remain visible inside the block.
 
 `session.md` in the `agent-run` artifact contains the complete rendered session
 (tool outputs are still bounded). The summary reserves space for accounting
