@@ -746,6 +746,7 @@ jobs:
         id: push
         if: ${{ inputs.push-item != '' }}
         env:
+          ALLOW: ${{ inputs.allow }}
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ inputs.event }}
           REVIEW: ${{ inputs.review }}
@@ -756,7 +757,7 @@ jobs:
           OUTPUT_REPO: ${{ inputs.output-repo || github.repository }}
         run: |
           "$JOB_DIR/bin/agentic-job" push resolve --event "$EVENT" --review "$REVIEW" --kind "$KIND" \
-            --item "$ITEM" --repo "$REPO" --output-repo "$OUTPUT_REPO" >> "$GITHUB_OUTPUT"
+            --item "$ITEM" --repo "$REPO" --output-repo "$OUTPUT_REPO" --allow "$ALLOW" >> "$GITHUB_OUTPUT"
       # The base is the pull request's where an event named one, or the
       # branch of the one a run pushes to, and the bounds have to cover it
       # like any other. Comments go to the item the event was about unless

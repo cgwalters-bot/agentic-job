@@ -958,6 +958,9 @@ pub fn check_context(context: &[ContextRepo]) -> Result<()> {
 /// gh-aw's safe-outputs configuration: a table per output type allowed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafeOutputs {
+    /// Caller acceptance of parent history as a fork-side replacement base.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub upstream_pull_request_base: bool,
     /// One pattern list per trusted bounds file; all must accept the head
     /// repository. Empty means no caller acceptance (the repository file
     /// remains an independent source).

@@ -10,11 +10,18 @@ pub use safe_outputs::apply::push::*;
 
 use super::github::GH_TOKEN_ENV;
 use crate::exit::Exit;
+use crate::policy::{Bounds, Load};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// For policy: print the branch, head, current base and author of the pull request a run pushes to
-    Resolve(ResolveArgs),
+    Resolve {
+        #[command(flatten)]
+        request: ResolveArgs,
+        /// Trusted caller bounds; absent, only the addressed PR supplies its base
+        #[arg(long, value_name = "FILE")]
+        allow: Option<std::path::PathBuf>,
+    },
     /// For apply: print the repository a run's commit is pushed to, forking for a new pull request
     Target(TargetArgs),
     /// For apply: set draft state after a verified continuation, respecting hold labels
@@ -24,9 +31,15 @@ pub enum Command {
 impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
-            Self::Resolve(args) => {
+            Self::Resolve { request, allow } => {
                 let github = super::github::from_env(GH_TOKEN_ENV)?;
-                let pull = resolve(&github, args)?;
+                let upstream = allow
+                    .as_deref()
+                    .map(Bounds::load)
+                    .transpose()?
+                    .and_then(|bounds| bounds.github)
+                    .is_some_and(|github| github.outputs.upstream_pull_request_base);
+                let pull = resolve(&github, request, upstream)?;
                 println!("branch={}", pull.branch);
                 println!("head={}", pull.head);
                 println!("replacement-base={}", pull.base);

@@ -344,8 +344,10 @@ What a producer leaves for `run` to take
   target-branch snapshots. Apply proves the base from trusted history; a
   fork PR uses its upstream target, not the fork's default branch
   ([replacement series](safe-outputs.md#the-bounds-and-the-policy)).
-  A fork-side PR uses a unique open same-head PR in its forge-reported parent
-  to resolve that target. `handback replace` requires the replayed final tree
+  With `[github.outputs] upstream-pull-request-base = true` (off by default),
+  a fork-side PR uses a unique open same-author, same-head PR in its forge-reported
+  parent to resolve that target. This opts into parent history outside the
+  checked mails on the fork's branch. `handback replace` requires the replayed final tree
   to equal the producer's intended `HEAD` tree before writing the series.
 - Where the bounds have `[github.test_evidence]`, `out/test-evidence.json`,
   schema `agentic-job/test-evidence/v1`, and its logs

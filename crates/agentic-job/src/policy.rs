@@ -627,6 +627,10 @@ impl Compile for Bounds {
                 .is_some_and(|bound| bound.ready_when_complete)
         };
         let safe_outputs = SafeOutputs {
+            upstream_pull_request_base: self
+                .github
+                .as_ref()
+                .is_some_and(|github| github.outputs.upstream_pull_request_base),
             own_branch_repos: self
                 .github
                 .as_ref()
@@ -4031,6 +4035,37 @@ max_patch_files = 10
                 ..OutputLimit::default()
             };
             assert_eq!(limit.validate(output).is_ok(), accepted, "{output} {total}");
+        }
+    }
+
+    #[test]
+    fn upstream_pull_request_base_is_opt_in_and_intersects() {
+        let compile = |enabled| {
+            let parsed: Bounds = toml::from_str(&format!(
+                "{BOUNDS}\nupstream-pull-request-base = {enabled}\n"
+            ))
+            .unwrap();
+            let policy = parsed.compile(&request()).unwrap();
+            let policy: Policy =
+                serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+            policy.validate().unwrap();
+            policy
+        };
+        assert!(
+            !bounds()
+                .compile(&request())
+                .unwrap()
+                .safe_outputs
+                .upstream_pull_request_base
+        );
+        for first in [false, true] {
+            for second in [false, true] {
+                let both = intersect(compile(first), compile(second)).unwrap();
+                assert_eq!(
+                    both.safe_outputs.upstream_pull_request_base,
+                    first && second
+                );
+            }
         }
     }
 

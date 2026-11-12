@@ -173,6 +173,11 @@ pub struct GithubBounds<Trigger = toml::Table> {
 /// GitHub output limits and the caller's acceptance of repository CI execution.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GithubOutputs {
+    /// Resolve a fork-side PR's replacement base through a same-author,
+    /// same-head PR in its parent. This trusts that parent's history,
+    /// including files outside the checked mails, on the fork's branch.
+    #[serde(default, rename = "upstream-pull-request-base")]
+    pub upstream_pull_request_base: bool,
     #[serde(default, rename = "own-branch-repos")]
     pub own_branch_repos: Vec<String>,
     #[serde(flatten)]
@@ -668,6 +673,7 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
         _ => None,
     };
     policy.max_outputs = policy.max_outputs.min(other.max_outputs);
+    policy.safe_outputs.upstream_pull_request_base &= other.safe_outputs.upstream_pull_request_base;
     // Keep each caller's patterns separate: a repository must match both,
     // not their union. No glob-pattern intersection is needed.
     if policy.safe_outputs.own_branch_repos.is_empty()

@@ -1017,13 +1017,18 @@ is also accepted after apply proves both ancestry relationships.
 To squash or reword without rebasing, `BASE_SHA` may also be the unique merge
 base of the policy-pinned PR head and target branch snapshot. For a
 fork-to-upstream PR this is the upstream target, not the fork's `main`.
-For a fork-side PR whose head is in that same fork, policy and apply look
+Only when caller bounds set `[github.outputs] upstream-pull-request-base = true`,
+for a fork-side PR whose head is in that same fork, policy and apply look
 for a unique open PR in the forge-reported parent with the same author and
 the exact same head repository, branch and commit. When present, that PR
 supplies the target snapshot. A failed lookup, no match, several matches or
 a mismatched one retain the addressed PR's target rather than refusing the
 push. This read-only association never changes the push destination or
-grants publication authority.
+grants publication authority. The default is off. Enabling it trusts the parent's
+history on the fork's PR branch: rebasing onto an admitted parent snapshot can
+bring in parent commits, including workflows, outside the checked mails. Only
+enable it for callers that accept that upstream history and its CI consequences.
+Both bounds files must enable it when organization bounds also apply.
 Policy resolves the branch ref, not the PR's possibly stale
 base SHA, and run fetches that snapshot into the producer checkout. Each string is one plain
 `git format-patch --stdout --no-signature --no-renames -1 COMMIT` mail with

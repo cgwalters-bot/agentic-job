@@ -482,6 +482,7 @@ mod tests {
                 repo: "example-org/example".into(),
                 output_repo: "example-org/example".into(),
             },
+            true,
         )
         .unwrap();
         assert_eq!(

@@ -101,7 +101,7 @@ pub struct Resolved {
     pub author: String,
 }
 
-pub fn resolve(github: &Github, args: &ResolveArgs) -> Result<Resolved> {
+pub fn resolve(github: &Github, args: &ResolveArgs, upstream: bool) -> Result<Resolved> {
     ensure!(
         args.event == "false"
             && args.review == "false"
@@ -145,18 +145,22 @@ pub fn resolve(github: &Github, args: &ResolveArgs) -> Result<Resolved> {
     Ok(Resolved {
         branch: branch.to_owned(),
         head: pull["head"]["sha"].as_str().unwrap_or_default().to_owned(),
-        base: current_base(github, &args.repo, &pull)?,
+        base: current_base(github, &args.repo, &pull, upstream)?,
         author: author.to_owned(),
     })
 }
 
 /// The head of PULL's base branch now, in REPOSITORY. Only the forge names
 /// that branch; no producer-provided ref or commit is used to resolve it.
-fn current_base(github: &Github, repository: &str, pull: &Value) -> Result<String> {
+fn current_base(github: &Github, repository: &str, pull: &Value, upstream: bool) -> Result<String> {
     // Every push resolves its base here, replacement or not: a failed,
     // ambiguous or mismatched association keeps the PR's own target, as
     // before upstream targets were resolved, rather than refusing the push.
-    let upstream = upstream_pull(github, repository, pull).unwrap_or(None);
+    let upstream = if upstream {
+        upstream_pull(github, repository, pull).unwrap_or(None)
+    } else {
+        None
+    };
     let (repository, pull) = upstream
         .as_ref()
         .map(|(repo, pull)| (repo.as_str(), pull))
@@ -182,7 +186,8 @@ fn current_base(github: &Github, repository: &str, pull: &Value) -> Result<Strin
 /// forge-reported parent and a unique, exact same-head association by the same
 /// author may supply its target: issue text, another branch or another user
 /// must not choose a replacement root.
-/// This changes no push destination or authority; replacement remains opt-in.
+/// Only caller bounds enable this: parent history can then reach the fork
+/// outside the checked mails. This changes no push destination or authority.
 fn upstream_pull(
     github: &Github,
     repository: &str,
@@ -539,7 +544,13 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
         );
     }
     let current_base = if args.replacement {
-        Some(current_base(github, &args.repo, &pull)?)
+        let upstream = config
+            .get("upstream_pull_request_base")
+            .map(|value| serde_json::from_value::<bool>(value.clone()))
+            .transpose()
+            .context("invalid upstream-pull-request-base configuration")?
+            .unwrap_or(false);
+        Some(current_base(github, &args.repo, &pull, upstream)?)
     } else {
         None
     };
@@ -820,11 +831,45 @@ mod tests {
             answers.push((200, json!([mismatched]), sha('c')));
         }
         for (status, answer, expected) in answers {
-            let mut routes = case.routes.clone();
-            routes.insert(UPSTREAM.into(), (status, answer.clone()));
-            let (github, _requests) = forge(routes);
-            let result = current_base(&github, "o/r", &pull);
-            assert_eq!(result.unwrap(), expected, "{status} {answer}");
+            for enabled in [false, true] {
+                let mut routes = case.routes.clone();
+                routes.insert(UPSTREAM.into(), (status, answer.clone()));
+                let (github, requests) = forge(routes.clone());
+                let args = ResolveArgs {
+                    event: "false".into(),
+                    review: "false".into(),
+                    kind: "branch".into(),
+                    item: "42".into(),
+                    repo: "o/r".into(),
+                    output_repo: "o/r".into(),
+                };
+                let expected = if enabled { expected.clone() } else { sha('c') };
+                assert_eq!(resolve(&github, &args, enabled).unwrap().base, expected);
+                assert_eq!(
+                    requests
+                        .try_iter()
+                        .any(|r| r.line.contains("/repos/upstream/")),
+                    enabled
+                );
+                for replacement in [false, true] {
+                    let mut apply = Case::new();
+                    apply.routes = routes.clone();
+                    apply.config["own_branch_repos"] = json!([["o/r"]]);
+                    if enabled {
+                        apply.config["upstream_pull_request_base"] = json!(true);
+                    }
+                    apply.replacement = replacement;
+                    let (result, asked) = apply.run();
+                    assert_eq!(
+                        result.unwrap().current_base,
+                        replacement.then(|| expected.clone())
+                    );
+                    assert_eq!(
+                        asked.iter().any(|r| r.contains("/repos/upstream/")),
+                        enabled && replacement
+                    );
+                }
+            }
         }
     }
 
@@ -1411,7 +1456,7 @@ mod tests {
         let mut app = Case::new();
         app.edit(PULL, "user", json!({"login": "renovate[bot]"}));
         let (github, _requests) = forge(app.routes);
-        assert_eq!(resolve(&github, &args()).unwrap().author, "");
+        assert_eq!(resolve(&github, &args(), false).unwrap().author, "");
         type Edit = fn(&mut ResolveArgs, &mut Case);
         // (what, the request and forge, the error's words or none)
         let cases: Vec<(&str, Edit, Option<&str>)> = vec![
@@ -1589,7 +1634,7 @@ mod tests {
             let (mut args, mut case) = (args(), Case::new());
             edit(&mut args, &mut case);
             let (github, _requests) = forge(case.routes);
-            match (resolve(&github, &args), want) {
+            match (resolve(&github, &args, false), want) {
                 (Ok(got), None) => assert_eq!(got, resolved, "{what}"),
                 (Err(err), Some(want)) => {
                     assert!(format!("{err:#}").contains(want), "{what}: {err:#}")

@@ -26,7 +26,9 @@ says what a caller may rely on across versions.
 - Replacement series may retain the PR's actual merge base with its target
   snapshot, including upstream targets for fork PRs, instead of rebasing to
   the target head. Fork-side PRs use a unique forge-verified same-head PR in
-  their parent to resolve that target. Arbitrary older ancestors remain
+  their parent to resolve that target only when caller bounds opt in with
+  `[github.outputs] upstream-pull-request-base = true` (off by default).
+  Arbitrary older ancestors remain
   refused, and `handback replace` enforces final-tree equality with HEAD (#3440).
 
 - GitHub dispatch and fix bounds may set `[github.outputs] own-branch-repos`
