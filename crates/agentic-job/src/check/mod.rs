@@ -31,7 +31,9 @@ use serde_json::{Map, Value};
 
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{Forge, Load, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
+use crate::policy::{
+    CREATE_PULL_REQUEST, Forge, Load, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH, Policy,
+};
 use crate::redact;
 use crate::run::public_addresses::PublicAddresses;
 use safe_outputs::check::inline::CheckedTarget;
@@ -157,6 +159,10 @@ pub struct Verdict {
     /// the draft.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_evidence: Option<test_evidence::Info>,
+    /// Trusted opt-in with a pull request patch but no collected evidence.
+    /// A producer's drop reason is deliberately not carried into the draft.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub test_evidence_missing: bool,
     /// The run is blocked, not failed: see [`Verdict::is_blocked`]. Apply
     /// reports it so and succeeds.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -187,6 +193,7 @@ impl Verdict {
             warnings: Vec::new(),
             memory: None,
             test_evidence: None,
+            test_evidence_missing: false,
             blocked: false,
             run_summary: None,
         }
@@ -273,7 +280,7 @@ impl Verdict {
         // patch without it is not read as tested.
         match &self.test_evidence {
             Some(evidence) => lines.push(format!("- {}", evidence.line())),
-            None if policy.test_evidence.is_some() && self.patch.is_some() => {
+            None if self.test_evidence_missing => {
                 lines.push("- test evidence: none handed back; no test result is claimed".into());
             }
             None => {}
@@ -579,12 +586,29 @@ fn verdict_of(
         checked.errors.push(format!("test evidence: {error:#}"));
         None
     });
+    // Absence is not acceptance: carry the trusted expectation to apply,
+    // without trusting a producer-supplied status or diagnostic.
+    let test_evidence_missing = policy.test_evidence.is_some()
+        && !contents.contains_key(test_evidence::TEST_EVIDENCE_FILE)
+        && checked
+            .patch
+            .as_ref()
+            .is_some_and(|patch| patch.commit_files.is_none())
+        && checked
+            .items
+            .iter()
+            .any(|item| item_type(item) == CREATE_PULL_REQUEST)
+        && checked
+            .items
+            .iter()
+            .all(|item| item_type(item) != PUSH_TO_PULL_REQUEST_BRANCH);
     Ok(Verdict {
         secondary_patch: checked.secondary_patch,
         checkpoint,
         warnings,
         memory,
         test_evidence,
+        test_evidence_missing,
         ..Verdict::new(checked.errors, checked.items, checked.patch)
     })
 }
@@ -1034,6 +1058,42 @@ mod tests {
             );
         handback.items.push(tool_request());
         handback
+    }
+
+    #[test]
+    fn missing_test_evidence_annotates_only_the_primary_of_two_drafts() {
+        use crate::apply::test_evidence::{Args, run};
+
+        for enabled in [false, true] {
+            let mut policy = secondary_policy();
+            policy.test_evidence = enabled.then(test_evidence::tests::rules);
+            let verdict = both().check_against(&policy);
+            assert!(verdict.ok, "{:?}", verdict.errors);
+            assert_eq!(verdict.test_evidence_missing, enabled);
+            let dir = tempfile::tempdir().unwrap();
+            let args = Args {
+                report: dir.path().join("report.json"),
+                file: dir.path().join("agent_output.json"),
+                tree: String::new(),
+                run_url: String::new(),
+            };
+            std::fs::write(&args.report, serde_json::to_vec(&verdict).unwrap()).unwrap();
+            let output = json!({"items": verdict.items});
+            std::fs::write(&args.file, output.to_string()).unwrap();
+            run(&args).unwrap();
+            let written: Value =
+                serde_json::from_slice(&std::fs::read(&args.file).unwrap()).unwrap();
+            assert_eq!(written["items"][1], output["items"][1]);
+            let body = written["items"][0]["body"].as_str().unwrap();
+            assert_eq!(
+                body.matches("No repeated-test acceptance is claimed.")
+                    .count(),
+                usize::from(enabled)
+            );
+            if !enabled {
+                assert_eq!(written, output);
+            }
+        }
     }
 
     /// The secondary pull request is checked as a destination of its own:
@@ -3314,6 +3374,13 @@ mod tests {
         // only where the bounds take evidence.
         for (policy, said) in [(&with_evidence, true), (&without, false)] {
             let verdict = Handback::pull_request().check_against(policy);
+            assert_eq!(verdict.test_evidence_missing, said);
+            assert_eq!(
+                serde_json::to_value(&verdict)
+                    .unwrap()
+                    .get("test_evidence_missing"),
+                said.then_some(&json!(true))
+            );
             assert_eq!(verdict.errors, Vec::<String>::new());
             assert!(
                 serde_json::to_value(&verdict)

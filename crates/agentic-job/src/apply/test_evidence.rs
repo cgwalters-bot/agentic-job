@@ -7,7 +7,8 @@
 //! A manifest naming another tree describes tests of another change, and
 //! stops the job. The draft then states each outcome's count, with a link
 //! to this run, whose checked upload holds the manifest and its logs. A
-//! hand-back without evidence is left as it is.
+//! hand-back without evidence is left as it is unless check reports a
+//! trusted opt-in with missing evidence; that draft explicitly claims none.
 
 use std::path::PathBuf;
 
@@ -23,6 +24,11 @@ use crate::policy::{COMMIT_RE, CREATE_PULL_REQUEST};
 const MAX_JSON_BYTES: u64 = 4 << 20;
 /// How much of an object ID the draft shows.
 const SHORT: usize = 12;
+
+/// Fixed prose only: never publish an untrusted producer's drop reason.
+const MISSING_NOTE: &str = "Test evidence: the trusted policy opted in, but no evidence was available \
+    in the checked hand-back (absent or dropped during collection). No repeated-test acceptance \
+    is claimed.";
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -62,33 +68,42 @@ fn note(info: &Info, run_url: &str) -> String {
 
 pub fn run(args: &Args) -> Result<Exit> {
     let report = read(&args.report)?;
-    let Some(evidence) = report.get("test_evidence").filter(|value| !value.is_null()) else {
+    let has_evidence = report
+        .get("test_evidence")
+        .is_some_and(|value| !value.is_null());
+    let paragraph = if let Some(evidence) =
+        report.get("test_evidence").filter(|value| !value.is_null())
+    {
+        let info: Info =
+            serde_json::from_value(evidence.clone()).context("check's report's test_evidence")?;
+        ensure!(
+            COMMIT_RE.is_match(&args.tree),
+            "the checked patch was not applied to a tree here, so the test evidence cannot be bound \
+         to it"
+        );
+        ensure!(
+            info.tree == args.tree,
+            "the test evidence is of tree {}, but the checked patch applied on {} makes {}: the tests \
+         ran on another change",
+            info.tree,
+            info.base,
+            args.tree
+        );
+        ensure!(
+            args.run_url.starts_with("https://")
+                && !args
+                    .run_url
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || "()<>[]".contains(c)),
+            "the run's URL {:?} is not one a link can hold",
+            args.run_url
+        );
+        note(&info, &args.run_url)
+    } else if report.get("test_evidence_missing").and_then(Value::as_bool) == Some(true) {
+        MISSING_NOTE.to_owned()
+    } else {
         return Ok(Exit::Success);
     };
-    let info: Info =
-        serde_json::from_value(evidence.clone()).context("check's report's test_evidence")?;
-    ensure!(
-        COMMIT_RE.is_match(&args.tree),
-        "the checked patch was not applied to a tree here, so the test evidence cannot be bound \
-         to it"
-    );
-    ensure!(
-        info.tree == args.tree,
-        "the test evidence is of tree {}, but the checked patch applied on {} makes {}: the tests \
-         ran on another change",
-        info.tree,
-        info.base,
-        args.tree
-    );
-    ensure!(
-        args.run_url.starts_with("https://")
-            && !args
-                .run_url
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control() || "()<>[]".contains(c)),
-        "the run's URL {:?} is not one a link can hold",
-        args.run_url
-    );
     let mut output = read(&args.file)?;
     let items = output["items"]
         .as_array_mut()
@@ -97,13 +112,22 @@ pub fn run(args: &Args) -> Result<Exit> {
     for item in items
         .iter_mut()
         .filter(|item| item["type"] == CREATE_PULL_REQUEST)
+        // Missing evidence describes only the primary patch. A secondary
+        // draft has its own prefixed branch and must remain unchanged.
+        // Keep the existing one-PR refusal for accepted evidence intact.
+        .filter(|item| {
+            has_evidence
+                || item["branch"]
+                    .as_str()
+                    .is_some_and(crate::check::is_run_branch)
+        })
     {
         ensure!(
             item["body"].is_null() || item["body"].is_string(),
             "pull request body is not text"
         );
         let body = item["body"].as_str().unwrap_or_default();
-        item["body"] = format!("{body}\n\n{}", note(&info, &args.run_url)).into();
+        item["body"] = format!("{body}\n\n{paragraph}").into();
         drafts += 1;
     }
     ensure!(
@@ -185,6 +209,20 @@ mod tests {
                 "",
                 RUN_URL,
                 Ok(Some("Why.")),
+            ),
+            (
+                "opted-in absent or dropped evidence, never its unsafe reason",
+                json!({"ok": true, "test_evidence_missing": true,
+                    "test_evidence_dropped": "<script>unsafe</script> @someone"}),
+                outputs.clone(),
+                "",
+                RUN_URL,
+                Ok(Some(concat!(
+                    "Why.\n\n",
+                    "Test evidence: the trusted policy opted in, but no evidence was available ",
+                    "in the checked hand-back (absent or dropped during collection). No repeated-test acceptance ",
+                    "is claimed."
+                ))),
             ),
             (
                 "another tree",

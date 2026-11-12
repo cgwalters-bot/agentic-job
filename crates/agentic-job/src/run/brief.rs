@@ -151,6 +151,63 @@ fn secondary_tree<'a>(
         .zip(secondary)
 }
 
+/// Only the trusted policy opts a producer in; other callers' prompts stay
+/// unchanged. Naming the bounds avoids inviting oversized or stray uploads.
+fn test_evidence(text: &mut String, policy: &Policy, home: &Path, base: Option<&str>) {
+    let Some(rules) = policy.test_evidence.as_ref().filter(|_| {
+        policy.kind == Kind::Branch
+            && policy
+                .safe_outputs
+                .patch_carrier()
+                .is_some_and(|(kind, _)| kind == CREATE_PULL_REQUEST)
+            && policy.safe_outputs.push_to_pull_request_branch.is_none()
+    }) else {
+        return;
+    };
+    let logs = (1..=rules.max_attempts)
+        .map(|n| format!("`out/{}`", crate::check::test_evidence::log_name(n)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        text,
+        "- Test evidence (trusted opt-in): `{}` (regular file, at most 65536 bytes), \
+         schema `agentic-job/test-evidence/v1`; 1 to {} planned attempts, each with its exact \
+         regular-file log under your home: {logs} (at most {} bytes each). Record every \
+         pass/fail/skipped/not-run attempt; never invent results or omit failures. \
+         Read `agentic-job handback guide` for the full manifest and tested-tree instructions.",
+        home.join("out/test-evidence.json").display(),
+        rules.max_attempts,
+        rules.max_log_bytes
+    );
+    if let Some(base) = base {
+        let _ = writeln!(
+            text,
+            "  In v1, `base` and `head` both name `{base}`, the starting commit the patch \
+             applies to, NOT a new commit. `tree` is the full Git tree ID of that base with \
+             your tested patch applied. Finish formatting and all edits first; stage exactly \
+             the files to hand back (`git add -- <paths>`), record `git write-tree` before \
+             testing that tree, then leave changes uncommitted (`git reset --mixed {base}` \
+             preserves working files). Include intended new files; exclude ignored artifacts. \
+             Every later edit requires retesting and recording the newly tested tree, never \
+             just replacing the old ID. Apply refuses a tree different from its checked-patch \
+             trial, including changes made by collection-time formatting.\n\
+             \x20 Plan attempts before testing; report all of them numbered 1 to N in order, \
+             each with outcome `pass`, `fail`, `skipped` or `not-run`, real `duration_s` \
+             (0 if not run), and `log` exactly `test-evidence-N.log`. Even skipped/not-run \
+             attempts need a log explaining why. No extra logs, paths, symlinks or secrets. \
+             Manifest fields (no others): `schema`, `base`, `head`, `tree`, `image`, `test`, \
+             `command`, `profile`, `resources` (positive `cpus`, `memory_mib`, `disk_gib`), \
+             `planned_attempts`, `attempts` (objects with `attempt`, `outcome`, `duration_s`, \
+             `log`). Image/test/profile are 1–256 ASCII letters/digits and `._:/@+=-`, \
+             starting with a letter/digit; command is one nonempty line of at most 1024 \
+             characters; duration is at most 86400 seconds. Full reference and example: \
+             `docs/safe-outputs.md#repeated-test-evidence` in agentic-job. Evidence is the \
+             producer's report, not independently verified acceptance; absent/dropped evidence \
+             claims no repeated-test acceptance."
+        );
+    }
+}
+
 /// What a run of POLICY is told before its task, as [`guide`] is: where
 /// it hands back, its limits, and the validator that names what `check`
 /// would refuse while the session can still fix it. The rest of the
@@ -212,6 +269,7 @@ pub fn hand_back(
             target.repo,
         );
     }
+    test_evidence(&mut text, policy, home, None);
     // #119: brief line comes with restore. Until a run is given its memory
     // back, telling the agent of `~/memory` would promise what is not so.
     let allowed: Vec<&str> = outputs
@@ -401,6 +459,7 @@ pub fn guide(
             None => format!("`{name}`"),
         })
         .collect();
+    test_evidence(&mut text, policy, home, Some(base));
     let requests = home.join(AGENT_OUTPUTS);
     if policy.advisory.is_some() {
         advisory_requests(&mut text, policy, &requests);
@@ -597,6 +656,58 @@ mod tests {
             None,
             "0123abcd",
         )
+    }
+
+    #[test]
+    fn test_evidence_instructions_follow_only_the_effective_opt_in() {
+        for (name, enabled, kind, carrier, expected) in [
+            ("enabled", true, Kind::Branch, true, true),
+            ("disabled", false, Kind::Branch, true, false),
+            ("analysis", true, Kind::Analysis, true, false),
+            ("no carrier", true, Kind::Branch, false, false),
+        ] {
+            let mut policy = crate::policy::tests::policy();
+            policy.kind = kind;
+            if !carrier {
+                policy.safe_outputs.create_pull_request = None;
+            }
+            policy.test_evidence = enabled.then(crate::check::test_evidence::tests::rules);
+            for instructions in [
+                text(&policy),
+                hand_back(&policy, Path::new("/home/agent"), Path::new("/work"), None),
+            ] {
+                for required in [
+                    "out/test-evidence.json",
+                    "test-evidence-1.log",
+                    "test-evidence-3.log",
+                    "65536 bytes",
+                    "1024 bytes each",
+                    "1 to 3 planned attempts",
+                    "never invent results",
+                ] {
+                    assert_eq!(
+                        instructions.contains(required),
+                        expected,
+                        "{name}: {required}"
+                    );
+                }
+                assert!(!instructions.contains("test-evidence-4.log"), "{name}");
+            }
+            let full = text(&policy);
+            for required in [
+                "`base` and `head` both name `0123abcd`",
+                "git write-tree",
+                "Every later edit requires retesting",
+                "`not-run`",
+                "`planned_attempts`",
+                "docs/safe-outputs.md#repeated-test-evidence",
+            ] {
+                assert_eq!(full.contains(required), expected, "{name}: {required}");
+            }
+        }
+        let mut push = crate::policy::tests::push_policy();
+        push.test_evidence = Some(crate::check::test_evidence::tests::rules());
+        assert!(!text(&push).contains("out/test-evidence.json"));
     }
 
     #[test]

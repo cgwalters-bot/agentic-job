@@ -342,7 +342,11 @@ What a producer leaves for `run` to take
 - Where the bounds have `[github.test_evidence]`, `out/test-evidence.json`,
   schema `agentic-job/test-evidence/v1`, and its logs
   `out/test-evidence-N.log`
-  ([test evidence](safe-outputs.md#repeated-test-evidence)).
+  ([test evidence](safe-outputs.md#repeated-test-evidence)). Opted-in pull
+  request briefs and the full handback guide explain the bounds and v1
+  base/head/tree binding. With a checked pull request patch but no evidence,
+  the report adds `test_evidence_missing: true` and apply adds a fixed
+  no-repeated-test-acceptance draft note; unconfigured drafts stay unchanged.
 
 A job other than the agent's hands back through `proposals-artifact`:
 an artifact holding `outputs.jsonl`, and optionally `base.json` and one

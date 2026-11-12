@@ -38,6 +38,11 @@ says what a caller may rely on across versions.
   `build-release-report` produces a dry-run ledger from release and resolved
   pin snapshots, retaining unresolved builds and never deleting releases (#3357).
 
+- Opted-in test-evidence producers receive bounded manifest and tested-tree
+  instructions. If evidence is absent or dropped during collection, the
+  checked report carries that trusted expectation to a draft note saying
+  no repeated-test acceptance is claimed. Unconfigured runs are unchanged.
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

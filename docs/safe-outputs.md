@@ -1677,6 +1677,28 @@ drops what `check` would refuse, evidence where the policy allows a push,
 and evidence without a patch. The reason goes to the job's log, and `agentic-job handback check`
 reports it.
 
+Only opted-in pull request runs receive evidence instructions in their
+brief and `agentic-job handback guide`. In v1, `base` **and** `head` are
+the starting commit the checked patch applies to, not a newly made
+commit. `tree` is the full Git tree ID of that base with the tested patch
+applied. Finish all edits and formatting first, stage exactly the intended
+patch files with `git add -- <paths>` (including intended new files, not
+ignored artifacts), and record `git write-tree` before testing that tree.
+Leave changes uncommitted; `git reset --mixed STARTING_COMMIT` unstages
+them without changing working files. Any later edit requires retesting
+and recording the newly tested tree, not merely changing the manifest's
+ID. Collection-time formatting can also make a stale tree; apply still
+refuses it rather than rebinding old results to the new tree.
+
+Plan attempts before testing and record every `pass`, `fail`, `skipped`
+and `not-run`, numbered 1 to N in order, with real durations and exact
+regular-file log names `out/test-evidence-1.log` through
+`out/test-evidence-N.log` under the agent's home. A skipped/not-run log
+explains why; even those attempts cannot be omitted. Never invent results.
+The trusted policy's attempt and per-log byte limits appear in the brief;
+the full guide lists the manifest fields and limits. The example below
+illustrates the format, not results of a real run.
+
 ```json
 {
   "schema": "agentic-job/test-evidence/v1",
@@ -1726,9 +1748,16 @@ passed, and a link to the run, whose checked upload holds the manifest
 and the logs. One pass after two failures is not a repeated pass, and the
 paragraph says so. A valid manifest shows that the evidence belongs to
 this patch. It does not show that the tests say what is true. Where the
-bounds take evidence and none came, check's summary says that no test
-result is claimed. A hand-back without evidence is otherwise checked
-and applied as before.
+bounds take evidence and a pull request patch came without it, check's
+summary says that no test result is claimed. Its report adds
+`test_evidence_missing: true` (omitted otherwise), derived from trusted
+policy and the checked patch, not a producer's status. Apply adds one
+fixed draft paragraph saying the evidence was absent or dropped during
+collection and **no repeated-test acceptance is claimed**. It never
+publishes producer drop diagnostics. This does not accept a malformed
+manifest that reaches check or soften apply's stale-tree refusal.
+Unconfigured hand-backs and drafts are unchanged; no correlation or
+external-runner preflight is added here.
 
 ## Who applies
 

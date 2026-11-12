@@ -4773,9 +4773,16 @@ mod tests {
         use crate::apply::test_evidence::{Args, run};
         use crate::check::test_evidence::tests::{manifest, rules};
         let mut policy = policy(Kind::Branch, pull_requests());
-        policy.test_evidence = Some(rules());
+        policy.test_evidence = Some(crate::policy::TestEvidence {
+            max_attempts: 4,
+            ..rules()
+        });
         let base_tree = |home: &Home| sh(&home.checkout.dir, "git rev-parse 'HEAD^{tree}'");
-        for (name, stale) in [("the patched tree", false), ("the base's tree", true)] {
+        for name in ["valid", "stale", "absent", "dropped", "disabled"] {
+            let mut policy = policy.clone();
+            if name == "disabled" {
+                policy.test_evidence = None;
+            }
             let home = Home::new();
             // The tree the tests ran on: the base with the change, as the
             // agent's own index makes it, then left unstaged again.
@@ -4783,21 +4790,46 @@ mod tests {
                 &home.checkout.dir,
                 "echo two >> a.txt && git add a.txt && git write-tree && git reset -q",
             );
-            let tested = if stale { base_tree(&home) } else { tested };
+            let tested = if name == "stale" {
+                base_tree(&home)
+            } else {
+                tested
+            };
             let mut evidence = manifest();
             evidence["base"] = json!(home.checkout.base_commit);
             evidence["head"] = json!(home.checkout.base_commit);
             evidence["tree"] = json!(tested.trim());
-            std::fs::write(home.path("out/test-evidence.json"), evidence.to_string()).unwrap();
+            evidence["planned_attempts"] = json!(4);
+            evidence["attempts"][1]["outcome"] = json!("skipped");
+            evidence["attempts"].as_array_mut().unwrap().push(json!({
+                "attempt": 4, "outcome": "not-run", "duration_s": 0, "log": "test-evidence-4.log"
+            }));
+            if name != "absent" {
+                let content = if name == "dropped" {
+                    "not a manifest <unsafe>".to_owned()
+                } else {
+                    evidence.to_string()
+                };
+                std::fs::write(home.path("out/test-evidence.json"), content).unwrap();
+            }
             sh(
                 home.dir.path(),
                 "printf one > out/test-evidence-1.log && printf two > out/test-evidence-2.log \
-                 && printf three > out/test-evidence-3.log",
+                  && printf three > out/test-evidence-3.log && printf not-run > out/test-evidence-4.log",
             );
             let change = home.collect(&policy, &config::Commit::default());
-            assert_eq!(change.test_evidence_dropped, None, "{name}");
+            assert_eq!(
+                change.test_evidence_dropped.is_some(),
+                name == "dropped",
+                "{name}"
+            );
             let verdict = home.verdict(&policy);
             assert!(verdict.ok, "{name}: {:?}", verdict.errors);
+            assert_eq!(
+                verdict.test_evidence_missing,
+                matches!(name, "absent" | "dropped"),
+                "{name}"
+            );
             let patch = home
                 .path("safe-outputs")
                 .join(&verdict.patch.as_ref().unwrap().file);
@@ -4825,17 +4857,34 @@ mod tests {
             )
             .unwrap();
             match run(&args) {
-                Ok(_) if !stale => {
+                Ok(_) if name != "stale" => {
                     let output: Value =
                         serde_json::from_slice(&std::fs::read(&args.file).unwrap()).unwrap();
                     let body = output["items"][0]["body"].as_str().unwrap();
-                    assert!(
-                        body.contains("1 pass, 2 fail, 0 skipped, 0 not run"),
-                        "{body}"
-                    );
-                    assert!(body.contains("/actions/runs/7)."), "{body}");
+                    if matches!(name, "absent" | "dropped") {
+                        assert!(
+                            body.contains("No repeated-test acceptance is claimed."),
+                            "{body}"
+                        );
+                        assert_eq!(body.matches("Test evidence:").count(), 1, "{body}");
+                        assert!(!body.contains("<unsafe>"), "{body}");
+                    } else if name == "disabled" {
+                        assert!(!body.contains("Test evidence:"), "{body}");
+                    } else {
+                        assert!(
+                            body.contains(
+                                "1 pass, 1 fail, 1 skipped, 1 not run; not every attempt passed"
+                            ),
+                            "{body}"
+                        );
+                        assert!(body.contains("/actions/runs/7)."), "{body}");
+                        assert_eq!(
+                            std::fs::read(home.path("safe-outputs/test-evidence.json")).unwrap(),
+                            evidence.to_string().as_bytes()
+                        );
+                    }
                 }
-                Err(err) if stale => {
+                Err(err) if name == "stale" => {
                     assert!(
                         format!("{err:#}").contains("ran on another change"),
                         "{err:#}"
