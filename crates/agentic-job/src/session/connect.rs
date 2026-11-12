@@ -318,6 +318,17 @@ struct State {
 }
 
 impl State {
+    /// Replay precedes the attach response, so its notifications may be
+    /// the first evidence of which run owns this endpoint.
+    fn session(&mut self, sid: &str) -> Result<()> {
+        ensure!(
+            self.session_id.as_deref().is_none_or(|had| had == sid),
+            "attached to another session; refusing to continue"
+        );
+        self.session_id = Some(sid.to_owned());
+        Ok(())
+    }
+
     fn id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -441,6 +452,11 @@ async fn converse<S: AsyncRead + AsyncWrite + Unpin>(
                 };
                 let msg: Value = serde_json::from_str(&text)
                     .context("a message from the session is not JSON")?;
+                if msg["method"] == "session/update"
+                    && let Some(sid) = msg["params"]["sessionId"].as_str()
+                {
+                    state.session(sid)?;
+                }
                 if state.json {
                     // Parsed and printed again: one line, whatever was sent.
                     writeln!(out, "{msg}")?;
@@ -456,11 +472,7 @@ async fn converse<S: AsyncRead + AsyncWrite + Unpin>(
                         if let Some(sid) = msg["result"]["sessionId"].as_str() {
                             // An endpoint can be reused by a later run. Neither
                             // queued input nor a normal EOF close belongs to it.
-                            ensure!(
-                                state.session_id.as_deref().is_none_or(|had| had == sid),
-                                "attached to another session; refusing to continue"
-                            );
-                            state.session_id = Some(sid.to_owned());
+                            state.session(sid)?;
                             if let Some(cursor) = msg["result"]["_meta"][META_KEY]["cursor"].as_u64() {
                                 state.since = state.since.max(cursor);
                             }

@@ -44,7 +44,7 @@ const GRANTED: &str = r#"{"example.com/cap/agentic-job-session":[{}]}"#;
 /// close, to a replacement run, even when the pending prompt was refused.
 #[test]
 fn connect_refuses_a_replacement_session() {
-    for refused in [true, false] {
+    for (refused, replay_only) in [(true, false), (false, false), (false, true)] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("ws://{}/", listener.local_addr().unwrap());
         let peer = std::thread::spawn(move || {
@@ -65,18 +65,30 @@ fn connect_refuses_a_replacement_session() {
                 client.send(json!({"jsonrpc": "2.0", "id": init["id"], "result": {}}));
                 let new = client.recv().unwrap();
                 assert_eq!(new["method"], "session/new");
-                client.send(json!({"jsonrpc": "2.0", "id": new["id"],
-                    "result": {"sessionId": sid}}));
+                if replay_only && sid == "original" {
+                    // Replay precedes the attach response. Losing that response
+                    // must not leave the client's selected session unknown.
+                    client.send(json!({"jsonrpc": "2.0", "method": "session/update",
+                        "params": {"sessionId": sid,
+                            "_meta": {"botHarness": {"cursor": 1}},
+                            "update": {"sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": "original replay"}}}}));
+                } else {
+                    client.send(json!({"jsonrpc": "2.0", "id": new["id"],
+                        "result": {"sessionId": sid}}));
+                }
             };
             let mut original = accept();
             attach(&mut original, "original");
-            let prompt = original.recv().unwrap();
-            assert_eq!(prompt["method"], "session/prompt");
-            assert_eq!(prompt["params"]["prompt"][0]["text"], "edit the old run");
-            if refused {
-                original.send(json!({"jsonrpc": "2.0", "id": prompt["id"],
-                    "error": {"code": -32600,
-                        "message": "a turn is running: cancel it or wait for its answer"}}));
+            if !replay_only {
+                let prompt = original.recv().unwrap();
+                assert_eq!(prompt["method"], "session/prompt");
+                assert_eq!(prompt["params"]["prompt"][0]["text"], "edit the old run");
+                if refused {
+                    original.send(json!({"jsonrpc": "2.0", "id": prompt["id"],
+                        "error": {"code": -32600,
+                            "message": "a turn is running: cancel it or wait for its answer"}}));
+                }
             }
             drop(original);
             let mut replacement = accept();
