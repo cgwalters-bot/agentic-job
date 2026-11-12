@@ -25,6 +25,14 @@ a caller, or change hosted defaults.
 
 ## The reusable workflow
 
+The secure-host split preserves `/secure-host` and `/agentic-job` in the
+image, both installed executable names, the host `agentic-job` compatibility
+shim and the warned `[sandbox]` alias for `[host]`. Source/release support
+is not effective deployment: the forwarder still selects the legacy v0.6.9
+image. CI records that baseline separately from standalone executable and
+action-call acceptance; see [published acceptance](secure-host.md#published-standalone-acceptance-2070)
+for exact revisions and pending adoption/E2E dependencies (#2070/#2656).
+
 Runner-only migration note (5 November 2026): `agent-user: runner` is the
 only accepted value. The `sandbox` option, superseded by #2989, was removed in
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) and is

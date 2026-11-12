@@ -76,6 +76,12 @@ says what a caller may rely on across versions.
   one the patch makes. Otherwise the draft gets each outcome's count and a
   link to the run (#3292).
 
+- CI's published secure-host acceptance distinguishes the exact legacy
+  v0.6.9 deployment from standalone images, requiring standalone identity
+  under both installed names and the action's compatibility calls after
+  adoption. Forwarder/site pins remain unchanged pending actions#230;
+  new-image hosted and agent E2E evidence remains pending (#2070/#2656).
+
 - The run action carries a host check that failed only to reach a host
   outside the runner, after its retries, as `exit` 4 with the new failure
   class `control_unreachable`, which the reusable workflows pass on and the

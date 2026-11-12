@@ -6592,6 +6592,93 @@ fn the_image_holds_and_installs_the_secure_host_binary() {
     }
 }
 
+/// Execute the published-path acceptance itself, not a copy of its logic.
+#[test]
+fn published_path_requires_the_effective_deployments_executables_and_compatibility() {
+    const STEP: &str = "Published executable and action compatibility";
+    const LEGACY: &str = "466a490e983ff07e6fb076fa4bd8b4d5f918fcd6";
+    let ci = definition("ci.yml");
+    let step = named_step(&ci, STEP);
+    let forwarder = definition("secure-host/action.yml");
+    let selected = steps(&forwarder)
+        .into_iter()
+        .find_map(|s| s["uses"].as_str())
+        .unwrap();
+    assert_eq!(
+        selected,
+        format!(
+            "cgwalters-forge/actions/secure-host@{}",
+            step["env"]["ACTION"].as_str().unwrap()
+        )
+    );
+    let text = workflow("secure-host/action.yml");
+    assert!(text.contains(&format!(
+        "# main, with secure-host:v{}\n",
+        step["env"]["VERSION"].as_str().unwrap()
+    )));
+    assert!(step["if"].is_badvalue());
+    assert!(step["continue-on-error"].is_badvalue());
+    assert_eq!(step["env"]["BIN_DIR"].as_str(), Some("/usr/local/bin"));
+    let job = &ci["jobs"]["secure-host-published"];
+    assert_eq!(
+        job["if"].as_str(),
+        Some("${{ github.event_name == 'push' }}")
+    );
+    let host = &job["steps"][0];
+    assert!(host["with"]["image-archive"].is_badvalue());
+    assert!(host["with"]["check"].is_badvalue());
+    // No other legacy deployment is excused: every new pin must prove the split.
+    for (action, version, identity, missing, different_bytes, failed_call, ok) in [
+        (LEGACY, "0.6.9", "agentic-job", false, false, "", true),
+        (LEGACY, "0.6.12", "agentic-job", false, false, "", false),
+        (LEGACY, "0.6.9", "secure-host", false, false, "", false),
+        (PIN, "0.6.12", "secure-host", false, false, "", true),
+        (PIN, "0.6.12", "agentic-job", false, false, "", false),
+        (PIN, "0.6.12", "secure-host", true, false, "", false),
+        (PIN, "0.6.12", "secure-host", false, true, "", false),
+        (PIN, "0.6.12", "secure-host", false, false, "config", false),
+        (PIN, "0.6.12", "secure-host", false, false, "sandbox", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            "#!/bin/bash\ncase \"$*\" in\n  --version) echo '{identity} {version}' ;;\n  'config --host --string sandbox.runner-user='*) test '{failed_call}' != config ;;\n  'sandbox check') test '{failed_call}' != sandbox ;;\n  *) exit 99 ;;\nesac\n"
+        );
+        executable(&dir.path().join("agentic-job"), &script);
+        if !missing {
+            // Same version and behavior, but not the same installed executable.
+            let host_script = if different_bytes {
+                format!("{script}# different bytes\n")
+            } else {
+                script
+            };
+            executable(&dir.path().join("secure-host"), &host_script);
+        }
+        let summary = dir.path().join("summary");
+        let result = run_step(
+            "ci.yml",
+            STEP,
+            dir.path(),
+            &[
+                ("ACTION", action),
+                ("VERSION", version),
+                ("BIN_DIR", path(dir.path())),
+                ("GITHUB_STEP_SUMMARY", path(&summary)),
+            ],
+        );
+        assert_eq!(
+            result.status.success(),
+            ok,
+            "{action} {identity} {missing} {different_bytes} {failed_call}: {result:?}"
+        );
+        let summary = std::fs::read_to_string(summary).unwrap_or_default();
+        assert_eq!(
+            summary.contains("Standalone published executable"),
+            ok && action != LEGACY
+        );
+        assert_eq!(summary.contains("baseline only"), ok && action == LEGACY);
+    }
+}
+
 /// Every caller, agentic-job's own jobs included, gets the new action's
 /// contract, under which every step after it is the runner's user's: the
 /// public secure-host forwards to the one pinned new action, and refuses

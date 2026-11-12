@@ -424,12 +424,73 @@ stay.
 CI proves the image of each revision from its archive: the
 `secure-host-image` job checks that both names on the host are the
 staged secure-host binary and not agentic-job's, and `confined` probes
-a step under it. The published image and the action's pin can follow
-only a release built so; until then the `secure-host-published` job,
-and every caller, go on running the v0.6 image, whose binary is
-agentic-job's. That job proves the published path only after a release
-and the pin move
-([#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)).
+a step under it. The split landed in
+[#3124](https://github.com/cgwalters-forge/agentic-job/pull/3124), source
+`b16c6d63e37ff78050c4dd3bf92739dabadf3fa4`; its
+[archive acceptance](https://github.com/cgwalters-forge/agentic-job/actions/runs/42126577776/job/127593880482)
+is not published-path acceptance.
+
+### Published standalone acceptance (#2070)
+
+Rechecked on 2026-11-09: the effective action, image digest and source
+remain [the v0.6.9 deployment above](#deployed-write-policy-diagnostics).
+The actual Ubuntu
+[`secure-host-published` setup/check](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648635121)
+verified that image's attestation, completed setup and passed 96 checks.
+It is a **legacy baseline**, not proof of the split or runner-only setup.
+The same run's
+[`e2e-dispatch`](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648702033)
+was skipped, not agent E2E evidence.
+
+The split shipped in
+[v0.6.12](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.12),
+source `eecc8c434e67a7607264ab3f7d90c88b6d02042a`.
+[Actions#211](https://github.com/cgwalters-forge/actions/pull/211) proposes
+image digest `sha256:d5fd0f3e102c589807df68656d5623f6d6cbc9ecb257bdd3c9af431242d7b73a`
+at reviewed head `502522ad437a469da99120f89e848219434f16a7`, but is still
+open. [Actions#230](https://github.com/cgwalters-forge/actions/issues/230)
+owns adoption using that bump; compatibility/evidence
+[#231](https://github.com/cgwalters-forge/actions/pull/231) and attestation
+regression [#235](https://github.com/cgwalters-forge/actions/pull/235) are
+also open. The exact prerequisite to moving this repository's forwarder
+and site pins is a reviewed immutable action revision selecting a
+compatible, attested published standalone image through that adoption.
+Neither pin moves here; no competing bump or release is needed from this PR.
+[Tracker#1369](https://github.com/cgwalters-forge/tracker/issues/1369)
+still records the release train's single-versioned-actions-pin blocker.
+
+The push-only `secure-host-published` job now binds its expected version
+and action SHA to the forwarder in regression tests. Only the exact reviewed
+legacy deployment gets the legacy baseline branch. Every replacement must
+report `secure-host VERSION` under **both** installed executable names,
+have identical installed bytes, and pass the action's `config --host
+--string sandbox.runner-user=…` and `sandbox check` compatibility calls.
+The action itself exercises `/agentic-job` configuration in the image
+before setup; neither an archive override nor `check: false` is used.
+Failures stop the job, not a silently skipped acceptance step. This adds
+acceptance only, not a new host control, permission or credential exception.
+
+Fresh Ubuntu published standalone setup/check and executable acceptance
+are **pending**, as is applicable published-path agent E2E such as
+`e2e-dispatch`. That E2E also depends on
+[#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)'s
+unconditional `sandbox prepare` and canonical host config adoption after
+image compatibility is established; this slice does not force either
+against the legacy image. v0.6.12 proves the split only: it does not contain
+[#3144](https://github.com/cgwalters-forge/agentic-job/pull/3144) or
+[#3154](https://github.com/cgwalters-forge/agentic-job/pull/3154).
+The later containing numbered release,
+[v0.6.13](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.13),
+was published on 2026-11-10 at source
+`4439980da2aef4db79b40890599ea661daab12b0`; its release notes include both
+changes. Publication is no longer the blocker, but does not prove deployment.
+Their deployment remains pending verification of the exact attested image,
+effective pin adoption and actual `core-pattern`,
+confined run/JavaScript main/post and confined-cleanup evidence. `build-*`
+archives, skipped jobs and green old-image jobs do not satisfy those gates.
+RHEL runtime acceptance is separately **pending**, not inferred from Ubuntu.
+[#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) stays open
+while these deployment and runtime obligations remain.
 
 ## Where the binary and image come from
 

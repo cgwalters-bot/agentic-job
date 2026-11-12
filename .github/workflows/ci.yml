@@ -660,6 +660,28 @@ jobs:
     steps:
       - id: host
         uses: cgwalters-forge/agentic-job/secure-host@main # zizmor: ignore[unpinned-uses] Deliberately test the public main-branch action in this fresh-runner integration job.
+      # Prevent a green old-image job from masquerading as split acceptance.
+      # Keep these reviewed deployment facts in sync with both action pins;
+      # workflows.rs binds them to the forwarder's SHA and image-version comment.
+      - name: Published executable and action compatibility
+        env:
+          ACTION: 466a490e983ff07e6fb076fa4bd8b4d5f918fcd6
+          VERSION: 0.6.9
+          BIN_DIR: /usr/local/bin
+        run: |
+          if [ "$ACTION" = 466a490e983ff07e6fb076fa4bd8b4d5f918fcd6 ]; then
+            test "$VERSION" = 0.6.9
+            test "$("$BIN_DIR/agentic-job" --version)" = "agentic-job $VERSION"
+            echo 'Legacy v0.6.9 baseline only; standalone published acceptance pending actions#230.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            for name in secure-host agentic-job; do
+              test "$("$BIN_DIR/$name" --version)" = "secure-host $VERSION"
+            done
+            cmp "$BIN_DIR/secure-host" "$BIN_DIR/agentic-job"
+            "$BIN_DIR/agentic-job" config --host --string sandbox.runner-user="$(id -un)" > /dev/null
+            "$BIN_DIR/agentic-job" sandbox check
+            echo 'Standalone published executable identity and action compatibility passed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: No later step has root
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
