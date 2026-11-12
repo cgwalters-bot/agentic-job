@@ -1016,9 +1016,16 @@ fn prepare_git(scratch: &Scratch, case: &Value, native: bool) -> Vec<(String, St
     let base = git["patch"]["base"].as_str().unwrap_or("main");
     scratch.git(&seed, &["checkout", "--quiet", "-b", "agent", base]);
     commit_change(scratch, &seed, &git["patch"]);
+    // The applied marker hashes the patch bytes. Do not let the installed
+    // Git version's mail signature change the recorded publication.
     let patch = Command::new("git")
         .current_dir(&seed)
-        .args(["format-patch", "--stdout", &format!("{base}..agent")])
+        .args([
+            "format-patch",
+            "--no-signature",
+            "--stdout",
+            &format!("{base}..agent"),
+        ])
         .envs(scratch.git_env())
         .output()
         .unwrap();
