@@ -200,7 +200,7 @@ impl Checker<'_> {
         if needs_socket_control {
             // A listener of ours, which the runner's user must reach: the
             // same attempt the probes expect to fail.
-            let path = format!("/tmp/agentic-job-{}-runner.sock", self.canary);
+            let path = format!("/tmp/secure-host-{}-runner.sock", self.canary);
             let listener = UnixListener::bind(&path).context("listening on a socket in /tmp")?;
             let reached = !socket_closed(&path);
             drop(listener);

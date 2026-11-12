@@ -40,7 +40,10 @@ pub use crate::host::{roots_alone, trusted_program};
 
 /// Root's copy of this program, which the helper's sudo rule names. The
 /// build it was made from is in the runner's home, which is closed.
-pub const SELF_COPY: &str = "/usr/local/libexec/agentic-job";
+pub const SELF_COPY: &str = crate::runtime::name(
+    "/usr/local/libexec/secure-host",
+    "/usr/local/libexec/agentic-job",
+);
 
 /// The command's name, as the sudo rule and the client spell it.
 pub const COMMAND: &str = "helper";
@@ -279,7 +282,7 @@ mod tests {
 
     #[test]
     fn the_sudo_rule_names_the_root_owned_copy() {
-        assert_eq!(sudoers_command(), "/usr/local/libexec/agentic-job helper *");
+        assert_eq!(sudoers_command(), format!("{SELF_COPY} helper *"));
     }
 
     #[test]

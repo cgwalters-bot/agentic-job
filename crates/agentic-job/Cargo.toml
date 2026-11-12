@@ -24,7 +24,8 @@ regex.workspace = true
 ring.workspace = true
 rustix.workspace = true
 safe-outputs = { path = "../safe-outputs", features = ["clap"] }
-secure-host = { path = "../secure-host" }
+# Keep the layout of the digest-pinned image until its release and readers migrate.
+secure-host = { path = "../secure-host", features = ["legacy-runtime"] }
 serde.workspace = true
 # Numbers read as JavaScript reads them, for apply's applied names.
 serde_json = { workspace = true, features = ["float_roundtrip"] }

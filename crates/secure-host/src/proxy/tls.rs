@@ -30,7 +30,7 @@ pub const CA_KEY: &str = "ca-key.pem";
 
 pub const CA_CERT: &str = "ca-cert.pem";
 
-const CA_NAME: &str = "agentic-job egress proxy";
+const CA_NAME: &str = crate::runtime::name("secure-host egress proxy", "agentic-job egress proxy");
 
 const MODE_KEY: u32 = 0o600;
 

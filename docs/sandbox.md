@@ -9,7 +9,7 @@ egress proxy) is documented with the action that runs it:
 [egress](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md)
 and the
 [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#what-it-assumes).
-The code is `crates/secure-host/`, `crates/agentic-job/src/sandbox/` and `egress/`
+The code is `crates/secure-host/`, `crates/agentic-job/src/sandbox/` and `crates/secure-host/egress/`
 ([layout](layout.md)); `run`'s probes are in
 [sandbox-check.md](sandbox-check.md), the requirements it serves in
 [requirements.md](requirements.md), and how a workflow calls it in
@@ -116,7 +116,7 @@ data out around the egress proxy. It needs systemd 258 or newer. Both
 (`.github/agentic-job/hosted.toml`). The egress policy file, the shipped
 one or `egress.policy`'s in its place, may set `[egress] mode = "allowlist"`
 with `allow`, at most 256 domains or gh-aw ecosystem identifiers
-(`egress/policy.py`): every destination, reads included, must then be one
+(`crates/secure-host/egress/policy.py`): every destination, reads included, must then be one
 of them or under one, and an address literal is refused. The default,
 `mode = "reads-anywhere"`, lets a read go to any host not on the threat
 feed.

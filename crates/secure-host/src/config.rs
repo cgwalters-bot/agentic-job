@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::network::Direct;
 
 /// Where `sandbox setup` puts the root-owned copy.
-pub const ROOT_COPY: &str = "/etc/agentic-job/config.toml";
+pub const ROOT_COPY: &str = crate::runtime::name(
+    "/etc/secure-host/config.toml",
+    "/etc/agentic-job/config.toml",
+);
 
 /// Who owns host isolation. An external declaration is not evidence that
 /// any host control passed; it must never be inferred from CI variables.

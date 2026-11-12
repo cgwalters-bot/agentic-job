@@ -82,7 +82,24 @@ describes history-preserving extraction and the standalone CI template.
 Publication, release attestation and action adoption are separate steps;
 this preparation does not publish an image or change the deployed action.
 
-Legacy installation paths and CLI aliases still contain the original
-consumer's name. They are compatibility interfaces, not build dependencies:
-the crate builds without that consumer. Removing them requires coordinated
-consumer deployment, not a silent rename of root-owned paths or BPF pins.
+Standalone builds use `/etc/secure-host/` for root's configuration and network
+rules, `/usr/local/libexec/secure-host` for the restricted helper,
+`/usr/local/lib/secure-host/` for the BPF object and
+`/sys/fs/bpf/secure-host-world-write` for its pins. Sudo, polkit, resolver,
+trust-store and check-record names use the same neutral prefix.
+
+The opt-in `legacy-runtime` Cargo feature selects the previous consumer's
+complete layout, including its host binary alias. The in-tree consumer enables
+it because its action still pins that layout's released image. Cargo unifies
+dependency features: workspace builds including that consumer therefore build
+the compatibility layout too. Build this crate independently (as above, or
+`cargo build -p secure-host` without the consumer) for the neutral layout.
+CLI compatibility aliases remain accepted but are not required by standalone
+setup. No layout is selected from job-controlled environment or configuration,
+and no missing file or pin falls back to another layout.
+
+Do not upgrade an already hardened host between layouts. On fresh disposable
+hosts, migrate the image, its action and all consumers together, then remove
+the consumer's feature opt-in. Never reuse an old layout's check record as
+evidence for a new one. Publication and privileged deployment remain separate
+from this source preparation.

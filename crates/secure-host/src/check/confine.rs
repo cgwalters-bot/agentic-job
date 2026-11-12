@@ -51,7 +51,10 @@ use crate::worker_diagnostics::{WORKER_COMM, listed_sockets};
 /// Root's, mode 0666, made before the control in a shared temporary
 /// directory on the root filesystem, which setup's walk and the check's
 /// search leave alone: only the access-time policy refuses a write to it.
-const FIXTURE: &str = "/var/tmp/agentic-job-confine-root-file";
+const FIXTURE: &str = crate::runtime::name(
+    "/var/tmp/secure-host-confine-root-file",
+    "/var/tmp/agentic-job-confine-root-file",
+);
 
 /// The pid of `sleep`, which a step before the control started and left
 /// running, so that every probe is a later step than it. Its environment
@@ -579,6 +582,8 @@ pub fn run(args: &Args) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use crate::helper;
+
     use super::*;
 
     fn results(pairs: &[(&'static str, bool)]) -> Results {
@@ -637,11 +642,16 @@ mod tests {
             "helper: not probed, must succeed",
         ];
 
-        let listing = "User runner may run the following commands on host:\n    (ALL) NOPASSWD: ALL\n    (ALL : ALL) !ALL\n    (root) NOPASSWD: /usr/local/libexec/agentic-job   helper *\n";
+        let listing = format!(
+            "User runner may run the following commands on host:\n    (ALL) NOPASSWD: ALL\n    (ALL : ALL) !ALL\n    (root) NOPASSWD: {}   helper *\n",
+            helper::SELF_COPY
+        );
         let grant = "(ALL) NOPASSWD: ALL";
         let deny = "(ALL : ALL) !ALL";
-        let helper = "(root) NOPASSWD: /usr/local/libexec/agentic-job helper *";
-        let narrower = "(root) NOPASSWD: /usr/local/libexec/agentic-job helper enter *";
+        let helper_rule = format!("(root) NOPASSWD: {} helper *", helper::SELF_COPY);
+        let helper = helper_rule.as_str();
+        let narrower_rule = format!("(root) NOPASSWD: {} helper enter *", helper::SELF_COPY);
+        let narrower = narrower_rule.as_str();
         let locks = |rules: &[&str]| {
             let rules: Vec<String> = rules.iter().map(|rule| (*rule).to_owned()).collect();
             locked(&rules)
@@ -694,9 +704,9 @@ mod tests {
             ),
             (
                 "sudo's listing",
-                sudo_rules(listing) == [grant, deny, helper],
+                sudo_rules(&listing) == [grant, deny, helper],
             ),
-            ("the lock's listing", locked(&sudo_rules(listing))),
+            ("the lock's listing", locked(&sudo_rules(&listing))),
             ("no rules", !locks(&[])),
             ("the helper's rule alone", !locks(&[helper])),
             ("the deny rule alone", !locks(&[deny])),
