@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{BASE_COMMIT_HEADER, PatchInfo, read_patch};
-use crate::contract::Push;
+use crate::contract::{PatchRules, Push};
 
 pub const REPLACEMENT_FILE: &str = "replacement.json";
 
@@ -48,44 +48,9 @@ pub fn check(content: &[u8], push: &Push, max_bytes: u64) -> Result<PatchInfo> {
     let mut all_files = BTreeSet::new();
     let mut commit_files = Vec::new();
     for mail in &series.commits {
-        let headers: Vec<_> = mail
-            .split('\n')
-            .take_while(|line| !line.is_empty())
-            .collect();
-        let dates: Vec<_> = headers
-            .iter()
-            .enumerate()
-            .filter_map(|(index, line)| {
-                line.split_once(':')
-                    .filter(|(name, _)| name.eq_ignore_ascii_case("date"))
-                    .map(|(_, date)| (index, date.trim()))
-            })
-            .collect();
-        ensure!(
-            dates.len() == 1
-                && chrono::DateTime::parse_from_rfc2822(dates[0].1).is_ok()
-                && headers
-                    .get(dates[0].0 + 1)
-                    .is_none_or(|line| !line.starts_with([' ', '\t'])),
-            "replacement mail requires one valid Date header for deterministic reruns"
-        );
-        // The protocol supplies the base separately. Inserting our header
-        // leaves duplicate headers and extra mails to the existing strict reader.
-        let (first, rest) = mail
-            .split_once('\n')
-            .ok_or_else(|| anyhow::anyhow!("replacement mail has no header"))?;
-        let patch = format!(
-            "{first}\n{BASE_COMMIT_HEADER}: {}\n{rest}",
-            series.base_commit
-        );
-        let reading = read_patch(&patch, &push.rules(), &series.base_commit);
-        ensure!(
-            reading.problems.is_empty(),
-            "replacement mail: {}",
-            reading.problems.join("; ")
-        );
-        all_files.extend(reading.files.iter().cloned());
-        commit_files.push(reading.files);
+        let files = read_mail(mail, &series.base_commit, &push.rules(), "replacement mail")?;
+        all_files.extend(files.iter().cloned());
+        commit_files.push(files);
     }
     ensure!(
         all_files.len() <= push.replacement_files() as usize,
@@ -98,4 +63,48 @@ pub fn check(content: &[u8], push: &Push, max_bytes: u64) -> Result<PatchInfo> {
         files: all_files.into_iter().collect(),
         commit_files: Some(commit_files),
     })
+}
+
+/// Reads one plain mail of a series made on BASE, whose commit apply
+/// rebuilds, and returns its paths; WHAT names it in an error.
+pub(crate) fn read_mail(
+    mail: &str,
+    base: &str,
+    rules: &PatchRules<'_>,
+    what: &str,
+) -> Result<Vec<String>> {
+    let headers: Vec<_> = mail
+        .split('\n')
+        .take_while(|line| !line.is_empty())
+        .collect();
+    let dates: Vec<_> = headers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("date"))
+                .map(|(_, date)| (index, date.trim()))
+        })
+        .collect();
+    ensure!(
+        dates.len() == 1
+            && chrono::DateTime::parse_from_rfc2822(dates[0].1).is_ok()
+            && headers
+                .get(dates[0].0 + 1)
+                .is_none_or(|line| !line.starts_with([' ', '\t'])),
+        "{what} requires one valid Date header for deterministic reruns"
+    );
+    // The protocol supplies the base separately. Inserting our header
+    // leaves duplicate headers and extra mails to the existing strict reader.
+    let (first, rest) = mail
+        .split_once('\n')
+        .ok_or_else(|| anyhow::anyhow!("{what} has no header"))?;
+    let patch = format!("{first}\n{BASE_COMMIT_HEADER}: {base}\n{rest}");
+    let reading = read_patch(&patch, rules, base);
+    ensure!(
+        reading.problems.is_empty(),
+        "{what}: {}",
+        reading.problems.join("; ")
+    );
+    Ok(reading.files)
 }

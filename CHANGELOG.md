@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The safe-outputs library has an experimental, opt-in ordered-stack checker
+  that checks each step's own patch and retains only the prefix before refusal
+  (#3438). CLI/workflow stack publication and fix-round restacking are not yet
+  supported; the one-PR hand-back limit is unchanged.
+
 - Rendered sessions retain opencode's tool names when later updates replace
   their titles with commands or filenames (#596).
 

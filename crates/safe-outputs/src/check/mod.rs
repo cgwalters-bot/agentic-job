@@ -20,6 +20,7 @@ pub mod inline;
 pub mod links;
 mod patch;
 pub mod replacement;
+pub mod stack;
 
 #[cfg(test)]
 pub(crate) mod fixtures;

@@ -44,7 +44,7 @@ serde.workspace = true
 # key order, as gh-aw's do, and read numbers as JavaScript does: stated
 # here, not left to whatever else the binary links (agent-client-protocol
 # brings `preserve_order` to agentic-job).
-serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
+serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order", "raw_value"] }
 # The checkout apply's push is made in (apply::git).
 tempfile.workspace = true
 # A bounds file's `[github.trigger]` table, carried unread where its caller

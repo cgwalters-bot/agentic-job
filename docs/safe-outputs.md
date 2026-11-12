@@ -152,6 +152,47 @@ failing step and reproduce/fix it without weakening these boundaries. Keep #2397
 open while waiting for merge/run or investigating failure; offline tests and PR
 CI are not credentialed publication evidence.
 
+## Stacked proposals: library groundwork only
+
+The experimental `safe_outputs::check::stack` library module checks an ordered
+proposal with one issue, title, body and single-commit mail patch per step.
+It does **not** enable stacked hand-backs or publish pull requests. The CLI,
+workflow bounds, artifact format and one-PR limit are unchanged. No caller should
+enable stacks yet; this is the first reviewable slice of #3438.
+
+The concrete threats are unbounded publication fan-out and a forbidden edit
+hidden by a later revert. The trusted library caller must explicitly pass a
+`max_steps` of 1–10 (zero refuses); the entire JSON envelope is capped at 1 MiB
+before parsing. Each step gets its own existing patch path/type/protection,
+file-count and pinned-author checks, plus a caller-supplied patch byte limit.
+Titles are capped at 128 bytes and bodies at 48,000 bytes. Issue numbers are
+distinct positive integers no greater than 2,147,483,647. The caller must supply
+a read-only inspection callback for its secret scan and other content checks;
+the library does not acquire credentials or scan secrets itself.
+
+The strict JSON envelope has `base_commit` and `steps`; each step has only
+`issue`, `title`, `body` and `patch`; duplicate fields are refused before they
+can be collapsed by JSON value decoding. The root commit must match the trusted
+caller's full commit ID. Patches are plain `git format-patch --stdout
+--no-signature -1` mails, without a base header, describing only their own step's
+diff. As for a replacement series, each needs exactly one valid `Date` header,
+so that rebuilding a step gives the same commit. The checker supplies the root
+provenance header to the existing patch
+reader; it does not prove that the mails apply in order or authenticate resulting
+commit IDs. Invalid envelopes refuse the whole proposal. A step refusal returns
+the accepted prefix and the first refused position (one-based), never inspecting
+steps above it. No accepted prefix is itself a publishable receipt.
+
+Remaining slices must wire this into trusted bounds and digest-bound check
+artifacts, construct and verify the commits in order, and publish each branch/PR
+against its predecessor, appending that step's closing line. Publication must
+stop on refusal without removing earlier PRs. Fix rounds must lease the selected
+step's head and replay/recheck every descendant before updating it; a conflict
+must stop restacking, not silently drop a step. The publisher must keep the stack
+rebased after parent changes/merges, not rely on PR retargeting to rewrite git
+history. Those publication/restacking paths, their three-step integration tests,
+per-step PR receipts and the series' total cost report are not implemented here.
+
 ## Caller-bound publisher roles
 
 The threat is credential substitution: a comment operation borrowing the
