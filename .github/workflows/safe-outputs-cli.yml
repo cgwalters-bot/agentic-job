@@ -1,5 +1,8 @@
-# Threat: an accidental dispatch or PR-controlled program using a write token.
-# Opt-in dispatch on this repository's main only; no caller-selected revision,
+# Threat: an accidental dispatch or PR-controlled program using a write token,
+# or concurrent/rerun attempts duplicating a possibly already published proof.
+# Only a scoped main push here or explicit main dispatch opts in; serialize the
+# fixed destination and refuse incomplete lookups and absent-proof reruns.
+# No caller-selected revision,
 # target, code artifact or credential is executed in apply. Issue 64 is the
 # existing e2e-full destination.
 # check runs secure-host; apply is a trusted artifact consumer
@@ -10,6 +13,9 @@
 name: safe-outputs-cli
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/safe-outputs-cli.yml]
   workflow_dispatch:
     inputs:
       publish:
@@ -19,9 +25,14 @@ on:
 
 permissions: {}
 
+# One fixed proof, including manual runs and reruns; never cancel a publisher.
+concurrency:
+  group: safe-outputs-cli-proof
+  cancel-in-progress: false
+
 jobs:
   check:
-    if: ${{ inputs.publish && github.repository == 'cgwalters-forge/agentic-job' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'cgwalters-forge/agentic-job' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -60,6 +71,7 @@ jobs:
 
   apply:
     needs: check
+    if: ${{ github.repository == 'cgwalters-forge/agentic-job' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     environment: agent-apply
@@ -96,7 +108,13 @@ jobs:
           mkdir "$RUNNER_TEMP/proposals"
           jq -j .input artifact > "$RUNNER_TEMP/proposals/outputs.jsonl"
           jq -j .checked artifact > "$RUNNER_TEMP/proposals/checked.json"
+      - name: Inspect the fixed destination before publication
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node "$RUNNER_TEMP/src/.github/actions/safe-outputs-proof/guard.cjs"
       - name: Revalidate and publish to the fixed e2e item
+        if: ${{ steps.proof.outputs.publish == 'true' }}
         env:
           # The job token only, never the environment's PAT: the build
           # above runs beside it without secure-host.
@@ -105,6 +123,9 @@ jobs:
           src="$RUNNER_TEMP/src"
           "$src/target/debug/safe-outputs" apply --context "$src/.github/agentic-job/e2e/safe-outputs-context.json" \
             --input "$RUNNER_TEMP/proposals/outputs.jsonl" --checked "$RUNNER_TEMP/proposals/checked.json"
-      - name: Link the successful live proof
-        run: |
-          printf 'Successful standalone CLI comment proof on issue 64: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+      # A lost POST response fails apply: do not retry it. Inspect issue 64 and
+      # the job logs; a rerun can reuse an existing comment but cannot post anew.
+      - name: Read back and link the proof comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node "$RUNNER_TEMP/src/.github/actions/safe-outputs-proof/guard.cjs" verify

@@ -35,6 +35,11 @@ says what a caller may rely on across versions.
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).
 
+- The standalone safe-outputs CLI proof runs on main pushes changing its workflow
+  as well as explicit `publish: true` dispatches. Fixed-destination serialization
+  and bounded, fail-closed comment lookup prevent blind duplicate publication;
+  live check/apply evidence for #2397 still requires the merged workflow to run.
+
 - Apply lists a replacement series it pushed to a pull request's branch
   under `made` in `applied.json`, not under `already_applied`, which now
   holds it only when an earlier attempt had pushed that same head (#3322).

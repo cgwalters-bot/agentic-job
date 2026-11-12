@@ -99,6 +99,108 @@ fn named_step<'a>(doc: &'a yaml_rust2::Yaml, name: &str) -> &'a yaml_rust2::Yaml
 }
 
 #[test]
+fn standalone_proof_event_gates_and_duplicate_refusals() {
+    let doc = definition("safe-outputs-cli.yml");
+    let events = doc["on"].as_hash().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(doc["on"]["push"]["branches"][0].as_str(), Some("main"));
+    assert_eq!(doc["on"]["push"]["branches"].as_vec().unwrap().len(), 1);
+    assert_eq!(doc["on"]["push"]["paths"].as_vec().unwrap().len(), 1);
+    assert_eq!(
+        doc["on"]["push"]["paths"][0].as_str(),
+        Some(".github/workflows/safe-outputs-cli.yml")
+    );
+    assert_eq!(
+        doc["on"]["workflow_dispatch"]["inputs"]["publish"]["default"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        doc["concurrency"]["group"].as_str(),
+        Some("safe-outputs-cli-proof")
+    );
+    assert_eq!(
+        doc["concurrency"]["cancel-in-progress"].as_bool(),
+        Some(false)
+    );
+    for name in ["check", "apply"] {
+        let expression = doc["jobs"][name]["if"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("${{ ")
+            .unwrap()
+            .strip_suffix(" }}")
+            .unwrap();
+        // Exercise the actual Actions boolean expression, not a copied gate.
+        let script = format!(
+            r#"for (const repository of ['cgwalters-forge/agentic-job', 'fork/agentic-job'])
+            for (const ref of ['refs/heads/main', 'refs/heads/topic', 'refs/pull/1/merge'])
+            for (const event_name of ['push', 'workflow_dispatch', 'pull_request', 'pull_request_target', 'schedule', 'workflow_run'])
+            for (const publish of [true, false, undefined]) {{
+                const github = {{repository, ref, event_name}}, inputs = {{publish}};
+                const expected = repository === 'cgwalters-forge/agentic-job' && ref === 'refs/heads/main' &&
+                    (event_name === 'push' || (event_name === 'workflow_dispatch' && publish === true));
+                require('node:assert/strict').equal(Boolean({expression}), expected, JSON.stringify({{github, inputs}}));
+            }}"#
+        );
+        let output = Command::new("node").args(["-e", &script]).output().unwrap();
+        assert!(output.status.success(), "{name}: {output:?}");
+    }
+    assert_eq!(
+        doc["jobs"]["check"]["permissions"].as_hash().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        doc["jobs"]["check"]["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    assert_eq!(
+        doc["jobs"]["apply"]["environment"].as_str(),
+        Some("agent-apply")
+    );
+    assert_eq!(
+        doc["jobs"]["apply"]["permissions"].as_hash().unwrap().len(),
+        3
+    );
+    assert_eq!(
+        doc["jobs"]["apply"]["permissions"]["issues"].as_str(),
+        Some("write")
+    );
+    assert_eq!(doc["jobs"]["apply"]["needs"].as_str(), Some("check"));
+    let apply = doc["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let guard = apply
+        .iter()
+        .position(|s| s["id"].as_str() == Some("proof"))
+        .unwrap();
+    let publish = named_step(&doc, "Revalidate and publish to the fixed e2e item");
+    assert_eq!(
+        publish["if"].as_str(),
+        Some("${{ steps.proof.outputs.publish == 'true' }}")
+    );
+    assert_eq!(apply[guard + 1], *publish);
+    assert!(
+        named_step(&doc, "Read back and link the proof comment")["run"]
+            .as_str()
+            .unwrap()
+            .ends_with("guard.cjs\" verify")
+    );
+    let guard_source = workflow(".github/actions/safe-outputs-proof/guard.cjs");
+    assert!(workflow("safe-outputs-cli.yml").contains(&format!(
+        "body:\"{}\"",
+        "Standalone safe-outputs deterministic CLI proof."
+    )));
+    assert!(guard_source.contains("Standalone safe-outputs deterministic CLI proof."));
+    let output = Command::new("node")
+        .args([
+            "--test",
+            ".github/actions/safe-outputs-proof/guard.test.cjs",
+        ])
+        .current_dir(root())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn role_and_legacy_workflow_credential_expressions() {
     let doc = definition("apply.yml");
     let mut expressions = Vec::new();

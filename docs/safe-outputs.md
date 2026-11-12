@@ -110,10 +110,11 @@ arguments, JSONL, receipts or logs; do not enable shell tracing. No ambient
 `GITHUB_TOKEN`, PAT fallback or Actions metadata is read by the CLI. The CI
 operator owns job isolation, artifact provenance and token issuance.
 
-The opt-in [CLI proof workflow](../.github/workflows/safe-outputs-cli.yml) uses
+The [CLI proof workflow](../.github/workflows/safe-outputs-cli.yml) uses
 the existing e2e destination, issue 64 in `cgwalters-forge/agentic-job`, and
-runs apply in the existing `agent-apply` environment. Dispatch on `main`
-with `publish: true` constructs a fixed non-agent comment, checks it after
+runs apply in the existing `agent-apply` environment. A push to this repository's
+`main` that changes the workflow file, or a dispatch on `main` with
+`publish: true`, constructs a fixed non-agent comment, checks it after
 secure-host without write permission, and uploads the request and receipt as
 one digest-bound file. Apply, a
 [trusted artifact consumer](workflows-check.md#trusted-artifact-consumers) on a
@@ -125,13 +126,31 @@ no pull-request event is accepted. Its fixed
 one comment. Apply publishes with its issue-write job token and never reads
 `SAFE_OUTPUTS_PAT`: the build's dependencies run beside that token without
 secure-host, so the job holds nothing stronger. It creates no repository and
-uses no new secret. A successful job links its run in the summary.
+uses no new secret. Manual `publish: false`, PR events, forks and other branches
+cannot run either job; manual publication remains off by default.
 
-Live proof requires this trusted workflow on `main`, operator opt-in and an
-accessible issue 64. Offline tests
-do not prove that provisioning. No successful live run is recorded yet; link the
-successful Actions run when an operator performs it, rather than treating this
-example or loopback tests as live evidence.
+The concrete duplicate threat is competing attempts, including a rerun after a
+lost POST response. All attempts share a fixed, non-cancelling concurrency group.
+Immediately before apply, a read-only guard inspects at most 100 comments on
+issue 64 (30 seconds, 8 MiB). A full page, failed/malformed lookup, multiple
+matches or a matching phrase without the exact body and GitHub Actions bot/App
+identity fails closed. An existing exact comment is linked and reused, never
+posted again. Absence permits publication only on a run's first attempt; a rerun
+without a comment refuses and requires inspection of issue 64 and prior apply
+logs. This is not a general CLI idempotency feature. No automatic POST retry is
+added. Successful apply reads the comment back and links it in the summary;
+an ambiguous POST failure stops before that step. Do not dispatch again to work
+around a refusal without inspecting the actual outcome.
+
+Live proof still requires the merged workflow on `main`, environment approval
+if configured, and an accessible issue 64. As of the latest pre-change inspection,
+the workflow has no runs and issue 64 has no standalone proof comment. Merge is
+only the trigger, not completion: observe the actual `check` and `apply` jobs and
+logs, verify the resulting comment, then link both the successful non-agent run
+and comment back to #2397 through safe outputs. If publication fails, inspect the
+failing step and reproduce/fix it without weakening these boundaries. Keep #2397
+open while waiting for merge/run or investigating failure; offline tests and PR
+CI are not credentialed publication evidence.
 
 ## Caller-bound publisher roles
 
