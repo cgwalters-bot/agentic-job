@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The Ubuntu packages stage bounds apt downloads and any index refresh to
+  45 seconds (plus at most 5 seconds to kill stuck download processes),
+  with a DNS/connectivity diagnostic instead of minutes of retries. It
+  installs the downloaded packages offline, without timing out dpkg (#3419).
+
 - GitHub dispatch and fix bounds may set `[github.outputs] own-branch-repos`
   to accept own-branch pushes by repository pattern, alongside the existing
   per-repository opt-in file (#3402). The default remains off.

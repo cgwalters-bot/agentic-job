@@ -375,6 +375,10 @@ const INSTALL_ATTEMPTS: u32 = 4;
 
 const INSTALL_PAUSE: Duration = Duration::from_secs(20);
 
+/// One budget for apt's downloads and index refresh, including DNS waits.
+/// Leave five seconds for timeout's forced cleanup, below one minute total.
+const APT_DOWNLOAD_SECONDS: u64 = 45;
+
 /// Sets the host up. READ reads and checks the program's configuration
 /// as the preflight's first step; EGRESS_IMAGE is the podman image ID,
 /// if any, the egress proxy runs from in root podman.
@@ -1299,7 +1303,13 @@ impl PackageManager {
                 // an install upgrades keeps the old one until it restarts,
                 // which on a runner that lasts one job is the job.
                 command.env("NEEDRESTART_SUSPEND", "1");
-                command.args(["install", "-y", "--no-install-recommends", "--"]);
+                command.args([
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    "--no-download",
+                    "--",
+                ]);
                 command
             }
         };
@@ -1320,6 +1330,20 @@ impl PackageManager {
 
     fn refresh_before(self, attempt: u32) -> bool {
         attempt > 1
+    }
+
+    fn download(packages: &[String]) -> Command {
+        let mut command = Command::new("apt-get");
+        command.env("DEBIAN_FRONTEND", "noninteractive");
+        command.args([
+            "install",
+            "-y",
+            "--no-install-recommends",
+            "--download-only",
+            "--",
+        ]);
+        command.args(packages);
+        command
     }
 
     fn needed(self, package: &str) -> bool {
@@ -1349,6 +1373,42 @@ fn plain_deb_name(package: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"+.-:".contains(&c))
 }
 
+/// Bound acquisition, not dpkg: killing an install could leave half-configured
+/// packages. Both commands share a deadline, so a DNS failure cannot multiply
+/// the wait by the number of packages, mirrors or outer retries.
+fn download_apt_packages(download: &Command, refresh: &Command) -> Result<()> {
+    let started = Instant::now();
+    let budget = Duration::from_secs(APT_DOWNLOAD_SECONDS);
+    for (command, is_download) in [(download, true), (refresh, false), (download, true)] {
+        let remaining = budget.saturating_sub(started.elapsed());
+        ensure!(
+            !remaining.is_zero(),
+            "packages: apt download deadline exceeded ({APT_DOWNLOAD_SECONDS}s); check mirror name resolution/DNS and connectivity; not retrying"
+        );
+        let status = Command::new("timeout")
+            .args(["--kill-after=5", &remaining.as_secs_f64().to_string()])
+            .arg(command.get_program())
+            .args(command.get_args())
+            .envs(
+                command
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .status()
+            .context("packages: running bounded apt download/refresh")?;
+        ensure!(
+            started.elapsed() < budget && !matches!(status.code(), Some(124 | 137)),
+            "packages: apt download deadline exceeded ({APT_DOWNLOAD_SECONDS}s); check mirror name resolution/DNS and connectivity; not retrying"
+        );
+        if is_download && status.success() {
+            return Ok(());
+        }
+    }
+    bail!(
+        "packages: apt download failed; check mirror name resolution/DNS and connectivity (see apt output above); not retrying"
+    )
+}
+
 pub fn install_packages(packages: &[String]) -> Result<()> {
     if packages.is_empty() {
         return Ok(());
@@ -1361,6 +1421,18 @@ pub fn install_packages(packages: &[String]) -> Result<()> {
         .cloned()
         .collect();
     if packages.is_empty() {
+        return Ok(());
+    }
+    if manager == PackageManager::Apt {
+        download_apt_packages(&PackageManager::download(&packages), &manager.refresh())?;
+        let status = manager
+            .install(&packages)
+            .status()
+            .context("packages: installing downloaded apt packages")?;
+        ensure!(
+            status.success(),
+            "packages: installing downloaded apt packages failed ({status})"
+        );
         return Ok(());
     }
     for attempt in 1..=INSTALL_ATTEMPTS {
@@ -1802,6 +1874,19 @@ mod tests {
                 "install",
                 "-y",
                 "--no-install-recommends",
+                "--no-download",
+                "--",
+                "just",
+                "gcc"
+            ]
+        );
+        assert_eq!(
+            args(&PackageManager::download(&packages)),
+            [
+                "install",
+                "-y",
+                "--no-install-recommends",
+                "--download-only",
                 "--",
                 "just",
                 "gcc"
@@ -1828,6 +1913,70 @@ mod tests {
                 ("NEEDRESTART_SUSPEND".to_owned(), "1".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn apt_download_harness_success_and_failure() {
+        let mut success = Command::new("true");
+        success.env("DEBIAN_FRONTEND", "noninteractive");
+        let failure = Command::new("false");
+        let unexpected_refresh = Command::new("/nonexistent/apt-refresh-must-not-run");
+        download_apt_packages(&success, &unexpected_refresh).unwrap();
+        let error = download_apt_packages(&failure, &success).unwrap_err();
+        assert!(error.to_string().contains("apt download failed"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut stale_index = Command::new("sh");
+        stale_index.args([
+            "-c",
+            "if test -e \"$1\"; then exit 0; fi; touch \"$1\"; exit 100",
+            "download",
+        ]);
+        stale_index.arg(dir.path().join("attempted"));
+        download_apt_packages(&stale_index, &success).unwrap();
+    }
+
+    #[test]
+    fn apt_download_real_name_resolution_failure() {
+        const HELPER: &str = "/usr/lib/apt/apt-helper";
+        if !Path::new(HELPER).exists() {
+            eprintln!("skipped: no {HELPER}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut download = Command::new(HELPER);
+        download.args([
+            "-o",
+            "Acquire::http::Proxy=DIRECT",
+            "-o",
+            "Acquire::Retries=0",
+            "download-file",
+            "http://mirror.invalid/package.deb",
+        ]);
+        download.arg(dir.path().join("package.deb"));
+        let started = Instant::now();
+        let error = download_apt_packages(&download, &Command::new("true")).unwrap_err();
+        eprintln!(
+            "Real apt DNS failure: {error}; stopped after {:.3?}",
+            started.elapsed()
+        );
+        assert!(error.to_string().contains("name resolution/DNS"));
+        assert!(started.elapsed() < Duration::from_secs(55));
+    }
+
+    /// Exercise the production deadline with a DNS-failing acquisition method
+    /// that stays stuck and ignores TERM. Never run dpkg or change the host.
+    #[test]
+    fn apt_download_dns_failure_harness_stops_within_a_minute() {
+        let mut download = Command::new("sh");
+        download.args(["-c", "trap '' TERM; printf \"Temporary failure resolving 'mirror.invalid' (harness)\\n\" >&2; exec sleep 120"]);
+        let refresh = Command::new("false");
+        let started = Instant::now();
+        let error = download_apt_packages(&download, &refresh).unwrap_err();
+        let elapsed = started.elapsed();
+        eprintln!("DNS failure harness: {error}; stopped after {elapsed:.3?}");
+        assert!(error.to_string().contains("apt download deadline exceeded"));
+        assert!(elapsed < Duration::from_secs(55), "{elapsed:?}");
     }
 
     #[test]

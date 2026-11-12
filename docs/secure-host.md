@@ -90,6 +90,14 @@ The action's documents describe the image it pins (v0.6.9). Main has
 changed the host since, and a forwarder caller gets these only with the
 next image release:
 
+- The Ubuntu `packages` stage shares a 45-second deadline across package
+  downloads and, if needed, one index refresh and download retry. A stuck
+  acquisition gets at most five more seconds for forced cleanup. A failure
+  names mirror name resolution/DNS and connectivity as things to check;
+  apt's own output remains in the job log. Installation then uses
+  `--no-download`, so no later acquisition can reintroduce the DNS wait,
+  and the deadline never kills dpkg. This also refuses downloads that take
+  longer than the budget on a slow but working network. Dnf is unchanged.
 - Host admission also accepts CentOS Stream 10, by exact `ID=centos` and
   `VERSION_ID=10`, with separate privileged-binary allowlist rows. Ubuntu
   26.04 and RHEL 10 (including minor releases) remain admitted. `ID_LIKE`
