@@ -95,6 +95,11 @@ says what a caller may rely on across versions.
   Experimental `[github.outputs] stack-steps` bounds (default zero, at most ten)
   now feed policy-based library checking, taking the lower of both bounds files.
 
+- Toolchain documentation no longer advertises the removed `setup.tools`
+  installer; it points callers to signed distribution packages or their own
+  unprivileged setup script after lockdown. The removed key remains refused
+  (#3376).
+
 - Rendered sessions retain opencode's tool names when later updates replace
   their titles with commands or filenames (#596).
 

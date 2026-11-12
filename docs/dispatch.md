@@ -321,12 +321,15 @@ group.
 
 ## Giving runs a toolchain
 
-Use distribution `setup.packages`/`repo-packages`, or a caller-owned
-`setup.script` after lockdown as the runner. **Do not enable `[setup.tools]`**
-or use a second user: runner mode refuses it, and #2989 supersedes that path.
-The installer discussion below is legacy implementation reference, removed in
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991), not an adoption
-recipe. Preserve trusted setup pins and never run target-selected setup as root.
+`[setup.tools]` was removed in
+[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) with the
+second-user path superseded by
+[#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989).
+The key is refused by name: remove the table, do not enable a second user.
+Migrate to trusted distribution `setup.packages`/`repo-packages`, or a
+caller-owned `setup.script` run unprivileged after lockdown through the
+reusable workflow's `setup` input, not host setup. Preserve trusted setup
+pins and never run target-selected setup as root.
 
 A sandbox has only what the runner image and the runner configuration
 (`AGENT_CONFIG`, by default this repository's
@@ -364,59 +367,6 @@ toolchain the distribution lacks needs a `setup` script of the caller's
 which runs unprivileged, never as root: in the reusable workflow as the
 runner's user. The old sandbox-user path was removed in #2991.
 
-The reusable workflow and `run --runner-home` refuse `[setup.tools]`.
-The following is **historical implementation reference**, not an opt-in recipe.
-The operator superseded the second-user path; a future host-read rule does not
-by itself authorize this installer or credentialed modes.
-
-The legacy agenthome tools manifest used caller-owned configuration on the
-default branch, not dispatcher workflow inputs:
-
-```toml
-[setup.tools]
-repository = "https://HOST/OWNER/AGENTHOME.git"
-revision = "FULL_40_DIGIT_COMMIT_SHA"
-recipe = "install-tools"
-```
-
-Absent this table, nothing is fetched or run. All three fields are required;
-the revision must be a full commit hash, not a branch or tag. This prevents
-a moving ref from replacing setup code without a caller configuration change.
-The caller must review that commit and its manifest: pinning does not make
-its code or dependencies trustworthy. The agenthome `install-tools` interface
-is a Justfile recipe installing into `$HOME/.local/bin` and
-`$HOME/.local/share/agenthome`; its manifest detects existing tools and pins
-release checksums and direct package versions. Transitive PyPI dependencies
-remain resolver-trusted. From agenthome commit
-[7e6a40c](https://github.com/cgwalters-forge/agenthome/commit/7e6a40c658a99f7b0ea482f940d2e60ca6571260)
-the recipe builds and runs agenthome's Rust installer with
-`cargo run --locked`, so the crates.io dependencies its `Cargo.lock` pins,
-and their build scripts and proc macros, are part of that setup code too.
-
-This code and its dependencies have pre-lockdown network access, including
-metadata services and the tailnet, and are outside the filesystem view.
-Treat them as trusted host setup, not as untrusted task code.
-
-The runner image or `setup.packages` must provide Git, just, curl, tar and
-unzip, and for a pin at or after 7e6a40c Cargo with Rust 1.85 or newer, or
-Node for an older pin. The recipe's PATH is only
-`$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin`, so a distribution `cargo`
-works if it is new enough, but the runner's rustup toolchain is not found.
-After package installation and privilege denial, setup fetches
-the pinned repository and runs the recipe as the sandbox user with a clean
-environment, outside the sandbox command entry and before network rules.
-It can fetch crates.io, PyPI and GitHub releases without changing sandbox
-egress policy. Each Git phase has a 120-second timeout; the recipe has 600
-seconds, a cold Cargo build included, with a 10-second forced-kill grace. Any failure stops setup before agent inference.
-Installer transcripts are discarded to bound memory and prevent workflow-command
-injection; setup logs phase starts and the failing exit status instead.
-The checkout stays in `$HOME/.agenthome-tools`; the sandbox PATH prepends
-`$HOME/.local/bin` when this table is present (including before a later
-`setup.script`). Neither host/root PATH nor other runs change. A setup script
-still runs later inside the hardened sandbox; it is not a second pre-lockdown
-hook. Real installations and privileged ordering need fresh-runner CI; local
-tests do not exercise host hardening.
-
 **Rust.** The shipped configuration gives this repository Ubuntu 26.04's
 `cargo` (1.93.1, pulling in `rustc` and `gcc` as its linker), which is
 newer than its `rust-version` of 1.88. That is preferred to rustup:
@@ -428,7 +378,7 @@ entry (`rustfmt` and `rust-clippy` on Ubuntu), so runs can pass
 A target that pins a newer Rust in
 its own `rust-toolchain` file can be given rustup from a caller `setup`
 script instead. rustup then follows the target's file, but as the
-sandbox user: the target picks a toolchain version, not what root
+unprivileged runner's user: the target picks a toolchain version, not what root
 installs.
 
 A `cargo build --locked` needs no egress rule: the proxy lets every
@@ -438,10 +388,10 @@ forge whose `git fetch` is already allowed. The shipped configuration
 lists those hosts in a comment; no write is opened for them. Allowing
 crates.io means the run executes code from it: every crate is checked
 against the checksum in `Cargo.lock`, but build scripts and procedural
-macros of the target's dependencies run as the sandbox user, as the
+macros of the target's dependencies run as the unprivileged runner's user, as the
 target's own tests do. That is the same reach as the agent's own: the
-sandbox user's read-only GitHub token and inference access, not the
-host's root, the runner's user or a write credential.
+runner's read-only GitHub token and inference access, not the
+host's root or a write credential.
 
 In a container on Ubuntu 26.04 through the same egress proxy, installing
 `cargo` took 24 seconds (70 packages, most of them `gcc` and LLVM, which
