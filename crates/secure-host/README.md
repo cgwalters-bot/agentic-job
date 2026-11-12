@@ -30,8 +30,9 @@ fixtures. They do **not** prove the privileged hardening paths. Tests requiring
 a prepared host must run only on a fresh disposable VM.
 
 Cargo needs registry access on a cold cache. The host crate only emits
-informational stage timings; the `agentic-job sandbox timed` command and its
-fixed consumer commands belong to that consumer, not this library.
+informational `Secure-host setup stage` / `Secure-host check stage` timings;
+summary adapters and their fixed consumer commands belong to consumers, not
+this library. Timing never substitutes for a passing probe.
 
 ## Host interface
 

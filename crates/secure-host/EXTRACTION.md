@@ -8,10 +8,12 @@ in a development checkout. The destination is the empty public repository
 
 ```sh
 git clone --no-local https://github.com/cgwalters-forge/agentic-job secure-host-export
+test "$(git -C secure-host-export rev-parse --is-shallow-repository)" = false
 git -C secure-host-export filter-repo \
   --path crates/secure-host/ --path egress/ \
   --path secure-host/default-config.sh \
   --path LICENSE --path LICENSE-MIT --path LICENSE-APACHE \
+  --path-rename crates/secure-host/ci/ci.yml:.github/workflows/ci.yml \
   --path-rename crates/secure-host/: \
   --path-rename secure-host/default-config.sh:default-config.sh
 ```
@@ -30,10 +32,10 @@ Generate and retain the export's own `Cargo.lock` before publishing, then
 repeat build, Clippy and tests with `--locked`. The parent workspace's
 lockfile is not exported: it includes unrelated consumers.
 
-`ci/ci.yml` is the standalone CI workflow. After extraction, install it as
-`.github/workflows/ci.yml` and commit that move before publishing. The
-preparation run cannot create a nested `.github/` path under its handback
-rules. The workflow grants only `contents: read`, persists no checkout token,
+`ci/ci.yml` is the standalone CI workflow. The specific rename **before** the
+crate-directory rename installs it as `.github/workflows/ci.yml` in the export;
+do not reverse those arguments. This avoids a nested `.github/` path in the
+preparation checkout. The workflow grants only `contents: read`, persists no checkout token,
 has a 15-minute bound and performs no privileged host mutation or publication.
 It builds/tests this source, not the deployed image. Release signing, image
 publication and privileged runtime CI still need their own reviewed setup.
