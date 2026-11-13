@@ -36,7 +36,10 @@ pub const BASE_COMMIT_HEADER: &str = "X-GH-AW-Base-Commit";
 /// Paths never touched: git's own files at any depth (`.git`,
 /// `.gitmodules`, `.gitattributes`, ...), and CI, hook, editor and shell
 /// configuration that the protection of top-level dot-folders does not
-/// reach (nested ones, and files).
+/// reach (nested ones, and files). A `.gitignore` filename is admitted
+/// apart, in [`path_problem`]: ignoring build output cannot change how
+/// git treats the repository's own files, and repo hygiene proposals are
+/// exactly the kind of safe output a run should make.
 static PROTECTED_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(^|/)\.git|(^|/)\.husky/|^\.pre-commit-config\.ya?ml$|^\.?lefthook\.ya?ml$",
@@ -135,6 +138,9 @@ fn quoted(line: &str) -> String {
 /// Why a path may not be in a change, if it may not. `PROTECTED_PATH_RE`
 /// takes `.github/` for git's own; only where the policy exempts that
 /// folder is it left out, and every component inside it is still matched.
+/// A `.gitignore` filename is admitted even so: the prefix refusal is
+/// about git's own files, and an ignore list the agent cannot exempt is
+/// not one of them.
 fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
     let dotted = path.split('/').any(|part| part == "." || part == "..");
     let inside = match path.strip_prefix(".github/") {
@@ -143,7 +149,8 @@ fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
     };
     if !PLAIN_PATH_RE.is_match(path) || dotted {
         Some("not a plain relative path")
-    } else if PROTECTED_PATH_RE.is_match(inside)
+    } else if (PROTECTED_PATH_RE.is_match(inside)
+        && inside.rsplit('/').next().unwrap_or(inside) != ".gitignore")
         || path
             .strip_prefix(MERGE_POLICY_PATH)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -784,6 +791,36 @@ mod tests {
             ] {
                 assert_eq!(
                     patch_problems(&(head() + &edit(path)), &pr, BASE).is_empty(),
+                    allowed,
+                    "{enabled}: {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gitignore_is_admitted_but_gits_own_files_are_not() {
+        // The dot-folder exemption must not matter: these are files and
+        // git's own directory, not folders the policy can exempt.
+        for enabled in [false, true] {
+            let mut pr = policy().safe_outputs.create_pull_request.unwrap();
+            if enabled {
+                pr.unprotected_dot_folders.push(".github".into());
+            }
+            for (path, allowed) in [
+                (".gitignore", true),
+                ("sub/.gitignore", true),
+                (".gitignore/keep", false),
+                (".gitmodules", false),
+                ("sub/.gitmodules", false),
+                (".gitattributes", false),
+                (".gitconfig", false),
+                (".git/config", false),
+                ("sub/.git/config", false),
+                (".gitignore.not", false),
+            ] {
+                assert_eq!(
+                    patch_problems(&(head() + &add(path, "100644")), &pr, BASE).is_empty(),
                     allowed,
                     "{enabled}: {path}"
                 );
