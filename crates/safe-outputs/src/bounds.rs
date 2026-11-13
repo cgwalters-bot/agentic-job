@@ -189,7 +189,7 @@ pub struct GithubOutputs {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NeutralBounds {
-    pub outputs: BTreeMap<String, OutputLimit>,
+    pub outputs: NeutralOutputs,
     /// The fork (OWNER/NAME) `apply` pushes a pull request's branch to,
     /// never the target repository: the target's CI then runs the agent's
     /// code as a fork's. Only the bounds name it, never a hand-back; it
@@ -198,6 +198,17 @@ pub struct NeutralBounds {
     /// #publishing-to-gitlab).
     #[serde(default)]
     pub push_repo: Option<String>,
+}
+
+/// `[forgejo.outputs]` or `[gitlab.outputs]`: output limits and, on GitLab
+/// alone, the caller's acceptance of the target's own CI running a branch
+/// pushed to it, as [`GithubOutputs::own_branch_repos`] on GitHub.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NeutralOutputs {
+    #[serde(default, rename = "own-branch-repos")]
+    pub own_branch_repos: Vec<String>,
+    #[serde(flatten)]
+    pub types: BTreeMap<String, OutputLimit>,
 }
 
 /// `[github.secondary_pull_request]`: its own repository, base, branches and
@@ -317,8 +328,17 @@ impl<Trigger> Bounds<Trigger> {
         static NONE: BTreeMap<String, OutputLimit> = BTreeMap::new();
         match (&self.github, self.neutral()) {
             (Some(github), _) => &github.outputs.types,
-            (None, Some(neutral)) => &neutral.outputs,
+            (None, Some(neutral)) => &neutral.outputs.types,
             (None, None) => &NONE,
+        }
+    }
+
+    /// The section's `own-branch-repos`: empty, accepting none, unless set.
+    pub fn own_branch_repos(&self) -> &[String] {
+        match (&self.github, self.neutral()) {
+            (Some(github), _) => &github.outputs.own_branch_repos,
+            (None, Some(neutral)) => &neutral.outputs.own_branch_repos,
+            (None, None) => &[],
         }
     }
 
@@ -328,7 +348,7 @@ impl<Trigger> Bounds<Trigger> {
             return Some(&mut github.outputs.types);
         }
         let neutral = self.forgejo.as_mut().or(self.gitlab.as_mut());
-        neutral.map(|neutral| &mut neutral.outputs)
+        neutral.map(|neutral| &mut neutral.outputs.types)
     }
 
     /// `[github.trigger]`.
@@ -371,9 +391,12 @@ impl<Trigger> Bounds<Trigger> {
         }
         let forge = self.forge();
         let outputs = self.outputs();
-        if let Some(github) = &self.github {
-            crate::contract::validate_own_branch_repos(&github.outputs.own_branch_repos)?;
-        }
+        let own_branch_repos = self.own_branch_repos();
+        crate::contract::validate_own_branch_repos(own_branch_repos)?;
+        ensure!(
+            forge != Forge::Forgejo || own_branch_repos.is_empty(),
+            "own-branch-repos is supported only on GitHub and GitLab"
+        );
         for (name, list) in [("hosts", &self.hosts), ("bases", &self.bases)] {
             ensure!(!list.is_empty(), "`{name}` is empty, so no run is allowed");
         }
@@ -466,11 +489,13 @@ impl<Trigger> Bounds<Trigger> {
             );
         }
         // Apply off GitHub opens a pull request only from the fork the
-        // bounds name: without one, they would admit a run whose patch
-        // apply then refuses.
+        // bounds name, or on GitLab from the target itself where
+        // `own-branch-repos` accepts it: without either, they would admit
+        // a run whose patch apply then refuses.
         ensure!(
             self.neutral().is_none()
                 || self.push_repo().is_some()
+                || !own_branch_repos.is_empty()
                 || !outputs.contains_key(CREATE_PULL_REQUEST),
             "a [{}] section allowing {CREATE_PULL_REQUEST} must name push_repo: apply \
              pushes a pull request's branch only to the fork it names",
@@ -1014,6 +1039,13 @@ events = ["issues"]
                 Some("bot/bootc"),
                 false,
             ),
+            (
+                "[gitlab.outputs]\nown-branch-repos = [\"example-org/*\"]\n\
+                 create_pull_request = { max = 1 }\nnoop = { max = 1 }\n",
+                Forge::Gitlab,
+                None,
+                false,
+            ),
         ] {
             let bounds = validated(&format!("{}{section}", neutral()))
                 .unwrap_or_else(|e| panic!("{section}: {e}"));
@@ -1127,6 +1159,18 @@ events = ["issues"]
                 "a GitHub-only type in [gitlab]",
                 format!("{neutral}[gitlab.outputs]\nlink_sub_issue = {{ max = 1 }}\n"),
                 "GitHub-only",
+            ),
+            (
+                "own-branch-repos in [forgejo]",
+                format!(
+                    "{neutral}[forgejo.outputs]\nown-branch-repos = [\"example-org/*\"]\n{noop}"
+                ),
+                "own-branch-repos is supported only on GitHub and GitLab",
+            ),
+            (
+                "an empty own-branch-repos pattern in [gitlab]",
+                format!("{neutral}[gitlab.outputs]\nown-branch-repos = [\"\"]\n{noop}"),
+                "own-branch-repos: patterns must be",
             ),
             (
                 "a Forgejo pull request without its fork",

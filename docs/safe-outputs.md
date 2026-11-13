@@ -1103,7 +1103,19 @@ the head repository. The repository file remains an independent source of
 acceptance. Both sources cover fix pushes and new PR branches in repositories
 the applying account [owns](workflow.md#a-repository-the-applying-account-owns).
 Neither grants write access or bypasses branch protection, default-branch
-refusals, patch limits or `.github` protection. Refusing `.github`
+refusals, patch limits or `.github` protection.
+
+GitLab bounds take the same key, with the same limits and intersection, in
+`[gitlab.outputs]`; Forgejo's refuse it. Where the bounds name no `push_repo`
+and the patterns match the target project, the caller may pass the target
+itself as `--push-repo`: apply then pushes the merge request's branch to the
+target and opens the merge request there, or pushes a fix on an open merge
+request's branch in it, instead of using a fork
+([publishing to GitLab](#publishing-to-gitlab)). A new branch must be named
+as a run's (`agent-run-` and digits) and not exist yet. Apply reads the project and its protected branch
+rules first and refuses its default branch and any branch a rule names, `*`
+wildcards included (at most 2,000 rules). The single commit, head lease,
+`Draft:` title, protected paths and output limits are unchanged. Refusing `.github`
 keeps the agent from adding workflows there, not from changing the build
 scripts, tests and local actions the existing ones run. Accept only a repository whose
 workflows give a branch nothing an agent is not to have; where that
@@ -2493,6 +2505,9 @@ for `noop`, `missing_tool` and `missing_data`:
   project as its `target_project_id`. The fork must be GitLab's fork of
   that project (`forked_from_project`), and private unless the project
   is public and the run is not private. A draft is a `Draft:` title.
+  With [`own-branch-repos`](#pushing-to-a-pull-requests-branch) accepting
+  the project, and no `push_repo`, the branch and merge request go to the
+  project itself instead; fixes pushed to an open merge request's branch alike.
 - `push_to_pull_request_branch` adds one commit to the branch of the
   policy's merge request, as on Forgejo
   ([pushing to a pull request's branch](#pushing-to-a-pull-requests-branch-on-forgejo)):
@@ -2503,8 +2518,10 @@ for `noop`, `missing_tool` and `missing_data`:
   iid of that project and into it (`project_id` and
   `target_project_id`), open, from the fork by its ID
   (`source_project_id`) and the policy's branch (`source_branch`), at
-  the head the run was asked for (`sha`). A merge request from the
-  project itself or another fork, merged, closed or moved on is refused.
+  the head the run was asked for (`sha`). A merge request from another
+  fork, merged, closed or moved on is refused, as is one from the project
+  itself unless `own-branch-repos` accepts it, which puts the project in
+  the fork's place.
 - `--status` sets the caller's commit status after every other write,
   off by default, never from agent JSONL. To prevent attaching a result
   to the wrong pipeline or taking over another run's job, GitLab requires

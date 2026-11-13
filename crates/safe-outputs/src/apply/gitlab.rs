@@ -2,7 +2,9 @@
 //! caller's issue or merge request, and a merge request from a branch
 //! pushed over git to the fork the bounds name, opened on the fork with
 //! the repository as its `target_project_id`. Never a branch of the
-//! repository itself, for the reason Forgejo's publisher gives. Also an
+//! repository itself, for the reason Forgejo's publisher gives, unless the
+//! caller's `own-branch-repos` bounds accept the repository's CI running
+//! it: then a branch neither its default nor a protected one. Also an
 //! issue, labels added to or removed from an issue or a merge request,
 //! and one closed with a note saying why; a commit pushed on the branch of
 //! the policy's merge request, in that fork, under a lease on the head the
@@ -58,6 +60,10 @@ const LABELS_PER_PAGE: usize = 100;
 /// thousand is refused rather than read without end.
 const MAX_LABEL_PAGES: usize = 20;
 
+/// Protected branch rules asked for a page, and the most pages read.
+const PROTECTED_PER_PAGE: usize = 100;
+const MAX_PROTECTED_PAGES: usize = 20;
+
 const DIFFS_PER_PAGE: usize = 100;
 const MAX_DIFF_PAGES: usize = 20;
 
@@ -107,10 +113,12 @@ pub struct Gitlab {
     comment_kind: Option<Kind>,
     /// Trusted deployment context, never taken from the checked JSONL.
     status_context: Option<(String, u64)>,
+    /// Whether the caller's bounds accept a branch of the project itself.
+    own_branches: bool,
 }
 
 /// What GitLab says of a project, as far as a push to it needs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Project {
     id: u64,
     path: String,
@@ -120,6 +128,18 @@ struct Project {
     public: bool,
     /// The ID of what it is a fork of.
     forked_from: Option<u64>,
+    /// None for a project with no commit yet.
+    default_branch: Option<String>,
+}
+
+/// Whether GitLab's protected branch RULE, where `*` is any text, `/`
+/// included, names BRANCH: a rule too large to read protects everything.
+fn protects(rule: &str, branch: &str) -> bool {
+    let parts: Vec<String> = rule.split('*').map(regex::escape).collect();
+    match regex::Regex::new(&format!("^{}$", parts.join(".*"))) {
+        Ok(rule) => rule.is_match(branch),
+        Err(_) => true,
+    }
 }
 
 /// PATH as one path segment: every byte but a letter, digit or `-._~`
@@ -323,7 +343,15 @@ impl Gitlab {
             recover_pushed_commit: None,
             comment_kind: None,
             status_context: None,
+            own_branches: false,
         })
+    }
+
+    /// Whether the caller's checked bounds accept a branch of the project
+    /// itself (`own-branch-repos`): never the hand-back's to say.
+    pub fn accepting_own_branches(mut self, accepted: bool) -> Self {
+        self.own_branches = accepted;
+        self
     }
 
     /// Only the trusted deployment may supply this, never agent output.
@@ -534,7 +562,60 @@ impl Gitlab {
             private: visibility == "private",
             public: visibility == "public",
             forked_from,
+            default_branch: answer["default_branch"].as_str().map(str::to_owned),
         })
+    }
+
+    /// The repository's project and BRANCH's: a fork as
+    /// [`Self::check_fork`] holds it, or, where the caller's bounds accept
+    /// it, the project itself, with BRANCH neither its default branch nor
+    /// one a protected branch rule names.
+    fn branch_projects(
+        &self,
+        push_repo: &str,
+        branch: &str,
+        private_run: bool,
+    ) -> Result<(Project, Project)> {
+        if !push_repo.eq_ignore_ascii_case(&self.repo) {
+            self.other_owner(push_repo)?;
+            return self.check_fork(push_repo, private_run);
+        }
+        ensure!(
+            self.own_branches,
+            "a merge request's branch goes to {push_repo} itself only where the caller's \
+             own-branch-repos bounds accept it"
+        );
+        let target = self.project(&self.repo)?;
+        ensure!(
+            target.default_branch.as_deref() != Some(branch),
+            "{branch} is the default branch of {push_repo}, which a push never goes to"
+        );
+        for page in 1..=MAX_PROTECTED_PAGES {
+            let path = format!(
+                "/projects/{}/protected_branches?page={page}&per_page={PROTECTED_PER_PAGE}",
+                target.id
+            );
+            let answer = self.request(GET, &path, None)?;
+            let rules = answer
+                .as_array()
+                .with_context(|| format!("GET {path}: the response is not protected branches"))?;
+            for rule in rules {
+                let name = rule["name"]
+                    .as_str()
+                    .with_context(|| format!("GET {path}: a protected branch has no name"))?;
+                ensure!(
+                    !protects(name, branch),
+                    "{branch} of {push_repo} is protected ({name}), which a push never goes to"
+                );
+            }
+            if rules.len() < PROTECTED_PER_PAGE {
+                return Ok((target.clone(), target));
+            }
+        }
+        bail!(
+            "{push_repo} has more protected branch rules than apply reads ({})",
+            MAX_PROTECTED_PAGES * PROTECTED_PER_PAGE
+        )
     }
 
     /// The repository's project and the fork's, refused unless the fork
@@ -757,10 +838,9 @@ impl Gitlab {
     /// of the repository's project, by the ID read, into that project,
     /// open, from the bounds' fork, by its ID, and the branch the policy
     /// read, at the head the run was asked for; and the fork as
-    /// [`Self::check_fork`] holds it.
+    /// [`Self::branch_projects`] holds it.
     fn push_target(&self, push: &BranchPush) -> Result<String> {
-        self.other_owner(&push.push_repo)?;
-        let (target, fork) = self.check_fork(&push.push_repo, push.private)?;
+        let (target, fork) = self.branch_projects(&push.push_repo, &push.branch, push.private)?;
         let number = push.number;
         let mr = reference(Kind::PullRequest, number);
         let path = format!("/projects/{}/merge_requests/{number}", target.id);
@@ -891,14 +971,13 @@ impl Publisher for Gitlab {
     fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
         // `plan` refuses this too; held here as well, as nothing else
         // stands between the agent's code and the repository's CI.
-        self.other_owner(&pr.push_repo)?;
         let pushing = || format!("pushing {} to {}", pr.branch, pr.push_repo);
         let (target, fork) = self
-            .check_fork(&pr.push_repo, pr.private)
+            .branch_projects(&pr.push_repo, &pr.branch, pr.private)
             .with_context(pushing)?;
         let commit = self.push(pr).with_context(pushing)?;
         // Opened on the fork, the branch's project, for the repository,
-        // both by the IDs `check_fork` read.
+        // both by the IDs `branch_projects` read.
         let path = format!("/projects/{}/merge_requests", fork.id);
         let opened = || -> Result<Made> {
             let answer = self.request(
@@ -2511,6 +2590,172 @@ mod tests {
         );
         let fork = root.path().join("fork/name.git");
         assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), pr.base_commit);
+    }
+
+    /// The repository, whose default branch is DEFAULT and whose protected
+    /// branch rules are PROTECTED, its merge request 9, MR, and a merge
+    /// request opened in it.
+    fn own_gitlab(
+        default: &'static str,
+        protected: Value,
+        mr: Value,
+    ) -> (String, std::sync::mpsc::Receiver<Request>) {
+        serve(64, move |request| {
+            let answer = match route(request).as_str() {
+                "GET /api/v4/projects/owner%2Fname" => {
+                    let mut answer = repo();
+                    answer["default_branch"] = json!(default);
+                    answer
+                }
+                line if line.starts_with("GET /api/v4/projects/1/protected_branches?") => {
+                    protected.clone()
+                }
+                MR => mr.clone(),
+                "POST /api/v4/projects/1/merge_requests" => {
+                    json!({"id": 90, "iid": 9, "project_id": 1, "target_project_id": 1,
+                        "web_url": MR_9_URL})
+                }
+                _ => return (404, "{}".to_owned()),
+            };
+            ok(&answer)
+        })
+    }
+
+    /// Where the caller's bounds accept it, a merge request's branch is
+    /// pushed to the repository itself and the merge request opened
+    /// there, or a commit pushed on an open one's, under the head's lease;
+    /// never without that acceptance, nor to the default branch or one a
+    /// protected branch rule names.
+    #[test]
+    fn own_branches_of_the_repository() {
+        let rules = json!([{"name": "main"}, {"name": "release/*"}]);
+        // What, whether the bounds accept it, the default branch, the
+        // protected branch rules, and a part of the error.
+        let cases: &[(&str, bool, &'static str, Value, Option<&str>)] = &[
+            ("accepted", true, "main", rules.clone(), None),
+            (
+                "not accepted",
+                false,
+                "main",
+                rules.clone(),
+                Some("only where the caller's own-branch-repos bounds accept it"),
+            ),
+            (
+                "the default branch",
+                true,
+                "agent-run-7",
+                rules.clone(),
+                Some("agent-run-7 is the default branch of owner/name"),
+            ),
+            (
+                "a protected branch",
+                true,
+                "main",
+                json!([{"name": "main"}, {"name": "agent-*"}]),
+                Some("agent-run-7 of owner/name is protected (agent-*)"),
+            ),
+        ];
+        let refs = |root: &std::path::Path| {
+            sh(
+                &root.join("owner/name.git"),
+                &["for-each-ref", "--format=%(refname)"],
+            )
+        };
+        let publisher = |server: &str, root: &std::path::Path, accepted: bool| {
+            let mut publisher = gitlab(server).accepting_own_branches(accepted);
+            publisher.git = root.display().to_string();
+            publisher
+        };
+        for (what, accepted, default, protected, want) in cases {
+            // A new merge request.
+            let (root, mut pr) = repository();
+            pr.push_repo = "owner/name".into();
+            let (server, requests) = own_gitlab(default, protected.clone(), Value::Null);
+            let opened = publisher(&server, root.path(), *accepted).open_pull_request(&pr);
+            match (opened, want) {
+                (Ok(made), None) => {
+                    assert_eq!(made.url, MR_9_URL);
+                    let posted = requests
+                        .try_iter()
+                        .find(|request| request.line.starts_with("POST"))
+                        .unwrap();
+                    assert_eq!(
+                        posted.line,
+                        "POST /api/v4/projects/1/merge_requests HTTP/1.1"
+                    );
+                    assert_eq!(posted.body["target_project_id"], 1, "{what}");
+                    let bare = root.path().join("owner/name.git");
+                    assert_eq!(sh(&bare, &["rev-parse", "agent-run-7~"]), pr.base_commit);
+                }
+                (Err(err), Some(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{what}: {err:#}");
+                    assert_eq!(refs(root.path()), "refs/heads/main", "{what}");
+                }
+                (result, _) => panic!("{what}: {result:?}"),
+            }
+
+            // A push to an open merge request's branch.
+            let (root, mut push) = pull_request_branch();
+            push.push_repo = "owner/name".into();
+            let bare = root.path().join("owner/name.git");
+            sh(&bare, &["branch", "agent-run-7", "main"]);
+            let mr = merge_request(1, "agent-run-7", &push.head);
+            let (server, _) = own_gitlab(default, protected.clone(), mr);
+            let pushed = publisher(&server, root.path(), *accepted).push_to_branch(&push);
+            match (pushed, want) {
+                (Ok(url), None) => {
+                    assert_eq!(url, MR_9_URL);
+                    assert_eq!(sh(&bare, &["rev-parse", "agent-run-7~"]), push.head);
+                }
+                (Err(err), Some(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{what}: {err:#}");
+                    assert_eq!(sh(&bare, &["rev-parse", "agent-run-7"]), push.head);
+                }
+                (result, _) => panic!("{what}: {result:?}"),
+            }
+        }
+
+        // A branch moved after GitLab answered is not forced over.
+        let (root, mut push) = pull_request_branch();
+        push.push_repo = "owner/name".into();
+        let bare = root.path().join("owner/name.git");
+        let work = root.path().join("work");
+        sh(&work, &["commit", "-q", "--allow-empty", "-m", "Other"]);
+        sh(
+            &work,
+            &[
+                "push",
+                "-q",
+                bare.to_str().unwrap(),
+                "HEAD:refs/heads/agent-run-7",
+            ],
+        );
+        let moved = sh(&bare, &["rev-parse", "agent-run-7"]);
+        let mr = merge_request(1, "agent-run-7", &push.head);
+        let (server, _) = own_gitlab("main", rules, mr);
+        let err = publisher(&server, root.path(), true)
+            .push_to_branch(&push)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refs/heads/agent-run-7 is no longer at"),
+            "{err:#}"
+        );
+        assert_eq!(sh(&bare, &["rev-parse", "agent-run-7"]), moved);
+    }
+
+    #[test]
+    fn protected_branch_rules() {
+        for (rule, branch, protected) in [
+            ("main", "main", true),
+            ("main", "main2", false),
+            ("agent-*", "agent-run-7", true),
+            ("*", "a/b", true),
+            ("release/*", "agent-run-7", false),
+            ("a.b", "axb", false),
+            ("*-run-*", "agent-run-7", true),
+        ] {
+            assert_eq!(protects(rule, branch), protected, "{rule} {branch}");
+        }
     }
 
     /// As Forgejo's: publication reads and opens, git pushes with the

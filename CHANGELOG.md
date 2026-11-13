@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- GitLab bounds may set `[gitlab.outputs] own-branch-repos`, as GitHub's do,
+  so that apply pushes a merge request's branch to the target project itself
+  and opens the merge request there, never to its default or a protected
+  branch (#3409). The default remains off.
+
 - The safe-outputs library has an experimental, opt-in ordered-stack checker
   that checks each step's own patch and retains only the prefix before refusal,
   and builds the accepted steps as one commit each, restacking the steps above

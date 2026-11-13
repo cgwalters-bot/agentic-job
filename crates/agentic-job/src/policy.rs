@@ -631,11 +631,9 @@ impl Compile for Bounds {
                 .github
                 .as_ref()
                 .is_some_and(|github| github.outputs.upstream_pull_request_base),
-            own_branch_repos: self
-                .github
-                .as_ref()
-                .filter(|github| !github.outputs.own_branch_repos.is_empty())
-                .map(|github| vec![github.outputs.own_branch_repos.clone()])
+            own_branch_repos: Some(self.own_branch_repos())
+                .filter(|patterns| !patterns.is_empty())
+                .map(|patterns| vec![patterns.to_vec()])
                 .unwrap_or_default(),
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
                 max: limit(CREATE_PULL_REQUEST).max,
@@ -900,7 +898,7 @@ pub fn run(args: &Args) -> Result<Exit> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use safe_outputs::bounds::NeutralBounds;
+    use safe_outputs::bounds::{NeutralBounds, NeutralOutputs};
 
     /// The old tree's allowlist, as a bounds file.
     pub(crate) const BOUNDS: &str = r#"
@@ -3357,7 +3355,10 @@ max_patch_files = 10
     pub(crate) fn on_forge(mut bounds: Bounds, forge: Forge, fork: &str) -> Bounds {
         let github = bounds.github.take().unwrap();
         let section = Some(NeutralBounds {
-            outputs: github.outputs.types,
+            outputs: NeutralOutputs {
+                own_branch_repos: Vec::new(),
+                types: github.outputs.types,
+            },
             push_repo: Some(fork.to_owned()),
         });
         match forge {
@@ -4133,6 +4134,28 @@ max_patch_files = 10
             let mut invalid = policy.clone();
             invalid.safe_outputs.own_branch_repos = vec![patterns];
             assert!(invalid.validate().is_err());
+        }
+        // GitLab's bounds carry it alike, a merge request needing no fork
+        // with it; Forgejo's refuse it.
+        for (forge, accepted) in [(Forge::Gitlab, true), (Forge::Forgejo, false)] {
+            let mut bounds = on_forge(bounds(), forge, "bot/unused");
+            let section = bounds.gitlab.as_mut().or(bounds.forgejo.as_mut()).unwrap();
+            section.push_repo = None;
+            section.outputs.own_branch_repos = vec!["example-org/*".to_owned()];
+            assert_eq!(bounds.validate().is_ok(), accepted, "{forge:?}");
+            let mut policy = policy.clone();
+            policy.forge = forge;
+            assert_eq!(policy.validate().is_ok(), accepted, "{forge:?}");
+            if accepted {
+                let policy = bounds.compile(&request()).unwrap();
+                policy.validate().unwrap();
+                assert!(
+                    policy
+                        .safe_outputs
+                        .accepts_own_branches("example-org/repo")
+                        .unwrap()
+                );
+            }
         }
     }
 

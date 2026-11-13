@@ -1261,8 +1261,8 @@ impl Policy {
         self.forge.check_outputs(self.safe_outputs.types())?;
         self.safe_outputs.validate_own_branch_repos()?;
         ensure!(
-            self.forge == Forge::Github || self.safe_outputs.own_branch_repos.is_empty(),
-            "own-branch-repos is supported only on GitHub"
+            self.forge != Forge::Forgejo || self.safe_outputs.own_branch_repos.is_empty(),
+            "own-branch-repos is supported only on GitHub and GitLab"
         );
         for output in self.safe_outputs.others.keys() {
             ensure!(

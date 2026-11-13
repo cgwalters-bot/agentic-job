@@ -242,7 +242,11 @@ fn forge_publisher(
                 .commenting_on(args.comment_target_kind)
                 .status_context(args.status_ref.clone().zip(args.status_pipeline_id))
                 .pushing_with(push)
-                .owned_by(owner),
+                .owned_by(owner)
+                .accepting_own_branches(
+                    policy.push_repo.is_none()
+                        && policy.safe_outputs.accepts_own_branches(&policy.repo)?,
+                ),
         ),
     })
 }

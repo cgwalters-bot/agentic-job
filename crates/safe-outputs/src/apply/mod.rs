@@ -746,6 +746,14 @@ fn pull_request(
         plain_branch(branch) && branch != policy.base,
         "a create_pull_request for branch {branch:?}, which apply does not push"
     );
+    // In the target itself, only a run's own branch name, never one its
+    // people or other automation use.
+    anyhow::ensure!(
+        !push_repo.eq_ignore_ascii_case(&policy.repo) || check::is_run_branch(branch),
+        "a create_pull_request for branch {branch:?} of {push_repo} itself, which apply \
+         pushes only as a run's own {}ID",
+        check::RUN_BRANCH_PREFIX
+    );
     let pr_rules = policy
         .safe_outputs
         .create_pull_request
@@ -850,10 +858,24 @@ fn branch_push(
 
 /// The fork a branch is pushed to: never the target, whose own CI would
 /// run it with the target's secrets, and the one the bounds name, not one
-/// the caller's command line or the hand-back chose.
+/// the caller's command line or the hand-back chose. On GitLab, bounds
+/// naming no `push_repo` whose `own-branch-repos` accept the target may
+/// have the caller push to the target itself, as GitHub's own-branch
+/// pushes ([`push`]): that caller's acceptance of the target's CI.
 fn bound_fork<'a>(policy: &Policy, target: &Target<'a>, output: &str) -> Result<&'a str> {
     let missing = || format!("a {output}, and the caller gave no --push-repo for its branch");
     let push_repo = target.push_repo.with_context(missing)?;
+    if target.forge == Forge::Gitlab
+        && policy.push_repo.is_none()
+        && push_repo.eq_ignore_ascii_case(&policy.repo)
+    {
+        anyhow::ensure!(
+            policy.safe_outputs.accepts_own_branches(&policy.repo)?,
+            "--push-repo {push_repo} is the target itself, which the caller's own-branch-repos \
+             bounds do not accept"
+        );
+        return Ok(push_repo);
+    }
     anyhow::ensure!(
         !owner(push_repo).eq_ignore_ascii_case(owner(&policy.repo)),
         "--push-repo {push_repo} is of the owner of {}; its branch goes to another owner's fork",
@@ -1404,6 +1426,95 @@ mod tests {
     fn on_gitlab(_: &Path, policy: &mut Policy, target: &mut Target<'static>) {
         policy.forge = crate::Forge::Gitlab;
         target.forge = Forge::Gitlab;
+    }
+
+    /// On GitLab, bounds naming no fork whose `own-branch-repos` accept
+    /// the target let the caller push a run's branch to the target itself,
+    /// with every other rule unchanged; nothing else does.
+    #[test]
+    fn own_branches_on_gitlab() {
+        let own = |policy: &mut Policy, target: &mut Target<'static>| {
+            policy.push_repo = None;
+            policy.safe_outputs.own_branch_repos = vec![vec!["Bootc-Dev/*".to_owned()]];
+            target.push_repo = Some("bootc-dev/bootc");
+        };
+        let not_accepted = "is the target itself, which the caller's own-branch-repos bounds \
+                            do not accept";
+        type Change = fn(&mut Policy, &mut Target<'static>);
+        let cases: &[(&str, Change, &str)] = &[
+            (BRANCH, |_, _| {}, ""),
+            (
+                BRANCH,
+                |policy, _| policy.safe_outputs.own_branch_repos.clear(),
+                not_accepted,
+            ),
+            (
+                BRANCH,
+                |policy, _| policy.safe_outputs.own_branch_repos = vec![vec!["other/*".into()]],
+                not_accepted,
+            ),
+            // Another file's patterns must accept it too.
+            (
+                BRANCH,
+                |policy, _| {
+                    policy
+                        .safe_outputs
+                        .own_branch_repos
+                        .push(vec!["other/*".into()]);
+                },
+                not_accepted,
+            ),
+            (
+                "fix-it",
+                |_, _| {},
+                "pushes only as a run's own agent-run-ID",
+            ),
+            (
+                BRANCH,
+                |policy, _| policy.push_repo = Some(PUSH_REPO.to_owned()),
+                "is of the owner of bootc-dev/bootc",
+            ),
+            (
+                BRANCH,
+                |policy, target| {
+                    policy.forge = crate::Forge::Forgejo;
+                    target.forge = Forge::Forgejo;
+                },
+                "is of the owner of bootc-dev/bootc",
+            ),
+        ];
+        for (branch, change, want) in cases {
+            let dir = checked(&[
+                json!({"type": "create_pull_request", "title": "Fix it", "body": "Why.", "branch": branch}),
+            ]);
+            let (mut policy, mut target) = (policy(), target(None));
+            on_gitlab(dir.path(), &mut policy, &mut target);
+            own(&mut policy, &mut target);
+            change(&mut policy, &mut target);
+            match plan(&upload(dir.path()), &policy, &target) {
+                Ok(ops) if want.is_empty() => {
+                    let Op::PullRequest(pr) = &ops[0] else {
+                        panic!("{ops:?}")
+                    };
+                    assert_eq!(pr.push_repo, "bootc-dev/bootc");
+                    assert_eq!(pr.title, "Draft: Fix it");
+                }
+                Err(errors) if !want.is_empty() => {
+                    assert!(errors.join(";").contains(want), "{want}: {errors:?}")
+                }
+                other => panic!("{branch} {want:?}: {other:?}"),
+            }
+        }
+        // A push to the policy's merge request in the target itself.
+        let dir = checked_push(&[push_item()]);
+        let (mut policy, mut target) = (push_policy(), target(None));
+        on_gitlab(dir.path(), &mut policy, &mut target);
+        own(&mut policy, &mut target);
+        let ops = plan(&upload(dir.path()), &policy, &target).unwrap();
+        let Op::Push(push) = &ops[0] else {
+            panic!("{ops:?}")
+        };
+        assert_eq!(push.push_repo, "bootc-dev/bootc");
     }
 
     /// On GitLab a draft is a `Draft:` title, and no line of a body runs a
