@@ -9,12 +9,13 @@ test("rewrite", () => {
     // Between docs pages, with and without a fragment.
     ["sandbox.md", "docs/workflow.md", "/agentic-job/docs/sandbox/"],
     ["sandbox-check.md#network", "docs/sandbox.md", "/agentic-job/docs/sandbox-check/#network"],
-    // The README and the landing page are pages too.
-    ["../README.md#try-it", "docs/inference.md", "/agentic-job/overview/#try-it"],
-    ["docs/inference.md", "README.md", "/agentic-job/docs/inference/"],
+    // The overview and the landing page are pages too.
+    ["../site/overview.md#try-it", "docs/inference.md", "/agentic-job/overview/#try-it"],
+    ["../docs/inference.md", "site/overview.md", "/agentic-job/docs/inference/"],
     ["../docs/workflow.md", "site/index.mdx", "/agentic-job/docs/workflow/"],
     ["index.mdx", "site/index.mdx", "/agentic-job/"],
     // Other repository files, Markdown or not, go to the forge.
+    ["../README.md", "docs/inference.md", "https://forge.example/o/r/blob/abc/README.md"],
     ["../specs/session.md", "docs/sandbox.md", "https://forge.example/o/r/blob/abc/specs/session.md"],
     [".github/workflows/example.yml", "README.md", "https://forge.example/o/r/blob/abc/.github/workflows/example.yml"],
     ["../crates/agentic-job/src/policy.rs#L10", "docs/layout.md", "https://forge.example/o/r/blob/abc/crates/agentic-job/src/policy.rs#L10"],
@@ -32,7 +33,8 @@ test("rewrite", () => {
 });
 
 test("pageId", () => {
-  assert.equal(pageId("README.md"), "overview");
+  assert.equal(pageId("README.md"), null);
+  assert.equal(pageId("site/overview.md"), "overview");
   assert.equal(pageId("site/index.mdx"), "");
   assert.equal(pageId("docs/sandbox.md"), "docs/sandbox");
   // Only the pages the collection loads.
@@ -54,7 +56,7 @@ test("remarkRepositoryLinks", () => {
     children: [
       { type: "heading", depth: 1, children: [{ type: "text", value: "The " }, { type: "inlineCode", value: "run" }, { type: "text", value: " step" }] },
       { type: "paragraph", children: [{ type: "link", url: "sandbox.md#network", children: [] }] },
-      { type: "definition", url: "../README.md" },
+      { type: "definition", url: "../site/overview.md" },
     ],
   });
   const tree = page();

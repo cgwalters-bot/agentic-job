@@ -1,13 +1,13 @@
 // The site renders the repository's Markdown in place, so a link between
 // files keeps the form that works on the forge (`sandbox.md#anchor`,
-// `../README.md`) and is rewritten here when the site is built.
+// `../site/overview.md`) and is rewritten here when the site is built.
 import path from "node:path";
 
 // Repository files the site renders, by page id; a page's route is
 // `<base><id>/`. The content collection and this table must agree.
 export const PAGES = {
   "site/index.mdx": "",
-  "README.md": "overview",
+  "site/overview.md": "overview",
 };
 export const DOCS = "docs/";
 

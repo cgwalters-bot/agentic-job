@@ -1,6 +1,6 @@
 # Start with [README.md](README.md)
 
-It covers usage, limitations and topic documentation for agentic-job.
+It links to the documentation site and its sources in this checkout.
 
 Read the [contributor guide](docs/contributing.md) for design constraints,
 code conventions, check prerequisites and security boundaries before changing code.

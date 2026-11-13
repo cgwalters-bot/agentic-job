@@ -199,7 +199,7 @@ agents-lock spec package +links:
 refresh-top-level-domains:
     curl --fail --silent --show-error --proto '=https' --output crates/safe-outputs/src/top-level-domains.txt https://data.iana.org/TLD/tlds-alpha-by-domain.txt
 
-# The documentation site in site/, a rendering of docs/ and the README.
+# The documentation site in site/, rendering its own pages and docs/.
 # Dependencies come from the lock alone, without their install scripts.
 # SITE_BASE, SITE_URL and SITE_SOURCE_URL (site/astro.config.mjs) place it.
 site-build:

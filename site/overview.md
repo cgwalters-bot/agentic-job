@@ -1,0 +1,42 @@
+# agentic-job
+
+> This text is LLM generated.
+
+This project takes as a core premise that [AI (LLMs) and CI should go together](https://blog.verbum.org/2026/08/21/agentic-ai-and-software-forges/);
+operational concerns (security, scalability, observability) for your agents should align with your regular deterministic CI.
+
+This project is heavily inspired by [GitHub Agentic Workflows](https://github.github.com/gh-aw/) but makes some different design choices.
+
+## Core model
+
+An agent invocation starts as a forge-native runner (e.g. GitHub action workflow), can perform arbitrary read-only
+operations, and at the end can post output through a [safe outputs](https://github.github.com/gh-aw/reference/safe-outputs/) style
+model.
+
+The supported harnesses are Claude Code, opencode and Vibe, using
+[ACP (Agent Client Protocol)](https://agentclientprotocol.com/get-started/introduction).
+See [agent harnesses](../docs/harness.md) for configuration.
+
+## Host Security vs Agent Security
+
+Projects like [OpenShell](https://github.com/NVIDIA/OpenShell) and many others aim to constrain
+agents specifically. This project again takes the stance that we should secure CI in general,
+and agents are just one type of workload.
+
+There's a `cgwalters-forge/actions/secure-host` action that is in the process
+of being split out that locks down a GHA runner so that all further
+code cannot regain `sudo`; this allows you to do things like have local
+credential proxies or network egress filters etc.
+
+## Try it
+
+Follow the [getting-started walkthrough](../docs/try-it.md) to run the scripted agent, then connect a real agent.
+
+## Documentation
+
+- [Workflow and deployment evidence](../docs/workflow.md), [events](../docs/events.md), [dispatch](../docs/dispatch.md) and [GitLab CI](../docs/gitlab.md).
+- [Safe outputs](../docs/safe-outputs.md), [host security](../docs/secure-host.md) and [known limitations](../docs/limitations.md).
+- [Agent harnesses](../docs/harness.md), [inference](../docs/inference.md), [MCP](../docs/mcp.md) and [skills](../docs/skills.md).
+- [Design and trust](../docs/requirements.md), [related projects](../docs/related-projects.md) and [interactive sessions](../docs/interactive.md).
+- [Project layout and license](../docs/layout.md), [stable interfaces](../docs/stable-interfaces.md) and [remaining work](../docs/plan.md).
+- [Contributing](../docs/contributing.md): design constraints, checks, code conventions and security boundaries.

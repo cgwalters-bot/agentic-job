@@ -4,7 +4,7 @@
 
 agentic-job hardens a CI host so it can run untrusted steps, including a coding agent.
 Its Rust CLI and reusable workflow separate the agent from credentials and check its outputs on another machine before applying them.
-Start with the [README](../README.md) for usage, limitations and topic documentation,
+Start with the [overview](../site/overview.md) for usage, limitations and topic documentation,
 and the [project layout](layout.md) for the contributor's map.
 
 ## Design principles

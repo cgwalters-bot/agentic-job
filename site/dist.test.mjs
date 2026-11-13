@@ -48,7 +48,7 @@ test("LLM notice banner", () => {
     assert.doesNotMatch(html, /<blockquote>\s*<p>This text is LLM generated/, `${file}: notice blockquote in the body`);
   }
   // Context is ordinary page content, not part of the notice banner.
-  assert.equal(llmNotice(readFileSync(new URL("README.md", root), "utf8")), "", "README notice");
+  assert.equal(llmNotice(readFileSync(new URL("site/overview.md", root), "utf8")), "", "overview notice");
   assert.equal(llmNotice(readFileSync(new URL("site/index.mdx", root), "utf8")), "", "landing page notice");
   assert.equal(llmNotice(readFileSync(new URL("docs/hive.md", root), "utf8")), "", "docs/hive.md notice");
   assert.match(built("docs/hive/index.html"), /<p>This is a comparison of external coordinator examples, not agentic-job setup\.\s*It was written from reading source and documentation; nothing in it was run\.<\/p>/, "docs/hive.md context stays in the body");
