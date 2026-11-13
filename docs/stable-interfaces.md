@@ -92,11 +92,10 @@ It publishes prose or nothing, never a review verdict/status or classifier resul
 All workflow pieces must use a release containing the input at the same pin.
 
 `bind-continuation` defaults to `false`. With a local admitted `push-item`, it
-records trusted repository/PR/head/run/attempt context and prepares attempt-scoped
-checked artifact provenance, without enabling unchanged completion or readiness.
-Check refuses bound workflow hand-backs until independent raw producer-attempt
-provenance is available; end-to-end producer-attempt binding is not implemented.
-Legacy callers are unchanged. See the
+records trusted repository/PR/head/run/attempt context, and check and apply
+refuse raw and checked uploads from any other run attempt, without enabling
+unchanged completion or readiness. A bound run is re-run with all its jobs, not
+only failed ones. Legacy callers are unchanged. See the
 [identity-only contract](safe-outputs.md#unchanged-completion-remains-unavailable).
 
 Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly

@@ -857,17 +857,22 @@ with the admitted policy; missing context or a different repository, PR, head,
 run or attempt is refused. Only an accepted report carries `continuation`.
 This field is identity, **not a completion claim** or required-verification result.
 
-The workflow opt-in currently **refuses before proposal download**. Raw
-proposal provenance still proves only run and digest: a fresh checker could
-otherwise read an earlier attempt's raw upload and stamp it with the current
-identity. The artifact API exposes no producer attempt. An agent job's reported
-attempt, an attempt-looking upload name or inference registration would not
-independently prove which attempt produced that ID. The identity tuple is
-admitted caller context, not proof of a raw artifact's producer attempt.
-This larger prerequisite remains open; **end-to-end producer-attempt binding
-does not exist yet**. No bound workflow result may reach apply until it does.
+Raw proposal ID and digest prove only the run: without more, a fresh checker
+could read an earlier attempt's raw upload and stamp it with the current
+identity. The artifact API exposes no producer attempt, and an agent job's
+reported attempt, an attempt-looking upload name or inference registration
+would not independently prove one. Check's bound path instead reads two
+server-set timestamps before downloading anything: the raw upload's
+`created_at` and this attempt's `run_started_at`, from the run-attempt endpoint
+for its own `github.run_id` and `github.run_attempt`. GitHub starts an attempt
+only after the previous one has completed, so an upload created strictly after
+this attempt started is this attempt's; an upload of the same second, an expired
+or other-run upload, a legacy proposals name and an unreadable attempt are
+refused. The policy context must also name this run and attempt, so a policy
+job kept from an earlier attempt by "re-run failed jobs" is refused too: re-run
+all jobs instead.
 
-The checked-upload groundwork, behind that refusal, reserves
+The checked upload then reserves
 `<artifact-prefix>checked-outputs-<run-id>-<attempt>` without overwrite. Apply
 derives the expected suffix from its own trusted Actions context, not artifact
 metadata, and requires the policy context to name that same run/attempt. Before
@@ -880,10 +885,10 @@ it. Check also exposes its trusted upload job's `artifact-attempt`, preserved
 unchanged through the detector job; apply requires it to equal the current
 attempt, so rerunning detection cannot relabel an earlier check. After download,
 apply requires the report and included policy to match the
-whole admitted tuple before any credentialed checkout or mutation. The API
-still supplies no artifact attempt: provenance relies on this checker-owned,
-collision-refusing namespace, the trusted workflow pin and successful check job,
-not a producer-supplied attempt field. Legacy callers omit the context and keep
+whole admitted tuple before any credentialed checkout or mutation. Checked
+provenance relies on this checker-owned, collision-refusing namespace, the
+trusted workflow pin and successful check job, not a producer-supplied attempt
+field. Legacy callers omit the context and keep
 their existing run-only artifact contract, with no unchanged-completion eligibility.
 
 Before carrying accepted completion evidence, required verification must still
@@ -891,8 +896,9 @@ be specified by trusted context; the agent cannot choose
 an empty required set. Missing context, identity mismatches, changed output
 claimed as unchanged, absent/malformed/incomplete checkpoints, stopped outcomes,
 and failed or unavailable required verification must fail closed. This is a
-prerequisite. The identity-only opt-in adds no receipt, scheduler, output bound,
-permission, hold exception or readiness transition. No shipped caller enables it.
+separate prerequisite: the bound identity is not a completion claim. The opt-in
+adds no receipt, scheduler, output bound, permission, hold exception or
+readiness transition. No shipped caller enables it.
 
 Today the producer saves outcomes as diagnostics outside the hand-back. The
 collector sanitizes requests; check validates bounded no-follow files, secrets,

@@ -205,38 +205,92 @@ fn a_fresh_checker_cannot_relabel_an_earlier_producer_attempt() {
     let steps = check["jobs"]["check"]["steps"].as_vec().unwrap();
     let position = steps
         .iter()
-        .position(|step| {
-            step["name"].as_str() == Some("Require independently proven producer attempt")
-        })
+        .position(|step| step["name"].as_str() == Some("The proposals are this attempt's upload"))
         .unwrap();
     let guard = &steps[position];
     assert_eq!(
         guard["if"].as_str(),
         Some("${{ fromJSON(inputs.policy).continuation-context != '' }}")
     );
-    let provenance = steps
-        .iter()
-        .position(|step| step["name"].as_str() == Some("The proposals are the agent job's upload"))
-        .unwrap();
-    assert!(position < provenance);
     assert!(!steps[..position].iter().any(|step| {
         step["uses"]
             .as_str()
             .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
     }));
-    // Same admitted repository/PR/head/run, but attempt 1 raw proposals are
-    // offered to attempt 2. Neither producer metadata nor even a fresh raw
-    // upload is proof: both remain refused until independent provenance exists.
-    for producer_attempt in [1, 2] {
-        let result = Command::new("bash").args(["-euo", "pipefail", "-c", guard["run"].as_str().unwrap()])
-            .env("GITHUB_RUN_ID", "7").env("GITHUB_RUN_ATTEMPT", "2")
-            .env("CONTINUATION", serde_json::json!({"repository":"example/repo", "pull_request":12, "head":"a".repeat(40), "run_id":7,"attempt":2}).to_string())
-            .env("PROPOSALS", "42").env("DIGEST", "c".repeat(64))
-            .env("PRODUCER_SELECTED_ATTEMPT", producer_attempt.to_string()).output().unwrap();
-        assert_eq!(result.status.code(), Some(1));
-        assert!(
-            String::from_utf8_lossy(&result.stdout)
-                .contains("producer-attempt provenance is not available")
+    // The admitted attempt 2 of run 7 started at 12:00:00. Producer-selected
+    // metadata is in the environment but never read: only the server's own
+    // timestamps tell this attempt's upload from an earlier one's.
+    let script = format!(
+        "gh() {{ case \"$*\" in 'api repos/o/r/actions/runs/7/attempts/2') printf '%s' \"$ATTEMPT\";; 'api repos/o/r/actions/artifacts/42') printf '%s' \"$ARTIFACT\";; *) return 9;; esac; }}\n{}",
+        guard["run"].as_str().unwrap()
+    );
+    let identity = serde_json::json!({"repository":"example/repo", "pull_request":12, "head":"a".repeat(40), "run_id":7, "attempt":2});
+    let started =
+        serde_json::json!({"id":7, "run_attempt":2, "run_started_at":"2026-01-01T12:00:00Z"});
+    let good = serde_json::json!({"id":42, "expired":false, "created_at":"2026-01-01T12:05:00Z", "workflow_run":{"id":7}});
+    for case in [
+        "valid",
+        "earlier-attempt",
+        "same-second",
+        "other-run",
+        "expired",
+        "no-created-at",
+        "artifact-unavailable",
+        "attempt-unavailable",
+        "attempt-mismatch",
+        "attempt-other-run",
+        "no-start",
+        "context-attempt",
+        "context-run",
+        "context-missing-attempt",
+        "legacy-name",
+        "no-id",
+    ] {
+        let (mut artifact, mut attempt, mut context) =
+            (good.clone(), started.clone(), identity.clone());
+        let (mut name, mut proposals) = ("", "42");
+        match case {
+            "earlier-attempt" => artifact["created_at"] = "2026-01-01T11:59:00Z".into(),
+            "same-second" => artifact["created_at"] = "2026-01-01T12:00:00Z".into(),
+            "other-run" => artifact["workflow_run"]["id"] = 8.into(),
+            "expired" => artifact["expired"] = true.into(),
+            "no-created-at" => artifact["created_at"] = serde_json::Value::Null,
+            "artifact-unavailable" => artifact = "".into(),
+            "attempt-unavailable" => attempt = "".into(),
+            "attempt-mismatch" => attempt["run_attempt"] = 1.into(),
+            "attempt-other-run" => attempt["id"] = 8.into(),
+            "no-start" => attempt["run_started_at"] = serde_json::Value::Null,
+            "context-attempt" => context["attempt"] = 1.into(),
+            "context-run" => context["run_id"] = 8.into(),
+            "context-missing-attempt" => {
+                context.as_object_mut().unwrap().remove("attempt");
+            }
+            "legacy-name" => name = "proposals",
+            "no-id" => proposals = "",
+            _ => {}
+        }
+        let text = |value: &serde_json::Value| match value {
+            serde_json::Value::String(text) => text.clone(),
+            value => value.to_string(),
+        };
+        let result = Command::new("bash")
+            .args(["-eo", "pipefail", "-c", &script])
+            .env("GITHUB_REPOSITORY", "o/r")
+            .env("GITHUB_RUN_ID", "7")
+            .env("GITHUB_RUN_ATTEMPT", "2")
+            .env("CONTINUATION", context.to_string())
+            .env("PROPOSALS", proposals)
+            .env("NAME", name)
+            .env("ATTEMPT", text(&attempt))
+            .env("ARTIFACT", text(&artifact))
+            .env("PRODUCER_SELECTED_ATTEMPT", "2")
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            case == "valid",
+            "{case}: {}",
+            String::from_utf8_lossy(&result.stderr)
         );
     }
 }

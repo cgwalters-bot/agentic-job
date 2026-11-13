@@ -15,9 +15,9 @@ says what a caller may rely on across versions.
   remain in force. The default remains managed isolation (#3638).
 
 - Optional `bind-continuation` (off by default) records admitted continuation
-  identity and prepares attempt-scoped checked artifacts. Bound workflow hand-backs
-  fail closed pending trusted raw producer-attempt provenance; legacy callers are
-  unchanged and unchanged completion remains unavailable.
+  identity and refuses raw or checked uploads from an earlier run attempt, judged
+  by GitHub's upload and attempt-start timestamps; legacy callers are unchanged
+  and unchanged completion remains unavailable.
 
 - GitHub organization bounds can opt into forks selected by caller-defined
   custom properties and topics, with a known parent. Policy checks live metadata

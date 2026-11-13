@@ -84,7 +84,7 @@ on:
         type: string
         default: ""
       bind-continuation:
-        description: Record admitted continuation identity; check refuses pending trusted producer-attempt provenance, no unchanged completion
+        description: Bind a local push to this run attempt; raw and checked uploads must be this attempt's; no unchanged completion
         type: boolean
         default: false
       repo:

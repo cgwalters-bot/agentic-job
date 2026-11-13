@@ -135,14 +135,6 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" == "$REPOSITORY" && "$SOURCE_SHA" == "$SHA" ]] ||
             { echo "::error::policy.yml ran at $SOURCE_REPOSITORY@$SOURCE_SHA, this workflow at $REPOSITORY@$SHA: pin all pieces to one commit"; exit 1; }
       # Empty IDs must not turn download-artifact into a download of all uploads.
-      # A fresh checker must not relabel a prior attempt's raw upload. The
-      # artifact API proves its run, not its producer attempt; neither an
-      # agent job output nor an agent-chosen name repairs that trust gap.
-      - name: Require independently proven producer attempt
-        if: ${{ fromJSON(inputs.policy).continuation-context != '' }}
-        run: |
-          echo '::error::continuation producer-attempt provenance is not available; bound workflow hand-backs remain disabled'
-          exit 1
       - name: Require explicit artifact contracts
         env:
           BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
@@ -175,6 +167,28 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROPOSALS" |
             jq -e --arg digest "sha256:$DIGEST" --arg run "$GITHUB_RUN_ID" '.digest == $digest and (.workflow_run.id | tostring) == $run' > /dev/null ||
             { echo "::error::artifact $PROPOSALS of run $GITHUB_RUN_ID does not have the digest the agent job gave, sha256:$DIGEST; the call needs \`actions: read\`"; exit 1; }
+      # A fresh checker must not relabel an earlier attempt's raw upload.
+      # The artifact API names a run, not an attempt, and nothing the agent
+      # job reports can say which; but GitHub stamps an upload's `created_at`
+      # and each attempt's `run_started_at`, and an attempt starts only once
+      # the one before it has completed. An upload created after this
+      # attempt started is this attempt's; the same second is refused.
+      - name: The proposals are this attempt's upload
+        if: ${{ fromJSON(inputs.policy).continuation-context != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTINUATION: ${{ fromJSON(inputs.policy).continuation-context }}
+          PROPOSALS: ${{ inputs.safe-outputs-artifact-id }}
+          NAME: ${{ fromJSON(inputs.policy).proposals-artifact }}
+        run: |
+          [[ -z "$NAME" && "$PROPOSALS" =~ ^[0-9]+$ ]] || { echo '::error::a continuation needs a proposal upload ID, not a name'; exit 1; }
+          jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '(.run_id | tostring) == $run and (.attempt | tostring) == $attempt' <<< "$CONTINUATION" > /dev/null ||
+            { echo "::error::the continuation policy is not for run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT; re-run all jobs"; exit 1; }
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" |
+            jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" 'select((.id | tostring) == $run and (.run_attempt | tostring) == $attempt) | .run_started_at | fromdateiso8601')
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROPOSALS" |
+            jq -e --argjson started "$started" --arg run "$GITHUB_RUN_ID" '(.workflow_run.id | tostring) == $run and .expired == false and (.created_at | fromdateiso8601) > $started' > /dev/null ||
+            { echo "::error::artifact $PROPOSALS was not uploaded during run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"; exit 1; }
       # Same source commit as the whole wrapper: a local reusable call is pinned
       # to its caller workflow's commit, not the target repository checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
