@@ -71,7 +71,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -426,6 +426,9 @@ pub struct Options {
     pub cwd: PathBuf,
     /// The task.
     pub prompt: String,
+    /// Skip the initial turn and prepend `prompt` to the first client's
+    /// prompt instead. Requires a bridge; the idle timeout starts at setup.
+    pub wait_for_client: bool,
     /// Where `acp.jsonl`, `agent-stderr.log` and `harness.json` go.
     pub out: PathBuf,
     pub permissions: Policy,
@@ -477,6 +480,7 @@ async fn watch_budget(
     tap: Arc<Tap>,
     stop: watch::Sender<Option<Stop>>,
     nudges: mpsc::UnboundedSender<Nudge>,
+    first_request_deadline: Arc<OnceLock<tokio::time::Instant>>,
 ) {
     let worker_subagents = limits.worker_subagents.clone();
     let mut budget = Budget::new(limits);
@@ -493,7 +497,11 @@ async fn watch_budget(
             worker_tasks,
             repeats: tap.repeats(),
         };
-        if usage.elapsed >= FIRST_REQUEST_DEADLINE && usage.requests == Some(0) {
+        if first_request_deadline
+            .get()
+            .is_some_and(|deadline| tokio::time::Instant::now() >= *deadline)
+            && usage.requests == Some(0)
+        {
             return set_stop(&stop, Stop::NoRequests);
         }
         // The session may be over: nobody is left to nudge.
@@ -575,6 +583,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         config_options,
         cwd,
         prompt,
+        wait_for_client,
         out,
         permissions,
         limits,
@@ -595,6 +604,10 @@ pub async fn run(opts: Options) -> Result<RunResult> {
     ensure!(
         limits.max_requests.is_none() || requests.is_some(),
         "the session has a cap on model requests and nothing that counts them"
+    );
+    ensure!(
+        !wait_for_client || bridge.is_some(),
+        "waiting for a client requires a session bridge"
     );
     std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
     // Listening before the agent starts: a client may come during the
@@ -622,6 +635,12 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         spec.provider_error.clone(),
     )?);
     let (argv, env) = spec.command(launch.wrapper(), model.as_deref());
+    // A task run's startup watchdog includes setup. A taskless run is
+    // deliberately idle: arm it only when the first client prompt starts.
+    let first_request_deadline = Arc::new(OnceLock::new());
+    if !wait_for_client {
+        let _ = first_request_deadline.set(tokio::time::Instant::now() + FIRST_REQUEST_DEADLINE);
+    }
     let task = Task {
         cwd: &cwd,
         model: model.as_deref(),
@@ -629,6 +648,8 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         fallback_model: fallback_model.as_deref(),
         config_options: &config_options,
         prompt: &prompt,
+        wait_for_client,
+        first_request_deadline: &first_request_deadline,
         notices: spec.notices,
         steering: spec.steering,
         hand_back_window: Budget::new(limits.clone()).hand_back_window(),
@@ -660,6 +681,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
         tap.clone(),
         stop_tx,
         nudge_tx,
+        first_request_deadline.clone(),
     ));
     // Whatever the agent left in its group goes before anything reads its
     // files.
@@ -798,6 +820,8 @@ struct Task<'a> {
     fallback_model: Option<&'a str>,
     config_options: &'a [(String, String)],
     prompt: &'a str,
+    wait_for_client: bool,
+    first_request_deadline: &'a OnceLock<tokio::time::Instant>,
     /// The agent takes a prompt sent during a turn (`AgentSpec::notices`).
     notices: bool,
     /// The agent takes `_session/steering` (`AgentSpec::steering`).
@@ -1318,6 +1342,26 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     };
     // Nobody waits for it in a task run.
     let _ = session_id.send(Some(sid.to_string()));
+    let link = Link {
+        cx: &cx,
+        tap,
+        sid: &sid,
+        cancelling: &cancelling,
+        notices: task.notices,
+        steering: task.steering,
+        first_request_deadline: task.first_request_deadline,
+    };
+    if task.wait_for_client {
+        let Some(talk) = conversation.take() else {
+            return Ended::failure("waiting for a client requires a session bridge".to_owned());
+        };
+        return match converse(&link, &mut stop, &mut nudges, talk, Some(task.prompt)).await {
+            Talked::Ended(ended) => ended,
+            Talked::HandBack { why, text, window } => {
+                hand_back(&link, &mut stop, &why, text, window).await
+            }
+        };
+    }
     let request = PromptRequest::new(
         sid.clone(),
         vec![ContentBlock::Text(TextContent::new(task.prompt.to_owned()))],
@@ -1331,14 +1375,6 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     // once the task's turn is over.
     let (restated_tx, mut restated) = mpsc::unbounded_channel::<String>();
     let restating = Abandon(Arc::default());
-    let link = Link {
-        cx: &cx,
-        tap,
-        sid: &sid,
-        cancelling: &cancelling,
-        notices: task.notices,
-        steering: task.steering,
-    };
     // Until when the agent may send nothing before its turn is taken for
     // stalled; none without a stall timeout.
     let mut heard = tap.heard();
@@ -1604,7 +1640,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                     _ => ended,
                 };
             };
-            return match converse(&link, &mut stop, &mut nudges, talk).await {
+            return match converse(&link, &mut stop, &mut nudges, talk, None).await {
                 Talked::Ended(ended) => ended,
                 Talked::HandBack { why, text, window } => {
                     hand_back(&link, &mut stop, &why, text, window).await
@@ -1652,6 +1688,7 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
 
 /// The agent's session, as the session's turns are sent to it.
 struct Link<'a> {
+    first_request_deadline: &'a OnceLock<tokio::time::Instant>,
     cx: &'a ConnectionTo<Agent>,
     tap: &'a Tap,
     sid: &'a SessionId,
@@ -2059,6 +2096,7 @@ async fn converse(
     stop: &mut watch::Receiver<Option<Stop>>,
     nudges: &mut mpsc::UnboundedReceiver<Nudge>,
     talk: Conversation,
+    mut prefix: Option<&str>,
 ) -> Talked {
     let Link {
         cx,
@@ -2106,6 +2144,11 @@ async fn converse(
                     continue;
                 }
                 Nudge::HandBack { why, text, window } => {
+                    // A taskless session has no work to hand back before
+                    // its first client prompt, and must not start a turn.
+                    if prefix.is_some() {
+                        return Talked::Ended(stopped_by(Some(why)));
+                    }
                     tap.log(&[format!("⚠ {}: asking the agent to hand back", stopped(&why).1)]);
                     return Talked::HandBack { why, text, window };
                 }
@@ -2127,7 +2170,7 @@ async fn converse(
             Some(FromClient::Prompt { prompt, answer }) => (prompt, answer),
         };
         let mut answer = Some(answer);
-        let blocks: Vec<ContentBlock> = match serde_json::from_value(prompt) {
+        let mut blocks: Vec<ContentBlock> = match serde_json::from_value(prompt) {
             Ok(blocks) => blocks,
             Err(e) => {
                 reply(
@@ -2137,6 +2180,11 @@ async fn converse(
                 continue;
             }
         };
+        if let Some(prefix) = prefix.take().filter(|text| !text.is_empty()) {
+            blocks.insert(0, ContentBlock::Text(TextContent::new(prefix.to_owned())));
+        }
+        link.first_request_deadline
+            .get_or_init(|| tokio::time::Instant::now() + FIRST_REQUEST_DEADLINE);
         let request = PromptRequest::new(sid.clone(), blocks);
         let mut response = std::pin::pin!(cx.send_request(request).block_task());
         loop {

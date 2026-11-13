@@ -187,6 +187,7 @@ struct Setup<'a> {
     refused_first: &'static [Headers],
     /// Construct the bridge through the gateway's production bind path.
     gateway: bool,
+    wait_for_client: bool,
     /// Standard input for `agentic-job session connect --json`, which
     /// then is the client in place of the one played, through a stand-in
     /// for serve that passes on `GRANTED`; what it prints is what the
@@ -694,6 +695,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             .collect(),
         cwd: path("work"),
         prompt: "Do the fake task.\n".to_owned(),
+        wait_for_client: setup.wait_for_client,
         out: path("out"),
         permissions: setup.permissions.map_or_else(Policy::allow_all, |text| {
             Policy::parse(&fill(text)).unwrap()
@@ -1382,6 +1384,7 @@ fn a_cap_nothing_counts_is_refused() {
         config_options: Vec::new(),
         cwd: dir.path().to_owned(),
         prompt: String::new(),
+        wait_for_client: false,
         out: dir.path().join("out"),
         permissions: Policy::allow_all(),
         limits: Limits {
@@ -3277,6 +3280,84 @@ fn a_quiet_client_ends_the_session() {
     assert!(r.elapsed < Duration::from_secs(30), "{:?}", r.elapsed);
     assert!(
         r.log.contains("waiting for the client's prompt"),
+        "{}",
+        r.log
+    );
+}
+
+#[test]
+fn a_taskless_session_is_bounded_before_its_first_prompt() {
+    for (timeout_s, idle_s, nudges, code, outcome) in [
+        (60, 1, false, 0, "success"),
+        (2, 60, false, 124, "timeout"),
+        (2, 60, true, 124, "timeout"),
+    ] {
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                wait_for_client: true,
+                files: &[("script.json", "[]"), ("later.json", LATER)],
+                timeout_s,
+                nudges,
+                // No session/new: a socket alone has not attached a client.
+                client: Some((
+                    |client| while client.recv().is_some() {},
+                    Duration::from_secs(idle_s),
+                )),
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, code, outcome);
+        assert!(
+            !r.records.iter().any(
+                |record| record["dir"] == "send" && record["msg"]["method"] == "session/prompt"
+            ),
+            "{}",
+            r.log
+        );
+        assert!(r.elapsed < Duration::from_secs(10), "{:?}", r.elapsed);
+        if idle_s == 1 {
+            assert_eq!(r.result["message"], "no prompt from the client for 1s");
+        }
+    }
+}
+
+#[test]
+fn a_taskless_session_defers_the_first_inference_deadline() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            wait_for_client: true,
+            count_requests: true,
+            advance_startup_clock: true,
+            files: &[
+                ("script.json", r#"[{"say": "First client turn."}]"#),
+                ("later.json", LATER),
+            ],
+            timeout_s: 1200,
+            client: Some((
+                |client| {
+                    // The harness advances the clock by 301 seconds after
+                    // 300ms; attach after that, still inside the idle limit.
+                    std::thread::sleep(Duration::from_secs(1));
+                    // The jump also expires the old transport's heartbeat.
+                    client.drop_and_come_back();
+                    let new = client.request(1, "session/new", json!({}));
+                    let sid = new["result"]["sessionId"].clone();
+                    assert!(sid.is_string(), "{new}");
+                    let answer = client.request(2, "session/prompt", text_prompt(&sid, "hi"));
+                    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+                },
+                Duration::from_secs(600),
+            )),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert!(
+        r.client
+            .iter()
+            .any(|msg| msg.to_string().contains("First client turn.")),
         "{}",
         r.log
     );

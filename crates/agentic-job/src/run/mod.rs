@@ -132,9 +132,9 @@ pub struct Args {
     /// The policy.json that `policy` printed for this run
     #[arg(long, value_name = "FILE")]
     pub policy: PathBuf,
-    /// The task given to the agent
+    /// The task given to the agent; omit to wait for a client with session.listen
     #[arg(long, value_name = "FILE")]
-    pub task: PathBuf,
+    pub task: Option<PathBuf>,
     /// JSON about the run from the CI system, copied into summary.json
     #[arg(long, value_name = "FILE")]
     pub meta: PathBuf,
@@ -696,19 +696,23 @@ impl Plan {
         let read = |path: &Path| {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
         };
-        let task_bytes = std::fs::metadata(&args.task)
-            .with_context(|| format!("reading {}", args.task.display()))?
-            .len();
+        let task = match &args.task {
+            Some(path) => {
+                let task_bytes = std::fs::metadata(path)
+                    .with_context(|| format!("reading {}", path.display()))?
+                    .len();
+                ensure!(
+                    task_bytes <= MAX_TASK_BYTES,
+                    "the task {} is {task_bytes} bytes, over {MAX_TASK_BYTES}",
+                    path.display()
+                );
+                read(path)?
+            }
+            None => String::new(),
+        };
         ensure!(
-            task_bytes <= MAX_TASK_BYTES,
-            "the task {} is {task_bytes} bytes, over {MAX_TASK_BYTES}",
-            args.task.display()
-        );
-        let task = read(&args.task)?;
-        ensure!(
-            !task.trim().is_empty(),
-            "the task {} is empty",
-            args.task.display()
+            !task.trim().is_empty() || config.session.listen,
+            "a missing or empty task requires session.listen = true"
         );
         let meta: Value = serde_json::from_str(&read(&args.meta)?)
             .with_context(|| format!("parsing {}", args.meta.display()))?;
@@ -1224,6 +1228,7 @@ impl Plan {
                 .collect(),
             cwd: prepared.cwd,
             prompt: prepared.prompt,
+            wait_for_client: self.task.trim().is_empty(),
             out: self.work.join(HARNESS_DIR),
             permissions: Policy::for_task(&self.sandbox.home)?,
             limits: self.limits.clone(),

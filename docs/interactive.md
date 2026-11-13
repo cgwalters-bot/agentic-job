@@ -17,7 +17,7 @@ A run without a tailnet can be reached through an
 [attach gateway](#an-attach-gateway) instead.
 
 Partly built: a session run ([session runs](../specs/session.md))
-accepts an operator's prompts after its task's turn, through a bridge
+accepts an operator's prompts after its optional task's turn, through a bridge
 that listens on the runner's tailnet name behind `tailscale serve`, and a
 client attaches to it from anywhere on the tailnet, late or again
 ([attaching](#attaching-to-a-session)). What follows that is the earlier
@@ -26,6 +26,28 @@ program, attaches to the agent's session and works with it, while the
 agent stays inside the same [sandbox](sandbox.md),
 [inference proxy](inference.md) and [safe-outputs](safe-outputs.md)
 limits as an unattended run. It is why the agent is driven over ACP.
+
+With `[session] listen = true`, `run` also accepts no `--task`, or an empty
+or whitespace-only task file. It initializes the agent's ACP session but sends
+no initial prompt: the first client prompt starts the first turn, with the
+run's hand-back brief prepended. This works with either the tailnet bridge or
+the attach gateway below. An explicitly named task file must still exist and
+fit the task size limit. Without the listener, a missing or empty task is
+refused. This is the standalone `run` interface; event admission in the reusable
+workflow still requires its event task.
+
+The idle timeout (`session.idle-minutes`, 10 by default, at most 60) starts
+after ACP setup for a taskless session, or after the task's turn otherwise,
+and restarts after each client turn. Merely connecting, attaching, reconnecting
+or polling `_session/status` does not renew it. A late client can use
+`session/new` to attach; after a dropped connection another `session/new` on a
+new connection attaches to the same agent session, not a fresh conversation.
+A second `session/new` on one connection is refused. Normal close ends the run;
+start a new run for a new conversation.
+
+For a taskless counted run, the five-minute first-inference-request watchdog
+starts with the first client prompt, not while the run is waiting for one.
+The overall timeout and budget still run from startup.
 
 ## Attaching to a session
 

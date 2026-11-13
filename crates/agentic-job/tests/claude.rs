@@ -121,6 +121,7 @@ fn pinned_claude_acp_offers_file_tools() {
             config_options: Vec::new(),
             cwd: work.clone(),
             prompt: "Write the requested file and stop.".into(),
+            wait_for_client: false,
             out: out.clone(),
             permissions: Policy::for_task(&home).unwrap(),
             limits: Limits {

@@ -598,6 +598,7 @@ fn session_with(mode: &str, servers: Vec<HttpMcp>) -> (Value, String, Value) {
         config_options: Vec::new(),
         cwd: dir.path().to_owned(),
         prompt: "Call the tool.\n".to_owned(),
+        wait_for_client: false,
         out: out.clone(),
         permissions: Policy::allow_all(),
         limits: Limits {

@@ -34,11 +34,21 @@ Tracked in [issue 536](https://github.com/cgwalters-forge/agentic-job/issues/536
 A session run is an ordinary `agentic-job run`, with the same policy, sandbox,
 inference proxy, limits, hand-back, check and apply. It does not end after the
 task's turn. After that turn it waits for a client's prompts, and each prompt is
-a turn of its own. The task is the session's profile, for example the
+a turn of its own. The task, when supplied, is the session's profile, for example the
 controller's instructions with agent-board read-only. The run ends when the
 client leaves, when no prompt arrives within the idle timeout, or at a limit.
 The transcript is the run's artifact, as for any run. A new session starts from
 the forge, not from an old transcript.
+
+Standalone `run` with `[session] listen = true` may omit `--task` or supply an
+empty or whitespace-only task file. A supplied path must exist and remains
+subject to the task size limit. In this taskless mode ACP setup still runs,
+but no initial `session/prompt` is sent. The bridge waits for a client and
+prepends the run's brief to its first prompt, under the same sandbox,
+inference, budget and safe-output limits. Before that first prompt, a limit
+ends the run without asking the agent for a hand-back turn. Both the tailnet
+and `[session] bind` attach-gateway paths support this mode; it adds no flag
+and does not relax event-task admission in the reusable workflow.
 
 It is off by default. Only a configuration with `[session] listen = true`, from
 the reusable workflow's `session` input, turns it on. The caller's file names
@@ -326,9 +336,14 @@ are built.
 A session run stays inside the run's timeout and budget. Hand-back near a limit
 also works the same, whether a turn is running or the session is idle. The idle
 timeout is `session.idle-minutes`: 10 by default, at most 60. It runs from the
-end of the task's turn whether or not a client has come. A runner waiting
+end of the task's turn, or completion of ACP setup when taskless, whether or
+not a client has come. Only a finished client turn renews it: attaching,
+reconnecting and status requests do not. A runner waiting
 for nobody still costs minutes. Hosted jobs end after six hours. At most 16
 operators and 16 origins are taken, and one capability.
+For a taskless counted run, the first-inference-request deadline starts with
+the first client prompt instead of startup; the overall budget and timeout
+still include the wait.
 `Tailscale-App-Capabilities` is taken up to 4 KiB. Up to 16 handshakes run concurrently, each
 with a 10-second deadline. At capacity a new connection replaces the oldest
 pending handshake, so parked sockets cannot reserve every slot. This does not

@@ -427,6 +427,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
                 .collect(),
             cwd: work.clone(),
             prompt: "Write the requested file and stop.".into(),
+            wait_for_client: false,
             out: out.clone(),
             permissions: Policy::for_task(&home).unwrap(),
             limits: Limits {

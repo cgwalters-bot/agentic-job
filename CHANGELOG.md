@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Standalone `run` with `[session] listen = true` accepts an omitted or empty
+  task and waits for a client's first prompt without an initial turn, including
+  through an attach gateway. The existing idle timeout and run limits still
+  bound the wait (#3616).
+
 - Standalone `safe-outputs check` and `apply` accept explicit `--forge gitlab`,
   using the existing GitLab policy, planner and publisher for every supported
   safe-output kind. Receipts also bind patch inputs; GitHub comments remain

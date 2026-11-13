@@ -159,7 +159,7 @@ impl Job {
         let mut command = Command::new(BIN);
         command
             .arg("run")
-            .args(["--policy", "policy.json", "--task", "task.md"])
+            .args(["--policy", "policy.json"])
             .args(["--meta", "meta.json", "--out", "out"])
             .args(["--config", "config.toml"])
             .current_dir(&self.dir)
@@ -172,6 +172,9 @@ impl Job {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if self.path("task.md").exists() {
+            command.args(["--task", "task.md"]);
+        }
         command
     }
 
@@ -988,6 +991,155 @@ fn a_session_run_talks_to_its_operator_and_hands_back() {
     let outputs = job.text("out/safe-outputs/outputs.jsonl");
     assert!(outputs.contains("docs: Add a greeting"), "{outputs}");
     assert_eq!(proxy.run_states(), ["finished"]);
+}
+
+#[test]
+fn a_taskless_session_waits_for_a_gateway_client() {
+    const ATTACH_SECRET: &str = "test-session-attach-secret-32-bytes";
+    for task in [None, Some(""), Some(" \n\t")] {
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let job = Job::new("taskless-chat");
+        job.own_repository();
+        if let Some(task) = task {
+            job.write("task.md", task);
+        } else {
+            std::fs::remove_file(job.path("task.md")).unwrap();
+        }
+        job.script(&json!([canary(), {"say": "Hello from the first turn."}]));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let config = format!(
+            "{}[session]\nlisten = true\nbind = \"{address}\"\nidle-minutes = 1\n",
+            own_config(&plain(&proxy))
+        );
+        let child = job
+            .own_command(&config)
+            .env(bridge::ATTACH_TOKEN_VAR, ATTACH_SECRET)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let log = job.path("out/work/harness/acp.jsonl");
+        // Attach late, after ACP setup, not merely after the socket binds.
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            if text.contains("session/new") && text.contains("sessionId") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the agent never initialized");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !job.text("out/work/harness/acp.jsonl")
+                .contains("session/prompt")
+        );
+        let mut request =
+            tungstenite::client::IntoClientRequest::into_client_request(format!("ws://{address}/"))
+                .unwrap();
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {ATTACH_SECRET}").parse().unwrap(),
+        );
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let (mut socket, _) = tungstenite::client(request.clone(), stream).unwrap();
+        let mut got = Vec::new();
+        let new = bridge_request(&mut socket, &mut got, 1, "session/new", json!({}));
+        let sid = new["result"]["sessionId"].clone();
+        assert!(sid.is_string(), "{new}");
+        let status = bridge_request(
+            &mut socket,
+            &mut got,
+            2,
+            "_session/status",
+            json!({"sessionId": sid}),
+        );
+        assert_eq!(status["result"]["running"], false, "{status}");
+        let answer = bridge_request(
+            &mut socket,
+            &mut got,
+            3,
+            "session/prompt",
+            json!({
+                "sessionId": sid, "prompt": [{"type": "text", "text": "Hello, agent."}]
+            }),
+        );
+        assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+        assert!(
+            got.iter()
+                .any(|msg| msg.to_string().contains("Hello from the first turn.")),
+            "{got:?}"
+        );
+        let repeated = bridge_request(&mut socket, &mut got, 4, "session/new", json!({}));
+        assert!(repeated["error"].is_object(), "{repeated}");
+        // A dropped client can attach again to the existing session;
+        // session/new is not a request for a fresh agent or initial turn.
+        socket.get_mut().shutdown(std::net::Shutdown::Both).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut socket = loop {
+            let stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            if let Ok((socket, _)) = tungstenite::client(request.clone(), stream) {
+                break socket;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the bridge never admitted a reconnect"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let reattached = bridge_request(&mut socket, &mut got, 5, "session/new", json!({}));
+        assert_eq!(reattached["result"]["sessionId"], sid, "{reattached}");
+        let _ = socket.close(Some(tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Normal,
+            reason: "done".into(),
+        }));
+        while socket.read().is_ok() {}
+        let result = Finished::of(child.wait_with_output().unwrap());
+        assert_eq!(result.code, Some(EXIT_SUCCESS), "{}", result.all());
+        let records: Vec<Value> = job
+            .text("out/work/harness/acp.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let prompts: Vec<_> = records
+            .iter()
+            .filter(|record| record["dir"] == "send" && record["msg"]["method"] == "session/prompt")
+            .collect();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        let prompt = prompts[0].to_string();
+        assert!(prompt.contains("Hello, agent."), "{prompt}");
+        assert!(prompt.contains("How this run hands back"), "{prompt}");
+        assert_eq!(proxy.run_states(), ["finished"]);
+    }
+}
+
+#[test]
+fn a_taskless_run_without_a_listener_is_refused() {
+    let proxy = Proxy::start();
+    for task in [None, Some(""), Some(" \n\t")] {
+        let job = Job::new("taskless-refused");
+        if let Some(task) = task {
+            job.write("task.md", task);
+        } else {
+            std::fs::remove_file(job.path("task.md")).unwrap();
+        }
+        let got = job.own_run(&own_config(&plain(&proxy)));
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(
+            got.stderr
+                .contains("a missing or empty task requires session.listen"),
+            "{}",
+            got.all()
+        );
+        assert!(!job.path("out/work/harness").exists());
+    }
 }
 
 #[test]
