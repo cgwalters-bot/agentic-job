@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::exit::Exit;
 
@@ -766,15 +766,84 @@ fn admits_repo(
     }
     let live = read(&format!("repos/{repo}"))
         .with_context(|| format!("cannot confirm organization repository {repo:?}"))?;
-    Ok(live["full_name"]
-        .as_str()
-        .is_some_and(|name| name.eq_ignore_ascii_case(repo))
-        && live["owner"]["login"]
+    ensure!(
+        live["full_name"]
             .as_str()
-            .is_some_and(|login| login.eq_ignore_ascii_case(owner))
-        && live["owner"]["type"] == "Organization"
-        && live["fork"] == false
-        && live["archived"] == false)
+            .is_some_and(|name| name.eq_ignore_ascii_case(repo))
+            && live["owner"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+            && live["owner"]["type"] == "Organization"
+            && live["archived"] == false,
+        "repository {repo:?} requires matching full_name, organization owner and archived = false"
+    );
+    let mut problems = Vec::new();
+    // Read properties at most once, even when several rules name this org.
+    let mut properties = None;
+    for rule in rules.iter().filter_map(|rule| match rule {
+        RepoRule::Organization(rule) if rule.org.eq_ignore_ascii_case(owner) => Some(rule),
+        _ => None,
+    }) {
+        if live["fork"] != rule.forks {
+            problems.push(format!("requires fork = {}", rule.forks));
+            continue;
+        }
+        if rule.forks
+            && !live["parent"]["full_name"]
+                .as_str()
+                .is_some_and(|name| safe_outputs::contract::REPO_RE.is_match(name) && !dotted(name))
+        {
+            problems.push("requires known parent.full_name".to_owned());
+            continue;
+        }
+        let missing_topics: Vec<_> = rule
+            .topics
+            .iter()
+            .filter(|topic| {
+                !live["topics"].as_array().is_some_and(|topics| {
+                    topics
+                        .iter()
+                        .any(|value| value.as_str() == Some(topic.as_str()))
+                })
+            })
+            .collect();
+        if !missing_topics.is_empty() {
+            problems.push(format!("requires topics {missing_topics:?}"));
+            continue;
+        }
+        if !rule.properties.is_empty() && properties.is_none() {
+            let values = read(&format!("repos/{repo}/properties/values"))
+                .with_context(|| format!("cannot confirm repository {repo:?} custom properties"))?;
+            ensure!(
+                values.is_array(),
+                "repository {repo:?} custom properties response must be an array"
+            );
+            properties = Some(values);
+        }
+        let missing_properties: Vec<_> = rule
+            .properties
+            .iter()
+            .filter(|(key, value)| {
+                !properties
+                    .as_ref()
+                    .and_then(|values| values.as_array())
+                    .is_some_and(|values| {
+                        values.iter().any(|entry| {
+                            entry["property_name"].as_str() == Some(key.as_str())
+                                && entry["value"].as_str() == Some(value.as_str())
+                        })
+                    })
+            })
+            .collect();
+        if missing_properties.is_empty() {
+            return Ok(true);
+        }
+        problems.push(format!("requires custom properties {missing_properties:?}"));
+    }
+    bail!(
+        "repository {repo:?} does not match organization rules: {}",
+        problems.join("; ")
+    )
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -1049,10 +1118,132 @@ missing_data = { max = 3 }
     }
 
     #[test]
+    fn organization_forks_require_live_metadata() {
+        use serde_json::json;
+
+        let mut bounds = bounds();
+        bounds.repos = toml::from_str::<toml::Table>(
+            r#"repos = [{org = "example-org", forks = true, properties = { category = "mirror" }, topics = ["managed-fork"]}]"#,
+        ).unwrap()["repos"].clone().try_into().unwrap();
+        bounds.validate().unwrap();
+        let request = Request {
+            repo: "example-org/example",
+            clone_url: "https://github.com/example-org/example",
+            ..request()
+        };
+        let live = json!({"full_name": request.repo,
+            "owner": {"login": "example-org", "type": "Organization"},
+            "fork": true, "archived": false, "parent": {"full_name": "upstream/example"},
+            "topics": ["managed-fork"]});
+        let properties = json!([{"property_name": "category", "value": "mirror"}]);
+        for (pointer, value, want) in [
+            ("/fork", json!(true), None),
+            ("/fork", json!(false), Some("fork = true")),
+            ("/topics", json!([]), Some("managed-fork")),
+            ("/topics", json!(null), Some("managed-fork")),
+            ("/parent", json!(null), Some("parent.full_name")),
+            (
+                "/parent/full_name",
+                json!("invalid"),
+                Some("parent.full_name"),
+            ),
+            ("/archived", json!(true), Some("archived = false")),
+            (
+                "/owner/login",
+                json!("other-org"),
+                Some("organization owner"),
+            ),
+        ] {
+            let mut answer = live.clone();
+            *answer.pointer_mut(pointer).unwrap() = value;
+            let result = bounds.compile_with(&request, &mut |path| match path {
+                "repos/example-org/example" => Ok(answer.clone()),
+                "repos/example-org/example/properties/values" => Ok(properties.clone()),
+                _ => panic!("unexpected read: {path}"),
+            });
+            match want {
+                Some(want) => assert!(result.unwrap_err().join(";").contains(want), "{pointer}"),
+                None => {
+                    let policy = result.unwrap();
+                    let pull = policy.safe_outputs.create_pull_request.unwrap();
+                    assert!(pull.draft);
+                    assert!(!pull.ready_when_complete);
+                    assert_eq!(policy.max_patch_bytes, bounds.max_patch_bytes);
+                    assert!(
+                        !policy
+                            .safe_outputs
+                            .others
+                            .contains_key("merge_pull_request")
+                    );
+                }
+            }
+        }
+        for answer in [
+            json!([]),
+            json!({}),
+            json!([{"property_name": "category", "value": "first-party"}]),
+        ] {
+            let errors = bounds
+                .compile_with(&request, &mut |path| {
+                    Ok(if path.ends_with("/properties/values") {
+                        answer.clone()
+                    } else {
+                        live.clone()
+                    })
+                })
+                .unwrap_err();
+            assert!(errors.join(";").contains("custom properties"));
+        }
+        for failed_path in [
+            "repos/example-org/example",
+            "repos/example-org/example/properties/values",
+        ] {
+            assert!(
+                bounds
+                    .compile_with(&request, &mut |path| {
+                        if path == failed_path {
+                            bail!("metadata unavailable");
+                        }
+                        Ok(live.clone())
+                    })
+                    .unwrap_err()
+                    .join(";")
+                    .contains("cannot confirm")
+            );
+        }
+        // Each file admits independently: non-fork bounds do not admit this fork.
+        let mut first_party = bounds.clone();
+        if let RepoRule::Organization(rule) = &mut first_party.repos[0] {
+            rule.forks = false;
+        }
+        assert!(
+            first_party
+                .compile_with(&request, &mut |_| Ok(live.clone()))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn organization_rule_validation() {
         for (rule, valid) in [
             ("{org = \"bootc-dev\", forks = false}", true),
             ("{org = \"bootc-dev\", forks = true}", false),
+            (
+                "{org = \"example-org\", forks = true, properties = { category = \"mirror\" }, topics = [\"managed-fork\"]}",
+                true,
+            ),
+            (
+                "{org = \"example-org\", forks = true, topics = [\"managed-fork\"]}",
+                false,
+            ),
+            (
+                "{org = \"example-org\", forks = true, properties = { category = \"mirror\" }}",
+                false,
+            ),
+            (
+                "{org = \"example-org\", forks = true, properties = { category = \"\" }, topics = [\"managed-fork\"]}",
+                false,
+            ),
             ("{org = \"bootc-dev\"}", false),
             (
                 "{org = \"bootc-dev\", forks = false, archived = true}",

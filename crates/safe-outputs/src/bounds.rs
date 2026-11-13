@@ -109,12 +109,17 @@ pub enum RepoRule {
     Organization(Organization),
 }
 
-/// A live GitHub organization rule. Fork admission is deliberately not configurable.
+/// A live GitHub organization rule. Forks require caller-selected metadata,
+/// so an arbitrary fork in the organization cannot acquire its permissions.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Organization {
     pub org: String,
     pub forks: bool,
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
 }
 
 impl From<String> for RepoRule {
@@ -133,7 +138,11 @@ impl std::fmt::Display for RepoRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pattern(pattern) => f.write_str(pattern),
-            Self::Organization(rule) => write!(f, "{{org = {:?}, forks = false}}", rule.org),
+            Self::Organization(rule) => write!(
+                f,
+                "{{org = {:?}, forks = {}, properties = {:?}, topics = {:?}}}",
+                rule.org, rule.forks, rule.properties, rule.topics
+            ),
         }
     }
 }
@@ -440,8 +449,15 @@ impl<Trigger> Bounds<Trigger> {
                         "organization repos rules require GitHub and hosts = [\"github.com\"]"
                     );
                     ensure!(
-                        !rule.forks,
-                        "organization repos rules require forks = false"
+                        !rule.forks || (!rule.properties.is_empty() && !rule.topics.is_empty()),
+                        "organization fork rules require nonempty properties and topics"
+                    );
+                    ensure!(
+                        rule.properties
+                            .iter()
+                            .all(|(key, value)| !key.is_empty() && !value.is_empty())
+                            && rule.topics.iter().all(|topic| !topic.is_empty()),
+                        "organization properties and topics must not contain empty names or values"
                     );
                     ensure!(
                         REPO_RE.is_match(&format!("{}/repo", rule.org))

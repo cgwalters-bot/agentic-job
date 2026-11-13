@@ -1325,8 +1325,17 @@ through `GITHUB_API_URL` with the read-only `GH_TOKEN`, and requires its
 `full_name` and organization owner to match, and both `fork` and `archived`
 to be false. Missing metadata or an API failure refuses admission, rather
 than trusting an organization name prefix that could admit forks or transferred
-repositories. The rule requires `hosts = ["github.com"]`; `forks = true`
-and unknown rule keys are refused. Exact string entries can explicitly admit
+repositories. The rule requires `hosts = ["github.com"]`; unknown rule keys
+are refused. To admit selected forks rather than arbitrary organization forks,
+use a rule such as
+`{org = "example-org", forks = true, properties = { category = "mirror" }, topics = ["managed-fork"]}`.
+Fork rules require nonempty `properties` and `topics`, and a live
+`parent.full_name` naming a repository. Every configured topic and string-valued
+custom property must match exactly; properties are read from
+`repos/OWNER/NAME/properties/values`. Missing or unreadable metadata refuses
+with a diagnostic naming the requirement. Property and topic names and values
+come only from the caller; nothing enables fork admission by default.
+Exact string entries can explicitly admit
 forks, archived repositories or other owners. Organization rules may be combined
 only with exact string entries, not globs; `own_author` admission cannot bypass
 their restrictions. Existing bounds containing only string globs are unchanged.

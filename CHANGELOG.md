@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- GitHub organization bounds can opt into forks selected by caller-defined
+  custom properties and topics, with a known parent. Policy checks live metadata
+  and refuses missing or unreadable requirements; output bounds are unchanged (#3625).
+
 - Standalone `run` with `[session] listen = true` accepts an omitted or empty
   task and waits for a client's first prompt without an initial turn, including
   through an attach gateway. The existing idle timeout and run limits still
