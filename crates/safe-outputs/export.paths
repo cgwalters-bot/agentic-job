@@ -1,0 +1,10 @@
+crates/safe-outputs/
+Cargo.lock
+crates/agentic-job/tests/data/collect/
+crates/agentic-job/tests/data/publication/
+safe-outputs/
+docs/safe-outputs.md
+specs/run-contract-spec.md
+LICENSE
+LICENSE-MIT
+LICENSE-APACHE

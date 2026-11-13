@@ -69,6 +69,11 @@ publish-feed-refresh:
 test-safe-output-handlers:
     node --test crates/agentic-job/tests/corpus/handlers.test.mjs
 
+# Copied-tree export proof, unprivileged/offline after dependencies are cached.
+# Builds only the component and a test-support consumer, never runner/host source.
+test-safe-outputs-export:
+    cargo test --locked -p safe-outputs --test export -- --ignored --nocapture
+
 # The parity fixtures of `collect` (crates/agentic-job/tests/data/collect):
 # what gh-aw's collector makes of each case's lines and configuration,
 # with links kept as `policy` keeps them. GH_AW_JS is actions/setup/js of

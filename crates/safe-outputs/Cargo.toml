@@ -1,15 +1,18 @@
 [package]
 name = "safe-outputs"
 description = "gh-aw's safe-output contract: the request vocabulary and collector, the policy and its bounds, and the check of a hand-back against them, bounded, without an agent run or a CI system"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-publish.workspace = true
+version = "0.6.13"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cgwalters-forge/agentic-job"
+publish = false
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
 
 [[bin]]
 name = "safe-outputs"
@@ -28,29 +31,29 @@ test-support = []
 # Nothing of agentic-job or secure-host: callers read the policy, the
 # hand-back and their credentials, and give this the text and settings.
 [dependencies]
-anyhow.workspace = true
+anyhow = "1"
 # GitLab's git credential (apply::gitlab).
-base64.workspace = true
+base64 = "0.23"
 # A replacement commit's Date header (check::replacement).
-chrono.workspace = true
-clap = { workspace = true, optional = true }
-regex.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"], optional = true }
+regex = "1"
 # GitHub's publishing: the temporary IDs and the digests gh-aw's handlers
 # make (apply::publish).
-ring.workspace = true
-rustix.workspace = true
-serde.workspace = true
+ring = "0.17"
+rustix = { version = "1", features = ["fs", "net", "process"] }
+serde = { version = "1", features = ["derive"] }
 # The collector's results follow the configuration's and the request's
 # key order, as gh-aw's do, and read numbers as JavaScript does: stated
 # here, not left to whatever else the binary links (agent-client-protocol
 # brings `preserve_order` to agentic-job).
-serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order", "raw_value"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 # The checkout apply's push is made in (apply::git).
-tempfile.workspace = true
+tempfile = "3"
 # A bounds file's `[github.trigger]` table, carried unread where its caller
 # gives no type of its own.
-toml.workspace = true
-unicode-normalization.workspace = true
+toml = "1"
+unicode-normalization = "0.1"
 # The Forgejo, GitLab and GitHub APIs (apply::forgejo, apply::gitlab,
 # apply::github), with the token the caller gives.
-ureq.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }

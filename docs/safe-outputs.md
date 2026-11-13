@@ -3104,7 +3104,84 @@ remains under [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398
 
 The library's tests read `safe-outputs/validation.json` and the parity
 fixtures in `crates/agentic-job/tests/data/collect` where they are, rather
-than copies; those move with the crate if it becomes its own
-repository. Its check tests read the policies in
+than copies; these are part of the export root below. Its check tests read the policies in
 `crates/safe-outputs/tests/data`, which agentic-job's tests compare with
 what `policy` compiles, so that neither drifts from the other.
+
+### Self-contained export root
+
+The export boundary is the path inventory
+[`export.paths`](../crates/safe-outputs/export.paths), **not just the crate
+directory**. It retains paths deliberately: the two parity corpora under
+`crates/agentic-job/tests/data` are data, not a dependency on runner source.
+The root includes the component, collector and publication corpora, generated
+validation and its generator, real-run fixtures, both license texts, this
+reference and the run-contract specification. Each asset still has one maintained
+source; no fixture, license or generated validation is copied into a second
+maintained location. Runner-specific sections and links in the reference/spec
+remain context, not a standalone promise to provide the runner.
+
+The crate manifest spells out package metadata, dependency features and lints;
+it inherits nothing from agentic-job's workspace. The export installs
+[`export.toml`](../crates/safe-outputs/export.toml) as its root `Cargo.toml`,
+with only this member and the existing release profile. `publish = false`
+remains intentional. Neither the contract, bounds nor publication defaults
+change. Since no maintained asset moves, workspace consumer paths and the
+release source-digest inputs do not change.
+
+Run `just test-safe-outputs-export` after `cargo test --locked -p safe-outputs`
+has cached dependencies (about three minutes on an unprivileged runner). This
+opt-in smoke test copies only the inventory into a temporary directory and uses
+a fresh target directory. It does an offline build to prune the workspace lock,
+then locked/offline default library/CLI build and tests, a no-default-feature
+library build and tests, and a separate no-default-feature `test-support`
+consumer test. It asserts there is no runner manifest/source or secure-host
+tree. It never runs host setup, reads a forge credential, or publishes.
+The ordinary workspace suite does not run this expensive ignored test.
+
+### History-preserving transfer (not publication)
+
+After merging this preparation, use a disposable clone with `git-filter-repo`
+installed. From the source repository root, the following retains the history
+of every inventory path without rewriting the source checkout:
+
+```sh
+git clone --no-local . /tmp/safe-outputs-history
+git -C /tmp/safe-outputs-history filter-repo --paths-from-file "$PWD/crates/safe-outputs/export.paths"
+cp /tmp/safe-outputs-history/crates/safe-outputs/export.toml /tmp/safe-outputs-history/Cargo.toml
+cargo build --offline --manifest-path /tmp/safe-outputs-history/Cargo.toml -p safe-outputs
+cargo test --locked --offline --manifest-path /tmp/safe-outputs-history/Cargo.toml -p safe-outputs
+cargo build --locked --offline --manifest-path /tmp/safe-outputs-history/Cargo.toml -p safe-outputs --no-default-features
+cargo test --locked --offline --manifest-path /tmp/safe-outputs-history/Cargo.toml -p safe-outputs --no-default-features --lib
+```
+
+Use a new, absent destination instead of reusing that temporary path. The first
+offline build prunes unrelated lock entries without upgrading the retained
+resolution; review the lock diff. In that clone, record the new root manifest
+and pruned lock as a transfer-only commit. Preserve `filter-repo`'s commit map
+and compare the inventory's final file contents against the source revision,
+then inspect `git log --all --stat` for retained history. `git-filter-repo` does
+not follow historical renames: if older pre-extraction history is required,
+identify and explicitly include its earlier paths before filtering, and check
+the resulting history separately. Do not call a copied-tree smoke test evidence
+that this history rewrite succeeded. This preparation runs the copied-tree
+proof; the actual history-transfer verification remains an adoption prerequisite.
+
+The runner keeps the hooks described above: admission and policy compilation,
+no-follow bounded reads, secret scanning, lifecycle/checkpoint checks, trusted
+run identity, artifact transport, credential acquisition, escaping and apply
+deduplication. It also keeps the pinned gh-aw workflow adapter and corpus
+regeneration harness. The export's recorded fixtures exercise the library
+offline; regenerating them still requires the caller's `just collect-fixtures`
+and `just publication-corpus`, the pinned gh-aw/github-script sources and the
+caller workflow. The validation generator is exported unchanged and still
+requires the pinned gh-aw compiled workflows. This does not expand or resolve
+[#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026).
+
+Later adoption under [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398)
+must authorize the destination, verify the actual history transfer, install
+standalone CI for this test matrix and fixture provenance, decide independent
+versioning/release policy, and review an immutable dependency/binary pin in each
+caller. The current runner path dependency and action/binary pins remain in
+place. No external repository, CI dispatch, release or publication is part of
+this preparation; #2398 remains open.

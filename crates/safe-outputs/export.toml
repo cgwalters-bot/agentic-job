@@ -1,0 +1,8 @@
+# Installed as Cargo.toml at the root of the path-preserving export.
+[workspace]
+resolver = "3"
+members = ["crates/safe-outputs"]
+
+[profile.release]
+lto = "thin"
+strip = true
