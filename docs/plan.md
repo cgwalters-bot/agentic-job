@@ -41,11 +41,20 @@ The existing opt-in and trusted public-base evidence shipped in #2914/#2919
 [tracker#1455](https://github.com/cgwalters-forge/tracker/issues/1455) owns
 effective caller configuration and compatible producer/checker evidence before
 deletion. This ledger neither enables it nor removes the fixture.
-Still ask cgwalters: **does “no JavaScript left” exempt the JavaScript that only
-drives gh-aw's pinned scripts, as it already exempts apply.yml's steps?**
-That means validation.mjs, handlers.test.mjs/collect.cjs, the two probe
-github-script steps and CI's apply-guard rerun. The controller's exception
-recommendation is not cgwalters' decision; preserve parity coverage meanwhile.
+In his [13 November response](https://github.com/cgwalters-forge/agentic-job/issues/2026#issuecomment-6860948527),
+cgwalters favors reusing upstream GitHub JavaScript rather than reinventing it,
+weighed against sharing with other output targets. Keep the current immutable
+setup-action pin and unchanged upstream handlers, with the Rust collector/checker
+as the shared local-handback and cross-forge contract. Retain validation.mjs,
+handlers.test.mjs/collect.cjs, the probe github-script steps and CI's apply-guard
+rerun for their [upstream parity coverage](safe-outputs.md#upstream-javascript-disposition).
+This bounded disposition does not establish no-JS 1.0 acceptance or complete
+fixture cleanup. The ratchet exempts only the three existing corpus harness
+paths, retaining corpus.test.mjs temporarily while tracker#1455 supplies evidence.
+No bundling requirement has been demonstrated. A future packaging proposal must
+show a concrete offline/distribution benefit and inventory dependencies and
+license notices before changing delivery; no vendor/submodule design is approved
+here. Standalone adoption remains with #2398.
 
 ## Deployment
 
@@ -102,7 +111,7 @@ separately owned non-goals propose post-1.0 P2 without moving their parent.
 | [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398) | #1047 | Propose P2: operator-authorized standalone adoption and immutable revision. |
 | [#2397](https://github.com/cgwalters-forge/agentic-job/issues/2397) | #1047 | Propose P2: standalone CLI live publication proof; local tests do not settle it. |
 | [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) | #674 | Propose #596 child: standalone binary/image exists; released attested image and caller proof remain. |
-| [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | #596 | Keep: caller override evidence and exact gh-aw JS exception question above. |
+| [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026) | #596 | Keep: fixture cleanup awaits caller override evidence; bounded upstream reuse above preserves parity, not no-JS 1.0 acceptance. |
 | [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735) | #674 | Question: propose P2 extraction, but `needs-design` still violates #596. Destination/name, governance and disclosure commitments remain operator decisions. |
 | [#589](https://github.com/cgwalters-forge/agentic-job/issues/589) | #57 | Propose P2: RHEL caller, ruleset and chat acceptance outside staged 1.0 scope. |
 | [#556](https://github.com/cgwalters-forge/agentic-job/issues/556) | #596 | Keep: protected CODEOWNERS and chosen ruleset need operator action, not another policy implementation. |

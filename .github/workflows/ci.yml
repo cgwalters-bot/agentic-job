@@ -221,9 +221,15 @@ jobs:
   # The JavaScript outside site/ may only shrink: new logic goes in the
   # Rust binary. A change fails if it adds a .js, .mjs, .cjs or .ts file
   # (or its .mts/.cts form) anywhere but site/, .github/actions/, whose
-  # probes must be JS to stand in for a third-party action, and the corpus
-  # parity harness, or if it grows the line count of the JavaScript outside
-  # them. Renames count as an add and a delete. Scripts inline in a
+  # probes must be JS to stand in for a third-party action, and the three
+  # named corpus harness files, or if it grows the line count outside them.
+  # Exact harness paths prevent unrelated JS from hiding in that directory.
+  # collect.cjs/handlers.test.mjs drive the pinned upstream collector/handlers;
+  # corpus.test.mjs stays temporarily until tracker#1455 enables safe deletion.
+  # validation.mjs extracts upstream rules/limits and remains subject to shrinkage.
+  # Probe github-script steps and CI's apply-guard rerun exercise actual upstream
+  # scripts; preserve them, not replacement handlers (see docs/safe-outputs.md).
+  # Renames count as an add and a delete. Scripts inline in a
   # workflow, .jsx/.tsx and extension-less node scripts are not counted.
   javascript:
     needs: changes
@@ -244,12 +250,12 @@ jobs:
             echo "::error::no base commit to compare with: '$BASE'"; exit 1
           fi
           js='[.][cm]?[jt]s$'
-          allowed='^(site/|[.]github/actions/|crates/agentic-job/tests/corpus/)'
+          allowed='^(site/|[.]github/actions/|crates/agentic-job/tests/corpus/(corpus[.]test[.]mjs|handlers[.]test[.]mjs|collect[.]cjs)$)'
           # -z, so git does not quote a name with a tab or non-ASCII byte
           # (which would end it in `"`); a newline in one becomes `?`.
           added=$(git diff -z --no-renames --diff-filter=A --name-only "$BASE" HEAD | tr '\0\n' '\n?' | grep -iE "$js" | grep -vE "$allowed" || true)
           if [ -n "$added" ]; then
-            sed 's/^/::error::adds a JavaScript file outside site\/, .github\/actions\/ and the corpus harness: /' <<< "$added"
+            sed 's/^/::error::adds a JavaScript file outside site\/, .github\/actions\/ and the three named corpus harness files: /' <<< "$added"
             exit 1
           fi
           growth=$(git diff -z --no-renames --numstat "$BASE" HEAD | tr '\0\n' '\n?' |

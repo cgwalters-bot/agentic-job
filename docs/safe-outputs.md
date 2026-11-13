@@ -3069,13 +3069,39 @@ gh-aw's compiler writes, which is why `safe-outputs/validation.mjs`
 reads them out of gh-aw's own compiled workflows. Reuse of gh-aw's code
 means pinning that action's commit, as apply.yml does.
 
-The pinned JavaScript stays outside the library, as adapters at its
-edge: gh-aw's handlers, which apply.yml runs under
-`actions/github-script` on GitHub; `safe-outputs/validation.mjs`, which
-regenerates `validation.json` and the handler limits; and the corpus
-harness (`crates/agentic-job/tests/corpus/collect.cjs`,
-`handlers.test.mjs`), which drives gh-aw's collector and handlers to
-write and compare fixtures ([#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026)).
+### Upstream JavaScript disposition
+
+The pinned JavaScript stays outside the library, at the GitHub adapter's edge.
+Following [cgwalters's 13 November response](https://github.com/cgwalters-forge/agentic-job/issues/2026#issuecomment-6860948527),
+keep reusing gh-aw's handlers unchanged through the existing immutable setup-action
+pin, rather than porting them for language uniformity. The Rust collector/checker
+remains the common contract for local handback and non-GitHub publishers. Preserve
+these drivers and their tests because they execute or compare actual upstream code:
+
+- `safe-outputs/validation.mjs` extracts compiled validation rules and footer/handler
+  limits into `validation.json`, rather than maintaining another set by hand.
+- `crates/agentic-job/tests/corpus/collect.cjs` drives the pinned collector to
+  record parity fixtures; `handlers.test.mjs` executes the pinned handlers against
+  mocked forge calls.
+- The two `github-script` steps in `safe-outputs-probe.yml` probe the actual
+  upstream collector and handler manager.
+- CI's apply-guard rerun exercises apply's actual guard rather than a model of it.
+  `apply.yml` continues to execute the upstream handlers under `actions/github-script`.
+
+The JS ratchet still requires shrinkage outside `site/`, `.github/actions/` and
+the exact three existing corpus harness paths. Its temporary `corpus.test.mjs`
+allowance and old-tree CI inputs remain until tracker#1455 supplies trusted
+effective opt-in, compatible exact producer/checker revisions and public-base
+evidence for fixture deletion. This disposition neither enables that override nor
+declares the no-JavaScript 1.0 bar met; #2026 remains open.
+
+No concrete offline/distribution need for bundling has been established. Before
+changing delivery, a packaging proposal must demonstrate that benefit and inventory
+shipped scripts, dependencies and license notices while preserving publication
+goldens, bounds and check/apply separation. This does not approve vendoring or a
+submodule design; current contribution constraints still apply. Standalone adoption
+remains under [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398).
+
 The library's tests read `safe-outputs/validation.json` and the parity
 fixtures in `crates/agentic-job/tests/data/collect` where they are, rather
 than copies; those move with the crate if it becomes its own

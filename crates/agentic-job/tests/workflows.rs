@@ -47,6 +47,96 @@ fn definition(file: &str) -> yaml_rust2::Yaml {
 }
 
 #[test]
+fn javascript_ratchet_allows_only_named_corpus_harnesses() {
+    let doc = definition("ci.yml");
+    let script = doc["jobs"]["javascript"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find_map(|step| step["run"].as_str())
+        .unwrap();
+    // Execute the real CI script over harmless, independent Git histories.
+    // Both additions and growth matter: allowing a directory silently admits
+    // new logic, while dropping the growth check permits expanding existing JS.
+    for (path, existing, accepted) in [
+        (
+            "crates/agentic-job/tests/corpus/corpus.test.mjs",
+            false,
+            true,
+        ),
+        (
+            "crates/agentic-job/tests/corpus/handlers.test.mjs",
+            false,
+            true,
+        ),
+        ("crates/agentic-job/tests/corpus/collect.cjs", false, true),
+        ("site/example.ts", false, true),
+        (".github/actions/example/probe.js", false, true),
+        (
+            "crates/agentic-job/tests/corpus/unrelated.mjs",
+            false,
+            false,
+        ),
+        (
+            "crates/agentic-job/tests/corpus/collect.cjs/extra.js",
+            false,
+            false,
+        ),
+        ("crates/agentic-job/tests/corpus/COLLECT.CJS", false, false),
+        ("other/new.MTS", false, false),
+        ("other/existing.cts", true, false),
+        ("safe-outputs/validation.mjs", true, false),
+        (
+            "crates/agentic-job/tests/corpus/handlers.test.mjs",
+            true,
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        let file = dir.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        if existing {
+            std::fs::write(&file, "// existing fixture\n").unwrap();
+            git(&["add", "."]);
+        }
+        git(&["commit", "--allow-empty", "-qm", "Base fixture"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(&file, "// existing fixture\n// added fixture\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "Changed fixture"]);
+        let output = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .current_dir(dir.path())
+            .env("BASE", base)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), accepted, "{path}: {output:?}");
+        if !accepted {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("::error::"), "{path}: {stdout}");
+        }
+    }
+}
+
+#[test]
 fn ordinary_ubuntu_runners_use_current_image() {
     // Check owned definitions, not historical checker fixtures. Architecture
     // suffixes and special runner classes are deliberately outside this rule.

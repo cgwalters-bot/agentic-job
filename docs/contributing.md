@@ -37,8 +37,13 @@ Run `just fmt` and then `just check` before every commit you hand back;
 a change that fails `just check` isn't done.
 
 CI's `javascript` job lets the JavaScript outside `site/`, `.github/actions/`
-and the corpus harness only shrink: put new logic in the Rust binary, and do
-not add `.js`, `.mjs`, `.cjs` or `.ts` files elsewhere.
+and exactly `corpus.test.mjs`, `handlers.test.mjs` and `collect.cjs` in
+`crates/agentic-job/tests/corpus/` only shrink: put new logic in the Rust binary,
+and do not add `.js`, `.mjs`, `.cjs` or `.ts` files elsewhere. The directory itself
+is not exempt. The legacy `corpus.test.mjs` allowance is temporary pending
+tracker#1455's trusted caller evidence for deletion; its CI dependencies remain.
+Keep the [pinned upstream parity drivers](safe-outputs.md#upstream-javascript-disposition)
+and their coverage; this is not acceptance of the 1.0 no-JavaScript bar.
 
 Passing the workspace suite does **not** prove the privileged integration paths:
 `run` and `probe` tests can return successfully without executing those paths,
