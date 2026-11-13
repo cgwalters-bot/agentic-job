@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- An experimental opt-in UID-1001 job-container image strips routes to container
+  root while supporting nested rootless Podman. CI separates candidate publication,
+  digest-based hosted probes and stable-tag promotion; runtime evidence is still
+  pending. See [job container](docs/job-container.md) (#137).
+
 - GitHub organization bounds can opt into forks selected by caller-defined
   custom properties and topics, with a known parent. Policy checks live metadata
   and refuses missing or unreadable requirements; output bounds are unchanged (#3625).

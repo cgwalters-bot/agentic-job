@@ -1,0 +1,7 @@
+name: Job container composite identity probe
+description: Assert a composite shell step uses the image user
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 -B job-container/probe.py identity

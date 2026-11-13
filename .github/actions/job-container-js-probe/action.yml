@@ -1,0 +1,6 @@
+name: Job container JavaScript identity probe
+description: Assert that local JavaScript main and post execute as the image user
+runs:
+  using: node24
+  main: identity.cjs
+  post: identity.cjs

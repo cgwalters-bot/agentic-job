@@ -36,6 +36,7 @@ Follow the [getting-started walkthrough](docs/try-it.md) to run the scripted age
 
 - [Workflow and deployment evidence](docs/workflow.md), [events](docs/events.md), [dispatch](docs/dispatch.md) and [GitLab CI](docs/gitlab.md).
 - [Safe outputs](docs/safe-outputs.md), [host security](docs/secure-host.md) and [known limitations](docs/limitations.md).
+- [Experimental non-root job container](docs/job-container.md) with nested rootless Podman.
 - [Agent harnesses](docs/harness.md), [inference](docs/inference.md), [MCP](docs/mcp.md) and [skills](docs/skills.md).
 - [Design and trust](docs/requirements.md), [related projects](docs/related-projects.md) and [interactive sessions](docs/interactive.md).
 - [Project layout and license](docs/layout.md), [stable interfaces](docs/stable-interfaces.md) and [remaining work](docs/plan.md).
