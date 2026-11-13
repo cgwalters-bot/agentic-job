@@ -105,6 +105,33 @@ still refuse upload. `[inference] allow-base-address-lines` is a legacy no-op.
 Read inference addresses from runtime configuration/environment, never copy a
 deployment's address into code.
 
+### Old-side patch recovery (not enabled)
+
+The inactive `safe_outputs::apply::recover::reconstruct` library primitive
+can reconstruct context and removed lines from an authenticated public
+preimage at the exact path and old-side hunk position. It validates the mail
+before reading preimages and revalidates paths afterward. Every non-placeholder
+byte must match, and only one placeholder per line, replacing one host:port
+literal, is supported. Overlapping hunks, malformed patches, CR and missing
+final newlines are refused. Patch and per-file preimage reads are bounded to
+1 MiB (or the caller's smaller patch limit), with at most 50 files.
+
+This is not yet a fix for
+[tracker#1309](https://github.com/cgwalters-forge/tracker/issues/1309): no check,
+workflow or publisher invokes it. Existing publication can still fail on
+redacted old-side lines. No caller setting enables recovery yet.
+
+Before enabling it, the trusted integration must authenticate the public base,
+not consult the producer's checkout, and bind each reconstructed predecessor
+as the next preimage for series. It must retain credential refusals, validate
+size/path bounds and receipts again, and give trial and publication identical
+repaired bytes on native, legacy, replacement and secondary paths. Unsupported
+paths must fail explicitly with a retained-artifact recovery link. Recovered
+bytes are application-only: never upload or log them. Added-line placeholders
+remain untouched; their count needs a clear draft-review warning. Live hosted
+PR-publication proof after deployment and moving wrapper addresses into
+deployment configuration remain follow-ups.
+
 ### Long rate-limit waits
 
 `stop-long-retry-after` is off by default and requires `front` or `api-key` to

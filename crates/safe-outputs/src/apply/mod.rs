@@ -37,6 +37,7 @@ pub mod inline;
 pub mod mentions;
 pub mod publish;
 pub mod push;
+pub mod recover;
 pub mod replacement;
 pub mod roles;
 pub mod secondary;
