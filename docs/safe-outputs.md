@@ -80,7 +80,7 @@ changed. The receipt is an internal CLI format, not a new safe-output wire forma
 
 ### Native operations and the pinned adapter
 
-Standalone apply supports **new GitHub issue/PR comments only** (`add_comment`),
+By default standalone apply supports **new GitHub issue/PR comments only** (`add_comment`),
 plus non-writing `noop`, `missing_tool` and `missing_data`. Comments may contain
 only `type`, `body`, `repo`, `item_number`, `pr` and `pr_number`; any supplied
 destination must match the context. Edits, replies, temporary IDs and other
@@ -90,8 +90,8 @@ there is no standalone idempotency marker, transaction or rollback; a network
 failure can leave an uncertain or partially published batch. Do not blindly retry.
 
 Check can validate other non-patch operations under explicit output bounds, but
-standalone apply refuses them, including a batch with a supported comment before
-an unsupported operation. Patch operations are not a standalone CLI interface.
+standalone GitHub apply refuses them, including a batch with a supported comment before
+an unsupported operation. Patch operations are not a standalone GitHub CLI interface.
 The library and `agentic-job publish` have additional native handlers; that does
 not make them standalone CLI handlers. The existing pinned gh-aw adapter in
 `apply.yml` remains the path for the broader GitHub vocabulary. Neither that
@@ -109,6 +109,88 @@ or binaries. Obtain a narrowly scoped token only in apply and expose it as
 arguments, JSONL, receipts or logs; do not enable shell tracing. No ambient
 `GITHUB_TOKEN`, PAT fallback or Actions metadata is read by the CLI. The CI
 operator owns job isolation, artifact provenance and token issuance.
+
+#### Standalone GitLab CI
+
+The threat is a producer redirecting GitLab writes or substituting patch bytes
+after check. Select `--forge gitlab` explicitly in **both** jobs; the default
+remains GitHub. GitLab uses the same collector, checker, planner and publisher as
+`agentic-job apply --forge gitlab`, including its whole-batch refusals and
+pre-write checks. All output kinds listed under [publishing to GitLab](#publishing-to-gitlab)
+are available under explicit policy bounds: notes, issues, labels, closing,
+inline findings, fork-pushed Draft MRs and head-leased updates, including
+caller-accepted own branches. Caller status/summary lifecycle flags are not
+safe-output kinds and are not part of this standalone interface.
+
+GitLab's trusted context has a different shape: `policy` is the existing full
+effective policy JSON (the same object `agentic-job policy` emits), `server` is
+the forge origin, and `run_url` is the trusted CI run page. Optional `item` and
+`item_kind` (`issue` or `pull-request`) must appear together. Inline findings
+also require trusted `review_head`, bound to that MR. Do not derive these from
+producer artifacts. For a single deterministic note, a minimal context is:
+
+```json
+{
+  "policy": {
+    "forge": "gitlab",
+    "contract": 1,
+    "repo": "example/team/project",
+    "clone_url": "https://gitlab.example/example/team/project",
+    "base": "main",
+    "kind": "analysis",
+    "max_outputs": 1,
+    "max_patch_bytes": 1048576,
+    "safe_outputs": { "add_comment": { "max": 1 } }
+  },
+  "server": "https://gitlab.example",
+  "item": 7,
+  "item_kind": "issue",
+  "run_url": "https://gitlab.example/example/team/project/-/pipelines/123"
+}
+```
+
+For patch operations, put the existing `base.json` and `aw-BRANCH.patch` beside
+the input JSONL. Check and apply read each as a bounded no-follow regular file
+(one patch, at most 1 MiB and the policy's limit; base at most 64 KiB). The
+receipt binds their exact bytes as well as forge, context and JSONL. Transfer
+these files through the trusted check artifact channel too. Patch policy uses
+the existing protected paths, author, fork/own-branch bounds and pinned push
+head, not a second standalone policy implementation. Nested group paths work.
+Apply reads only `SAFE_OUTPUTS_TOKEN`, never `GITLAB_TOKEN` or agent credentials.
+No automatic retry, transaction or rollback is added.
+
+Minimal GitLab CI jobs, on separate isolated runners, using a pinned binary
+already installed by the operator and caller-owned `/trusted/context.json`:
+
+```yaml
+stages: [check, apply]
+check:
+  stage: check
+  script:
+    - safe-outputs check --forge gitlab --context /trusted/context.json --input outputs.jsonl --checked checked.json
+  artifacts:
+    paths: [outputs.jsonl, checked.json]
+apply:
+  stage: apply
+  needs: [check]
+  environment: safe-output-apply
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+      when: manual
+  script:
+    - safe-outputs apply --forge gitlab --context /trusted/context.json --input outputs.jsonl --checked checked.json
+```
+
+Supply the deterministic JSONL before check, for example
+`{"type":"add_comment","body":"Deterministic GitLab proof."}`. GitLab numbers
+issues and MRs separately: notes use the caller's fixed item/kind, not
+`item_number` in the request. Store the token as a masked, protected variable
+named `SAFE_OUTPUTS_TOKEN`, **environment-scoped to `safe-output-apply`**, so
+check and the producer cannot read it. Protect that environment and the CI
+configuration; do not run apply on untrusted refs. Pin context/run identity
+outside producer control and do not execute transferred content. This example
+does not provision runners, produce agent output or prove live GitLab CI job
+isolation; the disposable local GitLab test covers publication, not deployment.
 
 The [CLI proof workflow](../.github/workflows/safe-outputs-cli.yml) uses
 the existing e2e destination, issue 64 in `cgwalters-forge/agentic-job`, and

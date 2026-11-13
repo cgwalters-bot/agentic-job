@@ -308,7 +308,8 @@ pub struct Committer {
 /// What an issue number names. Forgejo numbers issues and pull requests
 /// together, so a request for one may name the other; GitLab numbers them
 /// apart (`#5` and `!5`), so only the caller can say which.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Kind {
     Issue,

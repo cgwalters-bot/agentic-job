@@ -5767,7 +5767,14 @@ fn gitlab_ci_uses_only_a_disposable_local_forge() {
         .filter_map(|step| step["run"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(scripts.contains("cargo build --locked -p safe-outputs --bin safe-outputs"));
     assert!(scripts.contains("cargo test --locked --test gitlab -- --ignored --nocapture"));
+    let recipes = std::fs::read_to_string(root().join("Justfile")).unwrap();
+    assert!(recipes.contains("cargo build --locked -p safe-outputs --bin safe-outputs"));
+    assert!(
+        recipes
+            .contains("cargo test --locked -p agentic-job --test gitlab -- --ignored --nocapture")
+    );
     assert!(scripts.contains("--publish 127.0.0.1:8929:8929"));
     assert!(scripts.contains("{{.State.OOMKilled}}"));
     assert!(scripts.contains("docker logs --tail 300"));

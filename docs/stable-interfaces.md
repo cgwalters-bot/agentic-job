@@ -245,6 +245,10 @@ documented in [safe outputs](safe-outputs.md#standalone-cli). It uses the same
 request JSONL, not an agentic-job run/checkpoint. Its context and receipt are
 currently experimental, not stable interfaces. Existing workflow check/apply
 inputs and agentic-job commands are unchanged.
+Explicit `--forge gitlab` on both standalone commands uses the existing GitLab
+policy, planner and publisher, with caller-owned context and patch-bound
+receipts. GitHub comments remain the default; the GitLab standalone context
+is also experimental ([GitLab CI example](safe-outputs.md#standalone-gitlab-ci)).
 
 A run hands back requests in gh-aw's
 [safe-output format](https://github.github.com/gh-aw/reference/safe-outputs/):

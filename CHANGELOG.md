@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Standalone `safe-outputs check` and `apply` accept explicit `--forge gitlab`,
+  using the existing GitLab policy, planner and publisher for every supported
+  safe-output kind. Receipts also bind patch inputs; GitHub comments remain
+  the default. Credentials stay in the trusted apply job (#3604).
+
 - GitLab bounds may set `[gitlab.outputs] own-branch-repos`, as GitHub's do,
   so that apply pushes a merge request's branch to the target project itself
   and opens the merge request there, never to its default or a protected

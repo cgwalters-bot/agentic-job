@@ -14,6 +14,9 @@ use safe_outputs::{CONTRACT, Forge, MAX_OUTPUTS_BYTES, collect};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+#[path = "cli_gitlab.rs"]
+mod gitlab;
+
 const MAX_CONTEXT_BYTES: u64 = 64 * 1024;
 const MAX_RECEIPT_BYTES: u64 = 4096;
 const MAX_LINES: usize = 1000;
@@ -36,6 +39,9 @@ enum Command {
 
 #[derive(clap::Args)]
 struct Args {
+    /// Explicit publisher selection; GitHub comments remain the default.
+    #[arg(long, value_enum, default_value = "github")]
+    forge: CliForge,
     /// Trusted JSON bounds/context, not supplied by the proposals producer.
     #[arg(long)]
     context: PathBuf,
@@ -45,6 +51,12 @@ struct Args {
     /// Check creates this file; apply reads it from the trusted check job.
     #[arg(long)]
     checked: PathBuf,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum CliForge {
+    Github,
+    Gitlab,
 }
 
 #[derive(Deserialize)]
@@ -68,8 +80,12 @@ fn github_api() -> String {
 #[serde(deny_unknown_fields)]
 struct Receipt {
     version: u32,
+    #[serde(default)]
+    forge: Forge,
     context_sha256: String,
     input_sha256: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    files_sha256: std::collections::BTreeMap<String, String>,
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -197,14 +213,33 @@ fn run() -> Result<()> {
         Command::Apply(args) => (args, true),
     };
     let context_bytes = read(&args.context, MAX_CONTEXT_BYTES)?;
-    let context: ContextFile =
-        serde_json::from_slice(&context_bytes).context("invalid context JSON")?;
     let bytes = read(&args.input, MAX_OUTPUTS_BYTES)?;
-    let items = validate(&context, &bytes)?;
+    let gitlab = match args.forge {
+        CliForge::Gitlab => Some(gitlab::Checked::new(&context_bytes, &bytes, &args.input)?),
+        CliForge::Github => None,
+    };
+    let context: Option<ContextFile> = if gitlab.is_none() {
+        Some(serde_json::from_slice(&context_bytes).context("invalid context JSON")?)
+    } else {
+        None
+    };
+    let items = match &context {
+        Some(context) => validate(context, &bytes)?,
+        None => Vec::new(),
+    };
     let receipt = Receipt {
         version: 1,
+        forge: if gitlab.is_some() {
+            Forge::Gitlab
+        } else {
+            Forge::Github
+        },
         context_sha256: hash(&context_bytes),
         input_sha256: hash(&bytes),
+        files_sha256: gitlab
+            .as_ref()
+            .map(|checked| checked.digests())
+            .unwrap_or_default(),
     };
     if !apply {
         let parent = args
@@ -217,7 +252,10 @@ fn run() -> Result<()> {
         file.write_all(b"\n")?;
         file.persist_noclobber(&args.checked)
             .context("cannot create check receipt (must not exist)")?;
-        println!("checked {} requests", items.len());
+        println!(
+            "checked {} requests",
+            gitlab.as_ref().map_or(items.len(), |checked| checked.count)
+        );
         return Ok(());
     }
     let accepted: Receipt = serde_json::from_slice(&read(&args.checked, MAX_RECEIPT_BYTES)?)
@@ -226,6 +264,11 @@ fn run() -> Result<()> {
         accepted == receipt,
         "checked input or trusted context changed"
     );
+    if let Some(checked) = gitlab {
+        checked.apply()?;
+        return Ok(());
+    }
+    let context = context.context("missing GitHub context")?;
     // Refuse the ENTIRE batch before acquiring credentials or making any write.
     ensure!(
         items.iter().all(|item| matches!(

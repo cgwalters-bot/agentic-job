@@ -426,6 +426,7 @@ jobs:
           --publish 127.0.0.1:8929:8929 --shm-size 256m
           --env GITLAB_ROOT_PASSWORD --env GITLAB_OMNIBUS_CONFIG
           gitlab/gitlab-ce@sha256:6db4caefb0597c966065f4c3307b60aa00d13559bbe9b0c3b17bc32f0d239ab1
+      - run: cargo build --locked -p safe-outputs --bin safe-outputs
       - run: cargo test --locked --test gitlab -- --ignored --nocapture
       # Memory reads 0B once the container has stopped.
       - name: GitLab state and memory

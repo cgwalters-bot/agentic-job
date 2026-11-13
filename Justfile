@@ -121,6 +121,11 @@ world-write-test:
 test-binary:
     cargo test --locked -p agentic-job --test binary_sh
 
+# Disposable GitLab CE supplied by CI; no external forge access. Up to 25 minutes.
+test-gitlab:
+    cargo build --locked -p safe-outputs --bin safe-outputs
+    cargo test --locked -p agentic-job --test gitlab -- --ignored --nocapture
+
 # Unprivileged regression tests for setup, its probe batching and summaries.
 setup-tests:
     cargo test --locked -p agentic-job --lib sandbox::setup::tests
