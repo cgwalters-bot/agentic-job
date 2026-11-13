@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Preparation disables automatic Git maintenance/GC, including in new clones,
+  to prevent detached maintenance from racing successive shallow fetches.
+  Exact-head verification and clone transport restrictions are unchanged.
+
 - Standalone container runners may explicitly delegate host isolation with
   `[host] isolation = "external"`. Summaries and hand-back metadata record
   the declaration, not a passed host check; credential and output refusals
