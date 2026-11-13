@@ -1975,11 +1975,12 @@ refused rather than silently retargeted.
 The patch is read as git reads it and must be exactly what
 `format-patch` writes. Refused are protected files (the policy's, and
 git's own directory and files -- `.gitmodules`, `.gitattributes` -- and
-CI, hook and editor configuration; a `.gitignore` is admitted, as
-ignoring build output cannot change how git treats the repository's own
-files), paths that are
+CI, hook and editor configuration), paths that are
 not plain relative ones, binaries, symlinks, submodules, new
-executables, mode changes, renames, and a patch over its file count.
+executables, mode changes, renames, and a patch over its file count. A
+`.gitignore` that is a file of its own is admitted -- ignoring build
+output cannot change how git treats the repository's own files -- but
+not one inside a protected directory, such as `.git/.gitignore`.
 Beyond what the old tree's check refused, it also refuses a change
 carried in the commit message, a second mail, any mail header
 `format-patch` does not write, and a file whose header states no mode:
