@@ -910,6 +910,8 @@ the same caller run; another caller run or an earlier attempt cannot
 reuse it. The draft includes the external run URL, attempt and raw digest.
 Hosted calls omit `external-receipt` and retain optional detection and all
 existing same-run artifact associations. No shipped caller sets this input.
+[The GitLab caller spec](../specs/gitlab-caller.md) defines this contract's
+GitLab CI equivalent; it is not built.
 
 ### Checked hand-back and trusted apply
 

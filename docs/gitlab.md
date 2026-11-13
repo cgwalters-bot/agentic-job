@@ -34,7 +34,9 @@ The trusted jobs need Linux x86-64, a POSIX shell, `curl`, `jq`,
 CI configuration from the default branch, not merge-request code. Do not
 restore caches or execute scripts or binaries from producer artifacts in
 check or apply. The CI operator owns runner isolation, artifact provenance
-and token issuance.
+and token issuance. Fetching a producer pipeline's hand-back across
+pipelines is specified, not built, in
+[the GitLab caller spec](../specs/gitlab-caller.md).
 
 **Agent inference on GitLab is unsupported pending
 [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) and
