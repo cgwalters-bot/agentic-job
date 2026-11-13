@@ -105,6 +105,7 @@ pub struct Handback<'a> {
 /// the rest.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Trusted<'a> {
+    pub continuation: Option<&'a crate::contract::Continuation>,
     /// The repository and issue or pull request comments go to, fixed by
     /// the caller.
     pub comment: Option<(&'a str, u64)>,
@@ -829,7 +830,11 @@ pub fn check(
     publishers: &dyn Publishers,
     mut lifecycle: impl FnMut(Option<&Map<String, Value>>) -> Vec<String>,
 ) -> Checked {
-    let Trusted { comment, run_id } = trusted;
+    let Trusted {
+        comment,
+        run_id,
+        continuation,
+    } = trusted;
     // Only patches: the caller decides which files a hand-back may hold,
     // and one it misnames is refused here too.
     let mut errors: Vec<String> = handback
@@ -839,6 +844,13 @@ pub fn check(
         .map(|name| format!("unexpected file {name:?}"))
         .collect();
     drop_collectors_incomplete(&mut collected.items);
+    if let Some(identity) = &policy.continuation {
+        if let Err(error) = identity.check(continuation, run_id) {
+            errors.push(error.to_string());
+        }
+    } else if continuation.is_some() {
+        errors.push("trusted continuation context without a bound policy".into());
+    }
     if let Some(advisory) = &policy.advisory {
         let checked = (|| -> Result<()> {
             let lines = handback

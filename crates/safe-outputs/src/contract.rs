@@ -854,6 +854,9 @@ impl TestEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
+    /// Optional trusted continuation identity, never a completion permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
     /// Caller-owned external provenance. Never read from the producer's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external: Option<ExternalRun>,
@@ -928,6 +931,51 @@ pub struct ExternalRun {
     pub run_id: u64,
     pub base_commit: String,
     pub raw_digest: String,
+}
+
+/// Admitted target and producer attempt supplied by the trusted caller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Continuation {
+    pub repository: String,
+    pub pull_request: u64,
+    pub head: String,
+    pub run_id: u64,
+    pub attempt: u64,
+}
+
+impl Continuation {
+    pub fn validate(&self, policy: &Policy) -> Result<()> {
+        let push = policy.safe_outputs.push_to_pull_request_branch.as_ref();
+        ensure!(
+            policy.forge == Forge::Github
+                && policy.external.is_none()
+                && policy.advisory.is_none()
+                && self.repository == policy.repo
+                && self.pull_request > 0
+                && self.run_id > 0
+                && self.attempt > 0
+                && COMMIT_RE.is_match(&self.head)
+                && push
+                    .is_some_and(|push| push.target == self.pull_request.to_string()
+                        && push.head == self.head),
+            "continuation identity does not match the admitted push target"
+        );
+        Ok(())
+    }
+
+    /// Require independent trusted context; absence is not legacy acceptance.
+    pub fn check(&self, trusted: Option<&Self>, run_id: Option<&str>) -> Result<()> {
+        ensure!(
+            trusted == Some(self),
+            "missing or mismatched trusted continuation identity"
+        );
+        ensure!(
+            run_id == Some(self.run_id.to_string().as_str()),
+            "continuation producer run differs from check run"
+        );
+        Ok(())
+    }
 }
 
 /// Match HTTP authorities exactly, including ports, without DNS resolution.
@@ -1224,6 +1272,9 @@ impl Policy {
     /// that have a configuration here, and only draft pull requests with
     /// the dot-folders protected.
     pub fn validate(&self) -> Result<()> {
+        if let Some(continuation) = &self.continuation {
+            continuation.validate(self)?;
+        }
         ensure!(
             self.forge.is_repo(&self.repo) && !dotted(&self.repo),
             "invalid {} repository {:?}",

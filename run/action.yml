@@ -173,6 +173,13 @@ runs:
           { echo "::error::policy.yml ran at ${want:-no commit}, this action at ${have:-no commit}: pin all pieces to one commit"; exit 1; }
     # From the trusted policy upload prepare put in place, not from the
     # caller's job: the agent job passes nothing but the upload IDs.
+    - name: The continuation policy is for this producer attempt
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+      run: |
+        jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+          '.continuation == null or ((.continuation.run_id | tostring) == $run and (.continuation.attempt | tostring) == $attempt)' "$JOB_DIR/policy.json" > /dev/null
     - name: Read the run's settings
       id: settings
       shell: bash

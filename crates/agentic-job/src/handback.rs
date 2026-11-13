@@ -1229,6 +1229,7 @@ mod tests {
         let base = sh(&checkout, "git rev-parse HEAD").trim().to_owned();
         let policy = Policy {
             external: None,
+            continuation: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),

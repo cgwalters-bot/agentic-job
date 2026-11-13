@@ -137,6 +137,111 @@ fn javascript_ratchet_allows_only_named_corpus_harnesses() {
 }
 
 #[test]
+fn continuation_binding_is_off_by_default_and_preserved_by_trusted_workflows() {
+    for file in ["policy.yml", "agentic-job.yml"] {
+        assert_eq!(
+            definition(file)["on"]["workflow_call"]["inputs"]["bind-continuation"]["default"]
+                .as_bool(),
+            Some(false)
+        );
+    }
+    assert_eq!(
+        definition("agentic-job.yml")["jobs"]["policy"]["with"]["bind-continuation"].as_str(),
+        Some("${{ inputs.bind-continuation }}")
+    );
+    let policy = workflow("policy.yml");
+    assert!(policy.contains(
+        "--continuation-run-id \"$GITHUB_RUN_ID\" --continuation-attempt \"$GITHUB_RUN_ATTEMPT\""
+    ));
+    let check = definition("check.yml");
+    assert_eq!(
+        check["jobs"]["detect"]["outputs"]["artifact-attempt"].as_str(),
+        Some("${{ needs.check.outputs.artifact-attempt }}")
+    );
+    assert_eq!(
+        check["jobs"]["check"]["outputs"]["artifact-attempt"].as_str(),
+        Some("${{ steps.upload.outputs.artifact-id != '' && github.run_attempt || '' }}")
+    );
+    let action = definition("run/action.yml");
+    let steps = action["runs"]["steps"].as_vec().unwrap();
+    let verify = steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str() == Some("The continuation policy is for this producer attempt")
+        })
+        .unwrap();
+    let run = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("run"))
+        .unwrap();
+    assert!(verify < run);
+    let script = steps[verify]["run"].as_str().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for (run, attempt, accepted) in [(7, 2, true), (8, 2, false), (7, 1, false), (7, 0, false)] {
+        std::fs::write(
+            dir.path().join("policy.json"),
+            serde_json::json!({"continuation":{"run_id":run,"attempt":attempt}}).to_string(),
+        )
+        .unwrap();
+        let result = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .env("JOB_DIR", dir.path())
+            .env("GITHUB_RUN_ID", "7")
+            .env("GITHUB_RUN_ATTEMPT", "2")
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            accepted,
+            "{run}/{attempt}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_fresh_checker_cannot_relabel_an_earlier_producer_attempt() {
+    let check = definition("check.yml");
+    let steps = check["jobs"]["check"]["steps"].as_vec().unwrap();
+    let position = steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str() == Some("Require independently proven producer attempt")
+        })
+        .unwrap();
+    let guard = &steps[position];
+    assert_eq!(
+        guard["if"].as_str(),
+        Some("${{ fromJSON(inputs.policy).continuation-context != '' }}")
+    );
+    let provenance = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("The proposals are the agent job's upload"))
+        .unwrap();
+    assert!(position < provenance);
+    assert!(!steps[..position].iter().any(|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+    }));
+    // Same admitted repository/PR/head/run, but attempt 1 raw proposals are
+    // offered to attempt 2. Neither producer metadata nor even a fresh raw
+    // upload is proof: both remain refused until independent provenance exists.
+    for producer_attempt in [1, 2] {
+        let result = Command::new("bash").args(["-euo", "pipefail", "-c", guard["run"].as_str().unwrap()])
+            .env("GITHUB_RUN_ID", "7").env("GITHUB_RUN_ATTEMPT", "2")
+            .env("CONTINUATION", serde_json::json!({"repository":"example/repo", "pull_request":12, "head":"a".repeat(40), "run_id":7,"attempt":2}).to_string())
+            .env("PROPOSALS", "42").env("DIGEST", "c".repeat(64))
+            .env("PRODUCER_SELECTED_ATTEMPT", producer_attempt.to_string()).output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&result.stdout)
+                .contains("producer-attempt provenance is not available")
+        );
+    }
+}
+
+#[test]
 fn ordinary_ubuntu_runners_use_current_image() {
     // Check owned definitions, not historical checker fixtures. Architecture
     // suffixes and special runner classes are deliberately outside this rule.

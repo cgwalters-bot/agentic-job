@@ -111,6 +111,7 @@ impl Job {
     fn policy(&self, clone_url: &str) -> String {
         let policy = Policy {
             external: None,
+            continuation: None,
             advisory: None,
             context: Vec::new(),
             repo: format!("local/{}", self.name),

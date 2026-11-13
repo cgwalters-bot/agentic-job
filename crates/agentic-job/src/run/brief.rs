@@ -625,6 +625,7 @@ mod tests {
     fn policy(kind: Kind, outputs: serde_json::Value) -> Policy {
         Policy {
             external: None,
+            continuation: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
@@ -1032,6 +1033,7 @@ mod brief_tests {
         });
         Policy {
             external: None,
+            continuation: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),

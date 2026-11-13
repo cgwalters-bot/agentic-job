@@ -83,6 +83,12 @@ const MAX_OUTPUTS: &str = "max";
 /// and one that does is refused with a reason like any other.
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Bind a continuation to this trusted caller's producer run (not agent metadata)
+    #[arg(long, requires = "continuation_attempt", requires = "pull_request")]
+    pub continuation_run_id: Option<u64>,
+    /// Producer attempt from the trusted caller; no completion authority
+    #[arg(long, requires = "continuation_run_id")]
+    pub continuation_attempt: Option<u64>,
     /// Caller-owned external-fetch receipt; never the external run's policy/config
     #[arg(long, value_name = "FILE")]
     pub external_receipt: Option<PathBuf>,
@@ -685,6 +691,7 @@ impl Compile for Bounds {
                 .collect(),
         };
         Ok(Policy {
+            continuation: None,
             external: None,
             advisory: None,
             allow_http: self.allow_http.clone(),
@@ -954,6 +961,21 @@ pub fn run(args: &Args) -> Result<Exit> {
                     pull,
                     base: policy.base.clone(),
                     head: args.advisory_head.clone().context("advisory head")?,
+                });
+                policy.validate()?;
+            }
+            if let Some(run_id) = args.continuation_run_id {
+                let push = policy
+                    .safe_outputs
+                    .push_to_pull_request_branch
+                    .as_ref()
+                    .context("continuation requires an admitted push")?;
+                policy.continuation = Some(Continuation {
+                    repository: policy.repo.clone(),
+                    pull_request: push.target.parse().context("continuation pull request")?,
+                    head: push.head.clone(),
+                    run_id,
+                    attempt: args.continuation_attempt.context("continuation attempt")?,
                 });
                 policy.validate()?;
             }

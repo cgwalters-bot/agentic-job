@@ -62,7 +62,7 @@ Inputs:
 
 - the run: `id`, `task`, `task-artifact`, `repo`, `base`, `kind`,
   `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`,
-  `proposals-artifact`;
+  `proposals-artifact`, `bind-continuation`;
 - reviews and events: `review`, `advisory`, `review-task`, `review-item`,
   `review-head`, `event`;
 
@@ -90,6 +90,14 @@ the publisher identity or the attestation/checksum contract. See
 in [head-bound advisory publication](safe-outputs.md#head-bound-advisory-publication).
 It publishes prose or nothing, never a review verdict/status or classifier result.
 All workflow pieces must use a release containing the input at the same pin.
+
+`bind-continuation` defaults to `false`. With a local admitted `push-item`, it
+records trusted repository/PR/head/run/attempt context and prepares attempt-scoped
+checked artifact provenance, without enabling unchanged completion or readiness.
+Check refuses bound workflow hand-backs until independent raw producer-attempt
+provenance is available; end-to-end producer-attempt binding is not implemented.
+Legacy callers are unchanged. See the
+[identity-only contract](safe-outputs.md#unchanged-completion-remains-unavailable).
 
 Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`

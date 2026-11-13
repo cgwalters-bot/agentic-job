@@ -1611,6 +1611,20 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
         ..
     } = *request;
     let base = checkout.base_commit.as_str();
+    // The request carries the policy's caller-bound attempt, not an identity
+    // reconstructed from outcome.json or inference registration. These local
+    // consistency checks do not prove an uploaded artifact's producer attempt.
+    if let Some(identity) = &policy.continuation {
+        identity.validate(policy)?;
+        anyhow::ensure!(
+            identity.run_id.to_string() == run_id,
+            "continuation request differs from admitted run"
+        );
+        anyhow::ensure!(
+            identity.head == base,
+            "continuation checkout differs from admitted head"
+        );
+    }
     // An author the bounds pin is the only one `check` takes.
     let author = match &policy.commit_author {
         Some(pinned) => parse_author(pinned)?,
@@ -1994,6 +2008,7 @@ mod tests {
     fn policy(kind: Kind, outputs: Value) -> Policy {
         Policy {
             external: None,
+            continuation: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
@@ -3563,8 +3578,47 @@ mod tests {
         assert!(!home.path("safe-outputs").exists());
     }
 
-    /// Until policy/check/artifact provenance binds the workflow attempt,
-    /// an unchanged outcome is diagnostic text, never checked completion.
+    #[test]
+    fn continuation_request_uses_only_the_serialized_policy_identity() {
+        let home = Home::new();
+        let mut policy = crate::policy::tests::push_policy();
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        push.head.clone_from(&home.checkout.base_commit);
+        policy.continuation = Some(crate::policy::Continuation {
+            repository: policy.repo.clone(),
+            pull_request: push.target.parse().unwrap(),
+            head: push.head.clone(),
+            run_id: RUN_ID.parse().unwrap(),
+            attempt: 2,
+        });
+        let serialized = serde_json::to_vec(&policy).unwrap();
+        let policy: Policy = serde_json::from_slice(&serialized).unwrap();
+        policy.validate().unwrap();
+        std::fs::write(home.path(AGENT_OUTCOME), r#"{"summary":"No change","run_id":999,"run_attempt":999,"checkpoint":{"complete":true}}"#).unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert!(change.dropped.is_none(), "{:?}", change.dropped);
+        assert_eq!(policy.continuation.as_ref().unwrap().attempt, 2);
+        let mut wrong = policy;
+        wrong.continuation.as_mut().unwrap().head = "b".repeat(40);
+        let result = collect_change(&Request {
+            runner: &Unconfined,
+            home: home.dir.path(),
+            checkout: &home.checkout,
+            policy: &wrong,
+            commit: &config::Commit::default(),
+            run_id: RUN_ID,
+            harness: None,
+            run_dir: &home.path("results"),
+            safe_outputs: &home.path("safe-outputs"),
+        });
+        assert!(result.is_err());
+    }
+
+    /// Even identity-bound policy is not unchanged-completion authority.
     #[test]
     fn unchanged_completion_claims_are_not_checked_evidence() {
         let cases = [

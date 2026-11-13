@@ -572,6 +572,16 @@ the hand-back, as data. Check hands apply its own upload's ID and
 digest, `artifact-id` and `artifact-digest`, which apply holds to the
 same way. Check and apply need `actions: read` for these lookups.
 
+The threat from a stale continuation or earlier-attempt checked artifact is
+separate from transfer integrity. Optional `bind-continuation: true` (default
+`false`) on `policy.yml` or the complete reusable workflow binds a local admitted
+`push-item` to admitted caller run/attempt context and prepares attempt-specific
+checked artifact names. Check currently refuses all bound workflow hand-backs
+before proposal download: the raw artifact's producer attempt cannot yet be
+independently proven. Legacy callers retain their run-only binding. This is inert
+[identity groundwork](safe-outputs.md#unchanged-completion-remains-unavailable),
+not unchanged-completion acceptance; no caller is activated here.
+
 **Your privileged steps** go between `prepare` and `secure-host`. They
 run as the runner's user with sudo. They come before anything of the
 agent's is on the machine, and before `secure-host` takes root away.

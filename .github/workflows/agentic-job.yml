@@ -87,6 +87,10 @@ on:
           repository accepts it
         type: string
         default: ""
+      bind-continuation:
+        description: Record admitted continuation identity; check refuses pending trusted producer-attempt provenance, no unchanged completion
+        type: boolean
+        default: false
       repo:
         description: The repository the agent works on, OWNER/NAME on github.com; it must be public, or the calling repository where the bounds set `private = true` (docs/private-repositories.md)
         type: string
@@ -464,6 +468,7 @@ jobs:
       review-item: ${{ inputs.review-item }}
       review-head: ${{ inputs.review-head }}
       push-item: ${{ inputs.push-item }}
+      bind-continuation: ${{ inputs.bind-continuation }}
       repo: ${{ inputs.repo }}
       base: ${{ inputs.base }}
       kind: ${{ inputs.kind }}

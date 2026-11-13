@@ -192,6 +192,7 @@ fn validate(context: &ContextFile, bytes: &[u8]) -> Result<Vec<Map<String, Value
         },
         &policy,
         Trusted {
+            continuation: None,
             comment: Some((&context.repo, context.item)),
             run_id: None,
         },

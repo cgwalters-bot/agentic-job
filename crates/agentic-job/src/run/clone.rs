@@ -661,6 +661,7 @@ mod tests {
     fn policy(repo: &str, clone_url: &str, base: &str) -> Policy {
         Policy {
             external: None,
+            continuation: None,
             advisory: None,
             context: Vec::new(),
             repo: repo.into(),

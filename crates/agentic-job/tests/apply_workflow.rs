@@ -1105,7 +1105,7 @@ fn apply_takes_only_this_runs_check_output_whatever_caller_wired() {
     let checker = self::workflow("check.yml");
     matches(
         &checker,
-        r"- id: upload\n {8}if: \$\{\{ success\(\) && [^\n]*\n(?:[^\n]*\n){2} {10}name: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n",
+        r"- id: upload\n {8}if: \$\{\{ success\(\) && [^\n]*\n(?:[^\n]*\n){2} {10}name: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\$\{\{ fromJSON\(inputs.policy\).continuation-context != '' && format\('-\{0\}-\{1\}', github.run_id, github.run_attempt\) \|\| '' \}\}\n",
     );
     matches(
         apply,
@@ -1154,6 +1154,7 @@ fn apply_takes_only_this_runs_check_output_whatever_caller_wired() {
                     ("GITHUB_REPOSITORY", "o/r"),
                     ("GITHUB_RUN_ID", "7"),
                     ("ANSWER", &answer),
+                    ("CONTINUATION", ""),
                 ],
             ),
             expected,
@@ -1177,6 +1178,148 @@ fn apply_takes_only_this_runs_check_output_whatever_caller_wired() {
         job(&self::workflow("example-compose.yml"), "apply"),
         r"(?m)^ {4}permissions:\n(?: {6}[-\w]+: \w+\n)*? {6}actions: read\n",
     );
+}
+
+#[test]
+fn continuation_artifacts_refuse_prior_attempt_substitution_and_ambiguous_provenance() {
+    let doc = definition("apply.yml");
+    let binding = step(&doc, "apply", "The checked outputs are this run's check's");
+    let verify = binding["run"].as_str().unwrap();
+    let script = format!(
+        "gh() {{ case \"$*\" in 'api repos/o/r/actions/artifacts/42') printf '%s' \"$ARTIFACT\";; 'api repos/o/r/actions/runs/7/artifacts?per_page=100') printf '%s' \"$LIST\";; *) return 9;; esac; }}\n{verify}"
+    );
+    let digest = "c".repeat(64);
+    let identity = json!({"repository":"example/repo", "pull_request":12, "head":"a".repeat(40), "run_id":7, "attempt":2});
+    let good = json!({"id":42, "name":"p-checked-outputs-7-2", "digest":format!("sha256:{digest}"), "expired":false, "workflow_run":{"id":7}});
+    for case in [
+        "valid",
+        "previous-attempt",
+        "old-check-job",
+        "missing-check-attempt",
+        "wrong-run",
+        "wrong-context-run",
+        "wrong-context-attempt",
+        "missing-attempt",
+        "missing-run",
+        "legacy-name",
+        "digest",
+        "expired",
+        "ambiguous",
+        "missing",
+        "wrong-id",
+        "truncated",
+        "unavailable",
+    ] {
+        let mut artifact = good.clone();
+        let mut context = identity.clone();
+        match case {
+            "previous-attempt" => artifact["name"] = json!("p-checked-outputs-7-1"),
+            "wrong-run" => artifact["workflow_run"]["id"] = json!(8),
+            "wrong-context-run" => context["run_id"] = json!(8),
+            "wrong-context-attempt" => context["attempt"] = json!(1),
+            "missing-attempt" => {
+                context.as_object_mut().unwrap().remove("attempt");
+            }
+            "missing-run" => {
+                context.as_object_mut().unwrap().remove("run_id");
+            }
+            "legacy-name" => artifact["name"] = json!("p-checked-outputs"),
+            "digest" => artifact["digest"] = json!(format!("sha256:{}", "d".repeat(64))),
+            "expired" => artifact["expired"] = json!(true),
+            _ => {}
+        }
+        let mut artifacts = vec![artifact.clone()];
+        if case == "ambiguous" {
+            artifacts.push(artifact.clone());
+        }
+        if case == "missing" {
+            artifacts.clear();
+        }
+        if case == "wrong-id" {
+            artifacts[0]["id"] = json!(43);
+        }
+        let list = if case == "unavailable" {
+            String::new()
+        } else {
+            json!({"total_count":if case == "truncated" {101} else {artifacts.len()}, "artifacts":artifacts}).to_string()
+        };
+        let dir = TempDir::new().unwrap();
+        status(
+            &bash(
+                dir.path(),
+                &script,
+                &[
+                    ("CHECKED", "42"),
+                    ("DIGEST", &digest),
+                    ("NAME", "p-checked-outputs"),
+                    ("GITHUB_REPOSITORY", "o/r"),
+                    ("GITHUB_RUN_ID", "7"),
+                    ("GITHUB_RUN_ATTEMPT", "2"),
+                    (
+                        "ARTIFACT_ATTEMPT",
+                        match case {
+                            "old-check-job" => "1",
+                            "missing-check-attempt" => "",
+                            _ => "2",
+                        },
+                    ),
+                    ("CONTINUATION", &context.to_string()),
+                    ("ARTIFACT", &artifact.to_string()),
+                    ("LIST", &list),
+                ],
+            ),
+            if case == "valid" { 0 } else { 1 },
+        );
+    }
+}
+
+#[test]
+fn continuation_report_matches_every_admitted_identity_field_before_credentials() {
+    let doc = definition("apply.yml");
+    let name = "The checked continuation is the admitted target and attempt";
+    let binding = step(&doc, "apply", name);
+    let verify = binding["run"].as_str().unwrap();
+    let source = workflow("apply.yml");
+    let apply = job(&source, "apply");
+    assert!(apply.find(name).unwrap() < apply.find("uses: actions/checkout@").unwrap());
+    let identity = json!({"repository":"example/repo", "pull_request":12, "head":"a".repeat(40), "run_id":7, "attempt":2});
+    for field in [
+        "valid",
+        "repository",
+        "pull_request",
+        "head",
+        "run_id",
+        "attempt",
+        "missing",
+        "refused",
+        "policy",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let mut reported = identity.clone();
+        if reported.get(field).is_some() {
+            reported[field] = json!("wrong");
+        }
+        let report = dir.path().join("report.json");
+        std::fs::write(&report, json!({"ok":field != "refused", "continuation":if field == "missing" {Value::Null} else {reported}}).to_string()).unwrap();
+        std::fs::write(
+            dir.path().join("policy.json"),
+            json!({"continuation":if field == "policy" {Value::Null} else {identity.clone()}})
+                .to_string(),
+        )
+        .unwrap();
+        status(
+            &bash(
+                dir.path(),
+                verify,
+                &[
+                    ("CONTINUATION", &identity.to_string()),
+                    ("GH_AW_TMP", dir.path().to_str().unwrap()),
+                    ("REPORT", report.to_str().unwrap()),
+                ],
+            ),
+            if field == "valid" { 0 } else { 1 },
+        );
+    }
 }
 
 #[test]

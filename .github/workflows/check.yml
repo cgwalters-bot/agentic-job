@@ -31,6 +31,9 @@ on:
       artifact-digest:
         description: The checked upload's SHA-256 in hex, which apply holds it to
         value: ${{ jobs.detect.outputs.artifact-digest }}
+      artifact-attempt:
+        description: Trusted upload job attempt, preserved through detection; never inferred from artifact metadata
+        value: ${{ jobs.detect.outputs.artifact-attempt }}
       refusal:
         description: Bounded refusal diagnostic, not authorization to apply
         value: ${{ jobs.check.outputs.refusal }}
@@ -70,6 +73,7 @@ jobs:
     outputs:
       artifact-id: ${{ steps.release.outputs.artifact-id }}
       artifact-digest: ${{ steps.release.outputs.artifact-digest }}
+      artifact-attempt: ${{ needs.check.outputs.artifact-attempt }}
       detection-result: ${{ steps.detector.outcome }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -112,6 +116,7 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-attempt: ${{ steps.upload.outputs.artifact-id != '' && github.run_attempt || '' }}
       refusal: ${{ steps.refusal.outputs.reason }}
       decision-required: ${{ steps.refusal.outputs.decision-required }}
       has-patch: ${{ steps.checked.outputs.has-patch }}
@@ -130,6 +135,14 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" == "$REPOSITORY" && "$SOURCE_SHA" == "$SHA" ]] ||
             { echo "::error::policy.yml ran at $SOURCE_REPOSITORY@$SOURCE_SHA, this workflow at $REPOSITORY@$SHA: pin all pieces to one commit"; exit 1; }
       # Empty IDs must not turn download-artifact into a download of all uploads.
+      # A fresh checker must not relabel a prior attempt's raw upload. The
+      # artifact API proves its run, not its producer attempt; neither an
+      # agent job output nor an agent-chosen name repairs that trust gap.
+      - name: Require independently proven producer attempt
+        if: ${{ fromJSON(inputs.policy).continuation-context != '' }}
+        run: |
+          echo '::error::continuation producer-attempt provenance is not available; bound workflow hand-backs remain disabled'
+          exit 1
       - name: Require explicit artifact contracts
         env:
           BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
@@ -224,9 +237,13 @@ jobs:
           COMMENT_REPO: ${{ fromJSON(inputs.policy).item-repo || fromJSON(inputs.policy).output-repo || github.repository }}
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           EXPECT_REFUSAL: ${{ fromJSON(inputs.policy).expect-check-refusal }}
+          CONTINUATION: ${{ fromJSON(inputs.policy).continuation-context }}
         run: |
           destination=()
           case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
+          if [ -n "$CONTINUATION" ]; then
+            destination+=(--continuation-context "$CONTINUATION" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          fi
           set +e
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
             --base-secret-evidence "$JOB_DIR/public-base.json" \
@@ -289,7 +306,7 @@ jobs:
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs
+          name: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs${{ fromJSON(inputs.policy).continuation-context != '' && format('-{0}-{1}', github.run_id, github.run_attempt) || '' }}
           path: |
             ${{ env.GH_AW_TMP }}/agent_output.json
             ${{ env.GH_AW_TMP }}/folded.json

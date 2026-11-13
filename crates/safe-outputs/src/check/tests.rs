@@ -53,6 +53,7 @@ fn advisory_check_refuses_raw_fields_even_when_collection_drops_them() {
             collected,
             &policy,
             Trusted {
+                continuation: None,
                 comment: Some((&advisory.repo, 7)),
                 ..Default::default()
             },
@@ -179,6 +180,7 @@ impl Case {
             errors: Vec::new(),
         };
         let trusted = Trusted {
+            continuation: None,
             comment: Some((REPO, 7)),
             run_id: Some("7"),
         };

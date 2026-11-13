@@ -9,6 +9,132 @@ use serde_json::Value;
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn serialized_continuation_policy_requires_exact_trusted_check_context() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let bounds = dir.path().join("bounds.toml");
+    std::fs::write(&bounds, "hosts = ['github.com']\nrepos = ['example/repo']\nbases = ['main']\nmax_outputs = 1\nmax_patch_bytes = 65536\nmax_patch_files = 10\n[github.outputs]\nnoop = { max = 1 }\n[github.outputs.push_to_pull_request_branch]\nmax = 1\nbranches = ['topic/**']\n").unwrap();
+    let head = "a".repeat(40);
+    let policy_path = dir.path().join("policy.json");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    std::fs::write(
+        out.join("outputs.jsonl"),
+        "{\"type\":\"noop\",\"message\":\"No change\"}\n",
+    )
+    .unwrap();
+    let collected = dir.path().join("collected.json");
+    for bound in [false, true] {
+        let mut producer = Command::new(BIN);
+        producer.args(["policy", "--allow"]).arg(&bounds).args([
+            "--repo",
+            "example/repo",
+            "--output-repo",
+            "example/repo",
+            "--clone-url",
+            "https://github.com/example/repo",
+            "--base",
+            "topic/fix",
+            "--kind",
+            "branch",
+            "--outputs",
+            "push_to_pull_request_branch,noop",
+            "--max-outputs",
+            "1",
+            "--pull-request",
+            "12",
+            "--head",
+            &head,
+        ]);
+        if bound {
+            producer.args(["--continuation-run-id", "7", "--continuation-attempt", "2"]);
+        }
+        let made = producer.output().unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let policy: Value = serde_json::from_slice(&made.stdout).unwrap();
+        std::fs::write(&policy_path, &made.stdout).unwrap();
+        let identity = json!({"repository":"example/repo", "pull_request":12, "head":head, "run_id":7, "attempt":2});
+        assert_eq!(policy.get("continuation"), bound.then_some(&identity));
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(&policy_path)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(
+            ingest.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ingest.stderr)
+        );
+        for (field, value) in [
+            ("valid", Value::Null),
+            ("missing", Value::Null),
+            ("repository", json!("other/repo")),
+            ("pull_request", json!(13)),
+            ("head", json!("b".repeat(40))),
+            ("run_id", json!(8)),
+            ("attempt", json!(1)),
+            ("current-run", json!(8)),
+            ("current-attempt", json!(3)),
+        ] {
+            let mut context = identity.clone();
+            if context.get(field).is_some() {
+                context[field] = value;
+            }
+            let report = dir.path().join("report.json");
+            // A failed invocation must not leave a previous successful report.
+            if report.exists() {
+                std::fs::remove_file(&report).unwrap();
+            }
+            let mut check = Command::new(BIN);
+            check
+                .args(["check", "--policy"])
+                .arg(&policy_path)
+                .arg("--outputs")
+                .arg(&out)
+                .arg("--collected")
+                .arg(&collected)
+                .arg("--report")
+                .arg(&report)
+                .args(["--run-id", if field == "current-run" { "8" } else { "7" }]);
+            if field != "missing" {
+                check.args([
+                    "--continuation-context",
+                    &context.to_string(),
+                    "--run-attempt",
+                    if field == "current-attempt" { "3" } else { "2" },
+                ]);
+            }
+            let result = check.output().unwrap();
+            let accepted = (bound && field == "valid") || (!bound && field == "missing");
+            assert_eq!(
+                result.status.success(),
+                accepted,
+                "bound={bound} {field}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            if report.exists() {
+                let verdict: Value =
+                    serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+                assert_eq!(
+                    verdict.get("continuation"),
+                    (bound && accepted).then_some(&identity)
+                );
+                assert!(verdict.get("unchanged_completion").is_none());
+                assert!(verdict["patch"].is_null());
+            }
+        }
+    }
+}
+
+#[test]
 fn neutral_inline_comments_record_only_the_trusted_head_and_item() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out");

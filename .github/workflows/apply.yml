@@ -162,9 +162,10 @@ jobs:
       # check accepted: a policy call's prefix is unique in a run, as its
       # own uploads under it would conflict, and so would an earlier upload
       # of the name with check's. Read with the job token (`actions: read`).
-      # This binds the run, not the attempt: the API names no attempt, and
-      # a re-run keeps the run ID, so an earlier attempt's upload passes.
-      # That is still check's accepted output under this prefix. Its
+      # Bound continuations use an attempt-specific checker-owned name:
+      # an earlier attempt's accepted upload cannot satisfy this attempt.
+      # No attempt identity is inferred from producer-selected metadata.
+      # Legacy calls retain their run-only binding. Its
       # digest, as check's upload step gave it, holds the download below
       # to the bytes check uploaded, as check holds the agent's.
       - name: The checked outputs are this run's check's
@@ -173,7 +174,16 @@ jobs:
           CHECKED: ${{ fromJSON(inputs.check).outputs.artifact-id }}
           DIGEST: ${{ fromJSON(inputs.check).outputs.artifact-digest }}
           NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs
+          CONTINUATION: ${{ fromJSON(inputs.policy).continuation-context }}
+          ARTIFACT_ATTEMPT: ${{ fromJSON(inputs.check).outputs.artifact-attempt }}
         run: |
+          if [ -n "$CONTINUATION" ]; then
+            [ "$ARTIFACT_ATTEMPT" = "$GITHUB_RUN_ATTEMPT" ] || { echo '::error::checked upload is not from this attempt'; exit 1; }
+            jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '(.run_id | tostring) == $run and (.attempt | tostring) == $attempt' <<< "$CONTINUATION" > /dev/null || exit 1
+            NAME="$NAME-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" |
+              jq -e --arg name "$NAME" --arg id "$CHECKED" '.total_count <= 100 and ([.artifacts[] | select(.name == $name)] | length == 1 and .[0].expired == false and (.[0].id | tostring) == $id)' > /dev/null || exit 1
+          fi
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CHECKED" |
             jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" --arg digest "sha256:$DIGEST" \
               '.name == $name and (.workflow_run.id | tostring) == $run and .digest == $digest' > /dev/null ||
@@ -185,6 +195,21 @@ jobs:
       # A push's base is its pull request's branch, in the head repository
       # the fork step names: the checkout's own default is taken, and that
       # branch fetched below.
+      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+          path: ${{ env.GH_AW_TMP }}
+          digest-mismatch: error
+      - name: The checked continuation is the admitted target and attempt
+        if: ${{ fromJSON(inputs.policy).continuation-context != '' }}
+        env:
+          CONTINUATION: ${{ fromJSON(inputs.policy).continuation-context }}
+        run: |
+          jq -e --argjson identity "$CONTINUATION" --slurpfile policy "$GH_AW_TMP/policy.json" \
+            '.ok == true and .continuation == $identity and $policy[0].continuation == $identity' "$REPORT" > /dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
@@ -194,14 +219,6 @@ jobs:
           # Same selection as the handlers; only apply gets this PAT.
           token: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUSH_TOKEN }}
           persist-credentials: true
-      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
-        with:
-          destination: ${{ runner.temp }}/gh-aw/actions
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          artifact-ids: ${{ fromJSON(inputs.check).outputs.artifact-id }}
-          path: ${{ env.GH_AW_TMP }}
-          digest-mismatch: error
       - id: replacement
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

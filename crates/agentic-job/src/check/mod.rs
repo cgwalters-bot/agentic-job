@@ -49,6 +49,7 @@ use safe_outputs::check::{CREATE_ISSUE, ISSUE_LINKS, target_key};
 pub use safe_outputs::{MAX_OUTPUTS_BYTES, OUTPUTS_FILE};
 
 const MAX_BASE_BYTES: u64 = 4096;
+const MAX_CONTINUATION_CONTEXT_BYTES: usize = 4096;
 /// How much of a `memory.json` is read where the policy allows none: it
 /// is refused whatever it holds, but read with a bound like the rest.
 const MAX_UNEXPECTED_MEMORY_BYTES: u64 = 4096;
@@ -66,6 +67,12 @@ const SHORT_COMMIT: usize = 12;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Full admitted continuation identity from the trusted caller, never the hand-back
+    #[arg(long, value_name = "JSON")]
+    pub continuation_context: Option<String>,
+    /// Current attempt from trusted workflow context
+    #[arg(long)]
+    pub run_attempt: Option<u64>,
     /// The policy.json that `policy` printed for this run
     #[arg(long, value_name = "FILE")]
     pub policy: PathBuf,
@@ -138,6 +145,10 @@ pub struct Verdict {
     /// A bounded producer declaration, not evidence of passed host controls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_isolation: Option<crate::config::Isolation>,
+
+    /// Identity checked against independent caller context; not completion evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<crate::policy::Continuation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_target: Option<CheckedTarget>,
     pub ok: bool,
@@ -192,6 +203,7 @@ impl Verdict {
         errors.retain(|error| seen.insert(error.clone()));
         Self {
             host_isolation: None,
+            continuation: None,
             inline_target: None,
             ok: errors.is_empty(),
             errors,
@@ -424,6 +436,7 @@ fn check_outputs_to(
         policy,
         comment,
         run_id,
+        None,
         &PublicAddresses::default(),
     )
 }
@@ -441,7 +454,15 @@ pub(crate) fn check_run_outputs_with_public(
         .advisory
         .as_ref()
         .map(|advisory| (advisory.repo.as_str(), advisory.pull));
-    check_outputs_with_public(dir, collected, policy, comment, Some(run_id), public)
+    check_outputs_with_public(
+        dir,
+        collected,
+        policy,
+        comment,
+        Some(run_id),
+        policy.continuation.as_ref(),
+        public,
+    )
 }
 
 fn check_outputs_with_public(
@@ -450,9 +471,18 @@ fn check_outputs_with_public(
     policy: &Policy,
     comment: Option<(&str, u64)>,
     run_id: Option<&str>,
+    continuation: Option<&crate::policy::Continuation>,
     public: &PublicAddresses,
 ) -> Result<Verdict> {
-    let mut verdict = verdict_of(dir, collected, policy, comment, run_id, public)?;
+    let mut verdict = verdict_of(
+        dir,
+        collected,
+        policy,
+        comment,
+        run_id,
+        continuation,
+        public,
+    )?;
     verdict.blocked = verdict.is_blocked();
     Ok(verdict)
 }
@@ -463,6 +493,7 @@ fn verdict_of(
     policy: &Policy,
     comment: Option<(&str, u64)>,
     run_id: Option<&str>,
+    continuation: Option<&crate::policy::Continuation>,
     public: &PublicAddresses,
 ) -> Result<Verdict> {
     let mut errors = Vec::new();
@@ -604,7 +635,11 @@ fn verdict_of(
         }
         errors
     };
-    let trusted = Trusted { comment, run_id };
+    let trusted = Trusted {
+        comment,
+        run_id,
+        continuation,
+    };
     let mut checked =
         safe_outputs::check::check(&handback, collected, policy, trusted, &Apply, lifecycle);
     let evidence = checked_test_evidence(&contents, &checked.items, checked.patch.as_ref(), policy);
@@ -685,6 +720,24 @@ fn checked_test_evidence(
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
+    anyhow::ensure!(
+        args.continuation_context
+            .as_ref()
+            .is_none_or(|context| context.len() <= MAX_CONTINUATION_CONTEXT_BYTES),
+        "trusted continuation context exceeds {MAX_CONTINUATION_CONTEXT_BYTES} bytes"
+    );
+    let continuation: Option<crate::policy::Continuation> = args
+        .continuation_context
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .context("trusted continuation context")?;
+    if let Some(identity) = &continuation {
+        anyhow::ensure!(
+            args.run_attempt == Some(identity.attempt),
+            "continuation attempt differs from current check attempt"
+        );
+    }
     crate::external::caller_policy(&policy)?;
     let comment = args.comment_repo.as_deref().zip(args.comment_target);
     let public = args
@@ -704,6 +757,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         &policy,
         comment,
         args.run_id.as_deref(),
+        continuation.as_ref(),
         &public,
     )?;
     if let Some(external) = &policy.external {
@@ -753,6 +807,9 @@ pub fn run(args: &Args) -> Result<Exit> {
                 path.display()
             ),
         }
+    }
+    if verdict.ok {
+        verdict.continuation = continuation;
     }
     if let Some(report) = &args.report {
         let json = serde_json::to_string_pretty(&verdict).context("writing the verdict")?;

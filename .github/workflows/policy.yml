@@ -83,6 +83,10 @@ on:
           another's fork) only where that repository accepts it
         type: string
         default: ""
+      bind-continuation:
+        description: Record admitted continuation identity; check refuses pending trusted producer-attempt provenance, no unchanged completion
+        type: boolean
+        default: false
       repo:
         description: The repository the agent works on, OWNER/NAME on github.com; it must be public, or the calling repository where the bounds set `private = true` (docs/private-repositories.md)
         type: string
@@ -333,6 +337,9 @@ on:
     # so that what they check and apply is what this call decided, and the
     # caller's agent job finds its trusted inputs here by upload ID.
     outputs:
+      continuation-context:
+        description: Trusted admitted continuation repository, PR, head, run and attempt; empty by default
+        value: ${{ jobs.policy.outputs.continuation-context }}
       external-run-id:
         description: Matched external branch run ID, or empty for hosted mode
         value: ${{ jobs.policy.outputs.external-run-id }}
@@ -477,6 +484,7 @@ jobs:
     outputs:
       binary-artifact-id: ${{ steps.binary.outputs.artifact-id }}
       external-run-id: ${{ steps.request.outputs.external-run-id }}
+      continuation-context: ${{ steps.request.outputs.continuation-context }}
       policy-artifact-id: ${{ steps.policy.outputs.artifact-id }}
       # Whether the run goes on: `true` unless an event was refused.
       admitted: ${{ steps.event.outputs.admitted || 'true' }}
@@ -790,6 +798,7 @@ jobs:
           ADVISORY: ${{ inputs.advisory }}
           EXTERNAL_RECEIPT: ${{ inputs.external-receipt }}
           PROPOSALS_NAME: ${{ inputs.proposals-artifact }}
+          BIND_CONTINUATION: ${{ inputs.bind-continuation }}
           GH_TOKEN: ${{ github.token }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
@@ -807,6 +816,10 @@ jobs:
           if [ -n "$PUSH_ITEM" ]; then
             base=$PUSH_BRANCH
             set -- "$@" --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --pull-author "$PUSH_AUTHOR" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
+          fi
+          if [ "$BIND_CONTINUATION" = true ]; then
+            [ -n "$PUSH_ITEM" ] && [ -z "$PROPOSALS_NAME$EXTERNAL_RECEIPT" ] || { echo '::error::continuation binding requires a local admitted push'; exit 1; }
+            set -- "$@" --continuation-run-id "$GITHUB_RUN_ID" --continuation-attempt "$GITHUB_RUN_ATTEMPT"
           fi
           # A private run names where its outputs go, for the binary to
           # hold them to its own repository.
@@ -855,6 +868,7 @@ jobs:
           # The binary wrote and checked these: domain names, no comma.
           echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
           echo "external-run-id=$(jq -r '.external.run_id // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
+          echo "continuation-context=$(jq -c '.continuation // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
       # Uploaded for a refused event too: review.yml's refusal job writes
       # its status comment with it.
       - id: binary

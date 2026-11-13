@@ -125,6 +125,7 @@ impl Checked {
             },
             policy,
             Trusted {
+                continuation: None,
                 comment: context.item.map(|n| (policy.repo.as_str(), n)),
                 run_id: None,
             },

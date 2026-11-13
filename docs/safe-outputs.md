@@ -838,24 +838,61 @@ completion field**. A missing checkpoint in the check report is not proof of
 completion. An unchanged result cannot trigger the readiness transition above,
 even with `ready_when_complete`; that path still requires a push.
 
-The missing binding is concrete. `Policy` binds the repository and a push's
-target/head, but has no producer run/attempt identity. `run::handback::Request`
-has a run ID, not an attempt. `check::Args` has a trusted run ID and optional
-comment target/review head, but no attempt or complete unchanged-result context;
-`Trusted` passes only comment destination and run ID to the library. The workflow
-does not pass `--review-head` to this check invocation. Finally, the checked
-artifact ID/name/digest check in `apply.yml` binds the run **not the attempt**:
-an earlier attempt's artifact can pass. An agent-supplied attempt or an inference
-registration record does not repair that end-to-end binding.
+Merged [#3382](https://github.com/cgwalters-forge/agentic-job/pull/3382) preserved
+the fail-closed behavior while documenting these gaps. The optional
+`bind-continuation` workflow input (default `false`) now carries an admitted
+push's repository, positive PR number and exact head together with the trusted
+caller's `github.run_id` and `github.run_attempt` in `Policy.continuation`.
+It requires a local admitted push, not legacy named proposals or external output.
+The producer's existing hand-back `Request` carries that policy, checks its run
+and checkout head, and never reconstructs identity from outcomes, JSONL or
+inference registration. The run action refuses a policy from another attempt
+before starting the producer.
 
-Before carrying accepted evidence, the existing policy/check context and checked
-artifact provenance must bind the admitted repository, PR, exact head, producer
-run and attempt together, without reading identities from agent output. Required
-verification must also be specified by trusted context; the agent cannot choose
+Policy's `--continuation-run-id` and `--continuation-attempt` must be supplied
+together by a trusted caller. Check receives the full tuple separately as
+`--continuation-context` (at most 4096 bytes), plus the current `--run-id` and
+`--run-attempt`. The library's `Trusted.continuation` requires exact equality
+with the admitted policy; missing context or a different repository, PR, head,
+run or attempt is refused. Only an accepted report carries `continuation`.
+This field is identity, **not a completion claim** or required-verification result.
+
+The workflow opt-in currently **refuses before proposal download**. Raw
+proposal provenance still proves only run and digest: a fresh checker could
+otherwise read an earlier attempt's raw upload and stamp it with the current
+identity. The artifact API exposes no producer attempt. An agent job's reported
+attempt, an attempt-looking upload name or inference registration would not
+independently prove which attempt produced that ID. The identity tuple is
+admitted caller context, not proof of a raw artifact's producer attempt.
+This larger prerequisite remains open; **end-to-end producer-attempt binding
+does not exist yet**. No bound workflow result may reach apply until it does.
+
+The checked-upload groundwork, behind that refusal, reserves
+`<artifact-prefix>checked-outputs-<run-id>-<attempt>` without overwrite. Apply
+derives the expected suffix from its own trusted Actions context, not artifact
+metadata, and requires the policy context to name that same run/attempt. Before
+downloading it checks the ID, exact name, digest and run as before, and requires
+one unexpired artifact of that name with that ID. The lookup is bounded to 100
+artifacts in the run; a larger listing is refused, not partially searched.
+An earlier-attempt artifact keeps its old name and cannot substitute; a name
+preoccupied by another upload makes check's upload fail rather than authorizing
+it. Check also exposes its trusted upload job's `artifact-attempt`, preserved
+unchanged through the detector job; apply requires it to equal the current
+attempt, so rerunning detection cannot relabel an earlier check. After download,
+apply requires the report and included policy to match the
+whole admitted tuple before any credentialed checkout or mutation. The API
+still supplies no artifact attempt: provenance relies on this checker-owned,
+collision-refusing namespace, the trusted workflow pin and successful check job,
+not a producer-supplied attempt field. Legacy callers omit the context and keep
+their existing run-only artifact contract, with no unchanged-completion eligibility.
+
+Before carrying accepted completion evidence, required verification must still
+be specified by trusted context; the agent cannot choose
 an empty required set. Missing context, identity mismatches, changed output
 claimed as unchanged, absent/malformed/incomplete checkpoints, stopped outcomes,
 and failed or unavailable required verification must fail closed. This is a
-prerequisite, not a new receipt, option or caller opt-in in this version.
+prerequisite. The identity-only opt-in adds no receipt, scheduler, output bound,
+permission, hold exception or readiness transition. No shipped caller enables it.
 
 Today the producer saves outcomes as diagnostics outside the hand-back. The
 collector sanitizes requests; check validates bounded no-follow files, secrets,
