@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Check no longer refuses a patch that adds or edits a `.gitignore`: an
+  exact `.gitignore` filename is admitted past the protected-path refusal
+  for git's own files, which `.gitmodules`, `.gitattributes` and the rest
+  keep. Repo hygiene proposals are a safe output a run should be able to
+  make (#3407).
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

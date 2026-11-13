@@ -1974,7 +1974,10 @@ refused rather than silently retargeted.
 
 The patch is read as git reads it and must be exactly what
 `format-patch` writes. Refused are protected files (the policy's, and
-git's own files and CI, hook and editor configuration), paths that are
+git's own directory and files -- `.gitmodules`, `.gitattributes` -- and
+CI, hook and editor configuration; a `.gitignore` is admitted, as
+ignoring build output cannot change how git treats the repository's own
+files), paths that are
 not plain relative ones, binaries, symlinks, submodules, new
 executables, mode changes, renames, and a patch over its file count.
 Beyond what the old tree's check refused, it also refuses a change
