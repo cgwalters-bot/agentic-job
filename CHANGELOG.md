@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Preparation disables automatic Git maintenance/GC, including in new clones,
+  to prevent detached maintenance from racing successive shallow fetches.
+  Exact-head verification and clone transport restrictions are unchanged.
+
 - The getting-started guide now includes a tested local safe-output check,
   a minimal GitHub caller with generic host settings, and an explicit route
   to the deterministic GitLab example, without assuming project deployment access.

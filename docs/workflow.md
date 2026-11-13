@@ -79,6 +79,27 @@ separate jobs on separate machines. The apply job's additional checks are
    It runs gh-aw's handlers on the checked outputs:
     a branch and a draft pull request, comments.
 
+## Checkout preparation
+
+`run` prepares fresh target, secondary and context directories before starting
+the session. Target clone, replacement-base fetch and pinned-head fetch run
+sequentially; review preparation unshallows the base and then fetches the
+admitted head before adding its separate worktree. That worktree shares the
+base's Git directory, but no agent session has started during these operations.
+Other preparation clones use separate Git directories.
+
+Git can start detached automatic maintenance after a fetch returns, introducing
+a writer that can race the next fetch's shallow-boundary update. Preparation's
+networked Git commands disable `maintenance.auto` and `gc.auto`; `git clone -c`
+also persists those settings for later checkout commands, including handback.
+This is not a lock against an external Git writer or an agent explicitly running
+maintenance. It removes preparation-triggered automatic maintenance without
+changing exact-head checks, trusted review-base isolation, credentials or caller
+bounds. The [reported failure](https://github.com/cgwalters-forge/tracker/issues/1273)
+does not establish which process changed the original shallow file. Regression
+tests trace child starts under forced automatic-maintenance settings, with an
+unsuppressed fetch as a positive control; they do not depend on race timing.
+
 ## Which tokens reach what
 
 This table describes current credential-bearing behavior, **not** achievement

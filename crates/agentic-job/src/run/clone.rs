@@ -36,6 +36,11 @@ const PRIVATE_DIR_MODE: &str = "0700";
 /// What a commit id and one line of `git log` fit in.
 const MAX_GIT_OUTPUT: usize = 4096;
 
+/// Detached maintenance can rewrite a shallow boundary after fetch returns,
+/// racing the next fetch. Keep automatic maintenance off in our commands and
+/// in new checkouts; gc.auto covers Git versions predating maintenance.
+const NO_AUTO_MAINTENANCE: &[&str] = &["maintenance.auto=false", "gc.auto=0"];
+
 fn name_chars(text: &str, also: &[u8]) -> bool {
     text.bytes()
         .all(|b| b.is_ascii_alphanumeric() || also.contains(&b))
@@ -235,6 +240,7 @@ fn clone_args<'a>(
         depth,
     ]);
     argv.extend(credential.iter().flat_map(|item| ["-c", item.as_str()]));
+    argv.extend(NO_AUTO_MAINTENANCE.iter().flat_map(|item| ["-c", *item]));
     argv.extend(branch.iter().flat_map(|branch| ["--branch", branch]));
     argv.extend(["--", url, dir]);
     argv
@@ -267,6 +273,7 @@ fn fetch_args<'a>(
 fn networked_git<'a>(dir: Option<&'a str>, transports: &[&str]) -> Vec<&'a str> {
     let mut argv = vec!["timeout", CLONE_TIMEOUT_S, "git"];
     argv.extend(dir.iter().flat_map(|dir| ["-C", dir]));
+    argv.extend(NO_AUTO_MAINTENANCE.iter().flat_map(|item| ["-c", *item]));
     argv.extend(["-c", "protocol.allow=never"]);
     argv.extend(transports.iter().flat_map(|transport| {
         let allow: &'static str = match *transport {
@@ -766,6 +773,10 @@ mod tests {
                 CLONE_TIMEOUT_S,
                 "git",
                 "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "-c",
                 "protocol.allow=never",
                 "-c",
                 "protocol.https.allow=always",
@@ -776,6 +787,10 @@ mod tests {
                 "--no-recurse-submodules",
                 "--depth",
                 "50",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
                 "--branch",
                 "main",
                 "--",
@@ -786,8 +801,18 @@ mod tests {
         // Without a branch, the repository's default.
         let argv = clone_args("file:///srv/r.git", None, "1", "d", &[], TRANSPORTS);
         assert_eq!(
-            argv[argv.len() - 5..],
-            ["--depth", "1", "--", "file:///srv/r.git", "d"]
+            argv[argv.len() - 9..],
+            [
+                "--depth",
+                "1",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "--",
+                "file:///srv/r.git",
+                "d"
+            ]
         );
         // A push's head, fetched by its commit into the clone.
         let head = crate::policy::tests::HEAD;
@@ -800,6 +825,10 @@ mod tests {
                 "git",
                 "-C",
                 "/home/agent/work/r",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
                 "-c",
                 "protocol.allow=never",
                 "-c",
@@ -831,6 +860,66 @@ mod tests {
         check_pinned_head(&other, &"3".repeat(40)).unwrap();
     }
 
+    /// Force auto-maintenance on through inherited configuration. Command-line
+    /// settings must override it, even before clone has written local config.
+    /// Trace child starts instead of waiting for a probabilistic shallow race.
+    struct MaintenanceTrace(PathBuf);
+
+    impl Runner for MaintenanceTrace {
+        fn run(
+            &self,
+            argv: &[&str],
+            input: &[u8],
+            max_output: usize,
+        ) -> Result<super::super::enter::Output> {
+            let trace = format!("GIT_TRACE2_EVENT={}", self.0.display());
+            let env = [
+                "env",
+                &trace,
+                "GIT_CONFIG_COUNT=4",
+                "GIT_CONFIG_KEY_0=maintenance.auto",
+                "GIT_CONFIG_VALUE_0=true",
+                "GIT_CONFIG_KEY_1=gc.auto",
+                "GIT_CONFIG_VALUE_1=1",
+                "GIT_CONFIG_KEY_2=gc.autoDetach",
+                "GIT_CONFIG_VALUE_2=false",
+                "GIT_CONFIG_KEY_3=maintenance.autoDetach",
+                "GIT_CONFIG_VALUE_3=false",
+            ];
+            super::super::enter::Unconfined.run(&[&env[..], argv].concat(), input, max_output)
+        }
+    }
+
+    impl MaintenanceTrace {
+        fn maintenance_starts(&self) -> usize {
+            std::fs::read_to_string(&self.0)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|event| {
+                    event["event"] == "child_start"
+                        && event["argv"].as_array().is_some_and(|argv| {
+                            argv.iter().any(|arg| arg == "maintenance" || arg == "gc")
+                        })
+                })
+                .count()
+        }
+
+        fn check_and_control(&self, dir: &str) {
+            assert_eq!(self.maintenance_starts(), 0);
+            // With suppression absent, the very same fixture starts maintenance.
+            let out = self
+                .run(
+                    &["git", "-C", dir, "fetch", "--quiet", "origin"],
+                    b"",
+                    MAX_GIT_OUTPUT,
+                )
+                .unwrap();
+            assert!(out.success(), "{}", out.error());
+            assert!(self.maintenance_starts() > 0, "missing positive control");
+        }
+    }
+
     /// The clone and fetch as `clone` runs them, against a repository
     /// whose default branch does not hold the head: the forge serves a
     /// fork's commit only under the pull request's ref.
@@ -839,12 +928,12 @@ mod tests {
         use std::process::Command;
 
         let temp = tempfile::tempdir().unwrap();
+        let trace = MaintenanceTrace(temp.path().join("trace.jsonl"));
         let (repo, dir) = (temp.path().join("repo"), temp.path().join("r"));
         let (repo_text, dir_text) = (utf8(&repo).unwrap(), utf8(&dir).unwrap());
         let run = |argv: &[&str]| {
-            let out = Command::new(argv[0]).args(&argv[1..]).output().unwrap();
-            let stdout = String::from_utf8(out.stdout).unwrap();
-            (out.status.success(), stdout.trim().to_owned())
+            let out = trace.run(argv, b"", MAX_GIT_OUTPUT).unwrap();
+            (out.success(), out.text())
         };
         let ok = |argv: &[&str]| {
             let (success, stdout) = run(argv);
@@ -856,7 +945,9 @@ mod tests {
         in_repo(&["init", "-q", "-b", "main"]);
         in_repo(&["config", "user.name", "Test"]);
         in_repo(&["config", "user.email", "test@example.invalid"]);
-        in_repo(&["commit", "-q", "--allow-empty", "-m", "Base"]);
+        for _ in 0..55 {
+            in_repo(&["commit", "-q", "--allow-empty", "-m", "Base"]);
+        }
         in_repo(&["checkout", "-qb", "fork"]);
         in_repo(&["commit", "-q", "--allow-empty", "-m", "Pull request"]);
         let head = in_repo(&["rev-parse", "HEAD"]);
@@ -875,11 +966,20 @@ mod tests {
         let replacement_base = in_repo(&["rev-parse", "HEAD"]);
         in_repo(&["checkout", "-q", "main"]);
         let url = format!("file://{repo_text}");
+        // Ignore source-fixture commands; only preparation is under test.
+        std::fs::remove_file(&trace.0).unwrap();
         ok(&clone_args(&url, None, DEPTH, dir_text, &[], TRANSPORTS));
+        let in_clone = |args: &[&str]| ok(&[&["git", "-C", dir_text], args].concat());
+        assert_eq!(
+            in_clone(&["config", "--local", "maintenance.auto"]),
+            "false"
+        );
+        assert_eq!(in_clone(&["config", "--local", "gc.auto"]), "0");
+        assert_eq!(in_clone(&["rev-parse", "--is-shallow-repository"]), "true");
         assert!(!run(&["git", "-C", dir_text, "cat-file", "-e", &replacement_base]).0);
         ok(&fetch_args(dir_text, &replacement_base, DEPTH, TRANSPORTS));
         ok(&fetch_args(dir_text, &head, DEPTH, TRANSPORTS));
-        let in_clone = |args: &[&str]| ok(&[&["git", "-C", dir_text], args].concat());
+        trace.check_and_control(dir_text);
         in_clone(&["checkout", "--quiet", "--detach", &head, "--"]);
         assert_eq!(in_clone(&["rev-parse", "--verify", "HEAD"]), head);
         assert_eq!(
@@ -1093,13 +1193,9 @@ mod tests {
             base_commit: base.clone(),
             secondary: None,
         };
-        review_head(
-            &super::super::enter::Unconfined,
-            &policy,
-            &mut checkout,
-            &admitted,
-        )
-        .unwrap();
+        let trace = MaintenanceTrace(temp.path().join("trace.jsonl"));
+        review_head(&trace, &policy, &mut checkout, &admitted).unwrap();
+        trace.check_and_control(utf8(&dir).unwrap());
         assert_eq!(git(&dir, &["rev-parse", "HEAD"]), base);
         assert_ne!(checkout.dir, dir);
         assert!(
