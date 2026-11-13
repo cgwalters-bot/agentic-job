@@ -57,6 +57,7 @@ pub struct ToolCall {
     first_title: String,
     /// It starts a subagent (TASK_TOOLS), as it was when first seen.
     task: bool,
+    pending: bool,
     raw_input: Value,
     raw_output: Value,
     content: Value,
@@ -67,6 +68,39 @@ pub struct Denial {
     pub tool: String,
     pub summary: String,
     pub rule: Option<String>,
+}
+
+impl Digest {
+    /// With workers enabled, a pending task's streamed arguments do not yet
+    /// say which allowance it spends. Charge it once it starts or finishes,
+    /// including failed calls with absent/unknown targets. Legacy runs retain
+    /// their original immediate counting behavior.
+    pub fn task_counts(&self, names: &[String]) -> (usize, usize) {
+        let tasks = if names.is_empty() {
+            self.tasks
+        } else {
+            self.calls
+                .iter()
+                .filter(|call| call.task && !call.pending)
+                .count()
+        };
+        (tasks, self.worker_tasks(names))
+    }
+
+    pub fn worker_tasks(&self, names: &[String]) -> usize {
+        self.calls
+            .iter()
+            .filter(|call| {
+                call.task
+                    && !call.pending
+                    && ["subagent_type", "agent", "agent_name"].iter().any(|key| {
+                        call.raw_input[*key]
+                            .as_str()
+                            .is_some_and(|name| names.iter().any(|n| n == name))
+                    })
+            })
+            .count()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -209,6 +243,7 @@ impl ToolCall {
             title: String::new(),
             first_title: String::new(),
             task: false,
+            pending: false,
             raw_input: Value::Null,
             raw_output: Value::Null,
             content: Value::Null,
@@ -216,6 +251,9 @@ impl ToolCall {
     }
 
     fn merge(&mut self, fields: &Value) {
+        if let Some(status) = fields["status"].as_str() {
+            self.pending = status == "pending";
+        }
         if let Some(t) = fields["title"].as_str() {
             self.title = t.to_owned();
             if self.first_title.is_empty() {
@@ -1145,6 +1183,31 @@ mod tests {
             m.push(&long);
         }
         assert_eq!((m.line.as_str(), m.done), ("first", true));
+    }
+
+    #[test]
+    fn worker_task_targets() {
+        for key in ["subagent_type", "agent", "agent_name"] {
+            let mut raw = json!({"description": "diff-reviewer worker"});
+            raw[key] = json!("worker");
+            let (digest, _) = lines(&[
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "w", "title": "task", "kind": "think", "rawInput": raw}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": "w", "status": "completed"}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "r", "title": "task", "kind": "think", "rawInput": {"subagent_type": "diff-reviewer"}}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "u", "title": "task", "kind": "think", "rawInput": {"description": "worker"}}),
+                ),
+            ]);
+            assert_eq!(digest.tasks, 3);
+            assert_eq!(digest.worker_tasks(&["worker".into()]), 1, "{key}");
+            assert_eq!(digest.worker_tasks(&[]), 0);
+        }
     }
 
     #[test]

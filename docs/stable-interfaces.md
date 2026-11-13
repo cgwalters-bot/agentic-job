@@ -153,6 +153,12 @@ which a scheduler reads back; the repository variables `REVIEW_POOLS` and
 
 ## Configuration files
 
+Job TOML can opt into `agent.subagents = [{ name, model, description }]`
+and `limits.max-worker-tasks`, independently of the review/other
+`limits.max-tasks` allowance. Workers are off by default and require a
+proxy-wide `limits.max-requests` cap and models advertised on the run's
+inference route ([worker subagents](skills.md#worker-subagents)).
+
 Each is TOML, and a key the binary does not know is refused. A file that
 uses a key added in a later release is therefore refused by an older
 pin; from 1.0, a file that works with one release keeps working with

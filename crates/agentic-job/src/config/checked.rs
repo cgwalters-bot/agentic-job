@@ -323,7 +323,35 @@ impl Config {
         if let Some(endpoint) = &endpoint {
             self.check_reachable(kind, endpoint, &host.direct)?;
         }
-        let limits = limits(&self.limits, endpoint.as_ref())?;
+        let mut limits = limits(&self.limits, endpoint.as_ref())?;
+        if !self.agent.subagents.is_empty() {
+            ensure!(
+                !matches!(
+                    endpoint.as_ref().map(|e| &e.mode),
+                    Some(crate::run::inference::Mode::ApiKey { .. })
+                ),
+                "agent.subagents needs broker per-model token accounting: register = \"api-key\" records requests only"
+            );
+            ensure!(
+                limits.max_requests.is_some(),
+                "agent.subagents needs limits.max-requests: the lead's budget may omit worker usage"
+            );
+            ensure!(
+                limits.max_worker_tasks.is_some(),
+                "agent.subagents needs limits.max-worker-tasks"
+            );
+            limits.worker_subagents = self
+                .agent
+                .subagents
+                .iter()
+                .map(|w| w.name.clone())
+                .collect();
+        } else {
+            ensure!(
+                limits.max_worker_tasks.is_none(),
+                "limits.max-worker-tasks needs agent.subagents"
+            );
+        }
         // Vibe cannot price an arbitrary broker model. A caller's budget
         // alone would appear capped but never bind, so require counted requests.
         if kind == Kind::Vibe {
@@ -366,6 +394,47 @@ mod tests {
                           register = \"api-key\"\nprovider = \"github\"\n";
     const API_KEY: &str = "[inference]\nurl = \"https://api.anthropic.example\"\n\
                            register = \"api-key\"\nprovider = \"anthropic\"\n";
+
+    #[test]
+    fn worker_configuration_is_explicit_and_bounded() {
+        let worker = "[[agent.subagents]]\nname = 'worker'\nmodel = 'example/fast'\ndescription = 'Delegate tests'\n";
+        let base = format!(
+            "{CLAUDE}{worker}{PROXY}{OIDC}{DIRECT}{REQUESTS}max-tasks = 4\nmax-worker-tasks = 12\n"
+        );
+        let config = Config::parse(&base).unwrap();
+        let checked = config.check().unwrap();
+        assert_eq!(checked.limits.max_tasks, Some(4));
+        assert_eq!(checked.limits.max_worker_tasks, Some(12));
+        assert_eq!(checked.limits.worker_subagents, ["worker"]);
+        for (from, to, want) in [
+            ("name = 'worker'", "name = '../worker'", "worker name"),
+            ("name = 'worker'", "name = 'diff-reviewer'", "worker name"),
+            ("model = 'example/fast'", "model = ''", "needs a model"),
+            (
+                "max-requests = 50",
+                "budget = 100",
+                "needs limits.max-requests",
+            ),
+            (
+                "max-worker-tasks = 12",
+                "max-worker-tasks = 0",
+                "needs limits.max-worker-tasks",
+            ),
+        ] {
+            let config = Config::parse(&base.replace(from, to)).unwrap();
+            let error = format!("{:#}", config.check().unwrap_err());
+            assert!(error.contains(want), "{error}");
+        }
+        let duplicate = base.replace(worker, &format!("{worker}{worker}"));
+        assert!(Config::parse(&duplicate).unwrap().check().is_err());
+        let api_key = base.replace(&format!("{PROXY}{OIDC}{DIRECT}"), GITHUB);
+        let error = Config::parse(&api_key)
+            .unwrap()
+            .check()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("per-model token accounting"), "{error}");
+    }
 
     /// `[mcp.NAME]` with URL, the secret's name SECRET and the tools
     /// ALLOWED, as TOML values.

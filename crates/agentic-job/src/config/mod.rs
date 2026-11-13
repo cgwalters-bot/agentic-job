@@ -210,6 +210,8 @@ pub struct Agent {
     /// task that does not use them gets no instructions it did not ask
     /// for.
     pub skills: bool,
+    /// Named native worker subagents. Empty by default.
+    pub subagents: Vec<Subagent>,
     /// Include the redacted session in the run summary. On by default.
     pub render_session: bool,
     /// The context window, in tokens, of each Vibe model the job defines
@@ -229,10 +231,20 @@ impl Default for Agent {
             config_ref: None,
             config_path: None,
             skills: false,
+            subagents: Vec::new(),
             render_session: true,
             context_windows: BTreeMap::new(),
         }
     }
+}
+
+/// A worker uses the lead's tools and inference route, but its own model.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Subagent {
+    pub name: String,
+    pub model: String,
+    pub description: String,
 }
 
 /// The run's child agent: one the main agent may start over ACP with
@@ -257,6 +269,9 @@ pub struct Limits {
     pub max_requests: u64,
     /// Subagent tasks the agent may start.
     pub max_tasks: u64,
+    /// Tasks addressed to explicitly configured worker subagents, separate
+    /// from max-tasks (reviews and all unclassified delegation).
+    pub max_worker_tasks: u64,
     /// Identical tool calls in a row before the agent is told to change
     /// approach, and then asked to hand back; zero for no limit.
     pub max_repeats: u64,

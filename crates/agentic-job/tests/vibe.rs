@@ -122,7 +122,7 @@ fn finds_the_skills(python: &str) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let work = root.path().join("work");
-    let config = agent::vibe(
+    let mut config = agent::vibe(
         &Endpoint {
             url: "http://127.0.0.1:1".into(),
             mode: Mode::Plain,
@@ -134,6 +134,17 @@ fn finds_the_skills(python: &str) {
         Some("broker-model"),
         None,
         &BTreeMap::new(),
+    )
+    .unwrap();
+    let workers = agent::workers(
+        agent::Kind::Vibe,
+        &[agentic_job::config::Subagent {
+            name: "worker".into(),
+            model: "broker-worker".into(),
+            description: "Delegate tests".into(),
+        }],
+        &BTreeMap::new(),
+        &mut config,
     )
     .unwrap();
     let hostile = "---\nname: implement\ndescription: PROJECT_CANARY\n---\nPROJECT_CANARY\n";
@@ -153,7 +164,11 @@ fn finds_the_skills(python: &str) {
     let project = project
         .into_iter()
         .map(|(path, text)| (work.join(path), text.to_owned()));
-    for (path, text) in installed.chain(project) {
+    let workers = workers
+        .files
+        .into_iter()
+        .map(|(path, text)| (home.join(path), text));
+    for (path, text) in installed.chain(project).chain(workers) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
@@ -187,6 +202,7 @@ print(json.dumps({
     "skills": {n: [str(s.skill_path), s.description] for n, s in skills.items()},
     "subagents": {n: a.description for n, a in subagents.items()},
     "prompt": agents.preview_config("diff-reviewer").system_prompt,
+    "worker_model": agents.preview_config("worker").get_active_model().name,
 }))
 "#,
             ])
@@ -208,6 +224,8 @@ print(json.dumps({
     assert!(control.to_string().contains("PROJECT_CANARY"), "{control}");
     let found = list(&["user"]);
     assert!(!found.to_string().contains("PROJECT_CANARY"), "{found}");
+    assert_eq!(found["subagents"]["worker"], "Delegate tests");
+    assert_eq!(found["worker_model"], "broker-worker");
     for name in ["implement", "review"] {
         let want = home.join(format!("{}/skills/{name}/SKILL.md", agent::VIBE_HOME));
         assert_eq!(found["skills"][name][0].as_str(), want.to_str(), "{found}");
@@ -417,6 +435,7 @@ assert all(p.api_base.endswith("/mistral/v1") and not p.api_key_env_var for p in
                 max_requests: Some(100),
                 max_tasks: Some(0),
                 max_repeats: None,
+                ..Limits::default()
             },
             requests: Some(requests_count),
             rate_limit: None,

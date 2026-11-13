@@ -2060,6 +2060,7 @@ mod tests {
                 max_requests: None,
                 max_tasks: None,
                 max_repeats: None,
+                ..Limits::default()
             },
             handed_back: false,
             reminded: false,

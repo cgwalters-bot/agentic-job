@@ -42,6 +42,12 @@ pub struct Limits {
     /// Subagent tasks the agent may start (the digest's `tasks`).
     #[serde(default)]
     pub max_tasks: Option<usize>,
+    /// Explicitly configured workers have a separate allowance. Unknown task
+    /// targets stay in max-tasks, so a missing target cannot evade that cap.
+    #[serde(default)]
+    pub max_worker_tasks: Option<usize>,
+    #[serde(default)]
+    pub worker_subagents: Vec<String>,
     /// Identical tool calls in a row (the digest's `repeats`) after which
     /// the agent is told to change approach; one more has it hand back.
     #[serde(default)]
@@ -100,6 +106,11 @@ impl Limits {
             budget_aic: budget.map(|n| n as f64),
             max_requests,
             max_tasks,
+            max_worker_tasks: cap(limits.max_worker_tasks)
+                .map(usize::try_from)
+                .transpose()
+                .context("limits.max-worker-tasks is out of range")?,
+            worker_subagents: Vec::new(),
             max_repeats,
         })
     }
@@ -179,6 +190,7 @@ pub struct Usage {
     /// None when nothing counts them.
     pub requests: Option<u64>,
     pub tasks: usize,
+    pub worker_tasks: usize,
     pub repeats: Repeats,
 }
 
@@ -303,11 +315,19 @@ impl Budget {
             return None;
         }
         let window = self.hand_back_window();
-        if let Some(max) = self.limits.max_tasks
-            && u.tasks > max
-        {
+        for (cap, used, label) in [
+            (
+                self.limits.max_tasks,
+                u.tasks.saturating_sub(u.worker_tasks),
+                "subagent tasks",
+            ),
+            (self.limits.max_worker_tasks, u.worker_tasks, "worker tasks"),
+        ] {
+            let Some(max) = cap.filter(|max| used > *max) else {
+                continue;
+            };
             self.handing_back = true;
-            let used = format!("started more than {max} subagent tasks");
+            let used = format!("started more than {max} {label}");
             return Some(Signal::HandBack {
                 text: hand_back_text(&used, window),
                 why: Stop::Budget(used),
@@ -361,11 +381,18 @@ impl Budget {
                 text: notice_text(level, &top.used),
             });
         }
-        if self.limits.max_tasks == Some(u.tasks) && !self.last_task_noticed {
+        let review_tasks = u.tasks.saturating_sub(u.worker_tasks);
+        if self.limits.max_tasks == Some(review_tasks) && !self.last_task_noticed {
             self.last_task_noticed = true;
             return Some(Signal::Notice {
                 label: LABEL_LAST_TASK.to_owned(),
-                text: last_task_text(u.tasks),
+                text: if self.limits.max_worker_tasks.is_some() {
+                    format!(
+                        "{NOTICE_PREFIX} This run has started {review_tasks} review/other subagent tasks, the most it may. Start no more of those; configured workers have their own allowance. {KEEP_WORKING}"
+                    )
+                } else {
+                    last_task_text(review_tasks)
+                },
             });
         }
         None
@@ -495,6 +522,7 @@ mod tests {
             max_requests,
             max_tasks,
             max_repeats: None,
+            ..Limits::default()
         };
         let cases: &[(&str, Result<Limits, &str>)] = &[
             (
@@ -564,6 +592,27 @@ mod tests {
     }
 
     #[test]
+    fn workers_do_not_spend_the_review_allowance() {
+        for (reviews, workers, exceeded) in
+            [(3, 10, false), (5, 0, true), (0, 13, true), (4, 12, false)]
+        {
+            let mut budget = Budget::new(Limits {
+                max_worker_tasks: Some(12),
+                ..limits(None, Some(4))
+            });
+            let used = Usage {
+                worker_tasks: workers,
+                ..usage(10, None, reviews + workers)
+            };
+            assert_eq!(
+                matches!(budget.check(&used), Some(Signal::HandBack { .. })),
+                exceeded,
+                "{reviews} reviews, {workers} workers"
+            );
+        }
+    }
+
+    #[test]
     fn overspent() {
         let capped = Limits {
             budget_aic: Some(10.0),
@@ -582,6 +631,7 @@ mod tests {
             elapsed: Duration::from_secs(secs),
             requests,
             tasks,
+            worker_tasks: 0,
             repeats: Repeats::default(),
         }
     }

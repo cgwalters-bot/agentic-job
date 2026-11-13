@@ -174,6 +174,7 @@ struct Setup<'a> {
     /// A counter exists but cannot currently supply a reading; no request cap.
     unavailable_count: bool,
     max_tasks: Option<usize>,
+    max_worker_tasks: Option<usize>,
     max_repeats: Option<usize>,
     permissions: Option<&'a str>,
     launch: Launch,
@@ -702,6 +703,12 @@ fn run(mode: &[&str], setup: Setup) -> Run {
             budget_aic: setup.budget_aic,
             max_requests: setup.count_requests.then_some(MAX_REQUESTS),
             max_tasks: setup.max_tasks,
+            max_worker_tasks: setup.max_worker_tasks,
+            worker_subagents: if setup.max_worker_tasks.is_some() {
+                vec!["worker".into()]
+            } else {
+                Vec::new()
+            },
             max_repeats: setup.max_repeats,
         },
         requests: (setup.count_requests || setup.unavailable_count).then_some(requests),
@@ -2959,6 +2966,32 @@ fn a_compaction_has_the_task_restated() {
             r.log
         );
     }
+}
+
+/// A streamed pending worker is not an extra review task.
+#[test]
+fn pending_worker_does_not_spend_the_review_allowance() {
+    const SCRIPT: &str = r#"[
+      {"task": "Review"},
+      {"update": {"sessionUpdate": "tool_call", "toolCallId": "worker-1", "title": "task", "kind": "think", "status": "pending"}},
+      {"sleep": 2},
+      {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "worker-1", "status": "in_progress", "rawInput": {"subagent_type": "worker"}}},
+      {"sleep": 2},
+      {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "worker-1", "status": "completed"}},
+      {"say": "Done."}
+    ]"#;
+    let r = run(
+        SCRIPT_MODE,
+        Setup {
+            files: &[("script.json", SCRIPT)],
+            timeout_s: 60,
+            max_tasks: Some(1),
+            max_worker_tasks: Some(2),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["handed_back"], false);
 }
 
 /// A process the agent leaves in its group does not outlive the session;

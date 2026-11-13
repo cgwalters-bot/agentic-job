@@ -129,6 +129,7 @@ fn pinned_claude_acp_offers_file_tools() {
                 max_requests: None,
                 max_tasks: Some(0),
                 max_repeats: None,
+                ..Limits::default()
             },
             requests: None,
             rate_limit: None,

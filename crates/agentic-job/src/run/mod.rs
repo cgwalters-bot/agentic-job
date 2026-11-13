@@ -1013,6 +1013,22 @@ impl Plan {
             &source,
             &self.agent.context_windows,
         )?;
+        let workers = agent::workers(
+            self.kind,
+            &self.agent.subagents,
+            &self.agent.context_windows,
+            &mut configuration,
+        )?;
+        if !workers.models.is_empty() {
+            inference::check_worker_models(
+                self.kind,
+                endpoint.as_ref().context("workers need inference")?,
+                run.as_deref()
+                    .context("workers need an inference run")?
+                    .agent_token(),
+                &workers.models,
+            )?;
+        }
         let github = github_token()?;
         configuration
             .files
@@ -1047,6 +1063,7 @@ impl Plan {
             .files
             .push(agent::child(child, &self.agent.context_windows)?);
         agent::install(sandbox, &configuration)?;
+        agent::install_workers(sandbox, &workers.files)?;
         // The agent is this process's own user, and the run token is in
         // this process's environment, which the agent can read: no probe
         // could show it out of reach, so none runs (docs/sandbox.md).

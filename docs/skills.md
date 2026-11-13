@@ -27,6 +27,86 @@ replaces that tree, even when the option is off or no configuration
 repository is specified. Other harnesses' directories are left alone. Embedded
 procedures win over source files at the same paths.
 
+## Worker subagents
+
+A job can opt into named workers independently of `skills`. They use the
+lead's tools and inference route, but select their own model. For example,
+in the caller-owned TOML passed as the workflow's `config` input:
+
+```toml
+[agent]
+name = "opencode"
+model = "example/strong"
+skills = true
+subagents = [
+  { name = "worker", model = "example/fast", description = "Run delegated tests, read logs and bisect failures." },
+]
+
+[limits]
+timeout-minutes = 75
+max-requests = 150
+max-tasks = 4
+max-worker-tasks = 12
+```
+
+The default `subagents = []` installs no workers and leaves task counting
+unchanged. `max-tasks` counts reviews and other delegation; only tasks
+explicitly addressed to a configured worker count against
+`max-worker-tasks` instead. Unknown or missing targets stay under
+`max-tasks`. Both limits are per run, not concurrency limits. As with the
+existing task cap, ACP observation triggers a hand-back after the count
+exceeds its allowance; it is not a pre-execution tool gate. A caller can
+set either allowance in its job configuration (`agentic-job config
+--integer limits.max-worker-tasks=12` also works); the workflow's existing
+`max-tasks` input still selects the review/other allowance.
+
+Workers require positive `max-worker-tasks` and `max-requests`: the lead's
+reported budget may omit worker usage, while the inference proxy counts
+all requests using the run's token. Every worker uses that same token, so
+the proxy's run record and the existing cost summary include their tokens
+per upstream model, not just the lead's ACP usage. Missing usage or prices
+are still reported as partial/unpriced, never invented. Task caps are
+cooperation limits, not a boundary against agent code; the proxy-wide
+request cap remains the spending bound.
+Workers also require a broker route with per-model token accounting;
+`register = "api-key"` is refused because its local record counts requests
+only, not per-model tokens.
+
+Before launch, setup reads the run's actual inference API route's model
+catalog and refuses any worker model ID it does not advertise, with a clear
+`agent.subagents` error. A route without a usable `data[].id` model catalog
+cannot enable workers. Use exact advertised model IDs, not aliases that a
+provider might resolve only during inference. For opencode, the runner
+adds the model to its sole configured provider and prefixes the profile's
+`model` with that provider's name; an existing prefix for that same provider
+is accepted and stripped for the upstream request. A source model definition
+that maps that ID to a different upstream `id`, or a provider `whitelist` or
+`blacklist` that excludes it, is refused. Claude uses the model ID directly.
+Vibe adds a model with a private `worker-NAME` alias and selects
+that alias with the subagent profile's `active_model`; a source alias
+collision is refused. Context windows use `agent.context-windows` as for
+the lead's models.
+
+The runner writes opencode/Claude Markdown profiles with `model:` and
+`mode: subagent`, or Vibe TOML profiles with `agent_type = "subagent"`, in
+the user-only directories listed below. Before each run, including runs
+without workers, it removes only profiles bearing its generated-worker
+marker. Unrelated native profiles are preserved; a worker name that collides
+with one is refused rather than overwriting it.
+Claude's project subagents can still shadow user profiles, as with the
+reviewer below; workers do not add a permission or isolation boundary.
+
+Names become file paths: to prevent traversal or replacing the embedded
+reviewer/built-ins, names must be unique, start with a lowercase letter,
+and contain only lowercase ASCII letters, digits and hyphens (at most 64
+bytes). `diff-reviewer` and the harnesses' common built-in names are
+reserved. At most 16 workers are accepted, each with a nonempty model of
+at most 256 printable non-space ASCII characters and a description of
+1–4096 bytes without NUL. Text fields are quoted, not pasted as native
+configuration. `fake` refuses workers.
+
+## Source skills
+
 To use skills from a configuration repository, set `agent.config-repo` (or the caller's
 `AGENT_CONFIG_REPO` repository variable) to the configuration repository
 that owns them, enable skills, and name the skill in the task, for example
@@ -88,7 +168,8 @@ The opt-in test `cargo test --test skills` runs the pinned opencode
 (`opencode debug skill` and `debug agent`) and the Claude Agent SDK the
 pinned adapter resolves, with the setting sources the adapter passes (its
 `init` message), against a home that `run`'s files were written to, and
-checks that each finds `implement`, `review` and `diff-reviewer` there and
+checks that each finds `implement`, `review`, `diff-reviewer` and a worker
+with its explicit model there and
 that opencode ignores a target repository's own. Neither makes a model
 request. The ACP adapter itself and a real session with a model are not
 part of it. It needs both packages installed outside the repository:
@@ -114,9 +195,9 @@ follow-ups; the review job remains the merge gate. A target repository's
 `.claude/agents/diff-reviewer.md` would replace Claude Code's user
 subagent of that name (project subagents win there, user skills win over
 project ones), which can make a self-review weaker but cannot change
-what the run may hand back. Subagent tasks count against
-`limits.max-tasks` (the workflows' default is 4), which also bounds the
-review loop.
+what the run may hand back. Review and unclassified subagent tasks count
+against `limits.max-tasks` (the workflows' default is 4), which bounds the
+review loop; explicitly configured workers have their own allowance.
 
 The skills are built into the binary: `skills/` and `workflow/review.md`
 are part of the [source digest](workflow.md#things-a-caller-should-know)

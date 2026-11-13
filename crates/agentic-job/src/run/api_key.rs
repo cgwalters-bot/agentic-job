@@ -893,6 +893,13 @@ fn forward(state: &State, stream: &TcpStream) -> Result<(), Refusal> {
     pass_back(stream, answer, &state.quoted)
 }
 
+/// Models refused by the local inference front because they perform
+/// provider-side network requests outside the agent's egress filter.
+pub(super) fn model_searches_network(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    SEARCHING_MODELS.iter().any(|marker| lower.contains(marker))
+}
+
 /// Refuses a model request that has the provider reach the network for
 /// the agent: one that offers the model a tool the provider runs, names
 /// a field or a model that does, or content the provider fetches. Refused,
@@ -918,16 +925,12 @@ fn client_tools_only(path: &str, body: &[u8]) -> Result<Vec<u8>, Refusal> {
         )));
     }
     if let Some(model) = request.get("model").and_then(Value::as_str) {
-        let lower = model.to_ascii_lowercase();
-        ensure_ok(
-            !SEARCHING_MODELS.iter().any(|marker| lower.contains(marker)),
-            || {
-                refused(format!(
-                    "the model {model:?} searches the web with the request, outside the egress \
+        ensure_ok(!model_searches_network(model), || {
+            refused(format!(
+                "the model {model:?} searches the web with the request, outside the egress \
                      filter"
-                ))
-            },
-        )?;
+            ))
+        })?;
     }
     content_of(path, &request)?;
     let tools = match request.get("tools") {

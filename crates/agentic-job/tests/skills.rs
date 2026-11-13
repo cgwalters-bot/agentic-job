@@ -10,12 +10,89 @@ use agentic_job::run::agent::{self, CLAUDE_QUIET, Kind};
 use agentic_job::run::launch::OPENCODE_SWITCHES;
 use serde_json::Value;
 
+fn worker() -> agentic_job::config::Subagent {
+    agentic_job::config::Subagent {
+        name: "worker".into(),
+        model: "example/fast".into(),
+        description: "Run delegated tests and read logs.".into(),
+    }
+}
+
 /// Writes the files of KIND's skills under HOME, as `run` does.
 fn install(kind: Kind, home: &Path) {
     for file in agent::skills(kind, true) {
         let path = home.join(file.path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, file.content.unwrap()).unwrap();
+    }
+    let mut configuration = agent::Configuration::default();
+    if kind == Kind::Opencode {
+        configuration = agent::opencode(
+            &endpoint(),
+            &agentic_job::run::inference::Token::new("unused-test-token").unwrap(),
+            Some("example/lead"),
+            &agent::Source::default(),
+        )
+        .unwrap();
+    }
+    let workers =
+        agent::workers(kind, &[worker()], &Default::default(), &mut configuration).unwrap();
+    for (path, content) in workers.files {
+        let path = home.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+}
+
+fn endpoint() -> agentic_job::run::inference::Endpoint {
+    let config = agentic_job::config::Config::parse(
+        "[inference]\nurl = 'http://127.0.0.1:9'\nregister = 'plain'",
+    )
+    .unwrap();
+    agentic_job::run::inference::Endpoint::from_config(&config.inference)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn worker_profiles_select_their_model() {
+    for kind in [Kind::Opencode, Kind::Claude, Kind::Vibe] {
+        let mut config = agent::generate(
+            kind,
+            Some(&endpoint()),
+            Some(&agentic_job::run::inference::Token::new("unused-test-token").unwrap()),
+            Some("example/lead"),
+            &agent::Source::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let workers = agent::workers(kind, &[worker()], &Default::default(), &mut config).unwrap();
+        assert_eq!(workers.models, ["example/fast"]);
+        let (path, text) = &workers.files[0];
+        assert!(path.contains("/agents/worker."));
+        if kind == Kind::Vibe {
+            let profile: Value = toml::from_str(text).unwrap();
+            assert_eq!(profile["agent_type"], "subagent");
+            assert_eq!(profile["active_model"], "worker-worker");
+            let generated: Value =
+                toml::from_str(config.files[0].content.as_deref().unwrap()).unwrap();
+            assert!(
+                generated["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["alias"] == "worker-worker" && m["name"] == "example/fast")
+            );
+        } else {
+            let front = text.split("---").nth(1).unwrap();
+            let model = if kind == Kind::Opencode {
+                "inference/example/fast"
+            } else {
+                "example/fast"
+            };
+            assert!(front.contains(&format!("model: {model:?}")), "{text}");
+            assert!(front.contains("mode: subagent"));
+        }
     }
 }
 
@@ -90,6 +167,10 @@ fn pinned_opencode_finds_the_skills() {
     assert!(!skills.to_string().contains("PROJECT_CANARY"), "{skills}");
     let reviewer = run(&["agent", "diff-reviewer"]);
     assert_eq!(reviewer["mode"], "subagent");
+    let worker = run(&["agent", "worker"]);
+    assert_eq!(worker["mode"], "subagent");
+    assert_eq!(worker["model"]["providerID"], "inference");
+    assert_eq!(worker["model"]["modelID"], "example/fast");
     assert!(
         reviewer["prompt"]
             .as_str()
@@ -158,4 +239,7 @@ fn pinned_claude_adapter_finds_the_skills() {
         "{found}"
     );
     assert!(has("agents", "diff-reviewer"), "{found}");
+    assert!(has("agents", "worker"), "{found}");
+    let text = std::fs::read_to_string(home.join(".claude/agents/worker.md")).unwrap();
+    assert!(text.contains("model: \"example/fast\""));
 }

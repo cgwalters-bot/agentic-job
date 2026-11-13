@@ -75,6 +75,11 @@ says what a caller may rely on across versions.
   while still requiring both fork branches; live inline publication proof
   remains pending (#3179).
 
+- Jobs may opt into named `agent.subagents` with explicit worker models for
+  opencode, Claude Code and Vibe. `limits.max-worker-tasks` counts those
+  separately from the existing review/other `max-tasks` allowance; workers
+  require the proxy-wide request cap and an advertised model on their route.
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

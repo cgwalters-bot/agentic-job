@@ -719,6 +719,67 @@ fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
+/// Refuse a worker model before launch if the run's actual API route does
+/// not advertise it. No inference request is made and no catalog text (which
+/// could quote credentials) is included in errors. Unknown catalog shapes
+/// fail closed rather than guessing which aliases a provider might accept.
+pub fn check_worker_models(
+    kind: super::agent::Kind,
+    endpoint: &Endpoint,
+    token: &Token,
+    models: &[String],
+) -> Result<()> {
+    use super::agent::Kind;
+    let url = match kind {
+        Kind::Claude => format!("{}/v1/models", endpoint.anthropic_url),
+        Kind::Opencode => format!("{}/models", endpoint.openai_url),
+        Kind::Vibe => format!("{}/mistral/v1/models", endpoint.url),
+        Kind::Fake => bail!("fake has no worker inference route"),
+    };
+    // Match the launcher's Claude authentication, including when talking to
+    // the local front: it accepts the same run-token header as the broker.
+    let claude_run = kind == Kind::Claude && endpoint.mode.has_run_api();
+    let auth = bearer(if claude_run {
+        super::agent::PLACEHOLDER_CREDENTIAL
+    } else {
+        token.expose()
+    });
+    let mut headers = vec![("Authorization", auth.as_str())];
+    if kind == Kind::Claude {
+        headers.push(("anthropic-version", "2023-06-01"));
+    }
+    if claude_run {
+        headers.push((super::agent::RUN_TOKEN_HEADER, token.expose()));
+    }
+    let answer = send(&http(), Method::Get, &url, &headers)
+        .context("agent.subagents: cannot read the inference route's model catalog")?;
+    ensure!(
+        answer.status == 200,
+        "agent.subagents: inference route model catalog returned HTTP {}",
+        answer.status
+    );
+    let catalog = answer
+        .json()
+        .context("agent.subagents: inference route model catalog is not JSON")?;
+    let advertised = catalog["data"]
+        .as_array()
+        .context("agent.subagents: inference route model catalog has no data array")?;
+    for model in models {
+        ensure!(
+            !(endpoint.front || matches!(endpoint.mode, Mode::ApiKey { .. }))
+                || !api_key::model_searches_network(model),
+            "agent.subagents: worker model {model:?} searches the network outside the egress filter and is refused by the run's inference front"
+        );
+        ensure!(
+            advertised
+                .iter()
+                .any(|entry| entry["id"].as_str() == Some(model)),
+            "agent.subagents: worker model {model:?} is not advertised by the run's inference route; choose an allowed model ID"
+        );
+    }
+    Ok(())
+}
+
 /// A usage record of the run API, kept as the proxy sent it for the run's
 /// summary.
 #[derive(Debug, Clone, PartialEq)]
@@ -1537,6 +1598,134 @@ mod tests {
             let _ = stream.shutdown(Shutdown::Write);
         });
         url
+    }
+
+    #[test]
+    fn worker_catalog_uses_the_agents_route_authentication() {
+        use super::super::agent::{Kind, PLACEHOLDER_CREDENTIAL, RUN_TOKEN_HEADER};
+        for kind in [Kind::Claude, Kind::Opencode, Kind::Vibe] {
+            for registration in [
+                "register = 'plain'",
+                "register = 'github-oidc'\naudience = 'test'",
+                "register = 'plain'\nfront = true",
+                "register = 'token-file'\ntoken-file = '/run/token'",
+            ] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let server = std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader, Write};
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut lines = Vec::new();
+                    loop {
+                        let mut line = String::new();
+                        assert!(reader.read_line(&mut line).unwrap() > 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        lines.push(line.trim().to_ascii_lowercase());
+                    }
+                    let body = r#"{"data":[{"id":"example/fast"}]}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                    lines
+                });
+                let endpoint =
+                    Endpoint::from_config(&inference(&format!("url = '{url}'\n{registration}")))
+                        .unwrap()
+                        .unwrap();
+                let token = Token::new("catalog-test-token").unwrap();
+                check_worker_models(kind, &endpoint, &token, &["example/fast".into()]).unwrap();
+                let lines = server.join().unwrap();
+                let claude_run = kind == Kind::Claude && endpoint.mode.has_run_api();
+                let credential = if claude_run {
+                    PLACEHOLDER_CREDENTIAL
+                } else {
+                    token.expose()
+                };
+                assert!(
+                    lines.contains(
+                        &format!("authorization: Bearer {credential}").to_ascii_lowercase()
+                    ),
+                    "{lines:?}"
+                );
+                assert_eq!(
+                    lines.contains(&format!("{RUN_TOKEN_HEADER}: {}", token.expose())),
+                    claude_run,
+                    "{lines:?}"
+                );
+                assert!(
+                    !lines.iter().any(|line| line.starts_with("x-api-key:")),
+                    "{lines:?}"
+                );
+                let path = match kind {
+                    Kind::Claude => "/anthropic/v1/models",
+                    Kind::Opencode => "/v1/models",
+                    Kind::Vibe => "/mistral/v1/models",
+                    Kind::Fake => unreachable!(),
+                };
+                assert_eq!(lines[0], format!("get {path} http/1.1"));
+            }
+        }
+    }
+
+    #[test]
+    fn workers_require_a_model_on_the_runs_route() {
+        for kind in [
+            super::super::agent::Kind::Claude,
+            super::super::agent::Kind::Opencode,
+            super::super::agent::Kind::Vibe,
+        ] {
+            for (status, body, allowed) in [
+                (200, r#"{"data":[{"id":"example/fast"}]}"#, true),
+                (200, r#"{"data":[{"id":"other/fast"}]}"#, false),
+                (200, r#"{"models":["example/fast"]}"#, false),
+                (403, r#"{"error":"not allowed"}"#, false),
+            ] {
+                let url = scripted(status, body.into());
+                let endpoint = Endpoint::from_config(&inference(&format!(
+                    "url = '{url}'\nregister = 'plain'"
+                )))
+                .unwrap()
+                .unwrap();
+                let result = check_worker_models(
+                    kind,
+                    &endpoint,
+                    &Token::new("unused-test-token").unwrap(),
+                    &["example/fast".into()],
+                );
+                assert_eq!(result.is_ok(), allowed, "{kind:?}: {result:?}");
+                if let Err(error) = result {
+                    assert!(error.to_string().contains("agent.subagents"), "{error}");
+                }
+            }
+        }
+        let url = scripted(200, r#"{"data":[{"id":"gpt-4o-search-preview"}]}"#.into());
+        let endpoint = Endpoint::from_config(&inference(&format!(
+            "url = '{url}'\nregister = 'plain'\nfront = true"
+        )))
+        .unwrap()
+        .unwrap();
+        let error = check_worker_models(
+            super::super::agent::Kind::Opencode,
+            &endpoint,
+            &Token::new("unused-test-token").unwrap(),
+            &["gpt-4o-search-preview".into()],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("refused by the run's inference front"),
+            "{error}"
+        );
     }
 
     /// The error of a refused key quotes the provider's answer without

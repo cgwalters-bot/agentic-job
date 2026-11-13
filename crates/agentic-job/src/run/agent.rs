@@ -210,6 +210,21 @@ const ABSENT: i32 = 44;
 /// umask, which alone left it 0664 on one system this was tried on
 /// (Ubuntu 26.04; why is not established), where the probes caught it.
 const WRITE_SCRIPT: &str = r#"umask 077 && f="$HOME/$1" && d=$(dirname -- "$f") && mkdir -p -- "$d" && chmod 0700 -- "$d" && rm -f -- "$f" && : >"$f" && chmod 0600 -- "$f" && cat >>"$f""#;
+
+const WORKER_MARKER: &str = "# Managed by agentic-job: worker profile";
+
+// The marker is the second line in both native formats. Never follow a
+// profile symlink or remove an unrelated profile from the shared directory.
+const CLEAN_WORKERS_SCRIPT: &str = r#"set -eu
+d="$HOME/$1"
+[ ! -L "$d" ] || exit 1
+for f in "$d"/*.md "$d"/*.toml; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    { IFS= read -r first && IFS= read -r marker; } <"$f" || continue
+    [ "$marker" != "$2" ] || rm -f -- "$f"
+done"#;
+
+const WORKER_VACANT_SCRIPT: &str = r#"[ ! -e "$HOME/$1" ] && [ ! -L "$HOME/$1" ]"#;
 const REMOVE_SCRIPT: &str = r#"rm -f -- "$HOME/$1""#;
 
 /// The agents `run` can configure.
@@ -981,6 +996,7 @@ fn source_request(agent: &config::Agent) -> Result<Option<(&str, Option<&str>, &
 /// registered.
 pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
     check_context_windows(&agent.context_windows)?;
+    check_subagents(kind, &agent.subagents)?;
     // The scripted agent cannot discover or execute skills.
     ensure!(
         !agent.skills || kind != Kind::Fake,
@@ -1016,6 +1032,52 @@ pub fn check(kind: Kind, agent: &config::Agent) -> Result<()> {
     }
 }
 
+/// Names become paths and native profile keys: refuse traversal, duplicate
+/// profiles and replacement of the embedded reviewer. Quote all text fields
+/// when emitting YAML/TOML rather than treating descriptions as configuration.
+fn check_subagents(kind: Kind, workers: &[config::Subagent]) -> Result<()> {
+    ensure!(workers.len() <= 16, "agent.subagents: at most 16 workers");
+    ensure!(
+        workers.is_empty() || kind != Kind::Fake,
+        "agent.subagents is not supported for fake"
+    );
+    let mut names = std::collections::BTreeSet::new();
+    for worker in workers {
+        ensure!(
+            (1..=64).contains(&worker.name.len())
+                && worker.name.starts_with(|c: char| c.is_ascii_lowercase())
+                && worker
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && ![
+                    "diff-reviewer",
+                    "build",
+                    "plan",
+                    "general",
+                    "explore",
+                    "ask"
+                ]
+                .contains(&worker.name.as_str())
+                && names.insert(&worker.name),
+            "agent.subagents: invalid, reserved or duplicate worker name {:?}",
+            worker.name
+        );
+        ensure!(
+            (1..=256).contains(&worker.model.len())
+                && worker.model.bytes().all(|b| b.is_ascii_graphic()),
+            "agent.subagents: worker {:?} needs a model of at most 256 printable non-space ASCII characters",
+            worker.name
+        );
+        ensure!(
+            (1..=4096).contains(&worker.description.len()) && !worker.description.contains('\0'),
+            "agent.subagents: worker {:?} needs a description of 1..4096 bytes without NUL",
+            worker.name
+        );
+    }
+    Ok(())
+}
+
 /// Clones the caller's configuration repository as the sandbox user and
 /// reads from it the files KIND takes, as that user.
 pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Result<Source> {
@@ -1024,6 +1086,13 @@ pub fn fetch_source(sandbox: &Sandbox, agent: &config::Agent, kind: Kind) -> Res
     if let Some(dir) = skill_dir(kind) {
         sandbox.checked(
             &["rm", "-rf", "--", utf8(&sandbox.home.join(dir))?],
+            b"",
+            MAX_COMMAND_OUTPUT,
+        )?;
+    }
+    if let Some(dir) = subagent_dir(kind) {
+        sandbox.checked(
+            &["sh", "-c", CLEAN_WORKERS_SCRIPT, "sh", dir, WORKER_MARKER],
             b"",
             MAX_COMMAND_OUTPUT,
         )?;
@@ -1268,6 +1337,159 @@ pub fn skills(kind: Kind, on: bool) -> Vec<HomeFile> {
             }),
         })
         .collect()
+}
+
+fn subagent_dir(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Claude => Some(".claude/agents"),
+        Kind::Opencode => Some(".config/opencode/agents"),
+        Kind::Vibe => Some(".config/agentic-job/vibe/agents"),
+        Kind::Fake => None,
+    }
+}
+
+/// Add worker models to the generated provider configuration and return native
+/// user-only profiles. The returned model IDs are the ones sent upstream,
+/// which setup must check against that route's catalog before installing.
+#[derive(Debug, Default)]
+pub struct Workers {
+    pub files: Vec<(String, String)>,
+    pub models: Vec<String>,
+}
+
+pub fn workers(
+    kind: Kind,
+    workers: &[config::Subagent],
+    windows: &BTreeMap<String, u64>,
+    configuration: &mut Configuration,
+) -> Result<Workers> {
+    check_subagents(kind, workers)?;
+    let mut files = Vec::new();
+    let mut models = Vec::new();
+    for worker in workers {
+        let mut model = worker.model.clone();
+        let native_model = match kind {
+            Kind::Opencode => {
+                let file = configuration
+                    .files
+                    .iter_mut()
+                    .find(|f| f.path == OPENCODE_CONFIG_FILE)
+                    .context("worker has no opencode configuration")?;
+                let mut value: Value = serde_json::from_str(
+                    file.content.as_deref().context("missing opencode config")?,
+                )?;
+                let provider = only_provider(
+                    value
+                        .as_object()
+                        .context("opencode config is not an object")?,
+                )?;
+                model = model
+                    .strip_prefix(&format!("{provider}/"))
+                    .unwrap_or(&model)
+                    .to_owned();
+                ensure!(
+                    !model.is_empty(),
+                    "agent.subagents: worker {:?} has an empty upstream model ID",
+                    worker.name
+                );
+                let provider_config = &mut value["provider"][&provider];
+                for (filter, includes) in [("whitelist", true), ("blacklist", false)] {
+                    if let Some(ids) = provider_config.get(filter) {
+                        ensure!(
+                            ids.as_array()
+                                .is_some_and(|ids| ids.contains(&json!(model)) == includes),
+                            "agent.subagents: opencode provider {filter} excludes worker model {model:?}"
+                        );
+                    }
+                }
+                let definitions = provider_config
+                    .as_object_mut()
+                    .context("missing provider")?
+                    .entry("models")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .context("provider.models must be an object")?;
+                let definition = definitions
+                    .entry(model.clone())
+                    .or_insert_with(|| json!({}));
+                // A source alias must not change which upstream model setup
+                // validates, or which model the caller pays for.
+                ensure!(
+                    definition.get("id").is_none_or(|id| id == &model),
+                    "agent.subagents: opencode model {model:?} maps to a different upstream ID"
+                );
+                file.content = Some(pretty(&value));
+                format!("{provider}/{model}")
+            }
+            Kind::Vibe => {
+                let file = configuration
+                    .files
+                    .iter_mut()
+                    .find(|f| f.path == VIBE_CONFIG_FILE)
+                    .context("worker has no Vibe configuration")?;
+                let mut value: Value =
+                    toml::from_str(file.content.as_deref().context("missing Vibe config")?)?;
+                // A private alias cannot silently resolve to a source model
+                // with the same alias and a different upstream name.
+                let alias = format!("worker-{}", worker.name);
+                let definitions = value["models"]
+                    .as_array_mut()
+                    .context("missing Vibe models")?;
+                ensure!(
+                    definitions.iter().all(|m| vibe_alias(m) != Some(&alias)),
+                    "agent.subagents: Vibe model alias {alias:?} is already defined"
+                );
+                let window = windows.get(&model).copied().unwrap_or(VIBE_CONTEXT_TOKENS);
+                let mut definition = vibe_model(&model, &alias, window);
+                definition["max_output_tokens"] = json!((window / 4).clamp(1, VIBE_OUTPUT_TOKENS));
+                definitions.push(definition);
+                file.content = Some(toml::to_string(&value)?);
+                alias
+            }
+            _ => model.clone(),
+        };
+        let dir = subagent_dir(kind).context("worker has no subagent directory")?;
+        let text = if kind == Kind::Vibe {
+            let profile = toml::to_string(&json!({
+                "display_name": worker.name, "description": worker.description,
+                "agent_type": "subagent", "active_model": native_model,
+            }))?;
+            format!("# Worker profile\n{WORKER_MARKER}\n{profile}")
+        } else {
+            format!(
+                "---\n{WORKER_MARKER}\nname: {}\ndescription: {}\nmode: subagent\nmodel: {}\n---\n\nCarry out the delegated task and report your findings to the lead.\n",
+                serde_json::to_string(&worker.name)?,
+                serde_json::to_string(&worker.description)?,
+                serde_json::to_string(&native_model)?
+            )
+        };
+        let extension = if kind == Kind::Vibe { "toml" } else { "md" };
+        files.push((format!("{dir}/{}.{extension}", worker.name), text));
+        models.push(model);
+    }
+    Ok(Workers { files, models })
+}
+
+/// Write generated worker profiles with the same private-file procedure as
+/// the lead's configuration, never passing their contents on a command line.
+pub fn install_workers(sandbox: &Sandbox, files: &[(String, String)]) -> Result<()> {
+    for (path, content) in files {
+        sandbox
+            .checked(
+                &["sh", "-c", WORKER_VACANT_SCRIPT, "sh", path],
+                b"",
+                MAX_COMMAND_OUTPUT,
+            )
+            .with_context(|| {
+                format!("agent.subagents: refusing to replace existing profile {path}")
+            })?;
+        sandbox.checked(
+            &["sh", "-c", WRITE_SCRIPT, "sh", path],
+            content.as_bytes(),
+            MAX_COMMAND_OUTPUT,
+        )?;
+    }
+    Ok(())
 }
 
 /// TEXT without the frontmatter of a skill or subagent file, if it has one.
@@ -1598,6 +1820,85 @@ mod tests {
         assert_eq!(file(&got, OPENCODE_INSTRUCTIONS_FILE), None);
         assert_eq!(file(&got, OPENCODE_PROFILE_FILE), None);
         assert_eq!(got.model, None);
+    }
+
+    #[test]
+    fn opencode_workers_refuse_unresolvable_models() {
+        for (definition, filters, error) in [
+            (json!({}), json!({}), None),
+            (
+                json!({"id": "fast", "limit": {"context": 32000}}),
+                json!({}),
+                None,
+            ),
+            (
+                json!({"id": "expensive"}),
+                json!({}),
+                Some("different upstream ID"),
+            ),
+            (
+                json!({"id": null}),
+                json!({}),
+                Some("different upstream ID"),
+            ),
+            (json!({}), json!({"whitelist": ["lead", "fast"]}), None),
+            (
+                json!({}),
+                json!({"whitelist": ["lead"]}),
+                Some("whitelist excludes"),
+            ),
+            (
+                json!({}),
+                json!({"whitelist": []}),
+                Some("whitelist excludes"),
+            ),
+            (json!({}), json!({"blacklist": ["other"]}), None),
+            (
+                json!({}),
+                json!({"blacklist": ["fast"]}),
+                Some("blacklist excludes"),
+            ),
+        ] {
+            let mut provider = filters;
+            provider["models"] = json!({"fast": definition});
+            let source = Source {
+                main: Some(
+                    json!({
+                        "enabled_providers": ["inference"],
+                        "provider": {"inference": provider},
+                    })
+                    .to_string(),
+                ),
+                ..Source::default()
+            };
+            let mut configuration = opencode(
+                &endpoint(Mode::Plain),
+                &token(),
+                Some("inference/lead"),
+                &source,
+            )
+            .unwrap();
+            let result = workers(
+                Kind::Opencode,
+                &[config::Subagent {
+                    name: "worker".into(),
+                    model: "inference/fast".into(),
+                    description: "Run tests".into(),
+                }],
+                &BTreeMap::new(),
+                &mut configuration,
+            );
+            if let Some(error) = error {
+                assert!(result.unwrap_err().to_string().contains(error));
+            } else {
+                assert_eq!(result.unwrap().models, ["fast"]);
+                assert_eq!(
+                    json_file(&configuration, OPENCODE_CONFIG_FILE)["provider"]["inference"]["models"]
+                        ["fast"],
+                    definition
+                );
+            }
+        }
     }
 
     #[test]
@@ -2427,6 +2728,85 @@ provider = "llamacpp"
             .unwrap();
         child.stdin.take().unwrap().write_all(input).unwrap();
         child.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn worker_cleanup_preserves_unrelated_profiles() {
+        let home = tempfile::tempdir().unwrap();
+        for kind in [Kind::Claude, Kind::Opencode, Kind::Vibe] {
+            let dir = subagent_dir(kind).unwrap();
+            let root = home.path().join(dir);
+            std::fs::create_dir_all(&root).unwrap();
+            let custom = root.join("custom-reviewer.md");
+            std::fs::write(&custom, "---\nname: custom-reviewer\n---\nKeep me.\n").unwrap();
+            let mut configuration = generate(
+                kind,
+                Some(&endpoint(Mode::Plain)),
+                Some(&token()),
+                Some("example/lead"),
+                &Source::default(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let workers = workers(
+                kind,
+                &[config::Subagent {
+                    name: "worker".into(),
+                    model: "example/fast".into(),
+                    description: "Delegate tests".into(),
+                }],
+                &BTreeMap::new(),
+                &mut configuration,
+            )
+            .unwrap();
+            let (path, content) = &workers.files[0];
+            std::fs::write(home.path().join(path), content).unwrap();
+            let link = root.join("linked.md");
+            std::os::unix::fs::symlink(home.path().join(path), &link).unwrap();
+            for _ in 0..2 {
+                assert!(
+                    sh(
+                        CLEAN_WORKERS_SCRIPT,
+                        home.path(),
+                        &[dir, WORKER_MARKER],
+                        b""
+                    )
+                    .status
+                    .success()
+                );
+                assert!(!home.path().join(path).exists());
+                assert_eq!(
+                    std::fs::read_to_string(&custom).unwrap(),
+                    "---\nname: custom-reviewer\n---\nKeep me.\n"
+                );
+                assert!(link.is_symlink());
+                assert!(
+                    !sh(
+                        WORKER_VACANT_SCRIPT,
+                        home.path(),
+                        &[&format!("{dir}/custom-reviewer.md")],
+                        b""
+                    )
+                    .status
+                    .success()
+                );
+                assert!(
+                    !sh(
+                        WORKER_VACANT_SCRIPT,
+                        home.path(),
+                        &[&format!("{dir}/linked.md")],
+                        b""
+                    )
+                    .status
+                    .success()
+                );
+                assert!(
+                    sh(WORKER_VACANT_SCRIPT, home.path(), &[path], b"")
+                        .status
+                        .success()
+                );
+            }
+        }
     }
 
     /// The scripts that write the sandbox user's files replace what was

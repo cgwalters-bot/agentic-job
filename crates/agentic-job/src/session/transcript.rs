@@ -249,9 +249,9 @@ impl Tap {
         self.inner().log(lines);
     }
 
-    /// The subagent tasks the agent has started.
-    pub fn tasks(&self) -> usize {
-        self.inner().digest.tasks
+    /// Budget-ready task counts (total, configured workers), atomically.
+    pub fn task_counts(&self, names: &[String]) -> (usize, usize) {
+        self.inner().digest.task_counts(names)
     }
 
     /// The agent's latest run of identical tool calls.

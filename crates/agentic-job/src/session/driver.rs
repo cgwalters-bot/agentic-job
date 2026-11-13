@@ -478,16 +478,19 @@ async fn watch_budget(
     stop: watch::Sender<Option<Stop>>,
     nudges: mpsc::UnboundedSender<Nudge>,
 ) {
+    let worker_subagents = limits.worker_subagents.clone();
     let mut budget = Budget::new(limits);
     let mut timed = timed.into_iter().peekable();
     let started = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(BUDGET_TICK);
     loop {
         tick.tick().await;
+        let (tasks, worker_tasks) = tap.task_counts(&worker_subagents);
         let usage = Usage {
             elapsed: started.elapsed(),
             requests: requests.as_ref().and_then(|count| *count.borrow()),
-            tasks: tap.tasks(),
+            tasks,
+            worker_tasks,
             repeats: tap.repeats(),
         };
         if usage.elapsed >= FIRST_REQUEST_DEADLINE && usage.requests == Some(0) {

@@ -166,6 +166,8 @@ enum Step {
     },
     Task(String),
     TaskPending(String),
+    /// Replay native ACP tool-call transitions, including streamed arguments.
+    Update(Value),
     Compact,
     Context {
         used: u64,
@@ -586,6 +588,10 @@ fn play(
                 "content": {"type": "text", "text": text}}));
             return Ok(());
         }
+        Step::Update(update) => {
+            conn.update(update.clone());
+            return Ok(());
+        }
         Step::Cost { usd } => {
             conn.update(cost_update(*usd));
             return Ok(());
@@ -732,6 +738,7 @@ fn play(
         | Step::Cost { .. }
         | Step::Task(_)
         | Step::TaskPending(_)
+        | Step::Update(_)
         | Step::Compact
         | Step::Context { .. }
         | Step::Sleep(_)
