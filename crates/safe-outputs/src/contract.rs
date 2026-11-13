@@ -199,6 +199,25 @@ pub fn is_login(login: &str) -> bool {
 pub static REPO_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").expect("a valid pattern"));
 
+/// A repository under nested groups, as GitLab names projects
+/// (`redhat/centos-stream/rpms/kryoptic`): GitHub and Forgejo have only
+/// an owner and a name, so the deeper shape is GitLab's alone.
+pub static GITLAB_REPO_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$").expect("a valid pattern"));
+
+/// Whether REPO names a repository the way FORGE writes it: on GitHub
+/// and Forgejo an owner and a name, on GitLab a project under one or
+/// more nested groups (`redhat/centos-stream/rpms/kryoptic`), as its
+/// API takes a project's full path. The components are those
+/// [`REPO_RE`] always took, dots and hyphens included; what a name may
+/// not be as a path (`.` and `..`) is [`dotted`], as before.
+pub fn is_repo_name(forge: Forge, repo: &str) -> bool {
+    match forge {
+        Forge::Gitlab => GITLAB_REPO_RE.is_match(repo),
+        Forge::Github | Forge::Forgejo => REPO_RE.is_match(repo),
+    }
+}
+
 pub static BASE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$").expect("a valid pattern"));
 
@@ -1234,7 +1253,7 @@ impl Policy {
         }
         if let Some(push_repo) = &self.push_repo {
             ensure!(
-                REPO_RE.is_match(push_repo)
+                is_repo_name(self.forge, push_repo)
                     && !dotted(push_repo)
                     && !push_repo.ends_with(".git")
                     && !same_owner(push_repo, &self.repo),

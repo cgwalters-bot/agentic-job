@@ -16,7 +16,8 @@ use crate::contract::{
     DEFAULT_PROTECTED_FILES, ForgeAdmission, KB, MAX_PROTECTED_GLOBS, MAX_PULL_REQUESTS, Memory,
     OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, REPO_RE, Secondary, TestEvidence,
     UPDATE_FIELDS, allows_http, check_comment_on_duplicate, check_commit_author,
-    check_native_handlers, check_secondary, dotted, glob, validate_dot_folders, validate_protected,
+    check_native_handlers, check_secondary, dotted, glob, is_repo_name, validate_dot_folders,
+    validate_protected,
 };
 use crate::{CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, OUTPUT_TYPES, PUSH_TO_PULL_REQUEST_BRANCH};
 
@@ -461,7 +462,9 @@ impl<Trigger> Bounds<Trigger> {
         }
         if let Some(push_repo) = self.push_repo() {
             ensure!(
-                REPO_RE.is_match(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
+                is_repo_name(forge, push_repo)
+                    && !dotted(push_repo)
+                    && !push_repo.ends_with(".git"),
                 "push_repo requires an exact repository name: {push_repo:?}"
             );
         }
@@ -493,7 +496,7 @@ impl<Trigger> Bounds<Trigger> {
         check_comment_on_duplicate(outputs.get("create_issue"), &self.native_handlers)?;
         for repo in &self.unprotected_files.repos {
             ensure!(
-                REPO_RE.is_match(repo) && !dotted(repo),
+                is_repo_name(forge, repo) && !dotted(repo),
                 "unprotected_files.repos requires exact repository names: {repo:?}"
             );
         }
@@ -1028,6 +1031,34 @@ events = ["issues"]
                 assert_eq!(present, github_only, "{section}");
             }
         }
+    }
+
+    /// GitLab names projects under nested groups; GitHub and Forgejo do
+    /// not (#3408), so only a `[gitlab]` bounds may name a push_repo
+    /// that deep.
+    #[test]
+    fn nested_group_push_repos_are_gitlabs_alone() {
+        let gitlab = validated(&format!(
+            "{}[gitlab]\npush_repo = \"fork/sandbox/rpms/kryoptic\"\n\
+             [gitlab.outputs]\ncreate_pull_request = {{ max = 1 }}\nnoop = {{ max = 1 }}\n",
+            neutral()
+        ))
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            gitlab.push_repo(),
+            Some("fork/sandbox/rpms/kryoptic"),
+            "a nested push_repo compiles on GitLab"
+        );
+        let error = validated(&format!(
+            "{}[forgejo]\npush_repo = \"fork/a/b\"\n\
+             [forgejo.outputs]\nnoop = {{ max = 1 }}\n",
+            neutral()
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("push_repo requires an exact repository name"),
+            "{error}"
+        );
     }
 
     /// What a bounds file may not say about its forge: each refusal, and

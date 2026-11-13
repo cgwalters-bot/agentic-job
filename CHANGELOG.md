@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Bounds and policy admit GitLab's nested group paths: a repository
+  name on GitLab may have two or more components
+  (`redhat/centos-stream/rpms/kryoptic`), in `repos`, `push_repo`,
+  `unprotected_files.repos` and the request's `--repo`/`--item-repo`.
+  GitHub and Forgejo keep the strict owner/name shape (#3408).
+
 - The safe-outputs library has an experimental, opt-in ordered-stack checker
   that checks each step's own patch and retains only the prefix before refusal,
   and builds the accepted steps as one commit each, restacking the steps above

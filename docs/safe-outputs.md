@@ -1219,7 +1219,9 @@ A caller keeps a bounds file in its repository
 ([this repository's](../.github/agentic-job/allow.toml)): the `hosts` a
 clone URL may name, globs of `repos` and `bases`, `max_outputs`,
 `max_patch_bytes`, `max_patch_files`, and under its forge section's
-`outputs` each type with its ceiling. `agentic-job policy` checks one run's request against
+`outputs` each type with its ceiling. A repository name is an owner and
+a name on GitHub and Forgejo; on GitLab it is the project's full path,
+two or more components under nested groups. `agentic-job policy` checks one run's request against
 it (`--repo`, `--clone-url`, `--base`, `--kind`, `--outputs`,
 `--max-outputs`) and prints `policy.json`, or every reason for refusing.
 `--outputs all` is every type the bounds list, and `--max-outputs max`
@@ -1276,7 +1278,11 @@ off GitHub may list only the [neutral profile](#neutral-profile).
 `[github.secondary_pull_request]` ([below](#a-secondary-pull-request)).
 `[forgejo]` and `[gitlab]` hold `push_repo = "OWNER/NAME"`, the fork that
 [Forgejo's](#publishing-to-forgejo) or [GitLab's](#publishing-to-gitlab)
-apply pushes a pull request's branch to. It may not be of the target's
+apply pushes a pull request's branch to. On GitLab the name may be
+deeper than two components, a project under nested groups
+(`GROUP/GROUP/PROJECT`, as GitLab names `redhat/centos-stream/rpms/kryoptic`);
+GitHub and Forgejo keep an owner and a name. It may not be of the
+target's
 owner, a section that allows `create_pull_request` must name it, and
 with organization bounds both files must name it. Every section refuses
 keys it does not know, so a GitHub-only table in another forge's section
@@ -2477,7 +2483,9 @@ and pre-write checks. The token comes only from `GITLAB_TOKEN`, or the
 [role tokens](#forgejo-and-gitlab-roles), and goes
 only in an `Authorization: Bearer` header (to git as `oauth2` over
 Basic, through its environment). The policy must be for GitLab
-(`"forge": "gitlab"`, from a `[gitlab]` bounds section). It publishes the types below, and writes nothing
+(`"forge": "gitlab"`, from a `[gitlab]` bounds section). A repository
+name is the project's full path, two or more components under nested
+groups. It publishes the types below, and writes nothing
 for `noop`, `missing_tool` and `missing_data`:
 
 - `add_comment` is a note on the caller's issue or merge request.

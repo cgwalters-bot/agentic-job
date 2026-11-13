@@ -270,7 +270,7 @@ impl Compile for Bounds {
         let limits = self.outputs();
         let push_repo = self.push_repo();
 
-        let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
+        let repo_ok = is_repo_name(self.forge(), repo) && !dotted(repo);
         // Whether `repos` admits it is checked below, where the outputs
         // asked for say whether `own_author` may.
         let listed = repo_ok
@@ -286,7 +286,7 @@ impl Compile for Bounds {
         // with the apply credential: a repository the bounds let runs work
         // on, not any one a caller names.
         if let Some(item_repo) = item_repo
-            && (!REPO_RE.is_match(item_repo)
+            && (!is_repo_name(self.forge(), item_repo)
                 || dotted(item_repo)
                 || !admits_repo(&self.repos, item_repo, read).unwrap_or_else(|error| {
                     errors.push(error.to_string());
@@ -5361,6 +5361,37 @@ max_patch_files = 10
         ))?;
         bounds.validate()?;
         Ok(bounds)
+    }
+
+    /// GitLab names projects under nested groups, two or more plain
+    /// components; GitHub and Forgejo keep an owner and a name (#3408).
+    /// The shape check must not refuse a repository the bounds name
+    /// exactly, and the deeper shape stays GitLab's alone.
+    #[test]
+    fn nested_group_repositories_are_gitlabs_alone() {
+        let nested = Request {
+            repo: "redhat/centos-stream/rpms/kryoptic",
+            clone_url: "https://forge.example/redhat/centos-stream/rpms/kryoptic",
+            outputs: "add_comment",
+            ..request()
+        };
+        for forge in ["gitlab", "github", "forgejo"] {
+            let mut bounds = forge_bounds(forge, "add_comment", "{ max = 1 }").unwrap();
+            bounds.repos = vec![RepoRule::Pattern("redhat/centos-stream/rpms/*".into())];
+            match bounds.compile(&nested) {
+                Ok(policy) => assert_eq!(
+                    policy.repo, "redhat/centos-stream/rpms/kryoptic",
+                    "{forge}: compiled"
+                ),
+                Err(errors) => {
+                    assert!(forge != "gitlab", "{forge}: {errors:?}");
+                    assert!(
+                        errors.join("\n").contains("is not within the bounds"),
+                        "{forge}: {errors:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
