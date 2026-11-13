@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;
+use std::process::Command;
 
 /// The crates of agentic-job's agent side.
 const AGENT_CRATES: &[&str] = &["agentic-job", "agent-client-protocol"];
@@ -43,6 +44,41 @@ fn no_agent_crate_is_a_dependency() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(refused(&text), Vec::<String>::new());
+}
+
+#[test]
+fn manifest_resolves_without_the_parent_workspace() {
+    // Only the manifest is being extracted in this slice. A stub target lets
+    // Cargo validate it without pretending the external runtime assets moved.
+    let root = tempfile::tempdir().unwrap();
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    std::fs::write(root.path().join("Cargo.toml"), manifest).unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "").unwrap();
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "detached manifest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let package = &metadata["packages"][0];
+    assert_eq!(package["name"], "secure-host");
+    assert_eq!(package["edition"], "2024");
+    assert_eq!(package["rust_version"], "1.88");
+    assert_eq!(package["license"], "MIT OR Apache-2.0");
+    assert_eq!(metadata["workspace_members"].as_array().unwrap().len(), 1);
 }
 
 #[test]

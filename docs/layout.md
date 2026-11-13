@@ -26,6 +26,11 @@ and `secure-host`, the binary of `crates/secure-host` that the image holds.
 does not trust: it depends on nothing that runs an agent (no ACP,
 inference, safe outputs, sessions or `run`), which `cargo tree -p
 secure-host` shows, and agentic-job depends on it, never the reverse.
+Its manifest declares its own package metadata, registry dependencies and
+lints, without inheriting from this workspace. The boundary test resolves
+that manifest in isolation. This is an extraction prerequisite, not yet a
+standalone source tree: embedded egress assets still live in `egress/`, and
+some tests read `secure-host/` and `.github/actions/confine-probe/` here.
 The split is under way ([#1623](https://github.com/cgwalters-forge/agentic-job/issues/1623)).
 So far it holds bounded file reads (`files.rs`), host users and the
 programs root may run (`host.rs`), the network rules (`network.rs`), the
