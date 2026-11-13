@@ -1,4 +1,4 @@
-# Publishes source-addressed builds, without changing main or opening a PR.
+# Publishes attested main-run artifacts, without releases or registry writes.
 name: prebuilt
 
 on:
@@ -42,15 +42,13 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
-      packages: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.source.outputs.tag }}
       WORKFLOW_REPOSITORY: ${{ github.repository }}
-      BUILD_REGISTRY: ghcr.io
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,33 +72,14 @@ jobs:
           GH_TOKEN='' GITHUB_TOKEN='' gh attestation verify dist/release.json
           --bundle dist/provenance.jsonl --repo "$GITHUB_REPOSITORY"
           --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/pin.yml@refs/heads/main"
-          --source-ref refs/heads/main --deny-self-hosted-runners
-      # Repeated builds of the same source leave the first release intact.
-      - name: Publish if absent
-        run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > "$RUNNER_TEMP/draft"; then
-            [ "$(cat "$RUNNER_TEMP/draft")" = true ] || exit 0
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --latest=false --title "$TAG" --notes "Built from $GITHUB_SHA; checksums are in the attested manifest." dist/*
-          fi
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1
+          --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          version: 1.3.0
-          url: https://github.com/oras-project/oras/releases/download/v1.3.0/oras_1.3.0_linux_amd64.tar.gz
-          checksum: 6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64
-      - name: Publish OCI if absent, preserving the first verified build
-        env:
-          OCI_PUBLISH_TOKEN: ${{ github.token }}
-        run: |
-          status=0
-          bash secure-host/binary.sh verify-oci --out "$RUNNER_TEMP/existing" || status=$?
-          [ "$status" = 2 ] || exit "$status"
-          owner=${GITHUB_REPOSITORY_OWNER,,}
-          printf '%s' "$OCI_PUBLISH_TOKEN" | oras login "$BUILD_REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
-          cd dist
-          oras push --artifact-type application/vnd.agentic-job.build.v1 --annotation "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BUILD_REGISTRY/$owner/agentic-job-build:${TAG#build-}" release.json provenance.jsonl agentic-job-x86_64-unknown-linux-musl fake-agent-x86_64-unknown-linux-musl secure-host-x86_64-unknown-linux-musl world_write.bpf.o
-      # Packages must be public before consumers move to this workflow pin.
-      - name: Prove anonymous pull and offline verification
-        run: GH_TOKEN='' GITHUB_TOKEN='' bash secure-host/binary.sh verify-oci --out "$RUNNER_TEMP/anonymous"
+          name: agentic-job-verified
+          retention-days: 90
+          if-no-files-found: error
+          path: |
+            dist/release.json
+            dist/provenance.jsonl
+            dist/*-x86_64-unknown-linux-musl
+            dist/world_write.bpf.o

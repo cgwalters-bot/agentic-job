@@ -629,8 +629,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD: ${{ inputs.build-binary }}
-          BUILD_REGISTRY: ghcr.io
-          BUILD_OCI: ${{ vars.SOURCE_BUILD_OCI == 'true' }}
+          BUILD_ARTIFACTS: ${{ vars.SOURCE_BUILD_ARTIFACTS == 'true' }}
+          BUILD_COMMIT: ${{ vars.SOURCE_BUILD_COMMIT }}
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           # Read the new ref field at runtime: pinned actionlint's job schema
           # predates it. Do not broaden the unknown-property lint suppression.

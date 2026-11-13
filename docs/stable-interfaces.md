@@ -80,10 +80,13 @@ Inputs:
   `comment-target`, `issue`, `notify`, `status-comment`, `status-comment-mode`,
   `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings`.
 
-The optional repository variable `SOURCE_BUILD_OCI=true` enables OCI-first
-source-build transport in policy and dispatch (off by default, pending public
-package verification). It does not change `build-binary` or version-pin behavior,
-the publisher identity or the attestation/checksum contract. See
+The optional repository variable `SOURCE_BUILD_ARTIFACTS=true` selects the latest
+successful main push's attested `pin.yml` workflow artifact in policy and dispatch
+(off by default). `SOURCE_BUILD_COMMIT=FULL_SHA` restricts that selection for hand
+rollback; the artifact must still be retained. Unlike legacy source-addressed
+fetching, this deliberately permits a binary newer than the workflow checkout.
+It replaces the unused opt-in `SOURCE_BUILD_OCI` transport. It does not change
+`build-binary`, version pins or the trusted publisher identity. See
 [binary distribution](workflow.md#where-the-binary-comes-from).
 
 `advisory` is off by default and requires the restricted event-review contract

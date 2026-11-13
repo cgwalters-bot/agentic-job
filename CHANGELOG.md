@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Main builds now publish attested workflow artifacts instead of `build-*`
+  Releases or OCI file artifacts. Policy/dispatch can opt into the latest
+  successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with
+  `SOURCE_BUILD_COMMIT` for hand rollback. Version releases and historical
+  build releases are unchanged (#3357).
+
 - Standalone container runners may explicitly delegate host isolation with
   `[host] isolation = "external"`. Summaries and hand-back metadata record
   the declaration, not a passed host check; credential and output refusals

@@ -502,21 +502,25 @@ and attests it by its digest from `release.yml` on main; what the image
 does on the host is in the action's
 [setup](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-image).
 A new package on ghcr.io is private until an owner makes it public.
-The release, and `build-…` releases with it, also publish
+Version releases and main's attested workflow artifacts also contain
 `secure-host-x86_64-unknown-linux-musl`, its checksum in the attested
 manifest beside agentic-job's.
 
 The policy job gets the binary an agent job runs with
 [`binary.sh`](../secure-host/binary.sh), a shell script since no
 `agentic-job` exists yet, which computes the source digest at the pinned
-commit and fetches `build-FULL_DIGEST`. It verifies the release
+commit and, by default, looks for legacy `build-FULL_DIGEST`. It verifies the release
 manifest's GitHub attestation before checking the source digest and the
 checksums of the binaries and the world-write object, whose SHA-256 is
 in the attested `release.json` next to the binaries'; a manifest without
 it is refused whole. A missing release falls back to a source build with
 a notice (installing clang with musl-tools when missing); failed
-verification stops the job. Main publishes these releases automatically,
-without a pin PR. See
+verification stops the job. Main now uploads attested run artifacts instead
+of creating build releases. The off-default `SOURCE_BUILD_ARTIFACTS=true`
+reader selects the latest successful main push (or `SOURCE_BUILD_COMMIT` for
+rollback) and verifies against that run's head SHA, not the workflow checkout.
+Missing artifacts and verification failures stop that reader; there is no
+automatic rollback. Existing releases remain intact. See
 [the workflow's binary trust model](workflow.md#things-a-caller-should-know)
 for the verification and publishing boundaries. Fetching needs bash,
 `sha256sum`, jq and `gh` with attestation support, which it installs

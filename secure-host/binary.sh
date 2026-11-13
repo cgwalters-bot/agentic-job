@@ -1,5 +1,5 @@
-# Gets a source-addressed release using its attested manifest, or builds
-# this source when no manifest has been published yet. It runs before any
+# Gets an attested main-run artifact when opted in, otherwise a legacy
+# source-addressed release or a build of this source. It runs before any
 # agentic-job exists on the machine, so it is shell and not the binary's
 # Rust. It uses curl, sha256sum, jq, coreutils' timeout and gh, which `gh`
 # installs where it is missing; every step after it is the binary's.
@@ -10,15 +10,15 @@
 # its place. A build is not kept in a cache: a cache is the calling
 # repository's, where any workflow on its default branch or on the run's
 # own ref can leave an entry for a commit nobody has built yet. A push
-# to main that changes the source publishes its release a few minutes
-# after the push (pin.yml, which skips a push a newer one overtook): a
-# job of a commit off main, of a skipped one, or one that starts in
-# those minutes builds, and the build's minutes are the price of taking
-# nothing on trust but this repository's attestation.
+# to main now uploads an attested workflow artifact (pin.yml). Legacy
+# readers build when their source has no retained build release. Opted-in
+# readers instead take the latest successful main run, or a hand rollback
+# pin; absence or verification failure stops them rather than falling back.
 #
 #   binary.sh get --out DIR [--build]   the binaries, into DIR
 #     WORKFLOW_REPOSITORY=OWNER/NAME from the trusted workflow is required
-#     BUILD_OCI=true prefers anonymous GHCR files (default false)
+#     BUILD_ARTIFACTS=true selects the latest successful main prebuilt run
+#     BUILD_COMMIT=full SHA selects a successful main run for rollback
 #   binary.sh object --out DIR          the world-write policy object, into DIR
 #   binary.sh digest [--root DIR]       the digest of the source at DIR
 #   binary.sh gh                        install gh, where it is missing
@@ -26,7 +26,6 @@
 #                                       one GitHub URL, with bounded retries
 #   binary.sh pin --dist DIR --release TAG [--repository OWNER/NAME]
 #                                       release.json for a build of this source
-#   binary.sh verify-oci --out DIR      publisher pre/postflight; absent exits 2
 #
 # The action and the reusable workflow's policy job both run `get`, the
 # workflows that publish a release run `pin`, and
@@ -44,7 +43,6 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # Set by the trusted workflow, never the caller's repository or event input.
 REPOSITORY=${WORKFLOW_REPOSITORY-}
-OCI_TYPE=application/vnd.agentic-job.build.v1
 
 # What the binaries are built from. Whatever the build comes to read from
 # elsewhere (an `include_str!` of a file outside these, a toolchain file)
@@ -296,65 +294,48 @@ verify_build() {
   take "$out/release.json" "$from" "$out"
 }
 
-# OCI is only a transport: registry writers cannot substitute executable
-# bytes because the same offline attestation and source/checksum checks apply.
-# No archive extraction or registry-supplied paths. Each request has a time
-# and byte bound; only MANIFEST_UNKNOWN on the source tag permits fallback.
-oci_request() {
-  local url=$1 file=$2 limit=$3 missing=${4-} status
-  status=$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 120 --max-filesize "$limit" \
-    -H "Authorization: Bearer $oci_token" -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
-    --output "$file" --write-out '%{http_code}' "$url") || fail "OCI transport failed: $url"
-  [ "$status" != 200 ] || return 0
-  if [ "$missing" = missing ] && [ "$status" = 404 ] &&
-      jq -e '.errors | length == 1 and .[0].code == "MANIFEST_UNKNOWN"' "$file" > /dev/null; then
-    return 1
-  fi
-  fail "OCI request failed (HTTP $status): $url"
-}
-
-fetch_oci() {
-  local source=$1 out=$2 owner=${REPOSITORY%/*} registry=${BUILD_REGISTRY:-ghcr.io}
-  local package="${owner,,}/agentic-job-build" base stage manifest digest name layer sum size oci_token=""
-  local token_auth=()
-  [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "trusted WORKFLOW_REPOSITORY is required"
-  # Registry selection belongs to trusted workflow configuration. Initial
-  # transport is GHCR's anonymous bearer protocol, not arbitrary auth realms.
-  [ "$registry" = ghcr.io ] || fail "unsupported build registry: $registry"
-  base="https://$registry/v2/$package"
-  stage=$(mktemp -d "$(realpath "$out")/oci.XXXXXXXX")
-  if [ -n "${OCI_PUBLISH_TOKEN-}" ]; then
-    token_auth=(--user "${GITHUB_ACTOR:?}:$OCI_PUBLISH_TOKEN")
-  fi
-  # Only the isolated publisher supplies credentials. Readers are anonymous.
-  curl --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 120 \
-    --max-filesize 65536 "${token_auth[@]}" \
-    "https://$registry/token?service=$registry&scope=repository:$package:pull" > "$stage/token" || fail "OCI token request failed"
-  oci_token=$(jq -er '.token | select(type == "string" and length > 0)' "$stage/token") || fail "no anonymous OCI token"
-  manifest="$stage/manifest"
-  if ! oci_request "$base/manifests/$source" "$manifest" 1048576 missing; then
-    rm -rf -- "$stage"
-    return 0
-  fi
-  digest=$(sha256 < "$manifest")
-  # Resolve the mutable tag once, then use only the manifest's digest.
-  oci_request "$base/manifests/sha256:$digest" "$stage/resolved" 1048576
-  [ "$(sha256 < "$stage/resolved")" = "$digest" ] || fail "OCI manifest digest mismatch"
-  jq -e --arg type "$OCI_TYPE" '.schemaVersion == 2 and .artifactType == $type and
-    .mediaType == "application/vnd.oci.image.manifest.v1+json" and (.layers | length == 6)' "$manifest" > /dev/null || fail "unsupported OCI build schema"
+# A substituted workflow artifact could replace the policy/check/apply binary.
+# Select only successful main pushes of our publisher, then bind the offline
+# attestation to that run's head SHA before accepting its manifest/checksums.
+# Opt-in: latest main deliberately need not match the workflow checkout.
+fetch_artifact() {
+  local out=$1 base="https://api.github.com/repos/$REPOSITORY" query run commit id stage name
+  local pin=${BUILD_COMMIT-}
+  [ -z "$pin" ] || [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || fail "BUILD_COMMIT must be a full commit SHA"
+  stage=$(mktemp -d "$(realpath "$out")/artifact.XXXXXXXX")
+  query="branch=main&event=push&status=success&per_page=1"
+  [ -z "$pin" ] || query+="&head_sha=$pin"
+  fetch "$base/actions/workflows/pin.yml/runs?$query" "$stage/runs.json"
+  run=$(jq -ce '.workflow_runs[0] | select(.status == "completed" and .conclusion == "success" and
+    .event == "push" and .head_branch == "main" and .path == ".github/workflows/pin.yml")' "$stage/runs.json") || fail "no successful main prebuilt run; use --build explicitly"
+  commit=$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' <<< "$run")
+  [ -z "$pin" ] || [ "$commit" = "$pin" ] || fail "prebuilt run does not match BUILD_COMMIT"
+  id=$(jq -er '.id | select(type == "number" and . > 0 and . == floor)' <<< "$run")
+  fetch "$base/actions/runs/$id/artifacts?name=agentic-job-verified&per_page=100" "$stage/artifacts.json"
+  id=$(jq -er '[.artifacts[] | select(.name == "agentic-job-verified")] | select(length == 1) | .[0] |
+    select(.expired == false and .size_in_bytes > 0 and .size_in_bytes <= 268435456) |
+    .id | select(type == "number" and . > 0 and . == floor)' "$stage/artifacts.json") || fail "verified artifact missing, expired or oversized; use --build explicitly"
+  # Bound download and decompression even if metadata lies or the ZIP is a bomb.
+  (ulimit -f 262144; github "$stage/payload.zip" "" "$base/actions/artifacts/$id/zip" api "repos/$REPOSITORY/actions/artifacts/$id/zip")
+  printf '%s\n' release.json provenance.jsonl "${NAMES[@]/%/-$TARGET}" "$OBJECT" | sort > "$stage/expected"
+  unzip -Z1 "$stage/payload.zip" | sort > "$stage/names"
+  cmp -s "$stage/expected" "$stage/names" || fail "unexpected or duplicate artifact files"
   for name in release.json provenance.jsonl "${NAMES[@]/%/-$TARGET}" "$OBJECT"; do
-    layer=$(jq -ce --arg name "$name" '[.layers[] | select(.annotations["org.opencontainers.image.title"] == $name)] | select(length == 1) | .[0]' "$manifest") || fail "OCI build missing or duplicate $name"
-    sum=$(jq -er '.digest' <<< "$layer")
-    [[ "$sum" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid OCI layer digest"
-    size=$(jq -er '.size | select(type == "number" and . > 0 and . <= 268435456 and . == floor)' <<< "$layer") || fail "invalid OCI layer size"
-    oci_request "$base/blobs/$sum" "$stage/$name" "$size"
-    [ "$(sha256 < "$stage/$name")" = "${sum#sha256:}" ] || fail "OCI layer checksum mismatch: $name"
+    timeout 120 bash -o pipefail -c 'unzip -p "$1" "$2" | head -c 268435457 > "$3"' _ "$stage/payload.zip" "$name" "$stage/$name" || fail "artifact extraction failed: $name"
+    [ "$(stat -c %s "$stage/$name")" -le 268435456 ] || fail "artifact file too large: $name"
   done
-  cp -- "$stage/release.json" "$stage/provenance.jsonl" "$out/"
-  verify_build "$source" "$out" "$stage"
+  gh attestation verify "$stage/release.json" --bundle "$stage/provenance.jsonl" \
+    --repo "$REPOSITORY" --cert-identity "https://github.com/$REPOSITORY/.github/workflows/pin.yml@refs/heads/main" \
+    --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
+  jq -e --arg repository "$REPOSITORY" --arg commit "$commit" --arg target "$TARGET" --arg pattern "$SHA256" \
+    '.repository == $repository and .commit == $commit and .target == $target and
+    (.source | type == "string" and test($pattern)) and .release == ("build-" + .source)' \
+    "$stage/release.json" > /dev/null || fail "artifact manifest does not match selected main build"
+  take "$stage/release.json" "$stage" "$out"
+  source=$(jq -r .source "$stage/release.json")
+  echo "fetched main artifact at $commit (source $source) by its attested checksums"
   rm -rf -- "$stage"
-  fetched=oci
+  fetched=artifact
 }
 
 object() {
@@ -390,20 +371,18 @@ get() {
     [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "trusted WORKFLOW_REPOSITORY is required"
     need_gh
     fetch_tagged "$source" "$out"
-    # Avoid stranding existing callers on an initially private/unpublished
-    # GHCR package. Enable only after pin.yml's anonymous postflight passes.
-    if [ -z "$fetched" ] && [ "${BUILD_OCI:-false}" = true ]; then fetch_oci "$source" "$out"; fi
+    if [ -z "$fetched" ] && [ "${BUILD_ARTIFACTS:-false}" = true ]; then fetch_artifact "$out"; fi
     [ -n "$fetched" ] || fetch_release "$source" "$out"
   fi
   case $fetched in
     tagged) echo "fetched tagged release by its attested checksums" ;;
-    oci) echo "fetched OCI build-$source by its attested checksums" ;;
+    artifact) ;;
     release) echo "fetched build-$source by its attested checksums" ;;
     *)
       if [ "$asked" = true ]; then
         echo "::notice::A build was requested; building from this source, about two minutes"
       else
-        echo "::notice::No release exists for source $source (pin.yml publishes one for each push to main, a few minutes after it; a commit off main has none); building from this source, about two minutes"
+        echo "::notice::No release exists for source $source; main now publishes workflow artifacts (opt in with BUILD_ARTIFACTS=true); building from this source, about two minutes"
       fi
       build "$out"
       echo "built from this source"
@@ -456,8 +435,6 @@ main() {
     digest) digest "$root" ;;
     pin) pin "$dist" "$release" "$repository" ;;
     gh) need_gh ;;
-    # Publisher preflight/postflight: no source build or legacy fallback.
-    verify-oci) [ -n "$out" ] || fail "verify-oci: --out DIR is required"; mkdir -p -- "$out"; local fetched=""; fetch_oci "$(digest "$ROOT")" "$out"; [ "$fetched" = oci ] || exit 2 ;;
     # Exit status 2 for an absent resource, with --missing.
     fetch) [ -n "$url" ] && [ -n "$out" ] || fail "fetch: --url URL and --out FILE are required"; fetch "$url" "$out" "$missing" || exit 2 ;;
     *) fail "usage: binary.sh get|object|digest|pin|gh|fetch [options]" ;;

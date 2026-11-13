@@ -66,6 +66,12 @@ elif [[ "$1" =~ ^repos/([^/]+/[^/]+)/releases/tags/([^/]+)$ ]]; then
     jq -n --arg name "${name##*/}" --argjson id "$id" '{name: $name, id: $id}'
   done | jq -s '{assets: .}'
 else
+  if [[ "$1" == */actions/artifacts/2/zip ]] && [ -n "${STUB_ARCHIVE-}" ]; then
+    echo "fetch https://api.github.com/$1" >> "$STUB_LOG"
+    [ ! -e "$STUB_FILES/fail" ] || { printf '< HTTP/2.0 500 Error\n' >&2; exit 1; }
+    cat "$STUB_ARCHIVE"
+    exit 0
+  fi
   serve "api.github.com/$1"
 fi
 "#;
@@ -77,28 +83,8 @@ const CARGO: &str = r#"
 echo "cargo $*" >> "$STUB_LOG"; mkdir -p target/x86_64-unknown-linux-musl/release
 for name in agentic-job fake-agent secure-host; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
 
-const CURL: &str = r#"
-out=''
-for ((i=1; i<=$#; i++)); do
-  arg=${!i}
-  if [ "$arg" = --output ]; then j=$((i+1)); out=${!j}; fi
-done
-url=${!#}
-if [[ "$url" == https://ghcr.io/token* ]]; then printf '%s' '{"token":"anonymous"}'; exit 0; fi
-file="$STUB_FILES/${url#https://}"
-if [ -f "$file" ]; then
-  echo "oci $url" >> "$STUB_LOG"
-  cat "$file" > "$out"; printf '200'
-elif [ -n "${OCI_FAIL-}" ]; then
-  printf '{}' > "$out"; printf '%s' "$OCI_FAIL"
-else
-  printf '%s' '{"errors":[{"code":"MANIFEST_UNKNOWN"}]}' > "$out"; printf '404'
-fi
-"#;
-
-const STUBS: [(&str, &str); 8] = [
+const STUBS: [(&str, &str); 7] = [
     ("gh", GH),
-    ("curl", CURL),
     ("sleep", r#"echo "sleep $*" >> "$STUB_LOG""#),
     ("clang", CLANG),
     ("musl-gcc", "exit 0"),
@@ -694,7 +680,6 @@ fn source_addressed_releases_verify_before_trusting_bytes_and_fail_closed() {
                 files,
                 fail,
                 gh_fail,
-                env: env(&[("BUILD_OCI", "true")]),
                 ..Opts::default()
             },
         );
@@ -755,32 +740,45 @@ fn source_addressed_releases_verify_before_trusting_bytes_and_fail_closed() {
 }
 
 #[test]
-fn oci_builds_resolve_once_verify_offline_and_never_fallback_on_failure() {
+fn main_artifacts_verify_selected_commit_and_fail_closed() {
     let tree = tree();
     let root = tree.path();
-    let source = digest(root);
-    let base = "https://ghcr.io/v2/example-org/agentic-job-build";
+    // Latest main is intentionally independent of the pinned workflow source.
+    let source = "c".repeat(64);
+    let base = format!("https://api.github.com/repos/{REPOSITORY}");
+    let commit = "a".repeat(40);
     let release = json!({
         "repository": REPOSITORY, "release": format!("build-{source}"),
-        "target": TARGET, "source": source, "sha256": checksums(),
+        "target": TARGET, "source": source, "commit": commit, "sha256": checksums(),
     });
     for bad in [
         None,
-        Some("schema"),
+        Some("rollback"),
+        Some("run"),
+        Some("branch"),
+        Some("workflow"),
+        Some("failed"),
+        Some("absent"),
         Some("size"),
         Some("checksum"),
-        Some("digest"),
-        Some("source"),
+        Some("commit"),
+        Some("repository"),
+        Some("target"),
         Some("signature"),
         Some("bytes"),
         Some("missing"),
-        Some("duplicate"),
+        Some("extra"),
+        Some("pin"),
+        Some("expired"),
+        Some("transport"),
     ] {
-        let parent = tempdir("oci-");
+        let parent = tempdir("artifact-");
         let out = parent.path().join("bin");
         let mut release = release.clone();
-        if bad == Some("source") {
-            release["source"] = json!("b".repeat(64));
+        for field in ["commit", "repository", "target"] {
+            if bad == Some(field) {
+                release[field] = json!("wrong");
+            }
         }
         if bad == Some("checksum") {
             release["sha256"][OBJECT] = json!("f".repeat(64));
@@ -788,59 +786,94 @@ fn oci_builds_resolve_once_verify_offline_and_never_fallback_on_failure() {
         let mut payloads = assets("", |_| BYTES.to_owned());
         payloads.push(("/release.json".to_owned(), release.to_string()));
         payloads.push(("/provenance.jsonl".to_owned(), "bundle".to_owned()));
-        let mut files = Vec::new();
-        let mut layers = Vec::new();
+        let payload = parent.path().join("payload");
+        fs::create_dir(&payload).unwrap();
         for (name, bytes) in payloads {
             let name = name.trim_start_matches('/');
-            let sum = sha256(&bytes);
-            let layer_sum = if bad == Some("missing") && name == OBJECT {
-                "f".repeat(64)
-            } else {
-                sum.clone()
-            };
-            layers.push(json!({"mediaType": "application/octet-stream", "size": bytes.len(),
-                "digest": format!("sha256:{layer_sum}"), "annotations": {"org.opencontainers.image.title": name}}));
             if bad != Some("missing") || name != OBJECT {
-                files.push((
-                    format!("{base}/blobs/sha256:{sum}"),
+                write(
+                    &payload.join(name),
                     if bad == Some("bytes") && name == OBJECT {
                         "tampered".to_owned()
                     } else {
                         bytes
                     },
-                ));
+                );
             }
         }
-        if bad == Some("duplicate") {
-            layers[0] = layers[1].clone();
+        if bad == Some("extra") {
+            write(&payload.join("unexpected"), "extra");
         }
-        if bad == Some("size") {
-            layers[0]["size"] = json!(268435457);
+        let archive = parent.path().join("archive.zip");
+        let result = Command::new("zip")
+            .current_dir(&payload)
+            .args(["-q", "-r", s(&archive), "."])
+            .status()
+            .unwrap();
+        assert!(result.success());
+        // The fixture endpoint returns real ZIP bytes; only the forge is mocked.
+        let download_path = parent.path().join("download");
+        fs::copy(&archive, &download_path).unwrap();
+        let mut selected_run = json!({"id": 1, "head_sha": commit, "path": ".github/workflows/pin.yml",
+            "status": "completed", "conclusion": "success", "event": "push", "head_branch": "main"});
+        for (case, field, value) in [
+            ("run", "event", "pull_request"),
+            ("branch", "head_branch", "other"),
+            ("workflow", "path", ".github/workflows/other.yml"),
+            ("failed", "conclusion", "failure"),
+        ] {
+            if bad == Some(case) {
+                selected_run[field] = json!(value);
+            }
         }
-        let manifest = json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "artifactType": if bad == Some("schema") { "unknown" } else { "application/vnd.agentic-job.build.v1" }, "layers": layers}).to_string();
-        files.push((format!("{base}/manifests/{source}"), manifest.clone()));
-        files.push((
-            format!("{base}/manifests/sha256:{}", sha256(&manifest)),
-            if bad == Some("digest") {
-                "changed".to_owned()
-            } else {
-                manifest
-            },
-        ));
+        let runs = if bad == Some("absent") {
+            vec![]
+        } else {
+            vec![selected_run]
+        };
+        let mut files = vec![
+            (format!("{base}/actions/workflows/pin.yml/runs?branch=main&event=push&status=success&per_page=1"),
+             json!({"workflow_runs": runs}).to_string()),
+            (format!("{base}/actions/runs/1/artifacts?name=agentic-job-verified&per_page=100"),
+             json!({"artifacts": [{"id": 2, "name": "agentic-job-verified", "expired": bad == Some("expired"),
+                "size_in_bytes": if bad == Some("size") { 268435457 } else { 1024 }}]}).to_string()),
+        ];
+        if bad == Some("pin") {
+            files[0]
+                .0
+                .push_str(&format!("&head_sha={}", "b".repeat(40)));
+        } else if bad == Some("rollback") {
+            files[0].0.push_str(&format!("&head_sha={commit}"));
+        }
         let result = run(
             root,
             &["get", "--out", s(&out)],
             Opts {
                 files,
-                env: env(&[("BUILD_OCI", "true")]),
+                env: {
+                    let mut pairs = env(&[
+                        ("BUILD_ARTIFACTS", "true"),
+                        ("STUB_ARCHIVE", s(&download_path)),
+                    ]);
+                    if bad == Some("pin") {
+                        pairs.push(("BUILD_COMMIT".to_owned(), "b".repeat(40)));
+                    } else if bad == Some("rollback") {
+                        pairs.push(("BUILD_COMMIT".to_owned(), commit.clone()));
+                    }
+                    pairs
+                },
+                fail: (bad == Some("transport")).then(|| "zip".to_owned()),
                 gh_fail: bad == Some("signature"),
                 ..Opts::default()
             },
         );
         assert_eq!(
             result.status,
-            Some(if bad.is_some() { 1 } else { 0 }),
+            Some(if matches!(bad, None | Some("rollback")) {
+                0
+            } else {
+                1
+            }),
             "{bad:?}: {}",
             result.stderr
         );
@@ -848,7 +881,7 @@ fn oci_builds_resolve_once_verify_offline_and_never_fallback_on_failure() {
             !result
                 .log
                 .iter()
-                .any(|line| line.starts_with("fetch ") || line.starts_with("cargo ")),
+                .any(|line| line.contains("/releases/") || line.starts_with("cargo ")),
             "{bad:?}: {:?}",
             result.log
         );
@@ -856,29 +889,31 @@ fn oci_builds_resolve_once_verify_offline_and_never_fallback_on_failure() {
             result
                 .log
                 .iter()
-                .filter(|line| line.ends_with(&format!("/manifests/{source}")))
+                .filter(|line| line.contains("/actions/workflows/pin.yml/runs?"))
                 .count(),
             1
         );
-        if bad.is_none() {
+        if matches!(bad, None | Some("rollback")) {
             fetched(&out);
-            assert!(result.stdout.contains("fetched OCI"));
+            assert_eq!(result.output, format!("fetched=true\nsource={source}\n"));
             assert!(
                 result
-                    .log
-                    .iter()
-                    .any(|line| line.contains("--bundle")
-                        && line.contains("pin.yml@refs/heads/main"))
+                    .stdout
+                    .contains(&format!("fetched main artifact at {commit}"))
             );
+            assert!(result.log.iter().any(|line| line.contains("--bundle")
+                && line.contains("pin.yml@refs/heads/main")
+                && line.contains(&format!("--source-digest {commit}"))));
         }
     }
-    for status in ["401", "403", "404", "429", "500"] {
-        let out = tempdir("oci-fail-");
+    for status in ["401", "403", "404", "500"] {
+        let out = tempdir("artifact-fail-");
         let result = run(
             root,
             &["get", "--out", s(out.path())],
             Opts {
-                env: env(&[("BUILD_OCI", "true"), ("OCI_FAIL", status)]),
+                env: env(&[("BUILD_ARTIFACTS", "true")]),
+                traces: vec![Some(format!("< HTTP/2.0 {status} Refused\n"))],
                 ..Opts::default()
             },
         );
@@ -888,26 +923,19 @@ fn oci_builds_resolve_once_verify_offline_and_never_fallback_on_failure() {
 }
 
 #[test]
-fn oci_rollout_is_off_by_default_and_publisher_absence_is_explicit() {
+fn artifact_rollout_is_off_by_default() {
     let tree = tree();
     let out = tempdir("legacy-default-");
     let result = run(
         tree.path(),
         &["get", "--out", s(out.path())],
         Opts {
-            env: env(&[("OCI_FAIL", "403")]),
+            env: env(&[("BUILD_COMMIT", "invalid")]),
             ..Opts::default()
         },
     );
     assert_eq!(result.status, Some(0), "{}", result.stderr);
     assert!(result.log.contains(&cargo_build()));
-    let result = run(
-        tree.path(),
-        &["verify-oci", "--out", s(out.path())],
-        Opts::default(),
-    );
-    assert_eq!(result.status, Some(2), "{}", result.stderr);
-    assert!(result.log.is_empty());
 }
 
 #[test]
@@ -916,7 +944,14 @@ fn requested_build_fetches_nothing_and_installs_only_the_compilers_missing() {
     let root = tree.path();
     let parent = tempdir("build-");
     let out = parent.path().join("bin");
-    let result = run(root, &["get", "--out", s(&out), "--build"], Opts::default());
+    let result = run(
+        root,
+        &["get", "--out", s(&out), "--build"],
+        Opts {
+            env: env(&[("BUILD_ARTIFACTS", "true"), ("BUILD_COMMIT", "invalid")]),
+            ..Opts::default()
+        },
+    );
     assert_eq!(result.status, Some(0), "{}", result.stderr);
     assert!(
         !result.log.iter().any(|line| {

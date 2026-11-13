@@ -2463,38 +2463,45 @@ cannot substitute a binary. The trust anchor is GitHub's attestation
 service and this repository's main-branch publishing workflow, not a
 mutable release tag or the caller repository's cache.
 
-The concrete rollout failure is an initially private or unpublished GHCR package
-stranding a caller that could still use Releases. OCI-first fetching is therefore
-off by default: set the calling repository's variable `SOURCE_BUILD_OCI=true`
-only after `pin.yml` passes its anonymous postflight. Policy and dispatch both
-map this setting to the bootstrap's `BUILD_OCI=true`. The trusted workflow sets
-`WORKFLOW_REPOSITORY` to its own repository and `BUILD_REGISTRY` to `ghcr.io`,
-never the event or caller's repository. No package credentials reach readers.
+The concrete threat is a substituted Actions artifact replacing the binary
+that evaluates policy and checks outputs. The opt-in main-artifact reader
+therefore verifies the bundled `pin.yml` attestation against the selected run's
+head SHA, main ref and GitHub-hosted identity, then checks repository, commit,
+target, source-digest shape, release name and every payload checksum. It does
+not trust artifact names or API checksums as executable identity.
 
-When enabled, the source digest selects
-`ghcr.io/PUBLISHER_OWNER/agentic-job-build:FULL_DIGEST` (owner lowercased).
-This is an OCI image manifest with artifact type
-`application/vnd.agentic-job.build.v1`, not a runnable image. Its six named file
-layers are `release.json`, `provenance.jsonl`, the three
-`*-x86_64-unknown-linux-musl` binaries and `world_write.bpf.o`.
-The bootstrap resolves the tag once, refetches the manifest by SHA-256, and
-downloads only those exact names by layer digest, without extracting an archive.
-Requests have 120-second and byte limits (1 MiB manifest, 256 MiB per layer).
-It then verifies the same bundled `pin.yml` attestation, repository, source,
-target, release name and all payload checksums before anything can execute.
-Registry writers and mutable OCI tags are not new trust anchors.
-Only a tag lookup returning HTTP 404 with `MANIFEST_UNKNOWN` permits legacy
-Release lookup; authentication, throttling, network and verification errors stop.
+Set the calling repository's Actions variable `SOURCE_BUILD_ARTIFACTS=true`
+to opt in (default off). Policy and dispatch map this to `BUILD_ARTIFACTS=true`;
+the publisher repository always comes from the trusted workflow's own identity,
+never event data. This deliberately runs a newer binary than the pinned workflow
+checkout: it selects the latest successful **push** run of `pin.yml` on main,
+resolves it once and downloads `agentic-job-verified` by immutable artifact ID.
+It logs the selected commit and source digest. `SOURCE_BUILD_COMMIT=FULL_SHA`
+(bootstrap `BUILD_COMMIT`) restricts selection to a successful main push at
+that commit for hand rollback; unset it to resume latest-main selection.
+The pin must still have a retained artifact. No per-commit pin PR is needed.
+
+The artifact has exactly six files: `release.json`, `provenance.jsonl`, the three
+`*-x86_64-unknown-linux-musl` binaries and `world_write.bpf.o`. The ZIP is limited
+to 256 MiB, and decompression is bounded to 120 seconds and 256 MiB per file.
+Only those fixed names are streamed into regular files; paths and duplicates
+are refused. The reader uses the job's read-only forge token for the Actions
+API, not package credentials. Cross-repository consumers must prove artifact
+read access with their existing read-only token before enabling the setting;
+do not give policy or agent a write token to repair an access failure.
+Missing/expired artifacts, authentication, transport and verification failures
+all stop the opted-in job. There is no silent fallback to a different commit.
+Use `build-binary: true` explicitly to build the pinned source instead.
 
 Version-tagged workflow pins instead select the version's release and
 `release.yml` attestation, as described at the
 [start of this page](#running-it-on-github).
 
-Only a missing manifest (HTTP 404) falls back to building, with a notice
+With artifact selection disabled, only a missing legacy manifest (HTTP 404) falls back to building, with a notice
 that it takes about two minutes. A download or verification failure stops
 the job rather than silently building. A caller can always request a
 source build with `build-binary: true`. The Bash bootstrap uses `sha256sum`,
-jq, coreutils' `timeout` and `gh` with attestation support; GitHub-hosted
+jq, coreutils' `timeout`, `unzip` and `gh` with attestation support; GitHub-hosted
 runners provide them. The bundle
 is downloaded with the release, so verification needs no forge token.
 
@@ -2509,23 +2516,23 @@ that run included. A cache is also one per calling repository, where a
 release is fetched by every caller.
 
 When main's source changes, the `prebuilt` workflow (`pin.yml`) makes an
-uncached build and publishes its source-addressed release and OCI artifact. No branch,
-pull request or human merge is needed. Commits that only change docs or
-workflow usage share their source's release. A run started before the
-build finishes still builds locally; subsequent runs fetch the prebuilt.
-The build job has only contents-read access. The publishing job executes
-no built binaries; it has contents-write and packages-write to publish, OIDC and
-attestations-write to sign the manifest, and no pull-requests permission.
-Uploads are staged in a draft release and published only when complete;
-rerunning repairs an interrupted draft. Repeated builds of the same source
-leave the first published release intact.
-The isolated publisher installs checksum-pinned ORAS, verifies existing OCI
-artifacts instead of overwriting a source tag, and verifies anonymous pull plus
-offline provenance after publication. A newly created GHCR package may need to
-be made public in its package settings before that postflight succeeds; rerun
-the workflow afterward. Keep OCI-first disabled until it succeeds. Old pinned
-scripts cannot learn a new transport, so this migration still publishes both
-formats and does not change `v*` releases.
+uncached build and uploads its attested workflow artifact, retained for 90 days
+(subject to repository retention limits). No GitHub build release or OCI file
+artifact is published. The manifest's `build-DIGEST` field remains an internal
+source identifier, not a release tag to create. The build job has only
+contents-read access. The isolated publisher executes no built binaries and
+has contents-read, OIDC and attestations-write, but no contents-write or
+packages-write permission. It verifies its offline bundle before upload.
+
+Rollout: first merge the publisher and let a real main push finish; verify an
+artifact download and offline bundle with the consumer's read-only token,
+including rollback selection, before enabling the repository variable. Update
+external wrapper pins through their normal review gates. Older scripts cannot
+read run artifacts: retain all existing `build-*` releases, with source-build
+fallback for unpublished source digests. `v*` release behavior is unchanged.
+Historical cleanup is separate. Only if artifact retention or API rate limits
+cause problems in practice should a periodic (roughly weekly) real release be
+considered; no weekly publisher or automatic fallback is implemented here.
 
 ### Build-release retention dry run
 

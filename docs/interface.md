@@ -6,7 +6,9 @@
 a wrapper that moves files between jobs. Another CI system would run
 the same commands. The workflow fetches a checksummed static release
 binary when its source digest matches the pinned commit; otherwise it
-builds that source. `build-binary: true` forces a build.
+builds that source. Opting into `SOURCE_BUILD_ARTIFACTS=true` instead selects
+the latest successful main build's attested workflow artifact, with
+`SOURCE_BUILD_COMMIT` for hand rollback. `build-binary: true` forces a build.
 
 ## Commands
 

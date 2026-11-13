@@ -126,6 +126,7 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
+      actions: read # read the opted-in main build's workflow artifact
     outputs:
       task: ${{ steps.target.outputs.task }}
       agent: ${{ steps.target.outputs.agent }}
@@ -149,8 +150,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          BUILD_REGISTRY: ghcr.io
-          BUILD_OCI: ${{ vars.SOURCE_BUILD_OCI == 'true' }}
+          BUILD_ARTIFACTS: ${{ vars.SOURCE_BUILD_ARTIFACTS == 'true' }}
+          BUILD_COMMIT: ${{ vars.SOURCE_BUILD_COMMIT }}
         run: bash .agentic-job-source/secure-host/binary.sh get --out "$RUNNER_TEMP/agentic-job-bin"
       # The checks, the item's read and the task: `agentic-job dispatch`.
       - id: target
