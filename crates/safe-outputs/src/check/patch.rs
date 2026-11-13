@@ -140,7 +140,9 @@ fn quoted(line: &str) -> String {
 /// folder is it left out, and every component inside it is still matched.
 /// A `.gitignore` filename is admitted even so: the prefix refusal is
 /// about git's own files, and an ignore list the agent cannot exempt is
-/// not one of them.
+/// not one of them. Only a `.gitignore` that is a file of its own is:
+/// one inside a protected directory (`.git/.gitignore`,
+/// `.husky/.gitignore`) keeps the refusal around it.
 fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
     let dotted = path.split('/').any(|part| part == "." || part == "..");
     let inside = match path.strip_prefix(".github/") {
@@ -150,7 +152,8 @@ fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
     if !PLAIN_PATH_RE.is_match(path) || dotted {
         Some("not a plain relative path")
     } else if (PROTECTED_PATH_RE.is_match(inside)
-        && inside.rsplit('/').next().unwrap_or(inside) != ".gitignore")
+        && !matches!(inside.strip_suffix(".gitignore"),
+                     Some(before) if !PROTECTED_PATH_RE.is_match(before)))
         || path
             .strip_prefix(MERGE_POLICY_PATH)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -818,7 +821,16 @@ mod tests {
                 (".git/config", false),
                 ("sub/.git/config", false),
                 (".gitignore.not", false),
+                // A `.gitignore` inside a protected directory is not a
+                // file of its own: the refusal around it stays.
+                (".git/.gitignore", false),
+                (".gitmodules/.gitignore", false),
+                (".husky/.gitignore", false),
+                (".github/.gitignore", false),
             ] {
+                // Where the policy exempts `.github/` itself, a
+                // `.gitignore` in it is admitted too.
+                let allowed = allowed || (enabled && path == ".github/.gitignore");
                 assert_eq!(
                     patch_problems(&(head() + &add(path, "100644")), &pr, BASE).is_empty(),
                     allowed,
