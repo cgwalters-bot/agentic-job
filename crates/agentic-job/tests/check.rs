@@ -83,11 +83,38 @@ fn serialized_continuation_policy_requires_exact_trusted_check_context() {
             ("attempt", json!(1)),
             ("current-run", json!(8)),
             ("current-attempt", json!(3)),
+            ("malformed", Value::Null),
+            ("absent-repository", Value::Null),
+            ("absent-pull_request", Value::Null),
+            ("absent-head", Value::Null),
+            ("absent-run_id", Value::Null),
+            ("absent-attempt", Value::Null),
+            ("duplicate-repository", Value::Null),
+            ("duplicate-pull_request", Value::Null),
+            ("duplicate-head", Value::Null),
+            ("duplicate-run_id", Value::Null),
+            ("duplicate-attempt", Value::Null),
         ] {
             let mut context = identity.clone();
             if context.get(field).is_some() {
                 context[field] = value;
             }
+            if let Some(key) = field.strip_prefix("absent-") {
+                context.as_object_mut().unwrap().remove(key);
+            }
+            // Keep duplicate keys in the serialized input: a Value round trip
+            // would erase the malformed wire representation before check saw it.
+            let context = if let Some(key) = field.strip_prefix("duplicate-") {
+                format!(
+                    "{{\"{key}\":{},{}",
+                    identity[key],
+                    &context.to_string()[1..]
+                )
+            } else if field == "malformed" {
+                "{".to_owned()
+            } else {
+                context.to_string()
+            };
             let report = dir.path().join("report.json");
             // A failed invocation must not leave a previous successful report.
             if report.exists() {
@@ -107,7 +134,7 @@ fn serialized_continuation_policy_requires_exact_trusted_check_context() {
             if field != "missing" {
                 check.args([
                     "--continuation-context",
-                    &context.to_string(),
+                    &context,
                     "--run-attempt",
                     if field == "current-attempt" { "3" } else { "2" },
                 ]);

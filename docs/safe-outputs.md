@@ -910,6 +910,46 @@ to a proposed patch, not an unchanged-completion authority. Legacy outcomes and
 noops remain compatible as diagnostics; putting a raw outcome or an invented
 completion-evidence file into the hand-back is refused as an unexpected file.
 
+**Engineering dependency for #3637:** the identity/artifact prerequisite is on
+main at `d6613509e5dfe421e53a8076b8bb7a551beb5c36`, but there is no independent
+required-verification implementation in the existing check path. In particular,
+`check.yml` downloads proposals and invokes collect/check with read-only
+`contents`/`actions` access; it does not execute task tests. Executing a proposed
+test command there would run agent-controlled code on the trusted checker.
+`test-evidence.json` and `outcome.json.tests` instead report what the producer
+says happened. Neither is an independent verifier result, even with a correct
+artifact digest and attempt. No verification method is currently supported for
+unchanged acceptance; unavailable must remain a refusal, not an empty success.
+
+The missing implementation is a trusted caller specification of a **nonempty**
+required set and an explicit verifier method, plus an authenticated result reader
+for that method. For example, a read-only Actions-result method would need to
+authenticate the verifier's workflow/source revision and exact tested repository,
+PR head, verifier run/attempt and required jobs, not just find green checks by
+name. Its trusted workflow must establish what tree was tested; a dispatcher
+run's own `head_sha` can name the caller repository rather than the target.
+It must bound API reads and fail closed on missing, ambiguous, truncated,
+failed, skipped, cancelled or unreadable results. There is no such result reader
+or trusted verifier-job contract here today. Adding a producer-written
+`verification: passed` field, or letting a worker supply the required job list,
+would not resolve this engineering dependency. This needs implementation and
+serialized positive/adversarial proof, not a new completion-policy grant.
+
+**Serialized handoff to #3381:** today an accepted `report.json` may carry
+`continuation` with exactly `repository`, `pull_request`, `head`, `run_id` and
+`attempt`; it carries no checked unchanged-completion disposition. The report
+travels with the policy through the existing checked upload described above.
+The #3381 consumer must not consume an outcome, noop, absence of `checkpoint`, or this identity
+as completion. Before that consumer can proceed, #3637 must add a checked
+disposition to this same report, backed by the trusted required-verification
+method and bound candidate, and exercise the actual serialized producer,
+collector and checker handoff. No second receipt or agent-supplied result file
+can stand in for it. Even that future disposition will establish only the
+specified verification and structural claim, not semantic task completion.
+Agent-board #852/#853 must wait for that concrete contract and deployment;
+separately authorized live acceptance remains tracker #1071. Acceptance,
+readiness and caller opt-in remain unchanged and disabled for unchanged results.
+
 ### Requesting reviewers and assigning users
 
 Both notify whoever they name, so an agent could otherwise page anyone with

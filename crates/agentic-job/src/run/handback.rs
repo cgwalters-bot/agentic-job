@@ -3648,6 +3648,16 @@ mod tests {
                 .unwrap();
             push.head.clone_from(&home.checkout.base_commit);
             push.ready_when_complete = true;
+            policy.continuation = Some(crate::policy::Continuation {
+                repository: policy.repo.clone(),
+                pull_request: push.target.parse().unwrap(),
+                head: push.head.clone(),
+                run_id: RUN_ID.parse().unwrap(),
+                attempt: 2,
+            });
+            let policy: Policy =
+                serde_json::from_slice(&serde_json::to_vec(&policy).unwrap()).unwrap();
+            policy.validate().unwrap();
             let mut outcome = json!({
                 "summary": "No change required",
                 "checkpoint": {"complete": true},
@@ -3655,8 +3665,8 @@ mod tests {
                 "tests": [{"command": "just check", "exit_code": 0}],
                 // Deliberately untrusted claims, not a proposed wire format.
                 "unchanged_completion": {
-                    "repo": policy.repo, "target": push.target,
-                    "head": home.checkout.base_commit, "run_id": RUN_ID, "run_attempt": 1
+                    "repo": policy.repo, "target": policy.continuation.as_ref().unwrap().pull_request,
+                    "head": home.checkout.base_commit, "run_id": RUN_ID, "run_attempt": 2
                 }
             });
             for (key, value) in fields.as_object().unwrap() {
@@ -3700,11 +3710,12 @@ mod tests {
             let collected_path = home.path("collected.json");
             std::fs::write(&collected_path, serde_json::to_vec(&collected).unwrap()).unwrap();
             let check = || {
-                check::check_run_outputs(
+                check::check_run_outputs_with_public(
                     &home.path("safe-outputs"),
                     &collected_path,
                     &policy,
                     RUN_ID,
+                    &crate::run::public_addresses::PublicAddresses::default(),
                 )
                 .unwrap()
             };
@@ -3725,14 +3736,21 @@ mod tests {
             // the checked upload must fail, rather than authenticate it.
             for file in [OUTCOME_FILE, "unchanged-completion.json"] {
                 let path = home.path(&format!("safe-outputs/{file}"));
-                std::fs::write(&path, serde_json::to_vec(&outcome).unwrap()).unwrap();
-                let verdict = check();
-                assert!(!verdict.ok, "{name}: {file}");
-                assert!(
-                    verdict.errors.iter().any(|e| e.contains("unexpected file")),
-                    "{name}: {:?}",
-                    verdict.errors
-                );
+                for payload in [
+                    serde_json::to_vec(&outcome).unwrap(),
+                    b"{}".to_vec(),
+                    b"{".to_vec(),
+                    b"{\"complete\":true,\"complete\":false}".to_vec(),
+                ] {
+                    std::fs::write(&path, payload).unwrap();
+                    let verdict = check();
+                    assert!(!verdict.ok, "{name}: {file}");
+                    assert!(
+                        verdict.errors.iter().any(|e| e.contains("unexpected file")),
+                        "{name}: {:?}",
+                        verdict.errors
+                    );
+                }
                 std::fs::remove_file(path).unwrap();
             }
         }
