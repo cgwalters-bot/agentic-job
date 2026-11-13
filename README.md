@@ -34,7 +34,7 @@ Follow the [getting-started walkthrough](docs/try-it.md) to run the scripted age
 
 ## Documentation
 
-- [Workflow and deployment evidence](docs/workflow.md), [events](docs/events.md) and [dispatch](docs/dispatch.md).
+- [Workflow and deployment evidence](docs/workflow.md), [events](docs/events.md), [dispatch](docs/dispatch.md) and [GitLab CI](docs/gitlab.md).
 - [Safe outputs](docs/safe-outputs.md), [host security](docs/secure-host.md) and [known limitations](docs/limitations.md).
 - [Agent harnesses](docs/harness.md), [inference](docs/inference.md), [MCP](docs/mcp.md) and [skills](docs/skills.md).
 - [Design and trust](docs/requirements.md), [related projects](docs/related-projects.md) and [interactive sessions](docs/interactive.md).

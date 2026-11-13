@@ -520,6 +520,161 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     assert!(stderr.contains("limits.max-requests"), "{stderr}");
 }
 
+/// Check the documented deterministic hand-back with its own bounds, and
+/// keep the publisher environment out of the producer and check jobs.
+#[test]
+fn documented_gitlab_caller_fits_its_bounds() {
+    use yaml_rust2::{Yaml, YamlLoader};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let doc = std::fs::read_to_string(root.join("docs/gitlab.md")).unwrap();
+    let blocks = |fence: &str| -> Vec<&str> {
+        doc.split(fence)
+            .skip(1)
+            .map(|rest| rest.split("```").next().unwrap())
+            .collect()
+    };
+    let [bounds] = blocks("```toml\n")[..] else {
+        panic!("docs/gitlab.md should have one bounds example");
+    };
+    let pipeline = YamlLoader::load_from_str(blocks("```yaml\n")[0])
+        .unwrap()
+        .remove(0);
+    let release = pipeline["variables"]["AGENTIC_JOB_RELEASE"]
+        .as_str()
+        .unwrap();
+    assert!(doc.contains(&format!("\ntag={release}\n")));
+    assert!(
+        pipeline["apply"]["script"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("apply --forge gitlab"))
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let allow = temp.path().join("bounds.toml");
+    std::fs::write(&allow, bounds).unwrap();
+    let output = Command::new(BIN)
+        .arg("policy")
+        .arg("--allow")
+        .arg(&allow)
+        .args(["--repo", "group/project"])
+        .args([
+            "--clone-url",
+            "https://gitlab.example.com/group/project.git",
+        ])
+        .args(["--base", "main", "--kind", "branch"])
+        .args(["--outputs", "all", "--max-outputs", "max"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["forge"], "gitlab");
+    // A comment-only policy grants no fork push, even when bounds name one.
+    assert!(policy["push_repo"].is_null());
+
+    let policy_file = temp.path().join("policy.json");
+    std::fs::write(&policy_file, &output.stdout).unwrap();
+    let script = pipeline["produce"]["script"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .map(|line| line.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = Command::new("sh")
+        .args(["-eu", "-c", &script])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let collected = temp.path().join("collected.json");
+    let report = temp.path().join("report.json");
+    for command in ["collect", "check"] {
+        let mut cmd = Command::new(BIN);
+        cmd.arg(command)
+            .arg("--policy")
+            .arg(&policy_file)
+            .arg("--outputs")
+            .arg(temp.path().join("handback"))
+            .arg("--collected")
+            .arg(&collected);
+        if command == "check" {
+            cmd.arg("--report").arg(&report);
+        }
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Every flag the pipeline gives a command is one that command takes.
+    let command = regex::Regex::new(r#"agentic-job"? ((?:[a-z][a-z-]* )+)"#).unwrap();
+    let flag = regex::Regex::new(r"--[a-z][a-z-]*").unwrap();
+    let mut checked = 0;
+    for (_, job) in pipeline.as_hash().unwrap() {
+        for key in ["before_script", "script"] {
+            for line in job[key].as_vec().into_iter().flatten() {
+                let line = format!("{} ", line.as_str().unwrap());
+                let Some(found) = command.captures(&line) else {
+                    continue;
+                };
+                let words: Vec<&str> = found[1].split_whitespace().collect();
+                let help = Command::new(BIN)
+                    .args(&words)
+                    .arg("--help")
+                    .output()
+                    .unwrap();
+                assert!(help.status.success(), "{words:?}: {help:?}");
+                let help = String::from_utf8_lossy(&help.stdout);
+                for flag in flag.find_iter(&line[found.get(1).unwrap().end()..]) {
+                    assert!(help.contains(flag.as_str()), "{words:?} {}", flag.as_str());
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 4);
+
+    let needs = |job: &str| -> Vec<&str> {
+        pipeline[job]["needs"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .map(|need| need.as_str().unwrap())
+            .collect()
+    };
+    assert_eq!(needs("policy"), Vec::<&str>::new());
+    assert_eq!(needs("produce"), ["policy"]);
+    assert_eq!(needs("check"), ["produce"]);
+    assert_eq!(needs("apply"), ["check"]);
+    for job in ["policy", "produce", "check", "apply"] {
+        for key in ["environment", "id_tokens", "secrets"] {
+            assert_eq!(
+                pipeline[job][key].is_badvalue(),
+                job != "apply" || key != "environment",
+                "{job}.{key}"
+            );
+        }
+    }
+    assert!(matches!(
+        pipeline["apply"]["environment"]["name"],
+        Yaml::String(_)
+    ));
+    assert!(pipeline["agent"].is_badvalue());
+}
+
 #[test]
 fn a_request_outside_the_bounds_prints_no_policy() {
     // The change to the request, and a part of the reason.

@@ -94,7 +94,7 @@ separately owned non-goals propose post-1.0 P2 without moving their parent.
 | [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000) | #1311 | Propose #596 child: enforcement/credential refusal proof with positive controls. |
 | [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999) | #1311 | Question: credentialless broker launch prerequisite for 1.0 or P2? Client code is not readiness. |
 | [#2997](https://github.com/cgwalters-forge/agentic-job/issues/2997) | #1311 | Propose P2: measured small-runner compile work; retain existing split work. |
-| [#2996](https://github.com/cgwalters-forge/agentic-job/issues/2996) | #1311 | Propose P2: GitLab caller docs need supported credentialless deployment. |
+| [#2996](https://github.com/cgwalters-forge/agentic-job/issues/2996) | #1311 | Propose P2: [GitLab caller docs](gitlab.md) provide a checked deterministic example; supported credentialless deployment and live GitLab/TF evidence remain pending. |
 | [#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) | #1311 | Propose P2: downstream GitLab/TF evidence; two-user/API-key runs are historical. |
 | [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) | #1311 | Question: 1.0 prerequisite or P2? Operator owns identity/listener and off-agent lifecycle approval; no local proxy mandate. |
 | [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811) | #596 | Keep: exact-account egress diagnostics and caller release/image proof. |
