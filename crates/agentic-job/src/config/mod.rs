@@ -1,6 +1,7 @@
 //! The `--config` file: one TOML file for a run, with a table per
 //! concern. `sandbox setup` reads the caller's file and copies it to
-//! [`ROOT_COPY`]; `run` reads only that copy, which is root's.
+//! [`ROOT_COPY`]; `run` reads that copy by default, or a caller's trusted
+//! file through `run --config`.
 //!
 //! Each table's struct belongs to the step of docs/plan.md that uses it
 //! (see docs/layout.md). What the types cannot say (that `github-oidc`

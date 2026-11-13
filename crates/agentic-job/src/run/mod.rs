@@ -154,10 +154,13 @@ pub struct Args {
     #[arg(long, value_name = "OWNER/NAME#NUMBER")]
     pub watch_item: Option<String>,
     /// The configuration, in place of the root-owned copy `sandbox setup`
-    /// made. For tests: a job never passes it, since a file the job can
-    /// write is not one the sandbox setup vouched for.
-    #[arg(long, value_name = "FILE", hide = true, default_value = config::ROOT_COPY)]
+    /// made. Use a trusted read-only mount for a long-lived server.
+    #[arg(long, value_name = "FILE", default_value = config::ROOT_COPY)]
     pub config: PathBuf,
+    /// Acknowledge that this uid can write the configuration, including
+    /// changing limits, inference routing and session access for later runs
+    #[arg(long)]
+    pub allow_writable_config: bool,
     /// The agent's home: the agent is this program's own user, for a job
     /// that holds nothing the agent may not read, on a host
     /// cgwalters-forge/actions/secure-host secured. Required: there is no
@@ -306,15 +309,42 @@ enum Stage {
     Broken(anyhow::Error),
 }
 
-/// The configuration: the root-owned copy, which setup leaves readable
-/// by all (it holds no secret).
-fn load_config(path: &Path) -> Result<Config> {
-    let text = std::fs::read_to_string(path).with_context(|| {
-        format!(
-            "reading {}: `sandbox setup` puts the configuration there",
-            path.display()
-        )
-    })?;
+/// Check and read the same inode. This startup guard catches accidental
+/// trust in agent-writable settings, not a hostile same-uid supervisor.
+fn load_config(path: &Path, allow_writable: bool) -> Result<Config> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    use rustix::fs::{Access, AtFlags, CWD, OFlags, accessat};
+    use rustix::io::Errno;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(path)
+        .with_context(|| format!("opening configuration {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "configuration {} must be a regular file",
+        path.display()
+    );
+    if !allow_writable {
+        // /proc keeps this bound to the open inode, including its mount,
+        // without requiring faccessat2's AT_EMPTY_PATH support.
+        let opened = format!("/proc/self/fd/{}", file.as_raw_fd());
+        match accessat(CWD, opened.as_str(), Access::WRITE_OK, AtFlags::EACCESS) {
+            Ok(()) => bail!(
+                "configuration {} is writable by the run's uid; use a trusted read-only mount or explicitly acknowledge the risk with --allow-writable-config",
+                path.display()
+            ),
+            Err(Errno::ACCESS | Errno::ROFS) => {}
+            Err(error) => return Err(error).context("checking configuration write access"),
+        }
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("reading configuration {}", path.display()))?;
     Config::parse(&text).with_context(|| format!("in {}", path.display()))
 }
 
@@ -666,7 +696,7 @@ fn inference_addresses(endpoint: Option<&Endpoint>) -> Vec<String> {
 
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
-        let mut config = load_config(&args.config)?;
+        let mut config = load_config(&args.config, args.allow_writable_config)?;
         // What `agentic-job config` held the file to, again: it is only
         // a file by the time `run` reads it.
         let Checked {

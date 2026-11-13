@@ -24,7 +24,7 @@ are [listed in the plan](plan.md#breaking-keys-and-safe-refusals).
 | `sandbox setup --config FILE` | root | Prepares the host the agent runs on, and copies the configuration to `/etc/agentic-job/`. |
 | `sandbox prepare --config FILE` | root | Before the secure-host image, which holds no agent code: installs the packages, `[setup] npm` and `agents` and Vibe, writes the agent's managed settings and installs this binary as the helper that the image's setup keeps. Refuses a file without `[host.prepared]`, and `sandbox setup` one with it. |
 | `sandbox check [--record\|--unless-passed]` | the runner's user | Probes the sandbox as the sandbox user, with positive controls where the host provides them. `--record` leaves a record when all probes pass, and `--unless-passed` (run's) probes nothing when it finds that record, against the same configuration, with nothing having entered the sandbox user since ([sandbox-check.md](sandbox-check.md)). |
-| `run --runner-home DIR --policy FILE --task FILE --meta FILE --out DIR` | the runner's user | Runs the agent as this user and takes what it hands back. |
+| `run --runner-home DIR --policy FILE --task FILE --meta FILE --out DIR [--config FILE] [--allow-writable-config]` | the runner's user | Runs the agent as this user and takes what it hands back. |
 | `collect --policy FILE --outputs DIR --collected FILE` | anyone | Validates and sanitizes the handed-back requests as gh-aw's collector does, in check.yml and for a caller off GitHub ([safe-outputs.md](safe-outputs.md#off-github)). Exit 1 if it refused a line. |
 | `check --policy FILE --outputs DIR --collected FILE [--report FILE] [--comment-repo OWNER/NAME --comment-target N --review-head SHA] [--run-summary FILE]` | anyone | Checks handed-back outputs and patch against the policy. Neutral inline comments require the trusted caller's fixed item and admitted head, recorded in the report. A run summary that passes its checks is sanitized into the report for GitLab's apply to post ([safe outputs](safe-outputs.md#publishing-to-gitlab)). |
 | `apply --forge forgejo --server URL --repo OWNER/NAME --policy FILE --checked DIR --run-url URL [--comment-target N] [--push-repo OWNER/NAME] [--status STATE --status-sha SHA]` | the apply job | Publishes checked comments, issues, labels and closing, and a pull request from the bounds' fork or a push to its open one, to Forgejo with `FORGEJO_TOKEN`, or per-role tokens under `APPLY_ROLE_BINDINGS` ([roles](safe-outputs.md#forgejo-and-gitlab-roles)), then the caller's commit status ([safe outputs](safe-outputs.md#publishing-to-forgejo)). |
@@ -109,9 +109,30 @@ all, the patch's size and file limits.
 [This repository's](../.github/agentic-job/allow.toml) is an example.
 
 **`--config`**, TOML with these tables. Unknown keys are refused.
-`run` reads only the copy `sandbox setup` left in
-`/etc/agentic-job/`. The sandbox user cannot change it, and it
-contains no secret.
+`run` defaults to `config::ROOT_COPY`, `/etc/agentic-job/config.toml`,
+the root-owned copy `sandbox setup` leaves. `run --config FILE` is a
+supported alternative for long-lived servers started outside the workflow:
+mount a trusted configuration read-only and pass its path. Both paths use
+the same TOML parsing, unknown-key refusals and run admission checks; selecting
+a file does not perform host setup or change the helper's root-owned config.
+The configuration contains no secret.
+
+Before reading either path, `run` requires a regular file (not a symlink) and
+checks write access for its effective uid, including groups, ACLs and read-only
+mounts. A writable file is refused unless `--allow-writable-config` explicitly
+acknowledges it; this option is off by default and skips only the write-access
+check, not configuration validation. The threat is an agent editing settings
+that a later run trusts: it could relax limits, redirect inference, change the
+agent command/environment, or admit different session operators. A read-only
+mount whose source and mount controls remain trusted prevents those edits.
+If the caller opts into a writable file, it trusts whoever can change that
+file and should not reuse agent-modified settings as operator policy.
+
+This is a startup guard, not isolation from a hostile same-uid process.
+Clearing write bits alone is not a trust boundary: an owner can restore them,
+and a writable parent can permit replacement. Keep the file and its path under
+trusted control (including the mount source), especially between server runs.
+The loaded configuration is a snapshot; it is not watched for changes.
 
 | Table | Holds |
 | --- | --- |

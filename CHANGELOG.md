@@ -18,6 +18,12 @@ says what a caller may rely on across versions.
   through an attach gateway. The existing idle timeout and run limits still
   bound the wait (#3616).
 
+- `run --config FILE` is a supported, visible interface for long-lived
+  servers using a trusted read-only configuration mount. Both explicit files
+  and the default root-owned copy refuse write access by the run's uid unless
+  `--allow-writable-config` acknowledges the risk; normal validation still
+  applies (#3618).
+
 - Standalone `safe-outputs check` and `apply` accept explicit `--forge gitlab`,
   using the existing GitLab policy, planner and publisher for every supported
   safe-output kind. Receipts also bind patch inputs; GitHub comments remain

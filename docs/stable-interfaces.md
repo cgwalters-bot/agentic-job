@@ -194,10 +194,20 @@ the next in the same major version.
   `[gitlab.outputs] own-branch-repos` likewise lets merge request branches
   go to the target project itself.
 - **The runner configuration**, the workflow's `config` input
-  (`agentic-job config --from`, `sandbox setup --config`): the tables
+  (`agentic-job config --from`, `sandbox setup --config`, `run --config`): the tables
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
   `[limits]`, `[session]` and `[commit]`
   ([files read](interface.md#files-read)).
+  `run --config FILE` supports server configurations outside the workflow;
+  it defaults to `config::ROOT_COPY` (`/etc/agentic-job/config.toml`), the
+  root-owned setup copy. Either path gets the same parsing and run validation.
+  `run` refuses a file writable by its effective uid unless
+  `--allow-writable-config` is explicitly passed (off by default). That flag
+  acknowledges agent changes to later runs' limits, inference routing and
+  session access; it does not bypass validation. Prefer a trusted read-only
+  mount, with trusted source and path, rather than owner-changeable mode bits.
+  This startup guard is not same-uid isolation; see the
+  [trust assumptions](interface.md#files-read).
   `agentic-job config --no-session` refuses an effective `session.listen = true`,
   including one inherited from the file; review policy always uses it.
   `[host]` (with `[host.check]` and `[host.prepared]`) was `[sandbox]`

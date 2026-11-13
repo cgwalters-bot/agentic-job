@@ -155,7 +155,22 @@ impl Job {
     }
 
     fn command(&self, config: &str) -> Command {
+        use std::os::unix::fs::PermissionsExt;
+
+        if self.path("config.toml").exists() {
+            std::fs::set_permissions(
+                self.path("config.toml"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
         self.write("config.toml", config);
+        // Ordinary fixtures are read-only, like a server's mounted config.
+        std::fs::set_permissions(
+            self.path("config.toml"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
         let mut command = Command::new(BIN);
         command
             .arg("run")
@@ -278,6 +293,7 @@ impl Drop for Job {
     }
 }
 
+#[derive(Debug)]
 struct Finished {
     code: Option<i32>,
     stdout: String,
@@ -306,6 +322,46 @@ const NO_PROXY: &str = "[egress]\nproxy = false\n";
 
 fn config(inference: &str) -> String {
     format!("[agent]\nname = \"fake\"\n{LIMITS}{NO_PROXY}{inference}")
+}
+
+#[test]
+fn config_help_is_public() {
+    let output = Command::new(BIN).args(["run", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--config <FILE>"), "{help}");
+    assert!(help.contains(agentic_job::config::ROOT_COPY), "{help}");
+    assert!(help.contains("--allow-writable-config"), "{help}");
+}
+
+#[test]
+fn config_write_access_requires_acknowledgement() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let job = Job::new("config-write-access");
+    let mut command = job.own_command(&own_config(""));
+    std::fs::set_permissions(
+        job.path("config.toml"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let refused = Finished::of(command.output().unwrap());
+    assert_eq!(refused.code, Some(EXIT_ERROR), "{refused:?}");
+    assert!(
+        refused.stderr.contains("writable by the run's uid"),
+        "{refused:?}"
+    );
+    assert!(job.nothing_published());
+
+    // Acknowledging write access does not bypass ordinary validation.
+    let acknowledged = Finished::of(command.arg("--allow-writable-config").output().unwrap());
+    assert_eq!(acknowledged.code, Some(EXIT_ERROR), "{acknowledged:?}");
+    assert!(
+        acknowledged
+            .stderr
+            .contains("limits.max-requests = 50 would not bind"),
+        "{acknowledged:?}"
+    );
 }
 
 /// A configuration for a run whose agent is this user: the fake agent
