@@ -67,6 +67,14 @@ says what a caller may rely on across versions.
   checked report carries that trusted expectation to a draft note saying
   no repeated-test acceptance is claimed. Unconfigured runs are unchanged.
 
+- The disposable GitLab CI job generates and masks its root password instead
+  of supplying a predictable fixture rejected during admin seeding. Startup
+  exits now report container state and a bounded log tail. The fixture checks
+  the structural refusal of `.gitlab-ci.yml` and absence of publication on
+  refusal, and waits out GitLab's branch-list cache after a successful push
+  while still requiring both fork branches; live inline publication proof
+  remains pending (#3179).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

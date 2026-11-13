@@ -527,6 +527,28 @@ not a gitlab.com group or token. CI must establish live proof and stability;
 [#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) is closed;
 [#3179](https://github.com/cgwalters-forge/agentic-job/issues/3179) now owns
 disposable GitLab startup/apply proof.
+The [failed GitLab job](https://github.com/cgwalters-forge/agentic-job/actions/runs/42442455838/job/128614408124)
+shows admin seeding rejecting the fixed fixture password, then exit 1 with
+`OOMKilled=false`; it does not establish a port collision. CI now generates
+and masks a strong disposable root password before starting the container.
+Comment, fork MR and LEFT/RIGHT inline readback still need a green GitLab job;
+the [next job](https://github.com/cgwalters-forge/agentic-job/actions/runs/42907789357/job/130150336450)
+reached readiness about 200s after container start (108.8s waiting after
+compilation) and used 2.607GiB at its post-test sample, not a peak measurement.
+It stopped at the protected-patch assertion: `.gitlab-ci.yml` is refused as a
+structurally protected path, not by the configurable protected-files list.
+The fixture now checks that exact refusal offline and verifies no notes, MRs
+or branches were published on the live refusal path.
+The [13 November job](https://github.com/cgwalters-forge/agentic-job/actions/runs/43351323097/job/131642896219)
+passed note and fork MR readback, then saw one fork branch instead of two.
+The refusal check primes GitLab's 30-second branch-list response cache
+([pinned server source](https://github.com/gitlabhq/gitlabhq/blob/2e5ae10576d/lib/api/branches.rb#L56));
+the fixture now polls within its existing 120-second bound for both `main`
+and `agent-run`, without lowering the expected count. That job reached
+readiness about 204s after container start and sampled 2.646GiB afterward,
+not peak memory. LEFT/RIGHT inline readback and a green GitLab job remain
+unverified: local Docker has no daemon, and Podman cannot start even
+`/bin/true` in this fix runner.
 A caller's own agent job ([the pieces](workflow.md#the-pieces-and-an-agent-job-of-your-own))
 can be admitted by the broker only by repository, not by its workflow
 file, which widens admission ([inference admission](inference.md#which-workflows-a-broker-admits));

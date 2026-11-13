@@ -17,6 +17,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 /// GitLab's first reconfigure/migration is much slower than Forgejo's boot.
 const STARTUP: Duration = Duration::from_secs(600);
 const READY: Duration = Duration::from_secs(120);
+/// `docker inspect` format of the container's state, for a startup failure.
+const STATE: &str = "running {{.State.Running}}, exit {{.State.ExitCode}}, \
+    OOMKilled {{.State.OOMKilled}}, error \"{{.State.Error}}\", finished {{.State.FinishedAt}}";
 const TARGET: &str = "root/target";
 const FORK: &str = "fixture-bot/target";
 const RUN_URL: &str = "https://ci.example/runs/1";
@@ -79,6 +82,9 @@ fn bootstrap() -> (GitLab, String, String) {
             .build()
             .into(),
     };
+    // The port is published unchanged, so the server URL also reaches nginx
+    // from inside the container.
+    let readiness = format!("{}/-/readiness?all=1", forge.server.trim_end_matches('/'));
     let start = Instant::now();
     loop {
         // Monitoring endpoints admit container loopback, not the Docker
@@ -96,13 +102,28 @@ fn bootstrap() -> (GitLab, String, String) {
                 "10",
                 "--output",
                 "/dev/null",
-                "http://127.0.0.1:8080/-/readiness?all=1",
+                &readiness,
             ])
             .output()
             .unwrap();
         if ready.status.success() {
             break;
         }
+        // A failed reconfigure stops the container; waiting out STARTUP
+        // would only hide why. CI's diagnostics steps print its log tail.
+        let state = Command::new("docker")
+            .args(["inspect", "--format", STATE, &container])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&state.stdout);
+        assert!(
+            stdout.starts_with("running true,"),
+            "GitLab container stopped after {:.0}s: {} (inspect {}: {})",
+            start.elapsed().as_secs_f64(),
+            stdout.trim(),
+            state.status,
+            String::from_utf8_lossy(&state.stderr).trim()
+        );
         assert!(
             start.elapsed() < STARTUP,
             "GitLab did not become ready within {STARTUP:?}: curl status {}, {}",
@@ -267,6 +288,91 @@ fn wait_for(forge: &GitLab, token: &str, path: &str, ready: impl Fn(&Value) -> b
 }
 
 #[test]
+fn cached_branch_list_is_polled_until_push_appears() {
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let forge = GitLab {
+        server: format!("http://{}", listener.local_addr().unwrap()),
+        http: ureq::Agent::config_builder().proxy(None).build().into(),
+    };
+    let server = std::thread::spawn(move || {
+        for names in [vec!["main"], vec!["agent-run", "main"]] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(&mut stream);
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /api/v4/projects/2/repository/branches "));
+            loop {
+                line.clear();
+                assert_ne!(request.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body = json!(
+                names
+                    .iter()
+                    .map(|name| json!({"name": name}))
+                    .collect::<Vec<_>>()
+            )
+            .to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let branches = wait_for(&forge, "unused", "/projects/2/repository/branches", |v| {
+        v.as_array().unwrap().len() == 2
+    });
+    assert_eq!(branches[0]["name"], "agent-run");
+    assert_eq!(branches[1]["name"], "main");
+    server.join().unwrap();
+}
+
+#[test]
+fn protected_patch_is_refused_offline() {
+    let forge = GitLab {
+        server: "http://127.0.0.1:1".into(),
+        http: ureq::Agent::new_with_defaults(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let publishing = policy(
+        &forge,
+        dir.path(),
+        "publishing",
+        "create_pull_request = { max = 1 }\nadd_comment = { max = 1 }",
+    );
+    let protected = dir.path().join("protected");
+    checked(
+        &protected,
+        &"1".repeat(40),
+        "agent-protected",
+        ".gitlab-ci.yml",
+        "@all\n/close\n",
+    );
+    let output = apply(&forge, &publishing, &protected, "unused", 1, "issue");
+    assert_protected_refusal(&output, "unused");
+}
+
+fn assert_protected_refusal(output: &Output, token: &str) {
+    // Apply's diagnostics should already redact the credential. Redact again
+    // before displaying a bounded excerpt if the refusal changes in CI.
+    let stderr: String = String::from_utf8_lossy(&output.stderr)
+        .replace(token, "[REDACTED]")
+        .chars()
+        .take(4096)
+        .collect();
+    assert_eq!(output.status.code(), Some(1));
+    // .gitlab-ci.yml is structurally protected by its .git prefix, before
+    // the configurable protected-files check is reached.
+    assert!(
+        stderr.contains("\".gitlab-ci.yml\": protected path"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 #[ignore = "needs a GitLab CE container; CI's gitlab job runs it"]
 fn apply_publishes_to_gitlab() {
     let (forge, admin, token) = bootstrap();
@@ -311,9 +417,19 @@ fn apply_publishes_to_gitlab() {
         mention,
     );
     let output = apply(&forge, &publishing, &protected, &token, iid, "issue");
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("protected files"));
-    assert!(output.stdout.is_empty());
+    assert_protected_refusal(&output, &token);
+    for path in [
+        format!("{project}/issues/{iid}/notes"),
+        format!("{project}/merge_requests"),
+    ] {
+        assert!(forge.get(&token, &path).as_array().unwrap().is_empty());
+    }
+    for path in [project.clone(), format!("/projects/{fork_id}")] {
+        let branches = forge.get(&token, &format!("{path}/repository/branches"));
+        let branches = branches.as_array().unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0]["name"], "main");
+    }
 
     let accepted = dir.path().join("accepted");
     checked(&accepted, base, "agent-run", "src/x", mention);
@@ -345,8 +461,18 @@ fn apply_publishes_to_gitlab() {
     assert!(urls.lines().any(|url| pull["web_url"] == url));
     let branches = forge.get(&token, &format!("{project}/repository/branches"));
     assert_eq!(branches.as_array().unwrap().len(), 1);
-    let branches = forge.get(&token, &format!("/projects/{fork_id}/repository/branches"));
+    // The refusal check above primes GitLab's 30-second branch-list response
+    // cache. A successful push does not invalidate that API cache immediately.
+    let branches = wait_for(
+        &forge,
+        &token,
+        &format!("/projects/{fork_id}/repository/branches"),
+        |v| v.as_array().unwrap().len() == 2,
+    );
     assert_eq!(branches.as_array().unwrap().len(), 2);
+    assert_eq!(branches[0]["name"], "agent-run");
+    assert_eq!(branches[1]["name"], "main");
+    assert_eq!(branches[1]["commit"]["id"], base);
     let diffs = forge.get(
         &token,
         &format!("{project}/merge_requests/{}/diffs", pull["iid"]),

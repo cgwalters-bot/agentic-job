@@ -390,12 +390,13 @@ jobs:
     # readiness time and memory below; tune after the first measured run.
     timeout-minutes: 25
     env:
-      AGENTIC_JOB_TEST_GITLAB: http://127.0.0.1:8080
+      # Not 8080: Omnibus binds its bundled Puma to 127.0.0.1:8080;
+      # nginx should listen elsewhere. 8929 is GitLab's own Docker Compose
+      # example port; the observed startup failure was password validation.
+      AGENTIC_JOB_TEST_GITLAB: http://127.0.0.1:8929
       AGENTIC_JOB_TEST_GITLAB_CONTAINER: agentic-job-gitlab
-      # Fixed throwaway root password fixture, not a repository secret.
-      GITLAB_ROOT_PASSWORD: fixture-root-password-not-secret
       GITLAB_OMNIBUS_CONFIG: >-
-        external_url 'http://127.0.0.1:8080';
+        external_url 'http://127.0.0.1:8929';
         prometheus_monitoring['enable'] = false;
         gitlab_rails['usage_ping_enabled'] = false;
         puma['worker_processes'] = 0;
@@ -405,21 +406,38 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # GitLab rejects predictable fixture passwords during admin seeding.
+      # Mask before exporting; this disposable credential grants no forge access
+      # outside the loopback container and needs no repository secret.
+      - name: Generate disposable root password
+        shell: node {0}
+        run: |
+          const { randomBytes } = require('node:crypto');
+          const { appendFileSync } = require('node:fs');
+          const password = randomBytes(32).toString('hex');
+          console.log(`::add-mask::${password}`);
+          appendFileSync(process.env.GITHUB_ENV, `GITLAB_ROOT_PASSWORD=${password}\n`);
       # Start explicitly: Actions' service health wait is too short for the
       # initial Omnibus migrations. gitlab.rs polls with its STARTUP bound.
       - name: Start throwaway GitLab CE
         # Official GitLab CE 18.5.1-ce.0, pinned by hand like Forgejo.
         run: >-
           docker run --detach --name "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
-          --publish 127.0.0.1:8080:8080 --shm-size 256m
+          --publish 127.0.0.1:8929:8929 --shm-size 256m
           --env GITLAB_ROOT_PASSWORD --env GITLAB_OMNIBUS_CONFIG
           gitlab/gitlab-ce@sha256:6db4caefb0597c966065f4c3307b60aa00d13559bbe9b0c3b17bc32f0d239ab1
       - run: cargo test --locked --test gitlab -- --ignored --nocapture
-      - name: GitLab timing and memory
+      # Memory reads 0B once the container has stopped.
+      - name: GitLab state and memory
         if: ${{ always() }}
         run: |
-          docker inspect --format 'Started at {{.State.StartedAt}}' "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
+          docker inspect --format 'Started {{.State.StartedAt}}, finished {{.State.FinishedAt}}, running {{.State.Running}}, exit {{.State.ExitCode}}, OOMKilled {{.State.OOMKilled}}, error "{{.State.Error}}"' "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
           docker stats --no-stream --format '{{.Name}}: {{.MemUsage}}' "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"
+      # Reconfigure output and service logs. The root password is masked above;
+      # Rails PAT output is captured by the test, never sent to container logs.
+      - name: GitLab log tail
+        if: ${{ failure() }}
+        run: docker logs --tail 300 "$AGENTIC_JOB_TEST_GITLAB_CONTAINER" 2>&1
       - name: Remove throwaway GitLab
         if: ${{ always() }}
         run: docker rm --force --volumes "$AGENTIC_JOB_TEST_GITLAB_CONTAINER"

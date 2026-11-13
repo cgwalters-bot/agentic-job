@@ -2470,6 +2470,19 @@ comment, a fork merge request and inline discussions, including neutralized
 quick actions and `@all`. Like `forgejo`, the job runs on pull requests with a
 read-only job token, no repository secret and no external GitLab account or
 environment. Ordinary `cargo test` skips it; it is not required until stable.
+The job generates and masks its disposable root password before container
+creation: a fixed fixture password was rejected during admin seeding in
+[this failed run](https://github.com/cgwalters-forge/agentic-job/actions/runs/42442455838/job/128614408124).
+The [subsequent job](https://github.com/cgwalters-forge/agentic-job/actions/runs/42907789357/job/130150336450)
+reached readiness, then failed because the fixture expected the wrong
+protected-path diagnostic. The fixture now checks the structural refusal of
+`.gitlab-ci.yml` and that it publishes nothing. The
+[next job](https://github.com/cgwalters-forge/agentic-job/actions/runs/43351323097/job/131642896219)
+read back the note and fork MR, but the branch-list API returned its cached
+pre-push response. The fixture now waits for that cache to expire, still
+requiring both fork branches and an unchanged `main`. Passing live inline
+publication proof remains tracked by
+[#3179](https://github.com/cgwalters-forge/agentic-job/issues/3179).
 
 Also publishes `create_pull_request_review_comment` as head-bound discussions
 ([neutral inline comments](#neutral-inline-comments)), independently of the

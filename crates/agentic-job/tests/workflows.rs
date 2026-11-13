@@ -5730,16 +5730,47 @@ fn gitlab_ci_uses_only_a_disposable_local_forge() {
     assert!(job["environment"].is_badvalue());
     assert_eq!(
         job["env"]["AGENTIC_JOB_TEST_GITLAB"].as_str(),
-        Some("http://127.0.0.1:8080")
+        Some("http://127.0.0.1:8929")
     );
+    // Omnibus's Puma binds 127.0.0.1:8080; nginx must listen elsewhere.
+    let omnibus = job["env"]["GITLAB_OMNIBUS_CONFIG"].as_str().unwrap();
+    assert!(omnibus.contains("external_url 'http://127.0.0.1:8929'"));
+    assert!(!omnibus.contains(":8080"));
     let steps = job["steps"].as_vec().unwrap();
+    assert!(job["env"]["GITLAB_ROOT_PASSWORD"].is_badvalue());
+    let generate = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Generate disposable root password"))
+        .unwrap();
+    let start = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Start throwaway GitLab CE"))
+        .unwrap();
+    assert!(generate < start);
+    assert_eq!(steps[generate]["shell"].as_str(), Some("node {0}"));
+    let password = steps[generate]["run"].as_str().unwrap();
+    assert!(password.contains("randomBytes(32).toString('hex')"));
+    let mask = password.find("::add-mask::${password}").unwrap();
+    let export = password
+        .find("appendFileSync(process.env.GITHUB_ENV")
+        .unwrap();
+    assert!(mask < export);
+    assert!(password.contains("GITLAB_ROOT_PASSWORD=${password}"));
+    assert!(
+        steps[start]["run"]
+            .as_str()
+            .unwrap()
+            .contains("--env GITLAB_ROOT_PASSWORD")
+    );
     let scripts: String = steps
         .iter()
         .filter_map(|step| step["run"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(scripts.contains("cargo test --locked --test gitlab -- --ignored --nocapture"));
-    assert!(scripts.contains("--publish 127.0.0.1:8080:8080"));
+    assert!(scripts.contains("--publish 127.0.0.1:8929:8929"));
+    assert!(scripts.contains("{{.State.OOMKilled}}"));
+    assert!(scripts.contains("docker logs --tail 300"));
     assert!(scripts.contains("gitlab/gitlab-ce@sha256:"));
     assert!(scripts.contains("docker rm --force --volumes"));
     assert!(!scripts.contains("secrets."));
