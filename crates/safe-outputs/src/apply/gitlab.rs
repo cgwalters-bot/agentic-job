@@ -791,7 +791,8 @@ impl Gitlab {
     }
 
     /// Refuses a push repository of the repository's top-level group,
-    /// as Forgejo's publisher refuses one of its owner.
+    /// as Forgejo's publisher refuses one of its owner. Every subgroup
+    /// inherits CI variables from that top-level group.
     fn other_owner(&self, push_repo: &str) -> Result<()> {
         ensure!(
             !super::owner(push_repo).eq_ignore_ascii_case(super::owner(&self.repo)),
@@ -1211,6 +1212,66 @@ mod tests {
             "iid": iid, "project_id": project, "state": "opened", "labels": [],
             "web_url": format!("https://gitlab.example/owner/name/-/{}/{iid}", collection(kind)),
         })
+    }
+
+    #[test]
+    fn nested_forks_exclude_the_targets_top_level_group() {
+        let gitlab = Gitlab::new(
+            "https://gitlab.example.com",
+            "example/team/project",
+            TOKEN.into(),
+            &[],
+        )
+        .unwrap();
+        for (fork, accepted) in [
+            ("example/forks/project", false),
+            ("EXAMPLE/project", false),
+            ("example/team/deeper/project", false),
+            ("other/forks/project", true),
+        ] {
+            assert_eq!(gitlab.other_owner(fork).is_ok(), accepted, "{fork}");
+        }
+    }
+
+    #[test]
+    fn applies_to_a_nested_namespace() {
+        const REPO: &str = "example/team/project";
+        let checked = checked(&[json!({"type": "add_comment", "repo": REPO, "body": "Done."})]);
+        let mut policy = policy();
+        policy.forge = crate::Forge::Gitlab;
+        policy.repo = REPO.into();
+        policy.push_repo = Some("other/forks/project".into());
+        policy.validate().unwrap();
+        let target = Target {
+            forge: Forge::Gitlab,
+            repo: REPO,
+            push_repo: Some("other/forks/project"),
+            ..target(Some(5))
+        };
+        let ops = plan(&upload(checked.path()), &policy, &target).unwrap();
+        let project = project(1, REPO, "public", None);
+        let (server, requests) = mock(vec![
+            ok(&project),
+            ok(&item(Kind::Issue, 5, 1)),
+            ok(&project),
+            ok(&item(Kind::Issue, 5, 1)),
+            (201, json!({"id": 30, "noteable_iid": 5}).to_string()),
+        ]);
+        let gitlab = Gitlab::new(&server, REPO, TOKEN.into(), &[])
+            .unwrap()
+            .commenting_on(Some(Kind::Issue));
+        super::super::publish(&ops, &gitlab).unwrap();
+        let lines: Vec<_> = requests.iter().map(|request| request.line).collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /api/v4/projects/example%2Fteam%2Fproject HTTP/1.1",
+                "GET /api/v4/projects/example%2Fteam%2Fproject/issues/5 HTTP/1.1",
+                "GET /api/v4/projects/example%2Fteam%2Fproject HTTP/1.1",
+                "GET /api/v4/projects/example%2Fteam%2Fproject/issues/5 HTTP/1.1",
+                "POST /api/v4/projects/1/issues/5/notes HTTP/1.1",
+            ]
+        );
     }
 
     /// A planned note goes to the issue or the merge request the caller
@@ -2590,6 +2651,107 @@ mod tests {
         );
         let fork = root.path().join("fork/name.git");
         assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), pr.base_commit);
+    }
+
+    /// Nested paths retain project identity through preflight, git publication
+    /// and MR creation. Own-project publication needs separate caller consent;
+    /// that consent never exempts a sibling subgroup from fork isolation.
+    #[test]
+    fn publishes_nested_merge_requests() {
+        const TARGET: &str = "example/team/project";
+        for (destination, accepted, parent, refusal) in [
+            ("other/forks/project", false, 1, None),
+            (TARGET, true, 1, None),
+            (TARGET, false, 1, Some("own-branch-repos")),
+            (
+                "example/forks/project",
+                true,
+                1,
+                Some("another owner's fork"),
+            ),
+            ("other/forks/project", false, 3, Some("not a fork")),
+        ] {
+            let (root, mut pr) = repository();
+            for (from, to) in [("owner/name", TARGET), ("fork/name", "other/forks/project")] {
+                let to = root.path().join(format!("{to}.git"));
+                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+                std::fs::rename(root.path().join(format!("{from}.git")), to).unwrap();
+            }
+            pr.push_repo = destination.into();
+            let source_id = if destination == TARGET { 1 } else { 2 };
+            let (server, requests) = serve(64, move |request| {
+                let answer = match route(request).as_str() {
+                    "GET /api/v4/projects/example%2Fteam%2Fproject" => {
+                        let mut answer = project(1, TARGET, "public", None);
+                        answer["default_branch"] = json!("main");
+                        answer
+                    }
+                    "GET /api/v4/projects/other%2Fforks%2Fproject" => {
+                        project(2, "other/forks/project", "public", Some(parent))
+                    }
+                    line if line.starts_with("GET /api/v4/projects/1/protected_branches?") => {
+                        json!([{"name": "main"}])
+                    }
+                    line if line == format!("POST /api/v4/projects/{source_id}/merge_requests") => {
+                        json!({"id": 90, "iid": 9, "web_url": MR_9_URL})
+                    }
+                    _ => return (404, "{}".into()),
+                };
+                ok(&answer)
+            });
+            let mut publisher = Gitlab::new(&server, TARGET, TOKEN.into(), &[])
+                .unwrap()
+                .accepting_own_branches(accepted);
+            publisher.git = root.path().display().to_string();
+            let result = super::super::publish(&[Op::PullRequest(pr.clone())], &publisher);
+            let requests: Vec<_> = requests.try_iter().collect();
+            let target = root.path().join(format!("{TARGET}.git"));
+            let fork = root.path().join("other/forks/project.git");
+            if let Some(refusal) = refusal {
+                let err = result.unwrap_err();
+                assert!(
+                    format!("{err:#}").contains(refusal),
+                    "{destination}: {err:#}"
+                );
+                assert!(requests.iter().all(|r| r.line.starts_with("GET ")));
+                assert_eq!(
+                    sh(&target, &["for-each-ref", "--format=%(refname)"]),
+                    "refs/heads/main"
+                );
+                assert_eq!(sh(&fork, &["for-each-ref"]), "");
+                continue;
+            }
+            assert_eq!(result.unwrap(), [MR_9_URL]);
+            let posts: Vec<_> = requests
+                .iter()
+                .filter(|r| r.line.starts_with("POST "))
+                .collect();
+            assert_eq!(posts.len(), 1);
+            assert_eq!(
+                posts[0].line,
+                format!("POST /api/v4/projects/{source_id}/merge_requests HTTP/1.1")
+            );
+            assert_eq!(
+                posts[0].body,
+                json!({"source_branch": pr.branch, "target_branch": pr.base,
+                "target_project_id": 1, "title": pr.title, "description": pr.body})
+            );
+            let pushed = if source_id == 1 { &target } else { &fork };
+            assert_eq!(sh(pushed, &["rev-parse", "agent-run-7~"]), pr.base_commit);
+            if source_id == 2 {
+                assert_eq!(
+                    sh(&target, &["for-each-ref", "--format=%(refname)"]),
+                    "refs/heads/main"
+                );
+                assert!(
+                    requests
+                        .iter()
+                        .any(|r| r.line == "GET /api/v4/projects/other%2Fforks%2Fproject HTTP/1.1")
+                );
+            } else {
+                assert_eq!(sh(&fork, &["for-each-ref"]), "");
+            }
+        }
     }
 
     /// The repository, whose default branch is DEFAULT and whose protected

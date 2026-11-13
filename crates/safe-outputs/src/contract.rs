@@ -199,6 +199,24 @@ pub fn is_login(login: &str) -> bool {
 pub static REPO_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").expect("a valid pattern"));
 
+impl Forge {
+    /// An exact repository path, not a URL or a path with traversal components.
+    /// Only GitLab admits nested namespaces; the other forges require owner/name.
+    pub fn is_repo(self, repo: &str) -> bool {
+        let mut count = 0;
+        let plain = repo.split('/').all(|part| {
+            count += 1;
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        });
+        plain && count >= 2 && (self == Self::Gitlab || count == 2)
+    }
+}
+
 pub static BASE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$").expect("a valid pattern"));
 
@@ -1188,6 +1206,12 @@ impl Policy {
     /// that have a configuration here, and only draft pull requests with
     /// the dot-folders protected.
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.forge.is_repo(&self.repo) && !dotted(&self.repo),
+            "invalid {} repository {:?}",
+            self.forge.name(),
+            self.repo
+        );
         check_context(&self.context)?;
         if let Some(external) = &self.external {
             ensure!(
@@ -1234,7 +1258,7 @@ impl Policy {
         }
         if let Some(push_repo) = &self.push_repo {
             ensure!(
-                REPO_RE.is_match(push_repo)
+                self.forge.is_repo(push_repo)
                     && !dotted(push_repo)
                     && !push_repo.ends_with(".git")
                     && !same_owner(push_repo, &self.repo),
@@ -1472,10 +1496,15 @@ pub fn glob_matches(patterns: &[String], value: &str) -> bool {
         .any(|pattern| glob(pattern).is_ok_and(|re| re.is_match(value)))
 }
 
-/// Whether two OWNER/NAME names have the same owner.
+/// Whether two repository paths share an owner or top-level GitLab group.
+/// GitLab CI variables inherit recursively, so sibling subgroups are not isolated.
 pub fn same_owner(one: &str, other: &str) -> bool {
-    let owner = |repo: &str| repo.split('/').next().unwrap_or_default().to_owned();
-    owner(one).eq_ignore_ascii_case(&owner(other))
+    owner(one).eq_ignore_ascii_case(owner(other))
+}
+
+/// A repository's owner or top-level GitLab group, not its full namespace.
+pub fn owner(repo: &str) -> &str {
+    repo.split_once('/').map_or(repo, |(owner, _)| owner)
 }
 
 /// Whether the patch of a secondary pull request in SECONDARY, on a branch
@@ -1505,4 +1534,54 @@ pub(crate) fn validate_dot_folders(names: &[String], field: &str) -> Result<()> 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod repo_tests {
+    use super::*;
+
+    #[test]
+    fn forge_repository_shapes() {
+        for (repo, ordinary, nested) in [
+            ("owner/name", true, true),
+            ("Group_1/sub-group/project.name", false, true),
+            ("group/sub/deeper/project", false, true),
+            ("owner", false, false),
+            ("", false, false),
+            ("/owner/name", false, false),
+            ("owner/name/", false, false),
+            ("owner//name", false, false),
+            ("./name", false, false),
+            ("owner/..", false, false),
+            ("owner/./name", false, false),
+            ("owner/../name", false, false),
+            ("owner/a b", false, false),
+            ("owner/naïve", false, false),
+            ("owner/name?x", false, false),
+            ("owner/name%2Fother", false, false),
+            ("owner/name\\other", false, false),
+            ("owner/name\n", false, false),
+        ] {
+            for (forge, want) in [
+                (Forge::Github, ordinary),
+                (Forge::Forgejo, ordinary),
+                (Forge::Gitlab, nested),
+            ] {
+                assert_eq!(forge.is_repo(repo), want, "{forge:?}: {repo:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ownership_includes_all_subgroups() {
+        for (one, other, same) in [
+            ("owner/name", "OWNER/other", true),
+            ("group/sub/name", "GROUP/SUB/other", true),
+            ("group/sub/name", "group/fork/name", true),
+            ("group/sub/name", "group/sub/deeper/name", true),
+            ("group/sub/name", "other/sub/name", false),
+        ] {
+            assert_eq!(same_owner(one, other), same, "{one}, {other}");
+        }
+    }
 }

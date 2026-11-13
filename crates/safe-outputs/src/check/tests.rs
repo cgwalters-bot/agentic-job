@@ -191,6 +191,22 @@ impl Case {
 }
 
 #[test]
+fn nested_gitlab_base_is_checked_against_the_full_path() {
+    let mut policy = policy();
+    policy.forge = Forge::Gitlab;
+    policy.repo = "example/team/project".into();
+    let mut case = Case::pull_request("src/lib.rs");
+    for (repo, ok) in [
+        ("example/team/project", true),
+        ("example/other/project", false),
+    ] {
+        case.base = Some(base(repo, "main", BASE));
+        let result = case.check(&policy);
+        assert_eq!(result.errors.is_empty(), ok, "{repo}: {:?}", result.errors);
+    }
+}
+
+#[test]
 fn a_pull_request_with_its_patch_is_accepted() {
     let checked = Case::pull_request("src/lib.rs").check(&policy());
     assert_eq!(checked.errors, Vec::<String>::new());

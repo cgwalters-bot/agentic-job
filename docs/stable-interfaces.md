@@ -25,6 +25,14 @@ a caller, or change hosted defaults.
 
 ## The reusable workflow
 
+Repository paths in GitLab bounds and the `policy`, `check` and `apply` CLI
+path accept two or more components (`group/subgroup/project`). GitHub and
+Forgejo require exactly `owner/name`. Components use ASCII letters, digits,
+`_`, `.` and `-`, with no empty or dot-only components. Fork ownership checks
+exclude the target's entire top-level GitLab group, since CI variables inherit
+recursively into subgroups. Repository bounds
+and explicit GitLab selection still apply; this does not enable a new output.
+
 The secure-host split preserves `/secure-host` and `/agentic-job` in the
 image, both installed executable names, the host `agentic-job` compatibility
 shim and the warned `[sandbox]` alias for `[host]`. Source/release support

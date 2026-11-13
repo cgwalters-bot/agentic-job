@@ -862,6 +862,8 @@ fn branch_push(
 /// naming no `push_repo` whose `own-branch-repos` accept the target may
 /// have the caller push to the target itself, as GitHub's own-branch
 /// pushes ([`push`]): that caller's acceptance of the target's CI.
+/// GitLab forks must also be outside the target's top-level group, whose
+/// CI variables are inherited by every subgroup.
 fn bound_fork<'a>(policy: &Policy, target: &Target<'a>, output: &str) -> Result<&'a str> {
     let missing = || format!("a {output}, and the caller gave no --push-repo for its branch");
     let push_repo = target.push_repo.with_context(missing)?;
@@ -1106,9 +1108,9 @@ fn metadata(item: &Map<String, Value>, target: &Target<'_>) -> Result<Option<Op>
     }))
 }
 
-/// The OWNER of OWNER/NAME.
+/// The owner or top-level GitLab group of a repository path.
 pub fn owner(repo: &str) -> &str {
-    repo.split_once('/').map_or(repo, |(owner, _)| owner)
+    crate::contract::owner(repo)
 }
 
 /// gh-aw's footer, adapted: the run a post came from, so that a reader
@@ -1517,6 +1519,41 @@ mod tests {
         assert_eq!(push.push_repo, "bootc-dev/bootc");
     }
 
+    #[test]
+    fn nested_gitlab_own_branch_bounds() {
+        const REPO: &str = "example/team/project";
+        let dir = checked(&[
+            json!({"type": "create_pull_request", "title": "Fix it", "body": "Why.", "branch": BRANCH}),
+        ]);
+        for accepted in [false, true] {
+            let mut policy = policy();
+            policy.forge = crate::Forge::Gitlab;
+            policy.repo = REPO.into();
+            policy.clone_url = format!("https://gitlab.example.com/{REPO}");
+            policy.push_repo = None;
+            if accepted {
+                policy.safe_outputs.own_branch_repos = vec![vec!["example/team/*".into()]];
+            }
+            policy.validate().unwrap();
+            let target = Target {
+                forge: Forge::Gitlab,
+                repo: REPO,
+                push_repo: Some(REPO),
+                ..target(None)
+            };
+            let result = plan(&upload(dir.path()), &policy, &target);
+            if accepted {
+                let ops = result.unwrap();
+                let Op::PullRequest(pr) = &ops[0] else {
+                    panic!("{ops:?}");
+                };
+                assert_eq!(pr.push_repo, REPO);
+            } else {
+                assert!(result.unwrap_err().join(";").contains("own-branch-repos"));
+            }
+        }
+    }
+
     /// On GitLab a draft is a `Draft:` title, and no line of a body runs a
     /// quick action.
     #[test]
@@ -1657,6 +1694,43 @@ mod tests {
         assert_eq!(pr.patch, patch().into_bytes());
         assert_eq!(pr.files, ["src/x"]);
         assert_eq!(pr.committer, PROVENANCE.committer());
+    }
+
+    #[test]
+    fn nested_gitlab_forks_require_a_separate_top_level_group() {
+        for (repo, fork, accepted) in [
+            ("example/team/project", "example/forks/project", false),
+            ("example/team/project", "EXAMPLE/project", false),
+            ("example/project", "example/forks/project", false),
+            ("example/team/project", "example/team/deeper/project", false),
+            ("example/team/project", "other/forks/project", true),
+        ] {
+            let mut policy = policy();
+            policy.forge = crate::Forge::Gitlab;
+            policy.repo = repo.into();
+            policy.push_repo = Some(fork.into());
+            let target = Target {
+                forge: Forge::Gitlab,
+                repo,
+                push_repo: Some(fork),
+                ..target(None)
+            };
+            assert_eq!(policy.validate().is_ok(), accepted, "{repo} -> {fork}");
+            for output in [CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH] {
+                assert_eq!(
+                    bound_fork(&policy, &target, output).is_ok(),
+                    accepted,
+                    "{output}: {repo} -> {fork}"
+                );
+            }
+            let checked = checked(&[json!({"type": "create_pull_request",
+                "title": "Fix it", "body": "Why.", "branch": BRANCH})]);
+            assert_eq!(
+                plan(&upload(checked.path()), &policy, &target).is_ok(),
+                accepted,
+                "plan: {repo} -> {fork}"
+            );
+        }
     }
 
     /// The footer goes before a trailer block at the end of a body, which

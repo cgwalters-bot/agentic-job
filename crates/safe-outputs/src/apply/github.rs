@@ -83,16 +83,7 @@ pub fn same(a: &Value, b: &str) -> bool {
 /// Whether NAME is `owner/repo` as GitHub spells one, and so a path of
 /// two segments under `/repos/`.
 pub fn is_repo(name: &str) -> bool {
-    let part = |part: &str| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
-            && part != "."
-            && part != ".."
-    };
-    name.split_once('/')
-        .is_some_and(|(owner, repo)| part(owner) && part(repo))
+    crate::Forge::Github.is_repo(name)
 }
 
 /// TEXT as one path segment of a URL, `/` kept: a branch name the forge

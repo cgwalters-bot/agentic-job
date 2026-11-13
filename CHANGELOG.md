@@ -14,6 +14,11 @@ says what a caller may rely on across versions.
   and opens the merge request there, never to its default or a protected
   branch (#3409). The default remains off.
 
+- GitLab repository paths now admit nested groups in bounds, policy, check and
+  apply. Fork checks still exclude the target's top-level group, whose CI
+  variables all subgroups inherit; GitHub and Forgejo still
+  require exactly `owner/name` (#3408).
+
 - The safe-outputs library has an experimental, opt-in ordered-stack checker
   that checks each step's own patch and retains only the prefix before refusal,
   and builds the accepted steps as one commit each, restacking the steps above

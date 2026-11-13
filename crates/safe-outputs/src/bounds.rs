@@ -484,7 +484,7 @@ impl<Trigger> Bounds<Trigger> {
         }
         if let Some(push_repo) = self.push_repo() {
             ensure!(
-                REPO_RE.is_match(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
+                forge.is_repo(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
                 "push_repo requires an exact repository name: {push_repo:?}"
             );
         }
@@ -518,7 +518,7 @@ impl<Trigger> Bounds<Trigger> {
         check_comment_on_duplicate(outputs.get("create_issue"), &self.native_handlers)?;
         for repo in &self.unprotected_files.repos {
             ensure!(
-                REPO_RE.is_match(repo) && !dotted(repo),
+                forge.is_repo(repo) && !dotted(repo),
                 "unprotected_files.repos requires exact repository names: {repo:?}"
             );
         }

@@ -85,8 +85,8 @@ pub struct Args {
     /// The forge's address, without `/api/v1`
     #[arg(long, value_name = "URL")]
     pub server: String,
-    /// The repository to publish to: the policy's
-    #[arg(long, value_name = "OWNER/NAME")]
+    /// The repository to publish to: the policy's (nested group paths on GitLab)
+    #[arg(long, value_name = "REPO")]
     pub repo: String,
     /// The policy.json that `check` checked against
     #[arg(long, value_name = "FILE")]
@@ -105,7 +105,7 @@ pub struct Args {
     #[arg(long, value_name = "URL")]
     pub run_url: String,
     /// The fork a pull request's branch is pushed to: the policy's `push_repo`
-    #[arg(long, value_name = "OWNER/NAME")]
+    #[arg(long, value_name = "REPO")]
     pub push_repo: Option<String>,
     /// Open the PR for this exact previously pushed commit, without pushing again
     #[arg(long, value_name = "SHA")]

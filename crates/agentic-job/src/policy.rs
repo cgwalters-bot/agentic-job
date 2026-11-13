@@ -106,10 +106,10 @@ pub struct Args {
     /// Optional organization bounds; both files must admit the request
     #[arg(long, value_name = "FILE")]
     pub org_allow: Option<PathBuf>,
-    /// The repository the agent works on, as OWNER/NAME
+    /// The repository the agent works on: OWNER/NAME, or GROUP/SUBGROUP/NAME on GitLab
     #[arg(long, value_name = "REPO", allow_hyphen_values = true)]
     pub repo: String,
-    /// Where `run` clones that repository from: https://HOST/OWNER/NAME,
+    /// Where `run` clones that repository from: https://HOST/REPO,
     /// or http:// for a host in the bounds' `allow_http`
     #[arg(long, value_name = "URL", allow_hyphen_values = true)]
     pub clone_url: String,
@@ -153,14 +153,14 @@ pub struct Args {
         requires = "pull_request"
     )]
     pub pull_author: Option<String>,
-    /// Where apply applies the outputs (OWNER/NAME); a push is refused
+    /// Where apply applies the outputs (a repository path); a push is refused
     /// unless it is `--repo`, where the pull request is
-    #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
+    #[arg(long, value_name = "REPO", allow_hyphen_values = true)]
     pub output_repo: Option<String>,
     /// The repository the run's item (its issue and status comment) is
     /// in, where that is not the output repository; it must be within
     /// `repos`, as `--repo` must
-    #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
+    #[arg(long, value_name = "REPO", allow_hyphen_values = true)]
     pub item_repo: Option<String>,
     /// The repository could not be confirmed public: refused unless every
     /// bounds file sets `private = true`
@@ -270,7 +270,12 @@ impl Compile for Bounds {
         let limits = self.outputs();
         let push_repo = self.push_repo();
 
-        let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
+        let repo_ok = self.forge().is_repo(repo) && !dotted(repo);
+        if let Some(output_repo) = output_repo
+            && (!self.forge().is_repo(output_repo) || dotted(output_repo))
+        {
+            errors.push(format!("invalid output repository {output_repo:?}"));
+        }
         // Whether `repos` admits it is checked below, where the outputs
         // asked for say whether `own_author` may.
         let listed = repo_ok
@@ -286,7 +291,7 @@ impl Compile for Bounds {
         // with the apply credential: a repository the bounds let runs work
         // on, not any one a caller names.
         if let Some(item_repo) = item_repo
-            && (!REPO_RE.is_match(item_repo)
+            && (!self.forge().is_repo(item_repo)
                 || dotted(item_repo)
                 || !admits_repo(&self.repos, item_repo, read).unwrap_or_else(|error| {
                     errors.push(error.to_string());
@@ -472,7 +477,9 @@ impl Compile for Bounds {
         // The fork is never the target: a branch pushed to the target runs
         // its CI as the repository's own, with its secrets. Nor is it the
         // target's owner's: Forgejo reads a pull request's head of that
-        // owner as the target's own branch. A pull request's branch and a
+        // owner as the target's own branch. GitLab subgroups inherit CI
+        // variables from their top-level group, so that group is excluded.
+        // A pull request's branch and a
         // push to one both go to that fork.
         let to_fork =
             types.contains(&CREATE_PULL_REQUEST) || types.contains(&PUSH_TO_PULL_REQUEST_BRANCH);
@@ -1105,6 +1112,53 @@ missing_data = { max = 3 }
             output_repo: None,
             item_repo: None,
             private: false,
+        }
+    }
+
+    #[test]
+    fn repository_paths_follow_the_bounds_forge() {
+        for forge in [Forge::Github, Forge::Forgejo, Forge::Gitlab] {
+            for (repo, fork, shape) in [
+                ("example/project", "bot/project", true),
+                ("example/team/project", "example/forks/project", false),
+                (
+                    "example/team/project",
+                    "other/forks/project",
+                    forge == Forge::Gitlab,
+                ),
+                ("example/team/project", "EXAMPLE/project", false),
+                ("example/team/project", "example/team/deeper/project", false),
+                ("example/team/project", "example/team/fork", false),
+                ("example//project", "bot/project", false),
+                ("example/../project", "bot/project", false),
+                ("example/./project", "bot/project", false),
+                ("example/project/", "bot/project", false),
+                ("example/pro ject", "bot/project", false),
+            ] {
+                let mut bounds = if forge == Forge::Github {
+                    bounds()
+                } else {
+                    on_forge(bounds(), forge, fork)
+                };
+                bounds.hosts = vec!["forge.example".into()];
+                bounds.repos = vec![RepoRule::Pattern(repo.into())];
+                let url = format!("https://forge.example/{repo}");
+                let request = Request {
+                    repo,
+                    clone_url: &url,
+                    output_repo: Some(repo),
+                    item_repo: Some(repo),
+                    ..request()
+                };
+                let result = bounds
+                    .validate()
+                    .map_err(|e| vec![e.to_string()])
+                    .and_then(|_| bounds.compile(&request));
+                assert_eq!(result.is_ok(), shape, "{forge:?} {repo}: {result:?}");
+                if let Ok(policy) = result {
+                    policy.validate().unwrap();
+                }
+            }
         }
     }
 
