@@ -534,9 +534,14 @@ fn documented_gitlab_caller_fits_its_bounds() {
             .map(|rest| rest.split("```").next().unwrap())
             .collect()
     };
-    let [bounds] = blocks("```toml\n")[..] else {
-        panic!("docs/gitlab.md should have one bounds example");
+    let [isolation, bounds] = blocks("```toml\n")[..] else {
+        panic!("docs/gitlab.md should have isolation and bounds examples");
     };
+    let config = agentic_job::config::Config::parse(isolation).unwrap();
+    assert_eq!(
+        config.sandbox.isolation,
+        agentic_job::config::Isolation::External
+    );
     let pipeline = YamlLoader::load_from_str(blocks("```yaml\n")[0])
         .unwrap()
         .remove(0);

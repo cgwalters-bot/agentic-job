@@ -8,6 +8,17 @@ today. agentic-job runs the agent as a host user, not in a container
 authors have used it. See [deployment examples and evidence](workflow.md#what-has-run-and-what-has-not)
 for what has actually run; a passing local test is not deployment proof.
 
+Standalone container runs can explicitly set `[host] isolation = "external"`.
+This is a caller declaration, not proof of isolation; the default remains
+managed and never changes based on the environment. The runner host owns one
+job per runner, a fresh environment, an egress allowlist and no credentials
+beyond the run's own. Agentic-job performs no host setup in that mode;
+provider/MCP/OIDC credential refusals, session attach secrets, redaction and
+separate check/apply boundaries still apply. See
+[external host isolation](gitlab.md#explicit-external-host-isolation) for
+configuration, provenance and the pending readiness integration. Local fake-agent
+tests do not prove Kubernetes Pod Security or a live GitLab inference deployment.
+
 - Steps after `secure-host` lose root but keep the job's tokens and an open
   network ([one trust level for the rest of the job](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)).
   The reusable workflow's agent job has no `id-token`: a separate register job

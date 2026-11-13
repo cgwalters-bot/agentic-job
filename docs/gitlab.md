@@ -44,12 +44,13 @@ pipelines is specified, not built, in
 GitLab has no supported registration proof for the broker.
 `github-oidc` needs GitHub's identity; `plain` and `token-file` leave a
 bearer token readable by the runner's user. A provider API key, MCP
-credential, session, `inference.front`,
+credential, `inference.front`,
 `setup.tools` or child agent is refused by `run --runner-home`.
 A second sandbox user is not an option. Base64 wrapping, `hidepid` and
 a `run0` shim are historical downstream accommodations, not replacements
-for the runner-only credential boundary. A systemd-less container cannot
-replace the hardened VM needed by an agent job. See the
+for the runner-only credential boundary. Container runners can explicitly
+delegate host isolation as described below; that does not supply a new
+inference identity contract. See the
 [current boundary](inference.md) and
 [hardening inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
 
@@ -64,6 +65,59 @@ and [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000).
 Putting the same bearer in another variable or same-UID supervisor memory
 is not that path. Read deployment addresses from runtime configuration or
 the environment, never copy them into code.
+
+## Explicit external host isolation
+
+The concrete threat here is confusing host isolation delegated to a runner
+operator with isolation agentic-job has proved. For a container executor,
+the trusted runner configuration may explicitly declare:
+
+```toml
+[host]
+isolation = "external"
+```
+
+With a complete agent/inference/limits configuration, invoke standalone
+`agentic-job run --config runner.toml --runner-home HOME` with the usual
+policy, metadata, task and output arguments. Do not invoke `secure-host`,
+`sandbox prepare` or `sandbox setup`: external mode performs no host setup
+and needs no sudo, systemd, second user or owned VM. Install the agent and
+its tools in the runner image beforehand. `sandbox setup` refuses this
+declaration rather than suggesting it secured the host. For a session,
+set `[session] listen = true` and `bind = "ADDRESS:PORT"`, and supply a
+fresh per-run `AGENTIC_JOB_ATTACH_TOKEN`; a missing/short secret
+is still refused. A taskless session waits for the client's first prompt.
+
+The runner host must provide **one job per runner**, a fresh environment
+for each run, an egress allowlist (including blocking cloud metadata), and
+no credentials beyond the run's own. Do not mount a Kubernetes service
+account token, provider key, MCP credential, OIDC request credential,
+publisher token or host/container-engine socket into the agent's reach.
+Pod Security admission, NetworkPolicy and node placement are the runner
+hoster's responsibility, not something this declaration tests.
+
+The absent setting means `managed`, including on GitHub-hosted runners.
+GitLab variables, container detection and missing systemd never enable
+external mode. Provider-key, MCP, OIDC, private-target, front-proxy and
+child-agent refusals remain. Log redaction, run limits, hostile-data checking
+on a separate runner and apply as the only publisher are unchanged.
+
+`summary.json`, the agent's hand-back metadata and the published hand-back's
+`host-isolation.json` contain `host_isolation = "external"` (a JSON string
+field). Check reads the latter as a regular file of at most 128 bytes,
+accepts only the fixed declaration and retains it in its report for apply.
+An absent record means unknown, not proved managed isolation. `summary.md` labels it
+as a caller declaration, not proof; pass it to `check --run-summary`, which
+reads a bounded regular file and sanitizes it for apply. This is
+producer-reported provenance, not an attestation: it must never authorize
+an output or bypass bounds. Check and apply must remain on separate,
+trusted runners that never execute agent-produced code.
+
+Readiness #3000 / PR #3169 is not merged on main at the time of this change.
+Integration must delegate only its host-control evidence (privileges,
+process isolation and local network enforcement), never its reachable
+credential refusals. External mode does not resolve #2903's inference
+identity/lifecycle work or establish a live GitLab deployment proof.
 
 ## Pinned release binaries
 

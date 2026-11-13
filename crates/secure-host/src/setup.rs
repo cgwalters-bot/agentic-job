@@ -421,6 +421,10 @@ fn setup<P: Program>(
         let plan = read()?;
         let file = plan.program.file();
         let (config, egress_config) = (file.sandbox(), file.egress());
+        ensure!(
+            config.isolation != crate::config::Isolation::External,
+            "host.isolation = external: skip secure-host and sandbox setup; the runner host owns isolation"
+        );
         // A prepared helper that is not there would otherwise be found
         // only after the first changes, leaving a host that a retry
         // refuses (CONFIG_DIR) and that cannot be finished.

@@ -6,13 +6,23 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
 use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 
 use crate::network::Direct;
 
 /// Where `sandbox setup` puts the root-owned copy.
 pub const ROOT_COPY: &str = "/etc/agentic-job/config.toml";
+
+/// Who owns host isolation. An external declaration is not evidence that
+/// any host control passed; it must never be inferred from CI variables.
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Isolation {
+    #[default]
+    Managed,
+    External,
+}
 
 /// The table of [`Sandbox`].
 pub const HOST_TABLE: &str = "host";
@@ -103,6 +113,9 @@ pub trait HostFile: Sized {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Sandbox {
+    /// Explicit delegation to the runner host, for standalone container runs.
+    /// Does not relax credential or hand-back checks.
+    pub isolation: Isolation,
     /// Keys of the second user setup no longer makes, read only to be
     /// refused by name ([`Sandbox::refuse_removed`]) rather than as
     /// unknown.
@@ -409,6 +422,7 @@ impl Sandbox {
 impl Default for Sandbox {
     fn default() -> Self {
         Self {
+            isolation: Isolation::default(),
             removed_create_user: None,
             removed_user: None,
             removed_groups: None,

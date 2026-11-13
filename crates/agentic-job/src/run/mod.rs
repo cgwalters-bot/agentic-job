@@ -153,8 +153,9 @@ pub struct Args {
     /// configuration says (`[session] watch-item`)
     #[arg(long, value_name = "OWNER/NAME#NUMBER")]
     pub watch_item: Option<String>,
-    /// The configuration, in place of the root-owned copy `sandbox setup`
-    /// made. Use a trusted read-only mount for a long-lived server.
+    /// Trusted runner configuration. External isolation uses this without
+    /// setup; managed jobs use the default root-owned copy setup made.
+    /// Use a trusted read-only mount for a long-lived server.
     #[arg(long, value_name = "FILE", default_value = config::ROOT_COPY)]
     pub config: PathBuf,
     /// Acknowledge that this uid can write the configuration, including
@@ -163,7 +164,8 @@ pub struct Args {
     pub allow_writable_config: bool,
     /// The agent's home: the agent is this program's own user, for a job
     /// that holds nothing the agent may not read, on a host
-    /// cgwalters-forge/actions/secure-host secured. Required: there is no
+    /// secure-host secured, or whose isolation the host explicitly owns
+    /// (host.isolation = "external"). Required: there is no
     /// sandbox user to run it as without one (agentic-job#2989)
     #[arg(long, value_name = "DIR")]
     pub runner_home: Option<PathBuf>,
@@ -171,6 +173,7 @@ pub struct Args {
 
 /// Everything a run is, checked before anything is started or spent.
 struct Plan {
+    isolation: config::Isolation,
     kind: Kind,
     agent: config::Agent,
     /// The model of the child agent the main one may start, if any.
@@ -820,12 +823,16 @@ impl Plan {
             child: child.is_some(),
         })?;
         let sandbox = Sandbox::own(&config, home)?;
+        if config.sandbox.isolation == config::Isolation::External {
+            eprintln!("Host isolation: external (declared by caller; not proved by agentic-job)");
+        }
         let (commit, agent) = (
             std::mem::take(&mut config.commit),
             std::mem::take(&mut config.agent),
         );
         let max_requests = limits.max_requests;
         Ok(Self {
+            isolation: config.sandbox.isolation,
             kind,
             limits,
             endpoint,
@@ -1081,12 +1088,13 @@ impl Plan {
         }
         configuration.files.push(agent::HomeFile {
             path: crate::handback::RUN_FILE,
-            content: Some(crate::handback::run_file_with_public(
+            content: Some(crate::handback::run_file_with_isolation(
                 &self.policy,
                 &checkout,
                 &self.run_id,
                 &self.commit,
                 &public_base,
+                self.isolation,
             )?),
         });
         let child = self.child.as_deref().and_then(|model| {
@@ -1538,6 +1546,7 @@ impl Plan {
             usage: settled.usage.as_ref(),
         });
         let shaped = staging.shape_warnings()?;
+        summary["host_isolation"] = json!(self.isolation);
         summary["handback_replacements"] = json!(handback_replacements);
         if !shaped.is_empty() {
             summary[summary::SECRET_SHAPED] = json!(shaped);
@@ -1550,6 +1559,15 @@ impl Plan {
             &mut summary,
         )?;
 
+        if self.isolation == config::Isolation::External && staging.safe_outputs().is_dir() {
+            std::fs::write(
+                staging
+                    .safe_outputs()
+                    .join(crate::check::HOST_ISOLATION_FILE),
+                crate::check::EXTERNAL_ISOLATION_RECORD,
+            )
+            .context("writing the external host isolation declaration")?;
+        }
         let gate = Gate {
             ended: settled.dead,
             fake_agent: self.kind == Kind::Fake,

@@ -155,7 +155,10 @@ impl Config {
             );
             return Ok(());
         }
-        let Some(url) = kind.api_url(endpoint).filter(|_| self.egress.proxy) else {
+        let Some(url) = kind
+            .api_url(endpoint)
+            .filter(|_| self.egress.proxy && self.sandbox.isolation != super::Isolation::External)
+        else {
             return Ok(());
         };
         let unlisted = Direct::parse(url)
@@ -297,6 +300,11 @@ impl Config {
     /// does. `config` turns it on for a run's file that leaves it unset;
     /// `run` and `config` refuse it off.
     pub fn check_held(&self) -> Result<()> {
+        // External network policy belongs to the runner host, not our local
+        // proxy. This declaration proves no enforcement inside the container.
+        if self.sandbox.isolation == super::Isolation::External {
+            return Ok(());
+        }
         ensure!(
             self.agent.name.is_empty() || !self.egress.proxy || self.egress.write_policy,
             "egress.proxy needs egress.write-policy for an agent: it runs as the runner's \
@@ -394,6 +402,31 @@ mod tests {
                           register = \"api-key\"\nprovider = \"github\"\n";
     const API_KEY: &str = "[inference]\nurl = \"https://api.anthropic.example\"\n\
                            register = \"api-key\"\nprovider = \"anthropic\"\n";
+
+    #[test]
+    fn external_isolation_is_explicit_and_only_delegates_host_controls() {
+        for (setting, isolation, held) in [
+            ("", super::super::Isolation::Managed, false),
+            (
+                "[host]\nisolation = 'managed'\n",
+                super::super::Isolation::Managed,
+                false,
+            ),
+            (
+                "[host]\nisolation = 'external'\n",
+                super::super::Isolation::External,
+                true,
+            ),
+        ] {
+            let config = Config::parse(&format!("{setting}{FAKE}{CAPPED}")).unwrap();
+            assert_eq!(config.sandbox.isolation, isolation);
+            assert_eq!(config.check_held().is_ok(), held);
+            assert!(config.check().is_ok());
+        }
+        for value in ["auto", "container", "", "EXTERNAL"] {
+            assert!(Config::parse(&format!("[host]\nisolation = '{value}'\n")).is_err());
+        }
+    }
 
     #[test]
     fn worker_configuration_is_explicit_and_bounded() {

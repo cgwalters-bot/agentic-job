@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Standalone container runners may explicitly delegate host isolation with
+  `[host] isolation = "external"`. Summaries and hand-back metadata record
+  the declaration, not a passed host check; credential and output refusals
+  remain in force. The default remains managed isolation (#3638).
+
 - GitHub organization bounds can opt into forks selected by caller-defined
   custom properties and topics, with a known parent. Policy checks live metadata
   and refuses missing or unreadable requirements; output bounds are unchanged (#3625).

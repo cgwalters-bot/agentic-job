@@ -206,6 +206,15 @@ fn inference_address(table: &mut Table, address: &str) -> Result<()> {
 /// only the write policy holds to the proxy. Written out, so that the
 /// secure-host forwarder, which reads the file for it, passes it on.
 fn hold_the_agent(table: &mut Table) -> Result<()> {
+    if table
+        .get(HOST_TABLE)
+        .and_then(Value::as_table)
+        .and_then(|host| host.get("isolation"))
+        .and_then(Value::as_str)
+        == Some("external")
+    {
+        return Ok(());
+    }
     let named = table
         .get("agent")
         .and_then(Value::as_table)

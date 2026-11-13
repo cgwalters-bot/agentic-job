@@ -673,6 +673,14 @@ pub fn cost_line(s: &Value) -> String {
 }
 
 /// The run's `summary.md` from its `summary.json`.
+pub(super) fn isolation_notice(s: &Value) -> &'static str {
+    if s["host_isolation"] == "external" {
+        "Host isolation: **external** — declared by caller; not proved by agentic-job. This is producer-reported provenance, not a check attestation.\n"
+    } else {
+        ""
+    }
+}
+
 pub fn markdown(s: &Value) -> String {
     let or = |v: &Value, d: &str| if v.is_null() { d.to_owned() } else { text(v) };
     // What `--meta` named the run and its machine, where it did: the
@@ -735,6 +743,9 @@ pub fn markdown(s: &Value) -> String {
             ),
         ]),
     ];
+    if s["host_isolation"] == "external" {
+        out.insert(2, "Host isolation: **external** — declared by caller; not proved by agentic-job. This is producer-reported provenance, not a check attestation.\n".to_owned());
+    }
     if let Some(models) = s["cost"]["estimated_models"]
         .as_object()
         .filter(|m| !m.is_empty())

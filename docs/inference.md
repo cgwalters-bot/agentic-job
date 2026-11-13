@@ -10,6 +10,18 @@ filtering, Yama or `hidepid=2` is not a demonstrated boundary between them.
 Do not put a provider key, MCP credential or OIDC request credential there.
 Check and apply run on other machines and never execute agent-produced code.
 
+Container runners can opt into `[host] isolation = "external"` to delegate
+host controls, not credentials, to the runner operator. This stops a delegated
+run being mistaken for proved host isolation: summaries and hand-back metadata
+record the declaration, and `check --run-summary` carries its sanitized prose
+to apply without trusting it as an attestation. The default is `managed`, never
+inferred from GitLab or container variables. The host must provide one job per
+runner, a fresh environment, an egress allowlist and no credentials beyond the
+run's own; provider keys, MCP and OIDC request credentials remain refused.
+No sudo, systemd or second user is required in the container. See
+[external host isolation](gitlab.md#explicit-external-host-isolation) for
+standalone configuration and the unmerged readiness dependency.
+
 Current broker inference still gives the agent a **run token**, and the workflow
 forwards a GitHub read token unless `github-reads: false`. Those credentials
 remain a gap against the operator's no-credentials requirement, not proof it is

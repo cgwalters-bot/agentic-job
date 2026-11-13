@@ -146,7 +146,10 @@ impl Sandbox {
         // action's GITHUB_ENV and `env -i` would drop.
         let ca = crate::sandbox::egress::runner_ca_vars()
             .into_iter()
-            .filter(|_| config.egress.write_policy)
+            .filter(|_| {
+                config.egress.write_policy
+                    && config.sandbox.isolation != crate::config::Isolation::External
+            })
             .map(|(name, value)| (name.to_owned(), value.to_owned()));
         let env: std::collections::BTreeMap<String, String> = fixed
             .into_iter()

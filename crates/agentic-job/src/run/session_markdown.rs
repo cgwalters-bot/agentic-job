@@ -496,6 +496,7 @@ pub(super) fn write(
         // entire budget. Its complete data remains in summary.json.
         if markdown.len() > SUMMARY_BYTES / 2 {
             markdown = "## Agent run\n\nAccounting tables exceed the display budget; see `summary.json` in the [agent-run artifact](#artifacts).\n".to_owned();
+            markdown.push_str(summary::isolation_notice(accounting));
         }
         let remaining = SUMMARY_BYTES.saturating_sub(markdown.len());
         markdown.push_str(&session.preview(remaining));
@@ -1211,11 +1212,12 @@ mod tests {
             0.0,
             json!({"sessionUpdate":"agent_message_chunk","content":{"text":"keep assistant"}}),
         )];
-        let mut accounting = json!({"tests": [{"command": "x".repeat(1 << 20), "exit_code": 0}]});
+        let mut accounting = json!({"host_isolation": "external", "tests": [{"command": "x".repeat(1 << 20), "exit_code": 0}]});
         write(&staging, &records, &redactor, true, &mut accounting).unwrap();
         let markdown = std::fs::read_to_string(staging.run().join("summary.md")).unwrap();
         assert!(markdown.len() <= SUMMARY_BYTES);
         assert!(markdown.contains("Accounting tables exceed"));
+        assert!(markdown.contains("declared by caller; not proved by agentic-job"));
         assert!(markdown.contains("keep assistant"));
         assert!(
             std::fs::metadata(staging.run().join("summary.json"))

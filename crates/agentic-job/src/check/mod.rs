@@ -104,6 +104,11 @@ pub struct Args {
 /// footer and its breaking of mentions.
 const MAX_RUN_SUMMARY_UNITS: usize = 900_000;
 
+/// Producer-reported provenance only: never an attestation or authorization.
+pub(crate) const HOST_ISOLATION_FILE: &str = "host-isolation.json";
+pub(crate) const EXTERNAL_ISOLATION_RECORD: &str = "{\"host_isolation\":\"external\"}\n";
+const MAX_HOST_ISOLATION_BYTES: u64 = 128;
+
 /// `run`'s summary.md at PATH as apply may post it: read without
 /// following a link, at most the size `run` writes it to for GitHub's job
 /// summary, and sanitized as the collector sanitizes a comment's body, so
@@ -130,6 +135,9 @@ fn checked_run_summary(path: &Path, policy: &Policy) -> Result<String> {
 /// What `check` decided. `--report` holds this as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Verdict {
+    /// A bounded producer declaration, not evidence of passed host controls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_isolation: Option<crate::config::Isolation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_target: Option<CheckedTarget>,
     pub ok: bool,
@@ -183,6 +191,7 @@ impl Verdict {
         let mut seen = BTreeSet::new();
         errors.retain(|error| seen.insert(error.clone()));
         Self {
+            host_isolation: None,
             inline_target: None,
             ok: errors.is_empty(),
             errors,
@@ -342,6 +351,7 @@ fn redirections_to(
 
 pub(crate) fn is_handback_file(name: &str) -> bool {
     name == OUTPUTS_FILE
+        || name == HOST_ISOLATION_FILE
         || name == BASE_FILE
         || name == SECONDARY_BASE_FILE
         || name == replacement::REPLACEMENT_FILE
@@ -356,6 +366,7 @@ pub(crate) fn is_handback_file(name: &str) -> bool {
 /// budget and held to its own once it is.
 fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
     match name {
+        HOST_ISOLATION_FILE => MAX_HOST_ISOLATION_BYTES,
         OUTPUTS_FILE => MAX_OUTPUTS_BYTES,
         BASE_FILE | SECONDARY_BASE_FILE => MAX_BASE_BYTES,
         memory::MEMORY_FILE => policy
@@ -514,6 +525,21 @@ fn verdict_of(
         }
     }
     warnings.truncate(redact::MAX_SHAPE_WARNINGS);
+    let host_isolation = contents.get(HOST_ISOLATION_FILE).and_then(|bytes| {
+        // Only this fixed declaration is supported. In particular a producer
+        // cannot assert that managed isolation was proved. Missing provenance
+        // on older hand-backs means unknown, never managed or attested.
+        if serde_json::from_slice::<Value>(bytes).ok()
+            == Some(serde_json::json!({"host_isolation": "external"}))
+        {
+            Some(crate::config::Isolation::External)
+        } else {
+            errors.push(format!(
+                "{HOST_ISOLATION_FILE}: expected only host_isolation = external"
+            ));
+            None
+        }
+    });
     // Taken from a path of its own and never from `dir`, which the agent's
     // machine uploaded: a result found there could be the agent's.
     let collected_bytes = files::read_regular(collected, MAX_COLLECTED_BYTES)
@@ -603,6 +629,7 @@ fn verdict_of(
             .iter()
             .all(|item| item_type(item) != PUSH_TO_PULL_REQUEST_BRANCH);
     Ok(Verdict {
+        host_isolation,
         secondary_patch: checked.secondary_patch,
         checkpoint,
         warnings,

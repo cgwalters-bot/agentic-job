@@ -16,6 +16,12 @@ names and their contents (`policy.json`, `summary.json`, `applied.json`
 and the rest), the agent's brief, the built-in skills, and the
 `agentic-job` commands other than through the files below.
 
+Standalone `run` accepts the opt-in `[host] isolation = "external"` declaration
+for container runners; the absent value remains `managed`. This does not add a
+reusable-workflow input or change hosted defaults. Summaries and hand-back
+metadata record delegated isolation, not proof of host controls; see
+[external host isolation](gitlab.md#explicit-external-host-isolation).
+
 The opt-in [external correlation interface](dispatch.md#binary-correlation-interface)
 is currently internal: `policy.yml`'s `external-receipt` input and
 `external-run-id` output, `check.yml`'s `detection-result` output, the

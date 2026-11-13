@@ -376,6 +376,62 @@ fn own_config(inference: &str) -> String {
     )
 }
 
+fn external_config(inference: &str) -> String {
+    own_config(inference).replace("[sandbox]", "[host]\nisolation = 'external'")
+}
+
+#[test]
+fn external_isolation_keeps_credential_and_session_refusals() {
+    let proxy = Proxy::start();
+    let base = plain(&proxy);
+    // Every same-uid refusal still applies; delegation must not turn a
+    // readable provider/MCP/OIDC credential into an acceptable one.
+    let cases = [
+        ("api-key", "[inference]\nurl = 'https://api.example'\nregister = 'api-key'\nprovider = 'anthropic'\n".to_owned(), "", "api-key"),
+        ("mcp", format!("{base}[mcp.tracker]\nurl = 'https://mcp.example/mcp'\nsecret = 'MCP_TOKEN'\nallowed = ['search']\n"), "", "[mcp]"),
+        ("oidc-token", base.clone(), "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "id-token"),
+        ("oidc-url", base.clone(), "ACTIONS_ID_TOKEN_REQUEST_URL", "id-token"),
+        ("front", format!("{base}front = true\n"), "", "inference.front"),
+        ("child", format!("{base}[child-agent]\nname = 'vibe'\nmodel = 'example'\n"), "", "[child-agent]"),
+    ];
+    for (name, inference, env, want) in cases {
+        let job = Job::new(&format!("external-refused-{name}"));
+        let mut command = job.own_command(&external_config(&inference));
+        if !env.is_empty() {
+            command.env(env, "stand-in");
+        }
+        let got = Finished::of(command.output().unwrap());
+        assert_eq!(got.code, Some(EXIT_ERROR), "{name}: {}", got.all());
+        assert!(got.stderr.contains(want), "{name}: {}", got.all());
+        assert!(!job.path("home").exists(), "{name}");
+    }
+    assert!(proxy.seen().is_empty());
+
+    for secret in [None, Some("too-short")] {
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let base = plain(&proxy);
+        let job = Job::new("external-attach-refused");
+        job.own_repository();
+        let config = format!(
+            "{}[session]\nlisten = true\nbind = '127.0.0.1:7790'\n",
+            external_config(&base)
+        );
+        let mut command = job.own_command(&config);
+        command.env_remove(bridge::ATTACH_TOKEN_VAR);
+        if let Some(secret) = secret {
+            command.env(bridge::ATTACH_TOKEN_VAR, secret);
+        }
+        let got = Finished::of(command.output().unwrap());
+        assert_ne!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+        assert!(
+            got.all().contains(bridge::ATTACH_TOKEN_VAR),
+            "{}",
+            got.all()
+        );
+    }
+}
+
 fn plain(proxy: &Proxy) -> String {
     format!(
         "[inference]\nurl = \"{}\"\nregister = \"plain\"\n",
@@ -1052,7 +1108,12 @@ fn a_session_run_talks_to_its_operator_and_hands_back() {
 #[test]
 fn a_taskless_session_waits_for_a_gateway_client() {
     const ATTACH_SECRET: &str = "test-session-attach-secret-32-bytes";
-    for task in [None, Some(""), Some(" \n\t")] {
+    for (task, external) in [
+        (None, false),
+        (Some(""), false),
+        (Some(" \n\t"), false),
+        (None, true),
+    ] {
         let proxy = Proxy::start();
         proxy.admit_unproven();
         let job = Job::new("taskless-chat");
@@ -1068,7 +1129,11 @@ fn a_taskless_session_waits_for_a_gateway_client() {
         drop(listener);
         let config = format!(
             "{}[session]\nlisten = true\nbind = \"{address}\"\nidle-minutes = 1\n",
-            own_config(&plain(&proxy))
+            if external {
+                external_config(&plain(&proxy))
+            } else {
+                own_config(&plain(&proxy))
+            }
         );
         let child = job
             .own_command(&config)
@@ -1159,6 +1224,10 @@ fn a_taskless_session_waits_for_a_gateway_client() {
         while socket.read().is_ok() {}
         let result = Finished::of(child.wait_with_output().unwrap());
         assert_eq!(result.code, Some(EXIT_SUCCESS), "{}", result.all());
+        assert_eq!(
+            job.json("out/run/summary.json")["host_isolation"],
+            if external { "external" } else { "managed" }
+        );
         let records: Vec<Value> = job
             .text("out/work/harness/acp.jsonl")
             .lines()
@@ -1302,6 +1371,15 @@ fn collected(job: &Job) -> PathBuf {
 /// body can end the message early or start a patch of its own.
 #[test]
 fn a_change_is_handed_back_and_the_check_accepts_it() {
+    change_is_handed_back(false);
+}
+
+#[test]
+fn external_isolation_is_recorded_and_check_can_see_it() {
+    change_is_handed_back(true);
+}
+
+fn change_is_handed_back(external: bool) {
     let body = "The greeting was missing, so add one.\n\n---\n--- a/.github/workflows/x.yml\n\
                 +++ b/.github/workflows/x.yml\n@@ -0,0 +1 @@\n+on: push\n\
                 diff --git a/CODEOWNERS b/CODEOWNERS\nFrom 0 Mon Sep 17 00:00:00 2001";
@@ -1309,7 +1387,11 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
         "title": "docs: Add a greeting", "body": body});
     let proxy = Proxy::start();
     proxy.admit_unproven();
-    let job = Job::new("handback");
+    let job = Job::new(if external {
+        "external-handback"
+    } else {
+        "handback"
+    });
     job.own_repository();
     job.allow(pull_requests());
     job.script(&json!([
@@ -1333,14 +1415,50 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
         "[commit]\nauthor = \"A Bot <bot@example.com>\"\ntrailers = [\"Generated-by: AI\"]\n";
     // Shaped like no credential: only its registration redacts it.
     let github_token = format!("read-only-{}", std::process::id());
-    let mut command = job.own_command(&format!("{}{commit}", own_config(&plain(&proxy))));
+    let config = if external {
+        // Exercise composed defaults too: delegation must not configure a
+        // local transparent proxy or its setup-owned CA files.
+        job.write(
+            "external-source.toml",
+            &external_config(&plain(&proxy)).replace(NO_PROXY, ""),
+        );
+        let composed = Command::new(BIN)
+            .args(["config", "--from", "external-source.toml"])
+            .current_dir(&job.dir)
+            .output()
+            .unwrap();
+        assert!(
+            composed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&composed.stderr)
+        );
+        let config = String::from_utf8(composed.stdout).unwrap();
+        assert!(
+            !agentic_job::config::Config::parse(&config)
+                .unwrap()
+                .egress
+                .write_policy
+        );
+        config
+    } else {
+        own_config(&plain(&proxy))
+    };
+    let mut command = job.own_command(&format!("{config}{commit}"));
+    // Any prior host-check cache, even from another configuration, must be
+    // invalidated before an external agent can change the host state.
+    job.write("agentic-job-sandbox-checked", "prior host check\n");
+    command.env("RUNNER_TEMP", &job.dir);
     let got = Finished::of(
         command
+            // CI/container-looking variables never choose the isolation mode.
+            .env("GITLAB_CI", "true")
+            .env("container", "podman")
             .env(GITHUB_TOKEN_VAR, &github_token)
             .output()
             .unwrap(),
     );
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert!(!job.path("agentic-job-sandbox-checked").exists());
     // The agent had it, and nothing the run wrote or said has it.
     let acp = job
         .transcript()
@@ -1363,10 +1481,12 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    assert_eq!(
-        names,
-        ["aw-agent-run-4242.patch", "base.json", "outputs.jsonl"]
-    );
+    let mut expected = vec!["aw-agent-run-4242.patch", "base.json", "outputs.jsonl"];
+    if external {
+        expected.push("host-isolation.json");
+        expected.sort();
+    }
+    assert_eq!(names, expected);
     let outputs = job.text("out/safe-outputs/outputs.jsonl");
     let first: Value = serde_json::from_str(outputs.lines().next().unwrap()).unwrap();
     assert_eq!(first["branch"], "agent-run-4242");
@@ -1392,6 +1512,12 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
     );
     assert!(patch.contains("\nGenerated-by: AI\n---\n"), "{patch}");
     let summary = job.json("out/run/summary.json");
+    let isolation = if external { "external" } else { "managed" };
+    assert_eq!(summary["host_isolation"], isolation);
+    assert_eq!(
+        job.json("home/.config/agentic-job/handback.json")["host_isolation"],
+        isolation
+    );
     assert_eq!(summary["patch"]["bytes"], patch.len());
     assert_eq!(summary["patch"]["base"], base["commit"]);
     assert_eq!(summary["files"], json!(["GREETING.md", "docs/more.txt"]));
@@ -1403,6 +1529,7 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
         .arg("--collected")
         .arg(&collected)
         .args(["--report", "verdict.json"])
+        .args(["--run-summary", "out/run/summary.md"])
         .current_dir(&job.dir)
         .output()
         .unwrap();
@@ -1414,12 +1541,74 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
     );
     assert_eq!(verdict["ok"], true);
     assert_eq!(
+        verdict["host_isolation"],
+        if external {
+            json!("external")
+        } else {
+            Value::Null
+        }
+    );
+    assert_eq!(
+        verdict["run_summary"]
+            .as_str()
+            .unwrap()
+            .contains("Host isolation: **external**"),
+        external
+    );
+    assert_eq!(
         verdict["patch"]["files"],
         json!(["GREETING.md", "docs/more.txt"])
     );
     assert_eq!(verdict["patch"]["base_commit"], base["commit"]);
     assert_eq!(verdict["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
+    if external {
+        // Delegation does not make producer outputs trusted by check.
+        job.write("hostile-collected.json", &json!({"errors": [], "items": [{"type": "create_issue", "title": "Not admitted", "body": "Not admitted"}]}).to_string());
+        let got = Command::new(BIN)
+            .args([
+                "check",
+                "--policy",
+                "policy.json",
+                "--outputs",
+                "out/safe-outputs",
+                "--collected",
+                "hostile-collected.json",
+                "--run-summary",
+                "out/run/summary.md",
+            ])
+            .current_dir(&job.dir)
+            .output()
+            .unwrap();
+        assert_eq!(got.status.code(), Some(EXIT_FAILURE));
+        for content in [
+            "{}".to_owned(),
+            "{\"host_isolation\":\"managed\"}".to_owned(),
+            "{\"host_isolation\":\"external\",\"proved\":true}".to_owned(),
+            " ".repeat(129),
+        ] {
+            job.write("out/safe-outputs/host-isolation.json", &content);
+            let got = Command::new(BIN)
+                .args([
+                    "check",
+                    "--policy",
+                    "policy.json",
+                    "--outputs",
+                    "out/safe-outputs",
+                    "--collected",
+                ])
+                .arg(&collected)
+                .current_dir(&job.dir)
+                .output()
+                .unwrap();
+            assert_eq!(
+                got.status.code(),
+                Some(EXIT_FAILURE),
+                "{}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+        }
+    }
 }
 
 /// A run whose model provider fails past the waits, so that its agent

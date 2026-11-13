@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 // secure-host's now, at the paths callers know.
 pub use ::secure_host::config::{
-    HOST_TABLE, HostFile, LEGACY_HOST_TABLE, Prepared, ROOT_COPY, Refusal, Sandbox,
+    HOST_TABLE, HostFile, Isolation, LEGACY_HOST_TABLE, Prepared, ROOT_COPY, Refusal, Sandbox,
     host_table_names,
 };
 

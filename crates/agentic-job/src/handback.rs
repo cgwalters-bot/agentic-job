@@ -138,6 +138,8 @@ const MAX_RUN_FILE_BYTES: u64 = 1 << 20;
 #[serde(deny_unknown_fields)]
 struct RunFile {
     #[serde(default)]
+    host_isolation: config::Isolation,
+    #[serde(default)]
     public_base: crate::run::public_addresses::PublicAddresses,
     policy: Policy,
     checkout: PathBuf,
@@ -207,6 +209,24 @@ pub(crate) fn run_file_with_public(
     commit: &config::Commit,
     public: &crate::run::public_addresses::PublicAddresses,
 ) -> Result<String> {
+    run_file_with_isolation(
+        policy,
+        checkout,
+        run_id,
+        commit,
+        public,
+        config::Isolation::Managed,
+    )
+}
+
+pub(crate) fn run_file_with_isolation(
+    policy: &Policy,
+    checkout: &Checkout,
+    run_id: &str,
+    commit: &config::Commit,
+    public: &crate::run::public_addresses::PublicAddresses,
+    isolation: config::Isolation,
+) -> Result<String> {
     let mut policy = Policy {
         clone_url: String::new(),
         context: Vec::new(),
@@ -216,6 +236,7 @@ pub(crate) fn run_file_with_public(
         secondary.clone_url = String::new();
     }
     let mut file = json!({
+        "host_isolation": isolation,
         "public_base": public,
         "policy": policy,
         "checkout": checkout.dir,
@@ -333,6 +354,11 @@ fn fix_for(reason: &str, collector: bool) -> &'static str {
 /// `check`'s `check_outputs`, then the scan of the final gate's patterns.
 fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     let mut report = Report::default();
+    if run.host_isolation == config::Isolation::External {
+        report.notes.push(
+            "host isolation is external: declared by caller, not proved by agentic-job".to_owned(),
+        );
+    }
     let mut base_shapes_checked = false;
     let policy = &run.policy;
     let outcome = home.join(AGENT_OUTCOME);
@@ -1225,6 +1251,7 @@ mod tests {
             native_handlers: Vec::new(),
         };
         let run = RunFile {
+            host_isolation: config::Isolation::Managed,
             public_base: Default::default(),
             policy,
             checkout,
