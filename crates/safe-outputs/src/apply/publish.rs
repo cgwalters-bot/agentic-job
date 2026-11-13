@@ -84,6 +84,12 @@ pub struct Handler {
 /// its `labels` only empty.
 pub const HANDLERS: &[Handler] = &[
     Handler {
+        output: "document",
+        fields: &["type", "title", "files", "summary", "gist_id"],
+        settings: &["max", "document", "target-repo", "target"],
+        fixed: &[],
+    },
+    Handler {
         output: ADD_COMMENT,
         fields: &["type", "body", "item_number", "pr", "pr_number", "repo"],
         settings: &["max", "target-repo", "target"],
@@ -941,6 +947,13 @@ fn shape(output: &str, item: &Map<String, Value>) -> Vec<String> {
     if output == CREATE_REVIEW_COMMENT {
         errors.extend(review_comment_shape(item).err());
     }
+    if output == "document" {
+        errors.extend(
+            crate::document::Document::parse(item)
+                .err()
+                .map(|err| format!("{err:#}")),
+        );
+    }
     if output == CREATE_ISSUE {
         errors.extend(
             ["title", "body"]
@@ -1051,6 +1064,14 @@ fn holds_temporary_reference(value: &Value) -> bool {
 /// One routed request, everything that does not take the forge decided.
 #[derive(Debug, Clone)]
 enum Op {
+    Document {
+        index: usize,
+        max: u64,
+        repo: String,
+        issue: u64,
+        document: crate::document::Document,
+        settings: crate::document::Settings,
+    },
     Comment {
         advisory: Option<crate::advisory::Advisory>,
         index: usize,
@@ -1194,6 +1215,7 @@ impl Op {
     fn index(&self) -> usize {
         match self {
             Self::Comment { index, .. }
+            | Self::Document { index, .. }
             | Self::PullRequest { index, .. }
             | Self::Labels { index, .. }
             | Self::Close { index, .. }
@@ -1206,6 +1228,7 @@ impl Op {
     fn max(&self) -> u64 {
         match self {
             Self::Comment { max, .. }
+            | Self::Document { max, .. }
             | Self::PullRequest { max, .. }
             | Self::Labels { max, .. }
             | Self::Close { max, .. }
@@ -1217,6 +1240,7 @@ impl Op {
 
     fn output(&self) -> &'static str {
         match self {
+            Self::Document { .. } => "document",
             Self::Comment { .. } => ADD_COMMENT,
             Self::PullRequest { .. } => CREATE_PULL_REQUEST,
             Self::Labels { request, .. } if request.add => ADD_LABELS,
@@ -1304,6 +1328,15 @@ fn plan(
             same_repo(&item, setting(config, "target-repo")?)?;
             let max = config.get("max").and_then(Value::as_u64).unwrap_or(1);
             let repo = setting(config, "target-repo")?.to_owned();
+            if output == "document" {
+                let document = crate::document::Document::parse(&item)?;
+                let settings = policy.safe_outputs.others.get("document")
+                    .context("document is not allowed")?.document.clone().unwrap_or_default();
+                document.authorize(&settings)?;
+                let target = setting(config, "target")?;
+                ensure!(NUMBER_RE.is_match(target), "document requires one fixed issue target");
+                return Ok(Op::Document { index, max, repo, issue: target.parse()?, document, settings });
+            }
             let number = || -> Result<u64> {
                 number_field(&output)
                     .and_then(|key| item.get(key))
@@ -2868,6 +2901,24 @@ fn publish_one(
         repo: publisher.repo.clone(),
     };
     match op {
+        Op::Document {
+            document,
+            settings,
+            repo,
+            issue,
+            ..
+        } => match super::document::publish(&publisher.github, document, settings, repo, *issue) {
+            Ok(result) => {
+                if let Some(error) = result["comment_error"].as_str() {
+                    let mut outcome = Outcome::failed(op, error.to_owned());
+                    outcome.result = result;
+                    outcome
+                } else {
+                    Outcome::succeeded(op, result)
+                }
+            }
+            Err(err) => Outcome::failed(op, format!("{err:#}")),
+        },
         Op::ReviewComment { comment, .. } => {
             let (at, review) = review;
             buffer_review_comment(op, comment, defaults, &publisher.github, run, *at, review)
@@ -3834,7 +3885,9 @@ fn close_item(
 
 /// The manifest entry of a success (`extractCreatedItemFromResult`).
 fn manifest_entry(outcome: &Outcome, timestamp: &str) -> Option<Value> {
-    if outcome.kind != Kind::Success {
+    if outcome.kind != Kind::Success
+        && !(outcome.output == "document" && outcome.result["revision"].is_string())
+    {
         return None;
     }
     created_item(outcome.output, &outcome.result, timestamp)
@@ -4450,6 +4503,20 @@ pub fn apply(
         Ok(split) => split,
         Err(errors) => return refuse(errors),
     };
+    if items.iter().any(|item| item["type"] == "document") {
+        ensure!(
+            items
+                .iter()
+                .filter(|item| item["type"] == "document")
+                .count()
+                == 1
+                && items.iter().all(|item| matches!(
+                    item["type"].as_str(),
+                    Some("document" | "noop" | "missing_tool" | "missing_data")
+                )),
+            "document runs permit one document and no other writing outputs"
+        );
+    }
     let ops = match plan(ours, handlers, &upload, policy, run) {
         Ok(ops) => ops,
         Err(errors) => return refuse(errors),
@@ -4598,6 +4665,82 @@ mod tests {
     const SERVER: &str = "https://github.com";
     const REPO: &str = "owner/repo";
     const FORK: &str = "agentic-bot/repo";
+
+    #[test]
+    fn document_native_route_retains_revision_even_when_comment_fails() {
+        for comment_ok in [true, false] {
+            let mut routes = BTreeMap::from([
+                (
+                    "GET /user".into(),
+                    (200, json!({"id": 7, "login": "example-bot"})),
+                ),
+                (
+                    "POST /gists".into(),
+                    (
+                        201,
+                        json!({"id": "abc123", "owner": {"id": 7}, "public": false, "history": [{"version": "a".repeat(40)}]}),
+                    ),
+                ),
+            ]);
+            if comment_ok {
+                routes.insert(
+                    "POST /repos/owner/repo/issues/7/comments".into(),
+                    (201, json!({"id": 10})),
+                );
+            }
+            let (github, requests) = crate::apply::testing::forge(routes);
+            let publisher = GithubPublisher {
+                github,
+                git: String::new(),
+                item_repo: REPO.into(),
+                repo: REPO.into(),
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let path = |name: &str| dir.path().join(name);
+            let mut policy = crate::check::fixtures::policy();
+            policy.safe_outputs.create_pull_request = None;
+            policy.safe_outputs.others.insert(
+                "document".into(),
+                crate::contract::OutputLimit {
+                    max: 1,
+                    ..Default::default()
+                },
+            );
+            policy.native_handlers = vec!["document".into()];
+            policy.validate().unwrap();
+            let items = [
+                json!({"type": "document", "title": "Findings", "files": {"findings.md": "Evidence."}, "summary": ["First.", "Second.", "Third."]}),
+            ];
+            let handlers = json!({"document": {"max": 1, "target-repo": REPO, "target": "7"}});
+            let ok = apply(
+                &Checked {
+                    items: &items,
+                    handlers: handlers.as_object().unwrap(),
+                    upload: upload(dir.path()),
+                    policy: &policy,
+                },
+                &run(1, "http://127.0.0.1:1"),
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: None,
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(ok, comment_ok);
+            let made = read_json(&path("made.jsonl"));
+            assert_eq!(made["type"], "document");
+            assert_eq!(made["url"], "https://gist.github.com/example-bot/abc123");
+            assert_eq!(made["metadata"]["revision"], "a".repeat(40));
+            assert_eq!(read_json(&path("remainder.json"))["items"], json!([]));
+            assert_eq!(requests.try_iter().count(), 3);
+        }
+    }
 
     /// What gh-aw's handlers sent, as agentic-job's publication tests
     /// record it with the pinned handlers.

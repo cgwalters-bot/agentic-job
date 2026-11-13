@@ -355,6 +355,20 @@ fn commit(dir: &Path, content: &str) -> String {
 }
 
 #[test]
+fn document_handler_keeps_policy_authority_and_fixed_comment_target() {
+    let dir = TempDir::new().unwrap();
+    let config =
+        json!({"document": {"max": 1, "document": {"public": false, "gist_ids": ["abc123"]}}});
+    let (out, result) = handlers(dir.path(), &config, &[("COMMENT_TARGET", "7")]);
+    status(&out, 0);
+    assert_eq!(
+        result["document"],
+        json!({"max": 1, "document": {"public": false, "gist_ids": ["abc123"]}, "target-repo": "owner/item", "target": "7"})
+    );
+    assert!(safe_outputs::apply::publish::handler("document").is_some());
+}
+
+#[test]
 fn issue_actions_keep_checked_repository_and_caps() {
     let dir = TempDir::new().unwrap();
     let cases = [

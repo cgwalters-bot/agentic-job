@@ -758,6 +758,13 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             // Both files must set it, and so both route create_issue to
             // agentic-job's handler, which `validate` requires of each.
             limit.comment_on_duplicate &= bound.comment_on_duplicate;
+            if name == crate::document::TYPE {
+                let mut own = limit.document.clone().unwrap_or_default();
+                let other = bound.document.clone().unwrap_or_default();
+                own.public &= other.public;
+                own.gist_ids.retain(|id| other.gist_ids.contains(id));
+                limit.document = Some(own);
+            }
             true
         } else {
             false

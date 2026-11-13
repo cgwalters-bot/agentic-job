@@ -1546,6 +1546,9 @@ impl OutputType {
 /// `` `body` (string, required, …), `item_number` (number or string) ``.
 /// None for a type it does not validate.
 pub fn field_guide(name: &str, forge: Forge) -> Option<String> {
+    if name == crate::document::TYPE && forge == Forge::Github {
+        return Some("document: title (string), files (object of Markdown filenames to text), summary (three strings), gist_id (optional allowlisted ID)".into());
+    }
     let of = TYPES.iter().find(|of| of.name == name)?;
     let fields: Vec<String> = of
         .fields
@@ -1689,6 +1692,14 @@ fn request(
         ));
     }
     // A policy allows no such type; a configuration written by hand might.
+    if kind == crate::document::TYPE {
+        if forge != Forge::Github {
+            return Err(format!("Line {line}: document requires GitHub"));
+        }
+        return crate::document::collect(&item, keeps_link)
+            .map(Some)
+            .map_err(|err| format!("Line {line}: {err:#}"));
+    }
     let Some(of) = of else {
         let known: Vec<&str> = TYPES.iter().map(|of| of.name).collect();
         return Err(format!(

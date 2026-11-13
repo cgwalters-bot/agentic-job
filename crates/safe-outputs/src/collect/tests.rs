@@ -22,6 +22,26 @@ fn object(value: Value) -> Map<String, Value> {
     }
 }
 
+#[test]
+fn document_collection_is_opt_in_and_bounded() {
+    let item = json!({"type": "document", "title": "Findings", "files": {"findings.md": "Evidence."}, "summary": ["First.", "Second.", "Third."]});
+    let config = object(json!({"document": {"max": 1}}));
+    let collected = collect(&item.to_string(), &config, Forge::Github, &keeps_public);
+    assert!(collected.errors.is_empty(), "{:?}", collected.errors);
+    assert_eq!(collected.items.len(), 1);
+    for (lines, config, forge) in [
+        (item.to_string(), Map::new(), Forge::Github),
+        (format!("{item}\n{item}"), config.clone(), Forge::Github),
+        (item.to_string(), config.clone(), Forge::Forgejo),
+    ] {
+        assert!(
+            !collect(&lines, &config, forge, &keeps_public)
+                .errors
+                .is_empty()
+        );
+    }
+}
+
 /// The types and fields are gh-aw's, read at test time from the
 /// generated `validation.json`, regenerated from gh-aw's pinned source:
 /// a regeneration that changes them fails here. Fields are in the order
@@ -59,7 +79,10 @@ fn types_are_gh_aws() {
     assert_eq!(ours, theirs, "every type of validation.json, in its order");
     // And so every type a policy may allow.
     for name in OUTPUT_TYPES {
-        assert!(ours.contains(name), "{name}");
+        assert!(
+            ours.contains(name) || *name == crate::document::TYPE,
+            "{name}"
+        );
     }
 }
 

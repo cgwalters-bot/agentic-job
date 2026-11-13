@@ -219,6 +219,26 @@ pub fn redirections_to(
     publishers: &dyn Publishers,
 ) -> Vec<String> {
     let output = item_type(item);
+    if output == crate::document::TYPE {
+        let checked = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                comment.is_some(),
+                "document requires one fixed issue comment target"
+            );
+            let settings = policy
+                .safe_outputs
+                .others
+                .get(output)
+                .and_then(|limit| limit.document.clone())
+                .unwrap_or_default();
+            crate::document::Document::parse(item)?.authorize(&settings)
+        })();
+        return checked
+            .err()
+            .map(|err| format!("{err:#}"))
+            .into_iter()
+            .collect();
+    }
     let differs = |key: &str, same: &dyn Fn(&str) -> bool| {
         item.get(key)
             .filter(|value| !value.as_str().is_some_and(same))
@@ -911,6 +931,23 @@ pub fn check(
             .iter()
             .flat_map(|item| redirections_to(item, policy, comment, publishers)),
     );
+    if items
+        .iter()
+        .any(|item| item_type(item) == crate::document::TYPE)
+        && (items
+            .iter()
+            .filter(|item| item_type(item) == crate::document::TYPE)
+            .count()
+            != 1
+            || items.iter().any(|item| {
+                !matches!(
+                    item_type(item),
+                    "document" | "noop" | "missing_tool" | "missing_data"
+                )
+            }))
+    {
+        errors.push("document runs permit one document and no other writing outputs".into());
+    }
     if let Some(lines) = handback.outputs {
         errors.extend(check_run_names(lines, policy));
     }

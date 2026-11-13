@@ -52,6 +52,7 @@ pub fn update_fields(output: &str) -> Option<&'static [&'static str]> {
 /// (`agentic-job publish`) in place of gh-aw's, where the bounds'
 /// `native_handlers` name them; every other type stays gh-aw's.
 pub const NATIVE_OUTPUTS: &[&str] = &[
+    "document",
     "add_comment",
     CREATE_PULL_REQUEST,
     "add_labels",
@@ -296,6 +297,10 @@ pub(crate) fn check_native_handlers(
     forge: Forge,
     allows: impl Fn(&str) -> bool,
 ) -> Result<()> {
+    ensure!(
+        !allows("document") || types.iter().any(|name| name == "document"),
+        "document requires document in native_handlers"
+    );
     for (at, output) in types.iter().enumerate() {
         ensure!(
             NATIVE_OUTPUTS.contains(&output.as_str()),
@@ -551,6 +556,9 @@ impl Memory {
 #[serde(deny_unknown_fields)]
 pub struct OutputLimit {
     pub max: u32,
+    /// Gist authority, only for the opt-in native document output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<crate::document::Settings>,
     /// Labels an issue may name. Absent preserves the existing unrestricted
     /// behavior; an empty list permits no labels. Enforced by `check`, not
     /// by the handler's silent filtering. For [`PERSON_OUTPUTS`], the
@@ -635,6 +643,16 @@ fn is_false(value: &bool) -> bool {
 
 impl OutputLimit {
     pub fn validate(&self, output: &str) -> Result<()> {
+        ensure!(
+            output == "document" || self.document.is_none(),
+            "document settings are only for document"
+        );
+        if output == "document" {
+            ensure!(self.max <= 1, "document: at most one per run");
+            if let Some(settings) = &self.document {
+                settings.validate()?;
+            }
+        }
         ensure!(
             self.replacement_max_commits <= MAX_REPLACEMENT_COMMITS
                 && (output == PUSH_TO_PULL_REQUEST_BRANCH || self.replacement_max_commits == 0),

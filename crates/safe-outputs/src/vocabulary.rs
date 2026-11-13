@@ -69,6 +69,7 @@ pub const HIDE_REASONS: &[&str] = &[
 /// needs settings of its own, so it is added here with them and not by a
 /// caller's file alone.
 pub const OUTPUT_TYPES: &[&str] = &[
+    "document",
     CREATE_PULL_REQUEST,
     "add_comment",
     "create_issue",

@@ -519,6 +519,7 @@ jobs:
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push
               + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork], checkout_mapping: {($repo | ascii_downcase): "."}}
             | (select(has("add_comment")).add_comment) += {"target-repo": $item_repo, target: $target}
+            | (select(has("document")).document) += {"target-repo": $item_repo, target: $target}
             | if has("hide_comment") | not then .
               elif $target | test("^[1-9][0-9]*$") then .hide_comment += {"target-repo": $item_repo, target: $target}
               else del(.hide_comment) end

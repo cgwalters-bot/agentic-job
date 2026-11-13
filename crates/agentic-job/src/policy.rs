@@ -603,6 +603,7 @@ impl Compile for Bounds {
 
         // The lower of what was asked for and what the bounds allow.
         let limit = |output: &str| OutputLimit {
+            document: limits.get(output).and_then(|bound| bound.document.clone()),
             max: limits.get(output).map_or(0, |bound| bound.max).min(max),
             allowed: limits.get(output).and_then(|bound| bound.allowed.clone()),
             blocked: limits
@@ -4619,6 +4620,70 @@ max_patch_files = 10
     }
 
     #[test]
+    fn document_bounds_are_opt_in_and_only_narrow() {
+        let compile = |settings: Option<safe_outputs::document::Settings>| {
+            let mut bounds = bounds();
+            bounds.native_handlers = vec!["document".into()];
+            bounds.outputs_mut().unwrap().insert(
+                "document".into(),
+                OutputLimit {
+                    max: 1,
+                    document: settings,
+                    ..OutputLimit::default()
+                },
+            );
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs: "document,noop",
+                    ..request()
+                })
+                .unwrap()
+        };
+        let settings = |public, ids: &[&str]| {
+            Some(safe_outputs::document::Settings {
+                public,
+                gist_ids: ids.iter().map(|id| (*id).into()).collect(),
+            })
+        };
+        let caller = compile(settings(true, &["abc", "def"]));
+        let org = compile(settings(false, &["def", "123"]));
+        let narrowed = intersect(caller, org).unwrap();
+        narrowed.validate().unwrap();
+        assert_eq!(
+            narrowed.safe_outputs.others["document"].document,
+            settings(false, &["def"])
+        );
+        let default = intersect(compile(None), compile(settings(true, &["abc"]))).unwrap();
+        assert_eq!(
+            default.safe_outputs.others["document"].document,
+            settings(false, &[])
+        );
+        let mut policy = compile(None);
+        let loaded: Policy =
+            serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+        loaded.validate().unwrap();
+        policy.native_handlers.clear();
+        assert!(policy.validate().is_err());
+        assert!(
+            bounds()
+                .compile(&Request {
+                    outputs: "document",
+                    ..request()
+                })
+                .is_err()
+        );
+        assert!(
+            OutputLimit {
+                max: 2,
+                ..OutputLimit::default()
+            }
+            .validate("document")
+            .is_err()
+        );
+    }
+
+    #[test]
     fn ceilings_and_pull_request_settings() {
         let bounds = bounds();
         let compile = |request: Request<'_>| bounds.compile(&request).unwrap();
@@ -5612,9 +5677,15 @@ max_patch_files = 10
         } else {
             "push_repo = \"bot/name\"\n"
         };
+        let native = if output == "document" {
+            "native_handlers = [\"document\"]"
+        } else {
+            ""
+        };
         let bounds: Bounds = toml::from_str(&format!(
             r#"
 hosts = ["forge.example"]
+{native}
 repos = ["owner/*"]
 bases = ["main"]
 max_outputs = 3
@@ -5659,6 +5730,7 @@ max_patch_files = 10
             ("missing_tool", "{ max = 1 }", true),
             ("missing_data", "{ max = 1 }", true),
             // GitHub-only: no other forge has the object.
+            ("document", "{ max = 1 }", false),
             (
                 "create_discussion",
                 r#"{ max = 1, category = "General" }"#,

@@ -94,6 +94,10 @@ says what a caller may rely on across versions.
   separately from the existing review/other `max-tasks` allowance; workers
   require the proxy-wide request cap and an advertised model on their route.
 
+- Opt-in native `document` safe outputs create or update bounded Markdown gists
+  owned by the applying account, secret by default, with allowlisted update IDs
+  and one short fixed-target issue comment linking the exact revision (#3401).
+
 - GitHub bounds `repos` may opt into `{org = "ORG", forks = false}` to
   admit live, non-fork, non-archived repositories owned by that organization.
   Exact repository entries remain explicit exceptions (#3332).

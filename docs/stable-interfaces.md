@@ -159,6 +159,13 @@ and `limits.max-worker-tasks`, independently of the review/other
 proxy-wide `limits.max-requests` cap and models advertised on the run's
 inference route ([worker subagents](skills.md#worker-subagents)).
 
+The opt-in native `document` output adds `[github.outputs.document]` with
+`max = 1` and optional `document = { public = false, gist_ids = [] }`, plus
+`document` in `native_handlers`. Its JSONL fields are `title`, Markdown `files`,
+three-line `summary` and optional `gist_id`; visibility and update authority are
+caller-owned. See [durable documents](safe-outputs.md#durable-findings-documents)
+for limits, ownership, token requirements and revision records.
+
 Each is TOML, and a key the binary does not know is refused. A file that
 uses a key added in a later release is therefore refused by an older
 pin; from 1.0, a file that works with one release keeps working with

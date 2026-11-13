@@ -220,6 +220,58 @@ fn a_pull_request_with_its_patch_is_accepted() {
 }
 
 #[test]
+fn document_check_bounds_and_mixed_writes() {
+    let mut policy = fixtures::policy();
+    policy.safe_outputs.create_pull_request = None;
+    policy.safe_outputs.others.insert(
+        "document".into(),
+        crate::contract::OutputLimit {
+            max: 1,
+            document: Some(crate::document::Settings {
+                gist_ids: vec!["abc123".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    policy.native_handlers = vec!["document".into()];
+    let item = json!({"type": "document", "title": "Findings", "files": {"findings.md": "Evidence."}, "summary": ["First.", "Second.", "Third."]});
+    let mut case = Case {
+        items: vec![item],
+        outputs: true,
+        base: None,
+        replacement: None,
+        patches: Vec::new(),
+    };
+    assert!(case.check(&policy).errors.is_empty());
+    case.items[0]["gist_id"] = json!("abc123");
+    assert!(case.check(&policy).errors.is_empty());
+    case.items[0]["gist_id"] = json!("def456");
+    assert!(!case.check(&policy).errors.is_empty());
+    case.items[0]["gist_id"] = json!("abc123");
+    case.items
+        .push(json!({"type": "add_comment", "body": "Extra comment"}));
+    let checked = case.check(&policy);
+    assert!(
+        checked
+            .errors
+            .iter()
+            .any(|error| error.contains("no other writing outputs"))
+    );
+    let errors = redirections_to(
+        case.items[0].as_object().unwrap(),
+        &policy,
+        None,
+        &Fake::default(),
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("fixed issue comment target"))
+    );
+}
+
+#[test]
 fn refusals() {
     let ok = Case::pull_request("src/lib.rs");
     let with = |change: &dyn Fn(&mut Case)| {

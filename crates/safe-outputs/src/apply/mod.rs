@@ -28,6 +28,7 @@
 //! names itself ([`Provenance`]); nothing here reads the environment.
 //! docs/safe-outputs.md#library-boundary says what stays with the caller.
 
+mod document;
 pub mod forgejo;
 pub mod git;
 pub mod github;

@@ -528,7 +528,76 @@ The types a run can be allowed are `create_pull_request`, `create_issue`, `creat
 `add_reviewer`, `assign_to_user`, `close_pull_request`, `link_sub_issue`, `hide_comment`,
 `create_pull_request_review_comment`, `reply_to_pull_request_review_comment`,
 `resolve_pull_request_review_thread`,
-`noop`, `missing_tool` and `missing_data`.
+`document`, `noop`, `missing_tool` and `missing_data`.
+
+### Durable findings documents
+
+The threat is an untrusted request overwriting an unrelated gist or choosing
+public visibility using the applying account's credential. `document` is off
+unless bounds allow it and route it to the native GitHub publisher. Updates
+require an exact ID in trusted bounds; apply also verifies that the gist belongs
+to its authenticated account and has the policy's visibility before writing.
+No owner, visibility, deletion or filename rename can be selected by a request.
+
+```toml
+native_handlers = ["document"]
+
+[github.outputs.document]
+max = 1
+# Optional; absence means secret creates and no updates.
+document = { public = false, gist_ids = ["abcdef0123456789abcdef0123456789"] }
+```
+
+Organization bounds intersect IDs and permit public visibility only if both
+files enable it. **Secret is not private:** anyone with the URL can read a
+secret gist. The issue comment exposes that URL to the issue's readers. This
+does not add a private storage mechanism or give the producer/check job a token.
+Apply needs a user token with gist-write permission (a classic PAT's `gist`
+scope), plus issue-comment permission. The repository job token cannot write
+gists. In role mode the gist uses `publication` and its link comment uses
+`review`; gist updates must be owned by the publication account. No caller is
+enabled by this change.
+
+For example, request a new document with:
+
+```json
+{"type":"document","title":"Topic findings","files":{"findings.md":"# Topic\n\nEvidence and open questions."},"summary":["Saved the evidence.","Corrected one claim.","Recorded the remaining question."]}
+```
+
+Add `"gist_id":"abcdef0123456789abcdef0123456789"` to update that same gist.
+The request has no repository or issue destination: the caller's fixed comment
+target supplies both. Check refuses a run without that target, more than one
+document, or a document mixed with any other writing output. Non-writing `noop`,
+`missing_tool` and `missing_data` remain possible. One document request includes
+both the gist write and its one short issue comment; it does not require an
+`add_comment` allowance. Use `notify: none` to avoid a separate run-status
+notification comment if the caller wants only the document comment.
+
+Files are an object of Markdown basenames to nonempty text: 1–10 files, names
+at most 128 ASCII bytes (letters, digits, dots, hyphens and underscores, no
+leading dot), ending in `.md`. Title is 1–128 UTF-8 bytes. Summary is exactly
+three nonempty single-line strings, each at most 200 UTF-8 bytes. Title, names,
+contents and summary together may not exceed 46,000 UTF-8 bytes. Check refuses
+oversize content rather than truncating it, scans for private keys before
+sanitizing, and uses the same Markdown/mention/URL sanitizer as comments. The
+ordinary run-secret refusal and credential-shape warnings still apply. Unknown
+request fields refuse. Updates replace the supplied files' contents, retain
+unmentioned files, and create a revision of the same gist, not a new gist.
+
+The native result/created-item manifest records `url`, `id` and the exact
+`metadata.revision`. Apply posts one comment linking that immutable revision,
+followed by the three summary lines. A later run's caller supplies the prior
+document URL and content in its task/context input, and allowlists the ID in
+bounds, so the run can extend the existing document instead of starting over.
+There is no implicit gist discovery or background memory fetch. Concurrent
+updates have no compare-and-swap lease; callers should serialize runs per topic.
+
+Gist writes and comments are not transactional. No write is automatically
+retried: a lost response can leave an uncertain write. If the gist succeeds but
+the comment fails, apply fails and retains the URL/revision in its created-item
+record for recovery. Inspect it and the destination before retrying; replay can
+create another gist/revision/comment. The pinned gh-aw adapter, non-GitHub
+publishers and standalone CLI apply do not implement `document`.
 
 ### Proposing follow-up issues
 
