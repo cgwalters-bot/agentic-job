@@ -106,6 +106,14 @@ depending on its payload selection. The legacy old-check comparison remains;
 removing it still belongs to the gated corpus disposition above. No runtime
 control, permission or caller setting changes.
 
+The malformed-output JSONL corpus cases now run in `tests/check.rs` through
+the Rust collector and checker: invalid JSON, an array and an object without
+`type`. Each is refused alone and after a valid request, with line-numbered
+diagnostics, so a collector error cannot silently authorize the surviving
+publication. Empty and valid-request controls are accepted. Only those three
+legacy cases are removed; key-bearing fixtures and upstream parity remain.
+This test-only port adds no runtime control or caller setting.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

@@ -287,7 +287,6 @@ test("check: what both refuse", async () => {
     // The cases of the old tree's test.
     ["an output type not allowed", { lines: [{ type: "add_comment", body: "x", item_number: 1 }], base: null }, /Unexpected output type 'add_comment'/],
     ["a type nobody knows", { lines: [{ type: "delete_repo" }], base: null }, /Unexpected output type 'delete_repo'/],
-    ["a line that is not JSON", { lines: ["rm -rf /"], base: null }, /Invalid JSON/],
     ["more of a type than its maximum", withPatch(GOOD, [PR, PR]), /Too many items of type 'create_pull_request'/],
     ["more outputs than max_outputs", withPatch(GOOD, [{ type: "noop", message: "a" }, PR, PR]), /Too many|over max_outputs/],
     ["a field gh-aw's rules require", withPatch(GOOD, [{ type: "create_pull_request", branch: BRANCH }]), /title|body/],
@@ -335,8 +334,6 @@ test("check: what both refuse", async () => {
     ["a patch that is no patch", { lines: [PR], patch: "rm -rf /\n", base: GOOD.base }, /holds no change/],
     ["a patch with no change", { lines: [PR], patch: GOOD.patch.toString().split("diff --git")[0], base: GOOD.base }, /holds no change/],
     ["two noops", { lines: [NOOP, NOOP], base: null }, /Too many items of type 'noop'/],
-    ["a request with no type", { lines: [{ message: "x" }], base: null }, /./],
-    ["a request that is an array", { lines: ["[1, 2]"], base: null }, /./],
   ]) {
     if (SHAPED.has(name)) await warned(name, args, want);
     else await same(name, args, want);

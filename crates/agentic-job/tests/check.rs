@@ -787,6 +787,86 @@ fn a_hand_back_outside_the_policy_is_refused_with_its_reasons() {
     );
 }
 
+#[test]
+fn malformed_output_lines_survive_collection_as_check_refusals() {
+    for (line, diagnostic) in [
+        ("{", "Invalid JSON"),
+        ("[1, 2]", "Missing required 'type' field"),
+        (r#"{"message":"x"}"#, "Missing required 'type' field"),
+    ] {
+        for keep_valid_request in [false, true] {
+            let run = Run::new();
+            let outputs = run.path("out/outputs.jsonl");
+            let valid = std::fs::read_to_string(&outputs).unwrap();
+            if !keep_valid_request {
+                std::fs::remove_file(run.path("out/aw-agent-run-7.patch")).unwrap();
+                std::fs::remove_file(run.path("out/base.json")).unwrap();
+            }
+            // Check the accepted control first, then ensure that a bad line
+            // cannot be dropped silently, even alongside a valid publication.
+            for malformed in [false, true] {
+                let mut input = if keep_valid_request {
+                    format!("{}\n", valid.trim_end())
+                } else {
+                    String::new()
+                };
+                if malformed {
+                    input.push_str(line);
+                    input.push('\n');
+                }
+                std::fs::write(&outputs, input).unwrap();
+                let collected = run.path("collected.json");
+                if collected.exists() {
+                    std::fs::remove_file(&collected).unwrap();
+                    std::fs::remove_file(run.path("verdict.json")).unwrap();
+                }
+                let ingest = Command::new(BIN)
+                    .args(["collect", "--policy"])
+                    .arg(run.path("policy.json"))
+                    .arg("--outputs")
+                    .arg(run.path("out"))
+                    .arg("--collected")
+                    .arg(&collected)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    ingest.status.code(),
+                    Some(i32::from(malformed)),
+                    "{line}: {ingest:?}"
+                );
+                // The downstream check must refuse the collector's recorded
+                // error, not authorize its otherwise valid remaining items.
+                let checked = run.check(&collected);
+                let verdict = run.verdict();
+                assert_eq!(
+                    checked.status.code(),
+                    Some(i32::from(malformed)),
+                    "{line}: {checked:?}; {verdict}"
+                );
+                assert_eq!(verdict["ok"], !malformed, "{verdict}");
+                if malformed {
+                    let expected =
+                        format!("Line {}: {diagnostic}", 1 + usize::from(keep_valid_request));
+                    assert!(
+                        verdict["errors"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|error| error.as_str().unwrap().contains(&expected)),
+                        "{line}: {verdict}"
+                    );
+                } else {
+                    assert_eq!(verdict["errors"], serde_json::json!([]));
+                    assert_eq!(
+                        verdict["items"].as_array().unwrap().len(),
+                        usize::from(keep_valid_request)
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The hand-backs of two real runs (`safe-outputs/fixtures`, which the
 /// safe-outputs probe also applies), each through `collect` and `check`
 /// under a policy of the kind its run had: both are accepted whole.
