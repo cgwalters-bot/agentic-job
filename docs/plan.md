@@ -62,13 +62,16 @@ callers, the exact CI caller inventory, staged environment use and read-only
 permissions. Their replaced assertions are removed from `workflow/apply.test.cjs`;
 the remaining shell and upstream-handler tests still run in JavaScript. This
 test-only port changes no credential routing, caller settings or permissions.
+The staged-apply contracts also run in that Rust suite: credential-step gating,
+default-off policy forwarding, escaped preview/log output and the empty
+publication report, executing the actual workflow shell without a forge.
 
 For [tracker#1260](https://github.com/cgwalters-forge/tracker/issues/1260),
 the detector artifact-release and caller-permission assertions now run in
 Rust's `tests/workflows.rs`, rather than `workflow/apply.test.cjs`. They retain
 the opt-in, detection-before-release, read-only check and caller OIDC contracts;
-no workflow permissions or runtime behavior change. Next slices are staged-apply
-contracts and local shell-step tests, then the legacy corpus cleanup once
+no workflow permissions or runtime behavior change. Next slices are the
+remaining local shell-step tests, then the legacy corpus cleanup once
 tracker#1455 supplies trusted evidence; keep actual upstream JavaScript execution
 coverage and the fixture-deletion prerequisite above intact.
 

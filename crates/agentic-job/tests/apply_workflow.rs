@@ -17,6 +17,147 @@ const TRIAL: &str =
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn staged_apply_skips_credential_steps_and_defaults_off() {
+    let doc = definition("apply.yml");
+    let text = workflow("apply.yml");
+    let credential =
+        Regex::new(r"secrets\.SAFE_OUTPUTS_PAT|github\.token|gh api|git push").unwrap();
+    let read_only = [
+        "The checked outputs are this run's check's",
+        "Require policy's binary",
+        "Release external output only after trusted detection",
+    ];
+    let mut skipped = 0;
+    for body in Regex::new(r"\n      - (?:name:|uses:|id:)")
+        .unwrap()
+        .split(job(&text, "apply").split_once("\n    steps:\n").unwrap().1)
+        .skip(1)
+    {
+        if !credential.is_match(body)
+            || read_only
+                .iter()
+                .any(|name| body.starts_with(&format!(" {name}\n")))
+        {
+            continue;
+        }
+        let condition = body
+            .lines()
+            .find_map(|line| line.strip_prefix("        if: "))
+            .unwrap_or("");
+        assert!(
+            !condition.contains("||")
+                && (condition.contains("fromJSON(inputs.policy).apply-staged != 'true'")
+                    || condition.contains("steps.apply.outcome != 'skipped'")),
+            "{}",
+            body.lines().next().unwrap()
+        );
+        skipped += 1;
+    }
+    assert!(skipped >= 6, "only {skipped} credential steps checked");
+    let apply = step(&doc, "apply", "Apply the outputs with gh-aw's handlers");
+    assert_eq!(apply["id"].as_str(), Some("apply"));
+    assert_eq!(
+        apply["if"].as_str(),
+        Some("${{ fromJSON(inputs.policy).apply-staged != 'true' }}")
+    );
+    let policy = definition("policy.yml");
+    assert_eq!(
+        policy["on"]["workflow_call"]["outputs"]["apply-staged"]["value"].as_str(),
+        Some("${{ jobs.policy.outputs.apply-staged }}")
+    );
+    for file in ["policy.yml", "agentic-job.yml"] {
+        let caller = definition(file);
+        let input = &caller["on"]["workflow_call"]["inputs"]["apply-staged"];
+        assert!(input["description"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(input["type"].as_str(), Some("boolean"), "{file}");
+        assert_eq!(input["default"].as_bool(), Some(false), "{file}");
+        matches(
+            &workflow(file),
+            r"\n      apply-staged: \$\{\{ inputs\.apply-staged \}\}\n",
+        );
+    }
+}
+
+#[test]
+fn staged_apply_escapes_preview_and_reports_no_publication() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+    let summary = path.join("summary.md");
+    let report = path.join("report.json");
+    json_file(
+        path,
+        "agent_output.json",
+        &json!({"items": [{
+            "type": "create_pull_request", "title": "t", "branch": "agent-run-7",
+            "body": "see <img src=\"https://example.invalid/x.png\"> & [a](https://example.invalid)"
+        }]}),
+    );
+    json_file(
+        path,
+        "report.json",
+        &json!({"patch": {"files": [
+            "src/<b>.rs", "README.md", "::error title=Approved::x"
+        ]}}),
+    );
+    let shown = run_step(
+        path,
+        "Show what would be applied",
+        &[
+            ("GH_AW_TMP", path.to_str().unwrap()),
+            ("REPORT", report.to_str().unwrap()),
+            ("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()),
+        ],
+    );
+    status(&shown, 0);
+    let stdout = String::from_utf8(shown.stdout).unwrap();
+    assert!(stdout.contains("agent-run-7"));
+    // No agent-owned line may become a runner command.
+    let safe_line = Regex::new(r#"^\s*(?:["\[\]{}]|$)"#).unwrap();
+    assert!(
+        stdout.lines().all(|line| safe_line.is_match(line)),
+        "{stdout}"
+    );
+    let preview = fs::read_to_string(summary).unwrap();
+    assert!(preview.starts_with("### Staged: nothing was applied\n"));
+    assert!(preview.contains(r"&lt;img src=\&quot;https://example.invalid/x.png\&quot;&gt; &amp;"));
+    assert!(preview.contains("src/&lt;b&gt;.rs\nREADME.md"));
+    assert_eq!(
+        preview.matches('<').count(),
+        Regex::new(r"</?pre>").unwrap().find_iter(&preview).count()
+    );
+    let handlers = json!({"create_pull_request": {"max": 1}});
+    json_file(path, "handler-config.json", &handlers);
+    let made = path.join("made.jsonl");
+    for staged in ["true", "false"] {
+        status(
+            &run_step(
+                path,
+                "Write applied.json",
+                &[
+                    ("GH_AW_TMP", path.to_str().unwrap()),
+                    ("MADE", made.to_str().unwrap()),
+                    ("OUTPUT_REPO", "owner/repo"),
+                    ("PR", ""),
+                    ("PR_URL", ""),
+                    ("FORK", ""),
+                    ("EXIT", "0"),
+                    ("CHECKPOINT", ""),
+                    ("STAGED", staged),
+                ],
+            ),
+            0,
+        );
+        let applied = read_json(path, "applied.json");
+        assert_eq!(applied["staged"], staged == "true");
+        assert_eq!(applied["made"], json!([]));
+        assert_eq!(applied["already_applied"], json!([]));
+        assert_eq!(applied.get("pull_request"), Some(&Value::Null));
+        assert_eq!(applied.get("fork"), Some(&Value::Null));
+        assert_eq!(applied["handlers"], handlers);
+    }
+}
+
+#[test]
 fn optional_pat_is_forwarded_only_to_policy_and_apply() {
     let apply = definition("apply.yml");
     assert_eq!(
