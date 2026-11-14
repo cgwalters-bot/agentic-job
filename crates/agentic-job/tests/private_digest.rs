@@ -375,7 +375,7 @@ fn check_takes_one_comment_on_the_digest_issue() {
     let item: u64 = ITEM.parse().unwrap();
     // The outputs, and a part of check's refusal, None where it is
     // accepted.
-    for (items, refusal) in [
+    let mut cases = vec![
         (vec![comment(json!({}))], None),
         (vec![comment(json!({"item_number": item}))], None),
         (
@@ -396,7 +396,45 @@ fn check_takes_one_comment_on_the_digest_issue() {
             vec![json!({"type": "create_issue", "title": "Digest", "body": "This week's digest."})],
             Some("which the policy does not allow"),
         ),
+    ];
+    // Check all aliases independently, and with a valid preferred selector:
+    // an alternate field must not redirect a digest off the caller's issue.
+    for key in [
+        "item_number",
+        "pr",
+        "pr_number",
+        "issue_number",
+        "pull_request_number",
+        "pull_number",
+        "pr-number",
     ] {
+        for value in [json!(item), json!(item.to_string())] {
+            cases.push((vec![comment(json!({key: value}))], None));
+        }
+        for value in [json!(item + 1), json!((item + 1).to_string())] {
+            for preferred in [json!({}), json!({"item_number": item})] {
+                let mut fields = preferred.as_object().unwrap().clone();
+                fields.insert(key.into(), value.clone());
+                cases.push((
+                    vec![comment(Value::Object(fields))],
+                    Some("outside the caller's fixed item"),
+                ));
+            }
+        }
+    }
+    for key in [
+        "comment_id",
+        "commentId",
+        "comment-id",
+        "reply_to_id",
+        "target",
+    ] {
+        cases.push((
+            vec![comment(json!({"item_number": item, key: item}))],
+            Some("outside the caller's fixed destination"),
+        ));
+    }
+    for (items, refusal) in cases {
         let lines: Vec<String> = items.iter().map(Value::to_string).collect();
         std::fs::write(out.join("outputs.jsonl"), lines.join("\n")).unwrap();
         let collected = dir.join("collected.json");

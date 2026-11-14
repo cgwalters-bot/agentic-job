@@ -1926,6 +1926,13 @@ that repository has no such branch. `comment-target` fixes the issue/PR number;
 the read-only check job refuses an explicit repository or item that differs,
 including PR-number aliases, existing-comment IDs and discussion replies.
 Omitting a destination in the request uses the caller's fixed destination.
+All supplied item aliases must agree with that destination, even when another
+field already names the correct item; an existing-comment or reply selector is
+not authorized by a matching issue number. The shared check unit tests cover
+malformed selectors, and `cargo test --locked -p agentic-job --test private_digest
+check_takes_one_comment_on_the_digest_issue` exercises alias conflicts and
+existing-comment selectors through the CLI with the reference digest policy.
+This verifies output routing, not private runner admission or live publication.
 Where the item is an issue of another repository than `output-repo` (for
 a target with issues turned off), `item-repo` names it: `comment-target`
 and `issue` are then its numbers, comments and the status comment go

@@ -647,7 +647,64 @@ fn comments_go_to_the_trusted_target_only() {
             &Fake::default(),
         )
     };
-    assert!(comment(json!({"item_number": 7})).is_empty());
+    assert!(comment(json!({})).is_empty());
+    // Every supplied alias must agree, not merely the first one a publisher
+    // happens to prefer. Keep this list independent of the implementation.
+    for key in [
+        "item_number",
+        "pr",
+        "pr_number",
+        "issue_number",
+        "pull_request_number",
+        "pull_number",
+        "pr-number",
+    ] {
+        for value in [json!(7), json!("7")] {
+            assert!(comment(json!({key: value})).is_empty(), "{key}");
+        }
+        for value in [
+            json!(8),
+            json!("8"),
+            json!(0),
+            json!(-1),
+            json!(7.5),
+            json!("not-a-number"),
+            json!("18446744073709551616"),
+            Value::Null,
+            json!(true),
+            json!([7]),
+            json!({"number": 7}),
+        ] {
+            let extra = json!({key: value});
+            assert_eq!(
+                comment(extra.clone()),
+                [format!(
+                    "an add_comment with {key} outside the caller's fixed item"
+                )],
+                "{extra}"
+            );
+        }
+    }
+    for key in [
+        "comment_id",
+        "commentId",
+        "comment-id",
+        "reply_to_id",
+        "target",
+    ] {
+        // Even null or an ID equal to the issue number is not an authorized
+        // existing comment/discussion destination.
+        for value in [json!(7), json!("7"), Value::Null] {
+            let extra = json!({"item_number": 7, key: value});
+            assert_eq!(
+                comment(extra.clone()),
+                [format!(
+                    "an add_comment with {key}, outside the caller's fixed destination"
+                )],
+                "{extra}"
+            );
+        }
+    }
     assert!(comment(json!({"repo": "Bootc-Dev/Bootc"})).is_empty());
     for (extra, want) in [
         (
