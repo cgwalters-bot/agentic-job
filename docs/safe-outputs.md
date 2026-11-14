@@ -280,14 +280,44 @@ a conflict never drops a step silently. Neither function pushes or publishes.
 `apply::stack::push` updates the built steps' branches in one atomic push,
 each leased on the head the caller pinned when it read the published stack
 (or on the branch not existing yet), so the stack moves as a whole or not at
-all. Branches and pinned heads come from the caller, never the proposal. A
+all. Branches, pinned heads and the caller's `Target` (the admitted policy,
+whose repository and base the stack is published to, the run's branch prefix,
+and the handler's title prefix and draft flag) come from the caller, never the
+proposal: every step branch must be a distinct plain name under the run's
+prefix, and none may be the target branch. Since every step branch is the
+target repository's own, the policy must accept that repository's own branches
+([`own-branch-repos`](#pushing-to-a-pull-requests-branch)), as
+for an ordinary pull request from the repository itself. A
 stack already at its built heads is an earlier attempt's push and pushes
 nothing; any other head is a concurrent write and refuses. A stack shorter
 than its plan, refused or not, pushes only while no branch above it is pinned
 or, when read just before the push, exists on the remote, since updating the
 steps below would leave those on the old ones; git cannot lease a branch it
-does not push. The remote must carry no credential. It opens
-no pull request and acquires no credential.
+does not push. The remote must carry no credential.
+
+`apply::stack::publish` runs `push` and then opens each built step's pull
+request through a `Pulls` adapter: step N from its branch onto step N-1's
+branch, the first onto the target branch, with the step's title and body
+followed by `Closes #N` for its issue. Title and body go through the gates
+of an ordinary pull request's: the title prefix, mention and link
+sanitizing, the footer, workflow marker and run provenance, and GitHub's
+length limit. A step whose text they refuse, or a failed push, writes
+nothing. A pull
+request already open from a step's branch on the same base is an earlier
+attempt's and is kept, so a run whose answer was lost resumes without opening
+duplicates; one open on another base is an error, never retargeted. So once
+a parent merges and GitHub retargets its child's pull request, `publish`
+refuses that step until the caller rebuilds the rest of the stack on the new
+root, as below. The first
+step not opened stops the stack there, keeping the pull requests below it,
+and the result lists each opened step's position, issue, branch, head, base
+and pull request, plus the stopping refusal (whose reason may quote the patch when check refused
+the step) and any forge error
+apart. The GitHub adapter reads and opens with the publication role's
+credential. Because a pull request's base must be a branch of the repository
+it is opened in, every step branch is the target repository's own; a stack
+cannot be published from a fork. A found pull request's title and body are
+not updated after a fix round.
 
 ### Experimental library receipts
 
@@ -328,7 +358,11 @@ Local tests cover receipt tampering, changed admission/metadata, disabled and
 over-limit plans, independent inspection, three replayed steps, a middle
 refusal and a freshly checked step-1 fix rebuilding steps 2/3, and pushes of
 a new, restacked and refused stack to a local bare remote, including a stale
-lease. They do **not** prove PR publication or live credential behavior.
+lease. Publication tests open a three-step stack against a fake forge, resume
+after a lost answer and after a step-2 failure, keep the pull requests through
+a step-1 fix that restacks steps 2 and 3, and publish only step 1 of a stack
+refused at step 2; the GitHub adapter is tested against a local mock API. They
+do **not** prove live credential behavior.
 
 ### Remaining publisher and recovery requirements
 
@@ -341,13 +375,11 @@ gates, and refuse unsupported cross-fork parent layouts rather than borrow
 authority from another repository. No agent-board selection or caller setting
 is changed here.
 
-A publisher must open each accepted draft PR on its predecessor (the first on
-the admitted target branch), with its own title, body and closing line. On the
-first refusal or failure it must retain/report earlier PRs and stop. A lost
-write response is ambiguous, not permission to retry: inspect destination refs,
-PRs and apply records before resuming. Per-step URL/head/refusal reporting and
-aggregate cost must come from trusted apply/accounting data; unavailable cost
-must be marked unavailable, never inferred from producer claims.
+A lost write response is ambiguous, not permission to retry blindly: before
+resuming, the caller must read the published stack again to pin its heads,
+as `publish` finds the pull requests already open. The series' aggregate
+cost must come from trusted apply/accounting data; unavailable cost must be
+marked unavailable, never inferred from producer claims.
 
 A fix needs a new checked proposal and receipt for the admitted step and all
 descendants, bound to their pinned current heads. Replay must use only checked
@@ -361,14 +393,11 @@ it does not rebase its commits. Inspect the merge result (including squash or
 rebase merges), resolve conflicts explicitly, and obtain a new trusted check
 rather than replay unchecked branch contents.
 
-Remaining slices must wire these library receipts into trusted policy, producer
-and check/apply workflow artifacts, then push the steps' branches with `push`
-and open each PR against its predecessor, appending that step's closing line.
-Publication must stop on refusal without removing earlier PRs. The publisher
-must keep the stack rebased after parent changes/merges with `restack`, not
-rely on PR retargeting to rewrite git history. Opening the PRs, the workflow
-paths, their end-to-end tests, per-step PR receipts and the series' total cost
-report are not implemented yet.
+Remaining slices must wire these library receipts and `publish` into trusted
+policy, producer and check/apply workflow artifacts, keeping the stack rebased
+after parent changes/merges with `restack` rather than relying on PR
+retargeting to rewrite git history. The workflow paths, their end-to-end
+tests and the series' total cost report are not implemented yet.
 
 ## Caller-bound publisher roles
 

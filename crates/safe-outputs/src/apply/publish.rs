@@ -293,7 +293,7 @@ const API_VERSION: &str = "2026-03-10";
 
 /// The URL policy apply.yml gives gh-aw's handlers, the only one this
 /// sanitizes by.
-const URL_POLICY: &str = "allowed-or-code-region";
+pub(crate) const URL_POLICY: &str = "allowed-or-code-region";
 
 /// The types gh-aw's handlers publish nothing for here: a routed request
 /// may come after one of them.
@@ -3483,7 +3483,7 @@ fn pull_request_outcome(
     publisher: &GithubPublisher,
     run: &Run,
 ) -> Outcome {
-    let body = match pull_request_body(&pr.body, defaults, publisher, run) {
+    let body = match pull_request_body(&pr.body, defaults, &publisher.repo, run) {
         Ok(body) => body,
         Err(err) => return Outcome::failed(op, format!("{err:#}")),
     };
@@ -3519,13 +3519,8 @@ fn pull_request_outcome(
 
 /// A pull request's BODY, without a first heading repeating the title, as
 /// gh-aw's handler writes it: sanitized, with the footer, the workflow's
-/// marker and the run's provenance.
-fn pull_request_body(
-    body: &str,
-    defaults: &[String],
-    publisher: &GithubPublisher,
-    run: &Run,
-) -> Result<String> {
+/// marker and the run's provenance, for a pull request in REPO.
+fn pull_request_body(body: &str, defaults: &[String], repo: &str, run: &Run) -> Result<String> {
     let body = sanitize_with(
         body,
         MAX_SANITIZED,
@@ -3536,7 +3531,7 @@ fn pull_request_body(
         &|host| run.keeps_link(host),
     );
     let triggering = run.triggering(CREATE_PULL_REQUEST)?;
-    let history = history_url(run, &publisher.repo, "pullrequests", false);
+    let history = history_url(run, repo, "pullrequests", false);
     let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
     lines.push(String::new());
     lines.push(footer(run, triggering.as_deref(), Some(&history)));
@@ -3544,6 +3539,34 @@ fn pull_request_body(
     lines.push(format!("<!-- gh-aw-workflow-id: {} -->", run.workflow_id));
     lines.push(String::new());
     Ok(with_provenance(run, js_trim(&lines.join("\n"))))
+}
+
+/// The title and body of the pull request of a stack step for ISSUE in
+/// REPO ([`super::stack::publish`]), through the gates an ordinary pull
+/// request's go through: the title sanitized and given TITLE_PREFIX, the
+/// body without a heading repeating it, with the issue's closing line,
+/// sanitized, with the footer, the workflow's marker and the run's
+/// provenance, and within GitHub's length.
+pub fn stack_pull_text(
+    title: &str,
+    body: &str,
+    issue: u64,
+    title_prefix: &str,
+    repo: &str,
+    run: &Run,
+) -> Result<(String, String)> {
+    let title = js_trim(title);
+    let body = without_title_heading(title, body)?;
+    let body = format!("{}\n\nCloses #{issue}", js_trim(&body));
+    // Without `hide_applied`: no guard names a stack step's request, so an
+    // applied marker in its body is the agent's own text.
+    let body = pull_request_body(&body, &run.default_mentions()?, repo, run)?;
+    ensure!(
+        utf16_len(&body) <= MAX_BODY_UNITS,
+        "Pull request body exceeds GitHub's maximum length of {MAX_BODY_UNITS} characters"
+    );
+    let title = apply_title_prefix(&sanitize_title(title, title_prefix, run)?, title_prefix);
+    Ok((title, body))
 }
 
 /// `generateTemporaryId`: `aw_` and eight letters or digits.

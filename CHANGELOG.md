@@ -63,8 +63,13 @@ says what a caller may rely on across versions.
   Experimental library receipts now bind the ordinary policy, root, admitted
   issue order, exact proposal bytes and accepted prefix; local replay can
   independently revalidate them before building commits, and push the built
-  steps' branches atomically under exact leases on caller-pinned heads.
-  Opening the stack's PRs and producer/workflow integration remain
+  steps' branches atomically under exact leases on caller-pinned heads, held
+  to the run's branch prefix and to a policy that accepts the repository's
+  own branches. `apply::stack::publish` then opens each step's PR on its
+  predecessor with its closing line, through an ordinary PR's text gates and
+  the publication role on GitHub, and reports each step's PR and where the
+  stack stopped.
+  Producer/workflow integration and the series' cost report remain
   unimplemented.
 
 - Rendered sessions retain opencode's tool names when later updates replace
