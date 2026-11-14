@@ -56,6 +56,16 @@ show a concrete offline/distribution benefit and inventory dependencies and
 license notices before changing delivery; no vendor/submodule design is approved
 here. Standalone adoption remains with #2398.
 
+The apply workflow's optional-PAT forwarding and CI job-token fallback contracts
+now run in `crates/agentic-job/tests/apply_workflow.rs`, including the six example
+callers, the exact CI caller inventory, staged environment use and read-only
+permissions. Their replaced assertions are removed from `workflow/apply.test.cjs`;
+the remaining shell and upstream-handler tests still run in JavaScript. This
+test-only port changes no credential routing, caller settings or permissions.
+Next independent slices are the detector/staged-apply contract assertions and
+the remaining local shell-step tests; keep actual upstream JavaScript execution
+coverage and the fixture-deletion prerequisite above intact.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

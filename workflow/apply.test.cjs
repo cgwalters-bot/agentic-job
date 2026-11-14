@@ -62,56 +62,6 @@ function stepEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: '(.*)'$`, 'm'))[1];
 }
 
-test('apply uses the optional PAT with fallback, status receives it separately', () => {
-  const jobs = workflow.split('\njobs:\n')[1];
-  const before = jobs.split('\n  apply:\n')[0];
-  const [apply, after] = jobs.split('\n  apply:\n')[1].split('\n  conclude:\n');
-  assert.ok(workflow.includes('      SAFE_OUTPUTS_PAT:\n'));
-  assert.match(workflow.split('    secrets:\n')[1].split('    outputs:\n')[0], /required: false/);
-  assert.ok(!before.includes('secrets.SAFE_OUTPUTS_PAT'));
-  assert.match(after, /STATUS_TOKEN: \$\{\{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT /);
-  // The policy call consumes it only in notify, never in its read-only job.
-  const wrapperJobs = wrapper.split('\njobs:\n')[1].split(/\n  (?=[-\w]+:\n)/);
-  assert.deepEqual(wrapperJobs.filter(job => job.includes('secrets.SAFE_OUTPUTS_PAT')).map(job => job.split(':')[0]), ['policy', 'apply']);
-  assert.match(wrapperJobs.find(job => job.startsWith('apply:')), /uses: \.\/\.github\/workflows\/apply\.yml *(?:#[^\n]*)?\n/);
-  assert.ok(apply.includes('environment: ${{ fromJSON(inputs.policy).apply-environment }}'));
-  assert.doesNotMatch(apply, /HAS_TOKEN|no passed .* secret/);
-});
-
-for (const filename of ['example', 'example-command', 'example-deterministic', 'example-pull-request', 'example-schedule', 'review']) {
-  test(`${filename} explicitly forwards the optional safe outputs PAT`, () => {
-    const caller = readFileSync(join(__dirname, `../.github/workflows/${filename}.yml`), 'utf8');
-    assert.ok(caller.includes('SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}'));
-  });
-}
-
-test('every CI safe-output caller exercises job-token fallback without deployment secrets', () => {
-  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
-  const jobs = [...ci.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
-  const callers = jobs.filter(([, , job]) =>
-    /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose|example-deterministic)\.yml/.test(job));
-  assert.deepEqual(callers.map(([, name]) => name), [
-    'e2e-proposals', 'e2e-deterministic', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-secondary', 'e2e-secondary-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items', 'e2e-threads',
-  ]);
-  for (const [, name, caller] of callers) {
-    assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
-    if (/^      apply-environment:/m.test(caller)) assert.match(caller, /^      apply-staged: true$/m, name);
-  }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-compose', 'e2e-review']) {
-    const caller = callers.find(([, jobName]) => jobName === name)[2];
-    assert.match(caller, /^      contents: read$/m, name);
-    assert.doesNotMatch(caller, /^      contents: write$/m, name);
-  }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run']) {
-    const caller = callers.find(([, jobName]) => jobName === name)[2];
-    assert.match(caller, /^      build-binary: true$/m, name);
-    const reusable = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
-    assert.match(reusable, /^      build-binary:\n/m);
-    assert.doesNotMatch(caller, /^      build:/m, name);
-  }
-});
-
 // A staged apply is for trying a caller that may not write yet: no step
 // holding a credential runs in it but one that only reads.
 test('a staged apply skips every step that holds a credential, but one that only reads', () => {

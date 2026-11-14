@@ -17,6 +17,143 @@ const TRIAL: &str =
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn optional_pat_is_forwarded_only_to_policy_and_apply() {
+    let apply = definition("apply.yml");
+    assert_eq!(
+        apply["on"]["workflow_call"]["secrets"]["SAFE_OUTPUTS_PAT"]["required"].as_bool(),
+        Some(false)
+    );
+    let text = workflow("apply.yml");
+    let jobs = text.split_once("\njobs:\n").unwrap().1;
+    let before = jobs.split_once("\n  apply:\n").unwrap().0;
+    assert!(!before.contains("secrets.SAFE_OUTPUTS_PAT"));
+    matches(
+        job(&text, "conclude"),
+        r"STATUS_TOKEN: \$\{\{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT ",
+    );
+    assert_eq!(
+        apply["jobs"]["apply"]["environment"].as_str(),
+        Some("${{ fromJSON(inputs.policy).apply-environment }}")
+    );
+    assert!(
+        !Regex::new("HAS_TOKEN|no passed .* secret")
+            .unwrap()
+            .is_match(job(&text, "apply"))
+    );
+
+    // Policy forwards the PAT to notify, not to its read-only policy job.
+    let wrapper = definition("agentic-job.yml");
+    let wrapper_text = workflow("agentic-job.yml");
+    let consumers: Vec<_> = wrapper["jobs"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap())
+        .filter(|name| job(&wrapper_text, name).contains("secrets.SAFE_OUTPUTS_PAT"))
+        .collect();
+    assert_eq!(consumers, ["policy", "apply"]);
+    assert_eq!(
+        wrapper["jobs"]["apply"]["uses"].as_str(),
+        Some("./.github/workflows/apply.yml")
+    );
+
+    for name in [
+        "example",
+        "example-command",
+        "example-deterministic",
+        "example-pull-request",
+        "example-schedule",
+        "review",
+    ] {
+        assert!(
+            workflow(&format!("{name}.yml"))
+                .contains("SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}"),
+            "{name} must explicitly forward the optional PAT"
+        );
+    }
+}
+
+#[test]
+fn ci_safe_output_callers_exercise_job_token_fallback() {
+    let ci = definition("ci.yml");
+    let text = workflow("ci.yml");
+    let re = Regex::new(
+        r"^\./\.github/workflows/(agentic-job|dispatch|example-compose|example-deterministic)\.yml$",
+    ).unwrap();
+    let callers: Vec<_> = ci["jobs"]
+        .as_hash()
+        .unwrap()
+        .iter()
+        .filter(|(_, caller)| {
+            caller["uses"]
+                .as_str()
+                .is_some_and(|uses| re.is_match(uses))
+        })
+        .map(|(name, caller)| (name.as_str().unwrap(), caller))
+        .collect();
+    assert_eq!(
+        callers.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        [
+            "e2e-proposals",
+            "e2e-deterministic",
+            "e2e-full",
+            "e2e-limit",
+            "e2e-write-policy",
+            "e2e-event",
+            "e2e-analysis",
+            "e2e-analysis-refused",
+            "e2e-secondary",
+            "e2e-secondary-refused",
+            "e2e-people",
+            "e2e-check-run",
+            "e2e-dispatch",
+            "e2e-compose",
+            "e2e-review",
+            "e2e-items",
+            "e2e-threads",
+        ]
+    );
+    let secret_reference = Regex::new(r"\bsecrets\.").unwrap();
+    for (name, caller) in &callers {
+        assert!(caller["secrets"].is_badvalue(), "{name}");
+        assert!(!secret_reference.is_match(job(&text, name)), "{name}");
+        if !caller["with"]["apply-environment"].is_badvalue() {
+            assert_eq!(
+                caller["with"]["apply-staged"].as_bool(),
+                Some(true),
+                "{name}"
+            );
+        }
+    }
+    for name in [
+        "e2e-analysis",
+        "e2e-analysis-refused",
+        "e2e-people",
+        "e2e-check-run",
+        "e2e-compose",
+        "e2e-review",
+    ] {
+        assert_eq!(
+            ci["jobs"][name]["permissions"]["contents"].as_str(),
+            Some("read"),
+            "{name}"
+        );
+    }
+    let wrapper = definition("agentic-job.yml");
+    assert!(!wrapper["on"]["workflow_call"]["inputs"]["build-binary"].is_badvalue());
+    for name in [
+        "e2e-analysis",
+        "e2e-analysis-refused",
+        "e2e-people",
+        "e2e-check-run",
+    ] {
+        let inputs = &ci["jobs"][name]["with"];
+        assert_eq!(inputs["build-binary"].as_bool(), Some(true), "{name}");
+        assert!(inputs["build"].is_badvalue(), "{name}");
+    }
+}
+
+#[test]
 fn external_detection_cannot_be_skipped_to_release_a_checked_upload() {
     let doc = definition("check.yml");
     assert_eq!(
