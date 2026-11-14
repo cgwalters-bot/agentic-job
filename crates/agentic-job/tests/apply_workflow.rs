@@ -850,6 +850,64 @@ fn complete_work_opens_ready_checkpoint_or_stopped_run_opens_draft() {
 }
 
 #[test]
+fn added_placeholders_force_draft_after_recovery_preflight() {
+    let apply = definition("apply.yml");
+    let steps = apply["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    assert!(
+        position("Check inference-address recovery routing")
+            < position("Fork the output repository for the pull request")
+    );
+    let trial = step(&apply, "apply", TRIAL);
+    assert!(
+        trial["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"${recovery[@]}\"")
+    );
+    assert_eq!(
+        trial["env"]["RECOVER"].as_str(),
+        Some("${{ steps.recovery.outputs.replacement-recovery }}")
+    );
+    let dir = TempDir::new().unwrap();
+    json_file(
+        dir.path(),
+        "config.json",
+        &json!({"push_to_pull_request_branch":{"ready_when_complete":true}}),
+    );
+    json_file(dir.path(), "report.json", &json!({"ok":true}));
+    let output = dir.path().join("output");
+    status(
+        &run_step(
+            dir.path(),
+            "Decide whether the work is complete",
+            &[
+                ("GH_AW_TMP", dir.path().to_str().unwrap()),
+                ("REPORT", dir.path().join("report.json").to_str().unwrap()),
+                ("GITHUB_OUTPUT", output.to_str().unwrap()),
+                ("EXIT", "0"),
+                ("ADDED_PLACEHOLDERS", "1"),
+            ],
+        ),
+        0,
+    );
+    assert_eq!(
+        fs::read_to_string(output).unwrap(),
+        "checkpoint=incomplete\nready=false\n"
+    );
+    assert_eq!(
+        step(&apply, "apply", "Decide whether the work is complete")["env"]["ADDED_PLACEHOLDERS"]
+            .as_str(),
+        Some("${{ steps.recovery.outputs.added-placeholders }}")
+    );
+}
+
+#[test]
 fn partial_push_is_not_applied_whatever_else_it_posts() {
     for (types, expected) in [
         (vec!["add_comment"], 0),

@@ -326,6 +326,19 @@ jobs:
       # secrets: Actions are turned off there, and nothing is pushed
       # unless the forge then says they are off. The token goes to
       # policy's binary alone, as it does for the secondary pull request.
+      # Select recovery only for replacement series. Ordinary/secondary patches
+      # still trial unchanged (placeholder text can be literal base content).
+      # No recovered bytes replace the checked artifact. Refuse pushes with
+      # added placeholders until draft can be enforced before publication.
+      - name: Check inference-address recovery routing
+        id: recovery
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        env:
+          CHECKED_ARTIFACT: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" recovery-preflight --checked "$GH_AW_TMP" --policy "$GH_AW_TMP/policy.json" \
+            --artifact-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts/$CHECKED_ARTIFACT" >> "$GITHUB_OUTPUT"
       - name: Fork the output repository for the pull request
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
@@ -385,21 +398,29 @@ jobs:
         id: trial
         env:
           CURRENT_BASE: ${{ steps.fork.outputs.current-base }}
+          RECOVER: ${{ steps.recovery.outputs.replacement-recovery }}
+          GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUSH_TOKEN }}
+          CHECKED_ARTIFACT: ${{ fromJSON(inputs.check).outputs.artifact-id }}
         run: |
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0
           base=$(jq -er '.patch.base_commit' "$REPORT")
           if jq -e '.patch.commit_files != null' "$REPORT" > /dev/null; then
             chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+            recovery=()
+            if [ "${RECOVER:-false}" = true ]; then recovery=(--policy "$GH_AW_TMP/policy.json"); fi
             "$RUNNER_TEMP/apply-binary/agentic-job" replacement trial --report "$REPORT" \
               --series "$GH_AW_TMP/replacement.json" --config "$GH_AW_TMP/config.json" \
-              --current-base "$CURRENT_BASE" --remote "https://github.com/$REPO" --temp "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
+              --current-base "$CURRENT_BASE" --remote "https://github.com/$REPO" --temp "$RUNNER_TEMP" "${recovery[@]}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git merge-base --is-ancestor "$base" refs/agentic-job/target-base ||
             { echo "::error::the patch starts from $base, which is not a commit of the $BASE fetched above"; exit 1; }
           git worktree add --quiet --detach "$RUNNER_TEMP/trial" "$base"
-          git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP/$(jq -er '.patch.file' "$REPORT")"
+          if ! git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP/$(jq -er '.patch.file' "$REPORT")"; then
+            echo "::error::patch did not apply; ordinary old-side recovery is unsupported. Original checked hand-back: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts/$CHECKED_ARTIFACT"
+            exit 1
+          fi
           git -C "$RUNNER_TEMP/trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
           jq -er '.patch.files | select(type == "array" and length > 0) | .[]' "$REPORT" | LC_ALL=C sort > "$RUNNER_TEMP/checked-files"
           diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"
@@ -416,6 +437,7 @@ jobs:
         id: complete
         env:
           EXIT: ${{ (fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.policy).external-run-id != '') && '0' || fromJSON(inputs.agent).outputs.exit }}
+          ADDED_PLACEHOLDERS: ${{ steps.recovery.outputs.added-placeholders }}
         run: |
           case "${EXIT:-0}" in
             0) checkpoint=$(jq -r '.checkpoint.reason // ""' "$REPORT") ;;
@@ -423,6 +445,10 @@ jobs:
             *) checkpoint=cap ;;
           esac
           case "$checkpoint" in ''|budget|runtime|cap|incomplete) ;; *) echo '::error::check reported an unknown checkpoint reason'; exit 1 ;; esac
+          if [ "${ADDED_PLACEHOLDERS:-0}" != 0 ]; then
+            checkpoint=incomplete
+            echo '::warning::Added inference-address placeholders remain redacted; keeping the pull request in draft for manual review'
+          fi
           ready=$(jq --arg checkpoint "$checkpoint" \
             '$checkpoint == "" and ([.create_pull_request, .push_to_pull_request_branch] | any(.ready_when_complete == true))' "$GH_AW_TMP/config.json")
           printf '%s\n' "checkpoint=$checkpoint" "ready=$ready" | tee -a "$GITHUB_OUTPUT"
@@ -1073,6 +1099,7 @@ jobs:
         env:
           SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECKED_ARTIFACT: ${{ fromJSON(inputs.check).outputs.artifact-id }}
         run: |
           jq -e --slurpfile policy "$GH_AW_TMP/policy.json" '($policy[0].secondary_pull_request.repo // null) as $repo |
             $repo != null and (.secondary_patch != null or any(.items[]; .type == "create_pull_request" and .repo == $repo))' "$REPORT" > /dev/null || exit 0
@@ -1082,7 +1109,7 @@ jobs:
             --run-id "$GITHUB_RUN_ID" --run-url "$RUN_URL" > "$RUNNER_TEMP/secondary.log" 2>&1 || state=$?
           cat "$RUNNER_TEMP/secondary.log"
           { printf '### The secondary pull request\n\n'; sed 's/^/    /' "$RUNNER_TEMP/secondary.log"; } >> "$GITHUB_STEP_SUMMARY"
-          [ "$state" = 0 ] || { echo failed=true >> "$GITHUB_OUTPUT"; echo "::error::the secondary pull request was not opened; the summary says why"; exit 1; }
+          [ "$state" = 0 ] || { echo failed=true >> "$GITHUB_OUTPUT"; echo "::error::the secondary pull request was not opened; the summary says why. Old-side recovery is unsupported. Original checked hand-back: $RUN_URL/artifacts/$CHECKED_ARTIFACT"; exit 1; }
       # A continuation under `ready_when_complete`: once its push is on the
       # branch, the pull request is marked ready if the work is complete,
       # and made a draft again at a checkpoint. This is the one place apply

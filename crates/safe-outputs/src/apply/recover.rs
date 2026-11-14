@@ -6,7 +6,7 @@
 //! There is deliberately no filesystem, git or logging access here. The
 //! opt-in replacement trial authenticates its public preimage; other callers
 //! must do the same, keep the result application-only, and use it for both trial
-//! and publication. No workflow enables recovery. Never use the producer's
+//! and publication. Apply enables this only for replacement series. Never use the producer's
 //! checkout as the preimage source.
 
 use std::collections::BTreeSet;
@@ -22,6 +22,30 @@ use crate::contract::{COMMIT_RE, PatchRules};
 const PLACEHOLDER: &str = "<inference-address>";
 const MAX_BYTES: usize = 1 << 20;
 const MAX_FILES: usize = 50;
+
+/// Safe counts from a mail's diff, not its message. This deliberately errs on
+/// the side of treating placeholder-bearing diff metadata as recovery work;
+/// it is a routing/refusal guard, not permission to apply an unchecked mail.
+#[derive(Default)]
+pub struct Placeholders {
+    pub old: usize,
+    pub added: usize,
+}
+
+pub fn placeholders(mail: &str) -> Placeholders {
+    let mut counts = Placeholders::default();
+    if let Some((_, diff)) = mail.split_once("\ndiff --git ") {
+        for line in diff.lines() {
+            let count = line.matches(PLACEHOLDER).count();
+            if line.starts_with([' ', '-']) {
+                counts.old += count;
+            } else if line.starts_with('+') {
+                counts.added += count;
+            }
+        }
+    }
+    counts
+}
 
 static HUNK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@")

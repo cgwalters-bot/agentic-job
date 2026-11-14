@@ -105,7 +105,7 @@ still refuse upload. `[inference] allow-base-address-lines` is a legacy no-op.
 Read inference addresses from runtime configuration/environment, never copy a
 deployment's address into code.
 
-### Old-side patch recovery (not enabled)
+### Old-side patch recovery
 
 The `safe_outputs::apply::recover::reconstruct` library primitive
 can reconstruct context and removed lines from an authenticated public
@@ -145,16 +145,29 @@ restored lines and added placeholders are safe step outputs; added placeholders
 are never restored, and the command warns to keep them in draft for review.
 Callers must enforce that draft state before publishing.
 
-This is not yet a fix for
-[tracker#1309](https://github.com/cgwalters-forge/tracker/issues/1309): no workflow
-enables recovery. Native, legacy and secondary publication remain unchanged
-and can still fail on redacted old-side lines. Before enabling recovery, the
-workflow must enforce the added-line draft warning and integrate identical
-revalidated, application-only bytes across those publishers (or explicitly
-refuse unsupported paths with a retained-artifact recovery link). Recovered
-bytes must never enter logs, uploaded patches or publication identity receipts.
-Live hosted PR-publication proof after deployment and moving wrapper addresses
-into deployment configuration remain follow-ups.
+The shipped apply workflow runs `recovery-preflight` against the authenticated
+checked upload before forking or publishing anything. It selects recovered
+replacement trials only when old-side placeholders occur in a public GitHub
+series. The trial receives the apply credential for nondisclosing validation;
+the publication guard pushes its built objects, never the redacted input mails.
+Added placeholders on ordinary, replacement or secondary patches force the
+automatic readiness decision to draft, with a warning in the job log. Pushes
+with added placeholders are refused: the existing readiness opt-in cannot
+guarantee a previously-ready PR is draft before publication. An explicit request
+to mark work ready (or update it to non-draft) in that hand-back is also refused.
+Ordinary private/CRLF replacements without recovery retain their existing path.
+
+Ordinary native/legacy patch and secondary recovery remain unsupported. These
+paths still try the original bytes, since placeholder text can be literal base
+content. Application failures link the retained redacted checked artifact for
+manual recovery, without overwriting it with recovered bytes. This does **not**
+yet fix the original new-PR publication
+failure in [tracker#1309](https://github.com/cgwalters-forge/tracker/issues/1309).
+Standalone publisher entry points are unchanged; they do not reconstruct lines.
+Recovered bytes must never enter logs, uploaded patches or publication identity
+receipts. Ordinary-patch integration, live hosted PR-publication proof after
+deployment and moving wrapper addresses into deployment configuration remain
+follow-ups.
 
 ### Long rate-limit waits
 

@@ -9,10 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
-- Prepare exact recovery of redacted inference addresses on patch
-  context/removed lines, with an opt-in trusted replacement-series trial.
-  No workflow enables recovery yet; old-side redaction can still prevent
-  publication (tracker#1309).
+- Recover redacted inference addresses on replacement-series context/removed
+  lines from trusted public preimages during apply. Added placeholders keep
+  new work draft and are refused on pushes. Ordinary and secondary patch
+  recovery remain unsupported; failures link the retained artifact (tracker#1309).
 
 - Standalone container runners may explicitly delegate host isolation with
   `[host] isolation = "external"`. Summaries and hand-back metadata record

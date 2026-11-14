@@ -72,6 +72,8 @@ pub enum Command {
     /// Rebuild and push a checked replacement series of a pull request's branch
     #[command(subcommand)]
     Replacement(crate::apply::replacement::Command),
+    /// Route old-side recovery and count added placeholders before publication
+    RecoveryPreflight(crate::apply::recovery::Args),
     /// Read, with GH_TOKEN, the pull request a run pushes to and the repository its commit may go to
     #[command(subcommand)]
     Push(crate::apply::push::Command),
@@ -133,6 +135,7 @@ impl Command {
             Self::Publish(args) => crate::apply::publish::run(args),
             Self::SecondaryPullRequest(args) => crate::apply::secondary::run(args),
             Self::Replacement(command) => command.run(),
+            Self::RecoveryPreflight(args) => crate::apply::recovery::run(args),
             Self::Push(command) => command.run(),
             Self::Status(args) => crate::apply::status::run(args),
             Self::Diagnostics(command) => command.run(),

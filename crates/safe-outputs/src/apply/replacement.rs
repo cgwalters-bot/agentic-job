@@ -349,25 +349,15 @@ fn apply_recovered(
     temp: &Path,
     preparation: &Preparation<'_>,
 ) -> Result<Applied> {
-    let diff = mail
-        .split_once("\ndiff --git ")
-        .map_or("", |(_, diff)| diff);
-    let needs_recovery = diff
-        .lines()
-        .any(|line| line.starts_with([' ', '-']) && line.contains("<inference-address>"));
-    if !needs_recovery {
+    let placeholders = super::recover::placeholders(mail);
+    if placeholders.old == 0 {
         // Preserve ordinary replacement compatibility (CRLF, large preimages,
         // missing final newlines and credential-shape fixture warnings). Only
         // old-side recovery needs the stricter reconstruction restrictions.
         count_application_mail(mail, preparation)?;
-        preparation.added.set(
-            preparation.added.get()
-                + diff
-                    .lines()
-                    .filter(|line| line.starts_with('+'))
-                    .map(|line| line.matches("<inference-address>").count())
-                    .sum::<usize>(),
-        );
+        preparation
+            .added
+            .set(preparation.added.get() + placeholders.added);
         let file =
             tempfile::NamedTempFile::new_in(temp).context("creating private application mail")?;
         return apply_mail(dir, file.path(), mail, checked);

@@ -82,7 +82,8 @@ fn replacement_recovery_cli_binds_policy_credentials_and_safe_outputs() {
     std::fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
     std::fs::write(
         &report_path,
-        serde_json::to_vec(&json!({"ok": true, "errors": [], "patch": checked})).unwrap(),
+        serde_json::to_vec(&json!({"ok": true, "errors": [], "items": [], "patch": checked}))
+            .unwrap(),
     )
     .unwrap();
     std::fs::write(
@@ -91,6 +92,63 @@ fn replacement_recovery_cli_binds_policy_credentials_and_safe_outputs() {
     )
     .unwrap();
     std::fs::write(&series_path, &series).unwrap();
+    let preflight = Command::new(BIN)
+        .args(["recovery-preflight", "--checked"])
+        .arg(temp.path())
+        .arg("--policy")
+        .arg(&policy_path)
+        .args([
+            "--artifact-url",
+            "https://github.com/example-org/example/actions/runs/1/artifacts/2",
+        ])
+        .output()
+        .unwrap();
+    assert!(preflight.status.success(), "{preflight:?}");
+    assert_eq!(
+        String::from_utf8(preflight.stdout).unwrap(),
+        "replacement-recovery=true\nadded-placeholders=1\n"
+    );
+    // Exercise the shipped shell's routing, not just a hand-built command.
+    let workflow = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/apply.yml"),
+    )
+    .unwrap();
+    let documents = yaml_rust2::YamlLoader::load_from_str(&workflow).unwrap();
+    let trial = documents[0]["jobs"]["apply"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("trial"))
+        .unwrap();
+    let binary_dir = temp.path().join("apply-binary");
+    std::fs::create_dir(&binary_dir).unwrap();
+    std::os::unix::fs::symlink(BIN, binary_dir.join("agentic-job")).unwrap();
+    git(
+        &consumer,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", producer.display()),
+            "https://github.com/example-org/example",
+        ],
+    );
+    let output_path = temp.path().join("step-output");
+    let output = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", trial["run"].as_str().unwrap()])
+        .current_dir(&consumer)
+        .env("REPORT", &report_path)
+        .env("GH_AW_TMP", temp.path())
+        .env("RUNNER_TEMP", temp.path())
+        .env("CURRENT_BASE", &base)
+        .env("REPO", "example-org/example")
+        .env("RECOVER", "true")
+        .env("GITHUB_OUTPUT", &output_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let outputs = std::fs::read_to_string(output_path).unwrap();
+    assert!(outputs.contains("restored-lines=1\nadded-placeholders=1\n"));
+    assert!(outputs.lines().any(|line| line.starts_with("head=")));
+    assert!(!outputs.contains(address));
     for credential in [None, Some(address)] {
         let mut command = Command::new(BIN);
         command
