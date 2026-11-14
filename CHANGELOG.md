@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Threat-feed downloads cut short stalled attempts so transient timeouts can
+  retry within the existing bounded window; pins and CI's live-feed check stay
+  unchanged (tracker#1268).
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

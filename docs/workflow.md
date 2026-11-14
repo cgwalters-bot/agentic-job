@@ -2394,9 +2394,22 @@ without a feed and only warn: CI's `sandbox` jobs require the feed to
 load, so the next pull request here would show it.
 
 The fetch retries transient curl failures up to three times, with a
-60-second retry window and a 60-second timeout per attempt. The retry
-window is not a total wall-clock cap: the last attempt can finish after
-it. A successful fetch still has to pass the pinned checksum check.
+60-second retry window, a 20-second timeout per attempt and a 5-second
+connect timeout. Transfers below 1,024 bytes/second for 5 seconds time out
+too, leaving room to retry a stalled download. The retry window is not a
+total wall-clock cap: the last attempt can finish after it, for at most
+80 seconds of transfer/backoff time plus process scheduling. A successful
+fetch still has to pass the pinned checksum check.
+
+The [observed timeout](https://github.com/cgwalters-forge/agentic-job/actions/runs/41888399363/job/126779024830)
+used the old 60-second attempt timeout, exhausting the equally long retry
+window in one attempt. A fresh fetch on 2026-11-14 matched the pinned
+checksum: the pin is still served, but the original network stall's cause
+and recurrence are unknown. The `feed_fetch` unit tests exercise stalled
+transfer recovery, download failure without installation and checksum
+rejection through the fetch path. Hosted acceptance still requires the
+resulting PR's sandbox job to print `Threat feed:`; local tests are not
+proof of privileged setup.
 
 Stale pins miss newly listed malware and phishing hosts. To propose updates
 every eight hours, enable the repository variable `THREAT_FEED_REFRESH=true`
