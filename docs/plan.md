@@ -137,6 +137,13 @@ refusals assert their diagnostics. Only the replaced new-check JavaScript test i
 removed; old-tree comparisons, upstream drivers and gated fixtures remain.
 This adds no runtime control or caller setting.
 
+The legacy PR text and mixed-case branch cases also run through Rust's
+`policy`, `collect` and `check` in `tests/check.rs`. Exact collected and checked
+items pin control-character removal, deferred mentions and disallowed-link
+redaction; the branch keeps its case while resolving the lowercase patch filename.
+A plain request is the positive control. The legacy parity cases and gated
+fixture cleanup remain unchanged; no runtime control or caller setting is added.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

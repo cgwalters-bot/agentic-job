@@ -596,6 +596,75 @@ fn a_hand_back_within_the_policy_is_accepted() {
 }
 
 #[test]
+fn pull_request_text_and_branch_survive_collect_and_check() {
+    use serde_json::json;
+
+    for (name, title, body, branch, want_title, want_body) in [
+        (
+            "plain control",
+            "Fix the thing",
+            "Why.",
+            "agent-run-7",
+            "Fix the thing",
+            "Why.",
+        ),
+        (
+            "sanitized text",
+            "Fix\u{1} @example-user's thing",
+            "cc @example-user see https://evil.example/x",
+            "agent-run-7",
+            "Fix @example-user's thing",
+            "cc @example-user see (evil.example/redacted)",
+        ),
+        (
+            "mixed-case branch",
+            "Fix the thing",
+            "Why.",
+            "Agent-Run-7",
+            "Fix the thing",
+            "Why.",
+        ),
+    ] {
+        let run = Run::new();
+        let request = json!({"type": "create_pull_request", "title": title,
+            "body": body, "branch": branch});
+        std::fs::write(run.path("out/outputs.jsonl"), request.to_string()).unwrap();
+        let collected = run.path("collected.json");
+        let output = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{name}: {output:?}");
+        // Mentions remain deferred to publication. Only the patch filename,
+        // not the requested branch itself, is folded to lowercase.
+        let expected = json!([{"type": "create_pull_request", "title": want_title,
+            "body": want_body, "branch": branch}]);
+        let collected_value: Value =
+            serde_json::from_slice(&std::fs::read(&collected).unwrap()).unwrap();
+        assert_eq!(collected_value["errors"], json!([]), "{name}");
+        assert_eq!(collected_value["items"], expected, "{name}");
+
+        let output = run.check(&collected);
+        assert_eq!(output.status.code(), Some(0), "{name}: {output:?}");
+        let verdict = run.verdict();
+        assert_eq!(verdict["ok"], true, "{name}: {verdict}");
+        assert_eq!(verdict["errors"], json!([]), "{name}");
+        assert_eq!(verdict["items"], expected, "{name}");
+        assert_eq!(verdict["patch"]["file"], "aw-agent-run-7.patch", "{name}");
+        assert_eq!(
+            verdict["patch"]["files"],
+            json!(["src/lib.rs", "src/new.rs"]),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn public_base_evidence_cannot_complete_an_incomplete_key() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
