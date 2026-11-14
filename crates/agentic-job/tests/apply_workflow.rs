@@ -918,6 +918,7 @@ fn fork_handler_configuration_preserves_destinations_and_literal_prefixes() {
                 ("PARTIAL", partial),
                 ("TITLE_PREFIX", title),
                 ("BRANCH_PREFIX", branch),
+                ("BASH_ENV", ""),
             ],
         );
         status(&out, 0);
@@ -933,6 +934,7 @@ fn fork_handler_configuration_preserves_destinations_and_literal_prefixes() {
             });
         }
         assert_eq!(actual, expected, "fork={fork:?}, title={title:?}");
+        // Check the runner environment channel too, not only the JSON file.
         let env = fs::read_to_string(dir.path().join("env")).unwrap();
         let exported = env
             .lines()
