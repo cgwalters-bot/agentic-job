@@ -167,6 +167,13 @@ This supplements rather than removes the old-check comparison; the gated fixture
 cleanup and upstream parity disposition above remain unchanged. No runtime control
 or caller setting is added.
 
+The legacy policy corpus's repository/base admission cases also run independently
+in `tests/policy.rs`: listed repositories (including case variants), bot-branch
+globs and nested branches, unlisted targets, malformed names and JSON-shaped
+input. Accepted policies retain the requested identity and limits; refusals emit
+no policy. This supplements rather than removes the old-tree comparison, whose
+cleanup still awaits tracker#1455. No runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

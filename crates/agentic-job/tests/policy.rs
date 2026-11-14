@@ -895,6 +895,88 @@ fn a_bad_bounds_file_is_an_error_and_not_a_refusal() {
     }
 }
 
+/// Repository and base cases from the legacy policy corpus, without its
+/// external checkout. Malformed requests must not emit a partial policy.
+#[test]
+fn corpus_repository_and_base_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let allow = dir.path().join("allow.toml");
+    std::fs::write(
+        &allow,
+        "hosts = ['github.com']\nrepos = ['example-org/project', 'example-bot/home']\n\
+         bases = ['main', 'bot/**']\nmax_outputs = 3\n\
+         max_patch_bytes = 65536\nmax_patch_files = 10\n\
+         [github.outputs]\ncreate_pull_request = { max = 1 }\nnoop = { max = 1 }\n",
+    )
+    .unwrap();
+    for (repo, base, refusal) in [
+        ("example-org/project", "main", None),
+        ("EXAMPLE-ORG/Project", "main", None),
+        ("example-bot/home", "main", None),
+        ("Example-Bot/Home", "main", None),
+        ("example-org/project", "bot/agent-run", None),
+        ("example-org/project", "bot/a/b/c", None),
+        ("other/project", "main", Some("repo")),
+        ("example-bot/project", "main", Some("repo")),
+        ("example-org/project/x", "main", Some("repo")),
+        ("", "main", Some("repo")),
+        ("example-org/project\n", "main", Some("repo")),
+        (
+            "example-org/project\",\"max_outputs\":99,\"x\":\"",
+            "main",
+            Some("repo"),
+        ),
+        ("example-org/project", "release", Some("base")),
+        ("example-org/project", "bot/../main", Some("base")),
+        ("example-org/project", "", Some("base")),
+        ("example-org/project", "-main", Some("base")),
+        ("example-org/project", "bot/a b", Some("base")),
+        ("example-org/project", "main\n", Some("base")),
+        (
+            "example-org/project",
+            "main\",\"max_outputs\":99,\"x\":\"",
+            Some("base"),
+        ),
+        (
+            "example-org/project",
+            "main\n\"max_outputs\": 99",
+            Some("base"),
+        ),
+    ] {
+        let url = format!("https://github.com/{repo}");
+        let output = policy(
+            &allow,
+            &[("--repo", repo), ("--clone-url", &url), ("--base", base)],
+        );
+        let context = format!("repo={repo:?}, base={base:?}: {output:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(refusal.is_some())),
+            "{context}"
+        );
+        if let Some(reason) = refusal {
+            assert!(output.stdout.is_empty(), "{context}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(reason), "{context}");
+            assert!(
+                stderr.lines().all(|line| line.starts_with("error: ")),
+                "{context}"
+            );
+        } else {
+            let admitted: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(admitted["repo"], repo, "{context}");
+            assert_eq!(admitted["clone_url"], url, "{context}");
+            assert_eq!(admitted["base"], base, "{context}");
+            assert_eq!(admitted["max_outputs"], 2, "{context}");
+            assert_eq!(
+                admitted["safe_outputs"]["create_pull_request"]["max"], 1,
+                "{context}"
+            );
+            assert_eq!(admitted["safe_outputs"]["noop"]["max"], 1, "{context}");
+        }
+    }
+}
+
 #[test]
 fn dispatch_profiles_use_the_example_bounds() {
     let allow =
