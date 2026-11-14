@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- GitLab publication now counts nested cross-project closing references toward
+  the existing ten-reference cap, preventing subgroup paths from bypassing it.
+  GitHub and Forgejo filtering and output admission are unchanged.
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

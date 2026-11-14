@@ -49,11 +49,17 @@ const SYNTAX: &[Syntax] = &[
 const MAX_REFERENCES: usize = 10;
 const BREAK: char = '\u{200b}';
 
-// A GitLab namespace path may start with `.`.
-static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)@[\p{L}\p{N}_.][\p{L}\p{N}_./-]*|![0-9]+|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|reopen(?:ed|s)?|implement(?:ed|s)?)\s+(?:[\w.-]+/[\w.-]+)?[#!][0-9]+")
+static TOKENS: LazyLock<Regex> = LazyLock::new(|| tokens(r"[\w.-]+/[\w.-]+"));
+
+// Nested GitLab namespaces must count toward the same closing-reference cap:
+// otherwise a producer can bypass it just by naming a subgroup's project.
+static GITLAB_TOKENS: LazyLock<Regex> = LazyLock::new(|| tokens(r"(?:[\w.-]+/)+[\w.-]+"));
+
+fn tokens(project: &str) -> Regex {
+    // A GitLab namespace path may start with `.`.
+    Regex::new(&format!(r"(?i)@[\p{{L}}\p{{N}}_.][\p{{L}}\p{{N}}_./-]*|![0-9]+|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|reopen(?:ed|s)?|implement(?:ed|s)?)\s+(?:{project})?[#!][0-9]+"))
         .expect("valid notification pattern")
-});
+}
 
 /// BODY with no mention, reference or (on GitLab) quick action left
 /// that would notify or act: FORGE is `github`, `forgejo` or `gitlab`.
@@ -63,10 +69,15 @@ pub fn filter(body: &str, forge: &str) -> String {
         .find(|syntax| syntax.forge == forge)
         .expect("publisher has a syntax entry");
     let mut references = 0;
+    let tokens = if forge == "gitlab" {
+        &*GITLAB_TOKENS
+    } else {
+        &*TOKENS
+    };
     let mut filter_text = |text: &str, before: Option<char>, _: Option<char>| {
         let mut result = String::new();
         let mut end = 0;
-        for token in TOKENS.find_iter(text) {
+        for token in tokens.find_iter(text) {
             result.push_str(&text[end..token.start()]);
             let value = token.as_str();
             let previous = text[..token.start()].chars().next_back().or(before);
@@ -228,6 +239,43 @@ mod tests {
                     &keyword[1..]
                 )
             );
+        }
+    }
+
+    #[test]
+    fn nested_gitlab_references_share_the_cap() {
+        for keyword in ["Closes", "Fixes", "Resolves", "Implements"] {
+            for project in [
+                "group/project",
+                "group/subgroup/project",
+                "group/a/b/project",
+            ] {
+                let reference = format!("{keyword} {project}#2\n");
+                let prefix = reference.repeat(MAX_REFERENCES);
+                assert_eq!(filter(&prefix, "gitlab"), prefix);
+                let input = format!("{prefix}Closes #3\n{reference}");
+                let expected = format!(
+                    "{prefix}C{BREAK}loses #{BREAK}3\n{}{BREAK}{} {project}#{BREAK}2\n",
+                    &keyword[..1],
+                    &keyword[1..]
+                );
+                assert_eq!(filter(&input, "gitlab"), expected, "{input}");
+                assert_eq!(filter(&expected, "gitlab"), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_gitlab_references_in_code_are_counted() {
+        let prefix = "`Closes group/subgroup/project#1`\n".repeat(MAX_REFERENCES);
+        assert_eq!(
+            filter(&format!("{prefix}Fixes #2"), "gitlab"),
+            format!("{prefix}F{BREAK}ixes #{BREAK}2")
+        );
+        // Other forges do not have GitLab's nested project syntax.
+        for forge in ["github", "forgejo"] {
+            let input = "Closes group/subgroup/project#1\n".repeat(MAX_REFERENCES + 1);
+            assert_eq!(filter(&input, forge), input);
         }
     }
 }

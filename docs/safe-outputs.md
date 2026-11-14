@@ -2724,6 +2724,17 @@ and approval verdicts. Single-line inline comments are supported as described ab
 
 ### Publishing to GitLab
 
+The publication filter counts nested cross-project closing references such as
+`Closes group/subgroup/project#12` toward the same ten-reference cap as
+`Closes #12` and `Closes group/project#12`. Later matches have their keyword
+and reference broken with zero-width spaces, including in purported code,
+so a subgroup path cannot bypass the cap. This extends the existing filter,
+not the allowed output types or targets; GitHub and Forgejo parsing is unchanged.
+This is a cap on recognized keyword/reference pairs, not a complete parser for
+[GitLab's closing patterns](https://docs.gitlab.com/user/project/issues/managing_issues/#default-closing-pattern):
+reference lists, full-URL references and administrator-customized patterns are
+not covered. Review the issues-to-close widget before merging an MR.
+
 CI's `gitlab` job runs apply against a pinned, throwaway GitLab CE container
 on loopback, in [crates/agentic-job/tests/gitlab.rs](../crates/agentic-job/tests/gitlab.rs).
 The test bootstraps its own bot, target project, fork and runtime-generated PAT
