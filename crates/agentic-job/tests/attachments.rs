@@ -94,7 +94,7 @@ fn kind_mode_and_repository_bounds_matrix() {
                         admitted[0].head_repo.as_deref(),
                         match kind {
                             "issue" => None,
-                            "pull-request" => Some(FORK),
+                            "pull-request" => (mode == "write").then_some(FORK),
                             _ => Some(REPO),
                         }
                     );
@@ -283,65 +283,82 @@ fn writes_do_not_bypass_output_or_head_repository_bounds() {
 }
 
 #[test]
-fn read_heads_are_verified_forks_but_need_no_bounds() {
-    // Another author's public fork outside bounds may be read, never written.
-    const OTHER: &str = "example-other/example";
-    let mut other_head = |path: &str| -> Result<Value> {
-        Ok(match path {
-            "repos/example-other/example" => json!({"full_name": OTHER, "private": false,
-                "visibility": "public", "fork": true, "parent": {"full_name": REPO},
-                "clone_url": format!("https://github.com/{OTHER}")}),
-            _ => {
-                let mut response = metadata(path)?;
-                if path.ends_with("/pulls/8") {
-                    response["head"]["repo"]["full_name"] = OTHER.into();
-                    response["user"]["login"] = "example-other".into();
-                }
-                response
+fn read_heads_never_consult_the_head_repository() {
+    // Another author's fork outside bounds, or a deleted one, may be read but
+    // never written: a read head comes from the target's pull ref.
+    for head_repo in [json!({"full_name": "example-other/example"}), Value::Null] {
+        let mut other_head = |path: &str| -> Result<Value> {
+            assert!(
+                path != format!("repos/{FORK}") && !path.contains("example-other"),
+                "read-mode admission read the head repository: {path}"
+            );
+            let mut response = metadata(path)?;
+            if path.ends_with("/pulls/8") {
+                response["head"]["repo"] = head_repo.clone();
+                response["user"]["login"] = "example-other".into();
             }
-        })
-    };
-    let admitted = admit(
-        &request("pull-request", "read"),
-        &bounds(),
-        Some(&bounds()),
-        false,
-        &mut other_head,
-    )
-    .unwrap();
-    assert_eq!(admitted[0].head_repo.as_deref(), Some(OTHER));
-    assert!(admitted[0].write_policy.is_none());
-    assert!(
-        admit(
-            &request("pull-request", "write"),
-            &bounds(),
-            None,
-            false,
-            &mut other_head
-        )
-        .is_err()
-    );
-    for (pointer, value) in [
-        ("/full_name", json!("example-bot/other")),
-        ("/private", json!(true)),
-        ("/visibility", json!("internal")),
-        ("/fork", json!(false)),
-        ("/parent/full_name", json!("other/repo")),
-    ] {
-        let result = admit(
+            Ok(response)
+        };
+        let admitted = admit(
             &request("pull-request", "read"),
             &bounds(),
-            None,
+            Some(&bounds()),
             false,
-            &mut |path| {
-                let mut response = metadata(path)?;
-                if path == format!("repos/{FORK}") {
-                    *response.pointer_mut(pointer).unwrap() = value.clone();
-                }
-                Ok(response)
-            },
-        );
-        assert!(result.is_err(), "{pointer}: {result:?}");
+            &mut other_head,
+        )
+        .unwrap();
+        assert_eq!(admitted[0].head.as_deref(), Some(SHA));
+        assert_eq!(admitted[0].head_repo, None);
+        assert!(admitted[0].write_policy.is_none());
+    }
+    let result = admit(
+        &request("pull-request", "write"),
+        &bounds(),
+        None,
+        false,
+        &mut |path| {
+            let mut response = metadata(path)?;
+            if path.ends_with("/pulls/8") {
+                response["head"]["repo"] = Value::Null;
+            }
+            Ok(response)
+        },
+    );
+    assert!(result.is_err(), "{result:?}");
+}
+
+#[test]
+fn write_attachments_share_the_run_output_limit() {
+    let issue: Value = serde_json::from_str(&request("issue", "write")).unwrap();
+    let pull: Value = serde_json::from_str(&request("pull-request", "write")).unwrap();
+    let branch: Value = serde_json::from_str(&request("branch", "read")).unwrap();
+    let text = json!([issue[0], pull[0], branch[0]]).to_string();
+    // The issue's policy grants a comment; the PR's grants a push and up to
+    // two comments, its own max_outputs. Together: three outputs.
+    let comments = |max| {
+        let mut bounds = bounds();
+        let limits = &mut bounds.github.as_mut().unwrap().outputs.types;
+        limits.get_mut("add_comment").unwrap().max = max;
+        bounds
+    };
+    assert_eq!(
+        admit(&text, &comments(3), None, false, &mut metadata)
+            .unwrap()
+            .len(),
+        3
+    );
+    let mut total = comments(3);
+    total.max_outputs = 2;
+    for (caller, organization) in [
+        (&total, None),
+        (&comments(3), Some(&total)),
+        // Too few comments for 1 + 1, or for 1 + 2.
+        (&bounds(), None),
+        (&comments(3), Some(&bounds())),
+        (&comments(2), None),
+    ] {
+        let result = admit(&text, caller, organization, false, &mut metadata);
+        assert!(result.is_err(), "{result:?}");
     }
 }
 

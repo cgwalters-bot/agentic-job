@@ -254,9 +254,9 @@ File and artifact kinds are not implemented.
 All repositories must be public and admitted by both caller and optional
 organization bounds; `own_author` never bypasses repository admission here.
 Read-mode PRs and branches resolve to exact commits, without granting writes.
-A PR's head repository must be the target or its public fork in either mode,
-but a read-mode head need not be in bounds, so another author's PR can be read;
-its head must be fetched from the target's pull ref, not the head repository.
+A read-mode PR's head is fetched from the target's `refs/pull/N/head` and its
+head repository is never consulted, so another author's PR can be read even
+from a fork outside bounds or a deleted one.
 Issue writes compile the existing `add_comment` policy. PR writes compile
 `push_to_pull_request_branch` and `add_comment` together, preserving existing
 branch, credential, patch and output limits. Both bounds files must explicitly
@@ -264,14 +264,18 @@ name the PR author in `own_author`. A PR's head repository must independently
 fit bounds and be the target or its public fork. Attaching an upstream PR does
 not grant a push to upstream: its permitted push destination is its fork head.
 Write-mode branches refuse because no branch-push safe output exists.
+Each write policy is compiled alone, so the outputs, comments and pushes all
+compiled write policies grant together must fit `max_outputs` and each type's
+`max` in every bounds file.
 
 This API takes a caller-owned, bounded, read-only metadata reader. It does not
 fetch bodies, comments, reviews or diffs, create check artifacts, route requests
 or publish. Remaining work must wire trusted dispatch inputs and full read-only
 context, carry exact attachment/head identities through the hand-back and
-check/apply, enforce the run's aggregate output limits, repeat live push safety
-checks and test an issue run updating an attached bot PR end to end. Review-thread
-replies and the conversion of `fix` to a write attachment remain undone too.
+check/apply, count attachment writes against the item's own outputs, repeat
+live push safety checks and test an issue run updating an attached bot PR end
+to end. Review-thread replies and the conversion of `fix` to a write attachment
+remain undone too.
 
 ## Stacked proposals: library groundwork only
 

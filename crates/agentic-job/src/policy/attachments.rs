@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{Bounds, Compile, Kind, Policy, Request, admits_repo, intersect};
+use safe_outputs::apply::ADD_COMMENT;
 use safe_outputs::contract::{BASE_RE, COMMIT_RE, PULL_NUMBER_RE, REPO_RE, dotted};
 use safe_outputs::{Forge, PUSH_TO_PULL_REQUEST_BRANCH};
 
@@ -72,9 +73,8 @@ impl Attachment {
 #[derive(Debug)]
 pub struct Admitted {
     pub attachment: Attachment,
-    /// Repository containing the pinned head, distinct from a PR's target. For a
-    /// read-mode PR it is only checked to be the target or its public fork, not
-    /// admitted by bounds: fetch a read head from the target's pull ref, never here.
+    /// Repository containing the pinned head, distinct from a PR's target. None
+    /// for a read-mode PR: fetch its head from the target's `refs/pull/N/head`.
     pub head_repo: Option<String>,
     /// Exact checkout commit for a PR or branch; issues have no checkout.
     pub head: Option<String>,
@@ -92,7 +92,9 @@ pub struct Admitted {
 /// require explicit `own_author` bounds as well as branch admission. A fork head
 /// must independently fit repository bounds, so admitting an upstream PR alone
 /// does not authorize a push to its author's repository. A read-mode PR may come
-/// from any author's public fork (#3692): reading needs only the target in bounds.
+/// from any author's fork, even a deleted one (#3692): reading needs only the
+/// target in bounds. The compiled write policies together stay within every
+/// bounds file's `max_outputs` and per-type `max`.
 /// Apply must still repeat its live ownership, protected/default-branch and lease
 /// checks. This groundwork deliberately cannot replace those checks.
 pub fn admit(
@@ -158,7 +160,7 @@ pub fn admit(
         };
         ensure!(seen.insert(identity), "duplicate attachment target");
     }
-    attachments
+    let admitted = attachments
         .into_iter()
         .map(|attachment| {
             let repo = attachment.repo();
@@ -227,13 +229,24 @@ pub fn admit(
                         "attachment is not the requested pull request"
                     );
                     let head = commit(&pull["head"]["sha"])?;
+                    // A read head is fetched from the target's pull ref, so its
+                    // repository, which may be deleted or outside bounds, is
+                    // never consulted.
+                    if *mode == Mode::Read {
+                        return Ok(Admitted {
+                            attachment,
+                            head_repo: None,
+                            head: Some(head),
+                            write_policy: None,
+                        });
+                    }
                     let head_repo = pull["head"]["repo"]["full_name"]
                         .as_str()
                         .filter(|name| REPO_RE.is_match(name) && !dotted(name))
                         .context("attachment PR has no valid head repository")?;
                     // Re-read the head repository rather than trusting the embedded
-                    // PR object, in both modes. Cross-repository heads must be
-                    // public forks of the target.
+                    // PR object. Cross-repository heads must be public forks of
+                    // the target.
                     let head_metadata = read(&format!("repos/{head_repo}"))?;
                     ensure!(
                         same(&head_metadata["full_name"], head_repo)
@@ -244,7 +257,7 @@ pub fn admit(
                                     && same(&head_metadata["parent"]["full_name"], repo))),
                         "attachment head must be the target or its public fork"
                     );
-                    let policy = if *mode == Mode::Write {
+                    let policy = {
                         ensure!(
                             pull["state"] == "open",
                             "write attachment requires an open PR"
@@ -297,8 +310,6 @@ pub fn admit(
                             },
                             read,
                         )?)
-                    } else {
-                        None
                     };
                     (Some(head_repo.to_owned()), Some(head), policy)
                 }
@@ -326,7 +337,41 @@ pub fn admit(
                 write_policy,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    // Each write policy is compiled alone, so cap what they grant together.
+    let policies: Vec<_> = admitted
+        .iter()
+        .filter_map(|admitted| admitted.write_policy.as_ref())
+        .collect();
+    let total: u32 = policies.iter().map(|policy| policy.max_outputs).sum();
+    let pushes: u32 = policies
+        .iter()
+        .filter_map(|policy| policy.safe_outputs.push_to_pull_request_branch.as_ref())
+        .map(|push| push.max)
+        .sum();
+    let comments: u32 = policies
+        .iter()
+        .filter_map(|policy| policy.safe_outputs.others.get(ADD_COMMENT))
+        .map(|limit| limit.max)
+        .sum();
+    for bounds in &all_bounds {
+        ensure!(
+            total <= bounds.max_outputs,
+            "write attachments grant {total} outputs, more than max_outputs {}",
+            bounds.max_outputs
+        );
+        for (output, granted) in [
+            (ADD_COMMENT, comments),
+            (PUSH_TO_PULL_REQUEST_BRANCH, pushes),
+        ] {
+            let max = bounds.outputs().get(output).map_or(0, |limit| limit.max);
+            ensure!(
+                granted <= max,
+                "write attachments grant {granted} {output} outputs, more than its max {max}"
+            );
+        }
+    }
+    Ok(admitted)
 }
 
 fn compile(
