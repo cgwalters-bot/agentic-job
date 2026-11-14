@@ -196,6 +196,14 @@ destinations, the deliberately misdirected fixture and detection of a refused
 comment appearing in a run's results; they do not demonstrate a live forge run.
 Runtime workflows and upstream parity drivers are unchanged.
 
+Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
+the real collector/checker accepts the matching request, patch and base, and
+refuses missing, extra or renamed patches, a different request branch, an orphan
+patch, and missing or mismatched base repository/ref/commit metadata. This makes
+those corpus behaviors testable without Node or external checkouts. The legacy
+old-tree/upstream comparisons remain intact; this is preparation for cleanup,
+not evidence that the parity or fixture-deletion prerequisites are satisfied.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
