@@ -151,6 +151,12 @@ or truncated diff, or absent line refuses the entire batch before writing an
 earlier valid finding. Check refuses inline output without explicit bounds, a
 merge-request target and a trusted review head. These tests exercise the CLI
 through the shared publisher; they do not prove live GitLab or caller activation.
+The same suite (`cargo test --locked -p safe-outputs --features test-support
+--test cli_gitlab_inline`) changes each member of the diff SHA triple between
+the target reads around diff retrieval. Apply refuses before any write, including
+when an earlier finding has already passed preflight. This guards against posting
+a finding with a position computed from a diff that changed while it was read;
+it does not make publication atomic with subsequent changes on GitLab.
 
 Standalone close-operation loopback tests keep an issue and merge request with
 the same number distinct, even when the trusted default comment target is the

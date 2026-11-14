@@ -16,6 +16,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(fault: &str) -> Self {
+        Self::with_ref_change(fault, None)
+    }
+
+    fn with_ref_change(fault: &str, change: Option<(&'static str, usize)>) -> Self {
         let mut mr: Value = serde_json::from_str(include_str!("data/inline/gitlab.json")).unwrap();
         let mut diffs: Value =
             serde_json::from_str(include_str!("data/inline/gitlab-diffs.json")).unwrap();
@@ -28,12 +32,21 @@ impl Fixture {
             "ok" => {}
             _ => panic!("unknown fault"),
         }
+        let mut target_reads = 0;
         let (server, requests) = serve(100, move |request| {
             let body = match request.line.trim_end_matches(" HTTP/1.1") {
                 "GET /api/v4/projects/owner%2Fname" => {
                     json!({"id":1,"path_with_namespace":"owner/name","visibility":"public"})
                 }
-                "GET /api/v4/projects/1/merge_requests/9" => mr.clone(),
+                "GET /api/v4/projects/1/merge_requests/9" => {
+                    target_reads += 1;
+                    if let Some((key, read)) = change
+                        && target_reads == read
+                    {
+                        mr["diff_refs"][key] = json!("4".repeat(40));
+                    }
+                    mr.clone()
+                }
                 "GET /api/v4/projects/1/merge_requests/9/diffs?page=1&per_page=100" => {
                     diffs.clone()
                 }
@@ -183,6 +196,44 @@ fn standalone_inline_live_refusals_preflight_the_whole_batch() {
             requests.iter().all(|r| r.line.starts_with("GET ")),
             "{requests:#?}"
         );
+    }
+}
+
+#[test]
+fn standalone_inline_ref_changes_refuse_before_any_write() {
+    for (key, expected) in [
+        ("base_sha", "inline diff changed while reading"),
+        ("start_sha", "inline diff changed while reading"),
+        ("head_sha", "inline diff head is stale"),
+    ] {
+        // Each finding reads the target before and after its diff. Change it
+        // on the second read, or only after the first finding has preflighted.
+        for changed_read in [2, 4] {
+            let f = Fixture::with_ref_change("ok", Some((key, changed_read)));
+            f.input(&[finding("RIGHT", 2), finding("LEFT", 2)]);
+            f.ok("check");
+            assert!(f.requests.try_iter().next().is_none());
+            let result = f.run("apply");
+            assert!(!result.status.success(), "{key}, read {changed_read}");
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                error.contains(expected),
+                "{key}, read {changed_read}: {error}"
+            );
+            let requests: Vec<_> = f.requests.try_iter().collect();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.line == "GET /api/v4/projects/1/merge_requests/9 HTTP/1.1")
+                    .count(),
+                changed_read,
+                "{requests:#?}"
+            );
+            assert!(
+                requests.iter().all(|r| r.line.starts_with("GET ")),
+                "{requests:#?}"
+            );
+        }
     }
 }
 
