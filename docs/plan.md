@@ -212,6 +212,14 @@ A published-PR control keeps the same diagnostic from turning success into failu
 JavaScript test and its result helper, not upstream handler execution, and proves
 local behavior only; no runtime control or caller setting changes.
 
+The create-issue admission corpus now runs in `tests/create_issue.rs` through
+Rust `policy`, `collect` and `check`: per-type counts, required fields, parent-link
+refusal and case-insensitive label allow/block rules. Each case has fresh artifacts;
+accepted cases assert exact items and refused cases assert diagnostics. Label bounds
+come from TOML policy generation rather than modifying serialized policy. Only the
+replaced JavaScript test is removed; the key fixture, old-tree setup and upstream
+parity drivers remain. No runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
