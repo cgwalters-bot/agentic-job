@@ -122,6 +122,13 @@ inline findings, fork-pushed Draft MRs and head-leased updates, including
 caller-accepted own branches. Caller status/summary lifecycle flags are not
 safe-output kinds and are not part of this standalone interface.
 
+The standalone CLI's loopback tests exercise issue creation through check and
+apply, including exact project routing, allowed labels and publisher provenance.
+A policy-allowed label missing from the live project's label list refuses the
+whole batch before any write, including an earlier valid note: GitLab must not
+implicitly create it. This is local API-contract coverage, not live-service or
+CI artifact-provenance proof.
+
 GitLab's trusted context has a different shape: `policy` is the existing full
 effective policy JSON (the same object `agentic-job policy` emits), `server` is
 the forge origin, and `run_url` is the trusted CI run page. Optional `item` and
