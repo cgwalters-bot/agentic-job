@@ -364,6 +364,16 @@ The follow-ups for running per-job VM jobs there are the
 
 ## Open work
 
+Staged-apply safety contracts now run in
+`crates/agentic-job/tests/apply_workflow.rs`: default-off policy forwarding,
+credentialed writer gates, escaped previews and empty publication receipts.
+The tests execute the shipped preview and receipt shell steps; their duplicate
+JavaScript assertions are removed from `workflow/apply.test.cjs`. Runtime
+behavior, permissions and caller settings are unchanged. This is independent
+of the credential and detector ports in #3712 and #3724. Remaining local
+shell-step tests can move next; preserve actual upstream-handler execution
+coverage and the #2026/tracker#1455 fixture-cleanup prerequisite above.
+
 The secure-host image holds the secure-host binary and no agent code
 ([#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070)),
 but only CI runs such an image yet, from its archive; the published

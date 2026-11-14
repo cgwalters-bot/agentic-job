@@ -396,6 +396,52 @@ fn applied_all_requires_publication_and_distinguishes_blocked_results() {
 }
 
 #[test]
+fn staged_apply_skips_credentialed_writers_and_defaults_off() {
+    let doc = definition("apply.yml");
+    let credential = Regex::new(r"secrets\.|github\.token|gh api|git push").unwrap();
+    let read_only = [
+        "The checked outputs are this run's check's",
+        "Require policy's binary",
+        "Release external output only after trusted detection",
+    ];
+    let mut skipped = 0;
+    for step in doc["jobs"]["apply"]["steps"].as_vec().unwrap() {
+        if read_only.contains(&step["name"].as_str().unwrap_or_default())
+            || !credential.is_match(&format!("{step:?}"))
+        {
+            continue;
+        }
+        let condition = step["if"].as_str().unwrap_or_default();
+        assert!(
+            !condition.contains("||")
+                && (condition.contains("fromJSON(inputs.policy).apply-staged != 'true'")
+                    || condition.contains("steps.apply.outcome != 'skipped'")),
+            "credentialed step must skip staged apply: {step:?}"
+        );
+        skipped += 1;
+    }
+    assert!(skipped >= 6, "inventory credentialed steps: {skipped}");
+    let handlers = step(&doc, "apply", "Apply the outputs with gh-aw's handlers");
+    assert_eq!(handlers["id"].as_str(), Some("apply"));
+    assert_eq!(
+        handlers["if"].as_str(),
+        Some("${{ fromJSON(inputs.policy).apply-staged != 'true' }}")
+    );
+    let policy = definition("policy.yml");
+    assert_eq!(
+        policy["on"]["workflow_call"]["outputs"]["apply-staged"]["value"].as_str(),
+        Some("${{ jobs.policy.outputs.apply-staged }}")
+    );
+    for file in ["policy.yml", "agentic-job.yml"] {
+        let caller = definition(file);
+        let input = &caller["on"]["workflow_call"]["inputs"]["apply-staged"];
+        assert_eq!(input["type"].as_str(), Some("boolean"), "{file}");
+        assert_eq!(input["default"].as_bool(), Some(false), "{file}");
+        assert!(workflow(file).contains("      apply-staged: ${{ inputs.apply-staged }}\n"));
+    }
+}
+
+#[test]
 fn handler_errors_use_policy_binary_and_neutralize_annotations() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -429,6 +475,89 @@ fn handler_errors_use_policy_binary_and_neutralize_annotations() {
         fs::read_to_string(output).unwrap(),
         "reason=add\\_comment: bad ::warning::@\u{200b}user 100%0A; create\\_issue: no error given\n"
     );
+}
+
+#[test]
+fn staged_apply_escapes_preview_and_reports_no_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+    let summary = path.join("summary.md");
+    let report = path.join("report.json");
+    json_file(
+        path,
+        "agent_output.json",
+        &json!({"items": [{
+            "type": "create_pull_request", "title": "t", "branch": "agent-run-7",
+            "body": "see <img src=\"https://example.invalid/x.png\"> & [a](https://example.invalid)"
+        }]}),
+    );
+    json_file(
+        path,
+        "report.json",
+        &json!({"patch": {"files": [
+            "src/<b>.rs", "README.md", "::error title=Approved::x"
+        ]}}),
+    );
+    let shown = run_step(
+        path,
+        "Show what would be applied",
+        &[
+            ("GH_AW_TMP", path.to_str().unwrap()),
+            ("REPORT", report.to_str().unwrap()),
+            ("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()),
+        ],
+    );
+    status(&shown, 0);
+    let stdout = String::from_utf8(shown.stdout).unwrap();
+    assert!(stdout.contains("agent-run-7"));
+    // Agent text cannot become a runner command or HTML in the preview.
+    let json_line = Regex::new(r#"^\s*(?:["\[\]{}]|$)"#).unwrap();
+    assert!(
+        stdout.lines().all(|line| json_line.is_match(line)),
+        "{stdout}"
+    );
+    let summary = fs::read_to_string(summary).unwrap();
+    assert!(summary.starts_with("### Staged: nothing was applied\n"));
+    assert!(
+        summary.contains(r#"&lt;img src=\&quot;https://example.invalid/x.png\&quot;&gt; &amp;"#)
+    );
+    assert!(summary.contains("src/&lt;b&gt;.rs\nREADME.md"));
+    assert!(
+        !summary
+            .replace("<pre>", "")
+            .replace("</pre>", "")
+            .contains('<')
+    );
+
+    let handlers = json!({"create_pull_request": {"max": 1}});
+    json_file(path, "handler-config.json", &handlers);
+    for (staged, expected) in [("true", true), ("false", false)] {
+        status(
+            &run_step(
+                path,
+                "Write applied.json",
+                &[
+                    ("GH_AW_TMP", path.to_str().unwrap()),
+                    ("MADE", path.join("made.jsonl").to_str().unwrap()),
+                    ("OUTPUT_REPO", "owner/repo"),
+                    ("PR", ""),
+                    ("PR_URL", ""),
+                    ("FORK", ""),
+                    ("EXIT", "0"),
+                    ("CHECKPOINT", ""),
+                    ("STAGED", staged),
+                ],
+            ),
+            0,
+        );
+        let applied = read_json(path, "applied.json");
+        assert_eq!(applied["staged"], expected);
+        assert_eq!(applied["made"], json!([]));
+        assert_eq!(applied["already_applied"], json!([]));
+        assert!(applied["pull_request"].is_null());
+        assert!(applied["fork"].is_null());
+        assert_eq!(applied["handlers"], handlers);
+    }
 }
 
 fn root() -> PathBuf {

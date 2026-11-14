@@ -34,68 +34,6 @@ function stepEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: '(.*)'$`, 'm'))[1];
 }
 
-// A staged apply is for trying a caller that may not write yet: no step
-// holding a credential runs in it but one that only reads.
-test('a staged apply skips every step that holds a credential, but one that only reads', () => {
-  const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
-  const steps = apply.split('\n    steps:\n')[1].split(/\n      - (?=name:|uses:|id:)/).slice(1);
-  const readOnly = ["name: The checked outputs are this run's check's\n", "name: Require policy's binary\n", "name: Release external output only after trusted detection\n"];
-  let skipped = 0;
-  for (const body of steps) {
-    if (!/secrets\.SAFE_OUTPUTS_PAT|github\.token|gh api|git push/.test(body) || readOnly.some(name => body.startsWith(name))) continue;
-    const condition = body.match(/^        if: (.*)$/m)?.[1] ?? '';
-    assert.ok(!condition.includes('||') && (condition.includes("fromJSON(inputs.policy).apply-staged != 'true'") ||
-      condition.includes("steps.apply.outcome != 'skipped'")), body.split('\n')[0]);
-    skipped++;
-  }
-  assert.ok(skipped >= 6, `${skipped}`);
-  assert.match(apply, /- name: Apply the outputs with gh-aw's handlers\n        id: apply\n        if: \$\{\{ fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n/);
-  // The setting reaches apply only from the policy call, off unless the caller sets it.
-  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
-  assert.match(policy, /\n        value: \$\{\{ jobs.policy.outputs.apply-staged \}\}\n/);
-  for (const caller of [policy, wrapper]) {
-    assert.match(caller, /\n      apply-staged: \$\{\{ inputs.apply-staged \}\}\n/);
-    assert.match(caller, /\n      apply-staged:\n        description: [^\n]+\n        type: boolean\n        default: false\n/);
-  }
-});
-
-test('a staged apply shows the checked outputs escaped, and applied.json says it made nothing', () => {
-  const root = mkdtempSync(join(homedir(), 'apply-test-'));
-  try {
-    const summary = join(root, 'summary.md');
-    const report = join(root, 'report.json');
-    writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [{ ...pull, body: 'see <img src="https://example.invalid/x.png"> & [a](https://example.invalid)' }] }));
-    writeFileSync(report, JSON.stringify({ patch: { files: ['src/<b>.rs', 'README.md', '::error title=Approved::x'] } }));
-    const shown = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Show what would be applied')],
-      { GH_AW_TMP: root, REPORT: report, GITHUB_STEP_SUMMARY: summary });
-    assert.equal(shown.status, 0, shown.stderr);
-    assert.match(shown.stdout, /agent-run-7/);
-    // No line of the log is the agent's own, which the runner would read as a command.
-    assert.ok(shown.stdout.split('\n').every(line => /^\s*(?:["[\]{}]|$)/.test(line)), shown.stdout);
-    const text = readFileSync(summary, 'utf8');
-    assert.match(text, /^### Staged: nothing was applied\n/);
-    assert.match(text, /&lt;img src=\\&quot;https:\/\/example.invalid\/x.png\\&quot;&gt; &amp;/);
-    assert.match(text, /src\/&lt;b&gt;.rs\nREADME.md/);
-    // The only markup is the workflow's own.
-    assert.equal(text.match(/</g).length, text.match(/<\/?pre>/g).length);
-    // Nothing made, nothing found applied before: the guard and the handlers did not run.
-    writeFileSync(join(root, 'handler-config.json'), JSON.stringify({ create_pull_request: { max: 1 } }));
-    const written = staged => {
-      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Write applied.json')], {
-        GH_AW_TMP: root, MADE: join(root, 'made.jsonl'), OUTPUT_REPO: 'owner/repo', PR: '', PR_URL: '', FORK: '', EXIT: '0', CHECKPOINT: '', STAGED: staged });
-      assert.equal(result.status, 0, result.stderr);
-      return JSON.parse(readFileSync(join(root, 'applied.json'), 'utf8'));
-    };
-    const applied = written('true');
-    assert.deepEqual([applied.staged, applied.made, applied.already_applied, applied.pull_request, applied.fork],
-      [true, [], [], null, null]);
-    assert.deepEqual(applied.handlers, { create_pull_request: { max: 1 } });
-    assert.equal(written('false').staged, false);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 for (const filename of ['full', 'limit', 'event']) {
   test(`scripted ${filename} comments inherit the caller's fixed destination`, () => {
     const setup = readFileSync(join(__dirname, `../.github/agentic-job/e2e/${filename}.sh`), 'utf8');
