@@ -121,6 +121,14 @@ refuses all three ambiguous patches. Explicit-mode ordinary edits remain positiv
 controls. This supplements the legacy corpus comparison without removing its
 old-tree/upstream coverage or bypassing the fixture-deletion prerequisite.
 
+The repository-scoped documentation exception corpus now also runs through the
+native policy/collect/check CLI in `tests/documentation_bounds.rs`. Real Git patches
+test default protection, the named repository's explicit exception and another
+repository without that grant. Manifests, other protected documentation, CI beside
+a README and runtime-built private-key headers remain refused; ordinary docs are
+positive controls. Legacy old-tree comparisons and key-bearing fixtures remain
+pending the disposition above. No runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
