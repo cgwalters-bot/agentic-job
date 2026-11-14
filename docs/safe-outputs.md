@@ -2085,6 +2085,12 @@ names. CI runs a corpus of hand-backs through the old tree's check and
 this one, which must agree but for those differences
 (`crates/agentic-job/tests/corpus`). `crates/agentic-job/tests/check.rs`
 checks the hand-backs of two real runs (`safe-outputs/fixtures`).
+It also runs the output-count corpus cases through Rust `policy`, `collect`
+and `check`: comments, missing tools and missing data at and above their
+per-type limits, mixed outputs at the total limit, and a total-limit refusal
+where every type remains within its own limit. This coverage runs without
+Node or external checkouts; the legacy corpus retains its live upstream
+comparisons until their replacement or removal is authorized separately.
 
 `check` reads text, on a machine without the repository. It cannot see
 that `git am --3way` follows renames, that the base commit is only the
