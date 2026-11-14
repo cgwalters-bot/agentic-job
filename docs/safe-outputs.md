@@ -252,6 +252,11 @@ complete the listing. A nonempty page 20 refuses the entire batch without
 requesting page 21, even when the requested label was already found. This
 preserves the existing bounded scan rather than trusting an incomplete label
 inventory that could conceal label side effects.
+Revalidation cases change live labels after successful batch preflight: a
+deleted project label or newly conflicting scoped label refuses publication
+without a write, while an already completed addition or removal returns the
+typed item's URL without another mutation. This check narrows the race window;
+it is not an atomic guarantee against changes after the final read.
 These are loopback CLI-to-publisher tests, not live GitLab or CI isolation proof;
 they introduce no new permission or caller setting.
 

@@ -22,9 +22,19 @@ impl Fixture {
     }
 
     fn with_label_pages(outputs: Value, initial: &[&str], pages: Vec<Value>) -> Self {
+        Self::with_revalidated_labels(outputs, initial, pages, None)
+    }
+
+    fn with_revalidated_labels(
+        outputs: Value,
+        initial: &[&str],
+        mut pages: Vec<Value>,
+        mut changed: Option<(Value, Vec<Value>)>,
+    ) -> Self {
         // Separate state for #7 and !7 catches routing by iid alone. Update
         // state on PUT so replay observes the effect of the first apply.
         let mut labels = [json!(initial), json!(initial)];
+        let mut item_reads = 0;
         let (server, requests) = serve(usize::MAX, move |request| {
             let asked = request.line.trim_end_matches(" HTTP/1.1");
             let body = if asked == format!("GET {PROJECT}") {
@@ -39,6 +49,15 @@ impl Fixture {
             } else {
                 let mut response = None;
                 for (index, collection) in ["issues", "merge_requests"].iter().enumerate() {
+                    if asked == format!("GET {PROJECT}/{collection}/7") {
+                        item_reads += 1;
+                        if item_reads == 2
+                            && let Some((now, available)) = changed.take()
+                        {
+                            labels[index] = now;
+                            pages = available;
+                        }
+                    }
                     let item = || {
                         json!({
                             "iid":7,"project_id":1,"state":"opened","labels":labels[index],
@@ -184,6 +203,87 @@ fn labels_route_by_kind_and_replay_without_mutation() {
             assert!(
                 replay.iter().all(|r| r.line.starts_with("GET ")),
                 "{replay:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn label_publication_revalidates_after_preflight() {
+    for (field, collection) in [
+        ("issue_number", "issues"),
+        ("pull_request_number", "merge_requests"),
+    ] {
+        for (operation, initial, now, available, error) in [
+            // A deleted project label must not be implicitly recreated.
+            (
+                "add_labels",
+                vec!["keep"],
+                vec!["keep"],
+                vec![],
+                Some("apply creates none"),
+            ),
+            // A concurrent scoped label must not be implicitly removed.
+            (
+                "add_labels",
+                vec!["keep"],
+                vec!["keep", "priority::low"],
+                vec!["priority::high", "priority::low"],
+                Some("would remove"),
+            ),
+            // A concurrent writer already performed the requested change.
+            (
+                "add_labels",
+                vec!["keep"],
+                vec!["keep", "priority::high"],
+                vec!["priority::high"],
+                None,
+            ),
+            (
+                "remove_labels",
+                vec!["keep", "priority::high"],
+                vec!["keep"],
+                vec!["priority::high"],
+                None,
+            ),
+        ] {
+            let f = Fixture::with_revalidated_labels(
+                json!({operation:{"max":1,"allowed":["priority::high"]}}),
+                &initial,
+                vec![json!(["priority::high"])],
+                Some((json!(now), vec![json!(available)])),
+            );
+            f.input(&[json!({"type":operation,"repo":REPO,field:7,"labels":["priority::high"]})]);
+            f.offline_check();
+            let result = f.run("apply");
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert_eq!(
+                result.status.success(),
+                error.is_none(),
+                "{operation} {field}: {stderr}"
+            );
+            if let Some(error) = error {
+                assert!(stderr.contains(error), "{stderr}");
+            } else {
+                let url = format!("https://gitlab.example/{REPO}/-/{collection}/7");
+                assert!(
+                    String::from_utf8_lossy(&result.stdout)
+                        .lines()
+                        .any(|line| line == url)
+                );
+            }
+            let requests: Vec<_> = f.requests.try_iter().collect();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.line == format!("GET {PROJECT}/{collection}/7 HTTP/1.1"))
+                    .count(),
+                2,
+                "{requests:#?}"
+            );
+            assert!(
+                requests.iter().all(|r| r.line.starts_with("GET ")),
+                "{requests:#?}"
             );
         }
     }
