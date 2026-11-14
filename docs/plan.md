@@ -227,6 +227,13 @@ redaction; the branch keeps its case while resolving the lowercase patch filenam
 A plain request is the positive control. The legacy parity cases and gated
 fixture cleanup remain unchanged; no runtime control or caller setting is added.
 
+The check-run admission corpus now runs independently in `tests/check_run.rs`,
+through the Rust policy, collector and checker. Its seven cases retain the pinned
+check name, refusal of success conclusions, explicit pull-request target and
+per-type ceiling. Only the replaced JavaScript test is removed; upstream handler
+parity and the key-bearing legacy fixture remain. No runtime or caller settings
+change.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
