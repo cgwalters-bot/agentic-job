@@ -158,6 +158,68 @@ fn staged_apply_escapes_preview_and_reports_no_publication() {
 }
 
 #[test]
+fn apply_guard_wiring_uses_policy_binary_after_partial_mark() {
+    let doc = definition("apply.yml");
+    let steps = doc["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let trial = position(TRIAL);
+    let require = position("Require policy's binary");
+    let download = steps
+        .iter()
+        .position(|s| s["with"]["path"].as_str() == Some("${{ runner.temp }}/apply-binary"))
+        .unwrap();
+    let trusted_binary = "${{ fromJSON(inputs.policy).apply-staged != 'true' || fromJSON(inputs.policy).external-run-id != '' }}";
+    for index in [require, download] {
+        assert!(index < trial);
+        assert_eq!(steps[index]["if"].as_str(), Some(trusted_binary));
+    }
+    let guard_name = "Leave out what an earlier attempt applied";
+    assert!(position("Mark what a partial run opens or posts") < position(guard_name));
+    let guard = step(&doc, "apply", guard_name);
+    let handlers = step(&doc, "apply", "Apply the outputs with gh-aw's handlers");
+    assert_eq!(guard["id"].as_str(), Some("applied"));
+    assert_eq!(handlers["id"].as_str(), Some("apply"));
+    assert_eq!(guard["if"], handlers["if"]);
+    assert!(
+        guard["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"$RUNNER_TEMP/apply-binary/agentic-job\" applied --dir \"$GH_AW_TMP\" ")
+    );
+    for (key, value) in [
+        (
+            "GH_TOKEN",
+            "${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}",
+        ),
+        ("TOKEN_IS_PAT", "${{ secrets.SAFE_OUTPUTS_PAT != '' }}"),
+        ("REPLACEMENT_HEAD", "${{ steps.trial.outputs.head }}"),
+    ] {
+        assert_eq!(guard["env"][key].as_str(), Some(value), "{key}");
+    }
+    assert!(
+        steps[trial]["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"$RUNNER_TEMP/apply-binary/agentic-job\" replacement trial ")
+    );
+}
+
+#[test]
+fn apply_status_wiring_leaves_status_to_conclude() {
+    let doc = definition("apply.yml");
+    let status = step(&doc, "conclude", "Edit the status comment");
+    assert_eq!(
+        status["run"].as_str().unwrap().trim(),
+        "chmod +x \"$RUNNER_TEMP/conclude-binary/agentic-job\"\n\"$RUNNER_TEMP/conclude-binary/agentic-job\" status"
+    );
+}
+
+#[test]
 fn optional_pat_is_forwarded_only_to_policy_and_apply() {
     let apply = definition("apply.yml");
     assert_eq!(
