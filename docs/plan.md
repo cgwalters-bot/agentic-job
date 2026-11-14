@@ -152,6 +152,15 @@ The test proves that discrepancy and refusal with the existing apply settings
 path. The legacy corpus comparison remains intact pending the disposition
 above; this adds no runtime control or caller setting.
 
+The credential-shape corpus distinction now also runs through native collection
+and checking in `tests/check.rs`: GitHub, GitLab, AWS and run-token shapes warn
+without refusing a valid hand-back, while private-key headers refuse it. Each
+shape is tested in the request, patch and base metadata, with exact diagnostic
+locations and no matched value in diagnostics. Plain-text controls remain accepted.
+This supplements rather than removes the old-check comparison; the gated fixture
+cleanup and upstream parity disposition above remain unchanged. No runtime control
+or caller setting is added.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

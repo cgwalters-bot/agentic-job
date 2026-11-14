@@ -767,6 +767,121 @@ fn malformed_hand_back_entries_are_refused() {
     }
 }
 
+/// Native coverage of the legacy corpus's warning/refusal distinction. Build
+/// credential-shaped fixtures at runtime; never store a key in the source tree.
+#[test]
+fn credential_shapes_warn_but_private_keys_refuse_across_hand_back_files() {
+    use serde_json::json;
+
+    let cases = [
+        ("plain text", "ordinary fixture text".to_owned(), false),
+        ("GitHub token", format!("ghp_{}", "a1B2".repeat(10)), false),
+        (
+            "GitHub refresh",
+            format!("ghr_{}", "a1B2".repeat(10)),
+            false,
+        ),
+        ("GitLab token", format!("glpat-{}", "a1B2".repeat(6)), false),
+        ("AWS key id", format!("AKIA{}", "A1B2".repeat(4)), false),
+        (
+            "run token",
+            format!("praxis-run-{}", "0f".repeat(32)),
+            false,
+        ),
+        (
+            "private key",
+            ["-----BEGIN ", "PRIVATE KEY-----"].concat(),
+            true,
+        ),
+    ];
+    for (name, text, refused) in cases {
+        for (file, line) in [
+            ("outputs.jsonl", 1),
+            ("aw-agent-run-7.patch", 19),
+            ("base.json", 1),
+        ] {
+            let run = Run::new();
+            let path = run.path(&format!("out/{file}"));
+            let original = std::fs::read_to_string(&path).unwrap();
+            if file.ends_with(".patch") {
+                assert!(original.contains("println!(\"hi\")"));
+                std::fs::write(
+                    &path,
+                    original.replace("println!(\"hi\")", &format!("println!(\"{text}\")")),
+                )
+                .unwrap();
+            } else {
+                let mut value: Value = serde_json::from_str(&original).unwrap();
+                let field = if file == "outputs.jsonl" {
+                    "body"
+                } else {
+                    "note"
+                };
+                value[field] = text.clone().into();
+                std::fs::write(&path, format!("{value}\n")).unwrap();
+            }
+            let collected = run.path("collected.json");
+            let ingest = Command::new(BIN)
+                .args(["collect", "--policy"])
+                .arg(run.path("policy.json"))
+                .arg("--outputs")
+                .arg(run.path("out"))
+                .arg("--collected")
+                .arg(&collected)
+                .output()
+                .unwrap();
+            assert_eq!(
+                ingest.status.code(),
+                Some(0),
+                "{name} in {file}: {ingest:?}"
+            );
+            let checked = run.check(&collected);
+            let verdict = run.verdict();
+            assert_eq!(
+                checked.status.code(),
+                Some(i32::from(refused)),
+                "{name} in {file}: {checked:?}; {verdict}"
+            );
+            assert_eq!(verdict["ok"], !refused, "{name} in {file}: {verdict}");
+            if name == "plain text" {
+                assert!(verdict.get("warnings").is_none(), "{file}: {verdict}");
+            } else if refused {
+                let mut errors = vec![format!("a secret-shaped string in {file}: a private key")];
+                if file == "outputs.jsonl" {
+                    errors.push(
+                        "a secret-shaped string in the collected outputs: a private key".to_owned(),
+                    );
+                }
+                assert_eq!(verdict["errors"], json!(errors), "{file}: {verdict}");
+            } else {
+                let messages = verdict["warnings"].as_array().unwrap();
+                assert_eq!(messages.len(), 1, "{name} in {file}: {verdict}");
+                let message = messages[0].as_str().unwrap();
+                assert!(
+                    message.contains(&format!("{file}, line {line}")),
+                    "{message}"
+                );
+                assert!(message.contains("matches `"), "{message}");
+                assert!(
+                    !message.contains(&text),
+                    "diagnostic disclosed the matched fixture"
+                );
+            }
+            if refused {
+                assert!(verdict.get("warnings").is_none(), "{file}: {verdict}");
+            } else {
+                assert_eq!(verdict["errors"], json!([]));
+                assert_eq!(verdict["items"].as_array().unwrap().len(), 1);
+                assert_eq!(verdict["patch"]["file"], "aw-agent-run-7.patch");
+                assert_eq!(
+                    verdict["patch"]["files"],
+                    json!(["src/lib.rs", "src/new.rs"])
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_hand_back_outside_the_policy_is_refused_with_its_reasons() {
     let run = Run::new();
