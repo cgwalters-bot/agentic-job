@@ -2411,6 +2411,15 @@ rejection through the fetch path. Hosted acceptance still requires the
 resulting PR's sandbox job to print `Threat feed:`; local tests are not
 proof of privileged setup.
 
+The loopback recovery fixture bypasses ambient proxies only in its curl
+child; production fetches keep their proxy environment. On 2026-11-14 the
+fixture failed with an unreachable ambient proxy and empty proxy exclusions,
+then passed with the child-only bypass. The resulting [PR CI run](https://github.com/cgwalters-forge/agentic-job/actions/runs/43534172974)
+passed its required checks but skipped `sandbox`: with a merge queue enabled,
+CI defers privileged host jobs to the queue. That run is not feed-loaded
+acceptance evidence; the queue's sandbox log is still needed before closing
+tracker#1268.
+
 Stale pins miss newly listed malware and phishing hosts. To propose updates
 every eight hours, enable the repository variable `THREAT_FEED_REFRESH=true`
 and provide `THREAT_FEED_PAT`, a dedicated token restricted to this repository

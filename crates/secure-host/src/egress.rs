@@ -706,7 +706,23 @@ fn fetch_denylist() -> Result<bool> {
 }
 
 fn fetch_denylist_from(url: &str, fetched: &Path, destination: &str, pinned: &str) -> Result<bool> {
-    if let Err(err) = host::run(&mut denylist_fetch_command(url, fetched)) {
+    fetch_denylist_with_command(
+        &mut denylist_fetch_command(url, fetched),
+        url,
+        fetched,
+        destination,
+        pinned,
+    )
+}
+
+fn fetch_denylist_with_command(
+    command: &mut Command,
+    url: &str,
+    fetched: &Path,
+    destination: &str,
+    pinned: &str,
+) -> Result<bool> {
+    if let Err(err) = host::run(command) {
         eprintln!(
             "warning: the egress proxy runs without a threat feed: fetching {url} failed ({err:#})"
         );
@@ -1273,7 +1289,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fetched = dir.path().join("fetched");
         let destination = dir.path().join("installed");
-        let result = fetch_denylist_from(&url, &fetched, destination.to_str().unwrap(), PINNED);
+        let mut command = denylist_fetch_command(&url, &fetched);
+        // Only this child bypasses ambient proxies to reach the loopback fixture.
+        command.args(["--noproxy", "127.0.0.1"]);
+        let result = fetch_denylist_with_command(
+            &mut command,
+            &url,
+            &fetched,
+            destination.to_str().unwrap(),
+            PINNED,
+        );
         assert_eq!(server.join().unwrap(), 2);
         assert!(result.unwrap());
         assert_eq!(fs::read_to_string(destination).unwrap(), FEED);
