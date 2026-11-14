@@ -2484,6 +2484,10 @@ The pin must still have a retained artifact. No per-commit pin PR is needed.
 The artifact has exactly six files: `release.json`, `provenance.jsonl`, the three
 `*-x86_64-unknown-linux-musl` binaries and `world_write.bpf.o`. The ZIP is limited
 to 256 MiB, and decompression is bounded to 120 seconds and 256 MiB per file.
+Before sorting, the ZIP filename inventory is capped at the expected six-name
+listing's byte length plus one overflow-detection byte, with a 120-second timeout
+and forced termination after five more seconds. This prevents an unverified
+central directory from exhausting disk or time before attestation verification.
 Only those fixed names are streamed into regular files; paths and duplicates
 are refused. The reader uses the job's read-only forge token for the Actions
 API, not package credentials. Cross-repository consumers must prove artifact

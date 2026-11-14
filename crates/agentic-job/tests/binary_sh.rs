@@ -768,6 +768,10 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
         Some("bytes"),
         Some("missing"),
         Some("extra"),
+        Some("many-names"),
+        Some("long-name"),
+        Some("duplicate"),
+        Some("malformed-zip"),
         Some("pin"),
         Some("expired"),
         Some("transport"),
@@ -804,6 +808,17 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
         if bad == Some("extra") {
             write(&payload.join("unexpected"), "extra");
         }
+        if bad == Some("many-names") {
+            for index in 0..100 {
+                write(&payload.join(format!("unexpected-{index:03}")), "");
+            }
+        }
+        if bad == Some("long-name") {
+            write(&payload.join("x".repeat(240)), "");
+        }
+        if bad == Some("duplicate") {
+            write(&payload.join("world_write.bpf.x"), BYTES);
+        }
         let archive = parent.path().join("archive.zip");
         let result = Command::new("zip")
             .current_dir(&payload)
@@ -811,6 +826,20 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
             .status()
             .unwrap();
         assert!(result.success());
+        if bad == Some("duplicate") {
+            // Rename both ZIP headers without changing their lengths or data CRCs.
+            let mut bytes = fs::read(&archive).unwrap();
+            let name = b"world_write.bpf.x";
+            for offset in 0..=bytes.len() - name.len() {
+                if &bytes[offset..offset + name.len()] == name {
+                    bytes[offset + name.len() - 1] = b'o';
+                }
+            }
+            fs::write(&archive, bytes).unwrap();
+        }
+        if bad == Some("malformed-zip") {
+            fs::write(&archive, "not a ZIP").unwrap();
+        }
         // The fixture endpoint returns real ZIP bytes; only the forge is mocked.
         let download_path = parent.path().join("download");
         fs::copy(&archive, &download_path).unwrap();
@@ -877,6 +906,22 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
             "{bad:?}: {}",
             result.stderr
         );
+        if matches!(
+            bad,
+            Some("many-names" | "long-name" | "duplicate" | "malformed-zip")
+        ) {
+            assert!(
+                result.stderr.contains("artifact inventory"),
+                "{bad:?}: {}",
+                result.stderr
+            );
+            assert!(!result.log.iter().any(|line| line.starts_with("gh ")));
+            assert!(!out.join("agentic-job").exists());
+            assert!(result.output.is_empty());
+            let stage = fs::read_dir(&out).unwrap().next().unwrap().unwrap().path();
+            let expected = fs::metadata(stage.join("expected")).unwrap().len();
+            assert!(fs::metadata(stage.join("names")).unwrap().len() <= expected + 1);
+        }
         assert!(
             !result
                 .log
