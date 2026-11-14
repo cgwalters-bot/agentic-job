@@ -97,6 +97,12 @@ an unexpected directory and symlinked outputs. The size test also accepts exactl
 the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
 subject to the disposition above. No runtime control or caller setting changes.
 
+Apply's trusted-binary ordering, replay-guard token/trial wiring and conclude
+status-command assertions now run in `tests/apply_workflow.rs` as well. The
+equivalent JavaScript assertions are removed; actual handler execution stays in
+Node. This is local workflow-contract coverage, not hosted publication evidence,
+and adds no runtime option or authority.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
