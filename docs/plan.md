@@ -251,6 +251,13 @@ linking precedes replay detection and remains limited to non-staged patch runs.
 Their JavaScript equivalents are removed; the multi-step handler integration
 and pinned upstream parity tests remain unchanged.
 
+Patch byte and file-count boundaries also run through `policy`, `collect` and
+`check` in `tests/check.rs`: a fixed valid two-file patch is accepted below and
+at each configured limit, then refused one byte or one file over it. This pins
+the serialized bounds and the check-stage enforcement without Node or external
+checkouts. The legacy corpus comparisons remain; this adds no runtime control
+or caller setting and does not satisfy the fixture-deletion prerequisite above.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
