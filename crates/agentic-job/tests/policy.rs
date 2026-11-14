@@ -8,6 +8,120 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
+/// The legacy policy corpus's selectors and numeric limits, exercised without
+/// its old-tree checkout. Assert the serialized grant, not just admission.
+#[test]
+fn corpus_output_selection_and_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let allow = dir.path().join("allow.toml");
+    std::fs::write(
+        &allow,
+        "hosts = ['github.com']\nrepos = ['example/repo']\nbases = ['main']\n\
+         max_outputs = 5\nmax_patch_bytes = 65536\nmax_patch_files = 10\n\
+         [github.outputs]\ncreate_pull_request = { max = 1 }\n\
+         add_comment = { max = 2 }\nnoop = { max = 1 }\n",
+    )
+    .unwrap();
+    for (kind, outputs, maximum, expected) in [
+        (
+            "branch",
+            "create_pull_request,noop",
+            "3",
+            Some((3, vec![("create_pull_request", 1), ("noop", 1)])),
+        ),
+        (
+            "branch",
+            "all",
+            "max",
+            Some((
+                5,
+                vec![("add_comment", 2), ("create_pull_request", 1), ("noop", 1)],
+            )),
+        ),
+        (
+            "branch",
+            "all",
+            "2",
+            Some((
+                2,
+                vec![("add_comment", 2), ("create_pull_request", 1), ("noop", 1)],
+            )),
+        ),
+        (
+            "branch",
+            "all",
+            "1",
+            Some((
+                1,
+                vec![("add_comment", 1), ("create_pull_request", 1), ("noop", 1)],
+            )),
+        ),
+        (
+            "analysis",
+            "all",
+            "max",
+            Some((5, vec![("add_comment", 2), ("noop", 1)])),
+        ),
+        (
+            "analysis",
+            "noop,add_comment",
+            "3",
+            Some((3, vec![("add_comment", 2), ("noop", 1)])),
+        ),
+        (
+            "branch",
+            " noop , noop,create_pull_request",
+            "3",
+            Some((3, vec![("create_pull_request", 1), ("noop", 1)])),
+        ),
+        ("branch", "noop", "1", Some((1, vec![("noop", 1)]))),
+        ("analysis", "create_pull_request,noop", "3", None),
+        ("branch", "create_pull_request,delete_repo", "3", None),
+        ("branch", "ALL", "3", None),
+        ("branch", " , ", "3", None),
+        ("branch", "", "3", None),
+        ("branch", "noop", "6", None),
+        ("branch", "noop", "many", None),
+        ("branch", "noop", "0", None),
+        ("branch", "noop", "03", None),
+        ("branch", "noop", "+3", None),
+        ("branch", "noop", " 3", None),
+        ("branch", "noop", "1000", None),
+        ("branch", "noop", "4294967296", None),
+        ("branch", "noop", "", None),
+    ] {
+        let output = policy(
+            &allow,
+            &[
+                ("--repo", "example/repo"),
+                ("--clone-url", "https://github.com/example/repo"),
+                ("--kind", kind),
+                ("--outputs", outputs),
+                ("--max-outputs", maximum),
+            ],
+        );
+        let context = format!("{kind} {outputs:?} {maximum:?}: {output:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(if expected.is_some() { 0 } else { 1 }),
+            "{context}"
+        );
+        let Some((total, limits)) = expected else {
+            assert!(output.stdout.is_empty(), "{context}");
+            assert!(!output.stderr.is_empty(), "{context}");
+            continue;
+        };
+        let admitted: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(admitted["max_outputs"], total, "{context}");
+        assert_eq!(admitted["kind"], kind, "{context}");
+        let granted = admitted["safe_outputs"].as_object().unwrap();
+        assert_eq!(granted.len(), limits.len(), "{context}");
+        for (name, limit) in limits {
+            assert_eq!(granted[name]["max"], limit, "{name}: {context}");
+        }
+    }
+}
+
 /// Native publishers cannot enforce the applying identity against a PR's
 /// author yet: refuse both new bounds and an already compiled policy.
 #[test]

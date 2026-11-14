@@ -90,6 +90,13 @@ title/branch prefixes in both the JSON file and exported environment. These two
 tests replace their JavaScript equivalents without changing publication behavior
 or the retained upstream-handler execution tests.
 
+The policy corpus's output selectors and numeric limits now run through the
+Rust CLI in `tests/policy.rs`: exact serialized grants cover `all`,
+analysis filtering, duplicate selectors and per-operation ceilings, while empty,
+unknown and malformed requests must emit no policy. These tests need neither
+the old-tree checkout nor Node; the legacy parity matrix remains until its
+gated cleanup. No runtime control or caller setting changes.
+
 The malformed-handback corpus cases now run through the Rust CLI in
 `tests/check.rs`: invalid base JSON, a short commit, oversized base metadata,
 an unexpected directory and symlinked outputs. The size test also accepts exactly
@@ -120,6 +127,15 @@ symlink without an index-header mode, inheriting their types, while the reader
 refuses all three ambiguous patches. Explicit-mode ordinary edits remain positive
 controls. This supplements the legacy corpus comparison without removing its
 old-tree/upstream coverage or bypassing the fixture-deletion prerequisite.
+
+The bounded-update corpus now runs in `tests/bounded_updates.rs` through Rust's
+`policy`, `collect` and `check` commands. It pins issue-body and PR-title admission,
+body-section operations, explicit repository/target requirements, forbidden fields
+(including draft and branch changes), and marking ready only with an explicit
+bound. Accepted cases assert the sanitized items as well as the exit/verdict;
+refusals assert their diagnostics. Only the replaced new-check JavaScript test is
+removed; old-tree comparisons, upstream drivers and gated fixtures remain.
+This adds no runtime control or caller setting.
 
 The repository-scoped documentation exception corpus now also runs through the
 native policy/collect/check CLI in `tests/documentation_bounds.rs`. Real Git patches

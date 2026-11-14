@@ -1646,6 +1646,68 @@ mod tests {
     }
 
     #[test]
+    fn status_listing_identity_mismatch_is_refused() {
+        for field in ["name", "sha", "ref"] {
+            for value in [
+                Some(json!("other")),
+                Some(Value::Null),
+                Some(json!(7)),
+                None,
+            ] {
+                for page in [1, 2] {
+                    for preflight in [true, false] {
+                        let case = format!("{field}={value:?}, page={page}, preflight={preflight}");
+                        // Matching newer jobs must not hide a malformed older job,
+                        // even when it arrives on a later page.
+                        let mut entries: Vec<_> = (0..(page - 1) * STATUSES_PER_PAGE)
+                            .map(|id| status_entry(id as u64 + 2, State::Success, RUN_URL))
+                            .collect();
+                        let mut entry = status_entry(1, State::Success, RUN_URL);
+                        if let Some(value) = &value {
+                            entry[field] = value.clone();
+                        } else {
+                            entry.as_object_mut().unwrap().remove(field);
+                        }
+                        entries.push(entry);
+                        let (server, requests) = status_server(entries);
+                        let publisher = gitlab(&server);
+                        let status = CommitStatus {
+                            sha: "4".repeat(40),
+                            state: State::Success,
+                            target_url: RUN_URL.into(),
+                            context: STATUS_CONTEXT.into(),
+                        };
+                        let error = if preflight {
+                            publisher.preflight(&Op::Status(status)).unwrap_err()
+                        } else {
+                            publisher.status(&status).unwrap_err()
+                        };
+                        assert!(
+                            format!("{error:#}").contains(
+                                "GitLab status does not match the requested context, SHA and ref"
+                            ),
+                            "{case}: {error:#}"
+                        );
+                        let requests: Vec<_> = requests.try_iter().collect();
+                        assert_eq!(
+                            requests
+                                .iter()
+                                .filter(|r| r.line.contains("/statuses?"))
+                                .count(),
+                            page,
+                            "{case}"
+                        );
+                        assert!(
+                            requests.iter().all(|r| r.line.starts_with("GET ")),
+                            "{case}: no mutation is permitted"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_status_context_is_refused_before_other_writes() {
         let sha = "4".repeat(40);
         let pipeline = json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main", "archived": false, "yaml_errors": null});

@@ -104,6 +104,12 @@ receive the existing last-mile notification filter. Repeated apply posts again:
 there is no standalone idempotency marker, transaction or rollback; a network
 failure can leave an uncertain or partially published batch. Do not blindly retry.
 
+The standalone GitHub CLI tests publish digest-like text to a loopback forge
+and assert the exact JSON body: prose user/team mentions receive a zero-width
+break, while inline/fenced code and email addresses stay intact. This pins the
+last-mile filter against producer-selected notifications from quoted upstream
+text; it does not test GitHub's live notification behavior or caller deployment.
+
 Check can validate other non-patch operations under explicit output bounds, but
 standalone GitHub apply refuses them, including a batch with a supported comment before
 an unsupported operation. Patch operations are not a standalone GitHub CLI interface.
@@ -3027,6 +3033,13 @@ cannot hide a newer different result, and `failure` followed by `error`
 updates the description. Any pending or running job for this context
 whose URL is not this run's refuses, even if an even newer job matches:
 GitLab could otherwise update that unfinished job, stealing its identity.
+
+Every listed job must carry the exact string `name`, `sha` and `ref`
+requested, not just the newest job. Missing, null, wrongly typed or different
+values refuse rather than trusting the API's query filters. Loopback regression
+tests cover each field on the first and a later page, at both preflight and
+final publication, and assert that refusal sends no mutation. These tests do
+not prove live GitLab filtering or eliminate the races below.
 
 These reads are not a transaction. A pipeline can disappear, a competing
 run can publish between the read and POST, and GitLab can reject the
