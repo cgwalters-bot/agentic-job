@@ -8,6 +8,7 @@
 //! the result application-only, and use the same revalidated result for trial
 //! and publication. Never use the producer's checkout as the preimage source.
 
+use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use anyhow::{Result, ensure};
@@ -73,6 +74,14 @@ pub fn reconstruct(
         reading.files.len() <= MAX_FILES,
         "recovery exceeds file limit"
     );
+    // read_patch reports distinct paths, not sections. Re-reading one path
+    // would reset the overlap guard below and defeat the preimage read bound.
+    // Its validated headers name the same plain path on both sides, so exact
+    // header identity is sufficient. Refuse before invoking the reader at all.
+    let mut sections = BTreeSet::new();
+    for header in patch.lines().filter(|line| line.starts_with("diff --git ")) {
+        ensure!(sections.insert(header), "recovery repeats a file section");
+    }
     ensure!(
         patch.ends_with('\n')
             && !patch.contains('\r')
@@ -504,6 +513,72 @@ mod tests {
             "@@ -0 +1 @@\n-url=<inference-address>\n+new\n",
         ] {
             assert!(recover(&mail(hunk), &format!("url={ADDRESS}\n")).is_err());
+        }
+    }
+
+    #[test]
+    fn refuses_duplicate_sections_before_reading_preimages() {
+        let edited = "diff --git a/config b/config\nindex 1234567..abcdef0 100644\n\
+                      --- a/config\n+++ b/config\n\
+                      @@ -1 +1 @@\n-url=<inference-address>\n+new\n";
+        let added = "diff --git a/config b/config\nnew file mode 100644\n\
+                     index 0000000..abcdef0\n--- /dev/null\n+++ b/config\n\
+                     @@ -0,0 +1 @@\n+new\n";
+        let removed = "diff --git a/config b/config\ndeleted file mode 100644\n\
+                       index 1234567..0000000\n--- a/config\n+++ /dev/null\n\
+                       @@ -1 +0,0 @@\n-url=<inference-address>\n";
+        let original = mail("@@ -1 +1 @@\n-url=<inference-address>\n+new\n");
+        let prefix = original.split_once("diff --git ").unwrap().0;
+        for sections in [
+            edited.repeat(2),
+            edited.repeat(MAX_FILES + 1),
+            added.repeat(2),
+            format!("{removed}{added}"),
+        ] {
+            let patch = format!("{prefix}{sections}");
+            // The general parser intentionally returns a distinct path set.
+            // Recovery must not confuse that set's size with its read count.
+            let reading = read_patch(&patch, &rules(), BASE);
+            assert!(reading.problems.is_empty(), "{:?}", reading.problems);
+            assert_eq!(reading.files, ["config"]);
+            let err = reconstruct(&patch, &rules(), BASE, MAX_BYTES, |_, _| {
+                panic!("duplicate sections must be rejected before preimage reads")
+            })
+            .err()
+            .unwrap();
+            assert_eq!(err.to_string(), "recovery repeats a file section");
+        }
+    }
+
+    #[test]
+    fn reads_each_distinct_file_once_within_the_file_limit() {
+        let original = mail("@@ -1 +1 @@\n-url=<inference-address>\n+new\n");
+        let (prefix, section) = original.split_once("diff --git ").unwrap();
+        let section = format!("diff --git {section}");
+        let mut rules = rules();
+        rules.max_patch_files = (MAX_FILES + 1) as u32;
+        for count in [2, MAX_FILES, MAX_FILES + 1] {
+            let paths: Vec<_> = (0..count).map(|i| format!("config{i}")).collect();
+            let mut patch = prefix.to_owned();
+            for path in &paths {
+                patch.push_str(&section.replace("config", path));
+            }
+            let mut reads = Vec::new();
+            let result = reconstruct(&patch, &rules, BASE, MAX_BYTES, |path, limit| {
+                assert_eq!(limit, MAX_BYTES);
+                reads.push(path.to_owned());
+                Ok(format!("url={ADDRESS}\n").into_bytes())
+            });
+            if count <= MAX_FILES {
+                assert_eq!(result.unwrap().restored_lines, count);
+                assert_eq!(reads, paths);
+            } else {
+                assert_eq!(
+                    result.err().unwrap().to_string(),
+                    "recovery exceeds file limit"
+                );
+                assert!(reads.is_empty());
+            }
         }
     }
 }

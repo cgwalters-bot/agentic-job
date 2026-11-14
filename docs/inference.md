@@ -112,9 +112,11 @@ can reconstruct context and removed lines from an authenticated public
 preimage at the exact path and old-side hunk position. It validates the mail
 before reading preimages and revalidates paths afterward. Every non-placeholder
 byte must match, and only one placeholder per line, replacing one host:port
-literal, is supported. Overlapping hunks, malformed patches, CR and missing
-final newlines are refused. Patch and per-file preimage reads are bounded to
-1 MiB (or the caller's smaller patch limit), with at most 50 files.
+literal, is supported. Overlapping hunks, duplicate file sections, malformed
+patches, CR and missing final newlines are refused. Duplicate sections are
+rejected before any preimage read, including delete/recreate pairs. Patch and
+per-file preimage reads are bounded to 1 MiB (or the caller's smaller patch
+limit), with at most 50 files and one preimage read per file.
 
 This is not yet a fix for
 [tracker#1309](https://github.com/cgwalters-forge/tracker/issues/1309): no check,
