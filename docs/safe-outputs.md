@@ -69,6 +69,13 @@ Check reads no-follow regular files, caps input at 1 MiB/1000 lines and context 
 only on success. It will not overwrite a receipt. It does no network I/O and
 does not obtain credentials. Validation diagnostics omit request text.
 
+Apply uses the same bounded, no-follow regular-file reader for input and
+context, and caps the receipt at 4 KiB. Standalone comment CLI tests cover exact
+byte limits and refusal of missing, symlinked, directory and oversized artifacts,
+including replacements after a successful check. Refusals make no HTTP requests;
+the exact-limit controls publish only to a loopback fixture. This tests file
+admission, not the CI artifact provenance required below.
+
 Transfer the exact input and receipt through the trusted check job's artifact
 channel. The receipt binds both input and trusted context bytes with SHA-256;
 it is **not a signature** or a replacement for CI artifact provenance. A producer
@@ -144,6 +151,12 @@ or truncated diff, or absent line refuses the entire batch before writing an
 earlier valid finding. Check refuses inline output without explicit bounds, a
 merge-request target and a trusted review head. These tests exercise the CLI
 through the shared publisher; they do not prove live GitLab or caller activation.
+The same suite (`cargo test --locked -p safe-outputs --features test-support
+--test cli_gitlab_inline`) changes each member of the diff SHA triple between
+the target reads around diff retrieval. Apply refuses before any write, including
+when an earlier finding has already passed preflight. This guards against posting
+a finding with a position computed from a diff that changed while it was read;
+it does not make publication atomic with subsequent changes on GitLab.
 
 Standalone close-operation loopback tests keep an issue and merge request with
 the same number distinct, even when the trusted default comment target is the
