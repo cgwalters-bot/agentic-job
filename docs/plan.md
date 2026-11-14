@@ -205,6 +205,13 @@ JavaScript tests are removed, without changing runtime behavior or upstream
 handler coverage. Remaining local shell-step ports remain separate from live
 deployment acceptance.
 
+The missing-data path now runs in `tests/apply_workflow.rs`: a diagnostic survives
+the replay guard unchanged, the result shell step sets `missing-data=true` in the
+unblocked case when nothing was published, and the final shell step fails the job.
+A published-PR control keeps the same diagnostic from turning success into failure. This replaces the
+JavaScript test and its result helper, not upstream handler execution, and proves
+local behavior only; no runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
