@@ -216,6 +216,12 @@ numeric `status-comment` input: an owned, same-item ID takes precedence in both
 modes. Reusable, composed policy/apply and dispatch callers carry the same mode.
 Notifications remain off by default (`notify: none`).
 
+In `add` mode, marker lookup matches the run ID only in the final run/status
+trailer. Quoting another run's status earlier in the body cannot redirect an
+update to that comment or suppress creation of the current run's status. The
+existing ownership checks, lookup bound and explicit comment-ID precedence
+still apply; this is routing, not authentication of arbitrary comment text.
+
 With `notify: comment`, conclude **also updates status** before adding at most one
 actionable notice per run and item. Classification is deterministic:
 

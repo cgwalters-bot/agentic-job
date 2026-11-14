@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Per-run status lookup now matches the final run/status trailer, so a quoted
+  marker cannot redirect an update to another run's comment. Notification defaults,
+  explicit comment-ID precedence and lookup bounds are unchanged.
+
 - GitLab's closing-reference cap now also counts `-ing` keyword variants,
   optional colons and `issue`/`issues` prefixes. GitHub and Forgejo behavior
   and caller output bounds are unchanged.

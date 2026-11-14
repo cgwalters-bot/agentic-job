@@ -147,6 +147,8 @@ notification opt-outs and blocked/missing-data exceptions are unchanged
 `status-comment` remains a numeric owned same-item comment ID, never an enum.
 `status-comment-mode` is separately validated as `edit` (default, one item status)
 or `add` (one run status, edited on completion/retry); a numeric ID takes precedence.
+In `add` mode, lookup requires the matching run ID in the final run/status trailer,
+not a marker quoted earlier in the comment.
 With `notify: comment`, actionable outcomes update status and also add one
 run-keyed notice: checked `missing_data` with `data_type: "operator-question"`
 and nonblank reason, an unexpected checked refusal requiring correction/policy

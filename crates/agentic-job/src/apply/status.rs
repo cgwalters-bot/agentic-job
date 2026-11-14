@@ -209,8 +209,10 @@ impl Status {
                     && comment["body"].as_str().is_some_and(|body| {
                         body.ends_with(&format!("\n\n{MARKER}"))
                             && (!self.add
-                                || body.contains(&format!(
-                                    "\n\n<!-- agentic-job-run: {} -->",
+                                // Quoted run markers in the prose must not
+                                // select another run's status for an edit.
+                                || body.ends_with(&format!(
+                                    "\n\n<!-- agentic-job-run: {} -->\n\n{MARKER}",
                                     self.run
                                 )))
                     })
@@ -966,6 +968,54 @@ mod tests {
                 posts
             );
             assert!(requests.len() <= MAX_PAGES as usize + 2);
+        }
+    }
+
+    #[test]
+    fn add_mode_uses_the_final_run_marker_not_quoted_status() {
+        for other_run in ["99", "101"] {
+            for existing in [false, true] {
+                let quoted = body(
+                    &format!("Quoted status:\n\n{}\n\nEnd quote", written("100")),
+                    None,
+                    None,
+                    other_run,
+                )
+                .unwrap();
+                let mut comments = vec![comment(5, JOB_TOKEN_AUTHOR, &quoted)];
+                if existing {
+                    comments.push(comment(6, JOB_TOKEN_AUTHOR, &written("100")));
+                }
+                let (github, requests) = forge(BTreeMap::from([
+                    (format!("{LIST}1"), (200, json!(comments))),
+                    (POST.into(), (201, json!({"id": 6}))),
+                    (
+                        "PATCH /repos/o/r/issues/comments/5".into(),
+                        (200, json!({"id": 5})),
+                    ),
+                    (
+                        "PATCH /repos/o/r/issues/comments/6".into(),
+                        (200, json!({"id": 6})),
+                    ),
+                ]));
+                let mut update = status("100", "");
+                update.add = true;
+                update.body = body("finished", None, None, "100").unwrap();
+                let result = update
+                    .upsert(&github, JOB_TOKEN_AUTHOR, &mut |_| {})
+                    .unwrap();
+                let case = format!("other_run={other_run}, existing={existing}");
+                assert_eq!(result["id"], 6, "{case}");
+                let requests: Vec<_> = requests.try_iter().collect();
+                assert_eq!(requests.len(), 2, "{case}: {requests:?}");
+                let expected = if existing {
+                    "PATCH /repos/o/r/issues/comments/6"
+                } else {
+                    POST
+                };
+                assert!(requests[1].line.starts_with(expected), "{case}");
+                assert_eq!(requests[1].body["body"], update.body, "{case}");
+            }
         }
     }
 
