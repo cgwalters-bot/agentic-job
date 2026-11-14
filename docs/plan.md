@@ -189,6 +189,13 @@ specific diagnostics. This supplements, rather than removes, the legacy parity
 cases pending the caller-evidence gate above. No runtime control, permission or
 caller setting changes.
 
+The scripted end-to-end comment fixtures and CI's negative-publication filter
+are checked by `scripted_comments` tests in `crates/agentic-job/tests/workflows.rs`,
+replacing their JavaScript assertions. These local tests preserve fixed caller
+destinations, the deliberately misdirected fixture and detection of a refused
+comment appearing in a run's results; they do not demonstrate a live forge run.
+Runtime workflows and upstream parity drivers are unchanged.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
