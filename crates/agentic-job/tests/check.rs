@@ -595,6 +595,129 @@ fn a_hand_back_within_the_policy_is_accepted() {
     );
 }
 
+/// The corpus's patch-size boundaries, through serialized policy and the real
+/// collector/checker rather than only the patch reader. Keep the input fixed
+/// while moving each bound so the refusal cannot be attributed to a bad patch.
+#[test]
+fn collected_patches_obey_exact_byte_and_file_limits() {
+    use serde_json::json;
+
+    // The bounds parser requires at least 1024 bytes. Ordinary commit-message
+    // prose counts toward the budget just as the diff does.
+    let patch = std::fs::read_to_string(data("check/handback/aw-agent-run-7.patch"))
+        .unwrap()
+        .replacen(
+            "\n---\n",
+            &format!("\n{}\n\n---\n", "Context. ".repeat(128)),
+            1,
+        );
+    let bytes = patch.len();
+    for (name, max_bytes, max_files, refusal) in [
+        ("bytes below limit", bytes + 1, 2, None),
+        ("bytes at limit", bytes, 2, None),
+        (
+            "bytes over limit",
+            bytes - 1,
+            2,
+            Some(format!("is {bytes} bytes, over {}", bytes - 1)),
+        ),
+        ("files below limit", bytes + 1, 3, None),
+        ("files at limit", bytes + 1, 2, None),
+        (
+            "files over limit",
+            bytes + 1,
+            1,
+            Some("the patch touches 2 files, over 1".to_owned()),
+        ),
+    ] {
+        let run = Run {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        std::fs::create_dir(run.path("out")).unwrap();
+        std::fs::write(run.path("out/aw-agent-run-7.patch"), &patch).unwrap();
+        std::fs::copy(
+            data("check/handback/outputs.jsonl"),
+            run.path("out/outputs.jsonl"),
+        )
+        .unwrap();
+        let mut base: Value =
+            serde_json::from_slice(&std::fs::read(data("check/handback/base.json")).unwrap())
+                .unwrap();
+        base["repo"] = json!("example/repo");
+        std::fs::write(run.path("out/base.json"), base.to_string()).unwrap();
+        std::fs::write(run.path("bounds.toml"), format!(
+            "hosts = ['github.com']\nrepos = ['example/repo']\nbases = ['main']\nmax_outputs = 1\nmax_patch_bytes = {max_bytes}\nmax_patch_files = {max_files}\n[github.outputs]\ncreate_pull_request = {{ max = 1 }}\n"
+        )).unwrap();
+        let policy = Command::new(BIN)
+            .args([
+                "policy",
+                "--repo",
+                "example/repo",
+                "--clone-url",
+                "https://github.com/example/repo",
+                "--base",
+                "main",
+                "--kind",
+                "branch",
+                "--outputs",
+                "create_pull_request",
+                "--max-outputs",
+                "1",
+                "--allow",
+            ])
+            .arg(run.path("bounds.toml"))
+            .output()
+            .unwrap();
+        assert_eq!(policy.status.code(), Some(0), "{name}: {policy:?}");
+        let serialized: Value = serde_json::from_slice(&policy.stdout).unwrap();
+        assert_eq!(serialized["max_patch_bytes"], json!(max_bytes), "{name}");
+        assert_eq!(
+            serialized["safe_outputs"]["create_pull_request"]["max_patch_files"],
+            json!(max_files),
+            "{name}"
+        );
+        std::fs::write(run.path("policy.json"), policy.stdout).unwrap();
+        let collected = run.path("collected.json");
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(ingest.status.code(), Some(0), "{name}: {ingest:?}");
+        let checked = run.check(&collected);
+        let verdict = run.verdict();
+        assert_eq!(
+            checked.status.code(),
+            Some(i32::from(refusal.is_some())),
+            "{name}: {checked:?}; {verdict}"
+        );
+        assert_eq!(verdict["ok"], refusal.is_none(), "{name}: {verdict}");
+        if let Some(refusal) = refusal {
+            assert!(
+                verdict["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| error.as_str().unwrap().contains(&refusal)),
+                "{name}: {verdict}"
+            );
+        } else {
+            assert_eq!(verdict["errors"], json!([]), "{name}: {verdict}");
+            assert_eq!(verdict["items"].as_array().unwrap().len(), 1, "{name}");
+            assert_eq!(verdict["patch"]["bytes"], json!(bytes), "{name}");
+            assert_eq!(
+                verdict["patch"]["files"],
+                json!(["src/lib.rs", "src/new.rs"]),
+                "{name}"
+            );
+        }
+    }
+}
+
 #[test]
 fn public_base_evidence_cannot_complete_an_incomplete_key() {
     use base64::Engine as _;

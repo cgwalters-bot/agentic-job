@@ -137,6 +137,13 @@ refusals assert their diagnostics. Only the replaced new-check JavaScript test i
 removed; old-tree comparisons, upstream drivers and gated fixtures remain.
 This adds no runtime control or caller setting.
 
+Patch byte and file-count boundaries also run through `policy`, `collect` and
+`check` in `tests/check.rs`: a fixed valid two-file patch is accepted below and
+at each configured limit, then refused one byte or one file over it. This pins
+the serialized bounds and the check-stage enforcement without Node or external
+checkouts. The legacy corpus comparisons remain; this adds no runtime control
+or caller setting and does not satisfy the fixture-deletion prerequisite above.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
