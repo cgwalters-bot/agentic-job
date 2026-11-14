@@ -21,6 +21,10 @@ impl Fixture {
     }
 
     fn with_merge_request_state(state: &'static str) -> Self {
+        Self::with_failure(state, None)
+    }
+
+    fn with_failure(state: &'static str, failure: Option<(usize, u16, String)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -71,10 +75,23 @@ impl Fixture {
                 } else {
                     json!({"html_url":"https://github.com/owner/repo/issues/7#issuecomment-1","id":1,"noteable_iid":7})
                 }.to_string();
+                let mut status = 201;
+                let mut headers = String::new();
+                let mut body = body;
+                if let Some((at, code, location)) = &failure
+                    && requests.lock().unwrap().len() + 1 == *at
+                {
+                    status = *code;
+                    headers = format!("Location: {location}\r\n");
+                    // A server may reflect credentials or submitted prose in
+                    // its error. Neither belongs in the CLI's diagnostics.
+                    body = json!({"message":"loopback-test-token reflected-response-sentinel"})
+                        .to_string();
+                }
                 requests.lock().unwrap().push(request);
                 write!(
                     stream,
-                    "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 )
@@ -722,6 +739,63 @@ fn github_digest_comment_filters_notifications_before_publication() {
         let (_, payload) = writes[0].split_once("\r\n\r\n").unwrap();
         let payload: Value = serde_json::from_str(payload).unwrap();
         assert_eq!(payload["body"], expected, "input: {body}");
+    }
+}
+
+#[test]
+fn github_comment_failure_stops_publication_without_retry_or_response_leak() {
+    for status in [301, 302, 303, 307, 308, 403, 429, 500, 502, 503] {
+        for failed_request in [1, 2] {
+            let redirected = Fixture::new();
+            let f = Fixture::with_failure(
+                "opened",
+                Some((
+                    failed_request,
+                    status,
+                    format!("{}/redirected", redirected.api),
+                )),
+            );
+            write_context(
+                &f,
+                &json!({
+                    "repo":"owner/repo", "item":7, "max_outputs":3,
+                    "api_url":f.api, "outputs":{"add_comment":{"max":3}}
+                }),
+            );
+            let bodies = [
+                "First assessment.",
+                "Second assessment.",
+                "Third assessment.",
+            ];
+            f.input(
+                &bodies
+                    .iter()
+                    .map(|body| json!({"type":"add_comment","body":body}).to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            f.assert_ok("check");
+            assert!(f.writes.lock().unwrap().is_empty());
+            let result = f.run("apply");
+            assert_eq!(result.status.code(), Some(1), "{status}: {result:?}");
+            assert!(result.stdout.is_empty(), "{status}: {result:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&result.stderr),
+                "safe-outputs: comment publication failed\n",
+                "{status}"
+            );
+            // Earlier successful posts remain; neither the failed post nor
+            // later comments may be sent again automatically.
+            let requests = f.writes.lock().unwrap();
+            assert_eq!(requests.len(), failed_request, "{status}: {requests:#?}");
+            for (request, expected) in requests.iter().zip(bodies) {
+                assert!(request.starts_with("POST /repos/owner/repo/issues/7/comments "));
+                let (_, payload) = request.split_once("\r\n\r\n").unwrap();
+                let payload: Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(payload["body"], expected);
+            }
+            assert!(redirected.writes.lock().unwrap().is_empty(), "{status}");
+        }
     }
 }
 
