@@ -2804,6 +2804,12 @@ comment, a fork merge request and inline discussions, including neutralized
 quick actions and `@all`. Like `forgejo`, the job runs on pull requests with a
 read-only job token, no repository secret and no external GitLab account or
 environment. Ordinary `cargo test` skips it; it is not required until stable.
+The closing-cap fixture creates eleven distinct issues and compares exact
+project/iid pairs from GitLab's `closes_issues` API: an unfiltered control MR
+must reference all eleven, while an apply-published MR must reference only the
+first ten. It uses one `Closes project#iid` pair per line, not lists, URLs or
+custom patterns. It does not merge either MR and verifies the issues stay open;
+this checks GitLab's predicted merge consequences, not actual merge-time closure.
 The job generates and masks its disposable root password before container
 creation: a fixed fixture password was rejected during admin seeding in
 [this failed run](https://github.com/cgwalters-forge/agentic-job/actions/runs/42442455838/job/128614408124).
