@@ -212,7 +212,9 @@ the next in the same major version.
   The stack proposal and `check::stack::artifact` receipt are experimental
   library-only formats, not stable CLI/workflow inputs. They enable no caller
   and leave the ordinary one-PR cap unchanged. Experimental stack publication
-  requires an opaque revalidated build, its unchanged policy and full-plan leases
+  requires an opaque revalidated build, its unchanged policy and full-plan leases;
+  GitHub pushes use the policy repository's clone URL and fork-push role in an
+  isolated Git directory, while PR operations use the publication role
   ([stack receipts](safe-outputs.md#experimental-library-receipts)).
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`, `run --config`): the tables

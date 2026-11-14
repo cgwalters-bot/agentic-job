@@ -228,6 +228,16 @@ pub fn push(
     stacked: &Stacked,
     leases: &[Lease<'_>],
 ) -> Result<bool> {
+    push_using(remote, target, stacked, leases, |args| git(repo, args))
+}
+
+fn push_using(
+    remote: &str,
+    target: &Target<'_>,
+    stacked: &Stacked,
+    leases: &[Lease<'_>],
+    git: impl Fn(&[&str]) -> Result<String>,
+) -> Result<bool> {
     bind(target, leases)?;
     let built = stacked.steps.len();
     ensure!(built <= leases.len(), "stack leases do not cover the stack");
@@ -253,7 +263,7 @@ pub fn push(
     let current = || -> Result<Vec<Option<String>>> {
         let mut args = vec!["ls-remote", "--refs", remote];
         args.extend(references.iter().map(String::as_str));
-        let listed = git(repo, &args)?;
+        let listed = git(&args)?;
         let heads: Vec<_> = listed
             .lines()
             .filter_map(|line| line.split_once('\t'))
@@ -298,7 +308,7 @@ pub fn push(
         args.push(format!("{}:{reference}", step.head));
     }
     let args: Vec<_> = args.iter().map(String::as_str).collect();
-    git(repo, &args)?;
+    git(&args)?;
     ensure!(at(&current()?), "stack heads were not pushed");
     Ok(true)
 }
@@ -426,17 +436,80 @@ pub struct Published {
 /// TARGET must have exactly the policy revalidated by [`build_verified`], and
 /// LEASES must cover the entire admitted issue plan, including refused steps.
 /// Separate checked steps or caller-selected commit heads are not accepted.
-/// REMOTE is still a caller-owned, credential-free low-level transport; no
-/// workflow or CLI may enable this experimental publisher yet.
+/// Pushes use the ForkPush role and the policy's clone URL, which must name its
+/// own repository. PR operations use the Publication role. A fresh bare Git
+/// directory prevents the source checkout's hooks, remotes or URL rewrites from
+/// redirecting credentials or writes. No workflow or CLI enables this yet.
 pub fn publish(
     repo: &Path,
-    remote: &str,
     target: &Target<'_>,
     run: &Run,
     verified: &VerifiedStack,
     leases: &[Lease<'_>],
-    pulls: &dyn Pulls,
+    github: &Github,
 ) -> Result<Published> {
+    validate_publication(target, verified, leases)?;
+    let remote = publication_remote(target.policy)?;
+    let push = github.for_role(Role::ForkPush)?;
+    let transport = push.git();
+    let isolated = tempfile::tempdir().context("making a directory for the stack push")?;
+    git(isolated.path(), &["init", "--bare", "--quiet"])?;
+    let source = std::path::absolute(repo).context("resolving the stack's repository")?;
+    let source = source
+        .to_str()
+        .context("the stack's repository is not UTF-8")?;
+    for built in &verified.stacked.steps {
+        ensure!(COMMIT_RE.is_match(&built.head), "invalid built stack head");
+        git(
+            isolated.path(),
+            &["fetch", "--quiet", "--no-tags", "--", source, &built.head],
+        )?;
+    }
+    publish_using(
+        target,
+        run,
+        &verified.checked,
+        &verified.stacked,
+        leases,
+        github,
+        || {
+            push_using(remote, target, &verified.stacked, leases, |args| {
+                transport.run(isolated.path(), args, None)
+            })
+        },
+    )
+}
+
+/// The admitted repository, not a caller-selected remote name or URL. Refuse
+/// credentials, query/fragment syntax and a different repository before git
+/// receives a token. File mirrors are retained for local integration tests.
+fn publication_remote(policy: &Policy) -> Result<&str> {
+    let remote = policy.clone_url.as_str();
+    crate::contract::check_clone_url(remote)?;
+    let repository = remote.strip_suffix(".git").unwrap_or(remote);
+    let server = repository
+        .strip_suffix(&format!("/{}", policy.repo))
+        .context("stack clone URL does not name the admitted repository")?;
+    ensure!(
+        !remote.contains(['@', '?', '#', '%', '\\']),
+        "stack clone URL must not contain credentials or URL escapes"
+    );
+    if let Some(authority) = server.strip_prefix("https://") {
+        ensure!(
+            !authority.is_empty() && !authority.contains('/'),
+            "stack clone URL must name an HTTPS server and the admitted repository"
+        );
+    } else {
+        ensure!(server.starts_with("file:///"), "invalid stack Git server");
+    }
+    Ok(remote)
+}
+
+fn validate_publication(
+    target: &Target<'_>,
+    verified: &VerifiedStack,
+    leases: &[Lease<'_>],
+) -> Result<()> {
     ensure!(
         serde_json::to_vec(target.policy)? == verified.policy,
         "stack publication policy differs from the revalidated admission"
@@ -445,6 +518,20 @@ pub fn publish(
         leases.len() == verified.planned_steps,
         "stack leases do not cover the admitted issue plan"
     );
+    bind(target, leases)
+}
+
+#[cfg(test)]
+fn publish_local(
+    repo: &Path,
+    remote: &str,
+    target: &Target<'_>,
+    run: &Run,
+    verified: &VerifiedStack,
+    leases: &[Lease<'_>],
+    pulls: &dyn Pulls,
+) -> Result<Published> {
+    validate_publication(target, verified, leases)?;
     publish_checked(
         repo,
         remote,
@@ -470,6 +557,7 @@ pub fn publish(
 /// caller has read the published stack again, resumes from it. A step's
 /// text the gates refuse, or a failed push, writes nothing and is an error.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn publish_checked(
     repo: &Path,
     remote: &str,
@@ -479,6 +567,20 @@ fn publish_checked(
     stacked: &Stacked,
     leases: &[Lease<'_>],
     pulls: &dyn Pulls,
+) -> Result<Published> {
+    publish_using(target, run, steps, stacked, leases, pulls, || {
+        push(repo, remote, target, stacked, leases)
+    })
+}
+
+fn publish_using(
+    target: &Target<'_>,
+    run: &Run,
+    steps: &[CheckedStep],
+    stacked: &Stacked,
+    leases: &[Lease<'_>],
+    pulls: &dyn Pulls,
+    push: impl FnOnce() -> Result<bool>,
 ) -> Result<Published> {
     ensure!(
         stacked.steps.len() <= steps.len(),
@@ -523,7 +625,7 @@ fn publish_checked(
     for pull in &prepared {
         pulls.find(target.repo(), pull)?;
     }
-    let pushed = push(repo, remote, target, stacked, leases)?;
+    let pushed = push()?;
     let mut published = Published {
         pushed,
         opened: Vec::new(),
@@ -616,6 +718,7 @@ fn apply_steps(dir: &Path, file: &Path, steps: &[&CheckedStep]) -> Result<Stacke
 
 #[cfg(test)]
 mod tests {
+    use super::publish_local as publish;
     use super::*;
     use crate::check::stack::Step;
     use std::process::Command;
@@ -1282,9 +1385,17 @@ mod tests {
     }
 
     fn verified(fixture: &Fixture, inspect: impl Fn(&Step) -> Result<()>) -> VerifiedStack {
+        verified_policy(fixture, &POLICY, inspect)
+    }
+
+    fn verified_policy(
+        fixture: &Fixture,
+        policy: &Policy,
+        inspect: impl Fn(&Step) -> Result<()>,
+    ) -> VerifiedStack {
         use crate::check::stack::artifact::{self, Admission};
         let admission = Admission {
-            policy: &POLICY,
+            policy,
             base_commit: &fixture.base,
             issues: &[1, 2, 3],
         };
@@ -1303,6 +1414,125 @@ mod tests {
             fixture.temp.path(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn publication_remote_is_the_admitted_repository_without_credentials() {
+        for (url, accepted) in [
+            ("https://forge.invalid/owner/repo", true),
+            ("https://forge.invalid:8443/owner/repo.git", true),
+            ("file:///tmp/mirror/owner/repo.git", true),
+            ("https://forge.invalid/other/repo", false),
+            ("https://forge.invalid/owner/repo/", false),
+            ("https://user:password@forge.invalid/owner/repo", false),
+            ("https://forge.invalid/path/owner/repo", false),
+            ("https:///owner/repo", false),
+            ("https://forge.invalid?path=/owner/repo", false),
+            ("https://forge.invalid#path/owner/repo", false),
+            ("https://forge.invalid/%2e/owner/repo", false),
+            ("http://forge.invalid/owner/repo", false),
+            ("origin", false),
+            ("--upload-pack=example", false),
+        ] {
+            let mut policy = POLICY.clone();
+            policy.clone_url = url.to_owned();
+            assert_eq!(publication_remote(&policy).is_ok(), accepted, "{url}");
+        }
+    }
+
+    #[test]
+    fn github_publication_uses_isolated_git_and_separate_roles() {
+        use super::super::testing::{PROVENANCE, bound, mock};
+        let fixture = fixture();
+        let repo = fixture.repo();
+        let mirror = fixture.temp.path().join("mirror").join(&POLICY.repo);
+        std::fs::create_dir_all(&mirror).unwrap();
+        run(&mirror, &["init", "--bare", "--quiet"]);
+        let mut policy = POLICY.clone();
+        policy.clone_url = format!("file://{}", mirror.display());
+        let stack = verified_policy(&fixture, &policy, |_| Ok(()));
+        let target = Target {
+            policy: &policy,
+            ..target()
+        };
+        // Neither a named push remote nor a local URL rewrite may redirect the
+        // policy repository. The production push must not read this config.
+        let decoy = fixture.temp.path().join("decoy");
+        std::fs::create_dir(&decoy).unwrap();
+        run(&decoy, &["init", "--bare", "--quiet"]);
+        run(
+            &repo,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", decoy.display()),
+                &policy.clone_url,
+            ],
+        );
+        run(&repo, &["remote", "add", "origin", decoy.to_str().unwrap()]);
+        let mut answers = vec![(200, "[]".to_owned()); 3];
+        for number in 1..=3 {
+            answers.push((200, "[]".to_owned()));
+            answers.push((
+                201,
+                json!({
+                    "number": number,
+                    "html_url": format!("https://forge.invalid/owner/repo/pull/{number}")
+                })
+                .to_string(),
+            ));
+        }
+        let (api, requests) = mock(answers);
+        let github = bound(Github::new(&api, "unused".to_owned(), PROVENANCE).unwrap());
+        let result =
+            super::publish(&repo, &target, &apply_run(), &stack, &leases(&[]), &github).unwrap();
+        assert!(result.pushed);
+        assert_eq!(result.opened.len(), 3);
+        assert_eq!(
+            published(&repo, mirror.to_str().unwrap()),
+            heads(stack.built())
+        );
+        assert_eq!(
+            published(&repo, decoy.to_str().unwrap()),
+            [None, None, None]
+        );
+        for request in requests.iter().take(9) {
+            assert_eq!(
+                request.authorization,
+                "Bearer fake-PUBLICATION_TOKEN-credential"
+            );
+        }
+        // A configured missing push credential fails before any PR API write,
+        // even though a publication credential and a legacy token are present.
+        let mut credentials = std::collections::BTreeMap::new();
+        for role in [Role::ForkPush, Role::Publication] {
+            credentials.insert(
+                role,
+                super::super::roles::Credential {
+                    identity: super::super::roles::Identity {
+                        actor_id: 7,
+                        app_id: None,
+                    },
+                    token: if role == Role::ForkPush {
+                        String::new()
+                    } else {
+                        "publication".to_owned()
+                    },
+                },
+            );
+        }
+        let error = super::publish(
+            &repo,
+            &target,
+            &apply_run(),
+            &stack,
+            &leases(&[]),
+            &github.with_roles(credentials),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("PUSH_TOKEN is missing"),
+            "{error:#}"
+        );
     }
 
     #[test]

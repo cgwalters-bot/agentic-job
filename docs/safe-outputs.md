@@ -300,11 +300,11 @@ does not push. The remote must carry no credential.
 `apply::stack::publish` accepts only the opaque `VerifiedStack` returned by
 `build_verified`, not independently supplied checked steps and commit heads.
 The target policy must exactly match the revalidated admission, and leases must
-cover its entire issue plan, including steps above a refusal. It runs `push`
+cover its entire issue plan, including steps above a refusal. It pushes
 only after preflighting every built step's existing PR ownership and base;
 those are checked again before each PR is opened or reused. The draft flag
 must also match the admitted policy before any write. It then opens each step's pull
-request through a `Pulls` adapter: step N from its branch onto step N-1's
+request through the GitHub `Pulls` adapter: step N from its branch onto step N-1's
 branch, the first onto the target branch, with the step's title and body
 followed by `Closes #N` for its issue. Title and body go through the gates
 of an ordinary pull request's: the title prefix, mention and link
@@ -325,7 +325,14 @@ and the result lists each opened step's position, issue, branch, head, base
 and pull request, plus the stopping refusal (whose reason may quote the patch when check refused
 the step) and any forge error
 apart. The GitHub adapter reads and opens with the publication role's
-credential. Because a pull request's base must be a branch of the repository
+credential. Its Git operations use the fork-push role, never the publication
+credential or a checkout's credential helper. The remote is the receipt-bound
+policy's clone URL and must name that policy's repository over HTTPS (or a local
+file mirror for tests), without credentials, query/fragment syntax or URL escapes.
+A fresh bare Git directory imports only the built heads from the source checkout;
+local URL rewrites, remotes and hooks cannot redirect the authenticated push.
+The low-level `push` remains a credential-free local transport primitive, not
+the production publication entry point. Because a pull request's base must be a branch of the repository
 it is opened in, every step branch is the target repository's own; a stack
 cannot be published from a fork. A found pull request's title and body are
 not updated after a fix round. A failed create request is reported without
@@ -383,6 +390,8 @@ a step-1 fix that restacks steps 2 and 3, and publish only step 1 of a stack
 refused at step 2. Receipt-bound publication tests refuse policy substitution
 and truncated lease plans before any write, and repeat a checked fix under
 leases; mock API tests refuse unowned PRs and check single-attempt POSTs. They
+also exercise the GitHub publisher against a file mirror and mock API, refusing
+a missing fork-push credential and ignoring source-checkout URL rewrites. They
 do **not** prove live credential behavior.
 
 ### Remaining publisher and recovery requirements

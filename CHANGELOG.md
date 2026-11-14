@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Experimental library stack publication now binds Git pushes to the receipt's
+  policy repository and fork-push credential role, isolated from the source
+  checkout's Git configuration. CLI/workflow stack publication remains disabled.
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with
