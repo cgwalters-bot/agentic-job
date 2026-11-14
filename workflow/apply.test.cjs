@@ -450,18 +450,6 @@ function scriptEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: (.*)$`, 'm'))?.[1];
 }
 
-// gh-aw replaces its own list with GH_AW_ALLOWED_DOMAINS: the handlers
-// keep the links the policy call wrote down, as `collect` does. The
-// result step's reason is tests/workflows.rs's.
-test('every sanitizer keeps the links the policy keeps', () => {
-  const domains = '${{ fromJSON(inputs.policy).allowed-domains }}';
-  assert.equal(scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_ALLOWED_DOMAINS'), domains);
-  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
-  assert.match(policy, /\n        value: \$\{\{ jobs\.policy\.outputs\.allowed-domains \}\}\n/);
-  assert.match(policy, /\n      allowed-domains: \$\{\{ steps\.request\.outputs\.allowed-domains \}\}\n/);
-  assert.match(policy, /"allowed-domains=\$\(jq -r '\.allowed_domains \/\/ \[\] \| join\(","\)' "\$JOB_DIR\/policy\.json"\)"/);
-});
-
 // The result step's outputs, which src/apply/result.rs tests, for a run
 // whose checked outputs, after the guard, are `items`, with `pr` opened.
 function resultOutputs(items, pr = null) {

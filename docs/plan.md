@@ -90,6 +90,13 @@ title/branch prefixes in both the JSON file and exported environment. These two
 tests replace their JavaScript equivalents without changing publication behavior
 or the retained upstream-handler execution tests.
 
+The sanitizer-domain wiring test now runs in Rust's `tests/workflows.rs`,
+replacing its static JavaScript assertions. It checks the policy step, job and
+workflow outputs through both apply sanitizers, and executes the shipped domain
+output command for populated, empty, null and absent domain lists. This changes
+no runtime behavior or caller setting; the upstream sanitizer parity drivers
+remain intact.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

@@ -3083,6 +3083,71 @@ fn caller_network_credentials_are_spent_before_the_agent() {
     }
 }
 
+/// The handlers and result sanitizer must inherit the policy's domains,
+/// rather than silently falling back to gh-aw's own list.
+#[test]
+fn sanitizers_keep_the_policy_domains() {
+    let policy = definition("policy.yml");
+    assert_eq!(
+        policy["on"]["workflow_call"]["outputs"]["allowed-domains"]["value"].as_str(),
+        Some("${{ jobs.policy.outputs.allowed-domains }}")
+    );
+    assert_eq!(
+        policy["jobs"]["policy"]["outputs"]["allowed-domains"].as_str(),
+        Some("${{ steps.request.outputs.allowed-domains }}")
+    );
+    let request = policy["jobs"]["policy"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("request"))
+        .unwrap();
+    let commands: Vec<_> = request["run"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("allowed-domains="))
+        .collect();
+    assert_eq!(commands.len(), 1, "one domain output from the policy file");
+    for (input, expected) in [
+        (
+            r#"{"allowed_domains":["example.org","docs.example.net"]}"#,
+            "example.org,docs.example.net",
+        ),
+        (r#"{"allowed_domains":[]}"#, ""),
+        (r#"{"allowed_domains":null}"#, ""),
+        ("{}", ""),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("policy.json"), input).unwrap();
+        let output = dir.path().join("output");
+        let ran = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", commands[0]])
+            .env_remove("BASH_ENV")
+            .env("JOB_DIR", dir.path())
+            .env("GITHUB_OUTPUT", &output)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{input}: {ran:?}");
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("allowed-domains={expected}\n"),
+            "{input}"
+        );
+    }
+    let apply = definition("apply.yml");
+    for name in [
+        "Apply the outputs with gh-aw's handlers",
+        "Say where what the run made is",
+    ] {
+        assert_eq!(
+            named_step(&apply, name)["env"]["GH_AW_ALLOWED_DOMAINS"].as_str(),
+            Some("${{ fromJSON(inputs.policy).allowed-domains }}"),
+            "{name}"
+        );
+    }
+}
+
 /// Apply's result step only reads what the job wrote and writes step
 /// outputs and the summary: it gets no token, keeps the links the handlers
 /// keep, and runs whenever they ran, without failing the job.
