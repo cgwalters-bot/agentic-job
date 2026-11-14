@@ -1,7 +1,7 @@
 [package]
 name = "secure-host"
 description = "Secure a CI host for untrusted steps, and prove it"
-version = "0.6.13"
+version = "0.6.14"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
