@@ -793,6 +793,24 @@ fn malformed_output_lines_survive_collection_as_check_refusals() {
         ("{", "Invalid JSON"),
         ("[1, 2]", "Missing required 'type' field"),
         (r#"{"message":"x"}"#, "Missing required 'type' field"),
+        ("null", "Missing required 'type' field"),
+        (r#"{"type":""}"#, "Missing required 'type' field"),
+        (r#"{"type":null}"#, "Missing required 'type' field"),
+        (r#"{"type":false}"#, "Missing required 'type' field"),
+        (r#"{"type":0}"#, "Missing required 'type' field"),
+        (r#"{"type":true}"#, "Invalid JSON - 'type' is not a string"),
+        (r#"{"type":1}"#, "Invalid JSON - 'type' is not a string"),
+        (r#"{"type":[]}"#, "Invalid JSON - 'type' is not a string"),
+        (r#"{"type":{}}"#, "Invalid JSON - 'type' is not a string"),
+        (
+            r#"{"type":"not_an_output","message":"x"}"#,
+            "Unexpected output type 'not_an_output'",
+        ),
+        // Known to the collector, but not granted by this run's policy.
+        (
+            r#"{"type":"noop","message":"No change needed"}"#,
+            "Unexpected output type 'noop'",
+        ),
     ] {
         for keep_valid_request in [false, true] {
             let run = Run::new();

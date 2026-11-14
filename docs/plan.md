@@ -121,6 +121,13 @@ publication. Empty and valid-request controls are accepted. Only those three
 legacy cases are removed; key-bearing fixtures and upstream parity remain.
 This test-only port adds no runtime control or caller setting.
 
+The same CLI matrix also covers output-type admission: null requests, empty or
+falsey types, truthy non-string types, unknown operations and a known operation
+not granted by policy. Each must fail collection and downstream check, both alone
+and after a valid publication, with the correct line-numbered diagnostic. These
+regressions supplement the legacy corpus without changing its fixtures or CI
+dependencies. No new control or caller setting is introduced.
+
 The omitted-mode attack also has deterministic Rust coverage in
 `tests/patch_git.rs`: real Git applies edits to a plain file, executable and
 symlink without an index-header mode, inheriting their types, while the reader
