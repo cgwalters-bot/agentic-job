@@ -21,14 +21,12 @@ evidence, not independently reproduced here.
 ## Prerequisites and unsupported cases
 
 Use a public project at `GROUP/PROJECT`, a protected default branch, and
-isolated, fresh runners for producer, check and apply. Nested subgroup
-paths (`group/sub/project`) do not match the repository pattern and are
-refused; support is pending in
-[#3408](https://github.com/cgwalters-forge/agentic-job/issues/3408).
-Merge requests from a branch in the target project itself are also
-unsupported, pending
-[#3409](https://github.com/cgwalters-forge/agentic-job/issues/3409): the
-publisher currently requires another owner's fork.
+isolated, fresh runners for producer, check and apply. Keep that two-part
+project path for the pinned example below. Current source also supports
+nested subgroup paths and explicitly admitted same-project merge request
+branches ([GitLab publication](safe-outputs.md#publishing-to-gitlab)); the
+default publication path requires another owner's fork. Those source tests
+do not establish support in an older pinned binary or a live deployment.
 The trusted jobs need Linux x86-64, a POSIX shell, `curl`, `jq`,
 `sha256sum` and `git`; they need neither root nor systemd. Run only trusted
 CI configuration from the default branch, not merge-request code. Do not

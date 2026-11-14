@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The getting-started guide now includes a tested local safe-output check,
+  a minimal GitHub caller with generic host settings, and an explicit route
+  to the deterministic GitLab example, without assuming project deployment access.
+
 - Opt-in endpoint-redacted patch replay authenticates deletion/context bytes
   against an independently fetched declared base before publication. Artifacts
   stay redacted; only primary native GitHub pull requests support replay.

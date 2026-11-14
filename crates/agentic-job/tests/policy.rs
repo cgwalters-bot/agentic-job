@@ -517,6 +517,8 @@ fn documented_proposals_request_fits_shipped_and_small_bounds() {
 /// inputs, while the default request cap is refused without a broker.
 #[test]
 fn try_it_caller_fits_its_bounds_and_configuration() {
+    use yaml_rust2::YamlLoader;
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let guide = std::fs::read_to_string(root.join("docs/try-it.md")).unwrap();
     let section = guide.as_str();
@@ -540,6 +542,33 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     // The reusable workflow: an input's default, and the permissions its
     // agent job asks for, which GitHub refuses the whole call without.
     let workflow = std::fs::read_to_string(root.join(".github/workflows/agentic-job.yml")).unwrap();
+    let caller_yaml = YamlLoader::load_from_str(caller).unwrap().remove(0);
+    let workflow_yaml = YamlLoader::load_from_str(&workflow).unwrap().remove(0);
+    let declared = &workflow_yaml["on"]["workflow_call"]["inputs"];
+    for (key, value) in caller_yaml["jobs"]["run"]["with"].as_hash().unwrap() {
+        let key = key.as_str().unwrap();
+        assert!(!declared[key].is_badvalue(), "unknown caller input {key:?}");
+        let valid_type = match declared[key]["type"].as_str().unwrap() {
+            "string" => value.as_str().is_some(),
+            "boolean" => value.as_bool().is_some(),
+            "number" => value.as_i64().is_some() || value.as_f64().is_some(),
+            other => panic!("unhandled input type {other}"),
+        };
+        assert!(valid_type, "wrong type for {key:?}: {value:?}");
+    }
+    for (key, value) in declared.as_hash().unwrap() {
+        let key = key.as_str().unwrap();
+        if value["required"].as_bool() == Some(true) && value["default"].is_badvalue() {
+            assert!(
+                !caller_yaml["jobs"]["run"]["with"][key].is_badvalue(),
+                "missing required input {key:?}"
+            );
+        }
+    }
+    assert_eq!(
+        caller_yaml["jobs"]["run"]["uses"].as_str().unwrap(),
+        "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT"
+    );
     let default = |name: &str| {
         workflow
             .split(&format!("\n      {name}:\n"))
@@ -577,13 +606,15 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     let allow = temp.path().join("allow.toml");
     std::fs::write(
         &allow,
-        block("```toml\n").replace("OWNER/REPO", "bootc-dev/bootc"),
+        block("```toml\n").replace("OWNER/REPO", "example-org/example"),
     )
     .unwrap();
     // `max-outputs` and `base` are left at the workflow's defaults.
     let output = policy(
         &allow,
         &[
+            ("--repo", "example-org/example"),
+            ("--clone-url", "https://github.com/example-org/example"),
             ("--outputs", input("outputs")),
             ("--base", &default("base")),
             ("--max-outputs", &default("max-outputs")),
@@ -598,12 +629,24 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     let config = input("config")
         .strip_prefix(".agentic-job-source/")
         .expect("config is read from the pinned source");
+    // Keep the generic runner's host inventory aligned with the deployed
+    // one, without inheriting its repository packages or patch exceptions.
+    let generic: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join(config)).unwrap()).unwrap();
+    let deployed: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join(".github/agentic-job/hosted.toml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(generic["host"], deployed["host"]);
+    assert_eq!(generic["setup"]["packages"], deployed["setup"]["packages"]);
+    assert_eq!(generic.as_table().unwrap().len(), 2);
+    assert_eq!(generic["setup"].as_table().unwrap().len(), 1);
     let compose = |max_requests: &str| {
         Command::new(BIN)
             .arg("config")
             .arg("--from")
             .arg(root.join(config))
-            .args(["--repo", "bootc-dev/bootc"])
+            .args(["--repo", "example-org/example"])
             .args(["--string", &format!("agent.name={}", input("agent"))])
             .args(["--integer", &format!("limits.max-requests={max_requests}")])
             // The workflow's defaults for the inputs the caller leaves out;
@@ -634,6 +677,61 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     assert!(stderr.contains("limits.max-requests"), "{stderr}");
 }
 
+/// Execute the documented local entrypoint, without a forge, model or host
+/// setup. A second run demonstrates that its bounds stop a different request.
+#[test]
+fn documented_local_check_runs_and_refuses_an_out_of_bounds_request() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::tempdir().unwrap();
+    let examples = temp.path().join("docs/examples");
+    std::fs::create_dir_all(&examples).unwrap();
+    for file in ["local.sh", "local.toml", "outputs.jsonl"] {
+        std::fs::copy(root.join("docs/examples").join(file), examples.join(file)).unwrap();
+    }
+    let path = std::env::join_paths(
+        [Path::new(BIN).parent().unwrap().to_path_buf()]
+            .into_iter()
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    for accepted in [true, false] {
+        if !accepted {
+            std::fs::write(
+                examples.join("outputs.jsonl"),
+                r#"{"type":"add_comment","body":"Not granted by the local bounds."}"#,
+            )
+            .unwrap();
+        }
+        let output = Command::new("sh")
+            .arg("docs/examples/local.sh")
+            .env("PATH", &path)
+            .env("TMPDIR", temp.path())
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if accepted {
+            let report_path = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("Checked local example: "))
+                .unwrap();
+            let report: Value =
+                serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+            assert_eq!(report["ok"], true, "{report}");
+            assert_eq!(report["items"][0]["type"], "noop", "{report}");
+            assert!(report["patch"].is_null(), "{report}");
+        } else {
+            assert!(!stdout.contains("Checked local example:"), "{stdout}");
+        }
+    }
+}
+
 /// Check the documented deterministic hand-back with its own bounds, and
 /// keep the publisher environment out of the producer and check jobs.
 #[test]
@@ -659,6 +757,26 @@ fn documented_gitlab_caller_fits_its_bounds() {
     let pipeline = YamlLoader::load_from_str(blocks("```yaml\n")[0])
         .unwrap()
         .remove(0);
+    for (_, job) in pipeline.as_hash().unwrap() {
+        for key in ["before_script", "script"] {
+            let script = job[key]
+                .as_vec()
+                .into_iter()
+                .flatten()
+                .map(|line| line.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let output = Command::new("sh")
+                .args(["-n", "-c", &script])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{key}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
     let release = pipeline["variables"]["AGENTIC_JOB_RELEASE"]
         .as_str()
         .unwrap();

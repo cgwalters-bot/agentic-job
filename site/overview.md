@@ -23,14 +23,20 @@ Projects like [OpenShell](https://github.com/NVIDIA/OpenShell) and many others a
 agents specifically. This project again takes the stance that we should secure CI in general,
 and agents are just one type of workload.
 
-There's a `cgwalters-forge/actions/secure-host` action that is in the process
-of being split out that locks down a GHA runner so that all further
-code cannot regain `sudo`; this allows you to do things like have local
-credential proxies or network egress filters etc.
+The [`secure-host` action](../docs/secure-host.md) locks down a fresh
+supported GitHub Actions runner so that later steps cannot regain `sudo`.
+It is built from this workspace and also published through
+`cgwalters-forge/actions/secure-host`. Losing root does not protect
+credentials from another process running as the same user; see the
+[credential boundary](../docs/inference.md).
 
 ## Try it
 
-Follow the [getting-started walkthrough](../docs/try-it.md) to run the scripted agent, then connect a real agent.
+Follow the [getting-started walkthrough](../docs/try-it.md) for a local
+safe-output check and a first scripted agent run on GitHub, then connect a
+real agent. GitLab currently supports the deterministic policy/check/apply
+example, **not agent inference**; its [guide](../docs/gitlab.md) names the
+remaining prerequisites and live-verification gaps.
 
 ## Documentation
 
