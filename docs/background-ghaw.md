@@ -2,323 +2,147 @@
 
 > This text is LLM generated.
 
-[gh-aw](https://github.com/github/gh-aw) (GitHub Agentic Workflows) is the
-source of the safe-output format, the collector ported by `collect` and
-run by `check` here, and the handlers run by `apply`.
-[gh-cao](https://github.com/githubnext/gh-cao) (GitHub Central Agentic Ops)
-is a GitHub Next research prototype layered on gh-aw. It adds campaigns
-across repositories, a catalog and a dashboard. This page compares
-features. It is not deployment advice. [Below](#why-a-host-user-and-not-a-container)
-is why this project uses a host-user sandbox rather than gh-aw's container
-runtime.
+This comparison was refreshed on **2026-11-14** against
+[gh-aw v1.2.2](https://github.com/github/gh-aw/releases/tag/v1.2.2), published
+**2026-11-10**. The release tag was checked out at commit
+`399a445fe2d8926c616b54b1b82a16b5b2be4445`. All gh-aw sources below refer to
+that release, not its moving documentation site. This is a source/documentation
+comparison, not a live security test or a cost benchmark. It supersedes the
+v0.92.6 comparison from [#1625](https://github.com/cgwalters-forge/agentic-job/pull/1625).
 
-The gh-aw descriptions come from its documentation and the release notes up
-to [v0.92.6](https://github.com/github/gh-aw/releases), a pre-release of
-2026-10-20; the latest full release is v0.92.0 of 2026-10-15. The gh-cao
-descriptions come from its README of the same week. agentic-job pins gh-aw's
-setup action at v0.91.12 plus seven commits
-([safe-outputs.md](safe-outputs.md#what-is-gh-aws-and-why)). Statements about
-this repository were checked against its code when this page was written;
-the code wins where they differ. Issue numbers are the ones that tracked
-each gap. All of them are closed, even where part of the gap remains.
+The agentic-job column describes this checkout, not every deployed caller.
+Its gh-aw compatibility pin is still **v0.91.12-7**, not v1.2.2; refreshing
+this comparison does not upgrade the collector fixtures, validation data or
+apply handlers ([what is borrowed](safe-outputs.md#what-is-gh-aws-and-why)).
 
 ## Why a host user and not a container
 
-For most people, gh-aw is the right choice today. The difference is where
-the agent runs. gh-aw puts it in a container behind a firewall, with
-[VM isolation in preview](https://github.github.com/gh-aw/reference/agent-runtimes/).
-That is a good boundary until the work itself needs containers: gh-aw's
-[mode for that](https://github.com/github/gh-aw-firewall/blob/main/docs/usage.md)
-hands the agent the host's Docker socket, and its own docs warn that
-this lets the agent bypass the firewall. agentic-job hardens the runner
-VM instead and runs the agent as an ordinary unprivileged user on it,
-with `/dev/kvm`, user namespaces and a login session of its own. That is
-the work this was built for: operating system and container tooling.
+Choose agentic-job when the workload needs a hardened disposable host for
+rootless Podman or `/dev/kvm`, an ACP session, and bounded outputs checked on
+another machine before publication. Its [sandbox](sandbox.md) treats the
+agent as the runner's own, potentially hostile user: the job, not a second
+user or a process environment, is the trust boundary. This preserves host
+tooling without giving the agent a privileged container daemon socket.
+Container builds needing the network require host networking and the proxy's
+CA bundle; see the [container recipe](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#containers).
 
-Rootless Podman must be installed before hardening. Container build steps
-that need the network also need `--network=host` and a read-only mount of
-the egress proxy's CA bundle at the image's trust-bundle path; these are
-not Podman defaults. See the [container recipe](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#containers).
+Choose gh-aw when its GitHub Actions authoring, built-in integrations and
+workflow examples fit the task; its [compiler][gh-compile] constructs the
+job graph from Markdown and YAML frontmatter. Its default is a Docker
+sandbox, but it also has preview KVM microVM runtimes, so "gh-aw is only a
+container" is no longer an adequate distinction ([runtime matrix][gh-runtime]).
+Neither model is universally stronger: agentic-job shares the host kernel
+and trusts host hardening; gh-aw's default Docker shares the kernel too,
+while its preview VMs have different provisioning and compatibility limits.
 
-Three smaller differences:
+**Do not call agentic-job credentialless.** In the supported broker path the
+provider key stays off the agent machine, but the agent receives a run bearer
+token and normally a GitHub read token. Same-UID processes cannot hide keys
+from it. Credentialed MCP is currently refused, not safely proxied locally
+([inference boundary](inference.md#current-boundary-5-november-2026),
+[MCP status](mcp.md#current-status)). No forge write token is given to the
+agent; check and apply run on separate machines and do not execute its code.
 
-- The hardening is not tied to the agent. A build-and-test job with no
-  agent can use `secure-host` by itself.
-- The model key is never on the runner. gh-aw keeps it out of the
-  agent's process, in an
-  [API proxy](https://github.com/github/gh-aw-firewall) beside it on the
-  same runner, and has
-  [keyless modes](https://github.github.com/gh-aw/reference/auth/) too.
-  Here the runner gets a token good for one run, and the key stays on
-  another machine.
-- There is no compiler and no new workflow language. You write ordinary
-  workflow YAML that calls a reusable workflow.
-  The opt-in [workflow checker](workflows-check.md) enforces job shape;
-  this repository runs it in the required base-trusted ingress `vet` job.
+## Feature comparison
 
-## Shape of a workflow
+| Feature | gh-aw v1.2.2 (release-pinned evidence) | agentic-job in this checkout |
+| --- | --- | --- |
+| Sandbox | AWF defaults to rootless Docker/network isolation; privileged Docker, preview Cloud Hypervisor and preview NVX are alternatives. The default hides the Docker socket. [Sandbox][gh-sandbox], [runtime requirements][gh-runtime]. | Hardened disposable host, agent as runner UID; rootless Podman and KVM where provisioned. Same-UID transcript and harness limits are not trusted attestations. [Sandbox](sandbox.md), [harness](harness.md). |
+| Inference credentials | Provider credentials can stay in the AWF API-proxy sidecar on the runner, outside the agent container; Copilot Actions-token and provider WIF options also exist. This is not a claim that all configurations are credentialless. [Copilot isolation][gh-copilot], [native-provider routing][gh-routing], [authentication][gh-auth]. | External broker holds the provider key; a separate registration job holds OIDC credentials. Agent still holds a run token and, by default, a read-only GitHub token. Provider-key runner mode is refused. [Inference](inference.md), [job separation](workflow.md). |
+| Network egress | Domain/ecosystem allowlists, with a small `defaults` set when omitted and no network for `{}`; blocked entries win. Provider-hosted web tools need separate `hosted-web` policy, not just `network.allowed`. [Network][gh-network]. | Rust egress proxy: by default reads except pinned threat-feed destinations, with rules for writes; domain allowlist is opt-in. Runner-user write-policy enforcement is also opt-in, not an assumed default. [Egress policy](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md). |
+| Safe outputs and deterministic checking | Structured requests via safe-output tools/CLI; collector validates and sanitizes JSONL. Permission-controlled jobs execute enabled operations. Unlike this project, omission of non-system outputs auto-enables `create-issue` unless explicitly disabled. [Safe outputs][gh-outputs], [collector][gh-collector]. | Agent writes JSONL. Rust collector plus `check` on another machine enforce trusted per-type/target bounds, byte/file/path/type caps and secret checks. Every operation is off unless enabled. Agent can run the same handback checks locally. [Contract](safe-outputs.md). |
+| Apply | Separate permission-controlled output jobs. PR patch/bundle handling captures bytes and uses private snapshots, with digest/identity rechecks at publication boundaries. That handler-time guarantee alone is not detection provenance or a transaction. [Output jobs][gh-outputs], [transport requirements][gh-transport], [implementation][gh-integrity]. | Apply downloads the artifact ID/digest released by check; base, changed-path and head-lease guards remain. GitHub uses pinned gh-aw handlers plus opt-in native handlers; other forges use native publishers. [Apply](safe-outputs.md#who-applies), [workflow](workflow.md). |
+| ACP and sessions | Native engine interfaces and unified session capture; experimental artifact-backed durable sessions for all six built-ins, with engine-specific resume behavior. Restored history can carry prompt injection and does not restore workspace changes or exactly-once effects. ACP support was **not verified** in the reviewed engine contracts. [Engines and durable runs][gh-engines]. | One ACP client drives Claude Code, opencode, Vibe and a scripted test agent. Interactive joining and item-comment steering exist; they do not authorize writes. This is not a claim of equivalent cross-run durable resume. [Harness](harness.md), [agent registry](../crates/agentic-job/src/session/agents.toml), [interactive sessions](interactive.md). |
+| Forges and integrations | GitHub Actions/GitHub operations; GHES and data-residency compatibility are explicitly not an end-to-end support commitment. Jira, Linear and Azure DevOps integrations do not establish GitLab/Forgejo execution support, which was **not verified**. [Enterprise scope][gh-enterprise], [output integrations][gh-outputs], [tools][gh-tools]. | GitHub reusable workflow; Forgejo and GitLab have native publication subsets, not full GitHub parity. GitLab policy/check/apply is available, but agent inference there remains unsupported pending broker identity/lifecycle work. [Forge matrix](safe-outputs.md#neutral-profile), [GitLab status](gitlab.md). |
+| Authoring | Markdown instructions and YAML frontmatter compile into Actions `.lock.yml`; body instructions load at runtime, while configuration changes require compilation. Imports compose configuration/prompts. [Compilation][gh-compile], [imports][gh-imports]. | Ordinary YAML calling a pinned reusable workflow, a task, and caller-owned TOML bounds/configuration. No workflow compiler; optional base-trusted workflow shape checking. [Compiler decision](compiler.md), [workflow checker](workflows-check.md). |
+| Catalogue size | At this tag: **18 gallery Markdown/MDX pages** and **365 top-level workflow Markdown sources** in the upstream tree, including smoke/conformance/maintenance examples. These are not 365 supported catalogue products. Total installable community catalogue size was **not verified**. [Gallery tree][gh-gallery], [workflow tree][gh-workflows]; counting method below. | No equivalent curated installable catalogue. Repository-owned example callers exist; they are examples, not a promise of tested deployments for every combination. [Caller guide](dispatch.md), [deployment evidence](workflow.md#what-has-run-and-what-has-not). |
+| Operational cost | Actions minutes plus provider inference; AIC estimates, logs/audit and runtime credit/turn caps. Estimates are not provider invoices. Operating the default runtime requires Docker and supporting gateway/proxy services. [Cost management][gh-cost], [limits][gh-engines], [runtime prerequisites][gh-runtime]. | Runner minutes plus inference, and an external broker to operate. Budget watcher and offline audit report usage/estimated cost; scheduler-wide admission belongs to callers. Host preparation and separate check/apply jobs also cost time. [Inference](inference.md), [limits](harness.md), [audit](workflow.md#auditing-downloaded-artifacts). **No matched-task dollar, latency or maintenance-cost comparison was measured.** |
 
-gh-aw compiles Markdown with YAML frontmatter into a locked Actions workflow.
-Its compiler selects the engine, permissions, firewall, activation,
-detection and output jobs. It also lints workflows: v0.92.6 adds AST linters
-for checkout trust, prompt expressions and secret-leak taint. Imports compose
-prompts and configuration.
+The catalogue counts are reproducible from `git ls-tree -r --name-only HEAD`
+in the v1.2.2 checkout: count `.md` files directly under `.github/workflows/`
+(exclude subdirectories and generated `.lock.yml`), and recursively count
+`.md`/`.mdx` under `docs/src/content/docs/gallery/`. Gallery pages can describe
+several workflows; the two counts must not be added together or compared as
+deployment counts. No live community registry was inventoried.
 
-agentic-job has no compiler and no prompt language
-([compiler.md](compiler.md)). A caller writes ordinary YAML that calls the
-reusable workflow at a pinned commit. Its bounds TOML files set the limits
-check enforces. The caller supplies one standing task. The opt-in
-[`workflows check`](workflows-check.md) enforces job shape: pins, no
-persisted credentials, no secrets in secure-host jobs and no unsandboxed
-agent actions. This repository runs it in its required ingress `vet` job.
+## What remains borrowed
 
-## Sandbox and network
+agentic-job still uses gh-aw's safe-output idea, JSONL vocabulary and
+sanitization semantics. Its Rust collector is held to fixtures produced by
+the older pinned upstream collector, not assumed compatible with every
+v1.2.2 addition. Generated `safe-outputs/validation.json` derives from gh-aw's
+compiled workflows. GitHub apply still loads the pinned handler manager for
+operations not routed to native Rust handlers; staged apply follows the same
+separation of requests from writes. See the maintained
+[dependency and parity account](safe-outputs.md#what-is-gh-aws-and-why) and
+[upstream JavaScript disposition](safe-outputs.md#upstream-javascript-disposition).
+This refresh changes none of those pins or contracts.
 
-gh-aw's default runtime is AWF, its Agent Workflow Firewall, a rootless
-container with a domain allowlist. Two runtimes are in preview: a
-cloud-hypervisor VM and the `nvx` microVM. AWF's API proxy holds the model
-credential on the runner.
+## What could go upstream
 
-agentic-job uses no container: the agent shares the kernel of a disposable
-host, and keeps rootless podman and host KVM. Under the reusable workflow,
-secure-host first removes general root access and the metadata service,
-and the agent then runs as the runner's user. That job holds nothing the
-agent may not read: read-only permissions, no `id-token` and no secret but
-the run token ([workflow.md](workflow.md)). The CLI requires `--runner-home`
-and runs the agent as its own user too; the second-user mode was removed
-([sandbox.md](sandbox.md)). `[egress] write-policy`, off by default,
-holds the runner's user to the same egress policy
-([egress write policy](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#egress-write-policy-opt-in)).
-Egress goes through the binary's own Rust proxy
-([the policy file](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#the-policy-file)). mitmproxy remains only
-behind `[egress] rust-proxy = false`. By default, reads go to any host not
-on a pinned threat feed, and writes need a `[[write]]` rule. gh-aw's style of
-domain allowlist is opt-in: `mode = "allowlist"`
-([opt-in domain allowlist](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#opt-in-domain-allowlist)).
+These are proposals, not upstream support or announced plans:
 
-gh-aw runs on private repositories as on public ones. Here runs are
-public-only, and the reusable workflow refuses a private target or caller
-whatever the bounds say. Standalone `run` also refuses a private target:
-the policy's legacy private opt-in does not bypass the runner-only launch
-refusal ([private repositories](private-repositories.md)).
+- **A host-user runtime with a concrete threat model.** Share the rootless
+  Podman/KVM use case, secure-host probes and separation of credential-bearing
+  jobs. A useful proposal must retain egress and credential boundaries, not
+  expose a privileged daemon. The earlier host-user fork is not production
+  integration ([compiler investigation](compiler.md#the-options-that-were-not-chosen));
+  compare against gh-aw's current [runtime contracts][gh-runtime] first.
+- **An ACP engine adapter.** Offer the common session client, cancellation,
+  transcript and loopback adapter tests as an alternative to per-engine
+  drivers. Mapping ACP onto gh-aw's [engine contracts][gh-engines] remains
+  untried; do not equate unified logs with ACP transport.
+- **Reusable deterministic output checks and forge-neutral publishers.**
+  Share the [standalone Rust checker](safe-outputs.md#standalone-cli), bounded
+  patch-admission cases, exact-head leases and Forgejo/GitLab notification
+  filtering tests. First reconcile their policy semantics with the newer
+  upstream [safe-output contract][gh-outputs] and [transport checks][gh-transport];
+  these are test/code candidates, not a claim that gh-aw lacks such checks.
 
-Under the reusable workflow the model key never reaches the runner: it
-stays with a broker on another machine. A `register` job of its own
-registers the run with GitHub OIDC, and the agent's job, which has no
-`id-token`, gets only a token for that one run
-([the run token](workflow.md#the-run-token), [inference.md](inference.md)).
-`plain` and `token-file` registration also exist. The reusable workflow
-refuses the CLI's provider-API-key mode, which would serve the key on the
-runner.
-
-## Engines
-
-gh-aw supports six engines: Copilot CLI (the default), Claude Code, Codex,
-Gemini CLI, Agy and Pi. Others, OpenCode and Goose among them, are
-unsupported samples, imported as Markdown engine definitions.
-
-gh-aw marks Agy experimental and Gemini CLI soft-deprecated.
-
-agentic-job drives every agent over ACP, with the commands in
-[`agents.toml`](../crates/agentic-job/src/session/agents.toml) and versions
-pinned where the policy and setup install them. The agents are Claude Code,
-opencode, Mistral Vibe and a scripted `fake` agent for tests. Codex and
-Gemini are not included. A new agent needs code, not a caller-supplied
-command.
-
-## Triggers and admission
-
-Both implement role and bot checks, fork restrictions, slash commands,
-reactions and a status comment. Both consume a trigger label: agentic-job's
-`activate` job removes the label, and the run does not start if removal
-fails ([events.md](events.md#label-caller-and-activation-step)).
-
-gh-aw has more triggers and guards: skip-if-match, search guards and
-spending guards. Its work queues, which gained trusted dispatch in v0.92.0,
-claim items for workers. The only time guard in agentic-job is a
-`stop-after` deadline ([events.md](events.md#deadline)). Cooldowns and
-per-user quotas were removed rather than shipped
-([plan.md](plan.md),
-[#466](https://github.com/cgwalters-forge/agentic-job/issues/466)). A caller's concurrency group is not a quota.
-Claims and budgets belong to agent-board, described [below](#across-repositories-gh-cao-and-agent-board).
-
-Event text written to the task file has its control characters, format
-characters, ANSI escapes and line separators stripped. It is then capped and
-fenced ([`context.rs`](../crates/agentic-job/src/event/context.rs)). URLs
-and mentions are left as written there. gh-aw's full sanitizer is applied
-to outputs instead, by a Rust port of gh-aw's collector.
-
-## Tools available to the agent
-
-gh-aw gives the agent a GitHub MCP server, or the `gh` CLI through its
-proxy, and a gateway that holds the secrets of other MCP servers.
-`mcp-scripts` and Playwright are also available.
-
-agentic-job gives the agent the job's own read-only token as `GH_TOKEN`
-([GitHub reads](workflow.md#github-reads-from-the-agent)). It was chosen
-over gh-aw's CLI proxy
-([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)). That
-proxy's startup is Docker-specific, and its command sidecar could not
-safely run as the token holder. Its gateway forwards API paths, so it
-cannot carry git's HTTPS reads. The
-egress proxy refuses REST writes to GitHub. GraphQL POSTs pass, so GitHub's
-refusal of a read-only token is what stops a mutation.
-
-`[mcp.NAME]` serves one remote MCP server through a loopback proxy that
-admits only an exact list of tools. The agent never holds that server's
-credential ([mcp.md](mcp.md)). The reusable workflow does not accept it yet.
-There are no stdio servers or Playwright.
-
-## Outputs
-
-gh-aw's agent calls a safe-outputs MCP server, which validates each request
-as it is made. gh-aw has well over fifty types. Among them are Jira, Linear
-and Azure DevOps items, discussions, releases, workflow dispatch,
-code-scanning alerts and custom jobs.
-
-In agentic-job, the agent writes JSONL to a file, and `check` validates it
-on another machine after the run, with a port of the same pinned collector. There are
-24 types: 21 actions plus `noop`, `missing_tool` and `missing_data`
-([`OUTPUT_TYPES`](../crates/safe-outputs/src/vocabulary.rs)). Each one is off
-until the bounds enable it, and the bounds cap the count of each and, for
-most actions, their targets ([safe-outputs.md](safe-outputs.md)).
-
-Additions of agentic-job's own:
-
-- Patches are parsed strictly as git reads them, under byte and file caps.
-  gh-aw's protected-file list is extended with paths that are always
-  protected.
-- Replacing a branch's commit series is off by default. Each commit is
-  checked, and the push holds an exact head lease.
-- A completion checkpoint decides draft or ready.
-- Apply-time base and changed-path checks.
-
-v0.92.0 ties gh-aw's apply to the validated bytes. Here, apply downloads
-the artifact by the ID and digest that check released.
-
-Staged mode is gh-aw's staged mode as the `apply-staged` input
-([trying a caller without writes](workflow.md#trying-a-caller-without-writes)).
-gh-aw applies to GitHub, Jira, Linear and Azure DevOps. agentic-job applies
-to GitHub with gh-aw's handlers, and posts `add_comment` and
-`create_pull_request` to Forgejo with its own code
-([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)).
-
-## Threat detection, memory and conclusion
-
-**Threat detection.** gh-aw's detection job is on by default. It asks the
-workflow's engine for three flags (`prompt_injection`, `secret_leak`,
-`malicious_patch`) and supports pre- and post-steps for scanners. In the
-default warn mode, its reference says, both a detected threat and a
-detection failure still let reviewable outputs apply, annotated with a warning, and a push to a
-branch becomes a pull request for review. Strict mode blocks them.
-
-agentic-job's `detect` job is off unless the repository variable
-`AGENTIC_JOB_DETECT_MODEL` is set
-([optional threat detection](workflow.md#optional-threat-detection)). It
-sends one tool-less request through the broker, asking for the same three
-flags. A flag, a malformed answer or a failed request blocks apply; there is
-no warn mode. It runs after the deterministic check, which refuses private
-keys and warns of other secret-shaped strings.
-
-**Memory.** gh-aw has repo-memory, files kept on a Git branch and pushed
-after detection, and cache-memory in the Actions cache. agentic-job checks a
-handed-back `memory.json` against gh-aw's repo-memory defaults of 100
-files and 100 KiB each, plus a 1 MiB total of its own. It does not yet
-store that file or restore it for the next run, though
-[#119](https://github.com/cgwalters-forge/agentic-job/issues/119) is closed
-([safe-outputs.md](safe-outputs.md#the-bounds-and-the-policy),
-[plan.md](plan.md)). It has no cache-memory.
-
-**Conclusion.** gh-aw's conclusion job reports failures, as issues among
-other ways. With `notify: comment` or `notify: reaction` (the default is
-`none`), agentic-job's `conclude` job edits the run's one status comment,
-or reacts, with the outcome; a `missing_data` run gets a comment even
-without them. That covers the pull request or result link,
-check's refusal reason, a stop at a limit, a secret found or the
-`missing_data` reason. It opens no issues.
-
-**Steering.** gh-aw's experimental `steer:` creates a steering issue for
-each run. agentic-job's `[session] watch-item` forwards new comments on the
-run's own item to the agent, and is off by default
-([harness.md](harness.md#updates-of-the-runs-item)). An operator can also
-give a run further prompts over the tailnet after its task's turn
-([interactive.md](interactive.md#what-exists)), through the reusable
-workflow's `session` input; the agent, the runner's user, can attach to
-its own session too, so nothing over that channel authorizes a write.
-
-**Audit.** `gh aw logs` and gh-aw's audit tooling read run history. The
-offline `agentic-job audit` command reads one run's downloaded artifacts and
-reports tool errors, denials, refusals and estimated cost
-([auditing artifacts](workflow.md#auditing-downloaded-artifacts)). Missing
-evidence does not count as success. OpenTelemetry export is not implemented.
-
-**Apply credentials.** gh-aw computes the union of the permissions its
-output jobs need and can mint a GitHub App token. Here, apply uses the job
-token or `SAFE_OUTPUTS_PAT`, which three output types require. Minting a
-GitHub App token is not implemented
-([the apply job and its token](workflow.md#the-apply-job-and-its-token)).
+Conversely, gh-aw's [durable-session evidence][gh-engines],
+[cost accounting][gh-cost] and [workflow examples][gh-gallery] are useful
+reference points for work here. Reusing them requires a deliberate pin/parity
+update or implementation, not just changing this comparison.
 
 ## Across repositories: gh-cao and agent-board
 
-gh-cao runs from one control repository. A Go `gh` extension handles setup,
-authentication and diagnostics. Its Actions collect gh-aw run history into
-SQLite snapshots and publish a dashboard to GitHub Pages. Agents can query
-the evidence through `gh cao query` or a read-only MCP server. Campaigns
-package recurring work over a set of target repositories, under gh-aw's
-safe-output boundaries. A public catalog offers examples such as Repo
-Assist. Its installer verifies signed build provenance.
+[gh-cao](https://github.com/githubnext/gh-cao) (GitHub Central Agentic Ops)
+and [agent-board](https://github.com/cgwalters-forge/agent-board) are related
+coordinator projects. They are not the execution boundary compared above.
+This refresh did not check out or re-evaluate a gh-cao release, its catalogue,
+dashboard or operating costs; the older description is not evidence of its
+current capabilities. Consult each project's current README before choosing
+a coordinator. agentic-job itself runs one task; callers own scheduling and
+cross-run admission ([dispatch](dispatch.md)).
 
-agentic-job runs one task on one machine. Across repositories, it offers
-only operator dispatch of a single task, whose item may live in another
-repository ([dispatch.md](dispatch.md)). It has no campaigns, catalog or
-dashboard. Its sibling
-[agent-board](https://github.com/cgwalters-forge/agent-board) takes the
-coordinator's role, using a Projects v2 board as its record. Its
-[design](https://github.com/cgwalters-forge/agent-board/blob/main/docs/design.md)
-calls for the following:
+## Positioning follow-up
 
-- `reconcile(snapshot, policy, now) -> plan` is a pure function.
-- One trusted job admits work, and records the claim before launch.
-- Budgets are reserved in advance, and unknown usage holds admission.
-- Each worker run goes through agentic-job.
+[#4096](https://github.com/cgwalters-forge/agentic-job/issues/4096) asks for
+concrete positioning rather than "most people should use gh-aw". The choice
+above follows that direction, with two corrections to that issue's wording:
+say **no provider key or forge write credential on the agent machine**, not
+"no credentials"; and say **credentialed MCP is refused in runner-only mode**,
+not that a local MCP proxy currently isolates its secret. Keep GitLab
+publication separate from unsupported GitLab agent inference. The detailed
+limits are in [inference.md](inference.md), [mcp.md](mcp.md) and
+[gitlab.md](gitlab.md). This run cannot edit issue bodies through its allowed
+safe outputs; the issue wording still needs that correction.
 
-That is a design. Its read commands work against a live board. Its README
-lists what does not work yet, such as reconcile repairs that are previewed
-but not applied. Where gh-cao starts by
-observing runs and adds operations later, agent-board starts with
-admission and has no dashboard beyond the board itself and the reports
-of its CLI, such as `supervise health`. [hive.md](hive.md) compares it with another
-coordinator.
-
-## What to borrow
-
-- **A cross-run evidence store.** Gather `agentic-job audit --json` output
-  from many runs and repositories into one queryable snapshot, as gh-cao
-  does for gh-aw. Suggested issue: "audit: Aggregate run audits across
-  repositories into one snapshot".
-- **Read-only query access for a coordinator.** Give agent-board's
-  coordinator that snapshot through a read-only tool, as `gh cao mcp` does,
-  instead of having it re-read job logs. Suggested issue (agent-board):
-  "Query past run evidence read-only".
-- **The model that answered.** Since v0.92.0, gh-aw's Copilot engine
-  refuses a run whose configured model was silently swapped for another.
-  `audit` could compare the model named in the inference responses with
-  the configured one. Suggested issue: "audit: Report a run served by a model
-  other than the configured one".
-- **Deterministic scanners in detection.** gh-aw's detection post-steps run
-  scanners such as TruffleHog alongside the model. A fixed, pinned scanner
-  in `detect` would not depend on a model's judgement.
-- **Memory store and restore.** Adopt gh-aw repo-memory's branch layout and
-  its compare-and-swap push so the checked `memory.json` reaches the next
-  run. Suggested issue: "apply: Store checked memory on a branch and restore
-  it to the next run".
-- **A catalog of caller examples.** gh-cao's catalog shows each campaign's
-  scope and ceilings. The caller examples in `.github/workflows/` could be
-  listed with their bounds on the docs site.
-
-## Related gh-aw deployments
-
-[cgwalters-forge/gh-aw](https://github.com/cgwalters-forge/gh-aw) is an
-earlier fork with a host-user runtime. It is not the code agentic-job runs.
-[bootc-dev/gh-agentic-workflows](https://github.com/bootc-dev/gh-agentic-workflows)
-uses stock gh-aw, not this project.
+[gh-runtime]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/agent-runtimes.md
+[gh-sandbox]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/sandbox.md#L34-L142
+[gh-copilot]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/engines/copilot.md#L111
+[gh-routing]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/model-routing.md#L288
+[gh-auth]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/auth.mdx#L19-L69
+[gh-network]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/network.md#L8-L64
+[gh-outputs]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/safe-outputs.md
+[gh-collector]: https://github.com/github/gh-aw/blob/v1.2.2/actions/setup/js/collect_ndjson_output.cjs
+[gh-transport]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/specs/safe-outputs-specification.md#L2917-L2944
+[gh-integrity]: https://github.com/github/gh-aw/blob/v1.2.2/actions/setup/js/transport_integrity.cjs#L21-L118
+[gh-engines]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/engines.md#L12-L126
+[gh-enterprise]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/enterprise-configuration.md#L12-L37
+[gh-tools]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/tools.md
+[gh-compile]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/compilation-process.md#L8-L18
+[gh-imports]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/imports.md
+[gh-gallery]: https://github.com/github/gh-aw/tree/v1.2.2/docs/src/content/docs/gallery
+[gh-workflows]: https://github.com/github/gh-aw/tree/v1.2.2/.github/workflows
+[gh-cost]: https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/cost-management.md#L8-L31

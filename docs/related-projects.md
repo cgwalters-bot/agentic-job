@@ -2,10 +2,38 @@
 
 > This text is LLM generated.
 
-Projects agentic-job overlaps with, builds on or borrows from, apart from
-gh-aw, which has [a page of its own](background-ghaw.md). Descriptions
-are from each project's documentation as of September and October 2026;
-corrections are welcome.
+Projects agentic-job overlaps with, builds on or borrows from. The gh-aw
+comparison was refreshed on 2026-11-14 against its latest release, v1.2.2
+(published 2026-11-10); other project descriptions below remain observations
+from September and October 2026, not a fresh release audit.
+
+## GitHub Agentic Workflows (gh-aw)
+
+[The release-pinned comparison](background-ghaw.md) covers sandbox and
+credentials, egress, safe-output checking and apply, ACP/sessions, forges,
+authoring, catalogue counts and operational cost. Its
+[feature table](background-ghaw.md#feature-comparison) cites gh-aw's own
+v1.2.2 docs/code and marks unverified claims rather than inferring support.
+
+The practical distinction is a hardened host with rootless Podman/KVM and
+an [ACP harness](harness.md), versus gh-aw's
+[compiled GitHub Actions workflows](https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/compilation-process.md)
+and [AWF runtime choices](https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/reference/agent-runtimes.md),
+which now include preview VMs as well as Docker. This is not a blanket
+recommendation for one project. agentic-job still gives its agent a run
+token and normally a GitHub read token; credentialed MCP is refused
+([current inference boundary](inference.md#current-boundary-5-november-2026),
+[MCP status](mcp.md#current-status)). Forgejo/GitLab publication is not full
+GitHub workflow parity ([forge matrix](safe-outputs.md#neutral-profile)).
+
+agentic-job still borrows the safe-output format, collector semantics,
+generated validation data and pinned GitHub handlers, at an older pin than
+the release compared here. The comparison records
+[what remains borrowed](background-ghaw.md#what-remains-borrowed) and
+[upstream candidates](background-ghaw.md#what-could-go-upstream): the host
+runtime use case, ACP adapter and deterministic/forge-neutral output checks.
+It also separates [gh-cao and agent-board](background-ghaw.md#across-repositories-gh-cao-and-agent-board)
+from the one-job execution boundary; neither coordinator was re-audited.
 
 ## Paperclip
 
