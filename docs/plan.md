@@ -90,6 +90,13 @@ title/branch prefixes in both the JSON file and exported environment. These two
 tests replace their JavaScript equivalents without changing publication behavior
 or the retained upstream-handler execution tests.
 
+The policy corpus's output selectors and numeric limits now run through the
+Rust CLI in `tests/policy.rs`: exact serialized grants cover `all`,
+analysis filtering, duplicate selectors and per-operation ceilings, while empty,
+unknown and malformed requests must emit no policy. These tests need neither
+the old-tree checkout nor Node; the legacy parity matrix remains until its
+gated cleanup. No runtime control or caller setting changes.
+
 The malformed-handback corpus cases now run through the Rust CLI in
 `tests/check.rs`: invalid base JSON, a short commit, oversized base metadata,
 an unexpected directory and symlinked outputs. The size test also accepts exactly
