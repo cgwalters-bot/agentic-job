@@ -174,6 +174,14 @@ input. Accepted policies retain the requested identity and limits; refusals emit
 no policy. This supplements rather than removes the old-tree comparison, whose
 cleanup still awaits tracker#1455. No runtime control or caller setting changes.
 
+Executable-file corpus boundaries now also run through Rust's `collect` and
+`check` CLI in `tests/check.rs`. Real Git patches accept edits and deletions of
+existing executables, with the accepted patch replayed to the exact expected
+tree; new executables and mode changes in either direction are refused with
+specific diagnostics. This supplements, rather than removes, the legacy parity
+cases pending the caller-evidence gate above. No runtime control, permission or
+caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

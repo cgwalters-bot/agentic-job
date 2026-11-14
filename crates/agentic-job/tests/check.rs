@@ -596,6 +596,128 @@ fn a_hand_back_within_the_policy_is_accepted() {
 }
 
 #[test]
+fn executable_patch_modes_survive_collection_and_check() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for (case, before, after, diagnostic) in [
+        ("edit", Some(0o755), Some(0o755), None),
+        ("delete", Some(0o755), None, None),
+        (
+            "create",
+            None,
+            Some(0o755),
+            Some("new symlink, submodule, executable"),
+        ),
+        (
+            "make executable",
+            Some(0o644),
+            Some(0o755),
+            Some("mode change"),
+        ),
+        (
+            "make nonexecutable",
+            Some(0o755),
+            Some(0o644),
+            Some("mode change"),
+        ),
+    ] {
+        let run = Run::new();
+        let repo = run.path("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.test")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.test")
+                .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fileMode=true"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{case}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let script = repo.join("run.sh");
+        if let Some(mode) = before {
+            std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        git(&["add", "--all"]);
+        git(&["commit", "--allow-empty", "-qm", "Base"]);
+        let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+        if let Some(mode) = after {
+            std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+        } else {
+            std::fs::remove_file(&script).unwrap();
+        }
+        git(&["add", "--all"]);
+        git(&["commit", "-qm", "Change script"]);
+        let patch = git(&[
+            "format-patch",
+            "--stdout",
+            "--no-renames",
+            "-1",
+            "--add-header",
+            &format!("X-GH-AW-Base-Commit: {base}"),
+        ]);
+        std::fs::write(run.path("out/aw-agent-run-7.patch"), patch).unwrap();
+        let metadata_path = run.path("out/base.json");
+        let mut metadata: Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        metadata["commit"] = base.clone().into();
+        std::fs::write(metadata_path, metadata.to_string()).unwrap();
+        let collected = run.path("collected.json");
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(ingest.status.code(), Some(0), "{case}: {ingest:?}");
+        let checked = run.check(&collected);
+        let verdict = run.verdict();
+        assert_eq!(
+            checked.status.code(),
+            Some(i32::from(diagnostic.is_some())),
+            "{case}: {checked:?}; {verdict}"
+        );
+        assert_eq!(verdict["ok"], diagnostic.is_none(), "{case}: {verdict}");
+        if let Some(want) = diagnostic {
+            assert!(
+                String::from_utf8_lossy(&checked.stderr).contains(want),
+                "{case}: {checked:?}"
+            );
+            assert!(
+                verdict["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.as_str().unwrap().contains(want)),
+                "{case}: {verdict}"
+            );
+        } else {
+            assert_eq!(verdict["errors"], serde_json::json!([]));
+            assert_eq!(verdict["patch"]["files"], serde_json::json!(["run.sh"]));
+            assert_eq!(verdict["patch"]["base_commit"], base);
+            let expected_tree = git(&["rev-parse", "HEAD^{tree}"]);
+            git(&["reset", "--hard", &base]);
+            git(&[
+                "am",
+                "--quiet",
+                run.path("out/aw-agent-run-7.patch").to_str().unwrap(),
+            ]);
+            assert_eq!(git(&["rev-parse", "HEAD^{tree}"]), expected_tree, "{case}");
+        }
+    }
+}
+
+#[test]
 fn public_base_evidence_cannot_complete_an_incomplete_key() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
