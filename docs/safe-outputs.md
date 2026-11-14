@@ -137,6 +137,14 @@ earlier valid finding. Check refuses inline output without explicit bounds, a
 merge-request target and a trusted review head. These tests exercise the CLI
 through the shared publisher; they do not prove live GitLab or caller activation.
 
+Standalone close-operation loopback tests keep an issue and merge request with
+the same number distinct, even when the trusted default comment target is the
+issue. They check the closing note's mention and quick-action neutralization,
+the subsequent state change and the returned item URL. A locked merge request
+refuses the entire batch before an earlier valid issue note can be posted.
+These tests cover the CLI-to-publisher contract, not live-service publication
+or CI credential isolation.
+
 GitLab's trusted context has a different shape: `policy` is the existing full
 effective policy JSON (the same object `agentic-job policy` emits), `server` is
 the forge origin, and `run_url` is the trusted CI run page. Optional `item` and
