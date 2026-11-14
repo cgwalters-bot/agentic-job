@@ -211,7 +211,8 @@ the next in the same major version.
   go to the target project itself.
   The stack proposal and `check::stack::artifact` receipt are experimental
   library-only formats, not stable CLI/workflow inputs. They enable no caller
-  and leave the ordinary one-PR cap unchanged
+  and leave the ordinary one-PR cap unchanged. Experimental stack publication
+  requires an opaque revalidated build, its unchanged policy and full-plan leases
   ([stack receipts](safe-outputs.md#experimental-library-receipts)).
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`, `run --config`): the tables

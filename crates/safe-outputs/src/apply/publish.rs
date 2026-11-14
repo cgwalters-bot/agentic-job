@@ -3483,7 +3483,7 @@ fn pull_request_outcome(
     publisher: &GithubPublisher,
     run: &Run,
 ) -> Outcome {
-    let body = match pull_request_body(&pr.body, defaults, &publisher.repo, run) {
+    let body = match pull_request_body(&pr.body, defaults, &publisher.repo, run, None) {
         Ok(body) => body,
         Err(err) => return Outcome::failed(op, format!("{err:#}")),
     };
@@ -3519,8 +3519,16 @@ fn pull_request_outcome(
 
 /// A pull request's BODY, without a first heading repeating the title, as
 /// gh-aw's handler writes it: sanitized, with the footer, the workflow's
-/// marker and the run's provenance, for a pull request in REPO.
-fn pull_request_body(body: &str, defaults: &[String], repo: &str, run: &Run) -> Result<String> {
+/// marker and the run's provenance, for a pull request in REPO. A stack's trusted
+/// closing line is appended only after sanitizing/balancing the untrusted body,
+/// so an unmatched code fence cannot swallow the issue-closing keyword.
+fn pull_request_body(
+    body: &str,
+    defaults: &[String],
+    repo: &str,
+    run: &Run,
+    closing: Option<u64>,
+) -> Result<String> {
     let body = sanitize_with(
         body,
         MAX_SANITIZED,
@@ -3533,6 +3541,10 @@ fn pull_request_body(body: &str, defaults: &[String], repo: &str, run: &Run) -> 
     let triggering = run.triggering(CREATE_PULL_REQUEST)?;
     let history = history_url(run, repo, "pullrequests", false);
     let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
+    if let Some(issue) = closing {
+        lines.push(String::new());
+        lines.push(format!("Closes #{issue}"));
+    }
     lines.push(String::new());
     lines.push(footer(run, triggering.as_deref(), Some(&history)));
     lines.push(String::new());
@@ -3557,10 +3569,9 @@ pub fn stack_pull_text(
 ) -> Result<(String, String)> {
     let title = js_trim(title);
     let body = without_title_heading(title, body)?;
-    let body = format!("{}\n\nCloses #{issue}", js_trim(&body));
     // Without `hide_applied`: no guard names a stack step's request, so an
     // applied marker in its body is the agent's own text.
-    let body = pull_request_body(&body, &run.default_mentions()?, repo, run)?;
+    let body = pull_request_body(&body, &run.default_mentions()?, repo, run, Some(issue))?;
     ensure!(
         utf16_len(&body) <= MAX_BODY_UNITS,
         "Pull request body exceeds GitHub's maximum length of {MAX_BODY_UNITS} characters"

@@ -248,7 +248,9 @@ hidden by a later revert. The trusted library caller must explicitly pass a
 before parsing. Each step gets its own existing patch path/type/protection,
 file-count and pinned-author checks, plus a caller-supplied patch byte limit.
 Titles are capped at 128 bytes and bodies at 48,000 bytes. Issue numbers are
-distinct positive integers no greater than 2,147,483,647. The caller must supply
+distinct positive integers no greater than 2,147,483,647. Applied markers in
+titles, bodies or patches are refused, ignoring case, as in ordinary outputs;
+only trusted apply may write them. The caller must supply
 a read-only inspection callback for its secret scan and other content checks;
 the library does not acquire credentials or scan secrets itself.
 
@@ -295,16 +297,25 @@ or, when read just before the push, exists on the remote, since updating the
 steps below would leave those on the old ones; git cannot lease a branch it
 does not push. The remote must carry no credential.
 
-`apply::stack::publish` runs `push` and then opens each built step's pull
+`apply::stack::publish` accepts only the opaque `VerifiedStack` returned by
+`build_verified`, not independently supplied checked steps and commit heads.
+The target policy must exactly match the revalidated admission, and leases must
+cover its entire issue plan, including steps above a refusal. It runs `push`
+only after preflighting every built step's existing PR ownership and base;
+those are checked again before each PR is opened or reused. The draft flag
+must also match the admitted policy before any write. It then opens each step's pull
 request through a `Pulls` adapter: step N from its branch onto step N-1's
 branch, the first onto the target branch, with the step's title and body
 followed by `Closes #N` for its issue. Title and body go through the gates
 of an ordinary pull request's: the title prefix, mention and link
 sanitizing, the footer, workflow marker and run provenance, and GitHub's
 length limit. A step whose text they refuse, or a failed push, writes
-nothing. A pull
-request already open from a step's branch on the same base is an earlier
-attempt's and is kept, so a run whose answer was lost resumes without opening
+nothing. The trusted closing line is appended after balancing the producer's
+Markdown so an unmatched code fence cannot turn it into code. A pull
+request already open from a step's branch on the same base must belong to the
+publication identity (numeric actor/App identity when roles are configured,
+authenticated login otherwise). Only then is it kept as an earlier attempt's,
+so a run whose answer was lost resumes without opening
 duplicates; one open on another base is an error, never retargeted. So once
 a parent merges and GitHub retargets its child's pull request, `publish`
 refuses that step until the caller rebuilds the rest of the stack on the new
@@ -317,7 +328,9 @@ apart. The GitHub adapter reads and opens with the publication role's
 credential. Because a pull request's base must be a branch of the repository
 it is opened in, every step branch is the target repository's own; a stack
 cannot be published from a fork. A found pull request's title and body are
-not updated after a fix round.
+not updated after a fix round. A failed create request is reported without
+retrying the POST, including transient errors: a server may have written the
+pull request before failing to answer.
 
 ### Experimental library receipts
 
@@ -330,7 +343,9 @@ plan is limited to ten distinct positive issues and `policy.max_outputs`.
 Only an ordinary new GitHub PR policy is accepted, not a continuation,
 secondary, external or advisory context. No new workflow option or caller is
 enabled, and the policy's ordinary one-PR ceiling is not raised. This module
-does not implement or replace the policy-bounds work in open #3449.
+does not implement or replace the policy-bounds work merged in #3449;
+reconciliation with its default-off `stack_max_steps` and `check_policy` path
+is still required before workflow integration.
 
 `artifact::check` uses the policy's patch bytes, file count, protected paths
 and pinned author. Each reached step must match its position in the admitted
@@ -352,7 +367,11 @@ inspection even when digests match, and compares the entire receipt. A changed
 accepted prefix refuses rather than silently growing or shrinking it.
 `apply::stack::build_verified` performs that revalidation before creating any
 Git worktree, then builds only the accepted prefix and retains the first check
-or Git refusal. It acquires no credential and makes no forge write.
+or Git refusal. It returns an opaque `VerifiedStack` holding its own checked
+metadata, replayed heads, policy and admitted plan length. The `built()` accessor
+exposes the prefix for reporting but does not allow mutation. Publication cannot
+substitute another proposal's metadata or unchecked heads, or change the policy
+after replay. Building acquires no credential and makes no forge write.
 
 Local tests cover receipt tampering, changed admission/metadata, disabled and
 over-limit plans, independent inspection, three replayed steps, a middle
@@ -361,7 +380,9 @@ a new, restacked and refused stack to a local bare remote, including a stale
 lease. Publication tests open a three-step stack against a fake forge, resume
 after a lost answer and after a step-2 failure, keep the pull requests through
 a step-1 fix that restacks steps 2 and 3, and publish only step 1 of a stack
-refused at step 2; the GitHub adapter is tested against a local mock API. They
+refused at step 2. Receipt-bound publication tests refuse policy substitution
+and truncated lease plans before any write, and repeat a checked fix under
+leases; mock API tests refuse unowned PRs and check single-attempt POSTs. They
 do **not** prove live credential behavior.
 
 ### Remaining publisher and recovery requirements
@@ -397,7 +418,10 @@ Remaining slices must wire these library receipts and `publish` into trusted
 policy, producer and check/apply workflow artifacts, keeping the stack rebased
 after parent changes/merges with `restack` rather than relying on PR
 retargeting to rewrite git history. The workflow paths, their end-to-end
-tests and the series' total cost report are not implemented yet.
+tests and the series' total cost report are not implemented yet. The low-level
+push still takes a caller-selected credential-free remote rather than deriving
+the policy repository's remote and using the `ForkPush` role; it must not be
+enabled in a workflow until that transport is role- and repository-bound.
 
 ## Caller-bound publisher roles
 

@@ -68,7 +68,10 @@ says what a caller may rely on across versions.
   own branches. `apply::stack::publish` then opens each step's PR on its
   predecessor with its closing line, through an ordinary PR's text gates and
   the publication role on GitHub, and reports each step's PR and where the
-  stack stopped.
+  stack stopped. Publication now requires a receipt-bound build with unchanged
+  policy and full-plan leases; applied-marker input and unowned existing PRs
+  refuse before branch writes, draft settings must match policy, closing lines
+  stay outside code fences, and ambiguous PR creates are not retried blindly.
   Producer/workflow integration and the series' cost report remain
   unimplemented.
 

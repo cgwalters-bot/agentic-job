@@ -135,6 +135,12 @@ pub fn check(
             );
             // Before the patch is read: its problems quote the patch's lines.
             inspect(&step)?;
+            ensure!(
+                [&step.title, &step.body, &step.patch]
+                    .iter()
+                    .all(|text| !text.to_ascii_lowercase().contains(super::APPLIED_MARKER)),
+                "stack step holds an applied marker, which apply writes"
+            );
             // The base header the reader is given authenticates the
             // proposal's root provenance only. It does not claim the
             // resulting commit ID or prove ancestry; applying each diff on
@@ -474,6 +480,20 @@ mod tests {
         .unwrap();
         assert_eq!(checked.accepted.len(), 1);
         assert_eq!(checked.refused.unwrap().position, 2);
+    }
+
+    #[test]
+    fn applied_markers_in_any_step_text_refuse_the_prefix() {
+        for field in ["title", "body", "patch"] {
+            let mut proposal = proposal();
+            let text = proposal["steps"][1][field].as_str().unwrap();
+            proposal["steps"][1][field] = json!(format!("{text} AGENTIC-JOB-APPLIED"));
+            let checked = checked(&proposal);
+            assert_eq!(checked.accepted.len(), 1, "{field}");
+            let refusal = checked.refused.unwrap();
+            assert_eq!(refusal.position, 2, "{field}");
+            assert!(refusal.reason.contains("applied marker"), "{field}");
+        }
     }
 
     #[test]

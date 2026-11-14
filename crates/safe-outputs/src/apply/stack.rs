@@ -77,6 +77,15 @@ impl Target<'_> {
 /// (`own-branch-repos`): the repository's push workflows run on them.
 fn bind(target: &Target<'_>, leases: &[Lease<'_>]) -> Result<()> {
     ensure!(
+        target
+            .policy
+            .safe_outputs
+            .create_pull_request
+            .as_ref()
+            .is_some_and(|pr| pr.draft == target.draft),
+        "stack publication draft setting differs from the admitted policy"
+    );
+    ensure!(
         (1..=MAX_STEPS as usize).contains(&leases.len()),
         "stack leases are outside the step bounds"
     );
@@ -127,10 +136,28 @@ pub fn build(repo: &Path, base: &str, steps: &[CheckedStep], temp: &Path) -> Res
     replay(repo, base, &steps, temp)
 }
 
+/// Revalidated proposal and its replayed heads, bound together for publication.
+/// Only [`build_verified`] constructs this value; callers cannot substitute
+/// checked metadata, unchecked heads or another policy after revalidation.
+#[derive(Debug)]
+pub struct VerifiedStack {
+    policy: Vec<u8>,
+    planned_steps: usize,
+    checked: Vec<CheckedStep>,
+    stacked: Stacked,
+}
+
+impl VerifiedStack {
+    /// The replayed prefix and first refusal, for reporting without mutation.
+    pub fn built(&self) -> &Stacked {
+        &self.stacked
+    }
+}
+
 /// Revalidate a trusted library receipt before building anything. Check and Git
-/// refusals both retain only their accepted prefix. This is local replay, not a
-/// publisher: credential roles, repository/branch bounds and push leases remain
-/// the responsibility of a future publication adapter.
+/// refusals both retain only their accepted prefix. The result binds the admitted
+/// policy, checked metadata and replayed heads for [`publish`]; it acquires no
+/// credential and makes no forge write.
 pub fn build_verified(
     repo: &Path,
     content: &[u8],
@@ -138,19 +165,25 @@ pub fn build_verified(
     admission: &crate::check::stack::artifact::Admission<'_>,
     inspect: impl FnMut(&crate::check::stack::Step) -> Result<()>,
     temp: &Path,
-) -> Result<Stacked> {
+) -> Result<VerifiedStack> {
     let checked = crate::check::stack::artifact::revalidate(content, receipt, admission, inspect)?;
-    if checked.accepted.is_empty() {
-        return Ok(Stacked {
+    let mut stacked = if checked.accepted.is_empty() {
+        Stacked {
             steps: Vec::new(),
-            refused: checked.refused,
-        });
-    }
-    let mut stacked = build(repo, admission.base_commit, &checked.accepted, temp)?;
+            refused: None,
+        }
+    } else {
+        build(repo, admission.base_commit, &checked.accepted, temp)?
+    };
     if stacked.refused.is_none() {
         stacked.refused = checked.refused;
     }
-    Ok(stacked)
+    Ok(VerifiedStack {
+        policy: serde_json::to_vec(admission.policy)?,
+        planned_steps: admission.issues.len(),
+        checked: checked.accepted,
+        stacked,
+    })
 }
 
 /// Rebuilds the stack of the accepted STEPS on BASE after a fix round
@@ -324,6 +357,16 @@ impl Pulls for Github {
             pull.head,
             pull.base
         );
+        let publication = self.for_role(Role::Publication)?;
+        let legacy = if publication.configured() {
+            None
+        } else {
+            Some(publication.login()?)
+        };
+        ensure!(
+            publication.owns(Role::Publication, found, legacy.as_deref()),
+            "the open pull request from the stack branch is not owned by the publication identity"
+        );
         Made::from_answer(found, "GET", &format!("/repos/{repo}/pulls")).map(Some)
     }
 
@@ -337,12 +380,11 @@ impl Pulls for Github {
             "base": pull.base,
             "draft": pull.draft,
         });
-        let answer = self.for_role(Role::Publication)?.request_retrying(
-            "POST",
-            &path,
-            Some(&body),
-            &format!("create stack pull request in {repo}"),
-        )?;
+        // A timeout or server error can follow a successful write. Report it
+        // without a second POST; a later attempt must find what was opened.
+        let answer = self
+            .for_role(Role::Publication)?
+            .request("POST", &path, Some(&body))?;
         Made::from_answer(&answer, "POST", &path)
     }
 }
@@ -380,6 +422,41 @@ pub struct Published {
     pub error: Option<anyhow::Error>,
 }
 
+/// Pushes the receipt-bound stack, then opens each built step's pull request.
+/// TARGET must have exactly the policy revalidated by [`build_verified`], and
+/// LEASES must cover the entire admitted issue plan, including refused steps.
+/// Separate checked steps or caller-selected commit heads are not accepted.
+/// REMOTE is still a caller-owned, credential-free low-level transport; no
+/// workflow or CLI may enable this experimental publisher yet.
+pub fn publish(
+    repo: &Path,
+    remote: &str,
+    target: &Target<'_>,
+    run: &Run,
+    verified: &VerifiedStack,
+    leases: &[Lease<'_>],
+    pulls: &dyn Pulls,
+) -> Result<Published> {
+    ensure!(
+        serde_json::to_vec(target.policy)? == verified.policy,
+        "stack publication policy differs from the revalidated admission"
+    );
+    ensure!(
+        leases.len() == verified.planned_steps,
+        "stack leases do not cover the admitted issue plan"
+    );
+    publish_checked(
+        repo,
+        remote,
+        target,
+        run,
+        &verified.checked,
+        &verified.stacked,
+        leases,
+        pulls,
+    )
+}
+
 /// Pushes STACKED, as [`push`] does, then opens each built step's pull
 /// request in TARGET's repository with PULLS: step N's from LEASES' branch
 /// N onto branch N-1, the first onto the target branch, with the title and
@@ -393,7 +470,7 @@ pub struct Published {
 /// caller has read the published stack again, resumes from it. A step's
 /// text the gates refuse, or a failed push, writes nothing and is an error.
 #[allow(clippy::too_many_arguments)]
-pub fn publish(
+fn publish_checked(
     repo: &Path,
     remote: &str,
     target: &Target<'_>,
@@ -406,6 +483,11 @@ pub fn publish(
     ensure!(
         stacked.steps.len() <= steps.len(),
         "the checked steps do not cover the built stack"
+    );
+    bind(target, leases)?;
+    ensure!(
+        stacked.steps.len() <= leases.len(),
+        "stack leases do not cover the stack"
     );
     let texts = steps[..stacked.steps.len()]
         .iter()
@@ -421,6 +503,26 @@ pub fn publish(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let prepared: Vec<_> = texts
+        .into_iter()
+        .enumerate()
+        .map(|(index, (title, body))| Pull {
+            head: leases[index].branch,
+            base: match index {
+                0 => target.base(),
+                _ => leases[index - 1].branch,
+            },
+            title,
+            body,
+            draft: target.draft,
+        })
+        .collect();
+    // Leases prove branch heads, not ownership or PR topology. Refuse a known
+    // unowned/retargeted PR before rewriting any branch, then recheck below to
+    // catch changes between the preflight and each publication operation.
+    for pull in &prepared {
+        pulls.find(target.repo(), pull)?;
+    }
     let pushed = push(repo, remote, target, stacked, leases)?;
     let mut published = Published {
         pushed,
@@ -431,21 +533,10 @@ pub fn publish(
         }),
         error: None,
     };
-    for (index, ((built, checked), (title, body))) in
-        stacked.steps.iter().zip(steps).zip(texts).enumerate()
+    for (index, ((built, checked), pull)) in
+        stacked.steps.iter().zip(steps).zip(prepared).enumerate()
     {
         let step = &checked.step;
-        let base = match index {
-            0 => target.base(),
-            _ => leases[index - 1].branch,
-        };
-        let pull = Pull {
-            head: leases[index].branch,
-            base,
-            title,
-            body,
-            draft: target.draft,
-        };
         let made = pulls
             .find(target.repo(), &pull)
             .and_then(|found| match found {
@@ -458,7 +549,7 @@ pub fn publish(
                 issue: step.issue,
                 branch: pull.head.to_owned(),
                 head: built.head.clone(),
-                base: base.to_owned(),
+                base: pull.base.to_owned(),
                 pull: made,
                 found,
             }),
@@ -673,6 +764,7 @@ mod tests {
             temp,
         )
         .unwrap();
+        let built = built.built();
         assert_eq!(built.steps.len(), 3);
         assert!(built.refused.is_none());
 
@@ -690,8 +782,9 @@ mod tests {
             temp,
         )
         .unwrap();
+        let prefix = prefix.built();
         assert_eq!(prefix.steps, built.steps[..1]);
-        assert_eq!(prefix.refused.unwrap().position, 2);
+        assert_eq!(prefix.refused.as_ref().unwrap().position, 2);
 
         run(&repo, &["checkout", "-q", "--detach", &fixture.base]);
         let (fix, _) = commit(&repo, &fixture.base, 1, "a.txt", "fixed\n");
@@ -717,6 +810,7 @@ mod tests {
             temp,
         )
         .unwrap();
+        let rebuilt = rebuilt.built();
         let restacked = restack(&repo, &fixture.base, &fixture.steps, 1, &fix, temp).unwrap();
         assert_eq!(rebuilt.steps, restacked.steps);
         assert_eq!(rebuilt.steps.len(), 3);
@@ -853,6 +947,7 @@ mod tests {
     static POLICY: std::sync::LazyLock<Policy> = std::sync::LazyLock::new(|| {
         let mut policy = crate::check::fixtures::policy();
         policy.repo = "owner/repo".to_owned();
+        policy.max_outputs = 3;
         policy.safe_outputs.own_branch_repos = vec![vec!["owner/repo".to_owned()]];
         policy
     });
@@ -1186,6 +1281,211 @@ mod tests {
             .collect()
     }
 
+    fn verified(fixture: &Fixture, inspect: impl Fn(&Step) -> Result<()>) -> VerifiedStack {
+        use crate::check::stack::artifact::{self, Admission};
+        let admission = Admission {
+            policy: &POLICY,
+            base_commit: &fixture.base,
+            issues: &[1, 2, 3],
+        };
+        let content = json!({
+            "base_commit": fixture.base,
+            "steps": fixture.steps.iter().map(|checked| &checked.step).collect::<Vec<_>>()
+        })
+        .to_string();
+        let (_, receipt) = artifact::check(content.as_bytes(), &admission, &inspect).unwrap();
+        build_verified(
+            &fixture.repo(),
+            content.as_bytes(),
+            &receipt,
+            &admission,
+            inspect,
+            fixture.temp.path(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn publication_uses_only_receipt_bound_policy_metadata_and_heads() {
+        let mut fixture = fixture();
+        let repo = fixture.repo();
+        let remote = remote(&fixture);
+        let stack = verified(&fixture, |_| Ok(()));
+        let forge = Forge::default();
+        // Even otherwise valid policies cannot be substituted after replay.
+        for field in ["repo", "base", "max_outputs", "max_patch_bytes", "kind"] {
+            let mut policy = POLICY.clone();
+            match field {
+                "repo" => policy.repo = "other/repo".to_owned(),
+                "base" => policy.base = "other".to_owned(),
+                "max_outputs" => policy.max_outputs = 1,
+                "max_patch_bytes" => policy.max_patch_bytes = 1,
+                _ => policy.kind = crate::contract::Kind::Analysis,
+            }
+            let error = publish(
+                &repo,
+                &remote,
+                &Target {
+                    policy: &policy,
+                    ..target()
+                },
+                &apply_run(),
+                &stack,
+                &leases(&[]),
+                &forge,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("policy differs"),
+                "{field}: {error:#}"
+            );
+        }
+        for count in [1, 2] {
+            assert!(
+                publish(
+                    &repo,
+                    &remote,
+                    &target(),
+                    &apply_run(),
+                    &stack,
+                    &leases(&[])[..count],
+                    &forge,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            publish(
+                &repo,
+                &remote,
+                &Target {
+                    draft: false,
+                    ..target()
+                },
+                &apply_run(),
+                &stack,
+                &leases(&[]),
+                &forge,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("draft setting")
+        );
+        // A known PR on another base must refuse before rewriting any branch.
+        forge.open.borrow_mut().push((
+            BRANCHES[1].to_owned(),
+            "other".to_owned(),
+            String::new(),
+            true,
+        ));
+        assert!(
+            publish(
+                &repo,
+                &remote,
+                &target(),
+                &apply_run(),
+                &stack,
+                &leases(&[]),
+                &forge,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("another base")
+        );
+        forge.open.borrow_mut().clear();
+        assert_eq!(published(&repo, &remote), [None, None, None]);
+        assert!(forge.open.borrow().is_empty());
+
+        // Mutation of the caller's original checked values cannot change either
+        // published text or heads: publication retains its own revalidated copy.
+        fixture.steps[0].step.title = "Unadmitted title".to_owned();
+        let first = publish(
+            &repo,
+            &remote,
+            &target(),
+            &apply_run(),
+            &stack,
+            &leases(&[]),
+            &forge,
+        )
+        .unwrap();
+        assert_eq!(first.opened.len(), 3);
+        assert!(forge.open.borrow()[0].2.starts_with("Step 1\n"));
+        assert_eq!(published(&repo, &remote), heads(stack.built()));
+
+        // A fix requires a fresh checked receipt, replays the descendants, and
+        // can move the published heads only under their exact leases.
+        run(&repo, &["checkout", "-q", "--detach", &fixture.base]);
+        fixture.steps[0] = commit(&repo, &fixture.base, 1, "a.txt", "fixed\n").0;
+        let fixed = verified(&fixture, |_| Ok(()));
+        assert!(
+            publish(
+                &repo,
+                &remote,
+                &target(),
+                &apply_run(),
+                &fixed,
+                &leases(&[]),
+                &forge,
+            )
+            .is_err()
+        );
+        let second = publish(
+            &repo,
+            &remote,
+            &target(),
+            &apply_run(),
+            &fixed,
+            &leases(&heads(stack.built())),
+            &forge,
+        )
+        .unwrap();
+        assert!(second.pushed);
+        assert!(second.opened.iter().all(|step| step.found));
+        assert_eq!(published(&repo, &remote), heads(fixed.built()));
+    }
+
+    #[test]
+    fn receipt_refusal_publishes_only_the_revalidated_prefix() {
+        let fixture = fixture();
+        let repo = fixture.repo();
+        let remote = remote(&fixture);
+        let stack = verified(&fixture, |step| {
+            ensure!(step.issue != 2, "inspection refused");
+            Ok(())
+        });
+        let forge = Forge::default();
+        let result = publish(
+            &repo,
+            &remote,
+            &target(),
+            &apply_run(),
+            &stack,
+            &leases(&[]),
+            &forge,
+        )
+        .unwrap();
+        assert_eq!(opened(&result), [("main", 1, false)]);
+        assert_eq!(result.stopped.unwrap().position, 2);
+        assert_eq!(
+            published(&repo, &remote),
+            [Some(stack.built().steps[0].head.clone()), None, None]
+        );
+    }
+
+    #[test]
+    fn closing_line_follows_balanced_producer_markdown() {
+        for fence in ["```", "~~~~"] {
+            let body = format!("Why.\n\n{fence}\nexample");
+            let (_, text) =
+                stack_pull_text("Step 1", &body, 1, "", "owner/repo", &apply_run()).unwrap();
+            assert!(
+                text.contains(&format!("{fence}\n\nCloses #1\n\n")),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn three_steps_are_published_each_on_its_predecessor() {
         let mut fixture = fixture();
@@ -1196,7 +1496,7 @@ mod tests {
         fixture.steps[0].step.body = "Why, @someone. https://unlisted.invalid/x".to_owned();
         let forge = Forge::default();
         let publish = |stacked: &Stacked, steps: &[CheckedStep], heads: &[Option<String>]| {
-            publish(
+            publish_checked(
                 &repo,
                 &remote,
                 &target(),
@@ -1285,7 +1585,7 @@ mod tests {
         let stacked = build(&repo, &fixture.base, &fixture.steps, temp).unwrap();
         let forge = Forge::default();
         forge.failing.set(Some(BRANCHES[1]));
-        let failed = publish(
+        let failed = publish_checked(
             &repo,
             &remote,
             &target(),
@@ -1304,7 +1604,7 @@ mod tests {
 
         // The next attempt, which read the pushed stack, resumes at step two.
         forge.failing.set(None);
-        let resumed = publish(
+        let resumed = publish_checked(
             &repo,
             &remote,
             &target(),
@@ -1336,7 +1636,7 @@ mod tests {
         let forge = Forge::default();
         let steps = [fix];
         assert!(
-            publish(
+            publish_checked(
                 &repo,
                 fresh,
                 &target(),
@@ -1349,7 +1649,7 @@ mod tests {
             .is_err()
         );
         assert!(forge.open.borrow().is_empty());
-        let published = publish(
+        let published = publish_checked(
             &repo,
             fresh,
             &target(),
@@ -1388,6 +1688,7 @@ mod tests {
                 "html_url": "https://github.invalid/owner/repo/pull/8",
                 "number": 8,
                 "state": state,
+                "user": {"id": 7},
                 "head": {"ref": BRANCHES[1], "repo": {"full_name": repo}},
                 "base": {"ref": base},
             })
@@ -1443,6 +1744,23 @@ mod tests {
                 false => assert!(result.is_err()),
             }
         }
+        for identity in [json!({"id": 8}), json!({"login": "owner"}), Value::Null] {
+            let mut unowned = listed(BRANCHES[0], "open", "owner/repo");
+            unowned["user"] = identity;
+            let (github, _) = forge(BTreeMap::from([(
+                pulls.to_owned(),
+                (200, json!([unowned])),
+            )]));
+            let error = bound(github).find("owner/repo", &pull).unwrap_err();
+            assert!(error.to_string().contains("not owned"), "{error:#}");
+        }
+        // Transient failures are ambiguous writes, not a reason to POST again.
+        let (github, requests) = forge(BTreeMap::from([(
+            create.to_owned(),
+            (503, json!({"message": "temporarily unavailable"})),
+        )]));
+        assert!(bound(github).open("owner/repo", &pull).is_err());
+        assert_eq!(requests.try_iter().count(), 1);
         let (github, requests) = forge(BTreeMap::new());
         let github = bound(github);
         assert!(github.find("../repo", &pull).is_err());
