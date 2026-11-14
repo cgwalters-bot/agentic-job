@@ -3020,6 +3020,16 @@ must reference all eleven, while an apply-published MR must reference only the
 first ten. It uses one `Closes project#iid` pair per line, not lists, URLs or
 custom patterns. It does not merge either MR and verifies the issues stay open;
 this checks GitLab's predicted merge consequences, not actual merge-time closure.
+Both reads poll for the exact expected targets within the fixture's 120-second
+readiness bound: GitLab 18.5's `NewMergeRequestWorker` populates the closing-issue
+cache asynchronously, independently of diff readiness. A CI-backed bisect of
+[#4140](https://github.com/cgwalters-forge/agentic-job/issues/4140) isolated
+`df6134e` (the closing-cap fixture): its
+[parent passed](https://github.com/cgwalters-forge/agentic-job/actions/runs/43555817125/job/132328335798),
+while the [first failure](https://github.com/cgwalters-forge/agentic-job/actions/runs/43558071973/job/132335416665)
+read an empty cache at 04:48:31.545Z, before the MR worker finished at
+04:48:32.518Z. The eleven/ten target expectations, project identities and duplicate
+checks are unchanged; neither an empty cache nor a wrong target counts as success.
 The job generates and masks its disposable root password before container
 creation: a fixed fixture password was rejected during admin seeding in
 [this failed run](https://github.com/cgwalters-forge/agentic-job/actions/runs/42442455838/job/128614408124).

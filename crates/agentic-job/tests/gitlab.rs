@@ -305,6 +305,67 @@ fn closing_targets(issues: &Value) -> Vec<(u64, u64)> {
     targets
 }
 
+fn wait_for_closing_targets(
+    forge: &GitLab,
+    token: &str,
+    path: &str,
+    expected: &[(u64, u64)],
+) -> Vec<(u64, u64)> {
+    // GitLab 18.5's NewMergeRequestWorker populates cached_closes_issues
+    // asynchronously, after MR creation returns. diff_refs readiness does not
+    // imply that this cache is ready. Keep the exact target check and READY bound.
+    closing_targets(&wait_for(forge, token, path, |issues| {
+        closing_targets(issues) == expected
+    }))
+}
+
+#[test]
+fn closing_targets_are_polled_until_exact_cache_contents_arrive() {
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let forge = GitLab {
+        server: format!("http://{}", listener.local_addr().unwrap()),
+        http: ureq::Agent::config_builder()
+            .proxy(None)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into(),
+    };
+    let path = "/projects/2/merge_requests/1/closes_issues?per_page=100";
+    let server = std::thread::spawn(move || {
+        for issues in [
+            json!([]),
+            json!([{"project_id":2,"iid":1}]),
+            json!([{"project_id":3,"iid":1},{"project_id":2,"iid":2}]),
+            json!([{"project_id":2,"iid":1},{"project_id":2,"iid":1}]),
+            json!([{"project_id":2,"iid":2},{"project_id":2,"iid":1}]),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(&mut stream);
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert_eq!(line, format!("GET /api/v4{path} HTTP/1.1\r\n"));
+            loop {
+                line.clear();
+                assert_ne!(request.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body = issues.to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let expected = [(2, 1), (2, 2)];
+    assert_eq!(
+        wait_for_closing_targets(&forge, "unused", path, &expected),
+        expected
+    );
+    server.join().unwrap();
+}
+
 #[test]
 fn closing_target_comparison_preserves_identity_and_duplicates() {
     let expected = vec![(2, 1), (2, 2)];
@@ -568,8 +629,13 @@ fn apply_publishes_to_gitlab() {
     let inline = forge.post(&token, &format!("/projects/{fork_id}/merge_requests"), json!({"source_branch": "inline-review", "target_branch": "main", "target_project_id": id, "title": "Inline fixture", "description": closing_body}));
     let number = inline["iid"].as_u64().unwrap();
     let path = format!("{project}/merge_requests/{number}");
-    let targets = forge.get(&admin, &format!("{path}/closes_issues?per_page=100"));
-    assert_eq!(closing_targets(&targets), closing_issues);
+    let targets = wait_for_closing_targets(
+        &forge,
+        &admin,
+        &format!("{path}/closes_issues?per_page=100"),
+        &closing_issues,
+    );
+    assert_eq!(targets, closing_issues);
     let inline = wait_for(&forge, &token, &path, |v| {
         v["diff_refs"]["head_sha"].is_string()
     });
@@ -730,14 +796,16 @@ fn apply_publishes_to_gitlab() {
         .iter()
         .find(|mr| mr["source_branch"] == "closing-run")
         .expect("closing-cap Draft MR");
-    let targets = forge.get(
+    let targets = wait_for_closing_targets(
+        &forge,
         &admin,
         &format!(
             "{project}/merge_requests/{}/closes_issues?per_page=100",
             pull["iid"]
         ),
+        &closing_issues[..10],
     );
-    assert_eq!(closing_targets(&targets), closing_issues[..10]);
+    assert_eq!(targets, closing_issues[..10]);
     // Read the merge consequence without merging or closing any fixture issue.
     for (_, number) in closing_issues {
         assert_eq!(
