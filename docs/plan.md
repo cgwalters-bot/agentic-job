@@ -104,6 +104,12 @@ an unexpected directory and symlinked outputs. The size test also accepts exactl
 the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
 subject to the disposition above. No runtime control or caller setting changes.
 
+The same CLI suite expands that no-follow boundary to all three hand-back
+files: `outputs.jsonl`, `base.json` and the patch. Regular files are accepted;
+symlinks to identical bytes outside the hand-back, dangling symlinks and
+directories are refused with file-specific diagnostics. This tests the existing
+reader boundary, not a new runtime control, and requires no privileged host setup.
+
 The hidden-change corpus attacks also have deterministic Rust coverage in
 `tests/patch_git.rs`: a bare patch inside the commit message and a base64-encoded
 second mail must both be refused with the expected diagnostic, while real

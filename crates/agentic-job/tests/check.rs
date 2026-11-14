@@ -716,7 +716,6 @@ fn malformed_hand_back_entries_are_refused() {
         ("short commit", "base.json is not"),
         ("oversized base", "base.json is 4097 bytes, over 4096"),
         ("directory", "unexpected file \"sub\""),
-        ("outputs symlink", "outputs.jsonl is not a regular file"),
     ] {
         let run = Run::new();
         let base = run.path("out/base.json");
@@ -742,12 +741,6 @@ fn malformed_hand_back_entries_are_refused() {
                 std::fs::write(&base, bytes).unwrap();
             }
             "directory" => std::fs::create_dir(run.path("out/sub")).unwrap(),
-            "outputs symlink" => {
-                let outputs = run.path("out/outputs.jsonl");
-                let target = run.path("real-outputs.jsonl");
-                std::fs::rename(&outputs, &target).unwrap();
-                std::os::unix::fs::symlink(&target, &outputs).unwrap();
-            }
             _ => unreachable!(),
         }
         let output = run.check(&data("check/collected.json"));
@@ -764,6 +757,48 @@ fn malformed_hand_back_entries_are_refused() {
                 .any(|error| error.as_str().unwrap().contains(want)),
             "{case}: {verdict}"
         );
+    }
+}
+
+#[test]
+fn hand_back_files_must_be_regular_not_links_or_directories() {
+    for file in ["outputs.jsonl", "base.json", "aw-agent-run-7.patch"] {
+        for kind in ["symlink", "dangling symlink", "directory"] {
+            let run = Run::new();
+            let collected = data("check/collected.json");
+            let control = run.check(&collected);
+            assert_eq!(control.status.code(), Some(0), "{control:?}");
+            assert_eq!(run.verdict()["ok"], true);
+            std::fs::remove_file(run.path("verdict.json")).unwrap();
+
+            let path = run.path(&format!("out/{file}"));
+            let target = run.path("outside-handback");
+            let original = std::fs::read(&path).unwrap();
+            std::fs::rename(&path, &target).unwrap();
+            match kind {
+                // Even a link to identical, valid bytes must not be followed.
+                "symlink" => std::os::unix::fs::symlink(&target, &path).unwrap(),
+                "dangling symlink" => {
+                    std::os::unix::fs::symlink(run.path("absent"), &path).unwrap();
+                }
+                "directory" => std::fs::create_dir(&path).unwrap(),
+                _ => unreachable!(),
+            }
+            let output = run.check(&collected);
+            let verdict = run.verdict();
+            assert_eq!(output.status.code(), Some(1), "{file} {kind}: {output:?}");
+            assert_eq!(verdict["ok"], false, "{file} {kind}: {verdict}");
+            let diagnostic = format!("{file} is not a regular file");
+            assert!(
+                verdict["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| error.as_str().unwrap().contains(&diagnostic)),
+                "{file} {kind}: {verdict}"
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+        }
     }
 }
 
