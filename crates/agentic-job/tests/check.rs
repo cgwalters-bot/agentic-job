@@ -565,6 +565,64 @@ fn public_base_evidence_cannot_complete_an_incomplete_key() {
 }
 
 #[test]
+fn malformed_hand_back_entries_are_refused() {
+    for (case, want) in [
+        ("invalid JSON", "base.json is not"),
+        ("short commit", "base.json is not"),
+        ("oversized base", "base.json is 4097 bytes, over 4096"),
+        ("directory", "unexpected file \"sub\""),
+        ("outputs symlink", "outputs.jsonl is not a regular file"),
+    ] {
+        let run = Run::new();
+        let base = run.path("out/base.json");
+        match case {
+            "invalid JSON" => std::fs::write(&base, "{").unwrap(),
+            "short commit" => {
+                let mut metadata: Value =
+                    serde_json::from_slice(&std::fs::read(&base).unwrap()).unwrap();
+                metadata["commit"] = "5fffa9164184".into();
+                std::fs::write(&base, metadata.to_string()).unwrap();
+            }
+            "oversized base" => {
+                // Valid JSON at the exact limit is accepted; one whitespace byte
+                // more must be refused before parsing, not as malformed JSON.
+                let mut bytes = std::fs::read(&base).unwrap();
+                bytes.resize(4096, b' ');
+                std::fs::write(&base, &bytes).unwrap();
+                let accepted = run.check(&data("check/collected.json"));
+                assert_eq!(accepted.status.code(), Some(0), "{accepted:?}");
+                assert_eq!(run.verdict()["ok"], true);
+                std::fs::remove_file(run.path("verdict.json")).unwrap();
+                bytes.push(b' ');
+                std::fs::write(&base, bytes).unwrap();
+            }
+            "directory" => std::fs::create_dir(run.path("out/sub")).unwrap(),
+            "outputs symlink" => {
+                let outputs = run.path("out/outputs.jsonl");
+                let target = run.path("real-outputs.jsonl");
+                std::fs::rename(&outputs, &target).unwrap();
+                std::os::unix::fs::symlink(&target, &outputs).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let output = run.check(&data("check/collected.json"));
+        assert_eq!(output.status.code(), Some(1), "{case}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(want), "{case}: {stderr}");
+        let verdict = run.verdict();
+        assert_eq!(verdict["ok"], false, "{case}: {verdict}");
+        assert!(
+            verdict["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().contains(want)),
+            "{case}: {verdict}"
+        );
+    }
+}
+
+#[test]
 fn a_hand_back_outside_the_policy_is_refused_with_its_reasons() {
     let run = Run::new();
     std::fs::write(run.path("out/notes.txt"), "hi").unwrap();

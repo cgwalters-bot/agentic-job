@@ -90,6 +90,13 @@ title/branch prefixes in both the JSON file and exported environment. These two
 tests replace their JavaScript equivalents without changing publication behavior
 or the retained upstream-handler execution tests.
 
+The malformed-handback corpus cases now run through the Rust CLI in
+`tests/check.rs`: invalid base JSON, a short commit, oversized base metadata,
+an unexpected directory and symlinked outputs. The size test also accepts exactly
+4096 bytes before refusing 4097. Only those five JavaScript cases are removed;
+the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
+subject to the disposition above. No runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
