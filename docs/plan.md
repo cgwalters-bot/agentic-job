@@ -137,6 +137,13 @@ refusals assert their diagnostics. Only the replaced new-check JavaScript test i
 removed; old-tree comparisons, upstream drivers and gated fixtures remain.
 This adds no runtime control or caller setting.
 
+The check-run admission corpus now runs independently in `tests/check_run.rs`,
+through the Rust policy, collector and checker. Its seven cases retain the pinned
+check name, refusal of success conclusions, explicit pull-request target and
+per-type ceiling. Only the replaced JavaScript test is removed; upstream handler
+parity and the key-bearing legacy fixture remain. No runtime or caller settings
+change. Next slices include issue-creation corpus coverage.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
