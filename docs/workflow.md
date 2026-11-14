@@ -2646,15 +2646,22 @@ inventory; do not delete Git tags as a side effect. No such cleanup is in this P
 ## Versions to pin
 
 A version is released by hand: raise the
-workspace's version in `Cargo.toml`, move
-[CHANGELOG.md](../CHANGELOG.md)'s Unreleased entries under that
-version, merge, and run the `release`
+workspace's version in `Cargo.toml` and its packages in `Cargo.lock`,
+merge, and run the `release`
 workflow on main with that version (`0.1.0`, no `v`). It refuses a run
 off main, a version that is not `MAJOR.MINOR.PATCH`, not the workspace's
 or not newer than every `v` tag (`just release-check`), and a run whose
 `v` tags changed while it built. It then tags main's commit `vVERSION`
 and publishes the binaries with notes listing the pull requests merged
-since the previous version.
+since the previous version, using `gh release create --generate-notes`
+and an explicit `--notes-start-tag` for that version. GitHub groups the
+notes by the labels in [.github/release.yml](../.github/release.yml), with
+an Other changes category for unlabelled PRs; dependency-update noise is
+excluded, but coding-bot PRs are not. Release notes need no changelog
+entries or fragments. [CHANGELOG.md](../CHANGELOG.md) is only a pointer to
+releases and the history through v0.6.14; nothing updates it on a bump.
+The agent-board release train likewise bumps only the Cargo files and
+dispatches this workflow; it does not compose a separate release body.
 
 The concrete skew failure is an older image's `agentic-job` on the agent's
 PATH refusing configuration written by the newer policy. The optional

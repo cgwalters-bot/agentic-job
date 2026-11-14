@@ -196,6 +196,15 @@ destinations, the deliberately misdirected fixture and detection of a refused
 comment appearing in a run's results; they do not demonstrate a live forge run.
 Runtime workflows and upstream parity drivers are unchanged.
 
+The patch-application guard tests now run in Rust's `tests/apply_workflow.rs`,
+executing the shipped shell and real Git on temporary repositories. They retain
+ordinary, CRLF and Unicode-path success cases, checked-path and unrelated-base
+refusals, and refusal to follow a rename into a protected path. Successful trials
+must emit the exact expected tree; refused trials must emit none. Their former
+JavaScript tests are removed, without changing runtime behavior or upstream
+handler coverage. Remaining local shell-step ports remain separate from live
+deployment acceptance.
+
 Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
 the real collector/checker accepts the matching request, patch and base, and
 refuses missing, extra or renamed patches, a different request branch, an orphan
@@ -275,7 +284,7 @@ closed during this reconciliation, after the initial 27-issue read.
 
 Closed [#2994](https://github.com/cgwalters-forge/agentic-job/issues/2994)
 diagnostics and [#2995](https://github.com/cgwalters-forge/agentic-job/issues/2995)
-GitLab summary publication are in this checkout's Unreleased changelog. Keep
+GitLab summary publication are implemented in this checkout. Keep
 their existing owners/evidence, not duplicate implementation. Neither establishes
 credentialless TF/GitLab launch or live publication of this revision.
 
@@ -457,7 +466,7 @@ Historical fake-agent/config checks and closed audits establish narrower facts.
 | --- | --- |
 | Fresh deploy passes | **Pending.** [agent-board#282](https://github.com/cgwalters-forge/agent-board/issues/282) still needs an approved real Actions-backed stage path, credential placement/authority and saved green implement/review/fix/triage report plus installed recurrence. Fake transport, templates and old runs are not this proof. Require exact runner/image/caller revisions and authenticated creation/cleanup receipts. |
 | README alone suffices | **Pending.** #3245's static documentation revalidation after runner-only migration completed in [#3247](https://github.com/cgwalters-forge/agentic-job/pull/3247), not a live first run. Closed #2738–#2741/#2864 are not a fresh agent's completed first run in cgwalters-forge-stage. Need a separately authorized README-only live trial, its exact release/config/pins and resolved walkthrough failures; agent-board#282 deployment evidence is still pending. Config parsing, scripted fake launch or this documentation cleanup is insufficient. |
-| v1.0 and stable formats, no JS | **Pending.** [stable interfaces](stable-interfaces.md) and [changelog](../CHANGELOG.md) exist, but their promise starts at 1.0, not at documentation merge. Need an actual published v1.0 tag/release and explicit freeze of config/safe-output contracts, #2026 fixture cleanup after tracker#1455 evidence, and cgwalters' exact JS exception decision or replacement coverage. Build releases/0.x tags do not establish this bar. |
+| v1.0 and stable formats, no JS | **Pending.** [Stable interfaces](stable-interfaces.md) are documented and [GitHub Releases](https://github.com/cgwalters-forge/agentic-job/releases) record changes, but their promise starts at 1.0, not at documentation merge. Need an actual published v1.0 tag/release and explicit freeze of config/safe-output contracts, #2026 fixture cleanup after tracker#1455 evidence, and cgwalters' exact JS exception decision or replacement coverage. Build releases/0.x tags do not establish this bar. |
 | Closed backlog | **Pending.** Only #556/#2026/#2811/#3244/#3245 are current #596 children. The other 21 require applied child/P2 dispositions or decisions; Priority was not visible in the returned project data. #1735 remains `needs-design`; a P2 proposal or different parent alone does not clear that clause. #3143 findings need follow-through, not a duplicate audit. |
 
 Shipped source includes runner-key refusals, the public-base override and the

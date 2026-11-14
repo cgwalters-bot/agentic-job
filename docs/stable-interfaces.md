@@ -4,10 +4,11 @@
 
 This page names what a caller may rely on across releases once 1.0 is
 cut. Until then nothing is promised, and a 0.x release may change any
-of it; [CHANGELOG.md](../CHANGELOG.md) says what each release changed.
+of it; [GitHub Releases](https://github.com/cgwalters-forge/agentic-job/releases)
+say what each release changed.
 From 1.0, a stable interface is removed, renamed or given a different
 meaning only in a new major version, and a release that deprecates one
-says so in the changelog first. New optional inputs, keys, types and
+says so in its release notes first. New optional inputs, keys, types and
 fields may come in any release.
 
 Everything not named here is internal and may change in any release:
@@ -254,7 +255,7 @@ the next in the same major version.
   refused, even when either is empty. The alias stays at least until the
   release after the one whose image the secure-host forwarder pins and
   which reads `[host]` (#2656). Its removal will be listed as breaking
-  in the changelog first. `config` writes `[host]`, except in a host's
+  in the release notes first. `config` writes `[host]`, except in a host's
   file for that pinned image (`config --host` with no
   `[host.prepared]`), which reads only `[sandbox]`.
   `[commit] allow-base-secret-lines` is an optional boolean, default false;

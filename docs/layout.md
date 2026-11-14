@@ -269,4 +269,4 @@ systemd 257; they are not safe to run on a workstation.
 
 Licensed under either of [Apache License, Version 2.0](../LICENSE-APACHE)
 or [MIT license](../LICENSE-MIT) at your option. User-visible changes are
-recorded in the [changelog](../CHANGELOG.md).
+recorded in [GitHub Releases](https://github.com/cgwalters-forge/agentic-job/releases).
