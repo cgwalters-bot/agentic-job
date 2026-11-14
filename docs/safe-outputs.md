@@ -158,6 +158,14 @@ whole batch before any write, including an earlier valid note: GitLab must not
 implicitly create it. This is local API-contract coverage, not live-service or
 CI artifact-provenance proof.
 
+Standalone GitLab redirect regressions cover HTTP 301, 302, 303, 307 and 308
+on project lookup and note publication. The shared HTTP client's existing
+no-redirect policy prevents an API response from forwarding publication requests
+or credentials to another endpoint: apply fails and the redirect destination
+receives no request. A refused lookup makes no publication attempt; a redirected
+note POST is attempted only once. This adds no caller setting or authority and
+does not imply that a server returning a redirect made no change itself.
+
 Standalone inline-review loopback tests also cover LEFT/RIGHT and context-line
 positions, the checked MR head and SHA triple, mention/quick-action filtering,
 and MR-only routing. A stale head, foreign target, missing diff refs, unavailable
