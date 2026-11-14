@@ -47,6 +47,88 @@ fn definition(file: &str) -> yaml_rust2::Yaml {
 }
 
 #[test]
+fn detector_gates_the_released_check_artifact() {
+    let text = workflow("check.yml");
+    let doc = definition("check.yml");
+    assert_eq!(
+        doc["on"]["workflow_call"]["outputs"]["artifact-id"]["value"].as_str(),
+        Some("${{ jobs.detect.outputs.artifact-id }}")
+    );
+    let detect = &doc["jobs"]["detect"];
+    assert_eq!(detect["needs"].as_str(), Some("check"));
+    for (permission, value) in [("contents", "read"), ("id-token", "write")] {
+        assert_eq!(detect["permissions"][permission].as_str(), Some(value));
+    }
+    let body = job(&text, "detect");
+    for forbidden in ["secrets.", "continue-on-error", "always()"] {
+        assert!(!body.contains(forbidden), "detector contains {forbidden}");
+    }
+    let steps = detect["steps"].as_vec().unwrap();
+    let detector = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("detector"))
+        .unwrap();
+    let release = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("release"))
+        .unwrap();
+    assert!(detector < release, "detection must precede release");
+    assert_eq!(
+        steps[detector]["if"].as_str(),
+        Some("${{ vars.AGENTIC_JOB_DETECT_MODEL != '' }}")
+    );
+    assert!(
+        steps[detector]["run"]
+            .as_str()
+            .unwrap()
+            .contains("\"$JOB_DIR/agentic-job\" detect")
+    );
+    assert!(steps.iter().any(|step| {
+        step["with"]["artifact-ids"].as_str() == Some("${{ needs.check.outputs.artifact-id }}")
+    }));
+    assert_eq!(
+        doc["jobs"]["check"]["permissions"]["contents"].as_str(),
+        Some("read")
+    );
+    assert!(workflow("apply.yml").contains("fromJSON(inputs.check).result == 'success'"));
+}
+
+#[test]
+fn detector_callers_grant_digest_read_and_oidc_permissions() {
+    let mut count = 0;
+    for entry in std::fs::read_dir(root().join(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "yml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let docs = yaml_rust2::YamlLoader::load_from_str(&text).unwrap();
+        for (name, job) in docs[0]["jobs"].as_hash().unwrap() {
+            if !job["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.contains("/workflows/check.yml"))
+            {
+                continue;
+            }
+            count += 1;
+            for (permission, value) in [
+                ("contents", "read"),
+                ("actions", "read"),
+                ("id-token", "write"),
+            ] {
+                assert_eq!(
+                    job["permissions"][permission].as_str(),
+                    Some(value),
+                    "{} job {name:?}: {permission}",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert_eq!(count, 3, "inventory every shipped check caller");
+}
+
+#[test]
 fn javascript_ratchet_allows_only_named_corpus_harnesses() {
     let doc = definition("ci.yml");
     let script = doc["jobs"]["javascript"]["steps"]
