@@ -701,6 +701,158 @@ fn staged_apply_escapes_preview_and_reports_no_writes() {
     }
 }
 
+#[test]
+fn issue_reference_step_links_only_patch_runs_before_replay_guard() {
+    let doc = definition("apply.yml");
+    let name = "Say which issue a pull request is for";
+    assert_eq!(
+        step(&doc, "apply", name)["if"].as_str(),
+        Some(
+            "${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}"
+        )
+    );
+    let steps = doc["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    assert!(position(name) < position("Leave out what an earlier attempt applied"));
+}
+
+#[test]
+fn issue_reference_shell_preserves_existing_and_partial_work_references() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("apply-binary")).unwrap();
+    fs::copy(BIN, root.join("apply-binary/agentic-job")).unwrap();
+    let batch = "Batch sibling work\n\nCloses #64\nCloses #65\nCloses owner/tracker#66";
+    let mut cases = vec![
+        ("owner/repo", None, "\n\nCloses #64".to_owned()),
+        (
+            "owner/repo",
+            Some("change".to_owned()),
+            "change\n\nCloses #64".to_owned(),
+        ),
+        (
+            "owner/tracker",
+            Some("change".to_owned()),
+            "change\n\nRefs owner/tracker#64".to_owned(),
+        ),
+    ];
+    for repo in ["owner/repo", "owner/tracker"] {
+        cases.push((
+            repo,
+            Some(batch.to_owned()),
+            if repo == "owner/repo" {
+                batch.to_owned()
+            } else {
+                format!("{batch}\n\nRefs owner/tracker#64")
+            },
+        ));
+    }
+    for (repo, line) in [
+        ("owner/repo", "Closes #64"),
+        ("OWNER/REPO", "Closes #64"),
+        ("owner/tracker", "Refs owner/tracker#64"),
+    ] {
+        for ending in ["", "\r\n"] {
+            let body = format!("Done.\n\n{line}{ending}");
+            cases.push((repo, Some(body.clone()), body));
+        }
+    }
+    for line in [
+        "Part of #64",
+        "Part of #64 (item 5)",
+        "Refs #64",
+        "Refs #64\tthe parser",
+    ] {
+        for body in [
+            format!("{line}\n\nDid item 5; items 1 to 4 are left."),
+            format!("Did item 5.\r\n\r\n{line}\r\n"),
+        ] {
+            cases.push(("owner/repo", Some(body.clone()), body));
+        }
+    }
+    for (body, closing) in [
+        ("```text\nCloses #64\n```", ""),
+        ("~~~\nCloses #64\n~~~", ""),
+        ("<!--\nCloses #64\n-->", ""),
+        ("<!-- Closes #64 -->", ""),
+        ("```text\nCloses #64", "\n```"),
+        ("<!--\nCloses #64", "\n-->"),
+        ("**Partial work.** Not all work is done.", ""),
+        ("Mentions Closes #64 in prose.", ""),
+        ("Part of #640", ""),
+        ("Refs #6", ""),
+        ("Part of #65", ""),
+        ("See Part of #64", ""),
+        ("Refs owner/repo#64", ""),
+        ("```text\nPart of #64\n```", ""),
+        ("<!-- Refs #64 -->", ""),
+    ] {
+        cases.push((
+            "owner/repo",
+            Some(body.to_owned()),
+            format!("{body}{closing}\n\nCloses #64"),
+        ));
+    }
+    cases.push((
+        "owner/tracker",
+        Some("Part of #64".to_owned()),
+        "Part of #64\n\nRefs owner/tracker#64".to_owned(),
+    ));
+    let comment = json!({"type":"add_comment", "body":"first"});
+    let fix =
+        json!({"type":"push_to_pull_request_branch", "message":"Keep existing PR references."});
+    for (repo, body, expected) in cases {
+        let mut pull = json!({"type":"create_pull_request", "title":"t", "branch":"agent-run-7"});
+        if let Some(body) = &body {
+            pull["body"] = json!(body);
+        }
+        json_file(
+            root,
+            "agent_output.json",
+            &json!({"items":[pull, comment, fix], "errors":[]}),
+        );
+        let out = run_step(
+            root,
+            "Say which issue a pull request is for",
+            &[
+                ("GH_AW_TMP", root.to_str().unwrap()),
+                ("RUNNER_TEMP", root.to_str().unwrap()),
+                ("OUTPUT_REPO", "owner/repo"),
+                ("ITEM_REPO", repo),
+                ("ISSUE", "64"),
+            ],
+        );
+        status(&out, 0);
+        pull["body"] = json!(expected);
+        assert_eq!(
+            read_json(root, "agent_output.json"),
+            json!({"items":[pull, comment, fix], "errors":[]}),
+            "{repo}: {body:?}"
+        );
+    }
+
+    let document = json!({"items":[fix], "errors":[]});
+    json_file(root, "agent_output.json", &document);
+    let out = run_step(
+        root,
+        "Say which issue a pull request is for",
+        &[
+            ("GH_AW_TMP", root.to_str().unwrap()),
+            ("RUNNER_TEMP", root.to_str().unwrap()),
+            ("OUTPUT_REPO", "owner/repo"),
+            ("ITEM_REPO", "owner/repo"),
+            ("ISSUE", "64"),
+        ],
+    );
+    status(&out, 0);
+    assert_eq!(read_json(root, "agent_output.json"), document);
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
