@@ -619,6 +619,104 @@ fn handler_errors_use_policy_binary_and_neutralize_annotations() {
 }
 
 #[test]
+fn missing_data_survives_guard_and_fails_only_without_publication() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("apply-binary")).unwrap();
+    fs::copy(BIN, root.join("apply-binary/agentic-job")).unwrap();
+    let item =
+        json!({"type": "missing_data", "data_type": "workflow", "reason": "needs workflow edits"});
+    json_file(
+        root,
+        "agent_output.json",
+        &json!({"items": [item], "errors": []}),
+    );
+    let guard = Command::new(BIN)
+        .env_clear()
+        .args(["applied", "--dir"])
+        .arg(root)
+        .arg("--report")
+        .arg(root.join("report.json"))
+        .args([
+            "--output-repo",
+            "owner/repo",
+            "--repo",
+            "owner/repo",
+            "--item-repo",
+            "owner/repo",
+            "--token-is-pat",
+            "false",
+        ])
+        .env("GH_TOKEN", "test-token-not-secret")
+        // Diagnostic-only requests need no forge reads; accidental reads must fail.
+        .env("GITHUB_API_URL", "http://127.0.0.1:1")
+        .env("GITHUB_RUN_ID", "7")
+        .env("GITHUB_OUTPUT", root.join("guard-output"))
+        .output()
+        .unwrap();
+    status(&guard, 0);
+    assert_eq!(
+        read_json(root, "agent_output.json"),
+        json!({"items": [item], "errors": []})
+    );
+    assert_eq!(read_json(root, "skipped.json"), json!([]));
+
+    for published in [false, true] {
+        let pr = if published {
+            json!({"number": 39, "url": "https://github.com/owner/repo/pull/39"})
+        } else {
+            Value::Null
+        };
+        json_file(
+            root,
+            "applied.json",
+            &json!({"made": [], "already_applied": [], "pull_request": pr}),
+        );
+        let output = root.join("output");
+        let summary = root.join("summary");
+        fs::write(&output, "").unwrap();
+        fs::write(&summary, "").unwrap();
+        status(
+            &run_step(
+                root,
+                "Say where what the run made is",
+                &[
+                    ("GH_AW_TMP", root.to_str().unwrap()),
+                    ("RUNNER_TEMP", root.to_str().unwrap()),
+                    ("GITHUB_OUTPUT", output.to_str().unwrap()),
+                    ("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()),
+                    ("GH_AW_SAFE_OUTPUTS_URLS", "allowed-or-code-region"),
+                    ("CHECKED_ARTIFACT_ID", "99"),
+                    ("RUN_URL", "https://github.com/caller/repo/actions/runs/7"),
+                ],
+            ),
+            0,
+        );
+        let outputs = fs::read_to_string(output).unwrap();
+        let missing = outputs
+            .lines()
+            .find_map(|line| line.strip_prefix("missing-data="));
+        assert_eq!(missing, if published { None } else { Some("true") });
+        let ended = run_step(
+            root,
+            "Every output was applied",
+            &[
+                ("PROJECT_REFUSED", ""),
+                ("MISSING_DATA", missing.unwrap_or_default()),
+                ("GH_AW_TMP", root.to_str().unwrap()),
+                ("OUTCOME", "success"),
+                ("PUBLISHED", ""),
+                ("BLOCKED", ""),
+            ],
+        );
+        status(&ended, if published { 0 } else { 1 });
+        if !published {
+            assert!(text(&ended).contains("required data was missing"));
+        }
+    }
+}
+
+#[test]
 fn staged_apply_escapes_preview_and_reports_no_writes() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();

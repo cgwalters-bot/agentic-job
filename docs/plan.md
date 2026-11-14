@@ -106,6 +106,13 @@ depending on its payload selection. The legacy old-check comparison remains;
 removing it still belongs to the gated corpus disposition above. No runtime
 control, permission or caller setting changes.
 
+The missing-data path now runs in `tests/apply_workflow.rs`: a diagnostic survives
+the replay guard unchanged, the result shell step marks it blocked when nothing
+was published, and the final shell step fails the job. A published-PR control
+keeps the same diagnostic from turning success into failure. This replaces the
+JavaScript test and its result helper, not upstream handler execution, and proves
+local behavior only; no runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

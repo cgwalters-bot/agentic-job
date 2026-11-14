@@ -462,43 +462,6 @@ test('every sanitizer keeps the links the policy keeps', () => {
   assert.match(policy, /"allowed-domains=\$\(jq -r '\.allowed_domains \/\/ \[\] \| join\(","\)' "\$JOB_DIR\/policy\.json"\)"/);
 });
 
-// The result step's outputs, which src/apply/result.rs tests, for a run
-// whose checked outputs, after the guard, are `items`, with `pr` opened.
-function resultOutputs(items, pr = null) {
-  const dir = mkdtempSync(join(homedir(), 'result-test-'));
-  try {
-    mkdirSync(join(dir, 'apply-binary'));
-    copyFileSync(join(__dirname, '../target/debug/agentic-job'), join(dir, 'apply-binary/agentic-job'));
-    writeFileSync(join(dir, 'applied.json'), JSON.stringify({ made: [], already_applied: [], pull_request: pr }));
-    writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
-    for (const file of ['output', 'summary']) writeFileSync(join(dir, file), '');
-    const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('Say where what the run made is')],
-      { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_OUTPUT: join(dir, 'output'), GITHUB_STEP_SUMMARY: join(dir, 'summary'),
-        GH_AW_SAFE_OUTPUTS_URLS: 'allowed-or-code-region', CHECKED_ARTIFACT_ID: '99', RUN_URL: 'https://github.com/caller/repo/actions/runs/7' });
-    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
-    return Object.fromEntries(readFileSync(join(dir, 'output'), 'utf8').trimEnd().split('\n')
-      .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-test('missing-data alone passes the guard and fails the job', async () => {
-  const item = { type: 'missing_data', data_type: 'workflow', reason: 'needs workflow edits' };
-  const guarded = await guard([item]);
-  assert.deepEqual(guarded.kept, [item]);
-  assert.deepEqual(guarded.skipped, []);
-  const outputs = resultOutputs(guarded.kept);
-  assert.equal(outputs['missing-data'], 'true');
-  const ended = command(__dirname, 'bash', ['-euo', 'pipefail', '-c', step('Every output was applied')],
-    { PROJECT_REFUSED: '', MISSING_DATA: outputs['missing-data'] });
-  assert.equal(ended.status, 1, ended.stdout + ended.stderr);
-  assert.match(ended.stdout, /required data was missing/);
-  // A diagnostic alongside an actual result must not turn success into failure.
-  const opened = { number: 39, url: 'https://github.com/owner/repo/pull/39' };
-  assert.equal(resultOutputs([item], opened)['missing-data'], undefined);
-});
-
 test('the pinned comment handler posts a guarded review verdict', { skip: !process.env.GH_AW_JS }, async () => {
   const body = 'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: 0123';
   const guarded = await guard([comment(body)], [], { target: '454', artifacts: 'dispatch-review-' });
