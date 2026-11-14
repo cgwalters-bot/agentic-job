@@ -844,9 +844,10 @@ to be complete, and a checkpoint check cannot read is refused, not ignored.
 
 The threat is an agent-authored `outcome.json` or `noop` clearing an unfinished
 continuation, or evidence from another target, head, run or attempt doing so.
-There is currently **no accepted unchanged-completion candidate or checked
-completion field**. A missing checkpoint in the check report is not proof of
-completion. An unchanged result cannot trigger the readiness transition above,
+There is an inert, off-by-default candidate and independently checked result
+described below, but **no unchanged apply readiness or caller activation**.
+A missing checkpoint in the check report is not proof of completion.
+An unchanged result cannot trigger the readiness transition above,
 even with `ready_when_complete`; that path still requires a push.
 
 Merged [#3382](https://github.com/cgwalters-forge/agentic-job/pull/3382) preserved
@@ -866,7 +867,8 @@ together by a trusted caller. Check receives the full tuple separately as
 `--run-attempt`. The library's `Trusted.continuation` requires exact equality
 with the admitted policy; missing context or a different repository, PR, head,
 run or attempt is refused. Only an accepted report carries `continuation`.
-This field is identity, **not a completion claim** or required-verification result.
+This field is identity (optionally including a caller-pinned verification
+specification), **not a completion claim** or required-verification result.
 
 Raw proposal ID and digest prove only the run: without more, a fresh checker
 could read an earlier attempt's raw upload and stamp it with the current
@@ -902,73 +904,131 @@ trusted workflow pin and successful check job, not a producer-supplied attempt
 field. Legacy callers omit the context and keep
 their existing run-only artifact contract, with no unchanged-completion eligibility.
 
-Before carrying accepted completion evidence, required verification must still
-be specified by trusted context; the agent cannot choose
-an empty required set. Missing context, identity mismatches, changed output
-claimed as unchanged, absent/malformed/incomplete checkpoints, stopped outcomes,
-and failed or unavailable required verification must fail closed. This is a
-separate prerequisite: the bound identity is not a completion claim. The opt-in
-adds no receipt, scheduler, output bound, permission, hold exception or
-readiness transition. No shipped caller enables it.
+The concrete threat addressed by the optional `policy --continuation-verification
+JSON` is a worker choosing an empty required set, somebody else's green jobs or
+a dispatcher SHA unrelated to the tested tree. Only the trusted caller supplies
+this specification. It becomes `continuation.verification` and must match the
+independently supplied `check --continuation-context` exactly. No shipped workflow
+or caller supplies this new CLI-only option; `bind-continuation` alone remains
+identity-only. There is no deployment, dispatch, token-permission change, second
+receipt, hold exception or readiness transition.
 
-Today the producer saves outcomes as diagnostics outside the hand-back. The
-collector sanitizes requests; check validates bounded no-follow files, secrets,
-policy/patch constraints and checkpoints in accepted PR/push text. Agent-reported
-test commands and exit codes in outcomes are not independently executed or
-verified by check. Even a future identity-bound checked claim would not prove
-semantic completion. Existing repeated-test evidence is agent-authored and bound
-to a proposed patch, not an unchanged-completion authority. Legacy outcomes and
-noops remain compatible as diagnostics; putting a raw outcome or an invented
-completion-evidence file into the hand-back is refused as an unexpected file.
+The specification requires `method: "actions-push-v1"`, `repository`,
+`workflow` (a flat `.github/workflows/NAME.yml` path), `source` (full lowercase
+commit), positive verifier `run_id` and `attempt`, and `required_jobs` (1–20
+distinct job IDs/names, at most 64 ASCII letters, digits, underscores or hyphens
+each). Target repository/PR/head and producer run/attempt remain the outer tuple.
+The verifier repository must equal the target repository and `source` must equal
+the tested PR head. The caller must independently review and trust the workflow
+at that exact head; it is not trusted merely because it is proposed by the agent.
+Neither identity nor
+requirements can come from the producer's outcome or candidate.
 
-**Engineering dependency for #3637:** the identity/artifact prerequisite is on
-main at `d6613509e5dfe421e53a8076b8bb7a551beb5c36`, but there is no independent
-required-verification implementation in the existing check path. In particular,
-`check.yml` downloads proposals and invokes collect/check with read-only
-`contents`/`actions` access; it does not execute task tests. Executing a proposed
-test command there would run agent-controlled code on the trusted checker.
-`test-evidence.json` and `outcome.json.tests` instead report what the producer
-says happened. Neither is an independent verifier result, even with a correct
-artifact digest and attempt. No verification method is currently supported for
-unchanged acceptance; unavailable must remain a refusal, not an empty success.
+The supported verifier semantics are deliberately narrow: a successful completed
+`push` run in the target repository at the exact admitted head. For this event,
+[GitHub executes the workflow at the pushed commit](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push),
+so the run's source SHA authenticates the workflow source, not just a dispatcher
+commit. A separate current open-PR API read must match the admitted PR number,
+head and head/base repositories (fork and cross-repository verification are
+unsupported). A push need not originate from a PR; the exact current head is the
+binding. The API run's repository, head repository, workflow path, source SHA,
+run ID and latest attempt must all match. The workflow is read through the
+contents API at that exact source revision.
+Only canonical `serde_json::to_vec_pretty` JSON, without a trailing newline,
+is supported as a YAML subset; general YAML, aliases and duplicate fields are
+refused. This is an inert method contract, not a workflow to deploy.
 
-The missing implementation is a trusted caller specification of a **nonempty**
-required set and an explicit verifier method, plus an authenticated result reader
-for that method. For example, a read-only Actions-result method would need to
-authenticate the verifier's workflow/source revision and exact tested repository,
-PR head, verifier run/attempt and required jobs, not just find green checks by
-name. Its trusted workflow must establish what tree was tested; a dispatcher
-run's own `head_sha` can name the caller repository rather than the target.
-It must bound API reads and fail closed on missing, ambiguous, truncated,
-failed, skipped, cancelled or unreadable results. There is no such result reader
-or trusted verifier-job contract here today. Adding a producer-written
-`verification: passed` field, or letting a worker supply the required job list,
-would not resolve this engineering dependency. This needs implementation and
-serialized positive/adversarial proof, not a new completion-policy grant.
+The workflow allows only top-level `name`, `on`, `permissions` and `jobs`, with
+`on` equal to `"push"`. Its jobs must be exactly the required set.
+Each job allows only `name` (equal to its ID), `runs-on`, `steps`, `timeout-minutes`
+and `permissions`; no conditional, matrix, reusable workflow or continued-error
+job is accepted. Its first step must be exactly:
 
-**Serialized handoff to #3381:** today an accepted `report.json` may carry
-`continuation` with exactly `repository`, `pull_request`, `head`, `run_id` and
-`attempt`; it carries no checked unchanged-completion disposition. The report
-travels with the policy through the existing checked upload described above.
-The #3381 consumer must not consume an outcome, noop, absence of `checkpoint`, or this identity
-as completion. Before that consumer can proceed, #3637 must add a checked
-disposition to this same report, backed by the trusted required-verification
-method and bound candidate, and exercise the actual serialized producer,
-collector and checker handoff. No second receipt or agent-supplied result file
-can stand in for it. Even that future disposition will establish only the
-specified verification and structural claim, not semantic task completion.
-Agent-board #852/#853 must wait for that concrete contract and deployment;
-separately authorized live acceptance remains tracker #1071. Acceptance,
-readiness and caller opt-in remain unchanged and disabled for unchanged results.
+```json
+{
+  "name": "Establish tested tree",
+  "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+  "with": {
+    "repository": "${{ github.repository }}",
+    "ref": "${{ github.sha }}",
+    "persist-credentials": false
+  }
+}
+```
 
-The serialized CLI regression in `tests/run.rs` carries real producer uploads
-through separate `collect` and `check` processes under an identity-bound policy,
-including a readiness opt-in. Complete, incomplete, stopped, failed/unavailable
-test and mismatched-identity outcome claims remain diagnostics, never a checked
-completion disposition. Smuggled raw evidence files (including malformed and
-duplicate-key payloads) are refused by the independent checker. This proves the
-fallback stays closed; it is not the positive verification proof still required
-by #3637.
+These exact event expressions are required, not dispatcher inputs, mutable refs,
+or the default checkout. The authenticated push event supplies the admitted
+repository and commit. A literal self-referential source SHA in the workflow
+would be impossible to construct. At least one following verification step is required; each
+has a unique nonempty `name`, nonempty `run`, optional `shell`, and no other keys.
+The trusted caller must review and pin the **whole source**, including those
+commands and their dependencies, as actually testing that checkout. Structural
+checkout validation cannot establish what arbitrary test commands mean. Check
+never executes them, the proposed target code or agent-proposed commands.
+
+The reader makes at most six authenticated GETs, each at most 1 MiB and 10 seconds,
+with a 60-second total deadline, no redirects/retries or pagination. It refuses
+non-200, unreadable/malformed metadata, any Link header, more than 100 jobs or a
+count mismatch. Each required name must occur exactly once, at the pinned
+run/attempt/source, completed successfully. Every reported step must succeed,
+and each defined step must occur exactly once; missing, skipped, failed,
+cancelled or ambiguous results refuse. The run and PR are re-read unchanged
+before acceptance, closing head/rerun races. API origin and existing read-only
+token come from `GITHUB_API_URL` and `GH_TOKEN`/`GITHUB_TOKEN`, never the hand-back.
+
+**Unsupported bindings and missing engineering contracts:** a dispatch run's
+`head_sha` authenticates the dispatcher, not the target checkout. Supporting that
+case requires server-authenticated immutable event inputs/tested-tree metadata
+and a pinned workflow contract interpreting them. `pull_request_target` is also
+unsupported: REST `head_sha` can identify the PR head rather than the executed
+default-branch workflow source. A concrete read-only observation is
+[cli/cli run 43458281490](https://api.github.com/repos/cli/cli/actions/runs/43458281490):
+its REST run/jobs head is `f219d43648a38f528a207c6f707a678e986dc079`, while
+its recorded PR base is `3d5a9e355a837f2f5ee78d7484c118cc1342ad1a`.
+Authenticating that event's immutable executed workflow source requires a
+separate server-backed source contract; substituting a current default-branch
+or PR-base SHA is not sufficient. Fork runs, cross-repository verifiers, mutable
+refs, merge-tree testing, reusable workflows and general YAML are refused, not
+guessed from check names. Their event/source and tested-tree contracts must be
+specified and authenticated before extending this method. The push fixture's
+REST shape was checked against
+[run 43543815563](https://api.github.com/repos/cgwalters-forge/agentic-job/actions/runs/43543815563)
+(push, matching run/head repositories and commit, empty PR links); this is a
+read-only metadata observation, **not live verifier acceptance**.
+
+With trusted verification present, the producer can explicitly write
+`out/unchanged-candidate.json` (at most 16 KiB) containing only `identity` (the
+whole continuation tuple), `checkpoint` (`complete: true`, nonempty `done` up to
+4096 bytes, empty `left` and `next`), and `stopped_early: null`. All fields are
+required and duplicate/unknown fields refuse. The producer requires a readable
+unchanged checkout at the admitted head and an exactly matching explicit outcome
+checkpoint/non-stopped outcome. No candidate is synthesized from a noop or raw
+outcome. Check repeats candidate validation through bounded no-follow file and
+secret checks, refuses patches/memory or non-noop requests beside it, then reads
+independent results. Producer feedback does not read the API or stamp a checked
+disposition. Outcomes remain diagnostics outside the hand-back;
+`outcome.json.tests` and `test-evidence.json` are **agent-reported**, not independent
+proof. The producer's clean-tree and completion declarations are agent-reported
+too: even independently passing required jobs do **not** prove semantic task
+completion or that the agent performed all requested work.
+
+**Serialized handoff to #3381:** only a successful independent CLI check adds
+`unchanged_completion` to the existing `report.json`, with `disposition:
+"unchanged-verified"`, `identity` (including verifier specification), and
+`verified_jobs` (exact required names). It travels with the policy through the
+existing checker-owned, attempt-bound artifact above, not a parallel receipt.
+The #3381 consumer must authenticate that artifact and match the whole admitted
+repository/PR/head/producer run/attempt and verifier specification; an outcome,
+noop, missing checkpoint or `continuation` alone is never sufficient. Consumption
+and apply readiness remain unimplemented here. Agent-board #852 integration and
+tracker #1071's separately authorized live acceptance remain outside this change.
+
+`tests/run.rs` exercises the serialized producer → collector → independent CLI
+checker with authenticated local API fixtures, including a positive control and
+adversarial identity, source, checkout, result, context and checkpoint cases.
+The pre-existing serialized fallback still proves that legacy complete-looking
+outcomes/noops are diagnostics and raw/invented evidence is refused. Artifact
+attempt/replay and apply identity regressions remain in the workflow tests.
 
 ### Requesting reviewers and assigning users
 

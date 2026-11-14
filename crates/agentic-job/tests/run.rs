@@ -1519,6 +1519,375 @@ fn unchanged_claims_survive_only_as_diagnostics_across_the_cli_handoff() {
     }
 }
 
+/// A real producer upload, not a checker-only invented receipt. The API fixture
+/// requires authentication and serves only the bounded read-only endpoints.
+#[test]
+fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
+    use base64::Engine;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let job = Job::new("verified-unchanged");
+    job.own_repository();
+    let head = sh(&format!(
+        "git -C {} rev-parse HEAD",
+        job.path("repo").display()
+    ));
+    job.allow(json!({"noop": {"max": 1}, "push_to_pull_request_branch": {
+        "max": 1, "target": "7", "head": head, "protected_files": [],
+        "protect_top_level_dot_folders": true, "protected_files_policy": "blocked",
+        "max_patch_size": 65536, "max_patch_files": 10}}));
+    let mut policy = job.json("policy.json");
+    let repository = policy["repo"].as_str().unwrap().to_owned();
+    let source = head.clone();
+    let identity = json!({"repository": repository, "pull_request": 7, "head": head,
+        "run_id": RUN_ID.parse::<u64>().unwrap(), "attempt": 1,
+        "verification": {"method": "actions-push-v1", "repository": repository,
+            "workflow": ".github/workflows/verify.yml", "source": source,
+            "run_id": 81, "attempt": 2, "required_jobs": ["test"]}});
+    policy["continuation"] = identity.clone();
+    job.write("policy.json", &policy.to_string());
+    let checkpoint = json!({"complete": true, "done": "Already satisfied", "left": "", "next": ""});
+    let candidate = json!({"identity": identity, "checkpoint": checkpoint, "stopped_early": null});
+    let outcome = json!({"summary": "No change needed", "checkpoint": checkpoint,
+        "stopped_early": null, "tests": [{"command": "not independent evidence", "exit_code": 1}]});
+    job.script(&json!([canary(),
+        {"write": {"title": "Outcome", "path": "{home}/out/outcome.json", "content": outcome.to_string()}},
+        {"write": {"title": "Candidate", "path": "{home}/out/unchanged-candidate.json", "content": candidate.to_string()}},
+        {"write": {"title": "Noop", "path": "{home}/out/safe-outputs.jsonl", "content": "{\"type\":\"noop\",\"message\":\"No change\"}"}},
+        {"say": "Done."}]));
+    let got = job.own_run(&own_config(&plain(&proxy)));
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert_eq!(
+        job.json("out/safe-outputs/unchanged-candidate.json"),
+        candidate
+    );
+    let collected = collected(&job);
+
+    let workflow = json!({"on": "push", "permissions": {"contents": "read"},
+        "jobs": {"test": {"runs-on": "ubuntu-24.04", "steps": [
+            {"name": "Establish tested tree", "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+                "with": {"repository": "${{ github.repository }}", "ref": "${{ github.sha }}", "persist-credentials": false}},
+            {"name": "Verify", "run": "cargo test --locked"}]}}});
+    let run = json!({"id": 81, "run_attempt": 2, "repository": {"full_name": repository},
+        "head_repository": {"full_name": repository},
+        "event": "push", "head_sha": source, "path": ".github/workflows/verify.yml",
+        "status": "completed", "conclusion": "success", "pull_requests": []});
+    let pull = json!({"number": 7, "state": "open", "head": {"sha": head, "repo": {"full_name": repository}},
+        "base": {"sha": source, "repo": {"full_name": repository}}});
+    let jobs = json!({"total_count": 1, "jobs": [{"name": "test", "run_id": 81, "run_attempt": 2,
+        "head_sha": source, "status": "completed", "conclusion": "success", "steps": [
+            {"name": "Establish tested tree", "status": "completed", "conclusion": "success"},
+            {"name": "Verify", "status": "completed", "conclusion": "success"}]}]});
+    let mode = Arc::new(Mutex::new(String::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let root = format!("http://{}", listener.local_addr().unwrap());
+    let server_mode = mode.clone();
+    let server_stop = stop.clone();
+    let server = std::thread::spawn(move || {
+        let mut last_mode = String::new();
+        let mut run_reads = 0;
+        let mut pull_reads = 0;
+        while !server_stop.load(Ordering::SeqCst) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                continue;
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert!(request.starts_with("GET /repos/"), "{request}");
+            let mut authenticated = false;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                authenticated |=
+                    line.eq_ignore_ascii_case("authorization: bearer fixture-read-token\r\n");
+            }
+            assert!(authenticated);
+            let mode = server_mode.lock().unwrap().clone();
+            if mode != last_mode {
+                run_reads = 0;
+                pull_reads = 0;
+                last_mode.clone_from(&mode);
+            }
+            let mut workflow = workflow.clone();
+            if mode == "wrong-checkout" {
+                workflow["jobs"]["test"]["steps"][0]["with"]["ref"] = json!("b".repeat(40));
+            }
+            let mut value = if request.contains("/contents/") {
+                json!({"type": "file", "path": ".github/workflows/verify.yml", "encoding": "base64",
+                    "content": base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec_pretty(&workflow).unwrap())})
+            } else if request.contains("/pulls/") {
+                let mut pull = pull.clone();
+                if mode == "stale-pr" {
+                    pull["head"]["sha"] = json!("b".repeat(40));
+                }
+                pull_reads += 1;
+                if mode == "head-race" && pull_reads == 2 {
+                    pull["head"]["sha"] = json!("b".repeat(40));
+                }
+                pull
+            } else if request.contains("/jobs?") {
+                jobs.clone()
+            } else {
+                run.clone()
+            };
+            if request.contains("/actions/runs/") && !request.contains("/jobs?") {
+                run_reads += 1;
+                if mode == "rerun-race" && run_reads == 2 {
+                    value["run_attempt"] = json!(3);
+                }
+                match mode.as_str() {
+                    "wrong-source" => value["head_sha"] = json!("b".repeat(40)),
+                    "wrong-workflow" => value["path"] = json!(".github/workflows/other.yml"),
+                    "wrong-tree" => value["head_repository"]["full_name"] = json!("other/repo"),
+                    "wrong-run" => value["id"] = json!(82),
+                    "wrong-attempt" => value["run_attempt"] = json!(3),
+                    "dispatcher" => value["event"] = json!("workflow_dispatch"),
+                    "pr-target" => value["event"] = json!("pull_request_target"),
+                    _ => {}
+                }
+            }
+            if request.contains("/jobs?") {
+                match mode.as_str() {
+                    "failed" | "skipped" | "cancelled" => {
+                        value["jobs"][0]["conclusion"] = json!(mode)
+                    }
+                    "truncated" => value["total_count"] = json!(2),
+                    "duplicate" => value["jobs"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(jobs["jobs"][0].clone()),
+                    "missing-step" => value["jobs"][0]["steps"] = json!([]),
+                    _ => {}
+                }
+            }
+            if mode == "oversize" {
+                // Otherwise acceptable JSON: parsing alone must not make this
+                // negative pass if the transport byte limit regresses.
+                value["padding"] = json!("x".repeat((1 << 20) + 1));
+            }
+            let body = if mode == "malformed-api" {
+                "{".into()
+            } else {
+                value.to_string()
+            };
+            let status = if mode == "redirect" {
+                "302 Found"
+            } else if mode == "unavailable" {
+                "503 Unavailable"
+            } else {
+                "200 OK"
+            };
+            let link = if mode == "paginated" {
+                "Link: <https://invalid.example/next>; rel=next\r\n"
+            } else {
+                ""
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\n{link}Location: /must-not-follow\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            if mode == "stalled-body" {
+                std::thread::sleep(std::time::Duration::from_secs(11));
+            }
+            // Bounded clients may close before consuming oversized/late bodies.
+            let _ = stream.write_all(body.as_bytes());
+        }
+    });
+    let check = |context: &str| {
+        Finished::of(
+            Command::new(BIN)
+                .args([
+                    "check",
+                    "--policy",
+                    "policy.json",
+                    "--outputs",
+                    "out/safe-outputs",
+                ])
+                .arg("--collected")
+                .arg(&collected)
+                .args([
+                    "--report",
+                    "verdict.json",
+                    "--run-id",
+                    RUN_ID,
+                    "--run-attempt",
+                    "1",
+                    "--continuation-context",
+                    context,
+                ])
+                .env("GITHUB_API_URL", &root)
+                .env("GH_TOKEN", "fixture-read-token")
+                .current_dir(&job.dir)
+                .output()
+                .unwrap(),
+        )
+    };
+    let got = check(&identity.to_string());
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    let report = job.json("verdict.json");
+    assert_eq!(report["unchanged_completion"]["identity"], identity);
+    assert_eq!(
+        report["unchanged_completion"]["verified_jobs"],
+        json!(["test"])
+    );
+    assert!(report["patch"].is_null());
+    for failure in [
+        "wrong-source",
+        "wrong-workflow",
+        "wrong-tree",
+        "wrong-run",
+        "wrong-attempt",
+        "dispatcher",
+        "wrong-checkout",
+        "stale-pr",
+        "failed",
+        "skipped",
+        "cancelled",
+        "truncated",
+        "duplicate",
+        "missing-step",
+        "unavailable",
+        "malformed-api",
+        "paginated",
+        "pr-target",
+        "rerun-race",
+        "head-race",
+        "oversize",
+        "redirect",
+        "stalled-body",
+    ] {
+        *mode.lock().unwrap() = failure.into();
+        let got = check(&identity.to_string());
+        assert_eq!(got.code, Some(EXIT_FAILURE), "{failure}: {}", got.all());
+        assert!(
+            job.json("verdict.json")
+                .get("unchanged_completion")
+                .is_none(),
+            "{failure}"
+        );
+    }
+    *mode.lock().unwrap() = String::new();
+    let candidate_path = "out/safe-outputs/unchanged-candidate.json";
+    for (name, bad) in [
+        ("missing", "{}".into()), ("malformed", "{".into()),
+        ("duplicate", candidate.to_string().replacen('{', "{\"checkpoint\":{},", 1)),
+        ("no-checkpoint", json!({"identity": identity, "stopped_early": null}).to_string()),
+        ("malformed-checkpoint", json!({"identity": identity, "checkpoint": true, "stopped_early": null}).to_string()),
+        ("incomplete", json!({"identity": identity, "checkpoint": {"complete": false, "done": "Partial", "left": "Work", "next": "Continue"}, "stopped_early": null}).to_string()),
+        ("stopped", json!({"identity": identity, "checkpoint": checkpoint, "stopped_early": "timeout"}).to_string()),
+        ("raw-outcome", outcome.to_string()),
+    ] {
+        job.write(candidate_path, &bad);
+        let got = check(&identity.to_string());
+        assert_eq!(got.code, Some(EXIT_FAILURE), "{name}: {}", got.all());
+    }
+    for key in ["repository", "pull_request", "head", "run_id", "attempt"] {
+        let mut bad = candidate.clone();
+        bad["identity"][key] = if key == "repository" {
+            json!("other/repo")
+        } else if key == "head" {
+            json!("b".repeat(40))
+        } else {
+            json!(999)
+        };
+        job.write(candidate_path, &bad.to_string());
+        let got = check(&identity.to_string());
+        assert_eq!(got.code, Some(EXIT_FAILURE), "{key}: {}", got.all());
+    }
+    job.write(candidate_path, &candidate.to_string());
+    for key in ["identity", "checkpoint", "stopped_early"] {
+        let mut bad = candidate.clone();
+        bad.as_object_mut().unwrap().remove(key);
+        job.write(candidate_path, &bad.to_string());
+        assert_eq!(
+            check(&identity.to_string()).code,
+            Some(EXIT_FAILURE),
+            "missing candidate {key}"
+        );
+    }
+    job.write(candidate_path, &candidate.to_string());
+    for key in [
+        "repository",
+        "pull_request",
+        "head",
+        "run_id",
+        "attempt",
+        "verification",
+    ] {
+        let mut bad = identity.clone();
+        bad.as_object_mut().unwrap().remove(key);
+        assert_ne!(
+            check(&bad.to_string()).code,
+            Some(EXIT_SUCCESS),
+            "missing context {key}"
+        );
+        let bad = identity
+            .to_string()
+            .replacen('{', &format!("{{\"{key}\":null,"), 1);
+        assert_ne!(
+            check(&bad).code,
+            Some(EXIT_SUCCESS),
+            "duplicate context {key}"
+        );
+    }
+    for key in [
+        "method",
+        "repository",
+        "workflow",
+        "source",
+        "run_id",
+        "attempt",
+        "required_jobs",
+    ] {
+        let mut bad = identity.clone();
+        bad["verification"].as_object_mut().unwrap().remove(key);
+        assert_ne!(
+            check(&bad.to_string()).code,
+            Some(EXIT_SUCCESS),
+            "missing verifier {key}"
+        );
+    }
+    // A claimed unchanged result cannot carry any patch, even beside a noop.
+    job.write(
+        "out/safe-outputs/aw-change.patch",
+        "not an unchanged result\n",
+    );
+    assert_eq!(check(&identity.to_string()).code, Some(EXIT_FAILURE));
+    std::fs::remove_file(job.path("out/safe-outputs/aw-change.patch")).unwrap();
+    for context in [
+        "{}".into(),
+        "{".into(),
+        identity.to_string().replacen('{', "{\"head\":\"bad\",", 1),
+    ] {
+        assert_ne!(check(&context).code, Some(EXIT_SUCCESS), "{context}");
+    }
+    // An admitted policy with an empty required set is invalid, not vacuous success.
+    policy["continuation"]["verification"]["required_jobs"] = json!([]);
+    job.write("policy.json", &policy.to_string());
+    assert_ne!(
+        check(&policy["continuation"].to_string()).code,
+        Some(EXIT_SUCCESS)
+    );
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}
+
 /// The whole path of a change: the agent edits the tree and words its
 /// pull request, `run` hands that back as gh-aw's safe outputs, `collect`
 /// reads the requests, and `check` accepts the hand-back. The
@@ -1527,6 +1896,74 @@ fn unchanged_claims_survive_only_as_diagnostics_across_the_cli_handoff() {
 #[test]
 fn a_change_is_handed_back_and_the_check_accepts_it() {
     change_is_handed_back(false);
+}
+
+#[test]
+fn producer_refuses_unchanged_candidates_for_changed_stopped_or_incomplete_work() {
+    for case in [
+        "changed",
+        "stopped",
+        "missing-checkpoint",
+        "incomplete",
+        "malformed",
+    ] {
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let job = Job::new(&format!("refused-unchanged-{case}"));
+        job.own_repository();
+        let head = sh(&format!(
+            "git -C {} rev-parse HEAD",
+            job.path("repo").display()
+        ));
+        job.allow(json!({"noop": {"max": 1}, "push_to_pull_request_branch": {
+            "max": 1, "target": "7", "head": head, "protected_files": [],
+            "protect_top_level_dot_folders": true, "protected_files_policy": "blocked",
+            "max_patch_size": 65536, "max_patch_files": 10}}));
+        let mut policy = job.json("policy.json");
+        let identity = json!({"repository": policy["repo"], "pull_request": 7, "head": head,
+            "run_id": RUN_ID.parse::<u64>().unwrap(), "attempt": 1,
+            "verification": {"method": "actions-push-v1", "repository": policy["repo"],
+                "workflow": ".github/workflows/verify.yml", "source": head,
+                "run_id": 81, "attempt": 2, "required_jobs": ["test"]}});
+        policy["continuation"] = identity.clone();
+        job.write("policy.json", &policy.to_string());
+        let checkpoint =
+            json!({"complete": true, "done": "Claimed complete", "left": "", "next": ""});
+        let mut outcome =
+            json!({"summary": "No change", "checkpoint": checkpoint, "stopped_early": null});
+        match case {
+            "stopped" => outcome["stopped_early"] = json!("timeout"),
+            "missing-checkpoint" => {
+                outcome.as_object_mut().unwrap().remove("checkpoint");
+            }
+            "incomplete" => outcome["checkpoint"]["complete"] = json!(false),
+            _ => {}
+        }
+        let candidate = if case == "malformed" {
+            "{".into()
+        } else {
+            json!({"identity": identity, "checkpoint": checkpoint, "stopped_early": null})
+                .to_string()
+        };
+        let mut steps = vec![
+            canary(),
+            json!({"write": {"title": "Outcome", "path": "{home}/out/outcome.json", "content": outcome.to_string()}}),
+            json!({"write": {"title": "Candidate", "path": "{home}/out/unchanged-candidate.json", "content": candidate}}),
+            json!({"write": {"title": "Noop", "path": "{home}/out/safe-outputs.jsonl", "content": "{\"type\":\"noop\",\"message\":\"No change\"}"}}),
+        ];
+        if case == "changed" {
+            steps.push(json!({"write": {"title": "Edit", "path": "{cwd}/README.md", "content": "Changed tree\n"}}));
+        }
+        steps.push(json!({"say": "Done."}));
+        job.script(&json!(steps));
+        let got = job.own_run(&own_config(&plain(&proxy)));
+        assert_ne!(got.code, Some(EXIT_SUCCESS), "{case}: {}", got.all());
+        assert!(
+            !job.path("out/safe-outputs/unchanged-candidate.json")
+                .exists(),
+            "{case}"
+        );
+    }
 }
 
 #[test]

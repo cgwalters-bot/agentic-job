@@ -1820,6 +1820,49 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     }
 
     let outputs = build_outputs(&agent_text, policy, has_changes, &outcome, run_id);
+    // Explicit opt-in only. A raw outcome or noop never creates this candidate.
+    // These are producer declarations; the independent checker repeats the
+    // structural checks and obtains verification from the read-only Actions API.
+    if policy
+        .continuation
+        .as_ref()
+        .is_some_and(|identity| identity.verification.is_some())
+    {
+        let candidate = read_agent_file(
+            runner,
+            &request.home.join("out").join(crate::check::unchanged::FILE),
+            crate::check::unchanged::MAX_BYTES as usize,
+        );
+        anyhow::ensure!(
+            candidate != AgentFile::Refused,
+            "unchanged candidate is not a bounded readable regular file"
+        );
+        if let Some(bytes) = candidate.taken() {
+            let parsed: crate::check::unchanged::Candidate =
+                serde_json::from_slice(&bytes).context("unchanged candidate")?;
+            parsed.validate(
+                policy
+                    .continuation
+                    .as_ref()
+                    .context("missing continuation")?,
+            )?;
+            anyhow::ensure!(
+                !changed && !unreadable && !has_changes,
+                "changed or unreadable checkout claimed unchanged"
+            );
+            anyhow::ensure!(
+                outcome.get("stopped_early") == Some(&Value::Null)
+                    && outcome.get(OUTCOME_CHECKPOINT)
+                        == Some(&serde_json::to_value(&parsed.checkpoint)?),
+                "unchanged candidate differs from explicit complete, non-stopped outcome"
+            );
+            create_dir(request.safe_outputs)?;
+            write(
+                &request.safe_outputs.join(crate::check::unchanged::FILE),
+                &bytes,
+            )?;
+        }
+    }
     // Made before anything is written: a hand-back either holds every
     // patch its requests need, or, as in the old tree, none of its files.
     let mut patches = Vec::new();
@@ -3594,6 +3637,7 @@ mod tests {
             head: push.head.clone(),
             run_id: RUN_ID.parse().unwrap(),
             attempt: 2,
+            verification: None,
         });
         let serialized = serde_json::to_vec(&policy).unwrap();
         let policy: Policy = serde_json::from_slice(&serialized).unwrap();
@@ -3654,6 +3698,7 @@ mod tests {
                 head: push.head.clone(),
                 run_id: RUN_ID.parse().unwrap(),
                 attempt: 2,
+                verification: None,
             });
             let policy: Policy =
                 serde_json::from_slice(&serde_json::to_vec(&policy).unwrap()).unwrap();

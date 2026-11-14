@@ -21,6 +21,7 @@ pub mod base;
 pub mod checkpoint;
 pub mod memory;
 pub mod test_evidence;
+pub mod unchanged;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -142,6 +143,9 @@ fn checked_run_summary(path: &Path, policy: &Policy) -> Result<String> {
 /// What `check` decided. `--report` holds this as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Verdict {
+    /// Independent required-job results, not semantic task completion or readiness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unchanged_completion: Option<unchanged::Checked>,
     /// A bounded producer declaration, not evidence of passed host controls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_isolation: Option<crate::config::Isolation>,
@@ -202,6 +206,7 @@ impl Verdict {
         let mut seen = BTreeSet::new();
         errors.retain(|error| seen.insert(error.clone()));
         Self {
+            unchanged_completion: None,
             host_isolation: None,
             continuation: None,
             inline_target: None,
@@ -363,6 +368,7 @@ fn redirections_to(
 
 pub(crate) fn is_handback_file(name: &str) -> bool {
     name == OUTPUTS_FILE
+        || name == unchanged::FILE
         || name == HOST_ISOLATION_FILE
         || name == BASE_FILE
         || name == SECONDARY_BASE_FILE
@@ -378,6 +384,7 @@ pub(crate) fn is_handback_file(name: &str) -> bool {
 /// budget and held to its own once it is.
 fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
     match name {
+        unchanged::FILE => unchanged::MAX_BYTES,
         HOST_ISOLATION_FILE => MAX_HOST_ISOLATION_BYTES,
         OUTPUTS_FILE => MAX_OUTPUTS_BYTES,
         BASE_FILE | SECONDARY_BASE_FILE => MAX_BASE_BYTES,
@@ -642,6 +649,30 @@ fn verdict_of(
     };
     let mut checked =
         safe_outputs::check::check(&handback, collected, policy, trusted, &Apply, lifecycle);
+    if let Some(bytes) = contents.get(unchanged::FILE) {
+        let candidate = (|| -> Result<()> {
+            let identity = policy
+                .continuation
+                .as_ref()
+                .context("unchanged candidate without continuation")?;
+            let candidate: unchanged::Candidate = serde_json::from_slice(bytes)?;
+            candidate.validate(identity)?;
+            anyhow::ensure!(
+                checked.patch.is_none()
+                    && checked.secondary_patch.is_none()
+                    && memory.is_none()
+                    && checked.items.iter().all(|item| item_type(item) == NOOP)
+                    && checked.items.len() <= 1,
+                "changed or blocked result claimed unchanged"
+            );
+            Ok(())
+        })();
+        if let Err(error) = candidate {
+            checked
+                .errors
+                .push(format!("unchanged candidate: {error:#}"));
+        }
+    }
     let evidence = checked_test_evidence(&contents, &checked.items, checked.patch.as_ref(), policy);
     let test_evidence = evidence.unwrap_or_else(|error| {
         checked.errors.push(format!("test evidence: {error:#}"));
@@ -806,6 +837,21 @@ pub fn run(args: &Args) -> Result<Exit> {
                 "warning: the run summary {} is left out: {err:#}",
                 path.display()
             ),
+        }
+    }
+    if verdict.ok && args.outputs.join(unchanged::FILE).try_exists()? {
+        match continuation
+            .as_ref()
+            .context("missing trusted unchanged context")
+            .and_then(unchanged::verify)
+        {
+            Ok(checked) => verdict.unchanged_completion = Some(checked),
+            Err(error) => {
+                verdict
+                    .errors
+                    .push(format!("independent verification: {error:#}"));
+                verdict.ok = false;
+            }
         }
     }
     if verdict.ok {

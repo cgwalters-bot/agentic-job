@@ -89,6 +89,10 @@ pub struct Args {
     /// Producer attempt from the trusted caller; no completion authority
     #[arg(long, requires = "continuation_run_id")]
     pub continuation_attempt: Option<u64>,
+    /// Prevent worker-selected green-job forgery: pin the independent verifier
+    /// and nonempty required jobs in trusted caller policy, off by default.
+    #[arg(long, requires = "continuation_run_id", value_name = "JSON")]
+    pub continuation_verification: Option<String>,
     /// Caller-owned external-fetch receipt; never the external run's policy/config
     #[arg(long, value_name = "FILE")]
     pub external_receipt: Option<PathBuf>,
@@ -981,6 +985,18 @@ pub fn run(args: &Args) -> Result<Exit> {
                     head: push.head.clone(),
                     run_id,
                     attempt: args.continuation_attempt.context("continuation attempt")?,
+                    verification: args
+                        .continuation_verification
+                        .as_deref()
+                        .map(|text| {
+                            anyhow::ensure!(
+                                text.len() <= 4096,
+                                "verification context exceeds 4096 bytes"
+                            );
+                            Ok(serde_json::from_str(text)?)
+                        })
+                        .transpose()
+                        .context("trusted continuation verification")?,
                 });
                 policy.validate()?;
             }

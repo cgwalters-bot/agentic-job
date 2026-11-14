@@ -99,7 +99,12 @@ records trusted repository/PR/head/run/attempt context, and check and apply
 refuse raw and checked uploads from any other run attempt, without enabling
 unchanged completion or readiness. A bound run is re-run with all its jobs, not
 only failed ones. Legacy callers are unchanged. See the
-[identity-only contract](safe-outputs.md#unchanged-completion-remains-unavailable).
+[continuation contract](safe-outputs.md#unchanged-completion-remains-unavailable).
+The internal CLI-only `policy --continuation-verification JSON` can pin an
+independent Actions verifier and nonempty required jobs in that context. An
+explicit bounded unchanged candidate can then produce `unchanged_completion` in
+the checked report, but no reusable-workflow input enables it and apply does not
+consume it or enable unchanged readiness. Legacy identity-only callers are unchanged.
 
 Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`

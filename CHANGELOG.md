@@ -13,6 +13,11 @@ says what a caller may rely on across versions.
   the existing ten-reference cap, preventing subgroup paths from bypassing it.
   GitHub and Forgejo filtering and output admission are unchanged.
 
+- Add an inert CLI-only independent Actions-result method and bounded unchanged
+  candidate/checked-report disposition. Trusted caller policy pins the nonempty
+  required job set and verifier source/run/attempt; raw outcomes remain diagnostics.
+  Caller activation and unchanged apply readiness remain disabled (#3637).
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

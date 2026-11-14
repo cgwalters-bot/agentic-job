@@ -942,10 +942,78 @@ pub struct Continuation {
     pub head: String,
     pub run_id: u64,
     pub attempt: u64,
+    /// Caller-owned independent verification; absent keeps unchanged acceptance off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<ActionsVerification>,
+}
+
+/// One deliberately narrow read-only verifier contract. No dispatch inputs or
+/// producer-reported tests can establish the tested tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionsVerification {
+    pub method: String,
+    pub repository: String,
+    pub workflow: String,
+    pub source: String,
+    pub run_id: u64,
+    pub attempt: u64,
+    pub required_jobs: Vec<String>,
+}
+
+impl ActionsVerification {
+    pub fn validate(&self, target: &Continuation) -> Result<()> {
+        ensure!(
+            self.method == "actions-push-v1",
+            "unsupported verification method"
+        );
+        ensure!(
+            self.repository == target.repository,
+            "cross-repository verifier has no authenticated event binding"
+        );
+        ensure!(
+            COMMIT_RE.is_match(&self.source) && self.run_id > 0 && self.attempt > 0,
+            "invalid verifier source/run/attempt"
+        );
+        ensure!(
+            self.source == target.head,
+            "push verifier workflow source must be the admitted tested head"
+        );
+        ensure!(
+            self.workflow.starts_with(".github/workflows/")
+                && self.workflow.ends_with(".yml")
+                && !self.workflow[18..].contains('/')
+                && self
+                    .workflow
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"./_-".contains(&b)),
+            "invalid verifier workflow path"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        ensure!(
+            !self.required_jobs.is_empty() && self.required_jobs.len() <= 20,
+            "verification requires 1..=20 jobs"
+        );
+        for job in &self.required_jobs {
+            ensure!(
+                !job.is_empty()
+                    && job.len() <= 64
+                    && job
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                    && seen.insert(job),
+                "invalid or duplicate required job"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Continuation {
     pub fn validate(&self, policy: &Policy) -> Result<()> {
+        if let Some(verification) = &self.verification {
+            verification.validate(self)?;
+        }
         let push = policy.safe_outputs.push_to_pull_request_branch.as_ref();
         ensure!(
             policy.forge == Forge::Github
