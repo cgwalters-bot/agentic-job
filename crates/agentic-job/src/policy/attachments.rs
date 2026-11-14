@@ -91,9 +91,12 @@ pub struct Admitted {
 /// There is no branch-push safe output, so write-mode branches refuse. PR writes
 /// require explicit `own_author` bounds as well as branch admission. A fork head
 /// must independently fit repository bounds, so admitting an upstream PR alone
-/// does not authorize a push to its author's repository. A read-mode PR may come
-/// from any author's fork, even a deleted one (#3692): reading needs only the
-/// target in bounds. The compiled write policies together stay within every
+/// does not authorize a push to its author's repository. Public reads use the
+/// existing context authority: clone hosts remain bounded, but write repository
+/// bounds do not restrict reading. A read-mode PR may come from any author's
+/// fork, even a deleted one (#3692). An upstream PR outside write repository
+/// bounds may receive only an `own_author` push, never a comment, as for ordinary
+/// continuation admission (#3162). The compiled write policies stay within every
 /// bounds file's `max_outputs` and per-type `max`.
 /// Apply must still repeat its live ownership, protected/default-branch and lease
 /// checks. This groundwork deliberately cannot replace those checks.
@@ -164,10 +167,16 @@ pub fn admit(
         .into_iter()
         .map(|attachment| {
             let repo = attachment.repo();
-            // Unlike ordinary continuation admission, own_author cannot bypass repos.
-            for bounds in &all_bounds {
+            // As for public context, reads need no write-repository admission.
+            // PR writes compile below through the existing own_author exception;
+            // other writes still need every bounds file to list the target.
+            let mut listed = true;
+            if attachment.mode() == Mode::Write {
+                for bounds in &all_bounds {
+                    listed &= admits_repo(&bounds.repos, repo, read)?;
+                }
                 ensure!(
-                    admits_repo(&bounds.repos, repo, read)?,
+                    listed || matches!(attachment, Attachment::PullRequest { .. }),
                     "attachment repository is outside bounds"
                 );
             }
@@ -299,8 +308,16 @@ pub fn admit(
                                     .as_str()
                                     .context("attachment PR has no branch")?,
                                 kind: Kind::Branch,
-                                outputs: "push_to_pull_request_branch,add_comment",
-                                max_outputs: "2",
+                                // own_author grants only a push outside repos,
+                                // not authority to post upstream. Taking the
+                                // intersection here cannot recover comments
+                                // denied by either bounds file.
+                                outputs: if listed {
+                                    "push_to_pull_request_branch,add_comment"
+                                } else {
+                                    "push_to_pull_request_branch"
+                                },
+                                max_outputs: if listed { "2" } else { "1" },
                                 job_token,
                                 pull_request: Some((&number.to_string(), &head)),
                                 pull_author: Some(author),

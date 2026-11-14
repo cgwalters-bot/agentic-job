@@ -3,6 +3,7 @@
 use agentic_job::policy::Bounds;
 use agentic_job::policy::attachments::{MAX_ATTACHMENTS, MAX_REQUEST_BYTES, Mode, admit};
 use anyhow::Result;
+use safe_outputs::bounds::{Organization, RepoRule};
 use serde_json::{Value, json};
 
 const REPO: &str = "example-org/example";
@@ -70,7 +71,7 @@ fn kind_mode_and_repository_bounds_matrix() {
                     bounds.repos = vec!["other-org/other".into()];
                 }
                 let result = admit(&request(kind, mode), &bounds, None, false, &mut metadata);
-                let allowed = inside && !(kind == "branch" && mode == "write");
+                let allowed = mode == "read" || (inside && kind != "branch");
                 assert_eq!(
                     result.is_ok(),
                     allowed,
@@ -133,13 +134,215 @@ fn compiled_write_policies_retain_existing_limits() {
 }
 
 #[test]
+fn same_repository_head_uses_existing_push_policy() {
+    let admitted = admit(
+        &request("pull-request", "write"),
+        &bounds(),
+        Some(&bounds()),
+        false,
+        &mut |path| {
+            assert_ne!(path, format!("repos/{FORK}"));
+            let mut response = metadata(path)?;
+            if path.ends_with("/pulls/8") {
+                response["head"]["repo"]["full_name"] = REPO.into();
+            }
+            Ok(response)
+        },
+    )
+    .unwrap();
+    assert_eq!(admitted[0].head_repo.as_deref(), Some(REPO));
+    let policy = admitted[0].write_policy.as_ref().unwrap();
+    policy.validate().unwrap();
+    let push = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .unwrap();
+    assert_eq!(policy.repo, REPO);
+    assert_eq!(policy.base, "bot/topic");
+    assert_eq!(push.target, "8");
+    assert_eq!(push.head, SHA);
+    // This is admission, not evidence of apply's required owner-branch opt-in.
+    assert_eq!(push.author, None);
+}
+
+#[test]
+fn public_reads_reuse_context_authority_not_write_repository_bounds() {
+    let mut outside = bounds();
+    outside.repos = vec!["other-org/other".into()];
+    for kind in ["issue", "pull-request", "branch"] {
+        for (caller, organization) in [
+            (&outside, None),
+            (&bounds(), Some(&outside)),
+            (&outside, Some(&outside)),
+        ] {
+            let admitted = admit(
+                &request(kind, "read"),
+                caller,
+                organization,
+                true,
+                &mut metadata,
+            )
+            .unwrap_or_else(|error| panic!("{kind}: {error:#}"));
+            assert!(admitted[0].write_policy.is_none());
+        }
+    }
+}
+
+#[test]
+fn public_reads_still_require_public_metadata_and_admitted_clone_hosts() {
+    for kind in ["issue", "pull-request", "branch"] {
+        for (field, value) in [
+            ("full_name", json!("other/repo")),
+            ("private", json!(true)),
+            ("private", Value::Null),
+            ("visibility", json!("private")),
+            ("visibility", Value::Null),
+            (
+                "clone_url",
+                json!("https://untrusted.example/example-org/example"),
+            ),
+        ] {
+            let result = admit(
+                &request(kind, "read"),
+                &bounds(),
+                None,
+                false,
+                &mut |path| {
+                    let mut response = metadata(path)?;
+                    if path == format!("repos/{REPO}") {
+                        response[field] = value.clone();
+                    }
+                    Ok(response)
+                },
+            );
+            assert!(result.is_err(), "{kind} {field}: {result:?}");
+        }
+        let mut restricted = bounds();
+        restricted.hosts = vec!["other.example".into()];
+        for (caller, organization) in [(&restricted, None), (&bounds(), Some(&restricted))] {
+            let result = admit(
+                &request(kind, "read"),
+                caller,
+                organization,
+                false,
+                &mut metadata,
+            );
+            assert!(result.is_err(), "{kind}: {result:?}");
+        }
+    }
+}
+
+#[test]
+fn own_author_admits_an_upstream_push_without_upstream_comments() {
+    let mut fork_only = bounds();
+    fork_only.repos = vec![FORK.into()];
+    fork_only.max_outputs = 1;
+    fork_only
+        .github
+        .as_mut()
+        .unwrap()
+        .outputs
+        .types
+        .remove("add_comment");
+    for (caller, organization) in [
+        (&fork_only, None),
+        (&bounds(), Some(&fork_only)),
+        (&fork_only, Some(&bounds())),
+    ] {
+        let admitted = admit(
+            &request("pull-request", "write"),
+            caller,
+            organization,
+            false,
+            &mut metadata,
+        )
+        .unwrap();
+        let policy = admitted[0].write_policy.as_ref().unwrap();
+        policy.validate().unwrap();
+        assert_eq!(admitted[0].head_repo.as_deref(), Some(FORK));
+        assert_eq!(policy.repo, REPO);
+        assert_eq!(policy.max_outputs, 1);
+        assert!(policy.safe_outputs.others.is_empty());
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_ref()
+            .unwrap();
+        assert_eq!(push.author.as_deref(), Some("example-bot"));
+        assert_eq!(push.head, SHA);
+    }
+    assert!(
+        admit(
+            &request("issue", "write"),
+            &fork_only,
+            None,
+            false,
+            &mut metadata,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn upstream_push_does_not_recover_denied_author_branch_or_head_authority() {
+    let mut fork_only = bounds();
+    fork_only.repos = vec![FORK.into()];
+    for change in ["author", "branch", "head", "organization-rule"] {
+        let mut restricted = fork_only.clone();
+        match change {
+            "head" => restricted.repos = vec![REPO.into()],
+            "organization-rule" => {
+                // As for ordinary continuation, an organization policy never
+                // recovers an unlisted target through own_author.
+                restricted.repos = vec![RepoRule::Organization(Organization {
+                    org: "example-bot".into(),
+                    forks: false,
+                    properties: Default::default(),
+                    topics: Vec::new(),
+                })];
+            }
+            _ => {
+                let push = restricted
+                    .github
+                    .as_mut()
+                    .unwrap()
+                    .outputs
+                    .types
+                    .get_mut("push_to_pull_request_branch")
+                    .unwrap();
+                if change == "author" {
+                    push.own_author = Some("other-bot".into());
+                } else {
+                    push.branches = vec!["bot/other".into()];
+                }
+            }
+        }
+        for (caller, organization) in [
+            (&restricted, None),
+            (&fork_only, Some(&restricted)),
+            (&restricted, Some(&fork_only)),
+        ] {
+            let result = admit(
+                &request("pull-request", "write"),
+                caller,
+                organization,
+                false,
+                &mut metadata,
+            );
+            assert!(result.is_err(), "{change}: {result:?}");
+        }
+    }
+}
+
+#[test]
 fn organization_bounds_only_narrow_admission() {
     let caller = bounds();
     for kind in ["issue", "pull-request", "branch"] {
         for mode in ["read", "write"] {
             let mut organization = bounds();
             organization.repos = vec!["other-org/other".into()];
-            assert!(
+            assert_eq!(
                 admit(
                     &request(kind, mode),
                     &caller,
@@ -147,7 +350,8 @@ fn organization_bounds_only_narrow_admission() {
                     false,
                     &mut metadata
                 )
-                .is_err()
+                .is_ok(),
+                mode == "read"
             );
         }
     }
