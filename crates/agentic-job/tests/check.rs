@@ -596,6 +596,116 @@ fn a_hand_back_within_the_policy_is_accepted() {
 }
 
 #[test]
+fn ordinary_text_patch_content_survives_collection_and_check() {
+    let many_lines = (1..=60).map(|n| format!("line {n}\n")).collect::<String>();
+    let several_hunks = many_lines
+        .replace("line 3\n", "three\n")
+        .replace("line 50\n", "");
+    let patch_like = "--- a/.github/x\n+++ b/.github/x\n@@ -1 +1 @@\ndiff --git a/.github/y b/.github/y\nnew file mode 120000\nGIT binary patch\n";
+    for (case, before, after) in [
+        ("no final newline", "before\n", "after"),
+        ("carriage returns", "before\n", "one\r\ntwo\r\n"),
+        ("Unicode", "before\n", "// é ✓\n"),
+        ("several hunks", many_lines.as_str(), several_hunks.as_str()),
+        ("added patch-like content", "before\n", patch_like),
+        ("removed patch-like content", patch_like, "after\n"),
+    ] {
+        let run = Run::new();
+        let repo = run.path("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.test")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.test")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{case}: {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("text.txt"), before).unwrap();
+        git(&["add", "text.txt"]);
+        git(&["commit", "-qm", "Base"]);
+        let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+        std::fs::write(repo.join("text.txt"), after).unwrap();
+        git(&["commit", "-qam", "Change text"]);
+        let patch = git(&[
+            "format-patch",
+            "-1",
+            "--stdout",
+            "--no-renames",
+            "--no-signature",
+            "--add-header",
+            &format!("X-GH-AW-Base-Commit: {base}"),
+        ]);
+        std::fs::write(run.path("out/aw-agent-run-7.patch"), patch).unwrap();
+        let metadata_path = run.path("out/base.json");
+        let mut metadata: Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        metadata["commit"] = base.clone().into();
+        std::fs::write(metadata_path, metadata.to_string()).unwrap();
+        let collected = run.path("collected.json");
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(ingest.status.code(), Some(0), "{case}: {ingest:?}");
+        let checked = run.check(&collected);
+        assert_eq!(checked.status.code(), Some(0), "{case}: {checked:?}");
+        let verdict = run.verdict();
+        assert_eq!(verdict["ok"], true, "{case}: {verdict}");
+        assert_eq!(
+            verdict["errors"],
+            serde_json::json!([]),
+            "{case}: {verdict}"
+        );
+        assert_eq!(verdict["items"].as_array().unwrap().len(), 1, "{case}");
+        assert_eq!(
+            verdict["patch"]["files"],
+            serde_json::json!(["text.txt"]),
+            "{case}"
+        );
+        assert_eq!(verdict["patch"]["base_commit"], base, "{case}");
+        // Apply exactly the checked bytes, not the source commit. Patch-looking
+        // content must stay content, and text encodings must survive unchanged.
+        git(&["reset", "--hard", &base]);
+        git(&[
+            "-c",
+            "am.keepcr=true",
+            "am",
+            run.path("out/aw-agent-run-7.patch").to_str().unwrap(),
+        ]);
+        assert_eq!(
+            std::fs::read(repo.join("text.txt")).unwrap(),
+            after.as_bytes(),
+            "{case}"
+        );
+        assert_eq!(
+            git(&["diff", "--name-only", &base, "HEAD"]).trim(),
+            "text.txt",
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn public_base_evidence_cannot_complete_an_incomplete_key() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;

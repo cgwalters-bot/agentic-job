@@ -137,6 +137,13 @@ refusals assert their diagnostics. Only the replaced new-check JavaScript test i
 removed; old-tree comparisons, upstream drivers and gated fixtures remain.
 This adds no runtime control or caller setting.
 
+The ordinary-text corpus cases also run through Rust's `collect` and `check`
+in `tests/check.rs`: missing final newlines, CRLF, Unicode, multiple hunks and
+added/removed content that resembles patch headers. Real Git applies the checked
+bytes and must reproduce the exact text and only the reported path. This retains
+the legacy comparison while making acceptance coverage independent of Node and
+external checkouts; no runtime control or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
