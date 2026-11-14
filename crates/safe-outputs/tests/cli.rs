@@ -224,6 +224,47 @@ fn standalone_gitlab_note_uses_shared_publisher() {
 }
 
 #[test]
+fn standalone_gitlab_refuses_api_redirects_without_forwarding_credentials() {
+    for status in [301, 302, 303, 307, 308] {
+        // Apply looks up the project first and posts the note fifth.
+        for (at, prefix) in [
+            (1, "GET /api/v4/projects/group%2Fsubgroup%2Fproject "),
+            (5, "POST /api/v4/projects/1/issues/7/notes "),
+        ] {
+            // A serving destination makes following a redirect observable without
+            // hanging apply. It must receive no request, not merely no token.
+            let destination = Fixture::new();
+            let f = Fixture::with_failure(
+                "opened",
+                Some((at, status, format!("{}/redirected", destination.api))),
+            );
+            write_context(&f, &gitlab_context(&f, json!({"add_comment":{"max":1}})));
+            f.input(r#"{"type":"add_comment","body":"A checked note."}"#);
+            assert_gitlab_ok(&f, "check");
+            assert!(f.writes.lock().unwrap().is_empty());
+
+            let result = f.run_forge("apply", "gitlab");
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert_eq!(result.status.code(), Some(1), "{status} {prefix}: {error}");
+            // The fixture reflects the token in its redirect body.
+            assert!(!error.contains("loopback-test-token"), "credential leaked");
+            assert!(
+                destination.writes.lock().unwrap().is_empty(),
+                "followed {status} redirect from {prefix}"
+            );
+            let requests = f.writes.lock().unwrap();
+            assert_eq!(requests.len(), at, "{status} {prefix}: {requests:#?}");
+            let last = requests.last().unwrap();
+            assert!(last.starts_with(prefix), "{requests:#?}");
+            assert!(
+                last.to_ascii_lowercase()
+                    .contains("authorization: bearer loopback-test-token")
+            );
+        }
+    }
+}
+
+#[test]
 fn standalone_gitlab_issue_uses_checked_labels_and_shared_publisher() {
     let f = Fixture::new();
     write_context(
