@@ -18,6 +18,11 @@ says what a caller may rely on across versions.
   required job set and verifier source/run/attempt; raw outcomes remain diagnostics.
   Caller activation and unchanged apply readiness remain disabled (#3637).
 
+- Standalone `safe-outputs check` and `apply` accept explicit `--forge forgejo`
+  for new issue/PR comments and non-writing reports, reusing the shared policy,
+  planner and publisher. Other operations and unsupported comment fields refuse
+  before publication; GitHub remains the default.
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

@@ -14,8 +14,8 @@ use safe_outputs::{CONTRACT, Forge, MAX_OUTPUTS_BYTES, collect};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-#[path = "cli_gitlab.rs"]
-mod gitlab;
+#[path = "cli_native.rs"]
+mod native;
 
 const MAX_CONTEXT_BYTES: u64 = 64 * 1024;
 const MAX_RECEIPT_BYTES: u64 = 4096;
@@ -56,6 +56,7 @@ struct Args {
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum CliForge {
     Github,
+    Forgejo,
     Gitlab,
 }
 
@@ -140,28 +141,7 @@ fn validate(context: &ContextFile, bytes: &[u8]) -> Result<Vec<Map<String, Value
         bytes.split(|b| *b == b'\n').count() - usize::from(bytes.ends_with(b"\n")) <= MAX_LINES,
         "input exceeds {MAX_LINES} lines"
     );
-    // The collector drops unknown fields. Refuse comment semantics this small
-    // publisher cannot implement rather than silently turning an edit/reply into
-    // a new comment, or dropping a misspelled destination before checking it.
-    for line in bytes
-        .split(|b| *b == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-    {
-        let value: Value = serde_json::from_slice(line).context("malformed JSONL")?;
-        if value["type"]
-            .as_str()
-            .is_some_and(|kind| kind.replace('-', "_") == "add_comment")
-        {
-            let item = value.as_object().context("request must be an object")?;
-            ensure!(
-                item.keys().all(
-                    |key| ["type", "body", "repo", "item_number", "pr", "pr_number"]
-                        .contains(&key.as_str())
-                ),
-                "unsupported standalone comment field"
-            );
-        }
-    }
+    validate_comment_fields(bytes)?;
     let policy: Policy = serde_json::from_value(json!({
         "repo": context.repo, "clone_url": format!("https://github.com/{}", context.repo),
         "base": "main", "kind": "analysis", "max_outputs": context.max_outputs,
@@ -207,6 +187,32 @@ fn validate(context: &ContextFile, bytes: &[u8]) -> Result<Vec<Map<String, Value
     Ok(checked.items)
 }
 
+fn validate_comment_fields(bytes: &[u8]) -> Result<()> {
+    // The collector drops unknown fields. Refuse comment semantics this small
+    // publisher cannot implement rather than silently turning an edit/reply into
+    // a new comment, or dropping a misspelled destination before checking it.
+    for line in bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let value: Value = serde_json::from_slice(line).context("malformed JSONL")?;
+        if value["type"]
+            .as_str()
+            .is_some_and(|kind| kind.replace('-', "_") == "add_comment")
+        {
+            let item = value.as_object().context("request must be an object")?;
+            ensure!(
+                item.keys().all(
+                    |key| ["type", "body", "repo", "item_number", "pr", "pr_number"]
+                        .contains(&key.as_str())
+                ),
+                "unsupported standalone comment field"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let command = Cli::parse().command;
     let (args, apply) = match &command {
@@ -215,11 +221,19 @@ fn run() -> Result<()> {
     };
     let context_bytes = read(&args.context, MAX_CONTEXT_BYTES)?;
     let bytes = read(&args.input, MAX_OUTPUTS_BYTES)?;
-    let gitlab = match args.forge {
-        CliForge::Gitlab => Some(gitlab::Checked::new(&context_bytes, &bytes, &args.input)?),
+    let native = match args.forge {
+        CliForge::Gitlab | CliForge::Forgejo => Some(native::Checked::new(
+            &context_bytes,
+            &bytes,
+            &args.input,
+            match args.forge {
+                CliForge::Forgejo => safe_outputs::apply::Forge::Forgejo,
+                _ => safe_outputs::apply::Forge::Gitlab,
+            },
+        )?),
         CliForge::Github => None,
     };
-    let context: Option<ContextFile> = if gitlab.is_none() {
+    let context: Option<ContextFile> = if native.is_none() {
         Some(serde_json::from_slice(&context_bytes).context("invalid context JSON")?)
     } else {
         None
@@ -230,14 +244,14 @@ fn run() -> Result<()> {
     };
     let receipt = Receipt {
         version: 1,
-        forge: if gitlab.is_some() {
-            Forge::Gitlab
-        } else {
-            Forge::Github
+        forge: match args.forge {
+            CliForge::Github => Forge::Github,
+            CliForge::Forgejo => Forge::Forgejo,
+            CliForge::Gitlab => Forge::Gitlab,
         },
         context_sha256: hash(&context_bytes),
         input_sha256: hash(&bytes),
-        files_sha256: gitlab
+        files_sha256: native
             .as_ref()
             .map(|checked| checked.digests())
             .unwrap_or_default(),
@@ -255,7 +269,7 @@ fn run() -> Result<()> {
             .context("cannot create check receipt (must not exist)")?;
         println!(
             "checked {} requests",
-            gitlab.as_ref().map_or(items.len(), |checked| checked.count)
+            native.as_ref().map_or(items.len(), |checked| checked.count)
         );
         return Ok(());
     }
@@ -265,7 +279,7 @@ fn run() -> Result<()> {
         accepted == receipt,
         "checked input or trusted context changed"
     );
-    if let Some(checked) = gitlab {
+    if let Some(checked) = native {
         checked.apply()?;
         return Ok(());
     }

@@ -289,6 +289,13 @@ documented in [safe outputs](safe-outputs.md#standalone-cli). It uses the same
 request JSONL, not an agentic-job run/checkpoint. Its context and receipt are
 currently experimental, not stable interfaces. Existing workflow check/apply
 inputs and agentic-job commands are unchanged.
+Explicit `--forge forgejo` on both standalone commands supports new comments and
+non-writing reports through the shared Forgejo checker/planner/publisher, with
+whole-batch refusal of other operations and unknown comment fields. Its trusted
+context contains the effective policy, server, fixed item/kind and run URL;
+receipts bind forge, context and input. This context is experimental
+([Forgejo example](safe-outputs.md#standalone-forgejo-comments)).
+
 Explicit `--forge gitlab` on both standalone commands uses the existing GitLab
 policy, planner and publisher, with caller-owned context and patch-bound
 receipts. GitHub comments remain the default; the GitLab standalone context

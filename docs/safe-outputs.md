@@ -110,6 +110,62 @@ arguments, JSONL, receipts or logs; do not enable shell tracing. No ambient
 `GITHUB_TOKEN`, PAT fallback or Actions metadata is read by the CLI. The CI
 operator owns job isolation, artifact provenance and token issuance.
 
+#### Standalone Forgejo comments
+
+The threat is a producer redirecting a privileged comment, smuggling edit/reply
+semantics into it, or changing content after check. Select `--forge forgejo` in
+**both** jobs; GitHub remains the default. Forgejo uses the existing collector,
+checker, planner and publisher, including last-mile mention filtering. This
+standalone slice supports only new `add_comment` requests and non-writing
+`noop`, `missing_tool` and `missing_data` reports. Every other operation refuses
+the entire batch during check and revalidation, before credentials or writes.
+Comment fields have the same allowlist as standalone GitHub comments above;
+edits, replies and unknown fields refuse rather than becoming fresh comments.
+
+Use a trusted context outside producer control, with the existing effective
+policy JSON and a fixed issue/PR target, for example:
+
+```json
+{
+  "policy": {
+    "forge": "forgejo",
+    "contract": 1,
+    "repo": "example-org/project",
+    "clone_url": "https://forge.example/example-org/project",
+    "base": "main",
+    "kind": "analysis",
+    "max_outputs": 1,
+    "max_patch_bytes": 1048576,
+    "safe_outputs": { "add_comment": { "max": 1 } }
+  },
+  "server": "https://forge.example",
+  "item": 7,
+  "item_kind": "issue",
+  "run_url": "https://ci.example/runs/123"
+}
+```
+
+Use `item_kind: "pull-request"` for a PR; Forgejo shares issue/PR numbering.
+Any request destination must match this context. Operations default to disabled
+and retain the existing total/per-type and 1 MiB/1000-line caps. Check is offline
+and credential-free. Apply independently revalidates and compares the receipt's
+forge, context and input digests before reading **only** `SAFE_OUTPUTS_TOKEN`.
+The `server` is a credential destination, never a producer-selected value. HTTPS
+is required except for loopback tests or the policy's explicit `allow_http` hosts.
+
+```sh
+safe-outputs check --forge forgejo --context /trusted/context.json --input outputs.jsonl --checked checked.json
+# Separate trusted job, with SAFE_OUTPUTS_TOKEN from its CI secret facility:
+safe-outputs apply --forge forgejo --context /trusted/context.json --input outputs.jsonl --checked checked.json
+```
+
+Transfer the exact input and receipt through the trusted check artifact channel,
+not through the producer. As with GitHub, the receipt is not a signature. The
+publisher adds the run provenance footer; repeated apply may post again, with no
+transaction, rollback or automatic retry. No caller deployment, role routing,
+status lifecycle or live Forgejo CI isolation proof is included. Broader Forgejo
+standalone operations remain future work, not implied by the library's support.
+
 #### Standalone GitLab CI
 
 The threat is a producer redirecting GitLab writes or substituting patch bytes
