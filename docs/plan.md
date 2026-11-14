@@ -189,6 +189,13 @@ specific diagnostics. This supplements, rather than removes, the legacy parity
 cases pending the caller-evidence gate above. No runtime control, permission or
 caller setting changes.
 
+Issue-reference shell coverage now runs in `tests/apply_workflow.rs` too:
+same-repository closing lines, cross-repository references, batch preservation,
+partial-work opt-outs and misleading code/comment examples. It executes the
+shipped step and checks its patch-only/staged gate and ordering before replay
+deduplication. The remaining Node tests still exercise the body through the
+handler hook; no runtime behavior, permission or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
