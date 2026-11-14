@@ -72,7 +72,9 @@ impl Attachment {
 #[derive(Debug)]
 pub struct Admitted {
     pub attachment: Attachment,
-    /// Repository containing the pinned head, distinct from a PR's target.
+    /// Repository containing the pinned head, distinct from a PR's target. For a
+    /// read-mode PR it is only checked to be the target or its public fork, not
+    /// admitted by bounds: fetch a read head from the target's pull ref, never here.
     pub head_repo: Option<String>,
     /// Exact checkout commit for a PR or branch; issues have no checkout.
     pub head: Option<String>,
@@ -89,7 +91,8 @@ pub struct Admitted {
 /// There is no branch-push safe output, so write-mode branches refuse. PR writes
 /// require explicit `own_author` bounds as well as branch admission. A fork head
 /// must independently fit repository bounds, so admitting an upstream PR alone
-/// does not authorize a push to its author's repository.
+/// does not authorize a push to its author's repository. A read-mode PR may come
+/// from any author's public fork (#3692): reading needs only the target in bounds.
 /// Apply must still repeat its live ownership, protected/default-branch and lease
 /// checks. This groundwork deliberately cannot replace those checks.
 pub fn admit(
@@ -228,6 +231,19 @@ pub fn admit(
                         .as_str()
                         .filter(|name| REPO_RE.is_match(name) && !dotted(name))
                         .context("attachment PR has no valid head repository")?;
+                    // Re-read the head repository rather than trusting the embedded
+                    // PR object, in both modes. Cross-repository heads must be
+                    // public forks of the target.
+                    let head_metadata = read(&format!("repos/{head_repo}"))?;
+                    ensure!(
+                        same(&head_metadata["full_name"], head_repo)
+                            && head_metadata["private"] == false
+                            && head_metadata["visibility"] == "public"
+                            && (head_repo.eq_ignore_ascii_case(repo)
+                                || (head_metadata["fork"] == true
+                                    && same(&head_metadata["parent"]["full_name"], repo))),
+                        "attachment head must be the target or its public fork"
+                    );
                     let policy = if *mode == Mode::Write {
                         ensure!(
                             pull["state"] == "open",
@@ -239,18 +255,6 @@ pub fn admit(
                                 "attachment head repository is outside bounds"
                             );
                         }
-                        // Re-read the head repository rather than trusting the embedded
-                        // PR object. Cross-repository heads must be forks of the target.
-                        let head_metadata = read(&format!("repos/{head_repo}"))?;
-                        ensure!(
-                            same(&head_metadata["full_name"], head_repo)
-                                && head_metadata["private"] == false
-                                && head_metadata["visibility"] == "public"
-                                && (head_repo.eq_ignore_ascii_case(repo)
-                                    || (head_metadata["fork"] == true
-                                        && same(&head_metadata["parent"]["full_name"], repo))),
-                            "attachment head must be the target or its public fork"
-                        );
                         let head_clone = head_metadata["clone_url"]
                             .as_str()
                             .context("attachment head has no clone URL")?;

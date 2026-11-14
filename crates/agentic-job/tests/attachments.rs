@@ -283,6 +283,69 @@ fn writes_do_not_bypass_output_or_head_repository_bounds() {
 }
 
 #[test]
+fn read_heads_are_verified_forks_but_need_no_bounds() {
+    // Another author's public fork outside bounds may be read, never written.
+    const OTHER: &str = "example-other/example";
+    let mut other_head = |path: &str| -> Result<Value> {
+        Ok(match path {
+            "repos/example-other/example" => json!({"full_name": OTHER, "private": false,
+                "visibility": "public", "fork": true, "parent": {"full_name": REPO},
+                "clone_url": format!("https://github.com/{OTHER}")}),
+            _ => {
+                let mut response = metadata(path)?;
+                if path.ends_with("/pulls/8") {
+                    response["head"]["repo"]["full_name"] = OTHER.into();
+                    response["user"]["login"] = "example-other".into();
+                }
+                response
+            }
+        })
+    };
+    let admitted = admit(
+        &request("pull-request", "read"),
+        &bounds(),
+        Some(&bounds()),
+        false,
+        &mut other_head,
+    )
+    .unwrap();
+    assert_eq!(admitted[0].head_repo.as_deref(), Some(OTHER));
+    assert!(admitted[0].write_policy.is_none());
+    assert!(
+        admit(
+            &request("pull-request", "write"),
+            &bounds(),
+            None,
+            false,
+            &mut other_head
+        )
+        .is_err()
+    );
+    for (pointer, value) in [
+        ("/full_name", json!("example-bot/other")),
+        ("/private", json!(true)),
+        ("/visibility", json!("internal")),
+        ("/fork", json!(false)),
+        ("/parent/full_name", json!("other/repo")),
+    ] {
+        let result = admit(
+            &request("pull-request", "read"),
+            &bounds(),
+            None,
+            false,
+            &mut |path| {
+                let mut response = metadata(path)?;
+                if path == format!("repos/{FORK}") {
+                    *response.pointer_mut(pointer).unwrap() = value.clone();
+                }
+                Ok(response)
+            },
+        );
+        assert!(result.is_err(), "{pointer}: {result:?}");
+    }
+}
+
+#[test]
 fn malformed_or_oversized_lists_refuse_before_forge_reads() {
     let one: Value = serde_json::from_str(&request("issue", "read")).unwrap();
     let mut cases = vec!["null".into(), "{}".into(), "[null]".into(), " ".repeat(MAX_REQUEST_BYTES + 1),
