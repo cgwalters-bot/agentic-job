@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use safe_outputs::apply::{self, Op, Provenance, Target, Upload, gitlab::Gitlab, inline};
+use safe_outputs::apply::{
+    self, Op, Provenance, Target, Upload, forgejo::Forgejo, gitlab::Gitlab, inline,
+};
 use safe_outputs::check::{self, Handback, Publishers, Trusted};
 use safe_outputs::contract::Policy;
 use safe_outputs::{
@@ -46,13 +48,18 @@ pub(super) struct Checked {
 }
 
 impl Checked {
-    pub fn new(context: &[u8], bytes: &[u8], input: &Path) -> Result<Self> {
+    pub fn new(context: &[u8], bytes: &[u8], input: &Path, forge: apply::Forge) -> Result<Self> {
         let context: ContextFile =
-            serde_json::from_slice(context).context("invalid GitLab context")?;
+            serde_json::from_slice(context).context("invalid native forge context")?;
+        let syntax = match forge {
+            apply::Forge::Forgejo => Forge::Forgejo,
+            apply::Forge::Gitlab => Forge::Gitlab,
+        };
         let policy = &context.policy;
         ensure!(
-            policy.forge == Forge::Gitlab,
-            "context policy must select GitLab"
+            policy.forge == syntax,
+            "context policy must select {}",
+            forge.name()
         );
         policy.validate().context("invalid trusted bounds")?;
         ensure!(policy.max_outputs <= 1000, "max_outputs exceeds 1000");
@@ -65,11 +72,33 @@ impl Checked {
             bytes.split(|b| *b == b'\n').count() - usize::from(bytes.ends_with(b"\n")) <= MAX_LINES,
             "input exceeds {MAX_LINES} lines"
         );
+        if syntax == Forge::Forgejo {
+            // The standalone Forgejo interface is deliberately comment-only.
+            // Refuse raw fields before collect drops them, so edits/replies or
+            // misspelled destinations cannot become a fresh privileged comment.
+            super::validate_comment_fields(bytes)?;
+            for line in bytes
+                .split(|b| *b == b'\n')
+                .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+            {
+                let item: Value = serde_json::from_slice(line).context("malformed JSONL")?;
+                ensure!(
+                    matches!(
+                        item["type"]
+                            .as_str()
+                            .map(|s| s.replace('-', "_"))
+                            .as_deref(),
+                        Some("add_comment" | "noop" | "missing_tool" | "missing_data")
+                    ),
+                    "unsupported standalone Forgejo operation; no writes made"
+                );
+            }
+        }
         let config = serde_json::to_value(&policy.safe_outputs)?;
         let collected = safe_outputs::collect::collect_bytes(
             bytes,
             config.as_object().context("output bounds")?,
-            Forge::Gitlab,
+            syntax,
             &|host| {
                 safe_outputs::link_domains()
                     .iter()
@@ -144,7 +173,7 @@ impl Checked {
         {
             ensure!(
                 context.item_kind == Some(apply::Kind::PullRequest),
-                "inline comments require a merge request target"
+                "inline comments require a pull request target"
             );
             Some(inline::checked_target(
                 context.item.map(|n| (policy.repo.as_str(), n)),
@@ -159,7 +188,7 @@ impl Checked {
             "patch": checked.patch, "inline_target": inline_target
         }))?;
         let target = Target {
-            forge: apply::Forge::Gitlab,
+            forge,
             repo: &policy.repo,
             push_repo: match policy.push_repo.as_deref() {
                 Some(fork) => Some(fork),
@@ -198,7 +227,7 @@ impl Checked {
             policy,
             &target,
         )
-        .map_err(|errors| anyhow::anyhow!("GitLab plan refused ({} errors)", errors.len()))?;
+        .map_err(|errors| anyhow::anyhow!("native forge plan refused ({} errors)", errors.len()))?;
         Ok(Self {
             context,
             files,
@@ -222,18 +251,29 @@ impl Checked {
                 "apply requires a nonempty SAFE_OUTPUTS_TOKEN"
             );
             let policy = &self.context.policy;
-            let publisher = Gitlab::new(
-                &self.context.server,
-                &policy.repo,
-                token,
-                &policy.allow_http,
-            )?
-            .commenting_on(self.context.item_kind)
-            .accepting_own_branches(
-                policy.push_repo.is_none()
-                    && policy.safe_outputs.accepts_own_branches(&policy.repo)?,
-            );
-            for url in apply::publish(&self.ops, &publisher)? {
+            let urls = if policy.forge == Forge::Forgejo {
+                let publisher = Forgejo::new(
+                    &self.context.server,
+                    &policy.repo,
+                    token,
+                    &policy.allow_http,
+                )?;
+                apply::publish(&self.ops, &publisher)?
+            } else {
+                let publisher = Gitlab::new(
+                    &self.context.server,
+                    &policy.repo,
+                    token,
+                    &policy.allow_http,
+                )?
+                .commenting_on(self.context.item_kind)
+                .accepting_own_branches(
+                    policy.push_repo.is_none()
+                        && policy.safe_outputs.accepts_own_branches(&policy.repo)?,
+                );
+                apply::publish(&self.ops, &publisher)?
+            };
+            for url in urls {
                 println!("{url}");
             }
         }
