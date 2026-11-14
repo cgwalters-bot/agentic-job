@@ -190,6 +190,15 @@ head, not a second standalone policy implementation. Nested group paths work.
 Apply reads only `SAFE_OUTPUTS_TOKEN`, never `GITLAB_TOKEN` or agent credentials.
 No automatic retry, transaction or rollback is added.
 
+Standalone patch-file regressions (`cargo test --locked -p safe-outputs --test
+cli gitlab_patch_files_are_bounded_regular_inputs_at_check_and_apply`) exercise
+both MR creation and branch updates. Check accepts the exact caller patch-byte
+bound and the 64 KiB base-metadata bound; check and apply refuse the first byte
+over either bound, missing files, directories and symlinks to identical bytes.
+Apply is tested with a previously valid receipt, and every refusal precedes any
+forge request. This is local artifact-admission coverage, not successful git
+transport, live GitLab or CI artifact-isolation proof; no caller setting changes.
+
 Standalone label-operation regressions (`cargo test --locked -p safe-outputs
 --features test-support --test cli_gitlab_labels`) cover issue/MR routing with
 colliding numbers, incremental label changes and replay without another write.

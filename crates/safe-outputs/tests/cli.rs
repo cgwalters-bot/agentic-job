@@ -448,6 +448,105 @@ fn gitlab_patch_receipt_binds_all_inputs_and_rejects_protected_paths() {
 }
 
 #[test]
+fn gitlab_patch_files_are_bounded_regular_inputs_at_check_and_apply() {
+    for push in [false, true] {
+        for name in ["base.json", "aw-agent-run-1.patch"] {
+            for damage in ["missing", "symlink", "directory", "oversized"] {
+                let f = Fixture::new();
+                let kind = if push {
+                    "push_to_pull_request_branch"
+                } else {
+                    "create_pull_request"
+                };
+                let mut rules = json!({
+                    "max":1,"protected_files":[],"protect_top_level_dot_folders":true,
+                    "protected_files_policy":"blocked","max_patch_size":1024,"max_patch_files":10
+                });
+                if push {
+                    rules["target"] = json!("7");
+                    rules["head"] = json!("1".repeat(40));
+                } else {
+                    rules["draft"] = json!(true);
+                }
+                let mut context = gitlab_context(&f, json!({kind:rules}));
+                context["policy"]["kind"] = json!("branch");
+                context["policy"]["push_repo"] = json!("bot/project");
+                let patch = patch_fixture(&f, "src/x");
+                // Accept exactly the caller's patch byte bound before testing
+                // its first refused byte. Base metadata has a fixed 64 KiB cap.
+                context["policy"]["max_patch_bytes"] = json!(patch.len());
+                if push {
+                    context["policy"]["base"] = json!("agent-run-1");
+                    std::fs::write(
+                        f.dir.path().join("base.json"),
+                        json!({"repo":"group/subgroup/project","ref":"agent-run-1","commit":"1".repeat(40)}).to_string(),
+                    )
+                    .unwrap();
+                }
+                write_context(&f, &context);
+                f.input(&json!({"type":kind,"branch":"agent-run-1","title":"Fix","body":"Why","message":"Fix"}).to_string());
+                let path = f.dir.path().join(name);
+                let mut original = std::fs::read(&path).unwrap();
+                if name == "base.json" {
+                    original.resize(64 * 1024, b' ');
+                    std::fs::write(&path, &original).unwrap();
+                }
+                assert_gitlab_ok(&f, "check");
+                assert!(f.writes.lock().unwrap().is_empty());
+
+                let outside = tempfile::tempdir().unwrap();
+                match damage {
+                    "missing" => std::fs::remove_file(&path).unwrap(),
+                    "symlink" => {
+                        // Identical bytes must still be refused: receipt
+                        // equality is not a substitute for no-follow reads.
+                        let target = outside.path().join("artifact");
+                        std::fs::write(&target, &original).unwrap();
+                        std::fs::remove_file(&path).unwrap();
+                        std::os::unix::fs::symlink(&target, &path).unwrap();
+                    }
+                    "directory" => {
+                        std::fs::remove_file(&path).unwrap();
+                        std::fs::create_dir(&path).unwrap();
+                    }
+                    "oversized" => {
+                        original.push(b' ');
+                        std::fs::write(&path, original).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let error = match damage {
+                    "missing" | "symlink" => "cannot open input as a no-follow file",
+                    "directory" => "input is not a regular file",
+                    "oversized" => "file exceeds byte limit",
+                    _ => unreachable!(),
+                };
+                assert_patch_file_refused(&f, error, kind, name, damage);
+            }
+        }
+    }
+}
+
+fn assert_patch_file_refused(f: &Fixture, error: &str, kind: &str, name: &str, damage: &str) {
+    // Apply must re-read even after a valid receipt. A fresh check must not
+    // issue a receipt for the same malformed artifact either.
+    for command in ["apply", "check"] {
+        if command == "check" {
+            std::fs::remove_file(f.dir.path().join("checked.json")).unwrap();
+        }
+        let result = f.run_forge(command, "gitlab");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{command} {kind} {name} {damage}");
+        assert!(
+            stderr.contains(error),
+            "{command} {kind} {name} {damage}: {stderr}"
+        );
+        assert!(f.writes.lock().unwrap().is_empty());
+    }
+    assert!(!f.dir.path().join("checked.json").exists());
+}
+
+#[test]
 fn gitlab_check_accepts_supported_nonpatch_operations() {
     for (kind, bounds, fields) in [
         (
