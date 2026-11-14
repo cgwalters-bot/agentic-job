@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::exit::Exit;
 
+pub mod attachments;
 mod context;
 mod dispatch;
 use dispatch::admission as dispatch_admission;

@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Experimental attachment admission can resolve issue, PR and branch identities
+  against caller/organization bounds. This is library groundwork only: no
+  dispatch input or attachment publication is enabled, and `fix` is unchanged
+  (#3692).
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

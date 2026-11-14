@@ -44,6 +44,20 @@ Each requirement lists existing enforcement evidence. A runtime probe is a
 check, not proof against every possible attack. Section 4 is excluded from the
 tested conformance claim.
 
+## Attachment implementation status
+
+Attachments (#3692) have experimental read-only admission groundwork in
+[`policy/attachments.rs`](../crates/agentic-job/src/policy/attachments.rs), not
+an enabled run contract. The
+[admission API and limits](../docs/safe-outputs.md#attachments-admission-groundwork-only)
+describe what is implemented. Dispatch input, full context retrieval, checked
+write routing and apply publication remain unimplemented; `fix` still uses the
+existing single-target contract. The admission result MUST NOT be treated as a
+checked publication receipt. No existing RC guarantee is broadened by it.
+The kind × mode × repository-bounds matrix and metadata refusals are exercised
+in [attachments.rs](../crates/agentic-job/tests/attachments.rs); these are not
+end-to-end publication evidence.
+
 ## 3. Requirements
 
 ### 3.1 Admission, reads and credentials

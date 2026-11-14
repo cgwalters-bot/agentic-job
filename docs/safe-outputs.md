@@ -234,6 +234,42 @@ failing step and reproduce/fix it without weakening these boundaries. Keep #2397
 open while waiting for merge/run or investigating failure; offline tests and PR
 CI are not credentialed publication evidence.
 
+## Attachments: admission groundwork only
+
+The experimental `agentic_job::policy::attachments::admit` function resolves a
+caller-supplied attachment list against repository and output bounds. This is
+only the admission slice of #3692: **dispatch, run, check and apply do not accept
+attachments yet**. No caller setting enables them, and `fix` is unchanged.
+The result is not a checked receipt or permission to publish.
+
+The concrete threat is an attachment expanding write authority beyond the
+caller's repositories or push branches. The empty list enables nothing. An
+explicit list is capped at eight entries and 16 KiB before parsing, with required
+`kind`, `mode` and `repo` fields. Issues and pull requests use a positive `number`
+of at most nine digits; branches use `branch`. Kinds are `issue`, `pull-request`
+and `branch`; modes are `read` and `write`. Unknown fields, kinds, modes and
+duplicate destinations (including issue/PR aliases or differing modes) refuse.
+File and artifact kinds are not implemented.
+
+All repositories must be public and admitted by both caller and optional
+organization bounds; `own_author` never bypasses repository admission here.
+Read-mode PRs and branches resolve to exact commits, without granting writes.
+Issue writes compile the existing `add_comment` policy. PR writes compile
+`push_to_pull_request_branch` and `add_comment` together, preserving existing
+branch, credential, patch and output limits. Both bounds files must explicitly
+name the PR author in `own_author`. A PR's head repository must independently
+fit bounds and be the target or its public fork. Attaching an upstream PR does
+not grant a push to upstream: its permitted push destination is its fork head.
+Write-mode branches refuse because no branch-push safe output exists.
+
+This API takes a caller-owned, bounded, read-only metadata reader. It does not
+fetch bodies, comments, reviews or diffs, create check artifacts, route requests
+or publish. Remaining work must wire trusted dispatch inputs and full read-only
+context, carry exact attachment/head identities through the hand-back and
+check/apply, enforce the run's aggregate output limits, repeat live push safety
+checks and test an issue run updating an attached bot PR end to end. Review-thread
+replies and the conversion of `fix` to a write attachment remain undone too.
+
 ## Stacked proposals: library groundwork only
 
 The experimental `safe_outputs::check::stack` library module checks an ordered
