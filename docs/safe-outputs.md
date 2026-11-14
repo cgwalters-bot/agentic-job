@@ -1566,6 +1566,27 @@ the pull request, where the identity apply holds may push: its own fork
 another fork whose owner gave it write access, or the target repository
 itself. The target's CI runs a fork's commit as it ran the pull request's
 first one: as a fork's, with a read-only token, no secrets and no OIDC token.
+
+For an ordinary single-commit GitHub fix, `max_patch_bytes` also supplies the
+handler's `max_patch_size` in KiB. Besides bounding the submitted patch,
+the handler bounds the **sum of the complete resulting files** changed by it
+(deleted files contribute zero), rounded up to KiB. A tiny edit to a large
+existing file can therefore pass check's patch-byte limit and still be refused
+at apply. This applies equally to `dispatch/implement/*` and other admitted
+head branches; changing branch globs does not fix a changed-content refusal.
+Choose the caller's byte cap for both sizes, subject to any tighter organization
+bounds, rather than disabling the post-apply check.
+
+In [#4116](https://github.com/cgwalters-forge/agentic-job/issues/4116), the
+[apply log for #4082](https://github.com/cgwalters-forge/tracker/actions/runs/43599823431/job/132466356048)
+refused `push_to_pull_request_branch` because changed content was 1668 KiB,
+not because of branch permissions. The corresponding jobs for
+[#4081](https://github.com/cgwalters-forge/tracker/actions/runs/43599814592/job/132466221748),
+[#3998](https://github.com/cgwalters-forge/tracker/actions/runs/43599044455/job/132461287071) and
+[#4045](https://github.com/cgwalters-forge/tracker/actions/runs/43598817448/job/132463106884)
+reported 1667, 1570 and 1792 KiB against the same 1024 KiB cap. A 2 MiB caller
+cap admits those sizes while retaining a finite patch and changed-content bound.
+
 The head repository's own workflows are different: apply turns Actions off
 only in its own fork, and elsewhere the `push` and `pull_request` workflows
 of the target or of the other fork run the agent's commit with whatever

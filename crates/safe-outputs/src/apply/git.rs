@@ -432,6 +432,85 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn fix_on_implement_branch_bounds_changed_files_not_just_patch() {
+        const BRANCH: &str = "dispatch/implement/agent-run-12";
+        const KIB: usize = 1024;
+        // A small fix to existing large files fits the patch bound but can
+        // exceed gh-aw's post-apply changed-content bound (#4116).
+        for (bytes, max_kb, accepted) in [
+            (1792 * KIB, 1024, false),
+            (1792 * KIB, 2048, true),
+            (2048 * KIB, 2048, true),
+            (2048 * KIB + 1, 2048, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let work = root.path().join("work");
+            let remote = root.path().join("remote.git");
+            std::fs::create_dir(&work).unwrap();
+            let git = Git {
+                authorization: String::new(),
+                token: "",
+                extra_secrets: Vec::new(),
+                committer: ("ci", "ci@example.invalid"),
+            };
+            let run = |args: &[&str]| git.run(&work, args, None).unwrap().trim().to_owned();
+            run(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+            run(&["init", "-q", "-b", BRANCH]);
+            let mut content = "x\n".repeat(bytes.div_ceil(2));
+            content.truncate(bytes);
+            std::fs::write(work.join("large.txt"), &content).unwrap();
+            run(&["add", "large.txt"]);
+            run(&["commit", "-qm", "Original implementation"]);
+            let head = run(&["rev-parse", "HEAD"]);
+            run(&["push", "-q", remote.to_str().unwrap(), BRANCH]);
+            content.replace_range(..1, "y");
+            std::fs::write(work.join("large.txt"), content).unwrap();
+            run(&["commit", "-qam", "Fix implementation"]);
+            let patch = git
+                .run(
+                    &work,
+                    &["format-patch", "--stdout", "--no-signature", "-1"],
+                    None,
+                )
+                .unwrap();
+            assert!(patch.len() < KIB, "the submitted patch itself is small");
+            let result = git.push(
+                &Push {
+                    from: remote.to_str().unwrap(),
+                    base: BRANCH,
+                    base_commit: &head,
+                    to: remote.to_str().unwrap(),
+                    branch: BRANCH,
+                    patch: patch.as_bytes(),
+                    files: &["large.txt".into()],
+                    head: Some(&head),
+                    committer: None,
+                    at_author_date: false,
+                    max_changed_kb: Some(max_kb),
+                },
+                None,
+            );
+            let tip = run(&["--git-dir", remote.to_str().unwrap(), "rev-parse", BRANCH]);
+            if accepted {
+                let pushed = result.unwrap();
+                assert_eq!(tip, pushed);
+                assert_eq!(run(&["show", "-s", "--format=%P", &pushed]), head);
+            } else {
+                let err = result.unwrap_err();
+                assert!(err.is::<TooLarge>(), "{err:#}");
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "Changed content size ({} KB) exceeds maximum allowed size ({max_kb} KB)",
+                        bytes.div_ceil(KIB)
+                    )
+                );
+                assert_eq!(tip, head, "a refused fix must not move the branch");
+            }
+        }
+    }
+
     /// Neither the raw token nor any header form of it, as each publisher
     /// sends it, survives an error, wherever the cut falls.
     #[test]
