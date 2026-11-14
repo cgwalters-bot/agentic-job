@@ -165,7 +165,9 @@ job summary says why. Any such comment qualifies, an earlier run's answer by
 the same identity included, so a wrong id replaces that text. Opening lines
 that are each one whole hidden comment, such as a caller's
 `<!-- tag: {...} -->` state, are kept on every status edit, except tool-owned
-markers (`agentic-job-` and `agent-board-maintain-plan`); the rest becomes
+markers (`agentic-job-` and `agent-board-maintain-plan`). Nested HTML comment
+openers are not caller markers: a caller prefix must not conceal a tool-owned
+marker and carry it through a privileged edit. The rest becomes
 the status. A later run without the id edits the first marked comment, which
 is an earlier status comment where the item has one. A newer run's status is
 still never replaced by an older run's in the comment edited.
@@ -185,6 +187,12 @@ interrupted close finishes changing only the item's state, not its comment.
 Tests exercise the status writer with the fake forge and apply.yml's actual
 retry/completion scripts. This is a contract for that marker, not a claim that
 arbitrary preserved caller state is trusted controller data.
+The nested-opener regression also checks that no embedded maintain marker
+survives named or marker-based lookup, completion or retry, while ordinary
+caller tags still survive. This closes a marker-retention gap, not a demonstrated
+controller-record forgery: the controller's leading-marker check and the status
+writer's removal of fenced heads already prevent that nested form from being
+an accepted maintain record.
 
 The lookup accepts only the job token's `github-actions[bot]` marker, or the
 supplied token's authenticated user and marker, so another user's

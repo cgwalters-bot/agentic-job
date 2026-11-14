@@ -13,6 +13,10 @@ says what a caller may rely on across versions.
   optional colons and `issue`/`issues` prefixes. GitHub and Forgejo behavior
   and caller output bounds are unchanged.
 
+- Status edits no longer preserve malformed caller tags containing nested HTML
+  comment openers, which could retain embedded tool-owned markers. Ordinary
+  caller tags, lookup bounds and permissions are unchanged.
+
 - GitLab publication now counts nested cross-project closing references toward
   the existing ten-reference cap, preventing subgroup paths from bypassing it.
   GitHub and Forgejo filtering and output admission are unchanged.

@@ -3,7 +3,7 @@
 //! binary.sh runs in a copy of a small source tree, with gh and the build
 //! tools replaced by stubs: gh serves fixture files as GitHub's REST API
 //! would and logs what it was asked, and sleep logs the waits of the
-//! retries.
+//! retries. The clock is fixed so fixture setup cannot consume a retry wait.
 
 // clippy.toml lets only test functions unwrap, and the helpers here are
 // test code too.
@@ -25,6 +25,9 @@ const TARGET: &str = "x86_64-unknown-linux-musl";
 const NAMES: [&str; 3] = ["agentic-job", "fake-agent", "secure-host"];
 const OBJECT: &str = "world_write.bpf.o";
 const BYTES: &str = "binary";
+
+const NOW: i64 = 1_700_000_000;
+
 /// The environment `binary.sh` would take a tagged release's identity from,
 /// which the caller's own must not leak into.
 const WORKFLOW_PREFIX: &str = "WORKFLOW_";
@@ -83,9 +86,13 @@ const CARGO: &str = r#"
 echo "cargo $*" >> "$STUB_LOG"; mkdir -p target/x86_64-unknown-linux-musl/release
 for name in agentic-job fake-agent secure-host; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
 
-const STUBS: [(&str, &str); 7] = [
+const STUBS: [(&str, &str); 8] = [
     ("gh", GH),
     ("sleep", r#"echo "sleep $*" >> "$STUB_LOG""#),
+    (
+        "date",
+        r#"if [ "$*" = +%s ]; then echo "$STUB_NOW"; else exec /usr/bin/date "$@"; fi"#,
+    ),
     ("clang", CLANG),
     ("musl-gcc", "exit 0"),
     ("rustup", r#"echo "rustup $*" >> "$STUB_LOG""#),
@@ -253,6 +260,7 @@ fn run(root: &Path, args: &[&str], opts: Opts) -> Run {
         .env("PATH", format!("{}:{path}", s(bin())))
         .env("STUB_FILES", served)
         .env("STUB_LOG", &log)
+        .env("STUB_NOW", NOW.to_string())
         .env("GITHUB_OUTPUT", &output)
         .env("WORKFLOW_REPOSITORY", REPOSITORY)
         .envs(opts.env);
@@ -1341,8 +1349,8 @@ fn fetch_tells_an_absent_resource_from_a_refusal() {
 
 /// How a throttled fetch ends.
 enum Waits {
-    /// It succeeds after one wait of any of these.
-    OneOf(Vec<i64>),
+    /// It succeeds after exactly this wait.
+    One(i64),
     /// It fails at once.
     Failed,
     /// It fails at once, as the wait would exceed the budget.
@@ -1353,8 +1361,7 @@ enum Waits {
 /// and a wait that would end past the two minutes fails at once.
 #[test]
 fn only_a_throttled_response_is_retried_as_long_as_github_asks_within_the_budget() {
-    let now = || chrono::Utc::now().timestamp();
-    let http_date = chrono::DateTime::from_timestamp(now() + 20, 0)
+    let http_date = chrono::DateTime::from_timestamp(NOW + 20, 0)
         .unwrap()
         .format("%a, %d %b %Y %H:%M:%S GMT");
     let url = "https://api.github.com/repos/o/r/ok";
@@ -1362,33 +1369,33 @@ fn only_a_throttled_response_is_retried_as_long_as_github_asks_within_the_budget
     let cases = [
         (
             "< HTTP/2.0 403 Forbidden\n< Retry-After: 0\n".to_owned(),
-            Waits::OneOf(vec![1]),
+            Waits::One(1),
         ),
         (
             "< HTTP/2.0 403 Forbidden\n\nYou have exceeded a secondary rate limit.\n".to_owned(),
-            Waits::OneOf(vec![1]),
+            Waits::One(1),
         ),
         (
             "< HTTP/2.0 429 Too Many Requests\n< retry-after: 3\n".to_owned(),
-            Waits::OneOf(vec![3]),
+            Waits::One(3),
         ),
         (
             format!("< HTTP/2.0 429 Too Many Requests\n< Retry-After: {http_date}\n"),
-            Waits::OneOf(vec![19, 20]),
+            Waits::One(20),
         ),
         (
             format!(
                 "< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: {}\n",
-                now() + 10
+                NOW + 10
             ),
-            Waits::OneOf(vec![9, 10]),
+            Waits::One(10),
         ),
         (
             format!(
                 "< HTTP/2.0 302 Found\n< X-Ratelimit-Remaining: 4999\n< X-Ratelimit-Reset: 1\n< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: {}\n",
-                now() + 60
+                NOW + 60
             ),
-            Waits::OneOf(vec![59, 60]),
+            Waits::One(60),
         ),
         ("< HTTP/2.0 403 Forbidden\n".to_owned(), Waits::Failed),
         (
@@ -1411,11 +1418,10 @@ fn only_a_throttled_response_is_retried_as_long_as_github_asks_within_the_budget
             waits,
         } = fetch_one(url, false, &[Some(&trace)], &files);
         match expected {
-            Waits::OneOf(allowed) => {
+            Waits::One(wait) => {
                 assert_eq!(result.status, Some(0), "{trace}: {}", result.stderr);
                 assert_eq!(bytes.as_deref(), Some("bytes"));
-                assert_eq!(waits.len(), 1, "{trace}");
-                assert!(allowed.contains(&waits[0]), "{trace}: waited {waits:?}");
+                assert_eq!(waits, [wait], "{trace}");
             }
             Waits::Failed | Waits::Budget => {
                 let pattern = if matches!(expected, Waits::Budget) {

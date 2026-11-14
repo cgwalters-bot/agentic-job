@@ -119,6 +119,9 @@ fn is_caller_marker(line: &str) -> bool {
     };
     !inner.trim_start().starts_with("agentic-job-")
         && !inner.trim_start().starts_with("agent-board-maintain-plan")
+        // A nested opener could conceal a tool-owned marker behind a caller
+        // prefix and carry it through a privileged status edit.
+        && !inner.contains("<!--")
         && !line.contains(['\r', '\u{2028}', '\u{2029}'])
         && inner.find("-->").is_some_and(|end| end + 3 == inner.len())
 }
@@ -456,6 +459,8 @@ mod tests {
                     PLAN.to_owned(),
                     format!("{PLAN}\r"),
                     format!("{PLAN}\n{TAG}"),
+                    format!("<!-- caller: {PLAN}"),
+                    format!("{TAG}\n<!-- caller: {PLAN}"),
                 ] {
                     let mut current = comment(5, bot, &forged.replacen(PLAN, &prefix, 1));
                     current["edited"] = json!(false);
@@ -493,10 +498,30 @@ mod tests {
                             "named={named}: {current}"
                         );
                         assert!(!current["body"].as_str().unwrap().contains("aaaaaaaaaaaa"));
+                        assert!(!current["body"].as_str().unwrap().contains(PLAN));
+                        assert_eq!(
+                            current["body"].as_str().unwrap().starts_with(TAG),
+                            prefix.starts_with(TAG)
+                        );
                         assert!(current["body"].as_str().unwrap().contains(text));
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn caller_markers_are_single_comments() {
+        for (line, expected) in [
+            (TAG, true),
+            ("<!-- caller state -->", true),
+            ("<!-- caller: <tag> -->", true),
+            ("<!-- caller: <!-- nested -->", false),
+            ("<!-- caller: <!-- nested --> -->", false),
+            ("<!-- first --><!-- second -->", false),
+            ("<!-- unfinished", false),
+        ] {
+            assert_eq!(is_caller_marker(line), expected, "{line}");
         }
     }
 
