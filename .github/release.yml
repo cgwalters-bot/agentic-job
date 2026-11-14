@@ -1,12 +1,9 @@
 # GitHub's generated release notes use labels, not title prefixes.
-# Do not exclude the coding bot: its PRs include user-visible changes.
+# Exclude dependency-only noise by label, not by who authored the PR.
 changelog:
   exclude:
     labels:
       - dependencies
-    authors:
-      - dependabot
-      - renovate
   categories:
     - title: Features
       labels:
@@ -17,9 +14,6 @@ changelog:
     - title: Documentation
       labels:
         - documentation
-    - title: Tests
-      labels:
-        - tests
     - title: CI
       labels:
         - github_actions
