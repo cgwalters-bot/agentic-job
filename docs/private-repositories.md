@@ -30,6 +30,14 @@ sent to inference, printed in a job log or written to a summary if visibility
 changes during execution. The standalone CLI's bounds checks are not a private
 workflow admission guarantee.
 
+The digest regression suite executes the policy workflow's visibility step
+with fixture API responses for the target, agent-configuration and item
+repositories. Missing or contradictory visibility fields, non-boolean
+`private`, internal visibility, malformed responses and API failures must
+refuse a public caller's run. Even public-looking metadata from a failed API
+call is not admission evidence. A confirmed-public control must pass. These
+are offline admission tests, not proof of a live private deployment.
+
 The [run evidence guide](workflow.md#what-a-run-leaves) lists the artifacts and
 retention periods. The agent job prints a condensed transcript to its Actions
 log and writes a rendered session/job summary. `agent-run` retains summaries,

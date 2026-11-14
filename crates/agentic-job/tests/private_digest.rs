@@ -770,6 +770,134 @@ fn the_workflow_composes_the_private_path() {
     }
 }
 
+/// Unknown visibility must not turn private source into public run evidence.
+/// Run the workflow's own jq filter, including failed API calls that emit
+/// apparently valid metadata before exiting unsuccessfully.
+#[test]
+fn policy_refuses_unconfirmed_visibility_before_a_digest_run() {
+    let doc = yaml(".github/workflows/policy.yml");
+    let step = doc["jobs"]["policy"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Check that the repositories are public"))
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         [ \"$1\" = api ] && [ \"$3\" = --jq ] || exit 2\n\
+         if [ \"$2\" = repos/owner/public ]; then\n\
+           printf '%s' '{\"private\":false,\"visibility\":\"public\"}' | jq -r \"$4\"\n\
+         else\n\
+           jq -r \"$4\" \"$METADATA\" || exit 1\n\
+           exit \"$API_EXIT\"\n\
+         fi\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let metadata = temp.path().join("metadata.json");
+    let output_file = temp.path().join("output");
+    for (name, response, api_exit, public) in [
+        (
+            "public control",
+            r#"{"private":false,"visibility":"public"}"#,
+            "0",
+            true,
+        ),
+        (
+            "private",
+            r#"{"private":true,"visibility":"private"}"#,
+            "0",
+            false,
+        ),
+        (
+            "internal",
+            r#"{"private":true,"visibility":"internal"}"#,
+            "0",
+            false,
+        ),
+        ("missing private", r#"{"visibility":"public"}"#, "0", false),
+        ("missing visibility", r#"{"private":false}"#, "0", false),
+        (
+            "string boolean",
+            r#"{"private":"false","visibility":"public"}"#,
+            "0",
+            false,
+        ),
+        (
+            "contradictory private",
+            r#"{"private":true,"visibility":"public"}"#,
+            "0",
+            false,
+        ),
+        (
+            "contradictory public",
+            r#"{"private":false,"visibility":"private"}"#,
+            "0",
+            false,
+        ),
+        (
+            "unknown visibility",
+            r#"{"private":false,"visibility":"unknown"}"#,
+            "0",
+            false,
+        ),
+        ("null", "null", "0", false),
+        ("array", "[]", "0", false),
+        ("empty response", "", "0", false),
+        ("malformed JSON", "{", "0", false),
+        ("API failure", "", "1", false),
+        (
+            "partial success then API failure",
+            r#"{"private":false,"visibility":"public"}"#,
+            "1",
+            false,
+        ),
+    ] {
+        std::fs::write(&metadata, response).unwrap();
+        // Check the target and both positions in the auxiliary repository
+        // list (agent configuration and item), with a public caller throughout.
+        for (target, others) in [
+            (REPO, ""),
+            ("owner/public", REPO),
+            ("owner/public", "owner/public owner/digest"),
+        ] {
+            std::fs::write(&output_file, "").unwrap();
+            let output = script(
+                step,
+                temp.path(),
+                &[
+                    ("PATH", &path),
+                    ("METADATA", metadata.to_str().unwrap()),
+                    ("API_EXIT", api_exit),
+                    ("GITHUB_REPOSITORY", "owner/public"),
+                    ("GITHUB_OUTPUT", output_file.to_str().unwrap()),
+                    ("REPO", target),
+                    ("REPOS", others),
+                ],
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(i32::from(!public)),
+                "{name}, {target}, {others}: {output:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "", "{name}");
+            if !public {
+                assert!(
+                    String::from_utf8_lossy(&output.stdout)
+                        .contains("cannot be confirmed to be public"),
+                    "{name}: {output:?}"
+                );
+            }
+        }
+    }
+}
+
 /// policy.yml, which the example calls, admits a private target only as
 /// the calling repository: a public caller naming a private one is
 /// refused, and only the private caller on itself is marked private.
