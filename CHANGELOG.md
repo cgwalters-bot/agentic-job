@@ -9,9 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
-- Prepare an inactive library primitive for exact recovery of redacted
-  inference addresses on patch context/removed lines. No publisher invokes it
-  yet; old-side redaction can still prevent publication (tracker#1309).
+- Prepare exact recovery of redacted inference addresses on patch
+  context/removed lines, with an opt-in trusted replacement-series trial.
+  No workflow enables recovery yet; old-side redaction can still prevent
+  publication (tracker#1309).
 
 - Standalone container runners may explicitly delegate host isolation with
   `[host] isolation = "external"`. Summaries and hand-back metadata record

@@ -107,32 +107,54 @@ deployment's address into code.
 
 ### Old-side patch recovery (not enabled)
 
-The inactive `safe_outputs::apply::recover::reconstruct` library primitive
+The `safe_outputs::apply::recover::reconstruct` library primitive
 can reconstruct context and removed lines from an authenticated public
 preimage at the exact path and old-side hunk position. It validates the mail
 before reading preimages and revalidates paths afterward. Every non-placeholder
 byte must match, and only one placeholder per line, replacing one host:port
-literal, is supported. Overlapping hunks, duplicate file sections, malformed
+literal, is supported. Old- and new-side hunk coordinates must agree with all
+preceding hunk deltas. Overlapping hunks, duplicate file sections, malformed
 patches, CR and missing final newlines are refused. Duplicate sections are
 rejected before any preimage read, including delete/recreate pairs. Patch and
 per-file preimage reads are bounded to 1 MiB (or the caller's smaller patch
 limit), with at most 50 files and one preimage read per file.
 
-This is not yet a fix for
-[tracker#1309](https://github.com/cgwalters-forge/tracker/issues/1309): no check,
-workflow or publisher invokes it. Existing publication can still fail on
-redacted old-side lines. No caller setting enables recovery yet.
+`safe_outputs::apply::replacement::trial_recovered` provides an opt-in trusted
+preparation boundary for a replacement series. It binds the original series to
+check's receipt and trusted policy, rechecks every mail and the aggregate bounds,
+and authenticates the base through the existing replacement ancestry checks.
+Only a policy identifying a public GitHub repository is admitted. Each preimage
+is a bounded regular immutable git blob, not a working-tree file; each rebuilt
+predecessor supplies the next commit's preimage. Git replacement objects are
+disabled. After applying a recovered mail, every resulting blob is compared
+with the digest of its exact-position reconstruction; Git's context search
+cannot silently relocate a hunk within the same checked file. The caller must
+validate application bytes for credentials without
+logging them. Each recovered mail is applied from a private temporary file that
+is removed on success or refusal, and application errors do not quote its bytes.
+Publication pushes the trial's built commit objects, rather than applying the
+original redacted series again. Canonical JSON size after reconstruction is
+also held to the original aggregate patch limit.
 
-Before enabling it, the trusted integration must authenticate the public base,
-not consult the producer's checkout, and bind each reconstructed predecessor
-as the next preimage for series. It must retain credential refusals, validate
-size/path bounds and receipts again, and give trial and publication identical
-repaired bytes on native, legacy, replacement and secondary paths. Unsupported
-paths must fail explicitly with a retained-artifact recovery link. Recovered
-bytes are application-only: never upload or log them. Added-line placeholders
-remain untouched; their count needs a clear draft-review warning. Live hosted
-PR-publication proof after deployment and moving wrapper addresses into
-deployment configuration remain follow-ups.
+The internal `agentic-job replacement trial --policy FILE` opts into this
+boundary, using trusted policy/check inputs on the apply machine. It refuses
+credential shapes and known apply credentials in reconstructed application
+bytes, more conservatively than the ordinary handback shape warnings. Mails
+without old-side placeholders retain ordinary application behavior. Counts of
+restored lines and added placeholders are safe step outputs; added placeholders
+are never restored, and the command warns to keep them in draft for review.
+Callers must enforce that draft state before publishing.
+
+This is not yet a fix for
+[tracker#1309](https://github.com/cgwalters-forge/tracker/issues/1309): no workflow
+enables recovery. Native, legacy and secondary publication remain unchanged
+and can still fail on redacted old-side lines. Before enabling recovery, the
+workflow must enforce the added-line draft warning and integrate identical
+revalidated, application-only bytes across those publishers (or explicitly
+refuse unsupported paths with a retained-artifact recovery link). Recovered
+bytes must never enter logs, uploaded patches or publication identity receipts.
+Live hosted PR-publication proof after deployment and moving wrapper addresses
+into deployment configuration remain follow-ups.
 
 ### Long rate-limit waits
 

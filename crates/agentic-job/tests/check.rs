@@ -9,6 +9,149 @@ use serde_json::Value;
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn replacement_recovery_cli_binds_policy_credentials_and_safe_outputs() {
+    use safe_outputs::contract::Policy;
+    use serde_json::json;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.test"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let (producer, consumer) = (temp.path().join("producer"), temp.path().join("consumer"));
+    std::fs::create_dir(&producer).unwrap();
+    std::fs::create_dir(&consumer).unwrap();
+    git(&producer, &["init", "-q", "--initial-branch=main"]);
+    git(&consumer, &["init", "-q"]);
+    let address = "inference.example.test:8443";
+    std::fs::write(producer.join("config"), format!("url={address}\nold\n")).unwrap();
+    git(&producer, &["add", "config"]);
+    git(&producer, &["commit", "-qm", "Base"]);
+    let base = git(&producer, &["rev-parse", "HEAD"]);
+    std::fs::write(
+        producer.join("config"),
+        format!("url={address}\n<inference-address>\n"),
+    )
+    .unwrap();
+    git(&producer, &["commit", "-qam", "Change"]);
+    let head = git(&producer, &["rev-parse", "HEAD"]);
+    let mail = git(
+        &producer,
+        &["format-patch", "--stdout", "--no-signature", "-1"],
+    ) + "\n";
+    let mail = mail.replace(address, "<inference-address>");
+    let policy_fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../safe-outputs/tests/data/push-policy.json");
+    let mut policy: Policy =
+        serde_json::from_slice(&std::fs::read(policy_fixture).unwrap()).unwrap();
+    policy.repo = "example-org/example".into();
+    policy.clone_url = "https://github.com/example-org/example".into();
+    let push = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_mut()
+        .unwrap();
+    push.head = head;
+    push.replacement_base = Some(base.clone());
+    push.replacement_max_commits = 1;
+    policy.validate().unwrap();
+    let series = serde_json::to_vec(&json!({"base_commit": base, "commits": [mail]})).unwrap();
+    let checked = safe_outputs::check::replacement::check(
+        &series,
+        policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_ref()
+            .unwrap(),
+        policy.max_patch_bytes,
+    )
+    .unwrap();
+    let policy_path = temp.path().join("policy.json");
+    let report_path = temp.path().join("report.json");
+    let config_path = temp.path().join("config.json");
+    let series_path = temp.path().join("replacement.json");
+    std::fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    std::fs::write(
+        &report_path,
+        serde_json::to_vec(&json!({"ok": true, "errors": [], "patch": checked})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&policy.safe_outputs).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&series_path, &series).unwrap();
+    for credential in [None, Some(address)] {
+        let mut command = Command::new(BIN);
+        command
+            .current_dir(&consumer)
+            .args(["replacement", "trial", "--policy"])
+            .arg(&policy_path)
+            .arg("--report")
+            .arg(&report_path)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--series")
+            .arg(&series_path)
+            .arg("--remote")
+            .arg(&producer)
+            .arg("--current-base")
+            .arg(&base)
+            .arg("--temp")
+            .arg(temp.path());
+        for variable in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "SAFE_OUTPUTS_PAT",
+            "STATUS_TOKEN",
+            "REVIEW_TOKEN",
+            "PUSH_TOKEN",
+            "PUBLICATION_TOKEN",
+        ] {
+            command.env_remove(variable);
+        }
+        if let Some(value) = credential {
+            command.env("GH_TOKEN", value);
+        }
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stdout.contains(address) && !stderr.contains(address));
+        assert_eq!(output.status.success(), credential.is_none(), "{stderr}");
+        if credential.is_none() {
+            assert!(
+                stdout.contains("restored-lines=1\nadded-placeholders=1\n"),
+                "{stdout}"
+            );
+            assert!(stderr.contains("keep the pull request in draft"));
+            let built_head = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("head="))
+                .unwrap();
+            assert_eq!(
+                git(&consumer, &["show", &format!("{built_head}:config")]),
+                format!("url={address}\n<inference-address>")
+            );
+        } else {
+            assert!(!stdout.contains("head="));
+            assert!(stderr.contains("credential validation"));
+        }
+        assert!(!temp.path().join("replacement-trial").exists());
+        assert_eq!(std::fs::read(&series_path).unwrap(), series);
+    }
+}
+
+#[test]
 fn serialized_continuation_policy_requires_exact_trusted_check_context() {
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();

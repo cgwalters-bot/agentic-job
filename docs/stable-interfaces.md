@@ -402,6 +402,9 @@ What a producer leaves for `run` to take
   parent to resolve that target. This opts into parent history outside the
   checked mails on the fork's branch. `handback replace` requires the replayed final tree
   to equal the producer's intended `HEAD` tree before writing the series.
+  An internal opt-in [recovery trial](inference.md#old-side-patch-recovery-not-enabled)
+  can rebuild redacted old-side lines from trusted public preimages; no workflow
+  enables it, and the handed-back series and its receipt remain redacted.
 - Where the bounds have `[github.test_evidence]`, `out/test-evidence.json`,
   schema `agentic-job/test-evidence/v1`, and its logs
   `out/test-evidence-N.log`

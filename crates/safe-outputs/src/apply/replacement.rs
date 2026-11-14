@@ -9,6 +9,7 @@
 //! git's messages in an error hold the agent's text (`Applying:
 //! subject`): a caller that logs one escapes it first.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 
@@ -16,6 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
 use super::COMMIT_RE;
+use crate::contract::Policy;
 
 /// The hand-back's bound on a series, with room for JSON's escaping.
 const MAX_SERIES_BYTES: u64 = 4 << 20;
@@ -81,6 +83,24 @@ pub struct Built {
     pub tree: String,
 }
 
+/// Safe counts accompanying an application-only rebuild. Publication pushes
+/// `built.head` itself; it must not apply the original, redacted mails again.
+#[derive(Debug)]
+pub struct RecoveredTrial {
+    pub built: Built,
+    pub restored_lines: usize,
+    pub added_placeholders: usize,
+}
+
+struct Preparation<'a> {
+    policy: &'a Policy,
+    validate: &'a dyn Fn(&[u8]) -> Result<()>,
+    restored: Cell<usize>,
+    added: Cell<usize>,
+    bytes: Cell<usize>,
+    mails: Cell<usize>,
+}
+
 fn read_json(read: &dyn Fn(&Path, u64) -> Result<Vec<u8>>, path: &Path, max: u64) -> Result<Value> {
     let bytes = read(path, max).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
@@ -95,8 +115,47 @@ pub fn trial(
     repo: &Path,
     read: &dyn Fn(&Path, u64) -> Result<Vec<u8>>,
 ) -> Result<Built> {
-    let report = &read_json(read, &args.report, MAX_REPORT_BYTES)?["patch"];
-    let series = read_json(read, &args.series, MAX_SERIES_BYTES)?;
+    trial_using(args, repo, read, None)
+}
+
+/// Rebuild with exact recovery against the authenticated base and each actual
+/// predecessor. POLICY is trusted caller configuration, not producer data.
+/// VALIDATE must refuse credentials in application bytes without logging them.
+/// Recovered bytes live only in a private temporary mail, removed on return;
+/// the only publication input is the resulting commit object.
+pub fn trial_recovered(
+    args: &TrialArgs,
+    repo: &Path,
+    read: &dyn Fn(&Path, u64) -> Result<Vec<u8>>,
+    policy: &Policy,
+    validate: &dyn Fn(&[u8]) -> Result<()>,
+) -> Result<RecoveredTrial> {
+    let preparation = Preparation {
+        policy,
+        validate,
+        restored: Cell::new(0),
+        added: Cell::new(0),
+        bytes: Cell::new(0),
+        mails: Cell::new(0),
+    };
+    let built = trial_using(args, repo, read, Some(&preparation))?;
+    Ok(RecoveredTrial {
+        built,
+        restored_lines: preparation.restored.get(),
+        added_placeholders: preparation.added.get(),
+    })
+}
+
+fn trial_using(
+    args: &TrialArgs,
+    repo: &Path,
+    read: &dyn Fn(&Path, u64) -> Result<Vec<u8>>,
+    preparation: Option<&Preparation<'_>>,
+) -> Result<Built> {
+    let document = read_json(read, &args.report, MAX_REPORT_BYTES)?;
+    let report = &document["patch"];
+    let series_bytes = read(&args.series, MAX_SERIES_BYTES)?;
+    let series: Value = serde_json::from_slice(&series_bytes)?;
     let config = &read_json(read, &args.config, MAX_CONFIG_BYTES)?["push_to_pull_request_branch"];
     let base = report["base_commit"].as_str().unwrap_or("");
     let pinned = config["replacement_base"].as_str().unwrap_or("");
@@ -118,6 +177,46 @@ pub fn trial(
             && commits.len() as u64 <= max,
         "Unchecked replacement series"
     );
+    if let Some(preparation) = preparation {
+        ensure!(
+            document["ok"] == true && document["errors"].as_array().is_some_and(Vec::is_empty),
+            "recovery requires an accepted check report"
+        );
+        let policy = preparation.policy;
+        ensure!(
+            policy.forge == crate::Forge::Github && !policy.private,
+            "recovery requires a trusted public GitHub repository"
+        );
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_ref()
+            .context("recovery requires a trusted push policy")?;
+        ensure!(
+            push.replacement_base.as_deref() == Some(pinned)
+                && push.replacement_max_commits as u64 == max
+                && config["head"].as_str() == Some(push.head.as_str()),
+            "recovery configuration differs from trusted policy"
+        );
+        // Recheck the original receipt and every mail, not merely the final
+        // tree. Recovery may not turn a reverted forbidden edit into a push.
+        let checked = crate::check::replacement::check(&series_bytes, push, policy.max_patch_bytes)
+            .map_err(|_| anyhow::anyhow!("recovery requires a valid replacement series"))?;
+        ensure!(
+            report["bytes"].as_u64() == Some(series_bytes.len() as u64)
+                && report["file"].as_str() == Some(crate::check::replacement::REPLACEMENT_FILE)
+                && serde_json::to_value(&checked.files)? == report["files"]
+                && serde_json::to_value(&checked.commit_files)? == report["commit_files"],
+            "recovery series differs from check's receipt"
+        );
+        preparation.bytes.set(
+            serde_json::to_vec(&crate::check::replacement::Replacement {
+                base_commit: base.to_owned(),
+                commits: Vec::new(),
+            })?
+            .len(),
+        );
+    }
     let mails = commits
         .iter()
         .map(|mail| mail.as_str().context("a replacement commit is not text"))
@@ -160,7 +259,7 @@ pub fn trial(
             "Unchecked replacement series: base is not an ancestor of the trusted current base",
         )?;
     }
-    materialize(base, &mails, &paths, &args.temp, repo)
+    materialize_using(base, &mails, &paths, &args.temp, repo, preparation)
 }
 
 /// Only the PR's actual divergence point may precede the policy snapshot.
@@ -185,6 +284,7 @@ fn is_pr_merge_base(
 
 /// Applies each mail of a series on `base` in a worktree of its own and
 /// holds what each commit changed to the paths check read for it.
+#[cfg(test)]
 fn materialize(
     base: &str,
     mails: &[&str],
@@ -192,23 +292,46 @@ fn materialize(
     temp: &Path,
     repo: &Path,
 ) -> Result<Built> {
+    materialize_using(base, mails, checked, temp, repo, None)
+}
+
+fn materialize_using(
+    base: &str,
+    mails: &[&str],
+    checked: &[Vec<&str>],
+    temp: &Path,
+    repo: &Path,
+    preparation: Option<&Preparation<'_>>,
+) -> Result<Built> {
     let dir = temp.join("replacement-trial");
     let dir_arg = dir.to_str().context("the trial directory is not UTF-8")?;
     git(
         repo,
         &["worktree", "add", "--quiet", "--detach", dir_arg, base],
     )?;
-    let built = apply_series(mails, checked, temp, &dir);
+    let built = apply_series(base, mails, checked, temp, &dir, preparation);
     let removed = git(repo, &["worktree", "remove", "--force", dir_arg]);
     let built = built?;
     removed?;
     Ok(built)
 }
 
-fn apply_series(mails: &[&str], checked: &[Vec<&str>], temp: &Path, dir: &Path) -> Result<Built> {
+fn apply_series(
+    base: &str,
+    mails: &[&str],
+    checked: &[Vec<&str>],
+    temp: &Path,
+    dir: &Path,
+    preparation: Option<&Preparation<'_>>,
+) -> Result<Built> {
     let file = temp.join("replacement-mail.patch");
     for (index, (mail, checked)) in mails.iter().zip(checked).enumerate() {
-        match apply_mail(dir, &file, mail, checked)? {
+        let applied = if let Some(preparation) = preparation {
+            apply_recovered(base, mail, checked, dir, temp, preparation)?
+        } else {
+            apply_mail(dir, &file, mail, checked)?
+        };
+        match applied {
             Applied::Built(_) => {}
             Applied::Failed(error) => return Err(error),
             Applied::Nonlinear => bail!("Nonlinear replacement"),
@@ -216,6 +339,147 @@ fn apply_series(mails: &[&str], checked: &[Vec<&str>], temp: &Path, dir: &Path) 
         }
     }
     built(dir)
+}
+
+fn apply_recovered(
+    base: &str,
+    mail: &str,
+    checked: &[&str],
+    dir: &Path,
+    temp: &Path,
+    preparation: &Preparation<'_>,
+) -> Result<Applied> {
+    let diff = mail
+        .split_once("\ndiff --git ")
+        .map_or("", |(_, diff)| diff);
+    let needs_recovery = diff
+        .lines()
+        .any(|line| line.starts_with([' ', '-']) && line.contains("<inference-address>"));
+    if !needs_recovery {
+        // Preserve ordinary replacement compatibility (CRLF, large preimages,
+        // missing final newlines and credential-shape fixture warnings). Only
+        // old-side recovery needs the stricter reconstruction restrictions.
+        count_application_mail(mail, preparation)?;
+        preparation.added.set(
+            preparation.added.get()
+                + diff
+                    .lines()
+                    .filter(|line| line.starts_with('+'))
+                    .map(|line| line.matches("<inference-address>").count())
+                    .sum::<usize>(),
+        );
+        let file =
+            tempfile::NamedTempFile::new_in(temp).context("creating private application mail")?;
+        return apply_mail(dir, file.path(), mail, checked);
+    }
+    // Capture the immutable parent once. No working-tree file is a preimage,
+    // including for later commits whose parent was rebuilt by this trial.
+    let parent = git(dir, &["rev-parse", "HEAD"])?;
+    let (first, rest) = mail
+        .split_once('\n')
+        .context("replacement mail has no header")?;
+    let patch = format!(
+        "{first}\n{}: {base}\n{rest}",
+        crate::check::BASE_COMMIT_HEADER
+    );
+    let policy = preparation.policy;
+    let push = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .context("recovery requires a trusted push policy")?;
+    let rules = crate::contract::PatchRules {
+        commit_author: policy.commit_author.as_deref(),
+        ..push.rules()
+    };
+    let recovered = super::recover::reconstruct(
+        &patch,
+        &rules,
+        base,
+        usize::try_from(policy.max_patch_bytes)?,
+        |path, limit| read_preimage(dir, &parent, path, limit),
+    )?;
+    (preparation.validate)(recovered.application_patch().as_bytes())
+        .map_err(|_| anyhow::anyhow!("recovered replacement failed credential validation"))?;
+    // Drop only the header we inserted. The bounded replacement protocol
+    // supplies it separately, and a future recheck must see plain mails.
+    let (first, rest) = recovered
+        .application_patch()
+        .split_once('\n')
+        .context("recovered mail has no header")?;
+    let rest = rest
+        .strip_prefix(&format!("{}: {base}\n", crate::check::BASE_COMMIT_HEADER))
+        .context("recovered mail lost its base header")?;
+    let application_mail = format!("{first}\n{rest}");
+    count_application_mail(&application_mail, preparation)?;
+    let file =
+        tempfile::NamedTempFile::new_in(temp).context("creating private application mail")?;
+    // git am's error can quote a recovered context line. Never pass it (or
+    // a caller's validation error) to diagnostics. The temporary mail drops
+    // on both success and refusal, outside the checked artifact directory.
+    let applied = apply_mail(dir, file.path(), &application_mail, checked)
+        .map_err(|_| anyhow::anyhow!("recovered replacement application failed"))?;
+    let applied = match applied {
+        Applied::Failed(_) => bail!("recovered replacement mail did not apply"),
+        other => other,
+    };
+    // git am searches context and is not itself an exact-position proof.
+    // Hold every resulting blob to reconstruction's exact-position digest
+    // before this head can become a predecessor or a publication input.
+    if matches!(applied, Applied::Built(_)) {
+        let head = git(dir, &["rev-parse", "HEAD"])?;
+        recovered.verify_application(|path, limit| {
+            if git(dir, &["ls-tree", "-z", &head, "--", path])?.is_empty() {
+                return Ok(None);
+            }
+            read_preimage(dir, &head, path, limit).map(Some)
+        })?;
+    }
+    preparation
+        .restored
+        .set(preparation.restored.get() + recovered.restored_lines);
+    preparation
+        .added
+        .set(preparation.added.get() + recovered.added_placeholders);
+    Ok(applied)
+}
+
+fn count_application_mail(mail: &str, preparation: &Preparation<'_>) -> Result<()> {
+    let comma = usize::from(preparation.mails.get() != 0);
+    let bytes = preparation
+        .bytes
+        .get()
+        .checked_add(serde_json::to_vec(mail)?.len() + comma)
+        .context("recovered series byte count overflow")?;
+    ensure!(
+        bytes as u64 <= preparation.policy.max_patch_bytes,
+        "recovered series exceeds patch byte limit"
+    );
+    preparation.bytes.set(bytes);
+    preparation.mails.set(preparation.mails.get() + 1);
+    Ok(())
+}
+
+/// Read only a regular immutable blob, checking its size before obtaining its
+/// bytes. `git show` on a worktree path, lossy UTF-8 and trimmed output would
+/// all invalidate exact old-side comparison.
+fn read_preimage(dir: &Path, parent: &str, path: &str, limit: usize) -> Result<Vec<u8>> {
+    let entry = git(dir, &["ls-tree", "-z", parent, "--", path])?;
+    let (metadata, named) = entry.split_once('\t').context("preimage entry is absent")?;
+    let fields: Vec<_> = metadata.split(' ').collect();
+    ensure!(
+        fields.len() == 3
+            && matches!(fields[0], "100644" | "100755")
+            && fields[1] == "blob"
+            && named == format!("{path}\0")
+            && COMMIT_RE.is_match(fields[2]),
+        "preimage is not one regular blob"
+    );
+    let size: usize = git(dir, &["cat-file", "-s", fields[2]])?.parse()?;
+    ensure!(size <= limit, "preimage exceeds byte limit");
+    let bytes = git_output(dir, &["cat-file", "blob", fields[2]])?;
+    ensure!(bytes.len() == size, "preimage size changed");
+    Ok(bytes)
 }
 
 /// What one mail did to a worktree.
@@ -335,7 +599,16 @@ pub fn push(
 /// Runs git in REPO without hooks, signing or the machine's and user's
 /// configuration; the repository's own (the checkout's credentials) stays.
 pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(git_output(repo, args)?)
+        .context("git's output is not UTF-8")?
+        .trim()
+        .to_owned())
+}
+
+fn git_output(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Process::new("git")
+        // A full pinned SHA must name its own object, not refs/replace's.
+        .arg("--no-replace-objects")
         .args([
             "-c",
             "core.hooksPath=/dev/null",
@@ -360,10 +633,7 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
         args.join(" "),
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(String::from_utf8(output.stdout)
-        .context("git's output is not UTF-8")?
-        .trim()
-        .to_owned())
+    Ok(output.stdout)
 }
 
 #[cfg(test)]
@@ -407,6 +677,361 @@ mod tests {
     fn write(path: &Path, value: &Value) -> PathBuf {
         std::fs::write(path, value.to_string()).unwrap();
         path.to_owned()
+    }
+
+    const ADDRESS: &str = "inference.example.test:8443";
+
+    struct RecoveryFixture {
+        temp: tempfile::TempDir,
+        consumer: PathBuf,
+        args: TrialArgs,
+        policy: Policy,
+        intended_tree: String,
+        original: String,
+    }
+
+    impl RecoveryFixture {
+        fn new() -> Self {
+            Self::with_empty_deletion(false)
+        }
+
+        fn with_empty_deletion(delete_empty: bool) -> Self {
+            Self::with_options(delete_empty, false)
+        }
+
+        fn with_options(delete_empty: bool, added_placeholder: bool) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let producer = temp.path().join("producer");
+            std::fs::create_dir(&producer).unwrap();
+            run(&producer, &["init", "-q", "--initial-branch=main"]);
+            run(&producer, &["config", "user.name", "Test"]);
+            run(&producer, &["config", "user.email", "test@example.test"]);
+            let source = |value: &str| {
+                let suffix = if added_placeholder && value != "old" {
+                    "<inference-address>\n"
+                } else {
+                    ""
+                };
+                format!("url={ADDRESS}\n{value}\n{suffix}")
+            };
+            std::fs::write(producer.join("config"), source("old")).unwrap();
+            if delete_empty {
+                std::fs::write(producer.join("empty"), "").unwrap();
+                run(&producer, &["add", "empty"]);
+            }
+            run(&producer, &["add", "config"]);
+            run(&producer, &["commit", "-qm", "Base"]);
+            let base = run(&producer, &["rev-parse", "HEAD"]);
+            run(&producer, &["checkout", "-qb", "topic"]);
+            let mut mails = Vec::new();
+            for (value, message) in [("middle", "First"), ("new", "Second")] {
+                std::fs::write(producer.join("config"), source(value)).unwrap();
+                if delete_empty && value == "new" {
+                    std::fs::remove_file(producer.join("empty")).unwrap();
+                }
+                run(&producer, &["commit", "-qam", message]);
+                mails.push(mail(&producer).replace(ADDRESS, "<inference-address>"));
+            }
+            let intended_tree = run(&producer, &["rev-parse", "HEAD^{tree}"]);
+            let original = run(&producer, &["rev-parse", "HEAD"]);
+            run(temp.path(), &["init", "--bare", "-q", "remote"]);
+            let remote = temp.path().join("remote");
+            run(
+                &producer,
+                &["push", "-q", remote.to_str().unwrap(), "main", "topic"],
+            );
+            let consumer = temp.path().join("consumer");
+            std::fs::create_dir(&consumer).unwrap();
+            run(&consumer, &["init", "-q"]);
+            let mut policy = crate::check::fixtures::push_policy();
+            let push = policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap();
+            push.replacement_base = Some(base.clone());
+            push.replacement_max_commits = 2;
+            push.head = original.clone();
+            policy.commit_author = None;
+            let series = serde_json::json!({"base_commit": base, "commits": mails});
+            let args = TrialArgs {
+                report: temp.path().join("report.json"),
+                series: write(&temp.path().join("replacement.json"), &series),
+                config: write(
+                    &temp.path().join("config.json"),
+                    &serde_json::to_value(&policy.safe_outputs).unwrap(),
+                ),
+                current_base: base,
+                remote: remote.to_str().unwrap().to_owned(),
+                temp: temp.path().to_owned(),
+            };
+            let fixture = Self {
+                temp,
+                consumer,
+                args,
+                policy,
+                intended_tree,
+                original,
+            };
+            fixture.receipt();
+            fixture
+        }
+
+        fn receipt(&self) {
+            let bytes = std::fs::read(&self.args.series).unwrap();
+            let push = self
+                .policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_ref()
+                .unwrap();
+            let checked =
+                crate::check::replacement::check(&bytes, push, self.policy.max_patch_bytes)
+                    .unwrap();
+            write(
+                &self.args.report,
+                &serde_json::json!({"ok": true, "errors": [], "patch": checked}),
+            );
+        }
+
+        fn trial(&self, validate: &dyn Fn(&[u8]) -> Result<()>) -> Result<RecoveredTrial> {
+            trial_recovered(&self.args, &self.consumer, &read, &self.policy, validate)
+        }
+
+        fn clean(&self) {
+            assert!(!self.temp.path().join("replacement-trial").exists());
+            assert!(!self.temp.path().join("replacement-mail.patch").exists());
+            assert!(std::fs::read_dir(self.temp.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp")
+            }));
+        }
+    }
+
+    #[test]
+    fn recovered_trial_binds_predecessors_and_publishes_built_objects() {
+        let original_fixture = RecoveryFixture::new();
+        assert!(trial(&original_fixture.args, &original_fixture.consumer, &read).is_err());
+        let fixture = RecoveryFixture::new();
+        let raw = std::fs::read(&fixture.args.series).unwrap();
+        assert!(
+            !raw.windows(ADDRESS.len())
+                .any(|bytes| bytes == ADDRESS.as_bytes())
+        );
+        // Poisoning a working-tree file cannot supply the preimage.
+        std::fs::write(fixture.consumer.join("config"), "untrusted checkout\n").unwrap();
+        let calls = Cell::new(0);
+        let validate = |bytes: &[u8]| {
+            assert!(std::str::from_utf8(bytes).unwrap().contains(ADDRESS));
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        let trial = fixture.trial(&validate).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(trial.restored_lines, 2);
+        assert_eq!(trial.added_placeholders, 0);
+        assert_eq!(trial.built.tree, fixture.intended_tree);
+        let again = fixture.trial(&validate).unwrap();
+        assert_eq!(trial.built, again.built);
+        assert!(
+            push(
+                &fixture.consumer,
+                &fixture.args.remote,
+                "topic",
+                &fixture.original,
+                &trial.built.head
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            run(Path::new(&fixture.args.remote), &["rev-parse", "topic"]),
+            trial.built.head
+        );
+        assert!(
+            !push(
+                &fixture.consumer,
+                &fixture.args.remote,
+                "topic",
+                &fixture.original,
+                &trial.built.head
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(&fixture.args.series).unwrap(), raw);
+        fixture.clean();
+    }
+
+    #[test]
+    fn recovered_trial_refuses_policy_receipt_and_credential_mismatches() {
+        for case in [
+            "policy",
+            "receipt",
+            "credentials",
+            "bounds",
+            "wrong preimage",
+            "wrong base",
+            "private",
+        ] {
+            let mut fixture = RecoveryFixture::new();
+            match case {
+                "policy" => {
+                    fixture
+                        .policy
+                        .safe_outputs
+                        .push_to_pull_request_branch
+                        .as_mut()
+                        .unwrap()
+                        .head = "3".repeat(40);
+                }
+                "receipt" => {
+                    let mut report: Value =
+                        serde_json::from_slice(&std::fs::read(&fixture.args.report).unwrap())
+                            .unwrap();
+                    report["patch"]["bytes"] = 0.into();
+                    write(&fixture.args.report, &report);
+                }
+                "bounds" => fixture
+                    .policy
+                    .safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .protected_paths
+                    .push("config".into()),
+                "private" => fixture.policy.private = true,
+                "wrong base" => {
+                    let mut series: Value =
+                        serde_json::from_slice(&std::fs::read(&fixture.args.series).unwrap())
+                            .unwrap();
+                    series["base_commit"] = fixture.original.clone().into();
+                    write(&fixture.args.series, &series);
+                    fixture.receipt();
+                }
+                "wrong preimage" => {
+                    let bytes = std::fs::read_to_string(&fixture.args.series)
+                        .unwrap()
+                        .replace("url=", "other=");
+                    std::fs::write(&fixture.args.series, bytes).unwrap();
+                    fixture.receipt();
+                }
+                _ => {}
+            }
+            let validate = |_: &[u8]| {
+                ensure!(case != "credentials", "credential at {ADDRESS}");
+                Ok(())
+            };
+            let error = fixture.trial(&validate).unwrap_err();
+            assert!(!format!("{error:#}").contains(ADDRESS), "{case}");
+            fixture.clean();
+        }
+    }
+
+    #[test]
+    fn recovered_trial_retains_added_placeholders_and_counts_draft_warning() {
+        let fixture = RecoveryFixture::new();
+        let raw = std::fs::read_to_string(&fixture.args.series).unwrap();
+        std::fs::write(
+            &fixture.args.series,
+            raw.replace("+new", "+<inference-address>"),
+        )
+        .unwrap();
+        fixture.receipt();
+        let trial = fixture.trial(&|_| Ok(())).unwrap();
+        assert_eq!(trial.added_placeholders, 1);
+        assert_eq!(
+            run(
+                &fixture.consumer,
+                &["show", &format!("{}:config", trial.built.head)]
+            ),
+            format!("url={ADDRESS}\n<inference-address>")
+        );
+        fixture.clean();
+    }
+
+    #[test]
+    fn recovered_trial_accepts_added_placeholder_as_later_context() {
+        let fixture = RecoveryFixture::with_options(false, true);
+        let trial = fixture.trial(&|_| Ok(())).unwrap();
+        assert_eq!(trial.restored_lines, 2);
+        assert_eq!(trial.added_placeholders, 1);
+        assert_eq!(trial.built.tree, fixture.intended_tree);
+        fixture.clean();
+    }
+
+    #[test]
+    fn recovered_trial_allows_empty_file_deletion_without_a_hunk() {
+        let fixture = RecoveryFixture::with_empty_deletion(true);
+        let trial = fixture.trial(&|_| Ok(())).unwrap();
+        assert_eq!(trial.built.tree, fixture.intended_tree);
+        assert!(
+            git(
+                &fixture.consumer,
+                &["ls-tree", &trial.built.head, "--", "empty"]
+            )
+            .unwrap()
+            .is_empty()
+        );
+        fixture.clean();
+    }
+
+    #[test]
+    fn recovered_trial_bounds_the_entire_reconstructed_series() {
+        let mut fixture = RecoveryFixture::new();
+        fixture.policy.max_patch_bytes = std::fs::metadata(&fixture.args.series).unwrap().len();
+        let error = fixture.trial(&|_| Ok(())).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "recovered series exceeds patch byte limit"
+        );
+        fixture.clean();
+    }
+
+    #[test]
+    fn ordinary_mails_do_not_require_recovery_or_credential_shape_refusal() {
+        let fixture = RecoveryFixture::new();
+        let raw = std::fs::read_to_string(&fixture.args.series).unwrap();
+        std::fs::write(
+            &fixture.args.series,
+            raw.replace("<inference-address>", ADDRESS),
+        )
+        .unwrap();
+        fixture.receipt();
+        let trial = fixture
+            .trial(&|_| panic!("ordinary mails are already checked"))
+            .unwrap();
+        assert_eq!(trial.restored_lines, 0);
+        assert_eq!(trial.built.tree, fixture.intended_tree);
+        fixture.clean();
+    }
+
+    #[test]
+    fn preimage_reads_are_regular_bounded_and_byte_exact() {
+        let fixture = RecoveryFixture::new();
+        let repo = fixture.temp.path().join("producer");
+        let parent = run(&repo, &["rev-parse", "HEAD"]);
+        let expected = format!("url={ADDRESS}\nnew\n");
+        assert_eq!(
+            read_preimage(&repo, &parent, "config", expected.len()).unwrap(),
+            expected.as_bytes()
+        );
+        assert!(read_preimage(&repo, &parent, "config", expected.len() - 1).is_err());
+        assert!(read_preimage(&repo, &parent, "missing", 1024).is_err());
+        std::fs::write(repo.join("alternate"), "substituted preimage\n").unwrap();
+        let substitute = run(&repo, &["hash-object", "-w", "alternate"]);
+        let blob = run(&repo, &["rev-parse", &format!("{parent}:config")]);
+        run(&repo, &["replace", &blob, &substitute]);
+        assert_eq!(
+            read_preimage(&repo, &parent, "config", expected.len()).unwrap(),
+            expected.as_bytes()
+        );
+        std::os::unix::fs::symlink("config", repo.join("link")).unwrap();
+        run(&repo, &["add", "link"]);
+        run(&repo, &["commit", "-qm", "Symlink"]);
+        let parent = run(&repo, &["rev-parse", "HEAD"]);
+        assert!(read_preimage(&repo, &parent, "link", 1024).is_err());
     }
 
     #[test]

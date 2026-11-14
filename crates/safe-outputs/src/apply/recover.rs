@@ -1,18 +1,20 @@
-//! Inactive building block for exact old-side inference-address recovery.
+//! Building block for exact old-side inference-address recovery.
 //!
 //! The threat is a producer using a placeholder as a wildcard for unrelated
 //! public-base content. Only one host:port literal may replace a placeholder,
 //! at the exact old-side path and line, with every other byte matching.
-//! There is deliberately no filesystem, git, logging or publisher integration
-//! here. A future trusted caller must authenticate the public preimage, keep
-//! the result application-only, and use the same revalidated result for trial
-//! and publication. Never use the producer's checkout as the preimage source.
+//! There is deliberately no filesystem, git or logging access here. The
+//! opt-in replacement trial authenticates its public preimage; other callers
+//! must do the same, keep the result application-only, and use it for both trial
+//! and publication. No workflow enables recovery. Never use the producer's
+//! checkout as the preimage source.
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use anyhow::{Result, ensure};
 use regex::Regex;
+use ring::digest::{self, Digest};
 
 use crate::check::read_patch;
 use crate::contract::{COMMIT_RE, PatchRules};
@@ -30,9 +32,15 @@ static HUNK: LazyLock<Regex> = LazyLock::new(|| {
 /// the recovered old-side bytes must not become diagnostics or artifacts.
 pub struct Recovered {
     patch: String,
+    postimages: Vec<Postimage>,
     pub restored_lines: usize,
     /// Added lines remain redacted and need a draft-review warning.
     pub added_placeholders: usize,
+}
+
+struct Postimage {
+    path: String,
+    content: Option<(usize, Digest)>,
 }
 
 impl Recovered {
@@ -40,6 +48,61 @@ impl Recovered {
     pub fn application_patch(&self) -> &str {
         &self.patch
     }
+
+    /// Bind application to the exact authenticated hunk positions, not git's
+    /// context search. Read immutable result blobs, never working-tree files;
+    /// None means an absent path. Errors deliberately disclose no source bytes.
+    pub fn verify_application(
+        &self,
+        mut read: impl FnMut(&str, usize) -> Result<Option<Vec<u8>>>,
+    ) -> Result<()> {
+        for expected in &self.postimages {
+            let actual = read(
+                &expected.path,
+                expected.content.as_ref().map_or(0, |(size, _)| *size),
+            )
+            .map_err(|_| anyhow::anyhow!("recovery result unavailable"))?;
+            let matches = match (&expected.content, actual) {
+                (None, None) => true,
+                (Some((size, hash)), Some(bytes)) => {
+                    bytes.len() == *size
+                        && digest::digest(&digest::SHA256, &bytes).as_ref() == hash.as_ref()
+                }
+                _ => false,
+            };
+            ensure!(
+                matches,
+                "recovery applied at different positions or produced different bytes"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn finish_postimage(
+    path: &str,
+    deleted: bool,
+    mut result: String,
+    old_lines: &[&str],
+    old_position: usize,
+) -> Result<Postimage> {
+    for line in old_lines.get(old_position..).unwrap_or_default() {
+        result.push_str(line);
+        result.push('\n');
+    }
+    ensure!(
+        !deleted || result.is_empty(),
+        "recovery deletion leaves old-side content"
+    );
+    Ok(Postimage {
+        path: path.to_owned(),
+        content: (!deleted).then(|| {
+            (
+                result.len(),
+                digest::digest(&digest::SHA256, result.as_bytes()),
+            )
+        }),
+    })
 }
 
 /// Recover one validated mail against authenticated public BASE.
@@ -101,6 +164,11 @@ pub fn reconstruct(
     let mut added_placeholders = 0;
     let mut in_files = false;
     let mut new_file = false;
+    let mut postimages = Vec::new();
+    let mut file_path = "";
+    let mut postimage = String::new();
+    let mut postimage_lines = 0;
+    let mut deleted = false;
 
     for line in patch.split_inclusive('\n') {
         let text = &line[..line.len() - 1];
@@ -111,7 +179,9 @@ pub fn reconstruct(
                 let expected = old_lines.get(old_position).copied();
                 ensure!(expected.is_some(), "recovery old-side position is absent");
                 let expected = expected.unwrap_or("");
-                if body.contains(PLACEHOLDER) {
+                if body == expected {
+                    output.push_str(line);
+                } else if body.contains(PLACEHOLDER) {
                     ensure!(
                         matches_redaction(body, expected),
                         "recovery old-side mismatch"
@@ -121,8 +191,7 @@ pub fn reconstruct(
                     output.push('\n');
                     restored_lines += 1;
                 } else {
-                    ensure!(body == expected, "recovery old-side mismatch");
-                    output.push_str(line);
+                    anyhow::bail!("recovery old-side mismatch");
                 }
                 old_position += 1;
                 remaining.0 -= 1;
@@ -131,14 +200,42 @@ pub fn reconstruct(
             }
             if prefix == b' ' || prefix == b'+' {
                 remaining.1 -= 1;
+                postimage.push_str(if prefix == b' ' {
+                    old_lines[old_position - 1]
+                } else {
+                    body
+                });
+                postimage.push('\n');
+                postimage_lines += 1;
             }
             if prefix == b'+' {
                 added_placeholders += body.matches(PLACEHOLDER).count();
             }
         } else if text.starts_with("diff --git ") {
+            if in_files {
+                postimages.push(finish_postimage(
+                    file_path,
+                    deleted,
+                    std::mem::take(&mut postimage),
+                    &old_lines,
+                    old_position,
+                )?);
+            }
+            file_path = text
+                .strip_prefix("diff --git a/")
+                .and_then(|header| header.split_once(" b/"))
+                .map(|(path, _)| path)
+                .ok_or_else(|| anyhow::anyhow!("recovery invalid file header"))?;
             in_files = true;
             new_file = false;
             previous_end = 0;
+            old_position = 0;
+            old_lines.clear();
+            deleted = false;
+            postimage_lines = 0;
+            output.push_str(line);
+        } else if in_files && (text == "+++ /dev/null" || text.starts_with("deleted file mode ")) {
+            deleted = true;
             output.push_str(line);
         } else if in_files && text == "--- /dev/null" {
             new_file = true;
@@ -168,7 +265,7 @@ pub fn reconstruct(
             };
             let start = number(1)?;
             remaining = (number(2)?, number(4)?);
-            old_position = if remaining.0 == 0 {
+            let position = if remaining.0 == 0 {
                 start
             } else {
                 start
@@ -176,10 +273,26 @@ pub fn reconstruct(
                     .ok_or_else(|| anyhow::anyhow!("recovery invalid hunk start"))?
             };
             ensure!(
-                old_position >= previous_end
-                    && old_position <= old_lines.len()
+                position >= previous_end
+                    && position <= old_lines.len()
                     && (!new_file || remaining.0 == 0),
                 "recovery hunk position is invalid or overlapping"
+            );
+            for line in &old_lines[old_position..position] {
+                postimage.push_str(line);
+                postimage.push('\n');
+                postimage_lines += 1;
+            }
+            old_position = position;
+            let new_start = number(3)?;
+            let new_position = if remaining.1 == 0 {
+                Some(new_start)
+            } else {
+                new_start.checked_sub(1)
+            };
+            ensure!(
+                new_position == Some(postimage_lines),
+                "recovery inconsistent new-side position"
             );
             previous_end = old_position
                 .checked_add(remaining.0)
@@ -190,6 +303,15 @@ pub fn reconstruct(
         }
         ensure!(output.len() <= limit, "recovered patch exceeds byte limit");
     }
+    if in_files {
+        postimages.push(finish_postimage(
+            file_path,
+            deleted,
+            postimage,
+            &old_lines,
+            old_position,
+        )?);
+    }
     let recovered = read_patch(&output, rules, base);
     ensure!(
         recovered.problems.is_empty() && recovered.files == reading.files,
@@ -197,6 +319,7 @@ pub fn reconstruct(
     );
     Ok(Recovered {
         patch: output,
+        postimages,
         restored_lines,
         added_placeholders,
     })
@@ -350,6 +473,66 @@ mod tests {
             recovered
                 .application_patch()
                 .contains("+url=<inference-address>\n")
+        );
+    }
+
+    #[test]
+    fn duplicate_context_cannot_redirect_a_recovered_hunk() {
+        let preimage = format!("url={ADDRESS}\nold\nurl={ADDRESS}\nold\n");
+        let redirected = mail("@@ -1,2 +3,2 @@\n url=<inference-address>\n-old\n+new\n");
+        let error = recover(&redirected, &preimage).err().unwrap();
+        assert_eq!(error.to_string(), "recovery inconsistent new-side position");
+
+        let patch = mail("@@ -1,2 +1,2 @@\n url=<inference-address>\n-old\n+new\n");
+        let recovered = recover(&patch, &preimage).unwrap();
+        let exact = format!("url={ADDRESS}\nnew\nurl={ADDRESS}\nold\n");
+        recovered
+            .verify_application(|path, limit| {
+                assert_eq!(path, "config");
+                assert_eq!(limit, exact.len());
+                Ok(Some(exact.as_bytes().to_vec()))
+            })
+            .unwrap();
+        let relocated = format!("url={ADDRESS}\nold\nurl={ADDRESS}\nnew\n");
+        for bytes in [Some(relocated.into_bytes()), None] {
+            let error = recovered
+                .verify_application(|_, _| Ok(bytes.clone()))
+                .unwrap_err();
+            assert!(!format!("{error:#}").contains(ADDRESS));
+        }
+    }
+
+    #[test]
+    fn new_positions_include_preceding_hunk_deltas() {
+        let patch =
+            mail("@@ -1 +1,2 @@\n url=<inference-address>\n+inserted\n@@ -3 +4 @@\n-old\n+new\n");
+        let preimage = format!("url={ADDRESS}\nuntouched\nold\n");
+        let recovered = recover(&patch, &preimage).unwrap();
+        let result = format!("url={ADDRESS}\ninserted\nuntouched\nnew\n");
+        recovered
+            .verify_application(|_, _| Ok(Some(result.as_bytes().to_vec())))
+            .unwrap();
+        assert!(recover(&patch.replace("-3 +4", "-3 +3"), &preimage).is_err());
+    }
+
+    #[test]
+    fn application_verification_distinguishes_deleted_and_empty_files() {
+        let original = mail("@@ -1 +0,0 @@\n-url=<inference-address>\n");
+        let deleted = original.replace("+++ b/config", "+++ /dev/null").replace(
+            "index 1234567..abcdef0 100644",
+            "deleted file mode 100644\nindex 1234567..0000000",
+        );
+        let recovered = recover(&deleted, &format!("url={ADDRESS}\n")).unwrap();
+        recovered
+            .verify_application(|_, limit| {
+                assert_eq!(limit, 0);
+                Ok(None)
+            })
+            .unwrap();
+        assert!(
+            recovered
+                .verify_application(|_, _| Ok(Some(Vec::new())))
+                .is_err()
         );
     }
 
