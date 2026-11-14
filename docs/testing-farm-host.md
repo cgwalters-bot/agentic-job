@@ -52,10 +52,13 @@ What that deployment proves is the **contract**, not the tooling: the
 tooling it uses is a reimplementation of the safe-outputs discipline
 precisely because the GitLab publisher and the caller correlation did
 not exist when it was written. Both now do, or are specified (#3604 for
-the GitLab publisher, #3605 for the caller record spec). The rest of
-this document describes the contract the deployment validated, mapped
-onto agentic-job's existing vocabulary, and what would have to change
-to absorb it.
+the GitLab publisher, and the GitLab caller record and artifact
+identity contract as [`specs/gitlab-caller.md`](../specs/gitlab-caller.md),
+which landed after this draft was written). The rest of this document
+describes the contract the deployment validated, mapped onto
+agentic-job's existing vocabulary, and what would have to change to
+absorb it — reading that spec alongside this draft where the two
+overlap, and preferring its field-level choices where they differ.
 
 ## Actors and the trust boundary
 
@@ -198,18 +201,18 @@ only the execution host differs.
 
 Concrete, smallest-first:
 
-1. **A caller-agnostic correlation record** (design already split out
-   as #3605). `external.rs`'s `Record` and `caller_policy` are
-   parameterized on caller identity: today's
-   `GITHUB_REPOSITORY/RUN_ID/RUN_ATTEMPT` becomes a caller kind plus
-   its identity tuple (`CI_PROJECT_PATH`, `CI_PIPELINE_ID`,
-   `CI_JOB_ID` and attempt analogue for GitLab), with the same
-   construction rules — written by the caller before dispatch, never
-   downloaded from the run, validated before any artifact is trusted.
-   The artifacts fetch similarly grows a caller-kind branch: GitLab
-   job artifacts (by job ID and artifact name, digest-verified) in
-   place of Actions artifacts. The Actions path stays the default;
-   nothing about it changes.
+1. **A caller-agnostic correlation record** — now specified upstream
+   as [`specs/gitlab-caller.md`](../specs/gitlab-caller.md), which this
+   draft defers to. Where the draft sketched
+   `CI_PROJECT_PATH`/`CI_PIPELINE_ID`/`CI_JOB_ID`-plus-attempt, the
+   spec drops the attempt analogue (GitLab's pipeline create call
+   returns the pipeline ID directly, so the run-name matching and
+   appearance window GitHub needs have no counterpart), pins the
+   producer's `ci_config_path` and exact pipeline variables where
+   GitHub pins workflow paths and referenced workflows, and replaces
+   Actions artifact IDs and API digests with a job-ID-addressed archive
+   whose fetcher-computed digest is checked against the API's `size`.
+   The Actions path stays the default; nothing about it changes.
 2. **A provisioner surface for external VM hosts.** Not a trait with
    many implementations to start: one module, `provision`, with
    Testing Farm as the reference implementation, exposing submit /
@@ -262,22 +265,33 @@ pattern, but a caller concern, not a contract).
   The deployment's runtime-fetched scoped key is a middle position:
   no CI variable, no broker, single-use guest. This is the one item
   the #3406 findings explicitly left as an operator threat-model
-  decision.
-- **Correlation strength without Actions digests.** GitLab's job
-  artifact API does not hand back a server-computed digest the way
-  Actions artifacts do. Is a caller-computed digest over the fetched
-  bytes (recorded in the caller record before dispatch of the applier)
-  an adequate replacement, or should the record carry the artifact's
-  identity some other way?
+  decision, and the upstream GitLab caller spec keeps it out of scope
+  for the same reason; the new `[host] isolation = "external"`
+  declaration (#3638) reports delegated isolation but retains the
+  credential refusals, so it does not change this question.
+- **Correlation strength without Actions digests.** ~~Is a
+  caller-computed digest over the fetched bytes an adequate
+  replacement?~~ Answered by
+  [`specs/gitlab-caller.md`](../specs/gitlab-caller.md): GitLab job
+  archives have no API digest, so provenance rests on the re-derived
+  job identity, with the fetcher-computed digest checked against the
+  API's `size` as a transport bound rather than as provenance.
 - **Host artifact trust.** The caller fetches artifacts from the
   host's artifact server with host credentials. Is the host trusted
   for artifact integrity (TLS + a trusted internal CA) sufficient, or
   should the guest also write a digest of its proposals somewhere the
-  caller can cross-check? The deployment relies on the former.
+  caller can cross-check? The deployment relies on the former; the
+  upstream spec's launcher layer (the launcher downloads only its
+  request's hand-back and uploads it as its job archive, under the
+  archive bounds) composes with either answer.
 - **Cancellation and cost bounds.** A hung guest burns a VM for the
-  poll deadline. Should the provisioner surface expose cancel-on-
-  deadline as a first-class operation (the deployment just abandons
-  the request and lets the host's own timeout reclaim it)?
+  poll deadline. The upstream spec's launcher layer answers the
+  mechanics — an `after_script` sends `DELETE /v0.1/requests/ID` on
+  cancel or timeout, with the request's pipeline timeout as the
+  backstop — leaving open only whether the provisioner surface should
+  expose cancel as a first-class operation rather than a script
+  detail (the deployment just abandons the request and lets the
+  host's own timeout reclaim it).
 - **Where the state-note pattern lands.** The deployment's
   one-state-note-per-run back to a tracker item is a narrower output
   than the safe-outputs vocabulary (a comment with no write target
