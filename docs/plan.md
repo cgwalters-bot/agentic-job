@@ -299,11 +299,12 @@ credentialless TF/GitLab launch or live publication of this revision.
 
 The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
 [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) is
-designed, not built or deployed. This is its one list of follow-ups, in
-dependency order, for the next replan of
+designed and partly built, not deployed. This is its one list of
+follow-ups, in dependency order, for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-Slices 3 (#3291), 4 and 5 are built. None has run on an external runner.
-Each slice is one implement-sized pull
+Slices 3 (#3291), 4 and 5 are built, off by default; none has run on an
+external runner, and no caller enables them. Each slice is one
+implement-sized pull
 request. None of them enables a profile, changes credentials, broker
 admission or bounds, or adds ostree or any other target. Repositories
 without an owner are under `cgwalters-forge`.
@@ -375,7 +376,8 @@ without an owner are under `cgwalters-forge`.
    never read. It needs no deployment. Implemented for
    [#3293](https://github.com/cgwalters-forge/agentic-job/issues/3293),
    off by default and tested against offline fixtures only
-   ([binary interface](dispatch.md#binary-correlation-interface)).
+   ([binary interface](dispatch.md#binary-correlation-interface)); slice 7
+   still has to pass the receipt.
 6. **actions — External mode of the wrapper.** In
    `.github/workflows/cgwalters-agentic-job.yml`, a mode that runs policy,
    agent and check only: no apply job, no `SAFE_OUTPUTS_PAT`, the kind,

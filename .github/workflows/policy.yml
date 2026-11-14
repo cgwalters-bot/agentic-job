@@ -845,6 +845,9 @@ jobs:
             printf '%s' "$EXTERNAL_RECEIPT" > "$JOB_DIR/external-receipt.json"
             [ "$(jq -er '.record.item' "$JOB_DIR/external-receipt.json")" = "$ISSUE" ] || exit 1
             set -- "$@" --external-receipt "$JOB_DIR/external-receipt.json"
+            # Name apply's default output repository, which the binary
+            # requires in external mode, rather than letting it assume one.
+            [ "$PRIVATE" = true ] || set -- "$@" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
           fi
           "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" --context-request "$CONTEXT_REPOS" \
             --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||

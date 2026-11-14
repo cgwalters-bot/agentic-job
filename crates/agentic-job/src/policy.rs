@@ -927,11 +927,12 @@ pub fn run(args: &Args) -> Result<Exit> {
                 let receipt = crate::external::Receipt::load(path)?;
                 receipt.record.caller_env()?;
                 receipt.record.policy(&policy)?;
+                // Apply takes an omitted output repository to be the calling
+                // one, so external mode needs it named, not assumed.
                 ensure!(
-                    args.output_repo
-                        .as_deref()
-                        .is_none_or(|repo| repo == policy.repo),
-                    "external output repository must be the trusted target"
+                    args.output_repo.as_deref() == Some(policy.repo.as_str()),
+                    "external output repository must be named and be the trusted target {:?}",
+                    policy.repo
                 );
                 policy.external = Some(ExternalRun {
                     caller_repository: receipt.record.caller_repository,
