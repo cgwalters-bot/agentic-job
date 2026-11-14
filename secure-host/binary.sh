@@ -299,7 +299,7 @@ verify_build() {
 # attestation to that run's head SHA before accepting its manifest/checksums.
 # Opt-in: latest main deliberately need not match the workflow checkout.
 fetch_artifact() {
-  local out=$1 base="https://api.github.com/repos/$REPOSITORY" query run commit id stage name
+  local out=$1 base="https://api.github.com/repos/$REPOSITORY" query run commit id stage name inventory_bytes
   local pin=${BUILD_COMMIT-}
   [ -z "$pin" ] || [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || fail "BUILD_COMMIT must be a full commit SHA"
   stage=$(mktemp -d "$(realpath "$out")/artifact.XXXXXXXX")
@@ -318,8 +318,14 @@ fetch_artifact() {
   # Bound download and decompression even if metadata lies or the ZIP is a bomb.
   (ulimit -f 262144; github "$stage/payload.zip" "" "$base/actions/artifacts/$id/zip" api "repos/$REPOSITORY/actions/artifacts/$id/zip")
   printf '%s\n' release.json provenance.jsonl "${NAMES[@]/%/-$TARGET}" "$OBJECT" | sort > "$stage/expected"
-  unzip -Z1 "$stage/payload.zip" | sort > "$stage/names"
-  cmp -s "$stage/expected" "$stage/names" || fail "unexpected or duplicate artifact files"
+  # A hostile central directory can exhaust disk/time before attestation. Bound
+  # the listing before sorting, retaining one extra byte to detect overflow.
+  inventory_bytes=$(stat -c %s "$stage/expected")
+  timeout --kill-after=5 120 bash -o pipefail -c 'unzip -Z1 "$1" | head -c "$2" > "$3"' _ \
+    "$stage/payload.zip" "$(( inventory_bytes + 1 ))" "$stage/names" || fail "artifact inventory failed or exceeded its bounds"
+  [ "$(stat -c %s "$stage/names")" -le "$inventory_bytes" ] || fail "artifact inventory too large"
+  sort -o "$stage/names" "$stage/names"
+  cmp -s "$stage/expected" "$stage/names" || fail "unexpected or duplicate artifact inventory files"
   for name in release.json provenance.jsonl "${NAMES[@]/%/-$TARGET}" "$OBJECT"; do
     timeout 120 bash -o pipefail -c 'unzip -p "$1" "$2" | head -c 268435457 > "$3"' _ "$stage/payload.zip" "$name" "$stage/$name" || fail "artifact extraction failed: $name"
     [ "$(stat -c %s "$stage/$name")" -le 268435456 ] || fail "artifact file too large: $name"
