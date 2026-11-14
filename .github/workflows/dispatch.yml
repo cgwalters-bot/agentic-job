@@ -214,8 +214,8 @@ jobs:
       # its reason as the closing comment (dispatch.toml bounds how many).
       # Implement may deliver one comment on the fixed item, still intersected
       # with caller bounds; task/plan prose never grants a capability.
-      outputs: ${{ inputs.kind == 'review' && 'add_comment,noop' || (inputs.kind == 'implement' && 'create_pull_request,add_comment,noop,missing_tool,missing_data' || (inputs.kind == 'fix' && 'push_to_pull_request_branch,noop,missing_tool,missing_data' || (inputs.kind == 'triage' && 'close_issue,add_comment,noop,missing_tool,missing_data' || 'add_comment,noop,missing_tool,missing_data'))) }}
-      max-outputs: ${{ inputs.kind == 'review' && '1' || (inputs.kind == 'triage' && 'max' || '3') }}
+      outputs: ${{ inputs.kind == 'review' && 'add_comment,noop,add_labels' || (inputs.kind == 'implement' && 'create_pull_request,add_comment,noop,missing_tool,missing_data' || (inputs.kind == 'fix' && 'push_to_pull_request_branch,noop,missing_tool,missing_data' || (inputs.kind == 'triage' && 'close_issue,add_comment,noop,missing_tool,missing_data' || 'add_comment,noop,missing_tool,missing_data'))) }}
+      max-outputs: ${{ inputs.kind == 'review' && '2' || (inputs.kind == 'triage' && 'max' || '3') }}
       allow: .github/agentic-job/dispatch.toml
       agent: ${{ needs.target.outputs.agent }}
       model: ${{ needs.target.outputs.agent != 'fake' && vars.AGENT_MODEL || '' }}

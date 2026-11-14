@@ -192,12 +192,59 @@ pub(super) fn inline_section<'a>(items: impl IntoIterator<Item = &'a Value>) -> 
 /// that the submitted body fits the pass's bound; any other's holds none
 /// (classifier.rs). Which pull request the result names is the caller's
 /// to check against the one it bound.
+#[cfg(test)]
 pub fn check_outputs(output: &Value, number: &str, classifier: bool) -> Result<Option<Verdict>> {
+    check_scoped(output, number, classifier, "", &Value::Null)
+}
+
+/// The caller's existing add_labels bound, never agent-supplied configuration.
+pub(super) fn check_scoped(
+    output: &Value,
+    number: &str,
+    classifier: bool,
+    repo: &str,
+    label_bound: &Value,
+) -> Result<Option<Verdict>> {
     let Some(number) = positive(&Value::String(number.to_owned())) else {
         bail!("Review target must be a pull request number");
     };
-    let (inline, others): (Vec<&Value>, Vec<&Value>) =
-        items(output).iter().partition(|i| is_inline(i));
+    let (labels, rest): (Vec<&Value>, Vec<&Value>) = items(output)
+        .iter()
+        .partition(|i| i["type"] == "add_labels");
+    ensure!(labels.len() <= 1, "Review may request labels at most once");
+    if let Some(label) = labels.first() {
+        let allowed = label_bound["allowed"].as_array();
+        ensure!(
+            !classifier
+                && label_bound["max"] == 1
+                && allowed.is_some_and(|a| a.len() == 1 && a[0].is_string())
+                && label_bound["blocked"].as_array().is_none_or(|blocked| {
+                    !blocked.iter().any(|name| {
+                        name.as_str().is_some_and(|name| {
+                            allowed
+                                .and_then(|a| a.first())
+                                .and_then(Value::as_str)
+                                .is_some_and(|label| name.eq_ignore_ascii_case(label))
+                        })
+                    })
+                })
+                && !repo.is_empty()
+                && label["repo"] == repo
+                && positive(&label["item_number"]) == Some(number)
+                && label["labels"].as_array() == allowed
+                && label
+                    .as_object()
+                    .is_some_and(|fields| fields.keys().all(|key| [
+                        "type",
+                        "repo",
+                        "item_number",
+                        "labels"
+                    ]
+                    .contains(&key.as_str()))),
+            "Review escalation needs the caller's singleton add_labels bound on the reviewed PR; classifiers cannot escalate"
+        );
+    }
+    let (inline, others): (Vec<&Value>, Vec<&Value>) = rest.into_iter().partition(|i| is_inline(i));
     let [item] = others[..] else {
         bail!("Review must return exactly one comment or noop");
     };
@@ -207,7 +254,7 @@ pub fn check_outputs(output: &Value, number: &str, classifier: bool) -> Result<O
     );
     if item["type"] == "noop" {
         ensure!(
-            inline.is_empty(),
+            inline.is_empty() && labels.is_empty(),
             "Review inline comments need a verdict comment, not a noop"
         );
         return Ok(None);

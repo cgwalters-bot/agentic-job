@@ -82,6 +82,24 @@ fn inline_request() -> String {
     )
 }
 
+fn review_request(request: &str) -> bool {
+    request == VERDICT_ONLY
+        || request == inline_request()
+        || request == "add_comment,noop,add_labels/2"
+        || request == format!("add_comment,noop,{REVIEW_COMMENT},add_labels/12")
+}
+
+/// Plumbing of the effective safe-output bound from trusted policy to check
+/// and submit, not a second caller option. Unset keeps escalation off.
+fn review_label_bound(env: &dyn Fn(&str) -> String) -> Result<Value> {
+    let bound = env("REVIEW_LABEL_BOUND");
+    if bound.is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(&bound).context("reading the review's add_labels bound")
+    }
+}
+
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Validate the dispatch environment and print the read-only API target
@@ -246,7 +264,14 @@ impl Command {
                     ),
                 };
                 let checked = read_output(collected).and_then(|output| {
-                    let verdict = verdict::check_outputs(&output, target, bound.is_some())?;
+                    let labels = review_label_bound(&env)?;
+                    let verdict = verdict::check_scoped(
+                        &output,
+                        target,
+                        bound.is_some(),
+                        &env("REVIEW_REPO"),
+                        &labels,
+                    )?;
                     if let (Some(bound), Some(_)) = (&bound, verdict) {
                         ensure!(
                             target == &bound.pr.to_string(),
@@ -409,7 +434,7 @@ fn check_request(env: impl Fn(&str) -> String) -> Result<()> {
     ensure!(
         env("EVENT") == "true"
             && env("KIND") == "analysis"
-            && (request == inline_request() || request == VERDICT_ONLY)
+            && review_request(&request)
             && (env("ADVISORY") != "true" || request == VERDICT_ONLY)
             && env("NOTIFY") == "none"
             && env("TARGET").is_empty()
@@ -530,10 +555,12 @@ fn merge_statement(policy: MergePolicy) -> String {
         "\n\n## Merge policy\n\n{source}; it is a fact, not a question for this review: {who}\n\
          Where the ruleset requires code-owner review, paths that the base's CODEOWNERS file \
          (in .github/, the root or docs/, the first GitHub finds) assigns an owner also wait for that \
-         owner, whatever your verdict; you cannot see the ruleset, so review those paths as hard as any \
+         owner, whatever your verdict; CODEOWNERS alone does not block merging. You cannot see the ruleset, so review those paths as hard as any \
          other. If the pull request changes any, or changes the merge policy file or a CODEOWNERS file, \
-         which changes who decides, add a line after the verdict line: \"Needs the owner's review: \" \
-         and those paths.\n"
+         which changes who decides, add a line after the verdict line: \"Code-owner paths (approval required only where enforced by the ruleset): \" \
+         and those paths. Repository merge policy is authoritative; do not invent a universal human-review gate. \
+         Preserve explicit repository restrictions. Ask for human review only for a stated concrete security risk \
+         that you cannot bound, explaining the risk and what remains unbounded.\n"
     )
 }
 
@@ -564,7 +591,8 @@ impl Dispatch {
         let head = Some(env("REQUESTED_HEAD")).filter(|head| !head.is_empty());
         let request = format!("{}/{}", env("OUTPUTS"), env("MAX_OUTPUTS"));
         // Inline comments only where review.yml asks, which names a head.
-        let outputs = request == VERDICT_ONLY || (head.is_some() && request == inline_request());
+        let outputs =
+            review_request(&request) && (head.is_some() || !request.contains(REVIEW_COMMENT));
         ensure!(
             env("REVIEW") == "true"
                 && env("EVENT") == "false"
@@ -736,6 +764,8 @@ mod tests {
         let mut accepted = vec![
             json!({}),
             json!({"OUTPUTS":"add_comment,noop", "MAX_OUTPUTS":"1"}),
+            json!({"OUTPUTS":"add_comment,noop,add_labels", "MAX_OUTPUTS":"2"}),
+            json!({"OUTPUTS":"add_comment,noop,create_pull_request_review_comment,add_labels", "MAX_OUTPUTS":"12"}),
         ];
         accepted.extend(REVIEW_AGENTS.map(|agent| json!({"AGENT":agent})));
         for changes in accepted {
@@ -767,12 +797,11 @@ mod tests {
         let workflow = std::fs::read_to_string(root.join(".github/workflows/review.yml")).unwrap();
         assert!(workflow.contains(&format!(
             "\n      outputs: {}\n      max-outputs: '{}'\n",
-            original["OUTPUTS"].as_str().unwrap(),
-            original["MAX_OUTPUTS"].as_str().unwrap()
+            "add_comment,noop,create_pull_request_review_comment,add_labels", "12"
         )));
         for bounds in ["review.toml", "review-command.toml"] {
             let text = std::fs::read_to_string(root.join("workflow").join(bounds)).unwrap();
-            assert!(text.contains("\nmax_outputs = 11\n"), "{bounds}");
+            assert!(text.contains("\nmax_outputs = 12\n"), "{bounds}");
             assert!(
                 text.contains(&format!(
                     "\n{REVIEW_COMMENT} = {{ max = {REVIEW_COMMENTS_MAX} }}\n"
@@ -865,7 +894,12 @@ mod tests {
         }
         for statement in [&agent, &person, &unset] {
             assert!(statement.contains("it is a fact, not a question for this review"));
-            assert!(statement.contains("\"Needs the owner's review: \" and those paths"));
+            assert!(statement.contains(
+                "Code-owner paths (approval required only where enforced by the ruleset):"
+            ));
+            assert!(statement.contains("CODEOWNERS alone does not block merging"));
+            assert!(statement.contains("do not invent a universal human-review gate"));
+            assert!(statement.contains("concrete security risk that you cannot bound"));
             assert!(statement.contains("review those paths as hard as any other"));
             assert!(statement.contains("changes the merge policy file or a CODEOWNERS file"));
         }
@@ -1017,6 +1051,27 @@ mod tests {
             &json!({"OUTPUTS":"add_comment,noop", "MAX_OUTPUTS":"1"}),
         );
         assert!(request(&verdict).is_ok());
+        for changes in [
+            json!({"OUTPUTS":"add_comment,noop,add_labels", "MAX_OUTPUTS":"2"}),
+            json!({"OUTPUTS":"add_comment,noop,create_pull_request_review_comment,add_labels", "MAX_OUTPUTS":"12"}),
+        ] {
+            let escalation = merged(&original, &changes);
+            assert!(request(&escalation).is_ok());
+            assert!(
+                request(&merged(
+                    &escalation,
+                    &json!({"REVIEW_DRAFT_CLASSIFIER":"true"})
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            request(&merged(
+                &environment(),
+                &json!({"OUTPUTS":"add_comment,noop,add_labels", "MAX_OUTPUTS":"2"})
+            ))
+            .is_ok()
+        );
         for (changes, want) in [
             (json!({"REQUESTED_HEAD":"a".repeat(39)}), "40-hex"),
             (json!({"REQUESTED_HEAD":"A".repeat(40)}), "40-hex"),

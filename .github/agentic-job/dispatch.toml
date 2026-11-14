@@ -12,6 +12,7 @@ max_patch_files = 50
 create_pull_request = { max = 1 }
 add_comment = { max = 1 }
 noop = { max = 1 }
+add_labels = { max = 1, allowed = ["needs-human"] }
 missing_tool = { max = 1 }
 missing_data = { max = 1 }
 # Triage only: close issues of `repos` a run finds finished or overtaken,

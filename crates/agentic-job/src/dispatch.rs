@@ -112,7 +112,15 @@ is at least one blocker, and VERDICT: APPROVE otherwise, or noop. Name the exact
 SHA and cite files and lines for actionable findings, most important first. In an approving \
 review, list important findings and nits under a \"Follow-ups\" heading, each with its file and \
 line, for later pull requests. When there is a blocker, the fix may take important findings and \
-nits along. Do not include a Verification: paragraph. A verdict is not merge authority.";
+nits along. Do not include a Verification: paragraph. A verdict is not merge authority. \
+Repository merge policy from the trusted base is authoritative. GitHub rulesets enforce required \
+human or code-owner approval; CODEOWNERS alone does not block merging. Do not invent a universal \
+human-review gate, and preserve explicit repository restrictions. Ask for human review only for a \
+stated concrete security risk you cannot bound, explaining what remains unbounded. If the caller's \
+safe-output bounds offer add_labels with max 1 and a singleton allowed list, you may request that \
+exact label once beside a verdict for that risk, never alone or with noop. Use only type, repo \
+(the reviewed repository), item_number (the reviewed PR) and labels (the configured singleton). \
+No other labels, targets, aliases or removals; without the bound, request escalation in the verdict only.";
 
 const FIX: &str = "Fix works in a checkout of the pull request's branch at its pinned head; the \
 change is pushed to that branch as one commit. Use noop, missing_tool or missing_data when needed.";
@@ -994,7 +1002,7 @@ mod tests {
         let (result, _) = dispatch(&[("PROFILE", "review")], Ok(pull()));
         let task = result.unwrap().task;
         let head = "Profile: review. Review the pinned head supplied by the runner. Before reading the code, try the change as a user would.";
-        let end = "Do not include a Verification: paragraph. A verdict is not merge authority. Set only type and body on add_comment; do not set item_number or other routing fields: the workflow fixes the target.";
+        let end = "Set only type and body on add_comment; do not set item_number or other routing fields: the workflow fixes the target.";
         assert!(task.starts_with(head), "{task}");
         assert!(task.ends_with(&format!("{end}{TAIL}")), "{task}");
         for text in [
@@ -1099,12 +1107,13 @@ mod tests {
         assert!(standing.contains(routing));
         for text in [
             "Whether your approval merges is the repository owner's decision, stated under \"Merge policy\"",
-            "Without that section, a person approves every merge after you.",
-            "Ask for a person only when you find a concrete risk you cannot bound, and say which.",
+            "CODEOWNERS alone does not block merging.",
+            "Ask for human review only for a stated concrete security risk you cannot bound",
         ] {
             assert!(standing.contains(text), "{text}");
         }
         assert!(!standing.contains("merge gate for every change here"));
+        assert!(!standing.contains("Without that section, a person approves every merge"));
     }
 
     /// Only triage may close issues, and only of the target: the item may
