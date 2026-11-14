@@ -85,7 +85,7 @@ jobs:
       # archive: ci runs it from that archive, and release pushes it as it is.
       - name: The secure-host image
         run: |
-          podman build --file secure-host/Containerfile --tag localhost/secure-host:build dist
+          podman build --file secure-host/Containerfile --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --tag localhost/secure-host:build dist
           mkdir image
           podman save --format oci-archive --output image/secure-host.tar localhost/secure-host:build
       - id: image

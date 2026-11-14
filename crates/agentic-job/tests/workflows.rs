@@ -6961,6 +6961,39 @@ fn the_image_holds_and_installs_the_secure_host_binary() {
     }
 }
 
+/// Source metadata follows the build repository, not the project's former owner.
+#[test]
+fn image_source_follows_the_build_repository() {
+    let containerfile = workflow("secure-host/Containerfile");
+    assert!(!containerfile.contains("LABEL org.opencontainers.image.source="));
+    for repository in ["example-org/runner", "new-org/runner"] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(
+            &dir.path().join("podman"),
+            "#!/bin/bash\nprintf '%s\\n' \"$@\"\n",
+        );
+        let search = format!("{}:/usr/bin:/bin", dir.path().display());
+        let result = run_step(
+            "build.yml",
+            "The secure-host image",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("GITHUB_SERVER_URL", "https://github.example"),
+                ("GITHUB_REPOSITORY", repository),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        let args = String::from_utf8(result.stdout).unwrap();
+        assert!(
+            args.contains(&format!(
+                "--label\norg.opencontainers.image.source=https://github.example/{repository}\n"
+            )),
+            "{args}"
+        );
+    }
+}
+
 /// Execute the published-path acceptance itself, not a copy of its logic.
 #[test]
 fn published_path_requires_the_effective_deployments_executables_and_compatibility() {

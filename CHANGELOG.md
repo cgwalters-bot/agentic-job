@@ -13,6 +13,9 @@ says what a caller may rely on across versions.
   a minimal GitHub caller with generic host settings, and an explicit route
   to the deterministic GitLab example, without assuming project deployment access.
 
+- Secure-host image builds derive their OCI source label from the build's
+  repository, so an organization transfer does not retain the former owner.
+
 - Opt-in endpoint-redacted patch replay authenticates deletion/context bytes
   against an independently fetched declared base before publication. Artifacts
   stay redacted; only primary native GitHub pull requests support replay.
