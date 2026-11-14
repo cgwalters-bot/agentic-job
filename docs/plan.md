@@ -212,6 +212,14 @@ A published-PR control keeps the same diagnostic from turning success into failu
 JavaScript test and its result helper, not upstream handler execution, and proves
 local behavior only; no runtime control or caller setting changes.
 
+Issue-creation admission now runs in `tests/create_issue.rs` through Rust's
+policy, collector and checker: per-type count, required title/body, refusal of
+parent relationships, and case-insensitive allowed/blocked labels, including
+empty allowlists. Each case uses fresh artifacts and accepted requests are
+checked exactly. This replaces the corresponding legacy corpus block with native
+collector coverage; the separate upstream parity drivers and gated key-bearing
+fixtures remain. No runtime control, permission or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
