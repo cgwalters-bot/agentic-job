@@ -3028,6 +3028,13 @@ updates the description. Any pending or running job for this context
 whose URL is not this run's refuses, even if an even newer job matches:
 GitLab could otherwise update that unfinished job, stealing its identity.
 
+Every listed job must carry the exact string `name`, `sha` and `ref`
+requested, not just the newest job. Missing, null, wrongly typed or different
+values refuse rather than trusting the API's query filters. Loopback regression
+tests cover each field on the first and a later page, at both preflight and
+final publication, and assert that refusal sends no mutation. These tests do
+not prove live GitLab filtering or eliminate the races below.
+
 These reads are not a transaction. A pipeline can disappear, a competing
 run can publish between the read and POST, and GitLab can reject the
 request (including pending conflicts, 409 update conflicts or 422 job
