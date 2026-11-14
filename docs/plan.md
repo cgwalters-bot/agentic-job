@@ -128,6 +128,15 @@ refuses all three ambiguous patches. Explicit-mode ordinary edits remain positiv
 controls. This supplements the legacy corpus comparison without removing its
 old-tree/upstream coverage or bypassing the fixture-deletion prerequisite.
 
+The bounded-update corpus now runs in `tests/bounded_updates.rs` through Rust's
+`policy`, `collect` and `check` commands. It pins issue-body and PR-title admission,
+body-section operations, explicit repository/target requirements, forbidden fields
+(including draft and branch changes), and marking ready only with an explicit
+bound. Accepted cases assert the sanitized items as well as the exit/verdict;
+refusals assert their diagnostics. Only the replaced new-check JavaScript test is
+removed; old-tree comparisons, upstream drivers and gated fixtures remain.
+This adds no runtime control or caller setting.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
