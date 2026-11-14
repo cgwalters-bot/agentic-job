@@ -189,6 +189,14 @@ specific diagnostics. This supplements, rather than removes, the legacy parity
 cases pending the caller-evidence gate above. No runtime control, permission or
 caller setting changes.
 
+Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
+the real collector/checker accepts the matching request, patch and base, and
+refuses missing, extra or renamed patches, a different request branch, an orphan
+patch, and missing or mismatched base repository/ref/commit metadata. This makes
+those corpus behaviors testable without Node or external checkouts. The legacy
+old-tree/upstream comparisons remain intact; this is preparation for cleanup,
+not evidence that the parity or fixture-deletion prerequisites are satisfied.
+
 The scripted end-to-end comment fixtures and CI's negative-publication filter
 are checked by `scripted_comments` tests in `crates/agentic-job/tests/workflows.rs`,
 replacing their JavaScript assertions. These local tests preserve fixed caller
@@ -212,13 +220,13 @@ A published-PR control keeps the same diagnostic from turning success into failu
 JavaScript test and its result helper, not upstream handler execution, and proves
 local behavior only; no runtime control or caller setting changes.
 
-Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
-the real collector/checker accepts the matching request, patch and base, and
-refuses missing, extra or renamed patches, a different request branch, an orphan
-patch, and missing or mismatched base repository/ref/commit metadata. This makes
-those corpus behaviors testable without Node or external checkouts. The legacy
-old-tree/upstream comparisons remain intact; this is preparation for cleanup,
-not evidence that the parity or fixture-deletion prerequisites are satisfied.
+The create-issue admission corpus now runs in `tests/create_issue.rs` through
+Rust `policy`, `collect` and `check`: per-type counts, required fields, parent-link
+refusal and case-insensitive label allow/block rules. Each case has fresh artifacts;
+accepted cases assert exact items and refused cases assert diagnostics. Label bounds
+come from TOML policy generation rather than modifying serialized policy. Only the
+replaced JavaScript test is removed; the key fixture, old-tree setup and upstream
+parity drivers remain. No runtime control or caller setting changes.
 
 ## Deployment
 
