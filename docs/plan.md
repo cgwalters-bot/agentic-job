@@ -90,6 +90,15 @@ title/branch prefixes in both the JSON file and exported environment. These two
 tests replace their JavaScript equivalents without changing publication behavior
 or the retained upstream-handler execution tests.
 
+The patch-application guard tests now run in Rust's `tests/apply_workflow.rs`,
+executing the shipped shell and real Git on temporary repositories. They retain
+ordinary, CRLF and Unicode-path success cases, checked-path and unrelated-base
+refusals, and refusal to follow a rename into a protected path. Successful trials
+must emit the exact expected tree; refused trials must emit none. Their former
+JavaScript tests are removed, without changing runtime behavior or upstream
+handler coverage. Remaining local shell-step ports remain separate from live
+deployment acceptance.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

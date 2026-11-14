@@ -967,6 +967,121 @@ fn commit(dir: &Path, content: &str) -> String {
 }
 
 #[test]
+fn patch_guard_requires_checked_paths_and_related_base() {
+    for (case, filename, files, unrelated, expected) in [
+        ("ordinary", "file.txt", vec!["file.txt"], false, 0),
+        ("CRLF", "file.txt", vec!["file.txt"], false, 0),
+        ("Unicode", "café.txt", vec!["café.txt"], false, 0),
+        ("unchecked path", "file.txt", vec!["other.txt"], false, 1),
+        ("empty paths", "file.txt", vec![], false, 4),
+        ("unrelated base", "file.txt", vec!["file.txt"], true, 1),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let repo = root.join("repo");
+        let outputs = root.join("outputs");
+        fs::create_dir(&outputs).unwrap();
+        git(root, &["init", "-q", repo.to_str().unwrap()]);
+        identity(&repo);
+        let cr = if case == "CRLF" { "\r" } else { "" };
+        fs::write(repo.join(filename), format!("before{cr}\n")).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        git(
+            &repo,
+            &["update-ref", "refs/agentic-job/target-base", &base],
+        );
+        fs::write(repo.join(filename), format!("after{cr}\n")).unwrap();
+        git(&repo, &["commit", "-qam", "edit"]);
+        let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let patch = outputs.join("aw-test.patch");
+        write_patch(&repo, &patch);
+        git(&repo, &["reset", "--hard", &base]);
+        if unrelated {
+            git(&repo, &["checkout", "--orphan", "unrelated"]);
+            git(&repo, &["commit", "-qm", "unrelated root"]);
+            git(
+                &repo,
+                &["update-ref", "refs/agentic-job/target-base", "HEAD"],
+            );
+        }
+        json_file(
+            root,
+            "report.json",
+            &json!({"patch": {
+                "file":"aw-test.patch", "base_commit":base, "files":files
+            }}),
+        );
+        status(&run_step(&repo, "Configure git", &[]), 0);
+        assert_eq!(git(&repo, &["config", "merge.renames"]), "false");
+        assert_eq!(git(&repo, &["config", "am.keepcr"]), "true");
+        let output = root.join("output");
+        let out = run_step(
+            &repo,
+            TRIAL,
+            &[
+                ("REPORT", root.join("report.json").to_str().unwrap()),
+                ("RUNNER_TEMP", root.to_str().unwrap()),
+                ("GH_AW_TMP", outputs.to_str().unwrap()),
+                ("REPO", "owner/repo"),
+                ("BASE", "main"),
+                ("GITHUB_OUTPUT", output.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(expected), "{case}: {}", text(&out));
+        if expected == 0 {
+            assert_eq!(
+                fs::read_to_string(&output).unwrap(),
+                format!("tree={tree}\n"),
+                "{case}"
+            );
+        } else {
+            assert!(!output.exists(), "{case}: refused trial emitted a tree");
+        }
+        if case == "CRLF" {
+            git(&repo, &["am", "--3way", patch.to_str().unwrap()]);
+            assert_eq!(fs::read(repo.join(filename)).unwrap(), b"after\r\n");
+        }
+    }
+}
+
+fn write_patch(repo: &Path, patch: &Path) {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(["format-patch", "-1", "--stdout"])
+        .output()
+        .unwrap();
+    status(&out, 0);
+    // Preserve the mail bytes, including CRLF, rather than trimming text.
+    fs::write(patch, out.stdout).unwrap();
+}
+
+#[test]
+fn patch_guard_does_not_follow_rename_into_protected_path() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    identity(root);
+    let base = commit(root, "before\n");
+    commit(root, "after\n");
+    let patch = root.join("mail.patch");
+    write_patch(root, &patch);
+    git(root, &["reset", "--hard", &base]);
+    git(root, &["mv", "file.txt", ".envrc"]);
+    git(root, &["commit", "-qm", "rename"]);
+    status(&run_step(root, "Configure git", &[]), 0);
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(["am", "--3way"])
+        .arg(&patch)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(fs::read_to_string(root.join(".envrc")).unwrap(), "before\n");
+}
+
+#[test]
 fn document_handler_keeps_policy_authority_and_fixed_comment_target() {
     let dir = TempDir::new().unwrap();
     let config =
