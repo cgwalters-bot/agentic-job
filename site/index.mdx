@@ -76,13 +76,25 @@ repository's own deployment callers, it needs no project-specific settings.
 
 ## Compared with GitHub Agentic Workflows
 
-For most people [gh-aw](https://github.github.com/gh-aw/) is the right
-choice today: it has far more output types and triggers, and memory
-across runs. agentic-job checks and applies gh-aw's safe
-outputs with gh-aw's own pinned code, but runs the agent as an
-unprivileged user on a hardened runner rather than in a container, so
-the work can use containers, `/dev/kvm` and user namespaces, and you
-write ordinary workflow YAML with no compiler.
+agentic-job is for work that needs a [hardened host-user sandbox](../docs/sandbox.md)
+with rootless containers, `/dev/kvm` and user namespaces, and
+[ACP sessions](../docs/harness.md) rather than an engine-specific integration.
+[secure-host](../docs/secure-host.md) removes general root access before the
+agent runs. [Check runs on a separate runner](../docs/safe-outputs.md), then
+one apply job publishes the admitted outputs without executing agent code.
+
+The agent holds no forge write token or provider key; it does hold a read-only
+forge token and a run token. [Inference goes through a broker](../docs/inference.md)
+on another machine. [Credentialed MCP is refused](../docs/mcp.md) until an
+external proxy route is supported. Beyond GitHub, there is a
+[GitLab policy/check/apply path](../docs/gitlab.md), not yet a supported live
+agent pipeline, and [limited Forgejo publishing](../docs/safe-outputs.md#publishing-to-forgejo).
+
+[gh-aw](https://github.github.com/gh-aw/) is the better fit when you want its
+[workflow catalogue](https://github.github.com/gh-aw/gallery/),
+[GitHub-native Markdown authoring and compiler](https://github.github.com/gh-aw/setup/creating-workflows/),
+or its [community](https://github.com/orgs/community/discussions/186451).
+agentic-job callers instead write [ordinary workflow YAML](../docs/workflow.md).
 [The comparison](../docs/background-ghaw.md) lists the differences item by item.
 
 ## Read more

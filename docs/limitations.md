@@ -2,10 +2,9 @@
 
 > This text is LLM generated.
 
-For most people [gh-aw](https://github.com/github/gh-aw) is the right choice
-today. agentic-job runs the agent as a host user, not in a container
-([why](background-ghaw.md#why-a-host-user-and-not-a-container)). Only its
-authors have used it. See [deployment examples and evidence](workflow.md#what-has-run-and-what-has-not)
+agentic-job's [host-user sandbox and ACP sessions](background-ghaw.md#where-each-fits)
+come with the limits below. See
+[deployment examples and evidence](workflow.md#what-has-run-and-what-has-not)
 for what has actually run; a passing local test is not deployment proof.
 
 Standalone container runs can explicitly set `[host] isolation = "external"`.
@@ -41,6 +40,13 @@ tests do not prove Kubernetes Pod Security or a live GitLab inference deployment
   a real agent needs a broker ([refused for now](inference.md#a-provider-api-key)).
   Where an agent job of your own uses a key, nothing outside the provider
   caps what it spends.
+- The agent still holds a read-only forge token and a broker run token
+  ([which tokens reach what](workflow.md#which-tokens-reach-what)); this is
+  not credentialless operation. Credentialed MCP is refused in runner mode;
+  the external proxy route is [future work](mcp.md#future-external-route).
+- The [GitLab path](gitlab.md) covers policy/check/apply, not a supported live
+  agent pipeline. [Forgejo publishing](safe-outputs.md#publishing-to-forgejo)
+  supports a subset of GitHub outputs; the linked guide lists the supported types.
 - A broker admits a caller's own agent job by repository, allowing any
   workflow in it ([inference admission](inference.md#which-workflows-a-broker-admits)).
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
@@ -48,7 +54,8 @@ tests do not prove Kubernetes Pod Security or a live GitLab inference deployment
   ([checking the token first](workflow.md#checking-the-token-before-the-agent)).
 - Pushing to a stale fork with a PAT that lacks the `workflow` scope has
   not been tried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
-- Most of gh-aw's catalogue is not supported. Pull requests from forks do
+- Most of [gh-aw's catalogue](https://github.github.com/gh-aw/gallery/) is not supported
+  ([comparison](background-ghaw.md#where-each-fits)). Pull requests from forks do
   not get the end-to-end jobs that write. Setup takes two to five minutes
   on a hosted runner ([#188](https://github.com/cgwalters-forge/agentic-job/issues/188)).
 

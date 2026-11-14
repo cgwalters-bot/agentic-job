@@ -15,6 +15,35 @@ Its gh-aw compatibility pin is still **v0.91.12-7**, not v1.2.2; refreshing
 this comparison does not upgrade the collector fixtures, validation data or
 apply handlers ([what is borrowed](safe-outputs.md#what-is-gh-aws-and-why)).
 
+## Where each fits
+
+Choose agentic-job when the work needs a [host-user sandbox](sandbox.md) with
+rootless containers, `/dev/kvm` and user namespaces, or when you want one
+[ACP session protocol](harness.md) across agents. Its
+[secure-host hardening](secure-host.md) removes general root access before
+untrusted steps run and can also be used without an agent. Outputs are
+[checked on a separate runner](safe-outputs.md) before one apply job publishes
+the admitted requests; that job never executes agent-produced code.
+
+The credential boundary is specific: the agent has no provider key or forge
+write token, but it can read the job's read-only forge token and broker run
+token ([token placement](workflow.md#which-tokens-reach-what)).
+[Inference is proxied through a broker on another machine](inference.md).
+[Credentialed MCP is refused](mcp.md); the external proxy route is future work,
+not a deployed credentialless MCP service.
+
+The CLI also supports a [GitLab policy/check/apply path](gitlab.md) and
+[Forgejo comments and pull requests](safe-outputs.md#publishing-to-forgejo).
+These are not equivalent to the GitHub reusable workflow: GitLab agent
+inference is unsupported, and its current guide is not verified live.
+
+Choose gh-aw when its [workflow catalogue](https://github.github.com/gh-aw/gallery/),
+[GitHub-native Markdown authoring and compilation](https://github.github.com/gh-aw/setup/creating-workflows/),
+or [community](https://github.com/orgs/community/discussions/186451) fits your
+project. agentic-job instead uses [ordinary workflow YAML](workflow.md) and
+supports fewer outputs and triggers, as detailed below. Read its
+[known limitations](limitations.md) before deploying it.
+
 ## Why a host user and not a container
 
 Choose agentic-job when the workload needs a hardened disposable host for
