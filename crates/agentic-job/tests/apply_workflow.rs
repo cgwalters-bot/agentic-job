@@ -333,6 +333,104 @@ fn advisory_uses_the_same_check_artifact_and_cancellation_gates() {
     }
 }
 
+#[test]
+fn applied_all_requires_publication_and_distinguishes_blocked_results() {
+    for (outcome, asked, opened, refused, expected, missing, blocked, published) in [
+        ("success", false, false, "", 0, "", "", ""),
+        ("success", true, true, "", 0, "", "", "success"),
+        ("success", true, false, "", 1, "", "", ""),
+        ("failure", true, false, "", 1, "", "", ""),
+        ("failure", false, false, "", 1, "", "", ""),
+        ("success", false, false, "true", 1, "", "", ""),
+        ("success", false, false, "", 1, "true", "", ""),
+        ("success", false, false, "", 0, "true", "true", ""),
+        ("failure", false, false, "", 1, "true", "true", ""),
+        ("success", true, true, "", 1, "", "", "failure"),
+        ("success", false, false, "", 1, "true", "true", "failure"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let kind = if asked {
+            "create_pull_request"
+        } else {
+            "add_comment"
+        };
+        json_file(root, "agent_output.json", &json!({"items":[{"type":kind}]}));
+        json_file(
+            root,
+            "applied.json",
+            &json!({"pull_request":if opened {json!({"number":1})} else {Value::Null}, "made":[], "already_applied":[]}),
+        );
+        let output = root.join("output");
+        fs::write(&output, "").unwrap();
+        let out = run_step(
+            root,
+            "Every output was applied",
+            &[
+                ("GH_AW_TMP", root.to_str().unwrap()),
+                ("OUTCOME", outcome),
+                ("FAILED", ""),
+                ("OUTPUT_REPO", "owner/repo"),
+                ("PROJECT_REFUSED", refused),
+                ("MISSING_DATA", missing),
+                ("BLOCKED", blocked),
+                ("PUBLISHED", published),
+                ("PUBLISH_FAILED", ""),
+                ("GITHUB_OUTPUT", output.to_str().unwrap()),
+            ],
+        );
+        status(&out, expected);
+        assert_eq!(
+            text(&out).contains("::notice::the run is blocked"),
+            blocked == "true"
+        );
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            if expected == 0 && blocked == "true" {
+                "blocked=true\n"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+#[test]
+fn handler_errors_use_policy_binary_and_neutralize_annotations() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("apply-binary")).unwrap();
+    fs::copy(BIN, root.join("apply-binary/agentic-job")).unwrap();
+    json_file(
+        root,
+        "safe-output-errors.json",
+        &json!({"failures":[
+            {"type":"add_comment", "error":"bad\n::warning::@user 100%0A"},
+            {"type":"create_issue"}
+        ]}),
+    );
+    let output = root.join("output");
+    fs::write(&output, "").unwrap();
+    let out = run_step(
+        root,
+        "Show why a handler failed",
+        &[
+            ("GH_AW_TMP", root.to_str().unwrap()),
+            ("RUNNER_TEMP", root.to_str().unwrap()),
+            ("GITHUB_OUTPUT", output.to_str().unwrap()),
+        ],
+    );
+    status(&out, 0);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "::error::Failed to apply add\\_comment: bad ::warning::@\u{200b}user 100%250A\n::error::Failed to apply create\\_issue: no error given\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output).unwrap(),
+        "reason=add\\_comment: bad ::warning::@\u{200b}user 100%0A; create\\_issue: no error given\n"
+    );
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }

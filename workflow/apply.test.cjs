@@ -383,50 +383,6 @@ test("a pull request's handler pushes only to the fork, and there is none withou
   }
 });
 
-test('the job fails unless every output was applied, a pull request asked for was opened, and missing data is blocked', () => {
-  const root = mkdtempSync(join(homedir(), 'apply-test-'));
-  try {
-    for (const [outcome, asked, opened, refused, expected, missing = '', blocked = ''] of [
-      ['success', false, false, '', 0], ['success', true, true, '', 0],
-      // The forge refused the pull request, or the handler had no fork to push to.
-      ['success', true, false, '', 1], ['failure', true, false, '', 1], ['failure', false, false, '', 1],
-      ['success', false, false, 'true', 1], ['success', false, false, '', 1, 'true'], ['success', false, false, '', 0, 'true', 'true'], ['failure', false, false, '', 1, 'true', 'true'],
-    ]) {
-      writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: asked ? [pull] : [comment()] }));
-      writeFileSync(join(root, 'applied.json'), JSON.stringify({ pull_request: opened ? { number: 1 } : null })); writeFileSync(join(root, 'output'), '');
-      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Every output was applied')],
-        { GH_AW_TMP: root, OUTCOME: outcome, FAILED: '', OUTPUT_REPO: 'owner/repo', PROJECT_REFUSED: refused, MISSING_DATA: missing, BLOCKED: blocked, GITHUB_OUTPUT: join(root, 'output') });
-      assert.deepEqual([result.status, /::notice::the run is blocked/.test(result.stdout), readFileSync(join(root, 'output'), 'utf8')],
-        [expected, blocked === 'true', expected === 0 && blocked ? 'blocked=true\n' : ''],
-        `${outcome} ${asked} ${opened} ${refused} ${missing} ${blocked}: ${result.stdout}`);
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-// A handler's error reaches the annotations and the job's output with its
-// Markdown and mentions made inert, and no line of its own.
-test('policy binary says why a handler failed', () => {
-  const dir = mkdtempSync(join(homedir(), 'handler-errors-test-'));
-  try {
-    mkdirSync(join(dir, 'apply-binary'));
-    copyFileSync(join(__dirname, '../target/debug/agentic-job'), join(dir, 'apply-binary/agentic-job'));
-    writeFileSync(join(dir, 'safe-output-errors.json'), JSON.stringify({ failures: [
-      { type: 'add_comment', error: 'bad\n::warning::@user 100%0A' }, { type: 'create_issue' }] }));
-    writeFileSync(join(dir, 'output'), '');
-    const result = command(dir, 'bash', ['-e', '-o', 'pipefail', '-c', step('Show why a handler failed')],
-      { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_OUTPUT: join(dir, 'output') });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, '::error::Failed to apply add\\_comment: bad ::warning::@\u200buser 100%250A\n' +
-      '::error::Failed to apply create\\_issue: no error given\n');
-    assert.equal(readFileSync(join(dir, 'output'), 'utf8'),
-      'reason=add\\_comment: bad ::warning::@\u200buser 100%0A; create\\_issue: no error given\n');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 function refs(items, issue = '64', itemRepo = 'owner/repo') {
   const dir = mkdtempSync(join(homedir(), 'refs-test-'));
   try {
