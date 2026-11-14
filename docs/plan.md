@@ -220,6 +220,13 @@ come from TOML policy generation rather than modifying serialized policy. Only t
 replaced JavaScript test is removed; the key fixture, old-tree setup and upstream
 parity drivers remain. No runtime control or caller setting changes.
 
+The legacy PR text and mixed-case branch cases also run through Rust's
+`policy`, `collect` and `check` in `tests/check.rs`. Exact collected and checked
+items pin control-character removal, deferred mentions and disallowed-link
+redaction; the branch keeps its case while resolving the lowercase patch filename.
+A plain request is the positive control. The legacy parity cases and gated
+fixture cleanup remain unchanged; no runtime control or caller setting is added.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
