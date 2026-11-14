@@ -43,10 +43,14 @@ proposal runs that produced open draft merge requests). Its shape:
   tracker item with a read-only token and writing exactly one state note
   proposal, or a patch plus one-line JSONL for safe-outputs runs, into
   `TMT_TEST_DATA`.
+- The caller's submit job resolves the exact per-plan secret values the
+  guest needs (inference key, read-only tracker token, connectivity-test
+  credentials) on the CI side and forwards only those values as request
+  secrets; no credential that can unlock anything else enters the guest.
 - A privileged CI job downloads the test-data artifacts from the Testing
-  Farm artifacts server, re-validates the proposal (draft title, footer,
-  no quick actions, clean `git am`) and publishes to the forge. The
-  guest never holds a forge write credential.
+  Farm artifacts server, re-validates the proposal (see the egress
+  channel section for exactly what that means today) and publishes to
+  the forge. The guest never holds a forge write credential.
 
 What that deployment proves is the **contract**, not the tooling: the
 tooling it uses is a reimplementation of the safe-outputs discipline
@@ -118,10 +122,14 @@ wire" — though the wire is TLS to a trusted host either way.
 patch plus one-line JSONL proposal — are plain files in the test's data
 directory (`TMT_TEST_DATA`), which the host publishes as downloadable
 artifacts. The privileged applier job fetches them over TLS with the
-host's artifact credentials, then validates everything: bounded size,
-flat regular files, exact expected names, patch applies cleanly. The
-channel carries data, not authority: nothing in the artifact is
-executed, and no credential ever rides in it. This is the
+host's artifact credentials, then validates what it fetched: exactly one
+JSONL proposal line, type-specific content checks (draft title,
+attribution footer, no quick actions, allowed targets, clean `git am`).
+Bounded artifact size, flat regular files, and exact expected names are
+*proposed* checks for the hardened applier, not yet implemented in the
+reference deployment — direction, not current fact. The channel carries
+data, not authority: nothing in the artifact is executed, and no
+credential ever rides in it. This is the
 [other CI systems](safe-outputs.md#other-ci-systems-and-deterministic-proof)
 consumption model with the artifact hop made concrete.
 
@@ -147,10 +155,16 @@ Four credentials, each with one place it may exist:
 2. **Request secrets.** Values the caller wants present in the guest
    environment, sent in the request's `secrets` (not `variables`)
    section, so the host censors them in all artifacts and logs. In the
-   deployment these are the bootstrap pair for the secrets repository
-   (read-only deploy token + URL) and the read-only tracker token.
-   Censoring matters: a value forwarded as a plain environment variable
-   appears verbatim in the host's logs of the guest environment.
+   deployment the caller's submit job resolves the exact per-plan
+   values — the read-only tracker token, the scoped inference key, the
+   connectivity-test credentials a specific plan needs — on the CI side
+   (its own CI variables first, the private secrets repository second)
+   and forwards only those values; a plan not listed gets no secrets at
+   all. No bootstrap credential for the secrets repository crosses into
+   the guest: the fetch the guest used to do itself is now a
+   caller-side resolution step. Censoring matters: a value forwarded as
+   a plain environment variable appears verbatim in the host's logs of
+   the guest environment.
 3. **In-guest read-only state access.** A `read_api`-scoped project
    access token for the tracker, forwarded as a request secret. The
    agent uses it to read the item it was dispatched for and prior state
@@ -169,15 +183,17 @@ same-UID credential theft on a shared, long-lived machine. A
 single-use guest that is destroyed with the run changes the second
 half of that threat model but not the first: an agent process can
 still exfiltrate a key it holds while it runs. The deployment's
-answer is a **scoped inference key fetched at runtime from a
-read-only secrets repository by the guest itself**, so the key is (a)
-not a CI variable, (b) not in the request payload beyond the bootstrap
-token that fetches it, and (c) revocable and cheap to rotate
-independently of the loop. Whether that justifies a documented
-`ephemeral-host` inference profile in `run`, or whether the broker
-model should be extended to serve guests, is an open question below —
-deliberately not decided here, because it is an operator threat-model
-decision, as the #3406 findings already concluded.
+current answer is the per-plan resolution above: the inference key is
+a scoped value resolved by the caller and forwarded as a censored
+request secret — not a CI variable in the guest's environment listing,
+not reachable through any in-guest bootstrap credential, and cheap to
+rotate independently of the loop. What it is *not* is per-run: the
+value is long-lived, and it does spend its whole life inside a guest.
+Whether the answer is a documented `ephemeral-host` inference profile
+in `run`, per-run issuance (minting a short-lived key per dispatch),
+or extending the broker model to serve guests, is an open question
+below — deliberately not decided here, because it is an operator
+threat-model decision, as the #3406 findings already concluded.
 
 ## Image pinning
 
@@ -231,12 +247,26 @@ Concrete, smallest-first:
    ephemeral-host key mode rather than leaving it to the caller's
    harness, as the deployment does today.
 
-What the deployment already does that needs **no** change: the
-safe-outputs JSONL vocabulary and check/apply discipline (the
-deployment's `apply_safe_outputs.py` is a strict subset of
-`apply --forge gitlab`'s checks — draft title, footer, no quick
-actions, clean `git am`, one MR per run); the per-forge bounds
-sections; the GitLab publisher itself.
+What the deployment already does without change is narrower than it
+first looks. The check/apply *discipline* — proposals as data,
+unprivileged check, privileged apply, guest holds no write credential
+— carries over as is. The *vocabulary* does not: the deployment's
+runtime carries private output types (`tracker_note`, `review`,
+`create_merge_request`, `update_merge_request`) with deployment-baked
+targets, while upstream's safe-outputs speaks
+`add_comment`/`create_pull_request`/`push_to_pull_request_branch` with
+caller-owned targets. Convergence here is a design direction, not a
+fact. The migration path: `tracker_note` becomes an `add_comment`
+proposal with a caller-owned target (the tracker item as comment
+target, no new output type); `create_merge_request`/`update_merge_request`
+map onto `create_pull_request`/`push_to_pull_request_branch`; and the
+deployment's per-type applier checks (draft title, footer, no quick
+actions, clean `git am`) are absorbed by reusing the safe-outputs
+checker and the GitLab publisher rather than the bespoke Python
+applier, which is being hardened in parallel and is not a subset of
+`apply --forge gitlab` today. What genuinely stays custom is the
+Testing Farm provisioning and the artifact transport — the two things
+this document is about.
 
 ## What stays outside
 
@@ -262,13 +292,17 @@ pattern, but a caller concern, not a contract).
 - **Inference on ephemeral guests.** Is a documented
   `ephemeral-host` api-key/token-file mode in `run` acceptable with
   its bound stated, or must the credential broker be the only path?
-  The deployment's runtime-fetched scoped key is a middle position:
-  no CI variable, no broker, single-use guest. This is the one item
-  the #3406 findings explicitly left as an operator threat-model
-  decision, and the upstream GitLab caller spec keeps it out of scope
-  for the same reason; the new `[host] isolation = "external"`
-  declaration (#3638) reports delegated isolation but retains the
-  credential refusals, so it does not change this question.
+  The deployment's caller-resolved, censored request secret is a
+  middle position: no CI variable in the guest's listing, no broker,
+  single-use guest — but the value itself is long-lived and spends its
+  life in-guest, so per-run issuance (versus better delivery of a
+  long-lived value) is the open half of the question. This is the one
+  item the #3406 findings explicitly left as an operator
+  threat-model decision, and the upstream GitLab caller spec keeps it
+  out of scope for the same reason; the new `[host] isolation =
+  "external"` declaration (#3638) reports delegated isolation but
+  retains the credential refusals, so it does not change this
+  question.
 - **Correlation strength without Actions digests.** ~~Is a
   caller-computed digest over the fetched bytes an adequate
   replacement?~~ Answered by
