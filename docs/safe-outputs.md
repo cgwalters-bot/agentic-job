@@ -182,6 +182,14 @@ replacement refuses the whole batch before an earlier valid note can publish.
 These are loopback CLI-to-publisher tests, not live GitLab or CI isolation proof;
 they introduce no new permission or caller setting.
 
+Standalone push-preflight regressions (`cargo test --locked -p safe-outputs
+--features test-support --test cli_gitlab_push`) exercise a checked patch behind
+an earlier valid issue note. A moved head, changed source project or branch,
+deleted source project, non-open MR or mismatched MR identity refuses the whole
+batch before either the note or git transport runs. These loopback tests prove
+CLI-to-publisher refusal, not successful pushes, git leases or live CI isolation;
+they add no permission or caller setting.
+
 Minimal GitLab CI jobs, on separate isolated runners, using a pinned binary
 already installed by the operator and caller-owned `/trusted/context.json`:
 
