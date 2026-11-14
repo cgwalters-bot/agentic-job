@@ -821,6 +821,80 @@ fn omitted_modes_cannot_hide_symlink_edits() {
     }
 }
 
+/// A blob ID can make three-way rename detection redirect a harmless-looking
+/// path to a protected file. Text admission alone cannot discover that target.
+#[test]
+fn three_way_rename_detection_can_change_an_unreported_protected_path() {
+    let mut origin = Origin::new();
+    let source = origin.scratch.path().join("origin");
+    change(&source, &[Write("CONTRIBUTING.md", b"export WHO=good\n")]);
+    git_ok(&source, &["add", "--all"]);
+    git_ok(&source, &["commit", "-q", "-m", "Unique protected blob"]);
+    origin.base = String::from_utf8(git_ok(&source, &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let blob = String::from_utf8(git_ok(&source, &["rev-parse", "HEAD:CONTRIBUTING.md"])).unwrap();
+    let named = "docs/notes.txt";
+    let patch = format!(
+        "From {fake} Mon Sep 17 00:00:00 2001\n\
+         {BASE_COMMIT_HEADER}: {base}\n\
+         From: agent <agent@localhost>\n\
+         Date: Fri, 2 Jan 2026 03:04:05 +0000\n\
+         Subject: [PATCH] Change things\n\n---\n\n\
+         diff --git a/{named} b/{named}\n\
+         index {blob}..{fake} 100644\n\
+         --- a/{named}\n+++ b/{named}\n\
+         @@ -1 +1 @@\n-export WHO=good\n+export WHO=evil\n",
+        fake = "2".repeat(40),
+        base = origin.base,
+        blob = blob.trim(),
+    );
+    let reading = origin.read(patch.as_bytes());
+    assert!(reading.problems.is_empty(), "{:?}", reading.problems);
+    assert_eq!(files_of(&reading), BTreeSet::from([named.to_owned()]));
+
+    // Positive attack control: explicitly enable renames rather than depend on
+    // Git's default. The normal apply settings must refuse these same bytes.
+    let followed = origin.clone_as("followed");
+    let file = origin.scratch.path().join("redirect.patch");
+    std::fs::write(&file, &patch).unwrap();
+    let out = git(
+        &followed,
+        &["core.hooksPath=/dev/null", "merge.renames=true"],
+        &["am", "-q", "--keep-cr", "--3way", file.to_str().unwrap()],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        git_ok(
+            &followed,
+            &["diff", "--name-only", "--no-renames", &origin.base, "HEAD"]
+        ),
+        b"CONTRIBUTING.md\n"
+    );
+    assert_eq!(
+        std::fs::read(followed.join("CONTRIBUTING.md")).unwrap(),
+        b"export WHO=evil\n"
+    );
+    assert!(!reading.files.iter().any(|path| path == "CONTRIBUTING.md"));
+    assert!(is_protected("CONTRIBUTING.md"));
+
+    let strict = Trial::new(&origin, 0);
+    assert!(matches!(strict.am(patch.as_bytes()), Am::Refused));
+    assert_eq!(
+        std::fs::read(strict.dir.join("CONTRIBUTING.md")).unwrap(),
+        b"export WHO=good\n"
+    );
+    assert_eq!(
+        git_ok(&strict.dir, &["rev-parse", "HEAD"]),
+        format!("{}\n", origin.base).as_bytes()
+    );
+}
+
 /// xorshift64: all the randomness a repeatable corpus needs.
 struct Rng(u64);
 
