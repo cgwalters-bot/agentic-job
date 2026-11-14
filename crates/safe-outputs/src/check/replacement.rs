@@ -57,6 +57,7 @@ pub fn check(content: &[u8], push: &Push, max_bytes: u64) -> Result<PatchInfo> {
         "replacement exceeds the total file limit"
     );
     Ok(PatchInfo {
+        replay: None,
         file: REPLACEMENT_FILE.into(),
         bytes: content.len(),
         base_commit: series.base_commit,

@@ -96,6 +96,10 @@ pub fn trial(
     read: &dyn Fn(&Path, u64) -> Result<Vec<u8>>,
 ) -> Result<Built> {
     let report = &read_json(read, &args.report, MAX_REPORT_BYTES)?["patch"];
+    ensure!(
+        report["replay"].is_null(),
+        "endpoint replay is unsupported for replacement patches"
+    );
     let series = read_json(read, &args.series, MAX_SERIES_BYTES)?;
     let config = &read_json(read, &args.config, MAX_CONFIG_BYTES)?["push_to_pull_request_branch"];
     let base = report["base_commit"].as_str().unwrap_or("");

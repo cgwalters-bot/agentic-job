@@ -53,6 +53,8 @@ pub enum Command {
     Check(check::Args),
     /// Capture bounded public-base secret evidence in the trusted policy job
     CaptureBaseSecrets(check::base::Args),
+    /// Replay a checked endpoint-redacted primary patch against its verified base
+    ReplayTrial(check::replay::Args),
     /// Inspect checked proposals with a bounded model request before apply
     Detect(crate::detect::Args),
     /// Publish checked outputs, and the caller's commit status, to a Forgejo repository
@@ -124,6 +126,7 @@ impl Command {
             Self::Collect(args) => collect::run(args),
             Self::Check(args) => check::run(args),
             Self::CaptureBaseSecrets(args) => check::base::run(args),
+            Self::ReplayTrial(args) => check::replay::run(args),
             Self::Detect(args) => crate::detect::run(args),
             Self::Apply(args) => crate::apply::run(args),
             Self::LinkIssue(args) => crate::apply::issue_reference::run(args),

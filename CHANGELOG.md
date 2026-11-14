@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Opt-in endpoint-redacted patch replay authenticates deletion/context bytes
+  against an independently fetched declared base before publication. Artifacts
+  stay redacted; only primary native GitHub pull requests support replay.
+
 - Per-run status lookup now matches the final run/status trailer, so a quoted
   marker cannot redirect an update to another run's comment. Notification defaults,
   explicit comment-ID precedence and lookup bounds are unchanged.

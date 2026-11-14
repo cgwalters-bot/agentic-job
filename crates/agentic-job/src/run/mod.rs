@@ -679,7 +679,7 @@ fn secrets(
 /// it (#1860). Redacting them keeps the logs from mapping that network.
 /// Not under `api-key`, whose URL is the provider's public one: a
 /// literal is refused wherever it cannot be redacted, a patch included.
-fn inference_addresses(endpoint: Option<&Endpoint>) -> Vec<String> {
+pub(crate) fn inference_addresses(endpoint: Option<&Endpoint>) -> Vec<String> {
     let hosts = endpoint
         .filter(|endpoint| !matches!(endpoint.mode, inference::Mode::ApiKey { .. }))
         .map(Endpoint::hosts)

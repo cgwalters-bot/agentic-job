@@ -145,6 +145,11 @@ impl Git<'_> {
         self.run_as(dir, args, input, self.committer)
     }
 
+    /// Replay/check operations cannot wait indefinitely on a fetch or Git.
+    pub fn run_bounded(&self, dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
+        self.run_as_bounded(dir, args, input, self.committer, true)
+    }
+
     /// [`Git::run`], committing as COMMITTER.
     fn run_as(
         &self,
@@ -152,6 +157,17 @@ impl Git<'_> {
         args: &[&str],
         input: Option<&[u8]>,
         committer: (&str, &str),
+    ) -> Result<String> {
+        self.run_as_bounded(dir, args, input, committer, false)
+    }
+
+    fn run_as_bounded(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        input: Option<&[u8]>,
+        committer: (&str, &str),
+        bounded: bool,
     ) -> Result<String> {
         let config = [
             (
@@ -163,7 +179,13 @@ impl Git<'_> {
             ("user.name", committer.0.to_owned()),
             ("user.email", committer.1.to_owned()),
         ];
-        let mut command = Command::new("git");
+        let mut command = if bounded {
+            let mut command = Command::new("timeout");
+            command.args(["--kill-after=5", "120", "git"]);
+            command
+        } else {
+            Command::new("git")
+        };
         command
             .arg("-C")
             .arg(dir)
@@ -200,7 +222,11 @@ impl Git<'_> {
             bail!("git {}: {}", args[0], shown(&self.secrets(), stderr.trim()));
         }
         written.context("writing to git")?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        if bounded {
+            String::from_utf8(output.stdout).context("replay Git output is not UTF-8")
+        } else {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
     }
 
     /// Applies the patch on its base commit, fetched from the repository,
@@ -213,6 +239,21 @@ impl Git<'_> {
     /// re-run's push or anyone's, is refused, never forced.
     /// Returns the pushed commit.
     pub fn push(&self, push: &Push<'_>, recover: Option<&str>) -> Result<String> {
+        self.push_replaying(push, recover, None)
+    }
+
+    pub fn push_replaying(
+        &self,
+        push: &Push<'_>,
+        recover: Option<&str>,
+        replay: Option<&crate::replay::Receipt>,
+    ) -> Result<String> {
+        if let Some(receipt) = replay {
+            ensure!(
+                receipt.base_commit == push.base_commit && super::COMMIT_RE.is_match(&receipt.tree),
+                "endpoint replay receipt differs from checked base/tree"
+            );
+        }
         if let Some(head) = push.head {
             ensure!(
                 head == push.base_commit && recover.is_none(),
@@ -245,6 +286,10 @@ impl Git<'_> {
         )
         .with_context(|| format!("{} is not on {}", push.base_commit, push.base))?;
         self.run(dir, &["checkout", "-q", "--detach", push.base_commit], None)?;
+        let recovered = replay
+            .map(|receipt| self.recover(dir, push.patch, receipt))
+            .transpose()?;
+        let patch = recovered.as_deref().map_or(push.patch, str::as_bytes);
         // The commit's message is the patch's as `git am` reads it, and
         // nothing rewrites it: no hooks, and none of the job's
         // configuration (`am.messageid`, `mailinfo.scissors`) applies.
@@ -255,13 +300,26 @@ impl Git<'_> {
         // commit other bytes than check read, and a patch to a file with
         // CRLF line ends would not apply at all.
         let am = ["am", "-q", "--keep-cr", "--committer-date-is-author-date"];
-        match push.committer {
-            None => self.run(dir, &am, Some(push.patch))?,
-            Some(committer) if push.at_author_date => {
-                self.run_as(dir, &am, Some(push.patch), committer)?
-            }
-            Some(committer) => self.run_as(dir, &am[..3], Some(push.patch), committer)?,
+        let applied = match push.committer {
+            None => self.run(dir, &am, Some(patch)),
+            Some(committer) if push.at_author_date => self.run_as(dir, &am, Some(patch), committer),
+            Some(committer) => self.run_as(dir, &am[..3], Some(patch), committer),
         };
+        if replay.is_some() {
+            applied.map_err(|_| {
+                anyhow::anyhow!(
+                    "endpoint replay git am failed; regenerate the patch against its declared base"
+                )
+            })?;
+        } else {
+            applied?;
+        }
+        if let Some(receipt) = replay {
+            ensure!(
+                self.run(dir, &["rev-parse", "HEAD^{tree}"], None)?.trim() == receipt.tree,
+                "replay tree differs from trusted check/trial; nothing published"
+            );
+        }
         // check read the paths the patch names; git applies by its own
         // reading, so what it changed is held to those.
         let changed = self.run(
@@ -342,6 +400,28 @@ impl Git<'_> {
             None,
         )?;
         Ok(commit)
+    }
+
+    /// No checkout filters or target programs: only bounded regular blobs from
+    /// the independently fetched base. Git failures here must not quote values.
+    pub fn recover(
+        &self,
+        dir: &Path,
+        patch: &[u8],
+        receipt: &crate::replay::Receipt,
+    ) -> Result<String> {
+        ensure!(
+            crate::replay::digest(patch) == receipt.patch_sha256,
+            "replay patch digest differs from checked artifact"
+        );
+        let patch = std::str::from_utf8(patch).context("replay patch is not UTF-8")?;
+        crate::replay::recover(patch, &receipt.base_commit, &receipt.literals, |path| {
+            let object = format!("{}:{path}", receipt.base_commit);
+            ensure!(self.run_bounded(dir, &["cat-file", "-t", &object], None)?.trim() == "blob", "replay base path is not a blob");
+            let size: usize = self.run_bounded(dir, &["cat-file", "-s", &object], None)?.trim().parse()?;
+            ensure!(size <= crate::replay::MAX_BYTES, "replay base blob exceeds bound");
+            self.run_bounded(dir, &["cat-file", "blob", &object], None)
+        }).map_err(|_| anyhow::anyhow!("endpoint replay refused: old-side bytes, paths or coordinates differ from verified base; regenerate against the declared base with the trusted endpoint configuration"))
     }
 }
 

@@ -342,6 +342,7 @@ fn compose(args: &Args) -> Result<String> {
         if let Some(commit) = table.get_mut("commit").and_then(Value::as_table_mut) {
             commit.remove("format");
             commit.remove("allow-base-secret-lines");
+            commit.remove("replay-redacted-endpoints");
         }
         if let Some(inference) = table.get_mut("inference").and_then(Value::as_table_mut) {
             inference.remove("allow-base-address-lines");
@@ -883,7 +884,11 @@ mod tests {
 
     #[test]
     fn host_config_omits_run_only_commit_settings_for_the_released_image() {
-        for key in ["format", "allow-base-secret-lines"] {
+        for key in [
+            "format",
+            "allow-base-secret-lines",
+            "replay-redacted-endpoints",
+        ] {
             for enabled in [false, true] {
                 let run = Args {
                     boolean: settings(&[&format!("commit.{key}={enabled}")]),
@@ -891,10 +896,10 @@ mod tests {
                 };
                 let commit = composed(&run).commit;
                 assert_eq!(
-                    if key == "format" {
-                        commit.format
-                    } else {
-                        commit.allow_base_secret_lines
+                    match key {
+                        "format" => commit.format,
+                        "allow-base-secret-lines" => commit.allow_base_secret_lines,
+                        _ => commit.replay_redacted_endpoints,
                     },
                     enabled
                 );

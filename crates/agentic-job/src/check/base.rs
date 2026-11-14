@@ -33,6 +33,19 @@ pub fn run(args: &Args) -> Result<Exit> {
         .unwrap_or_default();
     let policy = Policy::load(&args.policy)?;
     let mut public = PublicAddresses::default();
+    if config.commit.replay_redacted_endpoints {
+        let endpoint = crate::run::inference::Endpoint::from_config(&config.inference)?;
+        let literals = crate::run::inference_addresses(endpoint.as_ref())
+            .iter()
+            .map(|address| safe_outputs::replay::Literal::new(address))
+            .collect::<Result<Vec<_>>>()?;
+        safe_outputs::replay::validate_literals(&literals)?;
+        ensure!(
+            !literals.is_empty(),
+            "endpoint replay requires configured broker endpoints"
+        );
+        public.replay = Some(Box::new(safe_outputs::replay::Provenance { literals }));
+    }
     if config.commit.allow_base_secret_lines {
         ensure!(
             !policy.private,

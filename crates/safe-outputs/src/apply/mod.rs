@@ -347,6 +347,7 @@ pub struct Close {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
+    pub replay: Option<crate::replay::Receipt>,
     pub base: String,
     /// The commit check read the patch against, on `base`.
     pub base_commit: String,
@@ -527,6 +528,8 @@ pub struct Report {
 
 #[derive(Debug, Deserialize)]
 pub struct ReportPatch {
+    #[serde(default)]
+    pub replay: Option<crate::replay::Receipt>,
     pub file: String,
     pub bytes: usize,
     pub base_commit: String,
@@ -773,6 +776,7 @@ fn pull_request(
     // GitHub; anything else a draft.
     let draft = pr_rules.draft && !(pr_rules.ready_when_complete && report.checkpoint.is_none());
     Ok(PullRequest {
+        replay: None,
         base: policy.base.clone(),
         base_commit,
         push_repo: push_repo.to_owned(),
@@ -921,6 +925,10 @@ fn checked_patch(
         .patch
         .as_ref()
         .with_context(|| format!("a {output}, and check accepted no patch"))?;
+    anyhow::ensure!(
+        patch.replay.is_none(),
+        "endpoint replay is supported only by native GitHub primary publication"
+    );
     anyhow::ensure!(
         patch.commit_files.is_none(),
         "a replacement series, which apply does not push off GitHub"

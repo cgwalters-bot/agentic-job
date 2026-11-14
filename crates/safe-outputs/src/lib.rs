@@ -25,6 +25,9 @@ pub mod collect;
 pub mod contract;
 pub mod decode;
 pub mod document;
+pub mod replay;
+#[cfg(test)]
+mod replay_tests;
 pub mod vocabulary;
 
 pub use vocabulary::*;

@@ -880,7 +880,7 @@ impl Publisher for GithubPublisher {
         self.github
             .for_role(Role::ForkPush)?
             .git()
-            .push(
+            .push_replaying(
                 &Push {
                     from: &format!("{}/{}.git", self.git, self.repo),
                     base: &pr.base,
@@ -895,6 +895,7 @@ impl Publisher for GithubPublisher {
                     max_changed_kb: None,
                 },
                 None,
+                pr.replay.as_ref(),
             )
             .context("Failed to push changes")?;
         let mut body = json!({"title": pr.title, "body": pr.body});

@@ -565,11 +565,59 @@ cannot hide an overlapping credential and a refusal retains the original work.
 and upstream MCP credentials remain refusals. If a token has both an agent-facing
 and an upstream role (direct broker mode), the upstream refusal wins.
 `allow-base-address-lines`
-is now a legacy no-op. A placeholder may break a build or patch application;
-review or continuation must repair that rather than discard the work. All
+is now a legacy no-op. A placeholder may break a build; review or continuation
+must repair added values rather than discard the work. Opted-in
+[old-side replay](#endpoint-redacted-patch-replay) can repair patch application. All
 other bounds and check/apply refusals remain. Logs and transcripts keep their
 current redaction; see
 [inference address redaction](inference.md#what-run-does).
+
+### Endpoint-redacted patch replay
+
+The threat is a producer treating a placeholder as a wildcard for arbitrary
+base bytes, inventing substitution evidence, or publishing a tree different
+from the checked trial. `[commit] replay-redacted-endpoints = true` is off by
+default. It authenticates only inference endpoint substitutions, not token
+placeholders. It currently supports **primary native GitHub create_pull_request**
+publication; that output must already be routed through `native_handlers`.
+Legacy handlers, pushes, other forges and endpoint-bearing replacement/secondary
+carriers fail closed. No target bounds or redaction exceptions are changed.
+
+The trusted policy job's existing `capture-base-secrets` command records only
+the configured broker endpoint authorities' byte lengths and SHA-256 digests in
+`public-base.json`. They come from trusted runtime configuration, never proposals
+or the agent's base evidence. Configure the same authorities that the producer
+redacts: resolving or overriding an authority only in the agent job does not
+authorize it for replay. Missing or different provenance fails closed.
+The existing private-key/run-credential scan of originals, overlap refusal,
+private retention and inference-end gates are unchanged.
+
+After normal collection and patch validation, check independently fetches the
+target branch, verifies the declared base's ancestry, and reads bounded blobs
+from that exact commit without running target code. Every old-side line must
+match at its declared coordinate, either exactly or after the authenticated
+endpoint substitution, including all surrounding bytes. Paths, hunk counts,
+non-overlap and old/new coordinates are validated. Only deletion and context
+bytes can be recovered; additions keep placeholders. Replay admits at most
+eight endpoint fingerprints (8–512 bytes each), 50 paths, 1 MiB of base blobs,
+and 1 MiB each of input and recovered patch. Non-ASCII/ambiguous paths,
+no-final-newline markers and non-text blobs fail closed rather than acquire
+different replay semantics.
+
+Check runs a real `git am --keep-cr`, compares changed paths with the normal
+check result, and binds the redacted patch digest, declared base, endpoint
+fingerprints and resulting tree in `report.patch.replay`. Artifacts contain
+only the redacted patch and value-free receipt. The apply workflow's
+`replay-trial --checked DIR` repeats that independent trial. Native publication
+reconstructs in memory again and pushes that very commit only after its tree
+and paths match the receipt; it never hands raw patches to legacy handlers.
+Replay failures report fixed, value-free guidance before publication. No raw
+replay patch or base blob is logged or uploaded.
+
+Offline regression tests cover collection/redaction, check, real Git trials
+and local bare-repository pushes. Hosted replay of the reported failures and
+release/pin rollout remain separate acceptance work; ordinary local tests do
+not establish either. Do not rerun production jobs merely to test this option.
 
 ### Public-base secret evidence
 

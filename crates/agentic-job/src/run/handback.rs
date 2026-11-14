@@ -3089,6 +3089,7 @@ mod tests {
             trailers: vec!["Generated-by: AI".into()],
             format: false,
             allow_base_secret_lines: false,
+            replay_redacted_endpoints: false,
         };
         sh(
             &home.checkout.dir,

@@ -55,6 +55,8 @@ static PATCH_FILE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// The patch of an accepted pull request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PatchInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<crate::replay::Receipt>,
     pub file: String,
     pub bytes: usize,
     pub base_commit: String,
@@ -1114,6 +1116,7 @@ pub fn check(
                     let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
                     errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
                     secondary_patch = Some(PatchInfo {
+                        replay: None,
                         file: want.clone(),
                         bytes: content.len(),
                         base_commit: base.commit,
@@ -1206,6 +1209,7 @@ pub fn check(
                     let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
                     errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
                     patch = Some(PatchInfo {
+                        replay: None,
                         file: want,
                         bytes: content.len(),
                         base_commit: base.commit,

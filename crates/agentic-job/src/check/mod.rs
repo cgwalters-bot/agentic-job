@@ -20,6 +20,7 @@
 pub mod base;
 pub mod checkpoint;
 pub mod memory;
+pub mod replay;
 pub mod test_evidence;
 pub mod unchanged;
 
@@ -791,6 +792,20 @@ pub fn run(args: &Args) -> Result<Exit> {
         continuation.as_ref(),
         &public,
     )?;
+    if verdict.ok
+        && let Err(error) = replay::check(
+            &mut verdict,
+            &args.outputs,
+            &policy,
+            public
+                .replay
+                .as_deref()
+                .map(|provenance| provenance.literals.as_slice()),
+        )
+    {
+        verdict.errors.push(format!("{error:#}"));
+        verdict.ok = false;
+    }
     if let Some(external) = &policy.external {
         for item in &mut verdict.items {
             if item_type(item) == crate::policy::CREATE_PULL_REQUEST {

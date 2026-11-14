@@ -20,6 +20,8 @@ const MAX_FILES: u32 = 50;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicAddresses {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<Box<safe_outputs::replay::Provenance>>,
     patches: BTreeMap<String, Base>,
     #[serde(default)]
     secrets: BTreeMap<String, Base>,
@@ -37,6 +39,7 @@ mod tests {
 
     fn public() -> PublicAddresses {
         PublicAddresses {
+            replay: None,
             secrets: BTreeMap::new(),
             key_blocks: BTreeSet::new(),
             patches: BTreeMap::from([(

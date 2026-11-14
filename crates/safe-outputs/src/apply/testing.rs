@@ -229,6 +229,7 @@ pub fn repository_with(eol: &str) -> (tempfile::TempDir, PullRequest) {
     std::fs::create_dir_all(&fork).unwrap();
     sh(&fork, &["init", "-q", "--bare"]);
     let pr = PullRequest {
+        replay: None,
         base: "main".into(),
         base_commit: base,
         push_repo: "fork/name".into(),

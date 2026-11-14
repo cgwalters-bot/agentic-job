@@ -355,6 +355,9 @@ impl Setup {
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Commit {
+    /// Recover only authenticated endpoint substitutions on the old side of a
+    /// primary native GitHub patch. Never permits publishing endpoint additions.
+    pub replay_redacted_endpoints: bool,
     /// Permit exact public-base secret-shaped patch lines, never run secrets.
     pub allow_base_secret_lines: bool,
     /// Who the commit is by, as `Name <address>`. Without it,

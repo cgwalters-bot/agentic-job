@@ -249,6 +249,11 @@ the next in the same major version.
   `[commit] allow-base-secret-lines` is an optional boolean, default false;
   it permits exact public-base secret-shaped patch lines within the same file,
   never known run secrets ([safe outputs](safe-outputs.md#public-base-secret-evidence)).
+  `[commit] replay-redacted-endpoints` is an optional boolean, default false;
+  it enables bounded old-side endpoint replay for primary native GitHub pull
+  requests using trusted endpoint fingerprints and an independently fetched
+  declared base. Added values remain placeholders; unsupported carriers fail
+  closed ([safe outputs](safe-outputs.md#endpoint-redacted-patch-replay)).
   `[inference] allow-base-address-lines` is an optional boolean, default false;
   it is now a legacy no-op. Hand-backs always replace inference endpoint literals
   with `<inference-address>`. Separate agent-facing inference and MCP proxy

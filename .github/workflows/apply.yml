@@ -389,6 +389,11 @@ jobs:
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0
           base=$(jq -er '.patch.base_commit' "$REPORT")
+          if jq -e '.patch.replay != null' "$REPORT" > /dev/null; then
+            chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+            "$RUNNER_TEMP/apply-binary/agentic-job" replay-trial --checked "$GH_AW_TMP" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if jq -e '.patch.commit_files != null' "$REPORT" > /dev/null; then
             chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
             "$RUNNER_TEMP/apply-binary/agentic-job" replacement trial --report "$REPORT" \

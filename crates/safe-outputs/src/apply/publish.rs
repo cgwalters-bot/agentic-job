@@ -1569,6 +1569,14 @@ fn pull_request(
         "a replacement series, which only a push carries"
     );
     let name = check::patch_file_name(text("branch")?);
+    if let Some(receipt) = &patch.replay {
+        ensure!(
+            receipt.base_commit == patch.base_commit
+                && receipt.patch_sha256.len() == 64
+                && super::COMMIT_RE.is_match(&receipt.tree),
+            "invalid endpoint replay receipt"
+        );
+    }
     ensure!(
         patch.file == name,
         "check accepted the patch {:?}, and the pull request's is {name}",
@@ -1625,6 +1633,7 @@ fn pull_request(
     let failure = pull_request_failure(config, &bytes, &patch.files);
     Ok((
         PullRequest {
+            replay: patch.replay.clone(),
             base: base.to_owned(),
             base_commit: patch.base_commit.clone(),
             push_repo: head_repo.to_owned(),

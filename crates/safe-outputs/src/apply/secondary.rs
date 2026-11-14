@@ -174,6 +174,10 @@ fn pull_request(
         .as_ref()
         .context("check accepted no secondary patch")
         .and_then(|patch| {
+            ensure!(
+                patch.replay.is_none(),
+                "endpoint replay is unsupported for secondary patches"
+            );
             let name = check::patch_file_name_in(&target.repo, &branch);
             ensure!(
                 patch.file == name,
