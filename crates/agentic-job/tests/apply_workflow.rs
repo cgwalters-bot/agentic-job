@@ -317,7 +317,7 @@ fn caller_branch_acceptance_is_not_a_handler_operation() {
     let dir = TempDir::new().unwrap();
     let (out, config) = handlers(
         dir.path(),
-        &json!({"own_branch_repos": [["example-org/*"]], "noop": {"max": 1}}),
+        &json!({"own_branch_repos": [["example-org/*"]], "stack_max_steps": 3, "noop": {"max": 1}}),
         &[],
     );
     status(&out, 0);

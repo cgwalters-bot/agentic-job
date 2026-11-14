@@ -60,6 +60,8 @@ says what a caller may rely on across versions.
   and builds the accepted steps as one commit each, restacking the steps above
   a fixed one (#3438). CLI/workflow stack publication is not yet supported; the
   one-PR hand-back limit is unchanged.
+  Experimental `[github.outputs] stack-steps` bounds (default zero, at most ten)
+  now feed policy-based library checking, taking the lower of both bounds files.
 
 - Rendered sessions retain opencode's tool names when later updates replace
   their titles with commands or filenames (#596).

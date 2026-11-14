@@ -521,7 +521,7 @@ jobs:
           jq --arg ready "${READY:-}" --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
-            | del(.own_branch_repos)
+            | del(.own_branch_repos, .stack_max_steps)
             | (select(has("create_pull_request")).create_pull_request) |= (.draft = ($ready != "true") | del(.ready_when_complete, .protected_paths))
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |= del(.ready_when_complete, .protected_paths)
             | (select(has("create_pull_request")).create_pull_request) |=

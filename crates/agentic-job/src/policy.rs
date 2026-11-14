@@ -649,6 +649,11 @@ impl Compile for Bounds {
                 .filter(|patterns| !patterns.is_empty())
                 .map(|patterns| vec![patterns.to_vec()])
                 .unwrap_or_default(),
+            stack_max_steps: self
+                .github
+                .as_ref()
+                .filter(|_| types.contains(&CREATE_PULL_REQUEST))
+                .map_or(0, |github| github.outputs.stack_steps),
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
                 max: limit(CREATE_PULL_REQUEST).max,
                 protected_files: protected_files(&self.unprotected_files, repo),
@@ -4425,6 +4430,56 @@ max_patch_files = 10
                 );
             }
         }
+    }
+
+    #[test]
+    fn stack_steps_are_caller_bounds_and_only_tighten() {
+        let compile = |steps: u32, outputs: &'static str| {
+            let mut bounds = bounds();
+            bounds.github.as_mut().unwrap().outputs.stack_steps = steps;
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs,
+                    ..request()
+                })
+                .unwrap()
+        };
+        let parsed: Bounds = toml::from_str(&format!("{BOUNDS}\nstack-steps = 3\n")).unwrap();
+        parsed.validate().unwrap();
+        let policy = parsed.compile(&request()).unwrap();
+        let policy: Policy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        policy.validate().unwrap();
+        assert_eq!(policy.safe_outputs.stack_max_steps, 3);
+        assert_eq!(
+            compile(0, "create_pull_request")
+                .safe_outputs
+                .stack_max_steps,
+            0
+        );
+        assert_eq!(compile(3, "add_comment").safe_outputs.stack_max_steps, 0);
+        for (other, expected) in [(5, 3), (2, 2), (0, 0)] {
+            let both = intersect(policy.clone(), compile(other, "create_pull_request")).unwrap();
+            assert_eq!(both.safe_outputs.stack_max_steps, expected, "{other}");
+        }
+        let mut over = bounds();
+        over.github.as_mut().unwrap().outputs.stack_steps = 11;
+        assert!(over.validate().is_err());
+        let without: Bounds = toml::from_str(
+            &format!("{BOUNDS}\nstack-steps = 3\n")
+                .replace("create_pull_request = { max = 1 }\n", ""),
+        )
+        .unwrap();
+        assert!(without.validate().is_err());
+        let mut invalid = policy.clone();
+        invalid.safe_outputs.stack_max_steps = 11;
+        assert!(invalid.validate().is_err());
+        let mut invalid = compile(0, "add_comment");
+        invalid.safe_outputs.stack_max_steps = 1;
+        assert!(invalid.validate().is_err());
+        let mut invalid = policy;
+        invalid.forge = Forge::Gitlab;
+        assert!(invalid.validate().is_err());
     }
 
     /// Off unless bounds say so, for the patch's carriers alone, and on

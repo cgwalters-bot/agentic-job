@@ -239,8 +239,18 @@ CI are not credentialed publication evidence.
 The experimental `safe_outputs::check::stack` library module checks an ordered
 proposal with one issue, title, body and single-commit mail patch per step.
 It does **not** enable stacked hand-backs or publish pull requests. The CLI,
-workflow bounds, artifact format and one-PR limit are unchanged. No caller should
-enable stacks yet; this is the first reviewable slice of #3438.
+artifact format and one-PR limit are unchanged. No production caller should
+enable stacks yet; this is library groundwork for #3438.
+
+Bounds may set experimental `[github.outputs] stack-steps` (default zero,
+at most ten, only alongside `create_pull_request`). Policy compilation carries
+it as `safe_outputs.stack_max_steps`, taking the lower of both bounds files;
+omission in either disables policy-based stack checking. `check_policy` uses
+that ceiling and `policy.max_outputs` together, plus the policy's patch byte,
+path, file-count and pinned-author rules. It refuses secondary, external or
+advisory publication contexts. This field is stripped from gh-aw's handler
+configuration and never increases its ordinary one-PR limit. No workflow
+consumes a stacked proposal yet.
 
 The concrete threats are unbounded publication fan-out and a forbidden edit
 hidden by a later revert. The trusted library caller must explicitly pass a
@@ -277,8 +287,9 @@ branch check did not read. A step that does not apply,
 or changes other paths, stops the stack at its position with a fixed reason, so
 a conflict never drops a step silently. Neither function pushes or publishes.
 
-Remaining slices must wire both into trusted bounds and digest-bound check
-artifacts, then push each step's branch with a lease and open its PR against its
+Remaining slices must wire the producer, per-step secret scan and both library
+modules into digest-bound check/apply artifacts, then push each step's branch
+with a lease and open its PR against its
 predecessor, appending that step's closing line. Publication must stop on
 refusal without removing earlier PRs. The publisher must keep the stack rebased
 after parent changes/merges with `restack`, not rely on PR retargeting to

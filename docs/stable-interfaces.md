@@ -207,6 +207,9 @@ the next in the same major version.
   `[github.outputs] own-branch-repos` optionally lists repository patterns
   accepting new PR branches and fix pushes without a per-repository file;
   it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).
+  `[github.outputs] stack-steps` is experimental, not a stable interface;
+  it defaults to zero and enables no workflow publication
+  ([stack groundwork](safe-outputs.md#stacked-proposals-library-groundwork-only)).
   `[gitlab.outputs] own-branch-repos` likewise lets merge request branches
   go to the target project itself.
 - **The runner configuration**, the workflow's `config` input

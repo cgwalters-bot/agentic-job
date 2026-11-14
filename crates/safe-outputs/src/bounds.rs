@@ -189,6 +189,10 @@ pub struct GithubOutputs {
     pub upstream_pull_request_base: bool,
     #[serde(default, rename = "own-branch-repos")]
     pub own_branch_repos: Vec<String>,
+    /// Experimental stack ceiling; zero disables stacks. No workflow publishes
+    /// a series yet.
+    #[serde(default, rename = "stack-steps")]
+    pub stack_steps: u32,
     #[serde(flatten)]
     pub types: BTreeMap<String, OutputLimit>,
 }
@@ -400,6 +404,12 @@ impl<Trigger> Bounds<Trigger> {
         }
         let forge = self.forge();
         let outputs = self.outputs();
+        if let Some(github) = &self.github {
+            crate::contract::validate_stack_steps(
+                github.outputs.stack_steps,
+                outputs.contains_key(CREATE_PULL_REQUEST),
+            )?;
+        }
         let own_branch_repos = self.own_branch_repos();
         crate::contract::validate_own_branch_repos(own_branch_repos)?;
         ensure!(
@@ -714,6 +724,10 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
         _ => None,
     };
     policy.max_outputs = policy.max_outputs.min(other.max_outputs);
+    policy.safe_outputs.stack_max_steps = policy
+        .safe_outputs
+        .stack_max_steps
+        .min(other.safe_outputs.stack_max_steps);
     policy.safe_outputs.upstream_pull_request_base &= other.safe_outputs.upstream_pull_request_base;
     // Keep each caller's patterns separate: a repository must match both,
     // not their union. No glob-pattern intersection is needed.

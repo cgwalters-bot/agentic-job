@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::replacement::read_mail;
-use crate::contract::{COMMIT_RE, PatchRules};
+use crate::contract::{COMMIT_RE, PatchRules, Policy};
 
 /// Hard ceilings, independent of the trusted caller's opt-in count.
 pub const MAX_STEPS: u32 = 10;
@@ -64,6 +64,42 @@ pub struct Refusal {
 pub struct CheckedStack {
     pub accepted: Vec<CheckedStep>,
     pub refused: Option<Refusal>,
+}
+
+/// Check with limits derived only from the trusted caller's policy. This is
+/// library groundwork, not a workflow hand-back or permission to publish.
+/// The callback must scan all step content before patch diagnostics can quote
+/// it, just as for [`check`]. Ordinary one-PR publication remains unchanged.
+pub fn check_policy(
+    content: &[u8],
+    policy: &Policy,
+    base_commit: &str,
+    inspect: impl FnMut(&Step) -> Result<()>,
+) -> Result<CheckedStack> {
+    policy.validate()?;
+    ensure!(
+        policy.secondary_pull_request.is_none()
+            && policy.external.is_none()
+            && policy.advisory.is_none(),
+        "stack requires an ordinary new-pull-request policy"
+    );
+    let pr = policy
+        .safe_outputs
+        .create_pull_request
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("stack requires create_pull_request"))?;
+    let rules = PatchRules {
+        commit_author: policy.commit_author.as_deref(),
+        ..pr.rules()
+    };
+    check(
+        content,
+        policy.safe_outputs.stack_max_steps.min(policy.max_outputs),
+        base_commit,
+        policy.max_patch_bytes,
+        &rules,
+        inspect,
+    )
 }
 
 /// Check an ordered proposal, retaining only the prefix before the first refusal.
@@ -186,6 +222,48 @@ mod tests {
         json!({"base_commit": BASE, "steps": [
             step(1, "one.rs"), step(2, "two.rs"), step(3, "three.rs")
         ]})
+    }
+
+    #[test]
+    fn trusted_policy_bounds_gate_every_step() {
+        let content = proposal().to_string();
+        for (steps, outputs, accepted) in [
+            (0, 3, false),
+            (2, 3, false),
+            (3, 2, false),
+            (3, 3, true),
+            (10, 3, true),
+        ] {
+            let mut policy = policy();
+            policy.safe_outputs.stack_max_steps = steps;
+            policy.max_outputs = outputs;
+            let mut inspected = Vec::new();
+            let result = check_policy(content.as_bytes(), &policy, BASE, |step| {
+                inspected.push(step.issue);
+                Ok(())
+            });
+            if accepted {
+                assert_eq!(result.unwrap().accepted.len(), 3);
+                assert_eq!(inspected, [1, 2, 3]);
+            } else {
+                assert!(result.is_err());
+                assert!(inspected.is_empty());
+            }
+        }
+        let mut policy = policy();
+        policy.safe_outputs.stack_max_steps = 3;
+        for (author, max_bytes, reason) in [
+            (Some("Other <other@example.com>"), 4096, "author"),
+            (None, 1, "byte limit"),
+        ] {
+            policy.commit_author = author.map(str::to_owned);
+            policy.max_patch_bytes = max_bytes;
+            let checked = check_policy(content.as_bytes(), &policy, BASE, |_| Ok(())).unwrap();
+            assert!(checked.accepted.is_empty());
+            let refusal = checked.refused.unwrap();
+            assert_eq!(refusal.position, 1);
+            assert!(refusal.reason.contains(reason), "{}", refusal.reason);
+        }
     }
 
     fn checked(value: &Value) -> CheckedStack {

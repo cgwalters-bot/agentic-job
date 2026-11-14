@@ -1050,6 +1050,10 @@ pub struct SafeOutputs {
     /// remains an independent source).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_branch_repos: Vec<Vec<String>>,
+    /// Experimental caller ceiling, intersected across bounds files. Zero
+    /// disables policy-based stack checking; not a gh-aw handler operation.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stack_max_steps: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_pull_request: Option<PullRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1353,6 +1357,10 @@ impl Policy {
         );
         self.forge.check_outputs(self.safe_outputs.types())?;
         self.safe_outputs.validate_own_branch_repos()?;
+        validate_stack_steps(
+            self.safe_outputs.stack_max_steps,
+            self.forge == Forge::Github && self.safe_outputs.create_pull_request.is_some(),
+        )?;
         ensure!(
             self.forge != Forge::Forgejo || self.safe_outputs.own_branch_repos.is_empty(),
             "own-branch-repos is supported only on GitHub and GitLab"
@@ -1481,6 +1489,16 @@ pub(crate) fn validate_own_branch_repos(patterns: &[String]) -> Result<()> {
         );
         glob(pattern).context("own-branch-repos: invalid pattern")?;
     }
+    Ok(())
+}
+
+/// A nonzero stack ceiling requires new GitHub pull requests. This does not
+/// enable publication or increase the ordinary one-PR output limit.
+pub(crate) fn validate_stack_steps(steps: u32, pull_requests: bool) -> Result<()> {
+    ensure!(
+        steps <= crate::check::stack::MAX_STEPS && (steps == 0 || pull_requests),
+        "stack-steps requires create_pull_request on GitHub and must be at most 10"
+    );
     Ok(())
 }
 
