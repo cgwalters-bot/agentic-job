@@ -753,6 +753,74 @@ fn hidden_changes_are_refused_even_though_git_am_applies_them() {
     }
 }
 
+/// Git inherits an existing file's type when the index header omits its mode.
+/// The text-only reader must not mistake a hidden link edit for a plain edit.
+#[test]
+fn omitted_modes_cannot_hide_symlink_edits() {
+    let origin = Origin::new();
+    for (number, (name, ops, mode, accepted)) in [
+        ("a.txt", EDIT, "100644", true),
+        (
+            "run.sh",
+            &[Write("run.sh", b"#!/bin/sh\necho changed\n")][..],
+            "100755",
+            true,
+        ),
+        (
+            "link",
+            &[Remove("link"), Link("link", "/etc/passwd")][..],
+            "120000",
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (patch, _) = origin.patch(number, &case(name, ops, Accepted));
+        let reading = origin.read(&patch);
+        assert_eq!(reading.problems.is_empty(), accepted, "{name}: {reading:?}");
+        let text = String::from_utf8(patch).unwrap();
+        let index = text
+            .lines()
+            .find(|line| line.starts_with("index "))
+            .unwrap();
+        let without_mode = index.strip_suffix(&format!(" {mode}")).unwrap();
+        let omitted = text.replacen(index, without_mode, 1);
+        let reading = origin.read(omitted.as_bytes());
+        assert!(
+            reading
+                .problems
+                .iter()
+                .any(|problem| problem.contains(&format!(
+                    "a change to {name:?} that does not state its mode"
+                ))),
+            "{name}: {reading:?}"
+        );
+
+        // Prove this is an applicable attack, not merely malformed patch text.
+        let dir = origin.clone_as(&format!("omitted-{number}"));
+        let file = origin
+            .scratch
+            .path()
+            .join(format!("omitted-{number}.patch"));
+        std::fs::write(&file, omitted).unwrap();
+        git_ok(&dir, &["am", "--quiet", file.to_str().unwrap()]);
+        let entry = String::from_utf8(git_ok(&dir, &["ls-tree", "HEAD", name])).unwrap();
+        assert!(entry.starts_with(&format!("{mode} ")), "{entry}");
+        if name == "link" {
+            assert_eq!(
+                std::fs::read_link(dir.join(name)).unwrap(),
+                Path::new("/etc/passwd")
+            );
+        } else {
+            assert_ne!(
+                git_ok(&dir, &["show", &format!("{}:{name}", origin.base)]),
+                std::fs::read(dir.join(name)).unwrap()
+            );
+        }
+    }
+}
+
 /// xorshift64: all the randomness a repeatable corpus needs.
 struct Rng(u64);
 

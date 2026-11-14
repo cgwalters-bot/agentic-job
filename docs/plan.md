@@ -114,6 +114,13 @@ publication. Empty and valid-request controls are accepted. Only those three
 legacy cases are removed; key-bearing fixtures and upstream parity remain.
 This test-only port adds no runtime control or caller setting.
 
+The omitted-mode attack also has deterministic Rust coverage in
+`tests/patch_git.rs`: real Git applies edits to a plain file, executable and
+symlink without an index-header mode, inheriting their types, while the reader
+refuses all three ambiguous patches. Explicit-mode ordinary edits remain positive
+controls. This supplements the legacy corpus comparison without removing its
+old-tree/upstream coverage or bypassing the fixture-deletion prerequisite.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
