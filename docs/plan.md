@@ -110,6 +110,13 @@ symlinks to identical bytes outside the hand-back, dangling symlinks and
 directories are refused with file-specific diagnostics. This tests the existing
 reader boundary, not a new runtime control, and requires no privileged host setup.
 
+The executable-file corpus cases also run through collection and check in
+`tests/check.rs`: edits and deletions of existing executables are accepted,
+while new executables and mode changes in either direction are refused. Real
+Git applies the accepted patches and verifies content, tracked mode or deletion.
+This supplements patch-reader coverage without removing the gated legacy parity
+fixture or adding a runtime control or caller setting.
+
 The hidden-change corpus attacks also have deterministic Rust coverage in
 `tests/patch_git.rs`: a bare patch inside the commit message and a base64-encoded
 second mail must both be refused with the expected diagnostic, while real

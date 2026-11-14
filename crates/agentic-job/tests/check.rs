@@ -595,6 +595,125 @@ fn a_hand_back_within_the_policy_is_accepted() {
     );
 }
 
+/// Keep the legacy corpus's executable exceptions narrow through the CLI,
+/// not only the patch reader: existing executables may change or disappear.
+#[test]
+fn executable_patch_admission_through_collect_and_check() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (case, refusal) in [
+        ("edit", None),
+        ("delete", None),
+        ("add", Some("new symlink, submodule, executable")),
+        ("promote", Some("mode change")),
+        ("demote", Some("mode change")),
+    ] {
+        let run = Run::new();
+        let repo = run.path("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.test")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.test")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{case} {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "core.fileMode", "true"]);
+        let file = repo.join("run.sh");
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        let base_mode = if case == "promote" { 0o644 } else { 0o755 };
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(base_mode)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "Base"]);
+        let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+        match case {
+            "edit" => std::fs::write(&file, "#!/bin/sh\nexit 1\n").unwrap(),
+            "delete" => std::fs::remove_file(&file).unwrap(),
+            "add" => {
+                let added = repo.join("new.sh");
+                std::fs::write(&added, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(&added, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            "promote" | "demote" => {
+                let mode = if case == "promote" { 0o755 } else { 0o644 };
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        git(&["add", "--all"]);
+        git(&["commit", "-qm", "Change"]);
+        let patch = git(&[
+            "format-patch",
+            "-1",
+            "--stdout",
+            "--no-signature",
+            &format!("--add-header=X-GH-AW-Base-Commit: {base}"),
+        ]);
+        std::fs::write(run.path("out/aw-agent-run-7.patch"), patch).unwrap();
+        let mut metadata: Value =
+            serde_json::from_slice(&std::fs::read(run.path("out/base.json")).unwrap()).unwrap();
+        metadata["commit"] = base.clone().into();
+        std::fs::write(run.path("out/base.json"), metadata.to_string()).unwrap();
+        let collected = run.path("collected.json");
+        let output = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{case}: {output:?}");
+        let output = run.check(&collected);
+        let verdict = run.verdict();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(refusal.is_some())),
+            "{case}: {output:?}"
+        );
+        assert_eq!(verdict["ok"], refusal.is_none(), "{case}: {verdict}");
+        if let Some(reason) = refusal {
+            assert!(
+                verdict["errors"].to_string().contains(reason),
+                "{case}: {verdict}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(reason),
+                "{case}: {output:?}"
+            );
+        } else {
+            assert_eq!(verdict["errors"], serde_json::json!([]));
+            assert_eq!(verdict["patch"]["files"], serde_json::json!(["run.sh"]));
+            assert_eq!(verdict["patch"]["base_commit"], base);
+            git(&["reset", "--hard", &base]);
+            git(&["am", run.path("out/aw-agent-run-7.patch").to_str().unwrap()]);
+            if case == "delete" {
+                assert!(!file.exists());
+                assert!(git(&["ls-files", "run.sh"]).is_empty());
+            } else {
+                assert_eq!(std::fs::read(&file).unwrap(), b"#!/bin/sh\nexit 1\n");
+                assert!(git(&["ls-files", "--stage", "run.sh"]).starts_with("100755 "));
+            }
+        }
+    }
+}
+
 #[test]
 fn executable_patch_modes_survive_collection_and_check() {
     use std::os::unix::fs::PermissionsExt as _;
