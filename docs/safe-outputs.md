@@ -78,6 +78,14 @@ digests, and rejects the entire unsupported batch before acquiring credentials
 or writing. A changed context requires a new check, even if only whitespace
 changed. The receipt is an internal CLI format, not a new safe-output wire format.
 
+For a fixed-destination digest caller, this also prevents an otherwise valid
+comment from moving to another repository, item or credential destination between
+check and apply. The standalone CLI regression tests change each of those context
+fields, output bounds and whitespace after check and require refusal before any
+HTTP request to either the original or replacement publisher. Each replacement
+context passes a fresh check; the refusal tests receipt binding, not invalid
+configuration. This does not authenticate a receipt supplied by the producer.
+
 ### Native operations and the pinned adapter
 
 By default standalone apply supports **new GitHub issue/PR comments only** (`add_comment`),

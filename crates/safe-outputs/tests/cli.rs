@@ -627,6 +627,53 @@ fn changed_content_or_context_never_writes() {
 }
 
 #[test]
+fn checked_comment_destination_cannot_change_before_apply() {
+    // Omit producer selectors so each changed context is independently valid:
+    // refusal must come from receipt binding, not a conflicting item selector.
+    for field in [
+        "repo",
+        "item",
+        "api_url",
+        "max_outputs",
+        "outputs",
+        "whitespace",
+    ] {
+        let f = Fixture::new();
+        let other = Fixture::new();
+        f.input(r#"{"type":"add_comment","body":"Daily assessment."}"#);
+        f.assert_ok("check");
+        assert!(f.writes.lock().unwrap().is_empty());
+        let path = f.dir.path().join("context.json");
+        let mut context: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        match field {
+            "repo" => context[field] = json!("owner/other"),
+            "item" => context[field] = json!(8),
+            "api_url" => context[field] = json!(other.api),
+            "max_outputs" => context[field] = json!(1),
+            "outputs" => context[field] = json!({"add_comment":{"max":2}}),
+            "whitespace" => {}
+            _ => unreachable!(),
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&context).unwrap()).unwrap();
+        let result = f.run("apply");
+        assert!(!result.status.success(), "{field}");
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            error.contains("checked input or trusted context changed"),
+            "{field}: {error}"
+        );
+        assert!(f.writes.lock().unwrap().is_empty(), "{field}");
+        assert!(other.writes.lock().unwrap().is_empty(), "{field}");
+
+        // A fresh check accepts the changed configuration, but does not publish.
+        std::fs::remove_file(f.dir.path().join("checked.json")).unwrap();
+        f.assert_ok("check");
+        assert!(f.writes.lock().unwrap().is_empty(), "{field}");
+        assert!(other.writes.lock().unwrap().is_empty(), "{field}");
+    }
+}
+
+#[test]
 fn unsupported_operation_refuses_entire_batch_before_writing() {
     let f = Fixture::new();
     f.input(&format!("{COMMENT}\n{}", json!({"type":"create_issue", "repo":"owner/repo", "title":"Unsupported", "body":"This operation must make no writes."})));
