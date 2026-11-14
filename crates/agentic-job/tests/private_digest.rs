@@ -470,6 +470,89 @@ fn check_takes_one_comment_on_the_digest_issue() {
     }
 }
 
+/// Exercise the real collector, not a synthetic collected document: unknown
+/// aliases disappear, while supported destination overrides reach check.
+#[test]
+fn collected_digest_comments_cannot_override_the_fixed_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let (output, _) = policy_step(dir, FILLED, true);
+    assert!(output.status.success(), "{output:?}");
+    let policy = dir.join("job/policy.json");
+    let out = dir.join("out");
+    std::fs::create_dir(&out).unwrap();
+    let collected = dir.join("collected.json");
+    let item: u64 = ITEM.parse().unwrap();
+    for (fields, retained, refusal) in [
+        (json!({}), json!({}), None),
+        (json!({"issue_number": item + 1}), json!({}), None),
+        (
+            json!({"issue_number": item, "pr_number": item + 1}),
+            json!({"pr_number": item + 1}),
+            Some("outside the caller's fixed item"),
+        ),
+        (
+            json!({"item_number": item, "issue_number": item + 1}),
+            json!({"item_number": item}),
+            None,
+        ),
+        (
+            json!({"item_number": item + 1, "issue_number": item}),
+            json!({"item_number": item + 1}),
+            Some("outside the caller's fixed item"),
+        ),
+        (
+            json!({"repo": "owner/public", "issue_number": item}),
+            json!({"repo": "owner/public"}),
+            Some("which is not the policy's"),
+        ),
+    ] {
+        let comment = |fields: &Value| {
+            let mut value = fields.as_object().unwrap().clone();
+            value.insert("type".into(), json!("add_comment"));
+            value.insert("body".into(), json!("Daily digest."));
+            Value::Object(value)
+        };
+        std::fs::write(out.join("outputs.jsonl"), comment(&fields).to_string()).unwrap();
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(ingest.status.success(), "{fields}: {ingest:?}");
+        let document: Value = serde_json::from_slice(&std::fs::read(&collected).unwrap()).unwrap();
+        assert_eq!(document["errors"], json!([]), "{fields}: {document}");
+        assert_eq!(document["items"], json!([comment(&retained)]), "{fields}");
+        let checked = Command::new(BIN)
+            .args(["check", "--policy"])
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .args(["--comment-repo", REPO, "--comment-target", ITEM])
+            .output()
+            .unwrap();
+        assert_eq!(
+            checked.status.code(),
+            Some(i32::from(refusal.is_some())),
+            "{fields}: {checked:?}"
+        );
+        if let Some(refusal) = refusal {
+            let log = format!(
+                "{}{}",
+                String::from_utf8_lossy(&checked.stdout),
+                String::from_utf8_lossy(&checked.stderr)
+            );
+            assert!(log.contains(refusal), "{fields}: {log}");
+        }
+    }
+}
+
 /// The configuration turns on the proxy and names the example's egress
 /// policy, which `run` admits for a private run where the shipped policy
 /// or one without the allowlist is refused. Run the actual host handoff

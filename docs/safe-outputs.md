@@ -78,6 +78,14 @@ digests, and rejects the entire unsupported batch before acquiring credentials
 or writing. A changed context requires a new check, even if only whitespace
 changed. The receipt is an internal CLI format, not a new safe-output wire format.
 
+For a fixed-destination digest caller, this also prevents an otherwise valid
+comment from moving to another repository, item or credential destination between
+check and apply. The standalone CLI regression tests change each of those context
+fields, output bounds and whitespace after check and require refusal before any
+HTTP request to either the original or replacement publisher. Each replacement
+context passes a fresh check; the refusal tests receipt binding, not invalid
+configuration. This does not authenticate a receipt supplied by the producer.
+
 ### Native operations and the pinned adapter
 
 By default standalone apply supports **new GitHub issue/PR comments only** (`add_comment`),
@@ -137,6 +145,14 @@ earlier valid finding. Check refuses inline output without explicit bounds, a
 merge-request target and a trusted review head. These tests exercise the CLI
 through the shared publisher; they do not prove live GitLab or caller activation.
 
+Standalone close-operation loopback tests keep an issue and merge request with
+the same number distinct, even when the trusted default comment target is the
+issue. They check the closing note's mention and quick-action neutralization,
+the subsequent state change and the returned item URL. A locked merge request
+refuses the entire batch before an earlier valid issue note can be posted.
+These tests cover the CLI-to-publisher contract, not live-service publication
+or CI credential isolation.
+
 GitLab's trusted context has a different shape: `policy` is the existing full
 effective policy JSON (the same object `agentic-job policy` emits), `server` is
 the forge origin, and `run_url` is the trusted CI run page. Optional `item` and
@@ -173,6 +189,15 @@ the existing protected paths, author, fork/own-branch bounds and pinned push
 head, not a second standalone policy implementation. Nested group paths work.
 Apply reads only `SAFE_OUTPUTS_TOKEN`, never `GITLAB_TOKEN` or agent credentials.
 No automatic retry, transaction or rollback is added.
+
+Standalone patch-file regressions (`cargo test --locked -p safe-outputs --test
+cli gitlab_patch_files_are_bounded_regular_inputs_at_check_and_apply`) exercise
+both MR creation and branch updates. Check accepts the exact caller patch-byte
+bound and the 64 KiB base-metadata bound; check and apply refuse the first byte
+over either bound, missing files, directories and symlinks to identical bytes.
+Apply is tested with a previously valid receipt, and every refusal precedes any
+forge request. This is local artifact-admission coverage, not successful git
+transport, live GitLab or CI artifact-isolation proof; no caller setting changes.
 
 Standalone label-operation regressions (`cargo test --locked -p safe-outputs
 --features test-support --test cli_gitlab_labels`) cover issue/MR routing with
@@ -2077,6 +2102,12 @@ names. CI runs a corpus of hand-backs through the old tree's check and
 this one, which must agree but for those differences
 (`crates/agentic-job/tests/corpus`). `crates/agentic-job/tests/check.rs`
 checks the hand-backs of two real runs (`safe-outputs/fixtures`).
+It also runs the output-count corpus cases through Rust `policy`, `collect`
+and `check`: comments, missing tools and missing data at and above their
+per-type limits, mixed outputs at the total limit, and a total-limit refusal
+where every type remains within its own limit. This coverage runs without
+Node or external checkouts; the legacy corpus retains its live upstream
+comparisons until their replacement or removal is authorized separately.
 
 `check` reads text, on a machine without the repository. It cannot see
 that `git am --3way` follows renames, that the base commit is only the

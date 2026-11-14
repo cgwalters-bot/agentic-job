@@ -153,6 +153,14 @@ in another repository, a patch and a project. Check refuses a comment anywhere
 but the issue, a second comment and any other output. Its egress policy is one
 `run` admits, and `policy.yml` refuses a public caller naming a private target.
 
+The collector-to-check regression also exercises the raw hand-back. Collection
+discards the unsupported `issue_number` alias; it does not treat it as a
+routing instruction or reject its conflicts. The surviving `pr_number`,
+`item_number` and `repo` fields are checked against the fixed destination.
+A body-only comment therefore uses the caller's digest issue, even when the
+raw output included discarded aliases naming other items. This is routing
+coverage, not proof of private-run admission or live publication.
+
 The host-configuration step resolves the egress policy against the caller
 checkout before handing it to the host image, which reads it from `/`.
 Container and subordinate-UID probes remain enabled even though the digest

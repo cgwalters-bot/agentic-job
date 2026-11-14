@@ -345,6 +345,151 @@ fn analysis_comments_use_the_callers_destination_without_a_checkout() {
     }
 }
 
+/// Port of the legacy corpus's count ceilings, through the real collector.
+/// Per-type limits and the total limit must both survive policy serialization.
+#[test]
+fn output_count_ceilings_through_collect_and_check() {
+    use serde_json::json;
+
+    let comment =
+        |n| json!({"type": "add_comment", "body": format!("comment {n}"), "item_number": n});
+    let tool = json!({"type": "missing_tool", "tool": "cargo-nextest", "reason": "not installed"});
+    let data = json!({"type": "missing_data", "data_type": "logs", "reason": "none kept"});
+    let mut cases = vec![
+        (
+            "mixed types",
+            vec![comment(1), comment(2), tool.clone(), data.clone()],
+            None,
+        ),
+        (
+            "total ceiling",
+            vec![
+                comment(1),
+                comment(2),
+                comment(3),
+                tool.clone(),
+                data.clone(),
+            ],
+            None,
+        ),
+        (
+            "over total only",
+            vec![
+                comment(1),
+                comment(2),
+                comment(3),
+                tool.clone(),
+                tool.clone(),
+                tool.clone(),
+            ],
+            Some("6 outputs, over max_outputs 5".to_owned()),
+        ),
+    ];
+    for item in [comment(1), tool, data] {
+        cases.push(("type ceiling", vec![item.clone(); 3], None));
+        cases.push((
+            "over type only",
+            vec![item.clone(); 4],
+            Some(format!(
+                "Too many items of type '{}'",
+                item["type"].as_str().unwrap()
+            )),
+        ));
+    }
+
+    for (name, items, refusal) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name);
+        std::fs::write(path("bounds.toml"), "hosts = ['github.com']\nrepos = ['example/repo']\nbases = ['main']\nmax_outputs = 5\nmax_patch_bytes = 4096\nmax_patch_files = 2\n[github.outputs]\nadd_comment = { max = 3 }\nmissing_tool = { max = 3 }\nmissing_data = { max = 3 }\n").unwrap();
+        let policy = Command::new(BIN)
+            .args([
+                "policy",
+                "--repo",
+                "example/repo",
+                "--clone-url",
+                "https://github.com/example/repo",
+                "--base",
+                "main",
+                "--kind",
+                "analysis",
+                "--outputs",
+                "all",
+                "--max-outputs",
+                "max",
+                "--allow",
+            ])
+            .arg(path("bounds.toml"))
+            .output()
+            .unwrap();
+        assert!(policy.status.success(), "{name}: {policy:?}");
+        std::fs::write(path("policy.json"), policy.stdout).unwrap();
+        std::fs::create_dir(path("out")).unwrap();
+        std::fs::write(
+            path("out/outputs.jsonl"),
+            items
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let collected = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(path("policy.json"))
+            .arg("--outputs")
+            .arg(path("out"))
+            .arg("--collected")
+            .arg(path("collected.json"))
+            .output()
+            .unwrap();
+        // The collector enforces per-type counts; check must also reject
+        // its recorded errors rather than accepting the truncated item list.
+        let type_overflow = name == "over type only";
+        assert_eq!(
+            collected.status.code(),
+            Some(i32::from(type_overflow)),
+            "{name}: {collected:?}"
+        );
+        let checked = Command::new(BIN)
+            .args(["check", "--policy"])
+            .arg(path("policy.json"))
+            .arg("--outputs")
+            .arg(path("out"))
+            .arg("--collected")
+            .arg(path("collected.json"))
+            .arg("--report")
+            .arg(path("verdict.json"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            checked.status.code(),
+            Some(i32::from(refusal.is_some())),
+            "{name} {items:?}: {checked:?}"
+        );
+        let verdict: Value =
+            serde_json::from_slice(&std::fs::read(path("verdict.json")).unwrap()).unwrap();
+        assert_eq!(verdict["ok"], refusal.is_none(), "{name}: {verdict}");
+        assert!(verdict["patch"].is_null(), "{name}: {verdict}");
+        if let Some(refusal) = refusal {
+            assert!(
+                verdict["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| error.as_str().unwrap().contains(&refusal)),
+                "{name}: {verdict}"
+            );
+        } else {
+            assert_eq!(verdict["errors"], json!([]), "{name}: {verdict}");
+            assert_eq!(
+                verdict["items"].as_array().unwrap().len(),
+                items.len(),
+                "{name}: {verdict}"
+            );
+        }
+    }
+}
+
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data")
