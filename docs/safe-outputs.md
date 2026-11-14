@@ -116,6 +116,11 @@ POST, without automatic retry or a request to the redirect destination. Earlier
 successful comments are not rolled back. Diagnostics omit the server response,
 which may reflect credentials or submitted prose. These tests cover first and
 later POST failures, not live-service delivery or recovery after a lost response.
+Separate cases receive a complete POST, then return HTTP success with malformed
+JSON or close before the advertised response body ends. Both stop without retry,
+later posts or response text in diagnostics. Even the last attempted comment may
+already exist: inspect the destination before replaying any part of the batch.
+These tests establish conservative failure handling, not delivery reconciliation.
 
 Check can validate other non-patch operations under explicit output bounds, but
 standalone GitHub apply refuses them, including a batch with a supported comment before

@@ -25,6 +25,14 @@ impl Fixture {
     }
 
     fn with_failure(state: &'static str, failure: Option<(usize, u16, String)>) -> Self {
+        Self::with_response_damage(state, failure, None)
+    }
+
+    fn with_response_damage(
+        state: &'static str,
+        failure: Option<(usize, u16, String)>,
+        damage: Option<(usize, bool)>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -88,11 +96,20 @@ impl Fixture {
                     body = json!({"message":"loopback-test-token reflected-response-sentinel"})
                         .to_string();
                 }
+                let mut length = body.len();
+                if let Some((at, truncated)) = damage
+                    && requests.lock().unwrap().len() + 1 == at
+                {
+                    body = "not JSON: loopback-test-token reflected-response-sentinel".into();
+                    // Close after fewer bytes than promised, or deliver a
+                    // complete but invalid JSON response to a successful POST.
+                    length = body.len() + usize::from(truncated);
+                }
                 requests.lock().unwrap().push(request);
                 write!(
                     stream,
                     "HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
+                    length,
                     body
                 )
                 .unwrap();
@@ -795,6 +812,58 @@ fn github_comment_failure_stops_publication_without_retry_or_response_leak() {
                 assert_eq!(payload["body"], expected);
             }
             assert!(redirected.writes.lock().unwrap().is_empty(), "{status}");
+        }
+    }
+}
+
+#[test]
+fn github_comment_ambiguous_response_stops_without_retry_or_response_leak() {
+    for truncated in [false, true] {
+        for failed_request in [1, 2] {
+            let f =
+                Fixture::with_response_damage("opened", None, Some((failed_request, truncated)));
+            write_context(
+                &f,
+                &json!({
+                    "repo":"owner/repo", "item":7, "max_outputs":3,
+                    "api_url":f.api, "outputs":{"add_comment":{"max":3}}
+                }),
+            );
+            let bodies = [
+                "First assessment.",
+                "Second assessment.",
+                "Third assessment.",
+            ];
+            f.input(
+                &bodies
+                    .iter()
+                    .map(|body| json!({"type":"add_comment","body":body}).to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            f.assert_ok("check");
+            assert!(f.writes.lock().unwrap().is_empty());
+            let result = f.run("apply");
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "{truncated}/{failed_request}: {result:?}"
+            );
+            assert!(result.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&result.stderr),
+                "safe-outputs: comment publication failed\n"
+            );
+            // The server received the complete POST, so even the last comment
+            // may exist. Retrying it or continuing the batch would be unsafe.
+            let requests = f.writes.lock().unwrap();
+            assert_eq!(requests.len(), failed_request);
+            for (request, expected) in requests.iter().zip(bodies) {
+                assert!(request.starts_with("POST /repos/owner/repo/issues/7/comments "));
+                let (_, payload) = request.split_once("\r\n\r\n").unwrap();
+                let payload: Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(payload["body"], expected);
+            }
         }
     }
 }
