@@ -820,6 +820,105 @@ fn invalid_inputs_never_write() {
 }
 
 #[test]
+fn rechecking_cannot_replace_comment_approval_evidence() {
+    for change in ["none", "input", "context", "invalid-input"] {
+        let f = Fixture::new();
+        f.input(COMMENT);
+        f.assert_ok("check");
+        let receipt_path = f.dir.path().join("checked.json");
+        let receipt = std::fs::read(&receipt_path).unwrap();
+        match change {
+            "input" => f.input(&COMMENT.replace("proof", "changed")),
+            "context" => f.context(json!({"add_comment":{"max":2}})),
+            "invalid-input" => f.input("{bad"),
+            "none" => {}
+            _ => unreachable!(),
+        }
+
+        let result = f.run("check");
+        assert!(!result.status.success(), "{change}");
+        if change != "invalid-input" {
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("cannot create check receipt (must not exist)"),
+                "{change}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt, "{change}");
+        assert!(f.writes.lock().unwrap().is_empty(), "{change}");
+
+        // A failed re-check neither revokes the original evidence nor approves
+        // changed bytes. Apply still validates against the original receipt.
+        let result = f.run("apply");
+        assert_eq!(result.status.success(), change == "none", "{change}");
+        assert_eq!(
+            f.writes.lock().unwrap().len(),
+            usize::from(change == "none")
+        );
+        if change == "input" || change == "context" {
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("checked input or trusted context changed"),
+                "{change}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            // Explicitly retire the old evidence before checking this new input.
+            std::fs::remove_file(&receipt_path).unwrap();
+            f.assert_ok("check");
+            assert_ne!(std::fs::read(&receipt_path).unwrap(), receipt, "{change}");
+            assert!(f.writes.lock().unwrap().is_empty(), "{change}");
+            f.assert_ok("apply");
+            assert_eq!(f.writes.lock().unwrap().len(), 1, "{change}");
+        }
+    }
+}
+
+#[test]
+fn checking_cannot_clobber_existing_receipt_destinations() {
+    for kind in ["regular", "symlink", "dangling-symlink", "directory"] {
+        let f = Fixture::new();
+        f.input(COMMENT);
+        let receipt = f.dir.path().join("checked.json");
+        let target = f.dir.path().join("target.json");
+        let sentinel = b"existing caller-owned evidence";
+        match kind {
+            "regular" => std::fs::write(&receipt, sentinel).unwrap(),
+            "symlink" | "dangling-symlink" => {
+                if kind == "symlink" {
+                    std::fs::write(&target, sentinel).unwrap();
+                }
+                std::os::unix::fs::symlink(&target, &receipt).unwrap();
+            }
+            "directory" => std::fs::create_dir(&receipt).unwrap(),
+            _ => unreachable!(),
+        }
+        let result = f.run("check");
+        assert!(!result.status.success(), "{kind}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("cannot create check receipt (must not exist)"),
+            "{kind}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        match kind {
+            "regular" => assert_eq!(std::fs::read(&receipt).unwrap(), sentinel),
+            "symlink" | "dangling-symlink" => {
+                assert_eq!(std::fs::read_link(&receipt).unwrap(), target);
+                if kind == "symlink" {
+                    assert_eq!(std::fs::read(&target).unwrap(), sentinel);
+                } else {
+                    assert!(!target.exists());
+                }
+            }
+            "directory" => assert!(receipt.is_dir()),
+            _ => unreachable!(),
+        }
+        assert!(f.writes.lock().unwrap().is_empty(), "{kind}");
+    }
+}
+
+#[test]
 fn changed_content_or_context_never_writes() {
     for change_context in [false, true] {
         let f = Fixture::new();

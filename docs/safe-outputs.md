@@ -93,6 +93,14 @@ HTTP request to either the original or replacement publisher. Each replacement
 context passes a fresh check; the refusal tests receipt binding, not invalid
 configuration. This does not authenticate a receipt supplied by the producer.
 
+Receipt-lifecycle regressions cover repeated checks with identical, changed and
+invalid input, and changed trusted bounds. A failed check preserves the previous
+receipt byte-for-byte: it does not approve the new input or revoke the original
+one. Use a fresh receipt path for a new check (or explicitly retire the old
+receipt). Existing regular files, symlinks including dangling ones, and directories
+at that path must not be replaced; symlink targets must not be written. These
+tests use local fixtures, not live publication or CI artifact provenance.
+
 ### Native operations and the pinned adapter
 
 By default standalone apply supports **new GitHub issue/PR comments only** (`add_comment`),
