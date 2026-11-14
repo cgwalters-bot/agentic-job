@@ -16,10 +16,22 @@ struct Fixture {
 
 impl Fixture {
     fn new(fault: &str) -> Self {
-        Self::with_ref_change(fault, None)
+        Self::build(fault, None, None)
     }
 
     fn with_ref_change(fault: &str, change: Option<(&'static str, usize)>) -> Self {
+        Self::build(fault, change, None)
+    }
+
+    fn with_diff_pages(fault: &str, pages: Option<Vec<Value>>) -> Self {
+        Self::build(fault, None, pages)
+    }
+
+    fn build(
+        fault: &str,
+        change: Option<(&'static str, usize)>,
+        pages: Option<Vec<Value>>,
+    ) -> Self {
         let mut mr: Value = serde_json::from_str(include_str!("data/inline/gitlab.json")).unwrap();
         let mut diffs: Value =
             serde_json::from_str(include_str!("data/inline/gitlab-diffs.json")).unwrap();
@@ -34,6 +46,18 @@ impl Fixture {
         }
         let mut target_reads = 0;
         let (server, requests) = serve(100, move |request| {
+            if let Some(pages) = &pages {
+                for (index, page) in pages.iter().enumerate() {
+                    if request.line
+                        == format!(
+                            "GET /api/v4/projects/1/merge_requests/9/diffs?page={}&per_page=100 HTTP/1.1",
+                            index + 1
+                        )
+                    {
+                        return (200, page.to_string());
+                    }
+                }
+            }
             let body = match request.line.trim_end_matches(" HTTP/1.1") {
                 "GET /api/v4/projects/owner%2Fname" => {
                     json!({"id":1,"path_with_namespace":"owner/name","visibility":"public"})
@@ -256,5 +280,88 @@ fn standalone_inline_requires_caller_authority_before_network() {
         assert!(!f.dir.path().join("checked.json").exists());
         assert!(!f.run("apply").status.success(), "{fault}");
         assert!(f.requests.try_iter().next().is_none());
+    }
+}
+
+#[test]
+fn standalone_inline_diff_pagination_is_complete_bounded_and_unambiguous() {
+    let diffs: Value = serde_json::from_str(include_str!("data/inline/gitlab-diffs.json")).unwrap();
+    let target = diffs[0].clone();
+    // Unrelated paths fill pages without introducing another match for src/x.
+    let full_page = |page: usize| {
+        Value::Array(
+            (0..100)
+                .map(|index| {
+                    let path = format!("other/{page}/{index}");
+                    json!({"old_path":path,"new_path":path})
+                })
+                .collect(),
+        )
+    };
+    for (case, expected, page_count) in [
+        ("last-page", None, 20),
+        ("early-match", None, 2),
+        ("full-cap", Some("more diff pages than apply reads"), 20),
+        ("duplicate", Some("ambiguous file in diff"), 2),
+        ("oversized", Some("MR diff page exceeds its limit"), 2),
+        ("non-array", Some("MR diffs response is not an array"), 2),
+    ] {
+        let mut pages: Vec<_> = (1..page_count).map(full_page).collect();
+        if case != "last-page" {
+            pages[0][0] = target.clone();
+        }
+        pages.push(match case {
+            "last-page" | "duplicate" => json!([target]),
+            "early-match" => json!([]),
+            "full-cap" => full_page(20),
+            "oversized" => json!(vec![target.clone(); 101]),
+            "non-array" => json!({}),
+            _ => unreachable!(),
+        });
+        let f = Fixture::with_diff_pages("ok", Some(pages));
+        f.input(&[finding("RIGHT", 2)]);
+        f.ok("check");
+        assert!(f.requests.try_iter().next().is_none());
+        let result = f.run("apply");
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(
+            result.status.success(),
+            expected.is_none(),
+            "{case}: {error}"
+        );
+        if let Some(expected) = expected {
+            assert!(error.contains(expected), "{case}: {error}");
+        }
+        let requests: Vec<_> = f.requests.try_iter().collect();
+        let reads: Vec<_> = requests
+            .iter()
+            .filter(|r| r.line.contains("/diffs?"))
+            .map(|r| r.line.clone())
+            .collect();
+        assert_eq!(
+            reads,
+            (1..=page_count)
+                // Apply preflights the batch, then revalidates before posting.
+                .cycle()
+                .take(page_count * if expected.is_none() { 2 } else { 1 })
+                .map(|page| format!(
+                    "GET /api/v4/projects/1/merge_requests/9/diffs?page={page}&per_page=100 HTTP/1.1"
+                ))
+                .collect::<Vec<_>>(),
+            "{case}"
+        );
+        let writes: Vec<_> = requests
+            .iter()
+            .filter(|r| !r.line.starts_with("GET "))
+            .collect();
+        assert_eq!(
+            writes.len(),
+            usize::from(expected.is_none()),
+            "{case}: {requests:#?}"
+        );
+        if let Some(write) = writes.first() {
+            assert_eq!(write.body["position"]["new_path"], "src/x");
+            assert_eq!(write.body["position"]["new_line"], 2);
+        }
     }
 }

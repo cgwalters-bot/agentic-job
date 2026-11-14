@@ -172,6 +172,15 @@ when an earlier finding has already passed preflight. This guards against postin
 a finding with a position computed from a diff that changed while it was read;
 it does not make publication atomic with subsequent changes on GitLab.
 
+Diff-pagination regressions in `cli_gitlab_inline` require a complete listing
+even after finding the requested file. They cover a match on the short twentieth
+page and an early match followed by an empty page. Twenty full pages refuse
+without requesting page 21; a duplicate match on a later page, an oversized
+page or a non-array response also refuses before any write. These tests pin
+the existing bounded scan against incomplete or ambiguous inline positions;
+they add no permission or caller setting and do not prove snapshot consistency
+across GitLab API requests.
+
 Standalone close-operation loopback tests keep an issue and merge request with
 the same number distinct, even when the trusted default comment target is the
 issue. They check the closing note's mention and quick-action neutralization,
