@@ -128,6 +128,14 @@ refuses all three ambiguous patches. Explicit-mode ordinary edits remain positiv
 controls. This supplements the legacy corpus comparison without removing its
 old-tree/upstream coverage or bypassing the fixture-deletion prerequisite.
 
+The oversized-output corpus case also has native Rust CLI coverage in
+`tests/check.rs`: an otherwise identical valid JSONL hand-back is accepted one
+byte below and exactly at the 1 MiB limit, and refused one byte above it with
+the size diagnostic. Padding changes neither request count nor message length.
+This supplements the legacy comparison without Node or external checkouts;
+gated fixture cleanup and upstream parity remain unchanged. No runtime control
+or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

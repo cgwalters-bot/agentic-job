@@ -710,6 +710,53 @@ fn public_base_evidence_cannot_complete_an_incomplete_key() {
 }
 
 #[test]
+fn output_jsonl_obeys_the_exact_byte_limit() {
+    const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+    for size in [MAX_OUTPUT_BYTES - 1, MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES + 1] {
+        let run = Run::new();
+        let path = run.path("out/outputs.jsonl");
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Pad the existing valid request, not its message or its item count:
+        // only the file byte limit should distinguish these hand-backs.
+        bytes.resize(size, b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        let output = run.check(&data("check/collected.json"));
+        let accepted = size <= MAX_OUTPUT_BYTES;
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(!accepted)),
+            "{size}: {output:?}"
+        );
+        let verdict = run.verdict();
+        assert_eq!(verdict["ok"], accepted, "{size}: {verdict}");
+        if accepted {
+            assert_eq!(
+                verdict["items"].as_array().unwrap().len(),
+                1,
+                "{size}: {verdict}"
+            );
+            assert_eq!(
+                verdict["errors"],
+                serde_json::json!([]),
+                "{size}: {verdict}"
+            );
+        } else {
+            let diagnostic = format!("outputs.jsonl is {size} bytes, over {MAX_OUTPUT_BYTES}");
+            assert_eq!(
+                verdict["errors"],
+                serde_json::json!([diagnostic]),
+                "{verdict}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(&diagnostic),
+                "{output:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_hand_back_entries_are_refused() {
     for (case, want) in [
         ("invalid JSON", "base.json is not"),
