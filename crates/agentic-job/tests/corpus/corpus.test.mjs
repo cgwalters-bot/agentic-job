@@ -376,40 +376,6 @@ test("check: every type, at its ceiling and over it", async () => {
   await same("a pull request from an analysis run", withPatch(GOOD), /Unexpected output type 'create_pull_request'/, { workflow: "analysis", outputs: "all" });
 });
 
-// A type the old tree never had, so there is nothing of it to compare
-// with: the new policy, gh-aw's collector and the new check alone.
-test("check: bounded issue actions, through the collector and the check", () => {
-  const bounds = join(scratch(), 'allow.toml');
-  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[github.outputs]\n',
-    '[github.outputs]\nclose_issue = { max = 1 }\nadd_labels = { max = 1, allowed = ["triage", "blocked"], blocked = ["blocked"] }\n'));
-  const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
-    '--base', BASE, '--kind', 'analysis', '--outputs', 'close_issue,add_labels', '--max-outputs', '2');
-  assert.equal(result.status, 0, result.stderr);
-  const policy = JSON.parse(result.stdout);
-  for (const [type, key] of [['close_issue', 'issue_number'], ['add_labels', 'item_number']]) {
-    const item = { type, repo: REPO, [key]: 7, ...(type === 'add_labels' ? { labels: ['triage'] } : { body: 'Done in #8.' }) };
-    for (const [name, lines, ok] of [
-      ['accepted', [item], true],
-      ['another repository', [{ ...item, repo: 'other/repo' }], false],
-      ['no repository', [{ ...item, repo: undefined }], false],
-      ['no number', [{ ...item, [key]: undefined }], false],
-      ['zero number', [{ ...item, [key]: 0 }], false],
-      ['over count', [item, item], false],
-      ...(type === 'add_labels' ? [
-        ['disallowed label', [{ ...item, labels: ['release'] }], false],
-        ['blocked label', [{ ...item, labels: ['blocked'] }], false],
-        ['label object', [{ ...item, labels: [{ name: 'triage' }] }], false],
-      ] : [
-        ['duplicate relationship', [{ ...item, duplicate_of: 'other/repo#8' }], false],
-        ['no closing comment', [{ ...item, body: undefined }], false],
-      ]),
-    ]) {
-      const verdict = newCheck(handback({ lines, base: null }), policy);
-      assert.equal(verdict.ok, ok, `${type}: ${name}: ${JSON.stringify(verdict.errors)}`);
-    }
-  }
-});
-
 test("check: the hand-backs of two real runs of the old tree", async () => {
   for (const [name, change] of [
     ["create-pull-request", { repo: OWN_REPO, outputs: "create_pull_request,noop,missing_tool" }],

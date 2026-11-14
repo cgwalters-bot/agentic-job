@@ -251,6 +251,13 @@ linking precedes replay detection and remains limited to non-staged patch runs.
 Their JavaScript equivalents are removed; the multi-step handler integration
 and pinned upstream parity tests remain unchanged.
 
+Bounded issue-action admission now runs through Rust's serialized CLI in
+`tests/issue_actions.rs`: explicit repository and item targets, per-type counts,
+label allow/block precedence (including case), and required closing explanations
+and refusal of duplicate relationships. It replaces that one JavaScript corpus
+test; upstream handler parity and the gated key-bearing fixture remain untouched.
+No runtime control, default, permission or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
