@@ -166,6 +166,14 @@ head, not a second standalone policy implementation. Nested group paths work.
 Apply reads only `SAFE_OUTPUTS_TOKEN`, never `GITLAB_TOKEN` or agent credentials.
 No automatic retry, transaction or rollback is added.
 
+Standalone label-operation regressions (`cargo test --locked -p safe-outputs
+--features test-support --test cli_gitlab_labels`) cover issue/MR routing with
+colliding numbers, incremental label changes and replay without another write.
+They also prove that a missing project label or an implicit scoped-label
+replacement refuses the whole batch before an earlier valid note can publish.
+These are loopback CLI-to-publisher tests, not live GitLab or CI isolation proof;
+they introduce no new permission or caller setting.
+
 Minimal GitLab CI jobs, on separate isolated runners, using a pinned binary
 already installed by the operator and caller-owned `/trusted/context.json`:
 
