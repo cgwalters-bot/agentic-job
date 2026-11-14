@@ -97,6 +97,14 @@ an unexpected directory and symlinked outputs. The size test also accepts exactl
 the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
 subject to the disposition above. No runtime control or caller setting changes.
 
+Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
+the real collector/checker accepts the matching request, patch and base, and
+refuses missing, extra or renamed patches, a different request branch, an orphan
+patch, and missing or mismatched base repository/ref/commit metadata. This makes
+those corpus behaviors testable without Node or external checkouts. The legacy
+old-tree/upstream comparisons remain intact; this is preparation for cleanup,
+not evidence that the parity or fixture-deletion prerequisites are satisfied.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

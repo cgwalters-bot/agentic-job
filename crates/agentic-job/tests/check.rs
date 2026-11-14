@@ -623,6 +623,92 @@ fn malformed_hand_back_entries_are_refused() {
 }
 
 #[test]
+fn collected_pull_requests_require_one_patch_bound_to_their_branch_and_base() {
+    for (case, want) in [
+        ("valid", None),
+        ("missing patch", Some("needs exactly one patch")),
+        ("extra patch", Some("needs exactly one patch")),
+        ("renamed patch", Some("needs exactly one patch")),
+        ("other branch", Some("needs exactly one patch")),
+        ("no request", Some("patch without a create_pull_request")),
+        ("missing base", Some("base.json is not")),
+        ("other repository", Some("base.json is not")),
+        ("other ref", Some("base.json is not")),
+        ("other commit", Some("X-GH-AW-Base-Commit")),
+    ] {
+        let run = Run::new();
+        let patch = run.path("out/aw-agent-run-7.patch");
+        let base = run.path("out/base.json");
+        match case {
+            "valid" => {}
+            "missing patch" => std::fs::remove_file(&patch).unwrap(),
+            "extra patch" => {
+                std::fs::copy(&patch, run.path("out/aw-other.patch")).unwrap();
+            }
+            "renamed patch" => {
+                std::fs::rename(&patch, run.path("out/aw-other.patch")).unwrap();
+            }
+            "other branch" => {
+                let outputs = run.path("out/outputs.jsonl");
+                let mut request: Value =
+                    serde_json::from_slice(&std::fs::read(&outputs).unwrap()).unwrap();
+                request["branch"] = "other".into();
+                std::fs::write(outputs, request.to_string()).unwrap();
+            }
+            "no request" => std::fs::write(run.path("out/outputs.jsonl"), "").unwrap(),
+            "missing base" => std::fs::remove_file(&base).unwrap(),
+            _ => {
+                let mut metadata: Value =
+                    serde_json::from_slice(&std::fs::read(&base).unwrap()).unwrap();
+                let (field, value) = match case {
+                    "other repository" => ("repo", "example/other".to_owned()),
+                    "other ref" => ("ref", "other".to_owned()),
+                    "other commit" => ("commit", "0".repeat(40)),
+                    _ => unreachable!(),
+                };
+                metadata[field] = value.into();
+                std::fs::write(&base, metadata.to_string()).unwrap();
+            }
+        }
+        // Use the shipped collector, not a synthetic collected request: branch
+        // changes and absence must survive the actual policy/collect/check path.
+        let collected = run.path("collected.json");
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(ingest.status.code(), Some(0), "{case}: {ingest:?}");
+        let output = run.check(&collected);
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(want.is_some())),
+            "{case}: {output:?}"
+        );
+        let verdict = run.verdict();
+        assert_eq!(verdict["ok"], want.is_none(), "{case}: {verdict}");
+        if let Some(want) = want {
+            assert!(
+                verdict["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|error| { error.as_str().unwrap().contains(want) }),
+                "{case}: {verdict}"
+            );
+        } else {
+            assert_eq!(verdict["errors"], serde_json::json!([]));
+            assert_eq!(verdict["items"].as_array().unwrap().len(), 1);
+            assert_eq!(verdict["patch"]["file"], "aw-agent-run-7.patch");
+        }
+    }
+}
+
+#[test]
 fn a_hand_back_outside_the_policy_is_refused_with_its_reasons() {
     let run = Run::new();
     std::fs::write(run.path("out/notes.txt"), "hi").unwrap();
