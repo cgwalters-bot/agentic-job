@@ -227,18 +227,6 @@ function scriptEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: (.*)$`, 'm'))?.[1];
 }
 
-// gh-aw replaces its own list with GH_AW_ALLOWED_DOMAINS: the handlers
-// keep the links the policy call wrote down, as `collect` does. The
-// result step's reason is tests/workflows.rs's.
-test('every sanitizer keeps the links the policy keeps', () => {
-  const domains = '${{ fromJSON(inputs.policy).allowed-domains }}';
-  assert.equal(scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_ALLOWED_DOMAINS'), domains);
-  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
-  assert.match(policy, /\n        value: \$\{\{ jobs\.policy\.outputs\.allowed-domains \}\}\n/);
-  assert.match(policy, /\n      allowed-domains: \$\{\{ steps\.request\.outputs\.allowed-domains \}\}\n/);
-  assert.match(policy, /"allowed-domains=\$\(jq -r '\.allowed_domains \/\/ \[\] \| join\(","\)' "\$JOB_DIR\/policy\.json"\)"/);
-});
-
 test('the pinned comment handler posts a guarded review verdict', { skip: !process.env.GH_AW_JS }, async () => {
   const body = 'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: 0123';
   const guarded = await guard([comment(body)], [], { target: '454', artifacts: 'dispatch-review-' });

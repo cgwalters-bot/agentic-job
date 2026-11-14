@@ -251,6 +251,13 @@ linking precedes replay detection and remains limited to non-staged patch runs.
 Their JavaScript equivalents are removed; the multi-step handler integration
 and pinned upstream parity tests remain unchanged.
 
+The sanitizer-domain wiring test now runs in Rust's `tests/workflows.rs`,
+replacing its static JavaScript assertions. It checks the policy step, job and
+workflow outputs through both apply sanitizers, and executes the shipped domain
+output command for populated, empty, null and absent domain lists. This changes
+no runtime behavior or caller setting; the upstream sanitizer parity drivers
+remain intact.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
