@@ -13,6 +13,13 @@ says what a caller may rely on across versions.
   the existing ten-reference cap, preventing subgroup paths from bypassing it.
   GitHub and Forgejo filtering and output admission are unchanged.
 
+- Reviewers defer to repository merge policy and ruleset-enforced human/code-owner
+  approval, escalating only stated unbounded security risks. Callers can enable
+  one exact allowlisted `add_labels` request beside a verdict on the reviewed PR;
+  check refuses other targets and apply retains the label after verdict submission
+  or inline folding. Unsupported raw label fields refuse even when collection
+  would discard them. Draft classifiers remain verdict-only (#556).
+
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest
   successful main build with `SOURCE_BUILD_ARTIFACTS=true`, with

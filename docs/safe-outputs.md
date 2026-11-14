@@ -695,6 +695,9 @@ include that explicit `repo` and a positive integer `issue_number` for
 on GitLab exactly one of `issue_number` and `pull_request_number` instead:
 [neutral profile](#neutral-profile)).
 Temporary IDs, target aliases and duplicate relationships are refused.
+For `add_labels`, raw requests may contain only `type`, `repo`, `labels` and
+the forge's target-number field above. Unsupported fields refuse even if the
+collector would discard them; collection cannot hide a forbidden routing alias.
 
 ```toml
 [github.outputs.close_issue]
@@ -719,6 +722,14 @@ with no leading/trailing whitespace or leading `-`. Unicode and other punctuatio
 are refused rather than sanitized. `max` bounds both requests and labels within
 each request; requests exceeding either limit are refused, not partially applied.
 The handler does not create missing labels. Create the labels first.
+Review escalation is narrower than this general label interface: an optional
+`add_labels` bound with `max = 1` and a singleton allowlist permits that exact
+spelling once beside a verdict, on the reviewed PR only. Label-only, noop plus
+label, classifier, aliases, another target and extra requests refuse. Apply
+retains it even when the verdict was submitted separately or findings were
+folded; it neither removes labels nor grants the agent forge writes. See
+[bounded security escalation](review.md#bounded-security-escalation) for caller
+setup, output counts, provisioning and failure behavior.
 `remove_labels` is off unless listed in bounds. Its explicit `allowed` list
 stops an agent from removing authorization or automation labels outside the
 caller's policy. It uses the same name restrictions, case-insensitive exact

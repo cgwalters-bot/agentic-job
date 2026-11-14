@@ -980,8 +980,8 @@ fn review_caller_bounds_allow_only_analysis_outputs() {
         // review.yml's request: up to ten inline findings beside the verdict.
         let output = review_with(
             "analysis",
-            "add_comment,noop,create_pull_request_review_comment",
-            "11",
+            "add_comment,noop,create_pull_request_review_comment,add_labels",
+            "12",
         );
         assert!(
             output.status.success(),
@@ -989,7 +989,15 @@ fn review_caller_bounds_allow_only_analysis_outputs() {
             String::from_utf8_lossy(&output.stderr)
         );
         let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(policy["max_outputs"], 11, "{bounds}");
+        assert_eq!(policy["max_outputs"], 12, "{bounds}");
+        assert_eq!(policy["safe_outputs"]["add_labels"]["max"], 1);
+        assert_eq!(
+            policy["safe_outputs"]["add_labels"]["allowed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             policy["safe_outputs"]["create_pull_request_review_comment"],
             serde_json::json!({"max": 10}),
@@ -998,9 +1006,9 @@ fn review_caller_bounds_allow_only_analysis_outputs() {
         let output = review_with(
             "analysis",
             "add_comment,noop,create_pull_request_review_comment",
-            "12",
+            "13",
         );
-        assert_eq!(output.status.code(), Some(1), "{bounds}: 12 outputs");
+        assert_eq!(output.status.code(), Some(1), "{bounds}: 13 outputs");
         let output = review("analysis", "add_comment,noop");
         assert!(
             output.status.success(),

@@ -4440,6 +4440,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"VERDICT: \$\{\{ needs.check.outputs.verdict \}\}",
             r"AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}",
             r"AGENT_JOB: \$\{\{ needs.agent.outputs.job \}\}",
+            r"REVIEW_LABEL_BOUND: \$\{\{ needs.policy.outputs.review-label-bound \}\}",
         ],
         &[r"secrets|safe-outputs-artifact-id|pull_request\.head|needs\.policy\.outputs\.ref\b"],
     ),
@@ -4447,7 +4448,8 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "review.yml",
         "apply",
         &[
-            r"if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.carry.outputs.from == '' && needs.submit.outputs.review-url == '' \}\}",
+            r"if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.carry.outputs.from == '' \}\}",
+            r"review-url: \$\{\{ needs.submit.outputs.review-url \}\}",
         ],
         &[],
     ),
@@ -7565,8 +7567,8 @@ fn the_dispatch_caller_fixes_capabilities_and_token_boundary() {
         (
             "review",
             "analysis",
-            "add_comment,noop",
-            "1",
+            "add_comment,noop,add_labels",
+            "2",
             "42",
             "",
             "review",

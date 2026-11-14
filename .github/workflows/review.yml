@@ -163,8 +163,8 @@ jobs:
       # The verdict comment or a noop, and up to ten inline findings beside
       # a verdict, which check holds to the triggering pull request: submit
       # puts them in its review, apply in its comment (docs/review.md).
-      outputs: add_comment,noop,create_pull_request_review_comment
-      max-outputs: '11'
+      outputs: add_comment,noop,create_pull_request_review_comment,add_labels
+      max-outputs: '12'
       notify: none
       # Any role, forks included, for the automatic events (the `if:` above
       # narrows them to owner, members, collaborators and listed bots); `/review` from
@@ -483,6 +483,7 @@ jobs:
           AGENT_EXIT: ${{ needs.agent.outputs.exit }}
           AGENT_JOB: ${{ needs.agent.outputs.job }}
           REAL_REVIEWS: ${{ vars.AGENT_REAL_REVIEWS }}
+          REVIEW_LABEL_BOUND: ${{ needs.policy.outputs.review-label-bound }}
           CARRIED_FROM: ${{ needs.carry.outputs.from }}
           CARRIED_WHY: ${{ needs.carry.outputs.why }}
         run: |
@@ -499,7 +500,7 @@ jobs:
   # approval has no comment: the status, or the submitted review, says why.
   apply:
     needs: [policy, carry, agent, check, submit]
-    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.carry.outputs.from == '' && needs.submit.outputs.review-url == '' }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.carry.outputs.from == '' }}
     uses: ./.github/workflows/apply.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
@@ -512,6 +513,7 @@ jobs:
       policy: ${{ toJSON(needs.policy.outputs) }}
       agent: ${{ toJSON(needs.agent) }}
       check: ${{ toJSON(needs.check) }}
+      review-url: ${{ needs.submit.outputs.review-url }}
 
   # The verdict as a commit status on the pull request's head: success only
   # for a checked APPROVE that was posted, as the review or the comment,

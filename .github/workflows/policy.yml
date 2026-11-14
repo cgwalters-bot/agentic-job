@@ -337,6 +337,9 @@ on:
     # so that what they check and apply is what this call decided, and the
     # caller's agent job finds its trusted inputs here by upload ID.
     outputs:
+      review-label-bound:
+        description: Effective add_labels safe-output bound, for review validation; null when disabled
+        value: ${{ jobs.policy.outputs.review-label-bound }}
       continuation-context:
         description: Trusted admitted continuation repository, PR, head, run and attempt; empty by default
         value: ${{ jobs.policy.outputs.continuation-context }}
@@ -483,6 +486,7 @@ jobs:
       contents: read
     outputs:
       binary-artifact-id: ${{ steps.binary.outputs.artifact-id }}
+      review-label-bound: ${{ steps.request.outputs.review-label-bound }}
       external-run-id: ${{ steps.request.outputs.external-run-id }}
       continuation-context: ${{ steps.request.outputs.continuation-context }}
       policy-artifact-id: ${{ steps.policy.outputs.artifact-id }}
@@ -869,6 +873,7 @@ jobs:
           echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
           echo "external-run-id=$(jq -r '.external.run_id // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
           echo "continuation-context=$(jq -c '.continuation // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
+          echo "review-label-bound=$(jq -c '.safe_outputs.add_labels // null' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
       # Uploaded for a refused event too: review.yml's refusal job writes
       # its status comment with it.
       - id: binary

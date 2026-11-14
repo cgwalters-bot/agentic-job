@@ -24,9 +24,8 @@ the agent reads such a pull request's text, upstream release notes
 included, without anyone having asked: it is data to a sandboxed agent,
 but it can steer the verdict. The agent holds a broker run token and, by
 default, a GitHub read token
-([current boundary](inference.md#current-boundary-5-november-2026)). Dependabot has no
-write access, so, as below, a person with write access still has to
-approve the merge: the review saves the `/review`, not that approval. The
+([current boundary](inference.md#current-boundary-5-november-2026)). Admission
+spends a review; it does not override the repository's merge restrictions. The
 workflow, the bounds and the
 [standing task](../workflow/review.md) come from the trusted caller, never the
 head. On `pull_request_target`, policy and task files are read at
@@ -61,14 +60,14 @@ window resets. One of those authors can still do that; per-author limits are
 A malicious head can still sway its own verdict, including an opt-in GitHub
 approval. Model review is not a trust boundary.
 
-The `review` status is not a security control. The author of a pull request
-writes both the code reviewed and the title and body the agent reads, so they
-can talk their own review into APPROVE. On a pull request from someone without
-write access, `review` success must not, alone or together with `ci`, gate
-auto-merge or a merge queue: a person with write access has to approve the
-merge. The same restriction applies to an automated GitHub approval: admitting
-a `/review` is not human merge approval. Requiring `review` stops a change from merging without a review; it
-does not make an approved change trusted.
+The `review` status is not a security control. The author controls both the
+code and text the agent reads and can sway its verdict. Repository merge policy
+is authoritative about whether agent approval suffices, including for external
+contributors. Required human or code-owner approvals belong in GitHub rulesets,
+not an invented universal reviewer gate; CODEOWNERS alone only requests review.
+Preserve explicit repository restrictions: neither `/review` admission nor an
+automated approval substitutes for human approval where the repository requires
+it. Requiring a review does not make an approved change trusted.
 
 ## The verdict
 
@@ -94,7 +93,7 @@ separate required check; the merge gate combines the checks, not the reviewer.
 These are review instructions, not an execution restriction enforced by the
 sandbox. Job permissions, token separation and output validation are unchanged.
 
-The one output is a comment whose first line starts with `VERDICT: APPROVE` or
+The verdict output is a comment whose first line starts with `VERDICT: APPROVE` or
 `VERDICT: CHANGES`, or a noop. `VERDICT: REJECT`, which briefs written for the
 earlier format still ask for, counts as CHANGES; the earlier `REASON:` line is
 no longer required. The check job refuses anything else, and any
@@ -106,7 +105,8 @@ The prompts ask for only `type` and `body`.
 
 Next to a verdict comment, never a noop, `review.yml`'s agent may return up
 to ten `create_pull_request_review_comment` outputs, one per finding with a
-line: the bounds list the type with `max = 10` and `max_outputs = 11`.
+line: the bounds list the type with `max = 10`; with escalation below,
+`max_outputs = 12` allows the verdict, ten findings and one label request.
 Check holds each to the triggering pull request with the rules every
 review comment has ([safe outputs](safe-outputs.md#review-comments-on-the-pull-request));
 `agentic-job review verdict` also refuses a `repo`, any field a review comment cannot
@@ -122,6 +122,53 @@ unfolded output, since apply runs no binary), and posts no review comment: gh-aw
 review, of event `COMMENT`, apart from the verdict. A path is shown with Markdown
 characters escaped, as it is the agent's and gh-aw does not sanitize it.
 Dispatch's `review` profile does not offer them.
+
+### Bounded security escalation
+
+Ask for human review only for a stated concrete security risk that the reviewer
+cannot bound, explaining the risk and what remains unbounded. Changes to the
+harness, workflows or permissions are not by themselves grounds for a human
+gate. Explicit repository restrictions still apply, including `merge = "person"`.
+
+The concrete threat is an agent using escalation to label unrelated PRs or
+drive arbitrary label-triggered automation. Escalation uses the existing
+`add_labels` safe output, off without explicit caller configuration. The caller
+requests `add_comment,noop,add_labels` with `max-outputs: '2'`, or
+`add_comment,noop,create_pull_request_review_comment,add_labels` with
+`max-outputs: '12'`, and bounds `add_labels` to `max = 1` and exactly one
+`allowed` spelling. For example:
+
+```toml
+[github.outputs.add_labels]
+max = 1
+allowed = ["security-triage"]
+```
+
+The reviewer may return that exact singleton once beside a verdict, never
+alone, with noop, or from a draft classifier. Only `type`, the exact reviewed
+`repo`, its `item_number`, and `labels` are accepted; aliases, another PR or
+repository, different case/spelling, extra labels or requests, and removals
+refuse the entire review. Ordinary verdicts, noops and inline findings remain
+compatible without escalation. Check still applies all ordinary safe-output
+counts, label validation and bounds. The trusted policy's `review-label-bound`
+output carries the effective bound to check and submit; agents cannot set it.
+
+Apply retains the label when folding findings and, after submit posts the
+verdict as a real review or its 422 fallback comment, drops only the already
+posted verdict/findings, not the label. It makes one label request, with the
+existing apply token and permissions; submit does not label. Reapplying adds
+the same label idempotently; no removal, direct agent forge write or broader
+credential is granted. A label is an escalation signal, not a merge lock:
+callers that need a hold must enforce their policy outside the model.
+
+This repository opts in through both `workflow/review*.toml`, `review.yml`, and
+the dispatched review's `.github/agentic-job/dispatch.toml` and `dispatch.yml`,
+using its existing `needs-human` label. Other callers choose their own spelling,
+copy the bounds and adjust output counts together, and provision that label
+before enabling it. The handler does not create missing labels: a missing label
+or API/permission failure fails apply, without undoing an already-posted
+verdict. Inspect the apply log and PR before retrying. No live label publication
+is proven by the offline tests.
 
 Each finding is tagged blocker, important or nit, and only a blocker earns
 CHANGES: a finding that makes the change wrong for its main purpose, loses
@@ -290,8 +337,8 @@ or `docs/`), and the owner turns on **Require review from Code Owners** in the
 ruleset. The review job's approval is not a code owner's, so with that rule
 those paths wait for the owner whatever the model says; without it, CODEOWNERS
 only requests reviewers and holds nothing. The reviewer is asked to name the
-changed paths that have a code owner after its verdict line ("Needs the
-owner's review: …"), so the pull request says why it waits, and to list
+changed paths that have a code owner after its verdict line ("Code-owner paths
+(approval required only where enforced by the ruleset): …"), and to list
 there any change to the policy file or to a CODEOWNERS file, which changes
 who decides even before CODEOWNERS covers it; that line is the
 model's reading and informs, while GitHub's rule is what holds the merge. The

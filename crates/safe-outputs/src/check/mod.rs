@@ -487,6 +487,9 @@ pub fn redirections_to(
         _ => single_target.as_slice(),
     };
     if !targets.is_empty() {
+        if unsupported_label_fields(item, policy) {
+            problems.push("an add_labels with unsupported fields".to_owned());
+        }
         if !item
             .get("repo")
             .and_then(Value::as_str)
@@ -731,6 +734,18 @@ pub fn redirections_to(
     problems
 }
 
+fn unsupported_label_fields(item: &Map<String, Value>, policy: &Policy) -> bool {
+    item_type(item).replace('-', "_") == "add_labels"
+        && item.keys().any(|key| {
+            !["type", "repo", "labels"].contains(&key.as_str())
+                && if policy.forge == Forge::Gitlab {
+                    !KIND_TARGETS.contains(&key.as_str())
+                } else {
+                    key != "item_number"
+                }
+        })
+}
+
 /// The field naming the one item an output acts on, for those that must
 /// name it explicitly.
 pub fn target_key(output: &str) -> Option<&'static str> {
@@ -844,6 +859,24 @@ pub fn check(
         .map(|name| format!("unexpected file {name:?}"))
         .collect();
     drop_collectors_incomplete(&mut collected.items);
+    // Collection is lossy: a raw alias must not vanish before the reviewed
+    // label reaches policy validation. Inspect the bounded original JSONL too.
+    if policy.safe_outputs.others.contains_key("add_labels")
+        && let Some(raw) = handback.outputs
+    {
+        let checked = (|| -> Result<()> {
+            for request in crate::decode::decode(raw)? {
+                anyhow::ensure!(
+                    !unsupported_label_fields(&request.object, policy),
+                    "an add_labels with unsupported raw fields"
+                );
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            errors.push(format!("invalid raw label request: {error}"));
+        }
+    }
     if let Some(identity) = &policy.continuation {
         if let Err(error) = identity.check(continuation, run_id) {
             errors.push(error.to_string());

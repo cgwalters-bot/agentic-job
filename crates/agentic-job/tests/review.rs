@@ -568,6 +568,225 @@ fn check_gets_one_verdict_word_or_a_refusal_report_and_the_folded_output() {
     );
 }
 
+/// Check's review validator and the exact projection apply runs must keep a
+/// single caller-bound escalation, whether the verdict was submitted or folded.
+#[test]
+fn review_escalation_survives_check_fold_and_apply_without_retargeting() {
+    let dir = tempfile::tempdir().unwrap();
+    let collected = dir.path().join("agent_output.json");
+    let report = dir.path().join("report.json");
+    let bound = json!({"max":1,"allowed":["security-triage"]});
+    let comment = json!({"type":"add_comment","body":"VERDICT: CHANGES\nblocker: Unbounded credential exposure; human review requested."});
+    let label =
+        json!({"type":"add_labels","repo":"o/r","item_number":147,"labels":["security-triage"]});
+    let inline = json!({"type":"create_pull_request_review_comment","path":"a.rs","line":3,"body":"blocker: credential exposure"});
+    let policy = dir.path().join("policy.json");
+    std::fs::write(&policy, json!({"repo":"o/r","clone_url":"https://github.com/o/r","base":"main","kind":"analysis","max_outputs":12,"max_patch_bytes":1024,"safe_outputs":{"add_comment":{"max":1},"noop":{"max":1},"add_labels":bound,"create_pull_request_review_comment":{"max":10}}}).to_string()).unwrap();
+    let raw = dir.path().join("out");
+    std::fs::create_dir(&raw).unwrap();
+    let raw_policy_check = |lines: &str| {
+        std::fs::write(raw.join("outputs.jsonl"), lines).unwrap();
+        let collection = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .arg("collect")
+            .arg("--policy")
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&raw)
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(
+            matches!(collection.status.code(), Some(0 | 1)),
+            "{collection:?}"
+        );
+        let review = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args(["review", "verdict", "--target", "147", "--collected"])
+            .arg(&collected)
+            .arg("--report")
+            .arg(&report)
+            .env("REVIEW_REPO", "o/r")
+            .env("REVIEW_LABEL_BOUND", bound.to_string())
+            .output()
+            .unwrap();
+        if !review.status.success() {
+            return review;
+        }
+        Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .arg("check")
+            .arg("--policy")
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&raw)
+            .arg("--collected")
+            .arg(&collected)
+            .args(["--comment-repo", "o/r", "--comment-target", "147"])
+            .output()
+            .unwrap()
+    };
+    let policy_check = |items: &Value| {
+        let lines: String = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| format!("{i}\n"))
+            .collect();
+        raw_policy_check(&lines)
+    };
+    let verdict = |items: Value, bound: &Value, classifier: bool| {
+        std::fs::write(&collected, json!({"items":items,"errors":[]}).to_string()).unwrap();
+        let mut cli = Command::new(env!("CARGO_BIN_EXE_agentic-job"));
+        cli.args(["review", "verdict", "--target", "147", "--collected"])
+            .arg(&collected)
+            .arg("--report")
+            .arg(&report)
+            .env("REVIEW_REPO", "o/r")
+            .env("REVIEW_LABEL_BOUND", bound.to_string())
+            .env(
+                "REVIEW_DRAFT_CLASSIFIER",
+                if classifier { "true" } else { "false" },
+            );
+        if classifier {
+            let pull = dir.path().join("pull.json");
+            let mut data = open_pull();
+            data["draft"] = json!(true);
+            data["title"] = json!("Title");
+            std::fs::write(&pull, data.to_string()).unwrap();
+            cli.arg("--pull-request").arg(pull);
+        }
+        cli.output().unwrap()
+    };
+    for items in [json!([comment, label]), json!([label, inline, comment])] {
+        let policy_checked = policy_check(&items);
+        assert!(policy_checked.status.success(), "{policy_checked:?}");
+        let checked = verdict(items, &bound, false);
+        assert_eq!(checked.status.code(), Some(0), "{checked:?}");
+        assert_eq!(checked.stdout, b"CHANGES\n");
+        let folded = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+            .args(["review", "fold"])
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(folded.status.success(), "{folded:?}");
+        let folded: Value = serde_json::from_slice(&folded.stdout).unwrap();
+        assert_eq!(folded["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            folded["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|i| i["type"] == "add_labels")
+                .collect::<Vec<_>>(),
+            vec![&label]
+        );
+        // Execute apply.yml's actual jq program, not a second implementation.
+        let workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/apply.yml"),
+        )
+        .unwrap();
+        let step = workflow
+            .split("- name: Retain only escalation after the verdict was submitted")
+            .nth(1)
+            .unwrap();
+        let program = step
+            .split("jq '")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap();
+        std::fs::write(&collected, folded.to_string()).unwrap();
+        let applied = Command::new("jq")
+            .arg(program)
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(applied.status.success(), "{applied:?}");
+        let applied: Value = serde_json::from_slice(&applied.stdout).unwrap();
+        assert_eq!(applied["items"], json!([label]));
+    }
+    // Collection supports JavaScript whitespace and normalizes type spelling.
+    for lines in [
+        format!("\u{feff}{comment}\r\n"),
+        format!("\u{feff}{comment}\r\n\u{feff}{label}\r\n"),
+    ] {
+        let checked = raw_policy_check(&lines);
+        assert!(checked.status.success(), "{checked:?}");
+    }
+    let mut hyphenated = label.clone();
+    hyphenated["type"] = json!("add-labels");
+    let checked = policy_check(&json!([comment, hyphenated]));
+    assert!(checked.status.success(), "{checked:?}");
+    for alias in ["target_repo", "pr", "pr_number", "pull_request_number"] {
+        let mut changed = hyphenated.clone();
+        changed[alias] = if alias == "target_repo" {
+            json!("o/other")
+        } else {
+            json!(147)
+        };
+        let refused = policy_check(&json!([comment, changed]));
+        assert!(!refused.status.success(), "raw {changed}: {refused:?}");
+    }
+    // An unrelated blocklist narrows policy without disabling escalation.
+    let unrelated = json!({"max":1,"allowed":["security-triage"],"blocked":["release"]});
+    assert!(
+        verdict(json!([comment, label]), &unrelated, false)
+            .status
+            .success()
+    );
+    for items in [
+        json!([comment, label, label]),
+        json!(vec![comment.clone(); 13]),
+    ] {
+        let refused = policy_check(&items);
+        assert!(!refused.status.success(), "{items}: {refused:?}");
+    }
+    for (items, scope, classifier) in [
+        (json!([comment, label]), Value::Null, false),
+        (
+            json!([comment, label]),
+            json!({"max":2,"allowed":["security-triage"]}),
+            false,
+        ),
+        (
+            json!([comment, label]),
+            json!({"max":1,"allowed":["security-triage","other"]}),
+            false,
+        ),
+        (
+            json!([comment, label]),
+            json!({"max":1,"allowed":["security-triage"],"blocked":["SECURITY-TRIAGE"]}),
+            false,
+        ),
+        (json!([label]), bound.clone(), false),
+        (json!([{"type":"noop"},label]), bound.clone(), false),
+        (json!([comment, label, label]), bound.clone(), false),
+        (json!([comment, label]), bound.clone(), true),
+    ] {
+        let refused = verdict(items.clone(), &scope, classifier);
+        assert_eq!(refused.status.code(), Some(1), "{items}: {refused:?}");
+    }
+    for (key, value) in [
+        ("repo", json!("o/other")),
+        ("item_number", json!(148)),
+        ("labels", json!(["other"])),
+        ("labels", json!(["Security-triage"])),
+        ("labels", json!(["security-triage", "security-triage"])),
+        ("pr", json!(147)),
+        ("pr_number", json!(147)),
+        ("pull_request_number", json!(147)),
+        ("target_repo", json!("o/r")),
+        ("type", json!("remove_labels")),
+    ] {
+        let mut changed = label.clone();
+        changed[key] = value;
+        let pipeline = policy_check(&json!([comment, changed]));
+        assert!(!pipeline.status.success(), "raw {changed}: {pipeline:?}");
+        let refused = verdict(json!([comment, changed]), &bound, false);
+        assert_eq!(refused.status.code(), Some(1), "{changed}: {refused:?}");
+    }
+}
+
 /// CI's e2e-review agent, scripted by .github/agentic-job/e2e/review.sh,
 /// posts a verdict check accepts, naming the head it was run at, which
 /// that job looks for on the pull request.

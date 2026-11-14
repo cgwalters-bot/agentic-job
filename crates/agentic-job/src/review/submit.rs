@@ -522,7 +522,14 @@ pub fn submit(
             return Ok(String::new());
         }
         let output = output.context("Review submission requires check's accepted output")?;
-        let verdict = verdict::check_outputs(output, &run.pull.to_string(), classifier)?;
+        let labels = super::review_label_bound(env)?;
+        let verdict = verdict::check_scoped(
+            output,
+            &run.pull.to_string(),
+            classifier,
+            &run.repo,
+            &labels,
+        )?;
         ensure!(
             Verdict::word(verdict) == checked,
             "Checked output does not match the checked verdict"
@@ -900,6 +907,32 @@ mod tests {
             .filter(|(path, _)| path.ends_with("/reviews"))
             .map(|(_, body)| body.clone())
             .collect()
+    }
+
+    #[test]
+    fn escalation_is_not_submitted_as_a_second_review_or_lost_from_checked_output() {
+        let label = json!({"type":"add_labels","repo":"owner/repo","item_number":12,"labels":["security-triage"]});
+        let bound = json!({"max":1,"allowed":["security-triage"]}).to_string();
+        let changes = [("REVIEW_LABEL_BOUND", bound.as_str())];
+        let mut output = checked(
+            "VERDICT: APPROVE\nimportant: Human review requested for an unbounded security risk.",
+        );
+        output["items"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, label.clone());
+        let fake = Fake::default();
+        assert_eq!(run_submit(&fake, &changes, &output).unwrap(), REVIEW_URL);
+        assert_eq!(reviews(&fake).len(), 1);
+        assert_eq!(fake.posted.borrow().len(), 1); // Labels belong to apply only.
+        assert_eq!(verdict::fold(output.clone())["items"][0], label);
+        assert!(run_submit(&Fake::default(), &[], &output).is_err());
+        let stale = Fake {
+            sha: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ..Fake::default()
+        };
+        assert_eq!(run_submit(&stale, &changes, &output).unwrap(), "");
+        assert!(stale.posted.borrow().is_empty());
     }
 
     #[test]

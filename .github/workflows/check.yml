@@ -242,6 +242,8 @@ jobs:
         if: ${{ fromJSON(inputs.policy).review == 'true' }}
         env:
           TARGET: ${{ fromJSON(inputs.policy).comment-target }}
+          REVIEW_LABEL_BOUND: ${{ fromJSON(inputs.policy).review-label-bound }}
+          REVIEW_REPO: ${{ fromJSON(inputs.policy).repo }}
         run: |
           verdict=$("$JOB_DIR/agentic-job" review verdict --collected "$GH_AW_TMP/agent_output.json" --target "$TARGET" --report "$GH_AW_TMP/report.json")
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"

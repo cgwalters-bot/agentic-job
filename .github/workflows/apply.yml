@@ -23,6 +23,10 @@ name: agentic-job apply
 on:
   workflow_call:
     inputs:
+      review-url:
+        description: Trusted submit job's posted verdict URL; suppress only the already-posted verdict, retaining checked escalation labels
+        type: string
+        default: ""
       role-bindings:
         description: Caller-only JSON binding status, review, fork_push and publication to numeric actor_id and optional app_id; empty keeps legacy token selection
         type: string
@@ -571,6 +575,11 @@ jobs:
       - name: Put a review's inline findings in its comment
         if: ${{ fromJSON(inputs.policy).review == 'true' }}
         run: mv "$GH_AW_TMP/folded.json" "$GH_AW_TMP/agent_output.json"
+      - name: Retain only escalation after the verdict was submitted
+        if: ${{ fromJSON(inputs.policy).review == 'true' && inputs.review-url != '' }}
+        run: |
+          jq '.items |= map(select(.type == "add_labels"))' "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/review-labels.json"
+          mv "$RUNNER_TEMP/review-labels.json" "$GH_AW_TMP/agent_output.json"
       # The first line of what a partial run opens or posts says so too,
       # in this file's words, chosen by the exit state. A partial run with
       # neither a pull request, an issue nor a comment would leave nothing

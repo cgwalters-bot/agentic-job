@@ -161,6 +161,21 @@ but forwarded to no job
 
 ## The review workflow's dispatch
 
+Review requests may opt into `add_labels` beside the verdict using the existing
+safe-output configuration: `max = 1`, exactly one `allowed` spelling, fixed to
+the reviewed repository and PR. Use total `max-outputs: '2'` without inline
+findings or `'12'` with up to ten findings. Without that explicit allowance,
+escalation is off. Classifiers remain verdict-only. The request's only fields
+are `type`, `repo`, `item_number` and the exact singleton `labels` array.
+The general `add_labels` checker now also refuses unsupported raw fields, before
+collection can hide them (GitLab retains its kind-specific target-number field).
+`policy.yml` forwards the effective bound as `review-label-bound`; check and
+submit receive it as trusted `REVIEW_LABEL_BOUND` JSON, with `REVIEW_REPO` on
+`review verdict` supplying the fixed repository. `apply.yml` accepts an optional
+trusted `review-url` from submit: nonempty suppresses the already-posted verdict
+but retains the checked label for apply. No label creates a merge lock or
+changes rulesets. See [review escalation](review.md#bounded-security-escalation).
+
 [`.github/workflows/review.yml`](../.github/workflows/review.yml) takes the
 `workflow_dispatch` and `workflow_call` string inputs `pr`, `head` and
 `pool`, and names a dispatched run `review OWNER/REPO#PR HEAD (POOL)`,
