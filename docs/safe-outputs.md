@@ -110,6 +110,13 @@ break, while inline/fenced code and email addresses stay intact. This pins the
 last-mile filter against producer-selected notifications from quoted upstream
 text; it does not test GitHub's live notification behavior or caller deployment.
 
+Standalone GitHub CLI loopback tests pin that failure boundary: redirects,
+authorization/rate-limit errors and server errors stop the batch at the failed
+POST, without automatic retry or a request to the redirect destination. Earlier
+successful comments are not rolled back. Diagnostics omit the server response,
+which may reflect credentials or submitted prose. These tests cover first and
+later POST failures, not live-service delivery or recovery after a lost response.
+
 Check can validate other non-patch operations under explicit output bounds, but
 standalone GitHub apply refuses them, including a batch with a supported comment before
 an unsupported operation. Patch operations are not a standalone GitHub CLI interface.

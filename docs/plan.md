@@ -137,6 +137,14 @@ refusals assert their diagnostics. Only the replaced new-check JavaScript test i
 removed; old-tree comparisons, upstream drivers and gated fixtures remain.
 This adds no runtime control or caller setting.
 
+The three-way rename attack also has deterministic Rust coverage in
+`tests/patch_git.rs`: a patch naming an innocuous missing file can redirect an
+edit to a protected file through its blob ID when Git rename detection is on.
+The test proves that discrepancy and refusal with the existing apply settings
+(`merge.renames=false`). Text admission alone cannot discover the redirected
+path. The legacy corpus comparison remains intact pending the disposition
+above; this adds no runtime control or caller setting.
+
 The repository-scoped documentation exception corpus now also runs through the
 native policy/collect/check CLI in `tests/documentation_bounds.rs`. Real Git patches
 test default protection, the named repository's explicit exception and another
