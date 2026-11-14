@@ -1365,6 +1365,160 @@ fn collected(job: &Job) -> PathBuf {
     result
 }
 
+/// Producer feedback alone is not a trusted check: carry its actual upload
+/// through the separate collector/check processes, with a bound policy.
+#[test]
+fn unchanged_claims_survive_only_as_diagnostics_across_the_cli_handoff() {
+    for (name, fields) in [
+        ("complete", json!({})),
+        ("absent-checkpoint", json!({"checkpoint": null})),
+        ("incomplete", json!({"checkpoint": {"complete": false}})),
+        ("malformed-checkpoint", json!({"checkpoint": "complete"})),
+        ("stopped", json!({"stopped_early": "timeout"})),
+        (
+            "failed-tests",
+            json!({"tests": [{"command": "just check", "exit_code": 1}]}),
+        ),
+        ("unavailable-tests", json!({"tests": []})),
+        ("wrong-repository", json!({"repository": "other/repo"})),
+        ("wrong-target", json!({"pull_request": 8})),
+        ("wrong-head", json!({"head": "b".repeat(40)})),
+        ("wrong-run", json!({"run_id": 999})),
+        ("wrong-attempt", json!({"attempt": 2})),
+    ] {
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let job = Job::new(&format!("unchanged-{name}"));
+        job.own_repository();
+        let head = sh(&format!(
+            "git -C {} rev-parse HEAD",
+            job.path("repo").display()
+        ));
+        job.allow(json!({
+            "noop": {"max": 1},
+            "push_to_pull_request_branch": {
+                "max": 1, "target": "7", "head": head,
+                "ready_when_complete": true,
+                "protected_files": [], "protect_top_level_dot_folders": true,
+                "protected_files_policy": "blocked",
+                "max_patch_size": 65536, "max_patch_files": 10
+            }
+        }));
+        let mut policy = job.json("policy.json");
+        let identity = json!({"repository": policy["repo"], "pull_request": 7,
+            "head": head, "run_id": RUN_ID.parse::<u64>().unwrap(), "attempt": 1});
+        policy["continuation"] = identity.clone();
+        job.write("policy.json", &policy.to_string());
+        let mut outcome = json!({
+            "summary": "No change required", "checkpoint": {"complete": true},
+            "stopped_early": null,
+            "tests": [{"command": "just check", "exit_code": 0}],
+            // An adversarial claim, not a supported completion wire format.
+            "unchanged_completion": identity
+        });
+        for (key, value) in fields.as_object().unwrap() {
+            if outcome["unchanged_completion"].get(key).is_some() {
+                outcome["unchanged_completion"][key] = value.clone();
+            } else if value.is_null() {
+                outcome.as_object_mut().unwrap().remove(key);
+            } else {
+                outcome[key] = value.clone();
+            }
+        }
+        let request = json!({"type": "noop", "message": "Already complete",
+            "unchanged_completion": outcome["unchanged_completion"]});
+        job.script(&json!([
+            canary(),
+            {"write": {"title": "Write", "path": "{home}/out/outcome.json",
+                "content": outcome.to_string()}},
+            {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
+                "content": request.to_string()}},
+            {"say": "Done."}
+        ]));
+        let got = job.own_run(&own_config(&plain(&proxy)));
+        assert_eq!(got.code, Some(EXIT_SUCCESS), "{name}: {}", got.all());
+        assert_eq!(job.json("out/run/outcome.json"), outcome, "{name}");
+        let files: Vec<_> = std::fs::read_dir(job.path("out/safe-outputs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, ["outputs.jsonl"], "{name}");
+        let collected = collected(&job);
+        let check = || {
+            Finished::of(
+                Command::new(BIN)
+                    .args([
+                        "check",
+                        "--policy",
+                        "policy.json",
+                        "--outputs",
+                        "out/safe-outputs",
+                    ])
+                    .arg("--collected")
+                    .arg(&collected)
+                    .args([
+                        "--report",
+                        "verdict.json",
+                        "--run-id",
+                        RUN_ID,
+                        "--run-attempt",
+                        "1",
+                        "--continuation-context",
+                        &identity.to_string(),
+                    ])
+                    .current_dir(&job.dir)
+                    .output()
+                    .unwrap(),
+            )
+        };
+        let got = check();
+        assert_eq!(got.code, Some(EXIT_SUCCESS), "{name}: {}", got.all());
+        let verdict = job.json("verdict.json");
+        assert_eq!(verdict["ok"], true, "{name}: {verdict}");
+        assert_eq!(verdict["continuation"], identity, "{name}");
+        assert!(
+            verdict["patch"].is_null() && verdict["checkpoint"].is_null(),
+            "{name}: {verdict}"
+        );
+        assert!(verdict.get("unchanged_completion").is_none(), "{name}");
+        assert!(
+            verdict["items"][0].get("unchanged_completion").is_none(),
+            "{name}"
+        );
+
+        // Bypass the producer's file selection: even plausible, empty,
+        // malformed or duplicate-key raw evidence must fail at check itself.
+        for file in ["outcome.json", "unchanged-completion.json"] {
+            let path = format!("out/safe-outputs/{file}");
+            for payload in [
+                outcome.to_string(),
+                "{}".into(),
+                "{".into(),
+                "{\"complete\":true,\"complete\":false}".into(),
+            ] {
+                job.write(&path, &payload);
+                let got = check();
+                assert_eq!(got.code, Some(EXIT_FAILURE), "{name} {file}: {}", got.all());
+                let verdict = job.json("verdict.json");
+                assert_eq!(verdict["ok"], false, "{name} {file}: {verdict}");
+                assert!(
+                    verdict["errors"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|error| error.as_str().unwrap().contains("unexpected file")),
+                    "{name} {file}: {verdict}"
+                );
+                assert!(
+                    verdict.get("unchanged_completion").is_none(),
+                    "{name} {file}"
+                );
+            }
+            std::fs::remove_file(job.path(&path)).unwrap();
+        }
+    }
+}
+
 /// The whole path of a change: the agent edits the tree and words its
 /// pull request, `run` hands that back as gh-aw's safe outputs, `collect`
 /// reads the requests, and `check` accepts the hand-back. The

@@ -950,6 +950,15 @@ Agent-board #852/#853 must wait for that concrete contract and deployment;
 separately authorized live acceptance remains tracker #1071. Acceptance,
 readiness and caller opt-in remain unchanged and disabled for unchanged results.
 
+The serialized CLI regression in `tests/run.rs` carries real producer uploads
+through separate `collect` and `check` processes under an identity-bound policy,
+including a readiness opt-in. Complete, incomplete, stopped, failed/unavailable
+test and mismatched-identity outcome claims remain diagnostics, never a checked
+completion disposition. Smuggled raw evidence files (including malformed and
+duplicate-key payloads) are refused by the independent checker. This proves the
+fallback stays closed; it is not the positive verification proof still required
+by #3637.
+
 ### Requesting reviewers and assigning users
 
 Both notify whoever they name, so an agent could otherwise page anyone with
