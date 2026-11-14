@@ -69,6 +69,13 @@ Check reads no-follow regular files, caps input at 1 MiB/1000 lines and context 
 only on success. It will not overwrite a receipt. It does no network I/O and
 does not obtain credentials. Validation diagnostics omit request text.
 
+Apply uses the same bounded, no-follow regular-file reader for input and
+context, and caps the receipt at 4 KiB. Standalone comment CLI tests cover exact
+byte limits and refusal of missing, symlinked, directory and oversized artifacts,
+including replacements after a successful check. Refusals make no HTTP requests;
+the exact-limit controls publish only to a loopback fixture. This tests file
+admission, not the CI artifact provenance required below.
+
 Transfer the exact input and receipt through the trusted check job's artifact
 channel. The receipt binds both input and trusted context bytes with SHA-256;
 it is **not a signature** or a replacement for CI artifact provenance. A producer

@@ -784,3 +784,82 @@ fn unsupported_operation_refuses_entire_batch_before_writing() {
     );
     assert!(f.writes.lock().unwrap().is_empty());
 }
+
+#[test]
+fn standalone_comment_artifacts_require_bounded_regular_files() {
+    for (name, limit) in [
+        ("context.json", 64 * 1024),
+        ("outputs.jsonl", 1024 * 1024),
+        ("checked.json", 4096),
+    ] {
+        for replacement in ["at-limit", "oversized", "missing", "symlink", "directory"] {
+            let f = Fixture::new();
+            f.input(COMMENT);
+            let path = f.dir.path().join(name);
+            // Bind context/input padding before check. Receipt padding does not
+            // change its parsed digests and is added after check creates it.
+            if name != "checked.json" {
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes.resize(limit, b' ');
+                std::fs::write(&path, bytes).unwrap();
+            }
+            f.assert_ok("check");
+            assert!(f.writes.lock().unwrap().is_empty());
+            if name == "checked.json" {
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes.resize(limit, b' ');
+                std::fs::write(&path, bytes).unwrap();
+            }
+            let refusal = match replacement {
+                "at-limit" => None,
+                "oversized" => {
+                    let mut bytes = std::fs::read(&path).unwrap();
+                    bytes.push(b' ');
+                    std::fs::write(&path, bytes).unwrap();
+                    Some(format!("file exceeds byte limit {limit}"))
+                }
+                "missing" | "symlink" | "directory" => {
+                    let saved = f.dir.path().join("saved.json");
+                    std::fs::rename(&path, &saved).unwrap();
+                    match replacement {
+                        "symlink" => std::os::unix::fs::symlink(&saved, &path).unwrap(),
+                        "directory" => std::fs::create_dir(&path).unwrap(),
+                        _ => {}
+                    }
+                    Some(if replacement == "directory" {
+                        "input is not a regular file".into()
+                    } else {
+                        "cannot open input as a no-follow file".into()
+                    })
+                }
+                _ => unreachable!(),
+            };
+            // A prior valid receipt must not bypass either reader. Check does
+            // not read receipts; only apply admits that artifact.
+            if name != "checked.json"
+                && let Some(refusal) = &refusal
+            {
+                let result = f.run("check");
+                assert_eq!(result.status.code(), Some(1), "{name}/{replacement}");
+                let error = String::from_utf8_lossy(&result.stderr);
+                assert!(error.contains(refusal), "{error}");
+            }
+            let result = f.run("apply");
+            assert_eq!(
+                result.status.code(),
+                Some(i32::from(refusal.is_some())),
+                "{name}/{replacement}: {result:?}"
+            );
+            if let Some(refusal) = refusal {
+                let error = String::from_utf8_lossy(&result.stderr);
+                assert!(error.contains(&refusal), "{name}/{replacement}: {error}");
+                assert!(f.writes.lock().unwrap().is_empty());
+            } else {
+                let requests = f.writes.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].starts_with("POST /repos/owner/repo/issues/7/comments "));
+                assert!(requests[0].contains(r#""body":"Deterministic proof.""#));
+            }
+        }
+    }
+}
