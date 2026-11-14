@@ -104,6 +104,12 @@ receive the existing last-mile notification filter. Repeated apply posts again:
 there is no standalone idempotency marker, transaction or rollback; a network
 failure can leave an uncertain or partially published batch. Do not blindly retry.
 
+The standalone GitHub CLI tests publish digest-like text to a loopback forge
+and assert the exact JSON body: prose user/team mentions receive a zero-width
+break, while inline/fenced code and email addresses stay intact. This pins the
+last-mile filter against producer-selected notifications from quoted upstream
+text; it does not test GitHub's live notification behavior or caller deployment.
+
 Check can validate other non-patch operations under explicit output bounds, but
 standalone GitHub apply refuses them, including a batch with a supported comment before
 an unsupported operation. Patch operations are not a standalone GitHub CLI interface.

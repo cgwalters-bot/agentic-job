@@ -693,6 +693,39 @@ fn valid_comment_without_run_or_ci_environment() {
 }
 
 #[test]
+fn github_digest_comment_filters_notifications_before_publication() {
+    // Check admits prose mentions; publication must not let quoted upstream
+    // text notify identities chosen by the producer using the bot's account.
+    for (body, expected) in [
+        (
+            "Waiting on @contributor; closer look by @example-org/reviewers.",
+            "Waiting on @\u{200b}contributor; closer look by @\u{200b}example-org/reviewers.",
+        ),
+        (
+            "`@code-example` and dev@example.com; ask @contributor.",
+            "`@code-example` and dev@example.com; ask @\u{200b}contributor.",
+        ),
+        (
+            "Example:\n```text\n@example-org/reviewers\n```\nOutside: @contributor",
+            "Example:\n```text\n@example-org/reviewers\n```\nOutside: @\u{200b}contributor",
+        ),
+    ] {
+        let f = Fixture::new();
+        f.context(json!({"add_comment":{"max":1}}));
+        f.input(&json!({"type":"add_comment","body":body}).to_string());
+        f.assert_ok("check");
+        assert!(f.writes.lock().unwrap().is_empty());
+        f.assert_ok("apply");
+        let writes = f.writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert!(writes[0].starts_with("POST /repos/owner/repo/issues/7/comments "));
+        let (_, payload) = writes[0].split_once("\r\n\r\n").unwrap();
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["body"], expected, "input: {body}");
+    }
+}
+
+#[test]
 fn invalid_inputs_never_write() {
     for input in [
         "{bad".to_owned(),
