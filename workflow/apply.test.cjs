@@ -268,59 +268,6 @@ test('another call of the same run posting the same comment does not leave it ou
   assert.equal(again.kept.length, 0);
 });
 
-// Where a patch goes is `agentic-job push target`'s (src/apply/push.rs),
-// with its refusals, decided before anything is fetched or applied.
-test('the fork step decides where a patch goes, with policy binary, before the patch is fetched', () => {
-  assert.ok(workflow.indexOf("- name: Require policy's binary\n") <
-    workflow.indexOf('- name: Fork the output repository for the pull request\n'));
-  assert.ok(workflow.indexOf('- name: Fork the output repository for the pull request\n') <
-    workflow.indexOf("- name: Fetch the target's base branch\n"));
-  assert.match(workflow, /- name: Fork the output repository for the pull request\n {8}id: fork\n {8}if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n/);
-  assert.match(step('Fork the output repository for the pull request'), /\/apply-binary\/agentic-job" push target /);
-  // The pull request's branch is the fork's: the checkout is of the output
-  // repository's default branch, by policy's own output, and the base is
-  // fetched from the fork the step above checked.
-  assert.match(workflow, /\n {10}ref: \$\{\{ fromJSON\(inputs\.policy\)\.push-item == '' && fromJSON\(inputs\.policy\)\.base \|\| '' \}\}\n/);
-  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
-  assert.match(policy, /\n {6}push-item:\n[^\n]*\n {8}value: \$\{\{ jobs\.policy\.outputs\.push-item \}\}\n/);
-  assert.match(policy, /\n {6}push-item: \$\{\{ inputs\.push-item \}\}\n/);
-});
-
-test("a pull request's handler pushes only to the fork, and there is none without one", () => {
-  const root = mkdtempSync(join(homedir(), 'apply-test-'));
-  try {
-    writeFileSync(join(root, 'config.json'), JSON.stringify({ create_pull_request: { max: 1, draft: true }, noop: { max: 1 } }));
-    const handlers = (forked, { partial = '', title = '', branch = 'p/' } = {}) => {
-      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
-        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source', OUTPUT_REPO: 'owner/other', ITEM_REPO: 'owner/other', BASE: 'main',
-        BRANCH_PREFIX: branch, READY: '', PARTIAL: partial, TITLE_PREFIX: title, COMMENT_TARGET: '',
-        PULL_REQUEST: workflow.match(/PULL_REQUEST: '([^'\n]+)'/)[1], PUSH: '{}', FORK: forked,
-      });
-      assert.equal(result.status, 0, result.stderr);
-      return JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
-    };
-    assert.deepEqual(handlers('bot/other').create_pull_request, {
-      max: 1, draft: true, signed_commits: false, fallback_as_issue: false,
-      preserve_branch_name: true, auto_close_issue: false, 'target-repo': 'owner/other', base_branch: 'main',
-      branch_prefix: 'p/', title_prefix: '', 'head-repo': 'bot/other', allowed_repos: ['bot/other'],
-    });
-    assert.deepEqual(handlers(''), { noop: { max: 1 } });
-    // A quote of each kind, and what a shell or jq would read as its own,
-    // reach the handlers as they are, each one string, adding no key.
-    const keys = Object.keys(handlers('bot/other').create_pull_request);
-    for (const title of [`e2e "full" it's:`, '$(id) `id` \\n %s ${X}', '" + {"x": 1} + "']) {
-      const config = handlers('bot/other', { partial: '[partial: stopped at a limit] ', title, branch: `b'"/` });
-      assert.equal(config.create_pull_request.title_prefix, `[partial: stopped at a limit] ${title}`);
-      assert.equal(config.create_pull_request.branch_prefix, `b'"/`);
-      assert.deepEqual(Object.keys(config.create_pull_request), keys);
-      assert.equal(readFileSync(join(root, 'env'), 'utf8').trimEnd().split('\n').pop(),
-        `GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=${JSON.stringify(config)}`);
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 function refs(items, issue = '64', itemRepo = 'owner/repo') {
   const dir = mkdtempSync(join(homedir(), 'refs-test-'));
   try {

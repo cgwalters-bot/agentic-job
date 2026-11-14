@@ -696,6 +696,113 @@ fn handler_settings() -> (String, String) {
     )
 }
 
+#[test]
+fn fork_routing_is_decided_before_fetching_the_patch_base() {
+    let doc = definition("apply.yml");
+    let steps = doc["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let fork = "Fork the output repository for the pull request";
+    assert!(position("Require policy's binary") < position(fork));
+    assert!(position(fork) < position("Fetch the target's base branch"));
+    let fork_step = step(&doc, "apply", fork);
+    assert_eq!(fork_step["id"].as_str(), Some("fork"));
+    assert_eq!(
+        fork_step["if"].as_str(),
+        Some(
+            "${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}"
+        )
+    );
+    assert!(
+        fork_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("/apply-binary/agentic-job\" push target ")
+    );
+    assert!(steps.iter().any(|step| step["with"]["ref"].as_str()
+        == Some(
+            "${{ fromJSON(inputs.policy).push-item == '' && fromJSON(inputs.policy).base || '' }}"
+        )));
+    let policy = definition("policy.yml");
+    assert_eq!(
+        policy["on"]["workflow_call"]["outputs"]["push-item"]["value"].as_str(),
+        Some("${{ jobs.policy.outputs.push-item }}")
+    );
+    assert_eq!(
+        policy["jobs"]["policy"]["outputs"]["push-item"].as_str(),
+        Some("${{ inputs.push-item }}")
+    );
+}
+
+#[test]
+fn fork_handler_configuration_preserves_destinations_and_literal_prefixes() {
+    let dir = TempDir::new().unwrap();
+    let (pull_request, _) = handler_settings();
+    let input = json!({"create_pull_request": {"max": 1, "draft": true}, "noop": {"max": 1}});
+    for (fork, partial, title, branch) in [
+        ("bot/other", "", "", "p/"),
+        ("", "", "", "p/"),
+        (
+            "bot/other",
+            "[partial: stopped at a limit] ",
+            "e2e \"full\" it's:",
+            "b'\"/",
+        ),
+        (
+            "bot/other",
+            "[partial: stopped at a limit] ",
+            "$(id) `id` \\n %s ${X}",
+            "b'\"/",
+        ),
+        (
+            "bot/other",
+            "[partial: stopped at a limit] ",
+            "\" + {\"x\": 1} + \"",
+            "b'\"/",
+        ),
+    ] {
+        let (out, actual) = handlers(
+            dir.path(),
+            &input,
+            &[
+                ("OUTPUT_REPO", "owner/other"),
+                ("ITEM_REPO", "owner/other"),
+                ("READY", ""),
+                ("PULL_REQUEST", &pull_request),
+                ("FORK", fork),
+                ("PARTIAL", partial),
+                ("TITLE_PREFIX", title),
+                ("BRANCH_PREFIX", branch),
+            ],
+        );
+        status(&out, 0);
+        let mut expected = json!({"noop": {"max": 1}});
+        if !fork.is_empty() {
+            expected["create_pull_request"] = json!({
+                "max": 1, "draft": true, "signed_commits": false,
+                "fallback_as_issue": false, "preserve_branch_name": true,
+                "auto_close_issue": false, "target-repo": "owner/other",
+                "base_branch": "main", "branch_prefix": branch,
+                "title_prefix": format!("{partial}{title}"),
+                "head-repo": fork, "allowed_repos": [fork],
+            });
+        }
+        assert_eq!(actual, expected, "fork={fork:?}, title={title:?}");
+        let env = fs::read_to_string(dir.path().join("env")).unwrap();
+        let exported = env
+            .lines()
+            .last()
+            .unwrap()
+            .strip_prefix("GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=")
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(exported).unwrap(), expected);
+    }
+}
+
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .current_dir(cwd)

@@ -80,6 +80,13 @@ and beside a blocked result, which must not hide a publication failure. This
 test-only migration leaves upstream handler execution in Node and changes no
 runtime control or caller setting.
 
+Fork routing and pull-request handler configuration are also covered in
+`tests/apply_workflow.rs`: trusted binary before target selection, target selection
+before fetching, staged-apply gating, no PR handler without a fork, and literal
+title/branch prefixes in both the JSON file and exported environment. These two
+tests replace their JavaScript equivalents without changing publication behavior
+or the retained upstream-handler execution tests.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
