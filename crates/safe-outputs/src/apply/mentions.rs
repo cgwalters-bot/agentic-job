@@ -49,16 +49,31 @@ const SYNTAX: &[Syntax] = &[
 const MAX_REFERENCES: usize = 10;
 const BREAK: char = '\u{200b}';
 
-static TOKENS: LazyLock<Regex> = LazyLock::new(|| tokens(r"[\w.-]+/[\w.-]+"));
+static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
+    tokens(
+        r"[\w.-]+/[\w.-]+",
+        r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|reopen(?:ed|s)?|implement(?:ed|s)?)\s+",
+    )
+});
 
 // Nested GitLab namespaces must count toward the same closing-reference cap:
 // otherwise a producer can bypass it just by naming a subgroup's project.
-static GITLAB_TOKENS: LazyLock<Regex> = LazyLock::new(|| tokens(r"(?:[\w.-]+/)+[\w.-]+"));
+static GITLAB_TOKENS: LazyLock<Regex> = LazyLock::new(|| {
+    // GitLab's default closing pattern also accepts -ing, a colon and an
+    // issue(s) prefix. Omitting these lets repeated pairs bypass the cap.
+    // https://docs.gitlab.com/user/project/issues/managing_issues/#default-closing-pattern
+    tokens(
+        r"(?:[\w.-]+/)+[\w.-]+",
+        r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:ed|s|ing)?):?\s+(?:issues?\s+)?",
+    )
+});
 
-fn tokens(project: &str) -> Regex {
+fn tokens(project: &str, closing: &str) -> Regex {
     // A GitLab namespace path may start with `.`.
-    Regex::new(&format!(r"(?i)@[\p{{L}}\p{{N}}_.][\p{{L}}\p{{N}}_./-]*|![0-9]+|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|reopen(?:ed|s)?|implement(?:ed|s)?)\s+(?:{project})?[#!][0-9]+"))
-        .expect("valid notification pattern")
+    Regex::new(&format!(
+        r"(?i)@[\p{{L}}\p{{N}}_.][\p{{L}}\p{{N}}_./-]*|![0-9]+|\b{closing}(?:{project})?[#!][0-9]+"
+    ))
+    .expect("valid notification pattern")
 }
 
 /// BODY with no mention, reference or (on GitLab) quick action left
@@ -263,6 +278,60 @@ mod tests {
                 assert_eq!(filter(&expected, "gitlab"), expected);
             }
         }
+    }
+
+    #[test]
+    fn gitlab_closing_keyword_variants_share_the_cap() {
+        for keyword in [
+            "Close",
+            "Closes",
+            "Closed",
+            "Closing",
+            "Fix",
+            "Fixes",
+            "Fixed",
+            "Fixing",
+            "Resolve",
+            "Resolves",
+            "Resolved",
+            "Resolving",
+            "Implement",
+            "Implements",
+            "Implemented",
+            "Implementing",
+        ] {
+            for separator in [" ", ": ", " issue ", ": issue ", " issues ", ": issues "] {
+                for project in ["", "group/project", "group/subgroup/project"] {
+                    let reference = format!("{keyword}{separator}{project}#2\n");
+                    let prefix = reference.repeat(MAX_REFERENCES);
+                    assert_eq!(filter(&prefix, "gitlab"), prefix);
+                    let expected = format!(
+                        "{prefix}{}{BREAK}{}{separator}{project}#{BREAK}2\n",
+                        &keyword[..1],
+                        &keyword[1..]
+                    );
+                    let input = format!("{prefix}{reference}");
+                    assert_eq!(filter(&input, "gitlab"), expected, "{input}");
+                    assert_eq!(filter(&expected, "gitlab"), expected);
+                    // New forms and old forms consume the same budget.
+                    assert_eq!(
+                        filter(&format!("{prefix}Closes #3"), "gitlab"),
+                        format!("{prefix}C{BREAK}loses #{BREAK}3")
+                    );
+                }
+            }
+        }
+        for forge in ["github", "forgejo"] {
+            for reference in ["Closing #1", "Fixes: #1", "Closes issue #1"] {
+                let input = format!("{reference}\n").repeat(MAX_REFERENCES + 1);
+                assert_eq!(filter(&input, forge), input);
+            }
+        }
+        let prefix = "`fIxInG: issue group/subgroup/project#1`\n".repeat(MAX_REFERENCES);
+        assert_eq!(
+            filter(&format!("{prefix}Resolving: #2"), "gitlab"),
+            format!("{prefix}R{BREAK}esolving: #{BREAK}2")
+        );
     }
 
     #[test]

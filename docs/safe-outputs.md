@@ -2790,6 +2790,11 @@ The publication filter counts nested cross-project closing references such as
 and reference broken with zero-width spaces, including in purported code,
 so a subgroup path cannot bypass the cap. This extends the existing filter,
 not the allowed output types or targets; GitHub and Forgejo parsing is unchanged.
+GitLab's `Closing`, `Fixing`, `Resolving` and `Implementing` variants, an optional
+colon after a keyword, and an optional `issue` or `issues` before the reference
+also consume that budget (for example, `Fixing: issue group/subgroup/project#12`).
+This prevents those alternate spellings from bypassing the existing cap; it
+adds no option and does not enable publication for any caller.
 This is a cap on recognized keyword/reference pairs, not a complete parser for
 [GitLab's closing patterns](https://docs.gitlab.com/user/project/issues/managing_issues/#default-closing-pattern):
 reference lists, full-URL references and administrator-customized patterns are

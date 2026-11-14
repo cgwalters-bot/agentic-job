@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- GitLab's closing-reference cap now also counts `-ing` keyword variants,
+  optional colons and `issue`/`issues` prefixes. GitHub and Forgejo behavior
+  and caller output bounds are unchanged.
+
 - GitLab publication now counts nested cross-project closing references toward
   the existing ten-reference cap, preventing subgroup paths from bypassing it.
   GitHub and Forgejo filtering and output admission are unchanged.
