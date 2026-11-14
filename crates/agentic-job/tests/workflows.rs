@@ -47,6 +47,59 @@ fn definition(file: &str) -> yaml_rust2::Yaml {
 }
 
 #[test]
+fn release_notes_use_github_categories_without_a_changelog_bump() {
+    let config = definition(".github/release.yml");
+    let notes = &config["changelog"];
+    let categories = notes["categories"].as_vec().unwrap();
+    let expected = [
+        ("Features", "enhancement"),
+        ("Fixes", "bug"),
+        ("Documentation", "documentation"),
+        ("Tests", "tests"),
+        ("CI", "github_actions"),
+        ("Other changes", "*"),
+    ];
+    assert_eq!(categories.len(), expected.len());
+    for (category, (title, label)) in categories.iter().zip(expected) {
+        assert_eq!(category["title"].as_str(), Some(title));
+        let labels = category["labels"].as_vec().unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].as_str(), Some(label));
+    }
+    assert_eq!(
+        notes["exclude"]["labels"].as_vec().unwrap(),
+        &[yaml_rust2::Yaml::String("dependencies".into())]
+    );
+    assert_eq!(
+        notes["exclude"]["authors"].as_vec().unwrap(),
+        &[
+            yaml_rust2::Yaml::String("dependabot".into()),
+            yaml_rust2::Yaml::String("renovate".into()),
+        ]
+    );
+
+    let release = definition("release.yml");
+    let publish = release["jobs"]["publish"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Publish"))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(publish.contains("--generate-notes"));
+    assert!(publish.contains("--notes-start-tag \"$PREVIOUS\""));
+    assert!(!workflow("release.yml").contains("CHANGELOG.md"));
+
+    let changelog = std::fs::read_to_string(root().join("CHANGELOG.md")).unwrap();
+    assert!(changelog.contains("/releases"));
+    assert!(changelog.contains("/blob/v0.6.14/CHANGELOG.md"));
+    assert!(!changelog.contains("## Unreleased"));
+    let contributing = std::fs::read_to_string(root().join("docs/contributing.md")).unwrap();
+    assert!(contributing.contains("do not edit `CHANGELOG.md` or add changelog fragments"));
+}
+
+#[test]
 fn detector_gates_the_released_check_artifact() {
     let text = workflow("check.yml");
     let doc = definition("check.yml");
