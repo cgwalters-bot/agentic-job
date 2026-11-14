@@ -205,6 +205,13 @@ JavaScript tests are removed, without changing runtime behavior or upstream
 handler coverage. Remaining local shell-step ports remain separate from live
 deployment acceptance.
 
+The missing-data path now runs in `tests/apply_workflow.rs`: a diagnostic survives
+the replay guard unchanged, the result shell step sets `missing-data=true` in the
+unblocked case when nothing was published, and the final shell step fails the job.
+A published-PR control keeps the same diagnostic from turning success into failure. This replaces the
+JavaScript test and its result helper, not upstream handler execution, and proves
+local behavior only; no runtime control or caller setting changes.
+
 Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
 the real collector/checker accepts the matching request, patch and base, and
 refuses missing, extra or renamed patches, a different request branch, an orphan

@@ -2656,8 +2656,8 @@ and publishes the binaries with notes listing the pull requests merged
 since the previous version, using `gh release create --generate-notes`
 and an explicit `--notes-start-tag` for that version. GitHub groups the
 notes by the labels in [.github/release.yml](../.github/release.yml), with
-an Other changes category for unlabelled PRs; dependency-update noise is
-excluded, but coding-bot PRs are not. Release notes need no changelog
+an Other changes category for tests and unlabelled PRs. PRs labelled
+`dependencies` are excluded; no authors are excluded. Release notes need no changelog
 entries or fragments. [CHANGELOG.md](../CHANGELOG.md) is only a pointer to
 releases and the history through v0.6.14; nothing updates it on a bump.
 The agent-board release train likewise bumps only the Cargo files and
