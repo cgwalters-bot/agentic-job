@@ -204,6 +204,11 @@ Standalone label-operation regressions (`cargo test --locked -p safe-outputs
 colliding numbers, incremental label changes and replay without another write.
 They also prove that a missing project label or an implicit scoped-label
 replacement refuses the whole batch before an earlier valid note can publish.
+Pagination cases find a label on page 19 and require an empty page 20 to
+complete the listing. A nonempty page 20 refuses the entire batch without
+requesting page 21, even when the requested label was already found. This
+preserves the existing bounded scan rather than trusting an incomplete label
+inventory that could conceal label side effects.
 These are loopback CLI-to-publisher tests, not live GitLab or CI isolation proof;
 they introduce no new permission or caller setting.
 
