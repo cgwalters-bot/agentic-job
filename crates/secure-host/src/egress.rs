@@ -130,7 +130,15 @@ const DENYLIST_SHA256: &str = "7d2782affed6465d3e3c34bbae68f5ea86ec385b46f95f76e
 /// Where the feed is fetched to, beside where it goes once it is checked.
 const DENYLIST_FETCHED: &str = "/opt/egress-proxy/denylist.txt.fetched";
 
-const FETCH_SECONDS: &str = "60";
+const FETCH_RETRY_SECONDS: &str = "60";
+
+const FETCH_ATTEMPT_SECONDS: &str = "20";
+
+const FETCH_CONNECT_SECONDS: &str = "5";
+
+const FETCH_LOW_SPEED_SECONDS: &str = "5";
+
+const FETCH_MIN_BYTES_PER_SECOND: &str = "1024";
 
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -658,8 +666,10 @@ fn check_sha256(path: &Path, pinned: &str) -> Result<()> {
 }
 
 /// Builds a feed fetch with a retry window and a per-attempt timeout.
-/// The last attempt can finish after the retry window has elapsed.
-fn denylist_fetch_command(url: &str) -> Command {
+/// A stalled attempt leaves time for retries. Curl can start the last
+/// attempt before the 60-second retry deadline and run it for 20 seconds:
+/// at most 80 seconds of transfer/backoff time, plus process scheduling.
+fn denylist_fetch_command(url: &str, fetched: &Path) -> Command {
     let mut command = Command::new("curl");
     command.args([
         "--fail",
@@ -670,33 +680,60 @@ fn denylist_fetch_command(url: &str) -> Command {
         "--retry",
         "3",
         "--retry-max-time",
-        FETCH_SECONDS,
+        FETCH_RETRY_SECONDS,
         "--max-time",
-        FETCH_SECONDS,
-        "--output",
-        DENYLIST_FETCHED,
-        url,
+        FETCH_ATTEMPT_SECONDS,
+        "--connect-timeout",
+        FETCH_CONNECT_SECONDS,
+        "--speed-limit",
+        FETCH_MIN_BYTES_PER_SECOND,
+        "--speed-time",
+        FETCH_LOW_SPEED_SECONDS,
     ]);
+    command.arg("--output").arg(fetched).arg(url);
     command
 }
 
 /// Fetches the threat feed; whether there is one. A fetch that fails
 /// leaves none, and a file that is not the pinned one is an error.
 fn fetch_denylist() -> Result<bool> {
-    let url = denylist_url();
-    let fetched = host::run(&mut denylist_fetch_command(&url));
-    if let Err(err) = fetched {
+    fetch_denylist_from(
+        &denylist_url(),
+        Path::new(DENYLIST_FETCHED),
+        DENYLIST,
+        DENYLIST_SHA256,
+    )
+}
+
+fn fetch_denylist_from(url: &str, fetched: &Path, destination: &str, pinned: &str) -> Result<bool> {
+    fetch_denylist_with_command(
+        &mut denylist_fetch_command(url, fetched),
+        url,
+        fetched,
+        destination,
+        pinned,
+    )
+}
+
+fn fetch_denylist_with_command(
+    command: &mut Command,
+    url: &str,
+    fetched: &Path,
+    destination: &str,
+    pinned: &str,
+) -> Result<bool> {
+    if let Err(err) = host::run(command) {
         eprintln!(
             "warning: the egress proxy runs without a threat feed: fetching {url} failed ({err:#})"
         );
         return Ok(false);
     }
-    check_sha256(Path::new(DENYLIST_FETCHED), DENYLIST_SHA256)
+    check_sha256(fetched, pinned)
         .with_context(|| format!("the threat feed fetched from {url} is not the pinned one"))?;
-    let text = fs::read_to_string(DENYLIST_FETCHED)
-        .with_context(|| format!("reading {DENYLIST_FETCHED}"))?;
-    fs::remove_file(DENYLIST_FETCHED).with_context(|| format!("removing {DENYLIST_FETCHED}"))?;
-    write(DENYLIST, &text)?;
+    let text =
+        fs::read_to_string(fetched).with_context(|| format!("reading {}", fetched.display()))?;
+    fs::remove_file(fetched).with_context(|| format!("removing {}", fetched.display()))?;
+    write(destination, &text)?;
     println!("Threat feed: {} domains from {url}", feed_entries(&text));
     Ok(true)
 }
@@ -1152,21 +1189,120 @@ mod tests {
     #[test]
     fn feed_fetch_sets_retry_window_and_per_attempt_timeout() {
         let url = denylist_url();
-        let command = denylist_fetch_command(&url);
+        let command = denylist_fetch_command(&url, Path::new(DENYLIST_FETCHED));
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect();
         for pair in [
             ["--retry", "3"],
-            ["--retry-max-time", FETCH_SECONDS],
-            ["--max-time", FETCH_SECONDS],
+            ["--retry-max-time", "60"],
+            ["--max-time", "20"],
+            ["--connect-timeout", "5"],
+            ["--speed-limit", "1024"],
+            ["--speed-time", "5"],
             ["--output", DENYLIST_FETCHED],
         ] {
             assert!(args.windows(2).any(|args| args == pair), "{pair:?}");
         }
         assert_eq!(args.last(), Some(&url.as_str()));
         assert!(args.contains(&"--fail"));
+    }
+
+    #[test]
+    fn feed_fetch_failure_and_checksum_rejection_install_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let fetched = dir.path().join("fetched");
+        let destination = dir.path().join("installed");
+        let url = format!("file://{}", source.display());
+        assert!(
+            !fetch_denylist_from(
+                &url,
+                &fetched,
+                destination.to_str().unwrap(),
+                DENYLIST_SHA256
+            )
+            .unwrap()
+        );
+        assert!(!destination.exists());
+        fs::write(&source, "evil.example\n").unwrap();
+        let err = fetch_denylist_from(
+            &url,
+            &fetched,
+            destination.to_str().unwrap(),
+            DENYLIST_SHA256,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not the pinned one"));
+        assert!(fetched.exists(), "checksum rejection followed a download");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn feed_fetch_retries_a_stalled_transfer_then_installs_verified_bytes() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        const FEED: &str = "evil.example\nbad.test\n";
+        const PINNED: &str = "8f5c06d1ad3e9913c292e76ab4f4a799a68c85e1ec32dfda4cc87d7890032c9b";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/feed", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut connections = 0;
+            while Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                connections += 1;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(25)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() <= 4096);
+                }
+                if connections == 1 {
+                    // Advertise a body, then send nothing until curl gives up.
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                        .unwrap();
+                    assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{FEED}",
+                        FEED.len()
+                    )
+                    .unwrap();
+                    return connections;
+                }
+            }
+            panic!("feed fetch did not retry within 30 seconds");
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = dir.path().join("fetched");
+        let destination = dir.path().join("installed");
+        let mut command = denylist_fetch_command(&url, &fetched);
+        // Only this child bypasses ambient proxies to reach the loopback fixture.
+        command.args(["--noproxy", "127.0.0.1"]);
+        let result = fetch_denylist_with_command(
+            &mut command,
+            &url,
+            &fetched,
+            destination.to_str().unwrap(),
+            PINNED,
+        );
+        assert_eq!(server.join().unwrap(), 2);
+        assert!(result.unwrap());
+        assert_eq!(fs::read_to_string(destination).unwrap(), FEED);
+        assert!(!fetched.exists());
     }
 
     fn requirements_are_pinned(text: &str) -> bool {
