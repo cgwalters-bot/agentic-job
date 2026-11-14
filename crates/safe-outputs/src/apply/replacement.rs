@@ -389,8 +389,15 @@ fn apply_recovered(
         usize::try_from(policy.max_patch_bytes)?,
         |path, limit| read_preimage(dir, &parent, path, limit),
     )?;
-    (preparation.validate)(recovered.application_patch().as_bytes())
-        .map_err(|_| anyhow::anyhow!("recovered replacement failed credential validation"))?;
+    // Literal placeholders can match the authenticated old side unchanged.
+    // Only restored bytes need an additional credential check: the original
+    // checked mail already passed its ordinary credential policy. Keep exact
+    // reconstruction and postimage verification even when no bytes changed;
+    // git am alone could relocate a hunk to a different literal occurrence.
+    if recovered.restored_lines > 0 {
+        (preparation.validate)(recovered.application_patch().as_bytes())
+            .map_err(|_| anyhow::anyhow!("recovered replacement failed credential validation"))?;
+    }
     // Drop only the header we inserted. The bounded replacement protocol
     // supplies it separately, and a future recheck must see plain mails.
     let (first, rest) = recovered
@@ -690,20 +697,23 @@ mod tests {
         }
 
         fn with_options(delete_empty: bool, added_placeholder: bool) -> Self {
-            let temp = tempfile::tempdir().unwrap();
-            let producer = temp.path().join("producer");
-            std::fs::create_dir(&producer).unwrap();
-            run(&producer, &["init", "-q", "--initial-branch=main"]);
-            run(&producer, &["config", "user.name", "Test"]);
-            run(&producer, &["config", "user.email", "test@example.test"]);
-            let source = |value: &str| {
+            Self::with_source(delete_empty, |value| {
                 let suffix = if added_placeholder && value != "old" {
                     "<inference-address>\n"
                 } else {
                     ""
                 };
                 format!("url={ADDRESS}\n{value}\n{suffix}")
-            };
+            })
+        }
+
+        fn with_source(delete_empty: bool, source: impl Fn(&str) -> String) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let producer = temp.path().join("producer");
+            std::fs::create_dir(&producer).unwrap();
+            run(&producer, &["init", "-q", "--initial-branch=main"]);
+            run(&producer, &["config", "user.name", "Test"]);
+            run(&producer, &["config", "user.email", "test@example.test"]);
             std::fs::write(producer.join("config"), source("old")).unwrap();
             if delete_empty {
                 std::fs::write(producer.join("empty"), "").unwrap();
@@ -994,6 +1004,73 @@ mod tests {
             .unwrap();
         assert_eq!(trial.restored_lines, 0);
         assert_eq!(trial.built.tree, fixture.intended_tree);
+        fixture.clean();
+    }
+
+    #[test]
+    fn literal_old_placeholders_do_not_require_credential_revalidation() {
+        for case in ["context", "removed"] {
+            let fixture = RecoveryFixture::with_source(false, |value| {
+                let url = if case == "context" || value == "old" {
+                    "<inference-address>"
+                } else {
+                    "configured"
+                };
+                format!("url={url}\n{value}\n")
+            });
+            let ordinary = trial(&fixture.args, &fixture.consumer, &read).unwrap();
+            // The legacy trial leaves its original mail in the caller's temp.
+            std::fs::remove_file(fixture.temp.path().join("replacement-mail.patch")).unwrap();
+            let recovered = fixture
+                .trial(&|_| panic!("literal content needs no credential revalidation: {case}"))
+                .unwrap();
+            assert_eq!(recovered.restored_lines, 0, "{case}");
+            assert_eq!(recovered.added_placeholders, 0, "{case}");
+            assert_eq!(recovered.built, ordinary, "{case}");
+            assert_eq!(recovered.built.tree, fixture.intended_tree, "{case}");
+            fixture.clean();
+        }
+    }
+
+    #[test]
+    fn recovered_trial_does_not_relocate_to_literal_placeholder_context() {
+        let fixture = RecoveryFixture::with_source(false, |value| {
+            format!(
+                "prefix\nlead one\nlead two\nlead three\n\
+                 url={ADDRESS}\n{value}\ntail one\ntail two\ntail three\n{}\
+                 lead one\nlead two\nlead three\n\
+                 url=<inference-address>\nold\ntail one\ntail two\ntail three\n",
+                "padding\n".repeat(10)
+            )
+        });
+        // Git can apply the redacted mails to the wrong block in this same
+        // checked file. Application success is not proof of literal content.
+        let relocated = trial(&fixture.args, &fixture.consumer, &read).unwrap();
+        assert_ne!(relocated.tree, fixture.intended_tree);
+        std::fs::remove_file(fixture.temp.path().join("replacement-mail.patch")).unwrap();
+        let calls = Cell::new(0);
+        let recovered = fixture
+            .trial(&|_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(recovered.restored_lines, 2);
+        assert_eq!(recovered.built.tree, fixture.intended_tree);
+        assert_eq!(
+            run(
+                &fixture.consumer,
+                &["show", &format!("{}:config", recovered.built.head)]
+            ),
+            format!(
+                "prefix\nlead one\nlead two\nlead three\n\
+                 url={ADDRESS}\nnew\ntail one\ntail two\ntail three\n{}\
+                 lead one\nlead two\nlead three\n\
+                 url=<inference-address>\nold\ntail one\ntail two\ntail three",
+                "padding\n".repeat(10)
+            )
+        );
         fixture.clean();
     }
 

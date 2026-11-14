@@ -10,7 +10,8 @@ says what a caller may rely on across versions.
 ## Unreleased
 
 - Recover redacted inference addresses on replacement-series context/removed
-  lines from trusted public preimages during apply. Added placeholders keep
+  lines from trusted public preimages during apply. Literal old-side placeholders
+  that restore no bytes retain the original credential-check policy. Added placeholders keep
   new work draft and are refused on pushes. Ordinary and secondary patch
   recovery remain unsupported; failures link the retained artifact (tracker#1309).
 

@@ -140,7 +140,12 @@ The internal `agentic-job replacement trial --policy FILE` opts into this
 boundary, using trusted policy/check inputs on the apply machine. It refuses
 credential shapes and known apply credentials in reconstructed application
 bytes, more conservatively than the ordinary handback shape warnings. Mails
-without old-side placeholders retain ordinary application behavior. Counts of
+without old-side placeholders retain ordinary application behavior. When exact
+reconstruction proves old-side placeholders are literal and restores no bytes,
+the already-checked mail needs no additional credential scan. It still passes
+the reconstruction bounds and exact-position result verification; literal
+placeholders with CRLF, large preimages or missing final newlines remain
+unsupported on this path. Counts of
 restored lines and added placeholders are safe step outputs; added placeholders
 are never restored, and the command warns to keep them in draft for review.
 Callers must enforce that draft state before publishing.
