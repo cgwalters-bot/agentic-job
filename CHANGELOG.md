@@ -62,8 +62,10 @@ says what a caller may rely on across versions.
   one-PR hand-back limit is unchanged.
   Experimental library receipts now bind the ordinary policy, root, admitted
   issue order, exact proposal bytes and accepted prefix; local replay can
-  independently revalidate them before building commits. Producer/workflow
-  publication and leased fix-round integration remain unimplemented.
+  independently revalidate them before building commits, and push the built
+  steps' branches atomically under exact leases on caller-pinned heads.
+  Opening the stack's PRs and producer/workflow integration remain
+  unimplemented.
 
 - Rendered sessions retain opencode's tool names when later updates replace
   their titles with commands or filenames (#596).

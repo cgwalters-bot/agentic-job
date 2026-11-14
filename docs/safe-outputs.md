@@ -277,6 +277,18 @@ branch check did not read. A step that does not apply,
 or changes other paths, stops the stack at its position with a fixed reason, so
 a conflict never drops a step silently. Neither function pushes or publishes.
 
+`apply::stack::push` updates the built steps' branches in one atomic push,
+each leased on the head the caller pinned when it read the published stack
+(or on the branch not existing yet), so the stack moves as a whole or not at
+all. Branches and pinned heads come from the caller, never the proposal. A
+stack already at its built heads is an earlier attempt's push and pushes
+nothing; any other head is a concurrent write and refuses. A stack shorter
+than its plan, refused or not, pushes only while no branch above it is pinned
+or, when read just before the push, exists on the remote, since updating the
+steps below would leave those on the old ones; git cannot lease a branch it
+does not push. The remote must carry no credential. It opens
+no pull request and acquires no credential.
+
 ### Experimental library receipts
 
 The concrete threat is replacing the root, ordered issue plan, policy, exact
@@ -314,8 +326,9 @@ or Git refusal. It acquires no credential and makes no forge write.
 
 Local tests cover receipt tampering, changed admission/metadata, disabled and
 over-limit plans, independent inspection, three replayed steps, a middle
-refusal and a freshly checked step-1 fix rebuilding steps 2/3. They do **not**
-prove publication, stale push leases, or live credential behavior.
+refusal and a freshly checked step-1 fix rebuilding steps 2/3, and pushes of
+a new, restacked and refused stack to a local bare remote, including a stale
+lease. They do **not** prove PR publication or live credential behavior.
 
 ### Remaining publisher and recovery requirements
 
@@ -339,8 +352,9 @@ must be marked unavailable, never inferred from producer claims.
 A fix needs a new checked proposal and receipt for the admitted step and all
 descendants, bound to their pinned current heads. Replay must use only checked
 patches, preserve existing Signed-off-by trailers without adding any, stop on
-conflicts and update refs with exact head leases. The current library receipt
-does **not** bind published heads or authorize fix pushes. After a parent
+conflicts and update refs with exact head leases, as `push` does. The library
+receipt does **not** bind published heads or authorize fix pushes; the caller
+must pin them from trusted reads. After a parent
 changes or merges, rebuild/recheck the remaining steps on the new admitted
 root before leased updates. GitHub retargeting a PR changes its base branch;
 it does not rebase its commits. Inspect the merge result (including squash or
@@ -348,12 +362,13 @@ rebase merges), resolve conflicts explicitly, and obtain a new trusted check
 rather than replay unchecked branch contents.
 
 Remaining slices must wire these library receipts into trusted policy, producer
-and check/apply workflow artifacts, then push each step's branch with a lease and open its PR against its
-predecessor, appending that step's closing line. Publication must stop on
-refusal without removing earlier PRs. The publisher must keep the stack rebased
-after parent changes/merges with `restack`, not rely on PR retargeting to
-rewrite git history. Those publication paths, their end-to-end tests, per-step
-PR receipts and the series' total cost report are not implemented yet.
+and check/apply workflow artifacts, then push the steps' branches with `push`
+and open each PR against its predecessor, appending that step's closing line.
+Publication must stop on refusal without removing earlier PRs. The publisher
+must keep the stack rebased after parent changes/merges with `restack`, not
+rely on PR retargeting to rewrite git history. Opening the PRs, the workflow
+paths, their end-to-end tests, per-step PR receipts and the series' total cost
+report are not implemented yet.
 
 ## Caller-bound publisher roles
 
