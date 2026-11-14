@@ -97,6 +97,14 @@ an unexpected directory and symlinked outputs. The size test also accepts exactl
 the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
 subject to the disposition above. No runtime control or caller setting changes.
 
+The issue-reference shell cases now run in `tests/apply_workflow.rs` too:
+same-repository closing lines, cross-repository references, batched and existing
+references, fenced/commented examples, and standalone `Part of`/`Refs` lines.
+The Rust tests execute the shipped shell with the built binary and check that
+linking precedes replay detection and remains limited to non-staged patch runs.
+Their JavaScript equivalents are removed; the multi-step handler integration
+and pinned upstream parity tests remain unchanged.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

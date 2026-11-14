@@ -701,6 +701,145 @@ fn staged_apply_escapes_preview_and_reports_no_writes() {
     }
 }
 
+#[test]
+fn issue_reference_step_links_only_patch_runs_before_the_replay_guard() {
+    let doc = definition("apply.yml");
+    let name = "Say which issue a pull request is for";
+    assert_eq!(
+        step(&doc, "apply", name)["if"].as_str(),
+        Some(
+            "${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}"
+        )
+    );
+    let steps = doc["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    assert!(position(name) < position("Leave out what an earlier attempt applied"));
+}
+
+#[test]
+fn issue_reference_shell_preserves_bodies_and_links_the_callers_issue() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("apply-binary")).unwrap();
+    fs::copy(BIN, root.join("apply-binary/agentic-job")).unwrap();
+    let refs = |items: Value, item_repo: &str| {
+        json_file(
+            root,
+            "agent_output.json",
+            &json!({"items":items,"errors":[]}),
+        );
+        status(
+            &run_step(
+                root,
+                "Say which issue a pull request is for",
+                &[
+                    ("GH_AW_TMP", root.to_str().unwrap()),
+                    ("RUNNER_TEMP", root.to_str().unwrap()),
+                    ("GITHUB_WORKSPACE", root.to_str().unwrap()),
+                    ("OUTPUT_REPO", "owner/repo"),
+                    ("ITEM_REPO", item_repo),
+                    ("ISSUE", "64"),
+                ],
+            ),
+            0,
+        );
+        read_json(root, "agent_output.json")["items"].clone()
+    };
+    let pull = |body: &str| json!({"type":"create_pull_request", "title":"t", "body":body, "branch":"agent-run-7"});
+    let comment = json!({"type":"add_comment", "body":"first"});
+    let got = refs(json!([pull("change"), comment]), "owner/repo");
+    assert_eq!(got, json!([pull("change\n\nCloses #64"), comment]));
+    let mut missing_body = pull("");
+    missing_body.as_object_mut().unwrap().remove("body");
+    assert_eq!(
+        refs(json!([missing_body]), "owner/repo"),
+        json!([pull("\n\nCloses #64")])
+    );
+    assert_eq!(
+        refs(json!([pull("change")]), "owner/tracker"),
+        json!([pull("change\n\nRefs owner/tracker#64")])
+    );
+
+    let batch = "Batch sibling work\n\nCloses #64\nCloses #65\nCloses owner/tracker#66";
+    for (repo, expected) in [
+        ("owner/repo", batch.to_owned()),
+        ("owner/tracker", format!("{batch}\n\nRefs owner/tracker#64")),
+    ] {
+        assert_eq!(
+            refs(json!([pull(batch)]), repo),
+            json!([pull(&expected)]),
+            "{repo}"
+        );
+    }
+    for (repo, line) in [
+        ("owner/repo", "Closes #64"),
+        ("OWNER/REPO", "Closes #64"),
+        ("owner/tracker", "Refs owner/tracker#64"),
+    ] {
+        for ending in ["", "\r\n"] {
+            let body = format!("Done.\n\n{line}{ending}");
+            assert_eq!(
+                refs(json!([pull(&body)]), repo),
+                json!([pull(&body)]),
+                "{repo} {body:?}"
+            );
+        }
+    }
+    let fix =
+        json!({"type":"push_to_pull_request_branch", "message":"Keep existing PR references."});
+    assert_eq!(refs(json!([fix]), "owner/repo"), json!([fix]));
+
+    for (body, closing) in [
+        ("Mentions Closes #64 in prose.", ""),
+        ("```text\nCloses #64\n```", ""),
+        ("~~~\nCloses #64\n~~~", ""),
+        ("<!--\nCloses #64\n-->", ""),
+        ("<!-- Closes #64 -->", ""),
+        ("```text\nCloses #64", "\n```"),
+        ("<!--\nCloses #64", "\n-->"),
+        ("**Partial work.** Not all work is done.", ""),
+        ("Part of #640", ""),
+        ("Refs #6", ""),
+        ("Part of #65", ""),
+        ("See Part of #64", ""),
+        ("Refs owner/repo#64", ""),
+        ("```text\nPart of #64\n```", ""),
+        ("<!-- Refs #64 -->", ""),
+    ] {
+        assert_eq!(
+            refs(json!([pull(body)]), "owner/repo"),
+            json!([pull(&format!("{body}{closing}\n\nCloses #64"))]),
+            "{body:?}"
+        );
+    }
+    for line in [
+        "Part of #64",
+        "Part of #64 (item 5)",
+        "Refs #64",
+        "Refs #64\tthe parser",
+    ] {
+        for body in [
+            format!("{line}\n\nDid item 5; items 1 to 4 are left."),
+            format!("Did item 5.\r\n\r\n{line}\r\n"),
+        ] {
+            assert_eq!(
+                refs(json!([pull(&body)]), "owner/repo"),
+                json!([pull(&body)]),
+                "{body:?}"
+            );
+        }
+    }
+    assert_eq!(
+        refs(json!([pull("Part of #64")]), "owner/tracker"),
+        json!([pull("Part of #64\n\nRefs owner/tracker#64")])
+    );
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
