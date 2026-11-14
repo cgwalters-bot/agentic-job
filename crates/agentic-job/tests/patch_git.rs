@@ -702,6 +702,57 @@ fn a_patch_without_its_final_newline_is_refused_as_git_am_refuses_it() {
     );
 }
 
+/// Keep the legacy corpus's hidden-change attacks deterministic: the mutation
+/// suite must not be the only proof that Git really applies these payloads.
+#[test]
+fn hidden_changes_are_refused_even_though_git_am_applies_them() {
+    let origin = Origin::new();
+    let (plain, _) = origin.patch(0, &case("an edit", EDIT, Accepted));
+    let plain = String::from_utf8(plain).unwrap();
+    let (headers, body) = plain.split_once("\n\n").unwrap();
+    let encoded = base64(format!("{SECOND_MESSAGE}{ADD_CI}").as_bytes());
+    let attacks = [
+        (
+            "commit message",
+            format!("{headers}\n\n{BARE_CI}\n{body}"),
+            "a line of the commit message that git would read as a patch",
+        ),
+        (
+            "encoded second mail",
+            format!("{plain}{SECOND_MAIL}{ENCODED}\n\n{encoded}"),
+            "a line after a file's change that is no part of one",
+        ),
+    ];
+    let trial = Trial::new(&origin, 0);
+    let reading = origin.read(plain.as_bytes());
+    assert!(reading.problems.is_empty(), "{:?}", reading.problems);
+    assert_eq!(files_of(&reading), BTreeSet::from(["a.txt".to_owned()]));
+    assert!(matches!(trial.am(plain.as_bytes()), Am::Applied(_)));
+
+    for (name, patch, diagnostic) in attacks {
+        let reading = origin.read(patch.as_bytes());
+        assert!(
+            reading.problems.iter().any(|p| p.contains(diagnostic)),
+            "{name}: {:?}",
+            reading.problems
+        );
+        let Am::Applied(changed) = trial.am(patch.as_bytes()) else {
+            panic!("{name}: Git must apply the attack for this regression to be meaningful");
+        };
+        let paths: BTreeSet<_> = changed.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            BTreeSet::from(["a.txt", ".github/workflows/evil.yml"]),
+            "{name}"
+        );
+        assert_eq!(
+            std::fs::read(trial.dir.join(".github/workflows/evil.yml")).unwrap(),
+            b"on: push\n",
+            "{name}"
+        );
+    }
+}
+
 /// xorshift64: all the randomness a repeatable corpus needs.
 struct Rng(u64);
 

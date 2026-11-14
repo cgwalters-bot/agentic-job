@@ -97,6 +97,15 @@ an unexpected directory and symlinked outputs. The size test also accepts exactl
 the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
 subject to the disposition above. No runtime control or caller setting changes.
 
+The hidden-change corpus attacks also have deterministic Rust coverage in
+`tests/patch_git.rs`: a bare patch inside the commit message and a base64-encoded
+second mail must both be refused with the expected diagnostic, while real
+`git am` must apply both the visible edit and hidden workflow file. An ordinary
+patch is the accepted control. This supplements the seeded mutation suite without
+depending on its payload selection. The legacy old-check comparison remains;
+removing it still belongs to the gated corpus disposition above. No runtime
+control, permission or caller setting changes.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
