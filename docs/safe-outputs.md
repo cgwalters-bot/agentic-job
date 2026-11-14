@@ -125,6 +125,14 @@ arguments, JSONL, receipts or logs; do not enable shell tracing. No ambient
 `GITHUB_TOKEN`, PAT fallback or Actions metadata is read by the CLI. The CI
 operator owns job isolation, artifact provenance and token issuance.
 
+The GitHub and GitLab CLI regression tests run check without credentials, then
+require comment publication to refuse a missing, empty or whitespace-only
+`SAFE_OUTPUTS_TOKEN` before any HTTP request, even with ambient forge tokens set.
+The same checked comment publishes to the loopback fixture once that explicit
+credential is supplied. Reporting-only batches (`noop`, `missing_tool` and
+`missing_data`) need no credential and make no HTTP requests in either phase.
+These tests cover token selection, not CI secret isolation or live token scopes.
+
 #### Standalone GitLab CI
 
 The threat is a producer redirecting GitLab writes or substituting patch bytes

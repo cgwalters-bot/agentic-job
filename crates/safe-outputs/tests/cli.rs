@@ -111,23 +111,26 @@ impl Fixture {
     }
 
     fn run_forge(&self, subcommand: &str, forge: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_safe-outputs"))
-            .current_dir(self.dir.path())
-            .env_clear()
+        self.command(subcommand, forge)
             .env("SAFE_OUTPUTS_TOKEN", "loopback-test-token")
-            .args([
-                subcommand,
-                "--forge",
-                forge,
-                "--context",
-                "context.json",
-                "--input",
-                "outputs.jsonl",
-                "--checked",
-                "checked.json",
-            ])
             .output()
             .unwrap()
+    }
+
+    fn command(&self, subcommand: &str, forge: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_safe-outputs"));
+        command.current_dir(self.dir.path()).env_clear().args([
+            subcommand,
+            "--forge",
+            forge,
+            "--context",
+            "context.json",
+            "--input",
+            "outputs.jsonl",
+            "--checked",
+            "checked.json",
+        ]);
+        command
     }
 
     fn assert_ok(&self, command: &str) {
@@ -774,15 +777,102 @@ fn checked_comment_destination_cannot_change_before_apply() {
 
 #[test]
 fn unsupported_operation_refuses_entire_batch_before_writing() {
-    let f = Fixture::new();
-    f.input(&format!("{COMMENT}\n{}", json!({"type":"create_issue", "repo":"owner/repo", "title":"Unsupported", "body":"This operation must make no writes."})));
-    f.assert_ok("check");
-    let result = f.run("apply");
-    assert!(!result.status.success());
-    assert!(
-        String::from_utf8_lossy(&result.stderr).contains("unsupported standalone native operation")
-    );
-    assert!(f.writes.lock().unwrap().is_empty());
+    for token in [None, Some("loopback-test-token")] {
+        let f = Fixture::new();
+        f.input(&format!("{COMMENT}\n{}", json!({"type":"create_issue", "repo":"owner/repo", "title":"Unsupported", "body":"This operation must make no writes."})));
+        f.assert_ok("check");
+        let mut command = f.command("apply", "github");
+        if let Some(token) = token {
+            command.env("SAFE_OUTPUTS_TOKEN", token);
+        }
+        let result = command.output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("unsupported standalone native operation")
+        );
+        assert!(f.writes.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn standalone_credentials_are_required_only_for_publication() {
+    for forge in ["github", "gitlab"] {
+        for token in [None, Some(""), Some(" \t\n")] {
+            let f = Fixture::new();
+            if forge == "gitlab" {
+                write_context(&f, &gitlab_context(&f, json!({"add_comment":{"max":1}})));
+            }
+            f.input(r#"{"type":"add_comment","body":"A checked comment."}"#);
+            let checked = f.command("check", forge).output().unwrap();
+            assert!(checked.status.success(), "{forge}: {checked:?}");
+            assert!(f.writes.lock().unwrap().is_empty());
+
+            let mut command = f.command("apply", forge);
+            // Ambient credentials must not turn an uncredentialed apply job
+            // into a publisher. The CLI has exactly one explicit token source.
+            for name in [
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GITLAB_TOKEN",
+                "FORGEJO_TOKEN",
+                "SAFE_OUTPUTS_PAT",
+            ] {
+                command.env(name, "ambient-test-token");
+            }
+            if let Some(token) = token {
+                command.env("SAFE_OUTPUTS_TOKEN", token);
+            }
+            let result = command.output().unwrap();
+            assert_eq!(result.status.code(), Some(1), "{forge}: {result:?}");
+            let error = String::from_utf8_lossy(&result.stderr);
+            let expected = if token.is_some() {
+                "apply requires a nonempty SAFE_OUTPUTS_TOKEN"
+            } else {
+                "apply requires SAFE_OUTPUTS_TOKEN"
+            };
+            assert!(error.contains(expected), "{forge}: {error}");
+            assert!(f.writes.lock().unwrap().is_empty(), "{forge}");
+
+            // The same receipt remains usable with an explicit credential.
+            let result = f.run_forge("apply", forge);
+            assert!(result.status.success(), "{forge}: {result:?}");
+            let requests = f.writes.lock().unwrap();
+            assert_eq!(
+                requests.iter().filter(|r| r.starts_with("POST ")).count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn standalone_reporting_only_batches_need_no_credentials_or_network() {
+    for forge in ["github", "gitlab"] {
+        let f = Fixture::new();
+        let outputs = json!({"noop":{"max":1},"missing_tool":{"max":1},"missing_data":{"max":1}});
+        if forge == "gitlab" {
+            write_context(&f, &gitlab_context(&f, outputs));
+        } else {
+            write_context(
+                &f,
+                &json!({
+                    "repo":"owner/repo", "item":7, "max_outputs":3,
+                    "api_url":f.api, "outputs":outputs
+                }),
+            );
+        }
+        f.input(concat!(
+            "{\"type\":\"noop\",\"message\":\"Nothing to change.\"}\n",
+            "{\"type\":\"missing_tool\",\"tool\":\"compiler\",\"reason\":\"Not installed.\"}\n",
+            "{\"type\":\"missing_data\",\"data_type\":\"build log\",\"reason\":\"Not available.\"}"
+        ));
+        for subcommand in ["check", "apply"] {
+            let result = f.command(subcommand, forge).output().unwrap();
+            assert!(result.status.success(), "{forge}/{subcommand}: {result:?}");
+            assert!(f.writes.lock().unwrap().is_empty(), "{forge}/{subcommand}");
+        }
+    }
 }
 
 #[test]
