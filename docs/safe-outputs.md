@@ -355,7 +355,9 @@ reconciliation with its default-off `stack_max_steps` and `check_policy` path
 is still required before workflow integration.
 
 `artifact::check` uses the policy's patch bytes, file count, protected paths
-and pinned author. Each reached step must match its position in the admitted
+and pinned author, and holds each step's patch to the pull request handler's
+`max_patch_size` as for an ordinary pull request; a step over a limit is a
+refusal that keeps the steps below it. Each reached step must match its position in the admitted
 issue plan; a mismatch retains only the earlier prefix. Proposals may contain
 a shorter prefix of that plan, but may not exceed it. The returned JSON receipt
 is at most 64 KiB and binds SHA-256 digests of the exact proposal bytes, the

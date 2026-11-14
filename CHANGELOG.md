@@ -11,7 +11,9 @@ says what a caller may rely on across versions.
 
 - Experimental library stack publication now binds Git pushes to the receipt's
   policy repository and fork-push credential role, isolated from the source
-  checkout's Git configuration. CLI/workflow stack publication remains disabled.
+  checkout's Git configuration, and holds each step's patch to the pull
+  request handler's `max_patch_size`. CLI/workflow stack publication remains
+  disabled.
 
 - Main builds now publish attested workflow artifacts instead of `build-*`
   Releases or OCI file artifacts. Policy/dispatch can opt into the latest

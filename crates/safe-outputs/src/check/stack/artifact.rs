@@ -111,12 +111,18 @@ fn checked(
         commit_author: admission.policy.commit_author.as_deref(),
         ..pr.rules()
     };
+    // Each step is one ordinary pull request, so its patch is held to the
+    // handler's `max_patch_size` (KB) too, as a refusal that keeps the prefix.
+    let max_patch_bytes = admission
+        .policy
+        .max_patch_bytes
+        .min(pr.max_patch_size.saturating_mul(1024));
     let mut position = 0;
     super::check(
         content,
         admission.issues.len() as u32,
         admission.base_commit,
-        admission.policy.max_patch_bytes,
+        max_patch_bytes,
         &rules,
         |step| {
             ensure!(
@@ -464,12 +470,17 @@ mod tests {
         let content = proposal().to_string();
         let mut policy = policy();
         policy.max_outputs = 3;
-        for (author, bytes, reason) in [
-            (Some("Other <other@example.com>"), 4096, "author"),
-            (None, 1, "byte limit"),
+        // The handler's `max_patch_size` (KB) bounds each step as well as
+        // the policy's byte limit.
+        for (author, bytes, kb, reason) in [
+            (Some("Other <other@example.com>"), 4096, 4, "author"),
+            (None, 1, 4, "byte limit"),
+            (None, 4096, 0, "byte limit"),
         ] {
             policy.commit_author = author.map(str::to_owned);
             policy.max_patch_bytes = bytes;
+            let pr = policy.safe_outputs.create_pull_request.as_mut().unwrap();
+            pr.max_patch_size = kb;
             let admission = Admission {
                 policy: &policy,
                 base_commit: BASE,
