@@ -3034,6 +3034,11 @@ for `noop`, `missing_tool` and `missing_data`:
   of that project, and the project under that path, not one it was
   renamed or moved to. The note then goes to the project's ID as read,
   as does the merge request below to the fork's.
+  These reads run again after batch preflight, immediately before posting.
+  Loopback regression tests cover both item kinds when the second read
+  returns another iid/project, malformed identity fields, or a moved project:
+  publication fails with only GET requests. This is not an atomic identity
+  guarantee across the final read and POST, nor proof against a live server.
 - `create_pull_request` pushes the branch to the bounds' `push_repo`, a
   fork of the project, and opens the merge request on the fork with the
   project as its `target_project_id`. The fork must be GitLab's fork of

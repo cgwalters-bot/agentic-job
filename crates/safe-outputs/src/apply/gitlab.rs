@@ -1385,6 +1385,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn comment_target_is_revalidated_after_preflight() {
+        for kind in [Kind::Issue, Kind::PullRequest] {
+            let mismatch = format!("{} is not an item of owner/name", reference(kind, 5));
+            let mut cases = vec![
+                (false, item(kind, 6, 1), mismatch.clone()),
+                (false, item(kind, 5, 2), mismatch.clone()),
+                (
+                    true,
+                    project(1, "other/name", "public", None),
+                    "GitLab answers for owner/name with other/name".into(),
+                ),
+            ];
+            for field in ["iid", "project_id"] {
+                for invalid in [Value::Null, json!("1")] {
+                    let mut changed = item(kind, 5, 1);
+                    changed[field] = invalid;
+                    cases.push((false, changed, mismatch.clone()));
+                }
+            }
+            for field in ["id", "path_with_namespace"] {
+                let mut changed = repo();
+                changed.as_object_mut().unwrap().remove(field);
+                cases.push((true, changed, format!("the response has no {field}")));
+            }
+            for (project_changed, changed, refusal) in cases {
+                // The first project/item pair passes batch preflight. Only
+                // the second read changes, immediately before publication.
+                let mut answers = vec![ok(&repo()), ok(&item(kind, 5, 1))];
+                if !project_changed {
+                    answers.push(ok(&repo()));
+                }
+                answers.push(ok(&changed));
+                let (server, requests) = mock(answers);
+                let publisher = gitlab(&server).commenting_on(Some(kind));
+                let error = super::super::publish(
+                    &[Op::Comment {
+                        issue: 5,
+                        body: "Done.".into(),
+                    }],
+                    &publisher,
+                )
+                .unwrap_err();
+                let error = format!("{error:#}");
+                assert!(error.contains(&refusal), "{changed}: {error}");
+                let routes: Vec<_> = requests.iter().map(|r| r.line).collect();
+                let project = "GET /api/v4/projects/owner%2Fname HTTP/1.1".to_owned();
+                let item = format!(
+                    "GET /api/v4/projects/owner%2Fname/{}/5 HTTP/1.1",
+                    collection(kind)
+                );
+                let mut expected = vec![project.clone(), item.clone(), project];
+                if !project_changed {
+                    expected.push(item);
+                }
+                assert_eq!(routes, expected, "{changed}: no note may be posted");
+            }
+        }
+    }
+
     /// Collection preserves Markdown escapes. Planning must not mistake
     /// escaped backticks for code and leave a live mention for GitLab.
     #[test]
