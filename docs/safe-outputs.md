@@ -129,6 +129,14 @@ whole batch before any write, including an earlier valid note: GitLab must not
 implicitly create it. This is local API-contract coverage, not live-service or
 CI artifact-provenance proof.
 
+Standalone inline-review loopback tests also cover LEFT/RIGHT and context-line
+positions, the checked MR head and SHA triple, mention/quick-action filtering,
+and MR-only routing. A stale head, foreign target, missing diff refs, unavailable
+or truncated diff, or absent line refuses the entire batch before writing an
+earlier valid finding. Check refuses inline output without explicit bounds, a
+merge-request target and a trusted review head. These tests exercise the CLI
+through the shared publisher; they do not prove live GitLab or caller activation.
+
 GitLab's trusted context has a different shape: `policy` is the existing full
 effective policy JSON (the same object `agentic-job policy` emits), `server` is
 the forge origin, and `run_url` is the trusted CI run page. Optional `item` and
