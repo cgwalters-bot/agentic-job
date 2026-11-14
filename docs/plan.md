@@ -90,6 +90,13 @@ title/branch prefixes in both the JSON file and exported environment. These two
 tests replace their JavaScript equivalents without changing publication behavior
 or the retained upstream-handler execution tests.
 
+The scripted end-to-end comment fixtures and CI's negative-publication filter
+are checked by `scripted_comments` tests in `crates/agentic-job/tests/workflows.rs`,
+replacing their JavaScript assertions. These local tests preserve fixed caller
+destinations, the deliberately misdirected fixture and detection of a refused
+comment appearing in a run's results; they do not demonstrate a live forge run.
+Runtime workflows and upstream parity drivers are unchanged.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)

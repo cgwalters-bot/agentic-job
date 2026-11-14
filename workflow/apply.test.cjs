@@ -34,54 +34,6 @@ function stepEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: '(.*)'$`, 'm'))[1];
 }
 
-for (const filename of ['full', 'limit', 'event']) {
-  test(`scripted ${filename} comments inherit the caller's fixed destination`, () => {
-    const setup = readFileSync(join(__dirname, `../.github/agentic-job/e2e/${filename}.sh`), 'utf8');
-    const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
-    // full's comment is appended by its GitHub probe, once the probe passed.
-    const appended = [...setup.matchAll(/^printf '%s\\n' '(\{.*\})' >> "\$HOME\/out\/safe-outputs\.jsonl"$/gm)]
-      .map(([, line]) => JSON.parse(line));
-    const comments = fixture.filter(step => step.write?.path.endsWith('safe-outputs.jsonl'))
-      .flatMap(step => step.write.content.trim().split('\n').map(line => JSON.parse(line)))
-      .concat(appended)
-      .filter(output => output.type === 'add_comment');
-    assert.equal(comments.length, 1);
-    assert.deepEqual(Object.keys(comments[0]).sort(), ['body', 'type']);
-  });
-}
-
-test('scripted negative analysis reaches check with a misdirected comment', () => {
-  const setup = readFileSync(join(__dirname, '../.github/agentic-job/e2e/misdirected.sh'), 'utf8');
-  const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
-  // Fake runs must exercise redaction before any hand-back may be uploaded.
-  assert.ok(fixture.some(step => step.execute?.command.includes('gh%s_%s')));
-  const outputs = fixture.filter(step => step.write?.path.endsWith('safe-outputs.jsonl'));
-  assert.equal(outputs.length, 1);
-  assert.deepEqual(JSON.parse(outputs[0].write.content), {
-    type: 'add_comment', item_number: 65, body: 'This misdirected analysis must be refused.',
-  });
-  const outcome = fixture.find(step => step.write?.path.endsWith('outcome.json'));
-  assert.equal(JSON.parse(outcome.write.content).stopped_early, null);
-});
-
-test('negative analysis verification refuses any posted misdirected comment', () => {
-  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
-  const filter = ci.split('- name: The refused comment was not posted on either item\n')[1]
-    .split("--arg run \"$RUN\" '")[1].split("'\n")[0].trim();
-  const hostile = { body: 'This misdirected analysis must be refused. actions/runs/123' };
-  for (const [comments, expected] of [
-    [[], 0],
-    [[{ body: 'unrelated comment' }], 0],
-    [[hostile], 1],
-    [[{ body: 'unrelated comment' }, hostile], 1],
-  ]) {
-    const result = spawnSync('jq', ['-se', '--arg', 'run', 'actions/runs/123', filter], {
-      encoding: 'utf8', input: JSON.stringify(comments),
-    });
-    assert.equal(result.status, expected, result.stderr);
-  }
-});
-
 for (const [name, filename, files, unrelated, expected] of [
   ['ordinary edit', 'file.txt', ['file.txt'], false, 0],
   ['CRLF edit', 'file.txt', ['file.txt'], false, 0],

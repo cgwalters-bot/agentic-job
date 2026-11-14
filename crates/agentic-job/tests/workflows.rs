@@ -129,6 +129,141 @@ fn detector_callers_grant_digest_read_and_oidc_permissions() {
 }
 
 #[test]
+fn scripted_comments_keep_the_callers_destination() {
+    use serde_json::Value;
+
+    let appended =
+        Regex::new(r#"(?m)^printf '%s\\n' '(\{.*\})' >> "\$HOME/out/safe-outputs\.jsonl"$"#)
+            .unwrap();
+    for name in ["full", "limit", "event", "misdirected"] {
+        let setup = workflow(&format!(".github/agentic-job/e2e/{name}.sh"));
+        let fixture: Vec<Value> = serde_json::from_str(
+            setup
+                .split_once("<<'JSON'\n")
+                .unwrap()
+                .1
+                .split_once("\nJSON")
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let writes: Vec<_> = fixture
+            .iter()
+            .filter(|step| {
+                step["write"]["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("safe-outputs.jsonl"))
+            })
+            .collect();
+        let mut outputs: Vec<Value> = writes
+            .iter()
+            .flat_map(|step| step["write"]["content"].as_str().unwrap().trim().lines())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // The full fixture appends its comment only after its GitHub probe passes.
+        outputs.extend(
+            appended
+                .captures_iter(&setup)
+                .map(|capture| serde_json::from_str::<Value>(&capture[1]).unwrap()),
+        );
+        let comments: Vec<_> = outputs
+            .iter()
+            .filter(|output| output["type"] == "add_comment")
+            .collect();
+        assert_eq!(comments.len(), 1, "{name}");
+        if name == "misdirected" {
+            assert_eq!(writes.len(), 1);
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(
+                comments[0],
+                &serde_json::json!({
+                    "type": "add_comment", "item_number": 65,
+                    "body": "This misdirected analysis must be refused."
+                })
+            );
+            // The negative fixture must reach check, after exercising redaction.
+            assert!(fixture.iter().any(|step| {
+                step["execute"]["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("gh%s_%s"))
+            }));
+            let outcome = fixture
+                .iter()
+                .find(|step| {
+                    step["write"]["path"]
+                        .as_str()
+                        .is_some_and(|path| path.ends_with("outcome.json"))
+                })
+                .unwrap();
+            let outcome: Value =
+                serde_json::from_str(outcome["write"]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(outcome.get("stopped_early"), Some(&Value::Null));
+        } else {
+            let mut keys: Vec<_> = comments[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["body", "type"], "{name}");
+        }
+    }
+}
+
+#[test]
+fn scripted_comments_negative_verification_detects_publication() {
+    use serde_json::json;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let ci = workflow("ci.yml");
+    let filter = ci
+        .split_once("- name: The refused comment was not posted on either item\n")
+        .unwrap()
+        .1
+        .split_once("--arg run \"$RUN\" '")
+        .unwrap()
+        .1
+        .split_once("'\n")
+        .unwrap()
+        .0
+        .trim();
+    let hostile = json!({"body": "This misdirected analysis must be refused. actions/runs/123"});
+    let unrelated = json!({"body": "unrelated comment"});
+    for (comments, expected) in [
+        (json!([]), 0),
+        (json!([unrelated]), 0),
+        (json!([hostile]), 1),
+        (json!([unrelated, hostile]), 1),
+        (
+            json!([{"body": "This misdirected analysis must be refused. actions/runs/456"}]),
+            0,
+        ),
+    ] {
+        let mut child = Command::new("jq")
+            .args(["-se", "--arg", "run", "actions/runs/123", filter])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(comments.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{comments}: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn javascript_ratchet_allows_only_named_corpus_harnesses() {
     let doc = definition("ci.yml");
     let script = doc["jobs"]["javascript"]["steps"]
